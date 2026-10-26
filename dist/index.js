@@ -19457,12 +19457,19 @@ var init_capture_spool_connector = __esm(() => {
   ]);
 });
 
+// src/workers/telegram-messages/protection-claims.ts
+var init_protection_claims = __esm(() => {
+  init_tier_move();
+  init_capture_spool_connector();
+  init_record_builder();
+});
+
 // src/workers/telegram-messages/store-sync.ts
 var init_store_sync = __esm(() => {
   init_source_storage();
   init_tiered_store_set();
   init_record_builder();
-  init_tier_move();
+  init_protection_claims();
   init_capture_spool_secrets();
   init_capture_freshness();
   init_corpus_adapter4();

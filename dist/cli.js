@@ -73204,8 +73204,8 @@ var init_message = __esm(() => {
 });
 
 // src/workers/telegram-messages/record-builder.ts
-function telegramCaptureVersion(version, file, line) {
-  return `${version}${CAPTURE_MARK}${file}:${String(line).padStart(10, "0")}`;
+function telegramCaptureVersion(version, order) {
+  return `${version}${CAPTURE_MARK}${order.capturedAt}:${String(order.seq).padStart(16, "0")}:${order.file}:${String(order.line).padStart(10, "0")}`;
 }
 function compareTelegramVersions(a, b) {
   if (a === b)
@@ -73701,9 +73701,14 @@ function parseTelegramCaptureSpoolRecord(line, asTrust) {
   const expected = sha2563([account, conversationId, messageId, sourceVersion ?? ""].join("\x1F"));
   if (captureId !== expected)
     throw new Error("Telegram capture spool found a capture identity mismatch.");
+  const captureSeq = record.capture_seq;
+  if (captureSeq !== undefined && (typeof captureSeq !== "number" || !Number.isSafeInteger(captureSeq) || captureSeq < 0)) {
+    throw new Error("Telegram capture spool found an invalid capture sequence.");
+  }
   return {
     captureId,
     capturedAt,
+    ...captureSeq !== undefined ? { captureSeq } : {},
     capturedItem: telegramMessageItem({
       account,
       conversationId,
@@ -73719,11 +73724,12 @@ function markCapture(record, file, line) {
   const version = item.identity.sourceVersion;
   if (version === undefined)
     return record;
+  const order = { capturedAt: record.capturedAt, seq: record.captureSeq ?? 0, file, line };
   return {
     ...record,
     capturedItem: {
       ...record.capturedItem,
-      item: { ...item, identity: { ...item.identity, sourceVersion: telegramCaptureVersion(version, file, line) } }
+      item: { ...item, identity: { ...item.identity, sourceVersion: telegramCaptureVersion(version, order) } }
     }
   };
 }
@@ -74013,6 +74019,87 @@ var init_capture_spool_connector = __esm(() => {
   ]);
 });
 
+// src/workers/telegram-messages/protection-claims.ts
+function telegramClaimKept(set, localItemId) {
+  return set.ledger.readMeta(`${CLAIM_META_PREFIX}${localItemId}`) === "1";
+}
+async function applyTelegramProtectionClaims(args) {
+  const result = { carried: [], moved: 0, relinquished: [] };
+  const readable = (identity2) => readableInOrdinaryLane(args.set, args.internal, identity2);
+  const held = args.claims.filter(readable);
+  const ids = new Set([...args.newestKnown.keys(), ...held.map((identity2) => identity2.localItemId)]);
+  const newest = ids.size > 0 ? readTelegramCaptureSpoolNewest({ spoolDir: args.spoolDir, localItemIds: ids, compareVersions: compareTelegramVersions, asTrust: "secure_local" }) : new Map;
+  const giveUp = [];
+  for (const identity2 of args.claims) {
+    const known = args.newestKnown.get(identity2.localItemId) ?? args.internal.storedItemState(identity2)?.version;
+    const found = newest.get(identity2.localItemId);
+    const foundVersion = found?.capturedItem.item.identity.sourceVersion;
+    const spoolHasNewest = found !== undefined && (known === undefined || foundVersion === undefined || compareTelegramVersions(foundVersion, known) >= 0);
+    if (spoolHasNewest)
+      result.carried.push(found);
+    if (!held.includes(identity2))
+      continue;
+    if (spoolHasNewest) {
+      giveUp.push(identity2);
+      continue;
+    }
+    try {
+      await (args.move ?? moveTieredItem)({ set: args.set, identity: identity2, target: { metadataTier: "secure", contentTier: "secure" } });
+      result.moved += 1;
+    } catch {
+      giveUp.push(identity2);
+    }
+  }
+  if (giveUp.length > 0) {
+    const eviction = args.internal.relinquishItems({
+      identities: giveUp,
+      syncConnectorId: TELEGRAM_TRUST_EVICTION_CONNECTOR_ID,
+      ownerConnectorId: TELEGRAM_CAPTURE_CONNECTOR_IDS.internal,
+      ownershipKind: "observed",
+      trustTier: "S4"
+    });
+    result.relinquished.push(...eviction.relinquishedLocalItemIds);
+    const still = giveUp.filter(readable);
+    if (still.length > 0)
+      throw new Error("Telegram could not take a protected message out of the ordinary lane.");
+  }
+  for (const identity2 of args.claims) {
+    if (!telegramClaimKept(args.set, identity2.localItemId))
+      args.set.ledger.writeMeta(`${CLAIM_META_PREFIX}${identity2.localItemId}`, "1");
+  }
+  return result;
+}
+function readableInOrdinaryLane(set, internal, identity2) {
+  if (!internal.itemPresence(identity2).active)
+    return false;
+  const copies = set.ledger.copies(identity2);
+  if (copies.length === 0)
+    return true;
+  return copies.some((copy) => copy.corpusId === internal.corpusId && copy.state === "current");
+}
+function telegramProtectedLaneLookup(set, claimed) {
+  return (identity2, compareVersions) => {
+    const localItemId = `${identity2.accountScope}:${identity2.providerConversationId ?? ""}:${identity2.providerItemId}`;
+    if (!claimed.has(localItemId))
+      return set.storedItem(identity2, compareVersions);
+    const state = set.store("secure_local")?.storedItemState(identity2);
+    if (!state)
+      return;
+    const stored = {
+      ...state.version !== undefined ? { version: state.version } : {},
+      hasContent: state.chunkCount > 0,
+      ...state.tombstoned ? { tombstoned: true } : {}
+    };
+    return stored;
+  };
+}
+var CLAIM_META_PREFIX = "telegram:secure_claim:";
+var init_protection_claims = __esm(() => {
+  init_tier_move();
+  init_capture_spool_connector();
+  init_record_builder();
+});
+
 // src/workers/telegram-messages/store-sync.ts
 function createTelegramConnectorStores(env = process.env) {
   const account = { sourceId: TELEGRAM_MESSAGES_SOURCE_ID };
@@ -74085,37 +74172,16 @@ function createTelegramConnectorStoreSyncHandler(options) {
       });
       const admitThroughCursor = preflight.resumeCursor ?? null;
       const claims = resolveTelegramTrustClaims(preflight.records, preflight.trustConflicts, options.stores, tierSet);
-      const moving = claims.moveWhole.size > 0 ? readTelegramCaptureSpoolNewest({ spoolDir, localItemIds: new Set(claims.moveWhole.keys()), compareVersions: compareTelegramVersions, asTrust: "secure_local" }) : new Map;
-      const unspooled = [...claims.moveWhole].filter(([localItemId, known]) => {
-        const found = moving.get(localItemId)?.capturedItem.item.identity.sourceVersion;
-        if (found !== undefined && (known === undefined || compareTelegramVersions(found, known) >= 0))
-          return false;
-        moving.delete(localItemId);
-        return true;
-      }).map(([localItemId]) => localItemId);
-      const movedStored = new Set;
-      let hiddenStored = 0;
-      for (const localItemId of unspooled) {
-        const identity2 = claims.secureClaims.find((claim) => claim.localItemId === localItemId);
-        if (!identity2)
-          continue;
-        tierSet.ledger.writeMeta(`${TELEGRAM_SECURE_CLAIM_META_PREFIX}${localItemId}`, "1");
-        try {
-          await moveTieredItem({ set: tierSet, identity: identity2, target: { metadataTier: "secure", contentTier: "secure" } });
-          movedStored.add(localItemId);
-        } catch {
-          hiddenStored += 1;
-        }
-      }
-      const evictable = claims.secureClaims.filter((identity2) => !movedStored.has(identity2.localItemId));
       const resolved = claims.resolvedTrustByItemId.size > 0 ? { resolvedTrustByItemId: claims.resolvedTrustByItemId } : {};
-      const eviction = options.stores.internal.relinquishItems({
-        identities: evictable,
-        syncConnectorId: TELEGRAM_TRUST_EVICTION_CONNECTOR_ID,
-        ownerConnectorId: TELEGRAM_CAPTURE_CONNECTOR_IDS.internal,
-        ownershipKind: "observed",
-        trustTier: "S4"
+      const protection = await applyTelegramProtectionClaims({
+        set: tierSet,
+        internal: options.stores.internal,
+        spoolDir,
+        claims: claims.secureClaims,
+        newestKnown: claims.moveWhole,
+        ...options.moveClaimed ? { move: options.moveClaimed } : {}
       });
+      const eviction = { relinquishedLocalItemIds: protection.relinquished, counts: { itemsRelinquished: protection.relinquished.length } };
       const conflictedItemIds = new Set(claims.resolvedTrustByItemId.keys());
       for (const localItemId of eviction.relinquishedLocalItemIds)
         conflictedItemIds.add(localItemId);
@@ -74145,8 +74211,8 @@ function createTelegramConnectorStoreSyncHandler(options) {
             spoolDir,
             trustDomain: "secure_local",
             admitThroughCursor,
-            storedItem,
-            ...moving.size > 0 ? { carried: [...moving.values()] } : {},
+            storedItem: telegramProtectedLaneLookup(tierSet, new Set(claims.secureClaims.map((identity2) => identity2.localItemId))),
+            ...protection.carried.length > 0 ? { carried: protection.carried } : {},
             ...resolved
           }),
           sync: {
@@ -74173,7 +74239,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
         redactionFailed = true;
         console.error(`[olympus:telegram] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : "unknown"}`);
       }
-      return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed, cursorResets, movedStored.size, hiddenStored, telegramCaptureLiveness(readTelegramCaptureSpoolNewestCapturedAt(spoolDir), readTelegramCaptureHeartbeat(spoolDir), now().getTime(), staleThresholdSeconds));
+      return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed, cursorResets, protection.moved, telegramCaptureLiveness(readTelegramCaptureSpoolNewestCapturedAt(spoolDir), readTelegramCaptureHeartbeat(spoolDir), now().getTime(), staleThresholdSeconds));
     },
     lastStoreRunCompletedAt() {
       const internal = options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.completedAt;
@@ -74228,7 +74294,7 @@ function resolveTelegramTrustClaims(records, spoolConflicts, stores, set) {
       }
       continue;
     }
-    const claimed = set.ledger.readMeta(`${TELEGRAM_SECURE_CLAIM_META_PREFIX}${identity2.localItemId}`) === "1";
+    const claimed = telegramClaimKept(set, identity2.localItemId);
     if (!claimed && !stores.secureLocal.itemPresence(identity2).active)
       continue;
     resolvedTrustByItemId.set(identity2.localItemId, "secure_local");
@@ -74249,7 +74315,7 @@ function cursorParts(cursor) {
   const separator = cursor.lastIndexOf(":");
   return [cursor.slice(0, separator), Number(cursor.slice(separator + 1))];
 }
-function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConflictItems, trustConflictEvictions, redacted, redactionFailed, cursorResets, trustClaimsMoved, trustClaimsHidden, liveness) {
+function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConflictItems, trustConflictEvictions, redacted, redactionFailed, cursorResets, trustClaimsMoved, liveness) {
   const { quiet, ...capture } = liveness;
   const runs = [internal, secureLocal];
   const counts = {
@@ -74266,7 +74332,6 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
     spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
     spool_cursor_resets: cursorResets,
     trust_claims_moved: trustClaimsMoved,
-    trust_claims_hidden: trustClaimsHidden,
     capture_quiet: quiet ? 1 : 0,
     ...captureFreshnessCounts(capture)
   };
@@ -74274,8 +74339,7 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
     ...malformedRecords > 0 ? [TELEGRAM_MALFORMED_SPOOL_WARNING] : [],
     ...trustConflictItems > 0 ? [TELEGRAM_TRUST_CONFLICT_WARNING] : [],
     ...redactionFailed ? [TELEGRAM_SPOOL_REDACTION_FAILED_WARNING] : [],
-    ...cursorResets > 0 ? [TELEGRAM_SPOOL_CURSOR_RESET_WARNING] : [],
-    ...trustClaimsHidden > 0 ? [TELEGRAM_TRUST_CLAIM_HIDDEN_WARNING] : []
+    ...cursorResets > 0 ? [TELEGRAM_SPOOL_CURSOR_RESET_WARNING] : []
   ];
   return {
     status: counts.items_changed > 0 || counts.items_tombstoned > 0 ? "progress" : "idle",
@@ -74294,12 +74358,12 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
 function sum(runs, key2) {
   return runs.reduce((total, run) => total + Number(run[key2]), 0);
 }
-var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_PERSONAL_ACCOUNT_SCOPE = "telegram.personal", TELEGRAM_MALFORMED_SPOOL_WARNING = "telegram_malformed_spool_records", TELEGRAM_TRUST_CONFLICT_WARNING = "telegram_trust_conflict_items", TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = "telegram_spool_secret_redaction_failed", TELEGRAM_SPOOL_CURSOR_RESET_WARNING = "telegram_spool_cursor_reset", TELEGRAM_TRUST_CLAIM_HIDDEN_WARNING = "telegram_trust_claim_hidden", TELEGRAM_SECURE_CLAIM_META_PREFIX = "telegram:secure_claim:", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500, MAX_TELEGRAM_PULL_MAX_ITEMS = 1e4;
+var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_PERSONAL_ACCOUNT_SCOPE = "telegram.personal", TELEGRAM_MALFORMED_SPOOL_WARNING = "telegram_malformed_spool_records", TELEGRAM_TRUST_CONFLICT_WARNING = "telegram_trust_conflict_items", TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = "telegram_spool_secret_redaction_failed", TELEGRAM_SPOOL_CURSOR_RESET_WARNING = "telegram_spool_cursor_reset", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500, MAX_TELEGRAM_PULL_MAX_ITEMS = 1e4;
 var init_store_sync = __esm(() => {
   init_source_storage();
   init_tiered_store_set();
   init_record_builder();
-  init_tier_move();
+  init_protection_claims();
   init_capture_spool_secrets();
   init_capture_freshness();
   init_corpus_adapter4();

@@ -17,25 +17,28 @@ import type { TelegramMessagesCorpusTrustDomain } from './corpus-adapter.ts';
 // The time a Telegram version ends with: the edit time, else the sent time,
 // then (optionally) a digest of the reactions it saw.
 const VERSION_TIME = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))(?::r[0-9a-f]{1,64})?$/;
-// Where in the spool a live capture was written: `<day file>:<line>`, both in sort order.
+// The capture order of a live record: when the helper captured it, its
+// capture sequence, then its place in the spool, each written to sort.
 const CAPTURE_MARK = '~at:';
 
 /**
- * A live capture's version: the helper's version and where in the spool the
- * capture sits, which only ever grows (the spool is append-only, and a
- * Secrets rewrite keeps every record in its place). Two captures of one
- * message at the same edit time (its reactions changed) are then ordered, and
- * a capture read again after its cursor was reset is never newer than the
- * one the store took after it.
+ * A live capture's version: the helper's version and the capture's order,
+ * by the time the helper captured it, then the helper's capture sequence
+ * (which only grows, kept beside the spool), then its place in the spool as
+ * the last tie-break. Two captures of one message at the same edit time (a
+ * reaction changed) are then ordered, also across a day file that was
+ * removed and written again, and a capture read again after its cursor was
+ * reset is never newer than the one the store took after it. A record written
+ * before the helper kept a sequence orders as sequence 0.
  */
-export function telegramCaptureVersion(version: string, file: string, line: number): string {
-  return `${version}${CAPTURE_MARK}${file}:${String(line).padStart(10, '0')}`;
+export function telegramCaptureVersion(version: string, order: { capturedAt: string; seq: number; file: string; line: number }): string {
+  return `${version}${CAPTURE_MARK}${order.capturedAt}:${String(order.seq).padStart(16, '0')}:${order.file}:${String(order.line).padStart(10, '0')}`;
 }
 
 /**
  * The source's own order of two versions of one message: by the edit (else
- * sent) time a version carries, then, at the same time, by where in the spool
- * each was captured. A version with no capture mark (an export's, a row
+ * sent) time a version carries, then, at the same time, by each capture's
+ * order (`telegramCaptureVersion`). A version with no capture mark (an export's, a row
  * stored before captures were marked) is older than a marked one at the same
  * time, so a tie between an export and live keeps live's copy. A version with
  * no time (an entry of the account export, an old record) orders as a tie.

@@ -25,7 +25,6 @@ import {
   TELEGRAM_CAPTURE_CONNECTOR_IDS,
   TELEGRAM_CAPTURE_HEARTBEAT_FILE,
   TELEGRAM_SPOOL_CURSOR_RESET_WARNING,
-  TELEGRAM_TRUST_CLAIM_HIDDEN_WARNING,
   createTelegramConnectorStoreSyncHandler,
   readTelegramCaptureSpool,
   telegramCaptureLiveness,
@@ -471,7 +470,6 @@ describe('review fixes, round 2 (Astra, #545)', () => {
       expect(contentOf(s.internal)).toBe('');
       expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
       expect(receipt.counts.trust_claims_moved).toBe(0);
-      expect(receipt.counts.trust_claims_hidden).toBe(0);
       await sync.pull();
       expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
     } finally {
@@ -493,7 +491,6 @@ describe('review fixes, round 2 (Astra, #545)', () => {
       expect(s.internal.searchItems('edited', 5)).toHaveLength(0);
       expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
       expect(receipt.counts.trust_claims_moved).toBe(1);
-      expect(receipt.counts.trust_claims_hidden).toBe(0);
       // The claim is the item's: an ordinary record of it later does not bring it back.
       writeFileSync(join(dir, '2026-10-24.jsonl'), versioned({ text: 'A edited again in the ordinary lane', at: '2026-10-24T09:00:00Z' }));
       await sync.pull();

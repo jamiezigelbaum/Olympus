@@ -79,6 +79,8 @@ const MAX_PAGE_LIMIT = 10_000;
 export interface TelegramCaptureSpoolRecord {
   captureId: string;
   capturedAt: string;
+  /** The helper's capture sequence, which only grows; absent on records written before it existed. */
+  captureSeq?: number;
   capturedItem: {
     item: RawItem;
     trustDomain: TelegramMessagesCorpusTrustDomain;
@@ -672,9 +674,14 @@ function parseTelegramCaptureSpoolRecord(line: string, asTrust?: TelegramMessage
   const captureId = requiredSha256(record.capture_id, 'capture id');
   const expected = sha256([account, conversationId, messageId, sourceVersion ?? ''].join('\x1f'));
   if (captureId !== expected) throw new Error('Telegram capture spool found a capture identity mismatch.');
+  const captureSeq = record.capture_seq;
+  if (captureSeq !== undefined && (typeof captureSeq !== 'number' || !Number.isSafeInteger(captureSeq) || captureSeq < 0)) {
+    throw new Error('Telegram capture spool found an invalid capture sequence.');
+  }
   return {
     captureId,
     capturedAt,
+    ...(captureSeq !== undefined ? { captureSeq } : {}),
     capturedItem: telegramMessageItem({
       account,
       conversationId,
@@ -687,16 +694,17 @@ function parseTelegramCaptureSpoolRecord(line: string, asTrust?: TelegramMessage
   };
 }
 
-/** The record with its place in the spool in its version (`telegramCaptureVersion`): `line` counts from 1. */
+/** The record with its capture order in its version (`telegramCaptureVersion`): `line` counts from 1. */
 function markCapture(record: TelegramCaptureSpoolRecord, file: string, line: number): TelegramCaptureSpoolRecord {
   const item = record.capturedItem.item;
   const version = item.identity.sourceVersion;
   if (version === undefined) return record;
+  const order = { capturedAt: record.capturedAt, seq: record.captureSeq ?? 0, file, line };
   return {
     ...record,
     capturedItem: {
       ...record.capturedItem,
-      item: { ...item, identity: { ...item.identity, sourceVersion: telegramCaptureVersion(version, file, line) } },
+      item: { ...item, identity: { ...item.identity, sourceVersion: telegramCaptureVersion(version, order) } },
     },
   };
 }

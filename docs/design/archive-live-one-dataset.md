@@ -420,17 +420,25 @@ message beyond its search context (`src/workers/telegram-messages/`,
   input of the Telegram connector, through the one record builder
   (`record-builder.ts`) and the intake rule, so a record older than what the
   stores hold is not applied (review, #545). A live version is the
-  helper's (edit time, reactions) plus where in the spool it was captured,
-  which only grows, so two captures at the same edit time (a reaction
-  changed) are ordered, and one read again after a cursor reset never puts
-  back an older count; an export's version has no capture mark and so ties
-  go to live. A protected lane's claim applies to the item whatever the
-  version: when it arrives in a record older than the copy the ordinary lane
-  holds, the newest version the spool has moves into the protected lane
-  whole; when the spool no longer has it, the stored copy moves through the
-  tier move (`trust_claims_moved`), or is hidden at once if it cannot move
-  (`trust_claims_hidden`). The claim is kept in the set's ledger, so a later
-  ordinary record never brings the item back to the ordinary lane.
+  helper's (edit time, reactions) plus the capture's order: when the helper
+  captured it, the helper's capture sequence (a counter kept beside the
+  spool, `.capture-seq`, that only grows; records written before it read as
+  0), and its place in the spool as the last tie-break. Two captures at the
+  same edit time are ordered, also across a day file removed and written
+  again, and a capture read again after a reset never puts back an older
+  count; an export's version has no capture mark, so ties go to live.
+- **Protected claims.** A protected lane's claim applies to the message,
+  whatever the version (`protection-claims.ts`). Before either lane writes,
+  each claimed message the ordinary lane still serves leaves it: its newest
+  version is carried from the spool into the protected lane and the ordinary
+  copy given up, or, when the spool no longer has that version, the stored
+  copy moves with the tier move (hidden first, content copied up;
+  `trust_claims_moved`), or is given up if it cannot move. The claim is then
+  kept in the set's ledger, so a later ordinary record is never admitted to
+  the ordinary lane. Any step that fails stops the pull before either cursor
+  passes the claim, so it runs again. The protected lane judges a claimed
+  record against what it alone holds, so a claimed record newer than its
+  own copy always lands there.
 - **Quiet is not stale.** After every finished cycle (it read every approved
   chat) the helper writes `.capture-heartbeat.json` beside the spool. The
   receipt's age is from the newer of the newest record and the heartbeat,
