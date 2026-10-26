@@ -61004,8 +61004,7 @@ class TieredRoutingRun {
       if (item.metadata["deletedIdentityResolved"] !== false) {
         this.set.retireSecretPresence(identity2, { record: ledger.itemIsSecret(identity2) });
       }
-      const noActiveRow = !TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity2).active === true);
-      const location = !routed && noActiveRow && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined && item.identity.sourceVersion !== undefined;
+      const location = !routed && (!hasRow || ledger.isUnseenDeletion(identity2)) && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined && item.identity.sourceVersion !== undefined;
       if (!routed && !location) {
         this.counts.itemsLegacy += 1;
         return { kind: "legacy" };
