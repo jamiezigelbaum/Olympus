@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { V0_4_PUBLIC_PACKAGE_FILES } from '../src/core/public-surface.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -238,5 +238,91 @@ describe('a disconnected bridge reads as stopped', () => {
     const receipt = await target.sync.pull();
     expect(receipt.counts).toMatchObject({ capture_stopped: 0, capture_fresh: 1 });
     expect(receipt.warnings ?? []).not.toContain(WHATSAPP_CAPTURE_DISCONNECTED_WARNING);
+  });
+});
+
+// Key-shaped fixture assembled at run time, so no literal key sits in the repository.
+const STRIPE_LIVE_KEY = ['sk', '_live_', 'k9Xp2LmQ7vRt4WzY8bNc3HdF'].join('');
+
+describe('review round 2', () => {
+  test('an idle pull clears a window an earlier pull failed to clear', async () => {
+    const target = lane();
+    const secret = line('s1', { text: `prod key ${STRIPE_LIVE_KEY}` });
+    writeFileSync(target.file, line('a') + secret);
+    await target.sync.pull();
+    expect(readFileSync(target.file, 'utf8')).not.toContain(STRIPE_LIVE_KEY);
+    // The bridge redelivers the Secret message, and the spool cannot be opened for writing for one pull.
+    appendFileSync(target.file, secret);
+    chmodSync(target.file, 0o400);
+    const failed = await target.sync.pull();
+    expect(failed.warnings).toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
+    chmodSync(target.file, 0o600);
+    // Nothing new to read: the window the failed pull owes is cleared all the same.
+    const idle = await target.sync.pull();
+    expect(idle.warnings ?? []).not.toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
+    expect(readFileSync(target.file, 'utf8')).not.toContain(STRIPE_LIVE_KEY);
+  });
+
+  test('reading reacted-to messages is spent from the pass budget, and the pass goes on next time', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-review-targets-'));
+    roots.push(dir);
+    const targets = Array.from({ length: 40 }, (_, index) => line(`t${index}`, { text: `${'y'.repeat(100 * 1024)} ${index}` })).join('');
+    writeFileSync(join(dir, '2026-10-24.jsonl'), targets);
+    let cursor: string | undefined;
+    for (let pass = 0; pass < 100; pass += 1) {
+      const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems(cursor ? { cursor } : {}));
+      cursor = pages.at(-1)?.nextCursor ?? cursor;
+      if (pages.at(-1)?.done) break;
+    }
+    writeFileSync(join(dir, '2026-10-25.jsonl'), Array.from({ length: 40 }, (_, index) => reaction(`r${index}`, `t${index}`, '👍')).join(''));
+    const reEmitted = new Set<string>();
+    let passes = 0;
+    let firstDone: boolean | undefined;
+    for (; passes < 100; passes += 1) {
+      const findings = emptyWhatsAppSpoolPassFindings();
+      const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, findings, passByteBudget: 256 * 1024 }).listItems(cursor ? { cursor } : {}));
+      firstDone ??= pages.at(-1)?.done;
+      for (const item of pages.flatMap((page) => [...page.items])) {
+        if (item.metadata['reactions'] !== undefined) reEmitted.add(item.identity.providerItemId);
+      }
+      expect(findings.unresolvedReactionTargets).toBe(0);
+      cursor = pages.at(-1)?.nextCursor ?? cursor;
+      if (pages.at(-1)?.done) break;
+    }
+    // Forty 100 KB lines do not fit one 256 KB pass: the first stops, and the rest follow, each target once.
+    expect(firstDone).toBe(false);
+    expect(passes).toBeGreaterThan(5);
+    expect(reEmitted.size).toBe(40);
+  });
+
+  test('a reaction from a file that is gone is no longer counted', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-review-gone-'));
+    roots.push(dir);
+    writeFileSync(join(dir, '2026-10-23.jsonl'), line('m1'));
+    writeFileSync(join(dir, '2026-10-24.jsonl'), reaction('r1', 'm1', '👍'));
+    const first = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems());
+    rmSync(join(dir, '2026-10-24.jsonl'));
+    writeFileSync(join(dir, '2026-10-25.jsonl'), reaction('r2', 'm1', '❤️', 'sender-3@s.whatsapp.net'));
+    const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor: first.at(-1)!.nextCursor! }));
+    const item = pages.flatMap((page) => [...page.items]).find((entry) => entry.identity.providerItemId === 'm1');
+    expect((item?.metadata['reactions'] as Array<{ key: string }>).map((entry) => entry.key)).toEqual(['❤️']);
+  });
+
+  test('a file replaced by another of the same length is indexed again, not trusted', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-review-replaced-'));
+    roots.push(dir);
+    const day = join(dir, '2026-10-24.jsonl');
+    writeFileSync(day, line('m1', { text: 'xxxx' }) + line('m2', { text: 'yyyy' }));
+    const first = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems());
+    // The same bytes in another order, in a new file put in its place: the length and the line ends agree.
+    writeFileSync(`${day}.new`, line('m2', { text: 'yyyy' }) + line('m1', { text: 'xxxx' }));
+    renameSync(`${day}.new`, day);
+    writeFileSync(join(dir, '2026-10-25.jsonl'), reaction('r1', 'm1', '👍'));
+    const findings = emptyWhatsAppSpoolPassFindings();
+    const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, findings }).listItems({ cursor: first.at(-1)!.nextCursor! }));
+    const item = pages.flatMap((page) => [...page.items]).find((entry) => entry.identity.providerItemId === 'm1');
+    expect(findings.unresolvedReactionTargets).toBe(0);
+    expect(item?.content).toEqual({ kind: 'text', text: 'xxxx' });
+    expect((item?.metadata['reactions'] as Array<{ key: string }>).map((entry) => entry.key)).toEqual(['👍']);
   });
 });

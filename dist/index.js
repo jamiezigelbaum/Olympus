@@ -14641,6 +14641,7 @@ var init_vocabulary = __esm(() => {
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       item_repeated: { one: "1 message was in more than one export file and was imported once", many: "{n} messages were in more than one export file and were imported once" },
+      item_refused: { one: "1 item was not imported because the place it belongs in would not take it (nothing was stored in the wrong place)", many: "{n} items were not imported because the place they belong in would not take them (nothing was stored in the wrong place)" },
       files_not_looked_at: { one: "1 file in what you chose was not looked at, so it was not imported if it is an export", many: "{n} files in what you chose were not looked at, so any of them that are exports were not imported" },
       files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
@@ -14656,6 +14657,7 @@ var init_vocabulary = __esm(() => {
       item_truncated: "not_imported",
       section_not_imported: "not_imported",
       file_damaged: "not_imported",
+      item_refused: "not_imported",
       files_not_looked_at: "not_imported",
       files_unconfirmed: "not_imported",
       time_zone_assumed: "how_read",
@@ -20991,7 +20993,7 @@ var init_spool_reader = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-var DEFAULT_PASS_BYTE_BUDGET;
+var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
@@ -20999,6 +21001,7 @@ var init_live_connector = __esm(() => {
   init_spool_index();
   init_spool_reader();
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
+  TARGET_READ_CHUNK_BYTES = 4 * 1024;
 });
 
 // src/workers/whatsapp/store-sync.ts

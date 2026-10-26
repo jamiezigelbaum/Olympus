@@ -414,7 +414,10 @@ export function clearWhatsAppSpoolSecrets(options: {
   through: string | undefined;
   /** Maps a media path a spool line names at the account's old place to the account folder (`whatsappMovedPathMapper`). */
   relocateMediaPath?: (path: string) => string;
-  /** False when the pull read nothing: the window is skipped and only a changed set of Secrets is swept. */
+  /**
+   * False when the pull read nothing: the window is skipped and only a changed set of Secrets is swept,
+   * unless an earlier window is still owed (it failed), which is cleared first.
+   */
   windowRead?: boolean;
 }): CaptureSpoolRedactionResult {
   const redact = (window: { from?: string; through: string }, judge: SpoolSecretJudge) => redactWhatsAppLiveSpoolSecrets({
@@ -425,7 +428,11 @@ export function clearWhatsAppSpoolSecrets(options: {
     ...window,
     judge,
   });
-  if (options.windowRead === false && options.through !== undefined) {
+  // A window a failed pull still owes (where clearing has reached is behind where reading has) is cleared
+  // before an idle pull may skip it: `clearCaptureSpoolSecrets` reaches back to where clearing stopped.
+  const owed = options.through !== undefined
+    && options.ledger.readMeta(`${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_through`) !== options.through;
+  if (options.windowRead === false && options.through !== undefined && !owed) {
     const through = options.through;
     return addCaptureSpoolRedactions(sweepCaptureSpoolWhenSecretsChange({
       ledger: options.ledger,

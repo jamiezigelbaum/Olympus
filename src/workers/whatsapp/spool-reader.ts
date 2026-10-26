@@ -67,6 +67,7 @@ export function* spoolRecords(
   maxRecordBytes = WHATSAPP_SPOOL_MAX_RECORD_BYTES,
   budget?: SpoolReadBudget,
   skipping = false,
+  chunkBytes = CHUNK_BYTES,
 ): Generator<SpoolRecordRead> {
   let fd: number;
   try {
@@ -75,7 +76,8 @@ export function* spoolRecords(
     return;
   }
   try {
-    const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
+    const size = Math.max(1, Math.min(CHUNK_BYTES, chunkBytes));
+    const chunk = Buffer.allocUnsafe(size);
     let pending: Buffer[] = [];
     let pendingBytes = 0;
     let oversized = skipping;
@@ -87,7 +89,7 @@ export function* spoolRecords(
         yield pauseAt(position, oversized, continued);
         return;
       }
-      const want = budget && oversized ? Math.max(1, Math.min(CHUNK_BYTES, budget.bytesLeft)) : CHUNK_BYTES;
+      const want = budget && oversized ? Math.max(1, Math.min(size, budget.bytesLeft)) : size;
       const read = readSync(fd, chunk, 0, want, position);
       if (read === 0) {
         // An over-long fragment at the end is never read again: the next read goes on past it.
@@ -197,11 +199,16 @@ export function isRecordBoundary(path: string, offset: number): boolean {
   }
 }
 
-/** A file's size and its inode (undefined where the platform reports none). */
-export function spoolFileIdentity(path: string): { size: number; ino?: number } | undefined {
+/**
+ * A file's size and its identity: its device, inode and birth time where the
+ * platform reports them, so a file put in another's place (even one of the
+ * same length) is told apart. Undefined when the file is not there.
+ */
+export function spoolFileIdentity(path: string): { size: number; ino?: number; identity: string } | undefined {
   try {
     const stats = statSync(path);
-    return { size: stats.size, ...(stats.ino > 0 ? { ino: stats.ino } : {}) };
+    const birth = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? Math.floor(stats.birthtimeMs) : 0;
+    return { size: stats.size, ...(stats.ino > 0 ? { ino: stats.ino } : {}), identity: `${stats.dev}:${stats.ino}:${birth}` };
   } catch {
     return undefined;
   }

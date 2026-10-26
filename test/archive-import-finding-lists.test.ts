@@ -67,6 +67,8 @@ describe('the two lists under an archive', () => {
       'spam_or_trash', 'note_unreadable', 'note_too_large', 'note_content_unsupported',
       // Kinds only an older record carries are still Not imported: nothing disappears.
       'item_truncated', 'text_cut', 'service_message', 'status_updates',
+      // An item placement refused (fail-closed) is told as a gap.
+      'item_refused',
     ];
     for (const kind of howRead) expect(archiveFindingList(kind), kind).toBe('how_read');
     for (const kind of notImported) expect(archiveFindingList(kind), kind).toBe('not_imported');
