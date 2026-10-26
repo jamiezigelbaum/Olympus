@@ -74,7 +74,7 @@ export function liveMatchKeys(input: { chatJid: string; timestamp: string; sende
 /**
  * A stable id of an export message live does not hold, from what it is, never
  * from where it is: its chat, its time slot (zone applied), its sender, its
- * whole text with the names of the files it carries (WhatsApp names each file
+ * exact text (never folded) with the names of the files it carries (WhatsApp names each file
  * apart, so a picture with no words has an id of its own), and its number
  * among exactly identical messages (the export reader's own count). The same
  * in a second export of the chat, however much more or less that one holds.
