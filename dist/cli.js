@@ -60848,6 +60848,7 @@ class TieredRoutingRun {
   legOptions;
   counts;
   plans;
+  versionPlans;
   copyRemovals;
   intents;
   namesAdvance;
@@ -60864,6 +60865,7 @@ class TieredRoutingRun {
     this.routedDomains = new Set;
     this.legOptions = new Map;
     this.plans = new Map;
+    this.versionPlans = new Map;
     this.copyRemovals = new Map;
     this.pendingWithdrawals = new Map;
     this.intents = new Map;
@@ -60885,7 +60887,7 @@ class TieredRoutingRun {
     return this.owedAlready.has(identityKey(item.identity));
   }
   plannedKind(item) {
-    return this.plans.get(planKey(item))?.plan.kind;
+    return this.plans.get(planKey(item))?.plan.kind ?? this.versionPlans.get(versionKey(item));
   }
   async route(input) {
     const domain = this.set.domainForCorpus(input.store.corpusId);
@@ -60897,6 +60899,7 @@ class TieredRoutingRun {
       entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
       this.plans.set(key2, entry);
     }
+    this.versionPlans.set(versionKey(input.item), entry.plan.kind);
     if (this.mode === "per_leg" && !entry.handedOff) {
       entry.handedOff = true;
       await this.handOff(entry, input, domain);
@@ -61241,6 +61244,9 @@ function planKey(item) {
     item.metadata["deleted"] === true
   ])).digest("hex");
   return `${identityKey(item.identity)}\x00${item.identity.sourceVersion ?? ""}\x00${judged}`;
+}
+function versionKey(item) {
+  return `${identityKey(item.identity)}\x00${item.identity.sourceVersion ?? ""}`;
 }
 function stringMetadata(item, keys) {
   for (const key2 of keys) {
