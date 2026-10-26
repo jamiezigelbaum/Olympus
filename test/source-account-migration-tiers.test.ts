@@ -176,10 +176,8 @@ function ledgerFoundBy(paths: Record<Tier, string>, tier: Tier): string | undefi
 /** The connections the fixtures open are closed but may not be collected yet; a store file must have none open when it is renamed (the engine moves it before it opens any). */
 const settle = (): void => { Bun.gc(true); };
 
-const withoutSwitch = (env: Env): Env => {
-  const { [MIGRATE_ACCOUNT_FOLDERS_ENV]: _removed, ...rest } = env;
-  return rest;
-};
+/** The switch turned off: the pass is on by default, so off is said (`OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0`). */
+const withoutSwitch = (env: Env): Env => ({ ...env, [MIGRATE_ACCOUNT_FOLDERS_ENV]: '0' });
 
 /** Adds a handler to the pass's checkpoints; the ones set before it run first, so a handler that kills the pass goes last. */
 function onCheckpoint(handler: (at: string) => void): void {

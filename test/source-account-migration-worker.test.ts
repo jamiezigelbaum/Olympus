@@ -133,7 +133,7 @@ describe('the boot migration, in a real worker', () => {
     const before = atOldPlaces(env);
     expect(before.length).toBeGreaterThanOrEqual(2);
 
-    const worker = await boot(env);
+    const worker = await boot(env, { [MIGRATE_ACCOUNT_FOLDERS_ENV]: '0' });
     try {
       expect(worker.output(), `the worker did not listen (exit ${worker.exitCode()}): ${worker.errors().slice(0, 2000)}`).toContain('worker listening');
       expect(worker.output()).not.toContain('[storage]');
@@ -181,7 +181,7 @@ describe('the boot migration, in a real worker', () => {
     expect(registry.accounts.find((account) => account.source_id === 'dropbox.files')).toMatchObject({ layout: 'folder', state: 'active', migration: { state: 'done' } });
 
     // The next boot, with the switch back off: the stores are where the registry says, and no empty ones appear at the old places.
-    const second = await boot(env);
+    const second = await boot(env, { [MIGRATE_ACCOUNT_FOLDERS_ENV]: '0' });
     try {
       expect(second.output(), `the worker did not listen (exit ${second.exitCode()}): ${second.errors().slice(0, 2000)}`).toContain('worker listening');
       expect(second.output()).not.toContain('[storage]');

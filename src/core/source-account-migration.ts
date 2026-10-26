@@ -11,11 +11,11 @@
  *
  * It runs once per worker boot, under the owner lock, after
  * `replaceEmptyLegacyAccounts` and before adoption is enabled and anything
- * mounts, so no store is open anywhere while files move. It starts moves only
- * when `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` is in the worker's environment; a
- * move already under way (a plan in the registry) is finished or undone at
- * every boot, whatever the switch says, because its account stays closed until
- * one or the other.
+ * mounts, so no store is open anywhere while files move. It starts moves
+ * unless `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0` is in the worker's environment
+ * (on by default since 2026-10-26); a move already under way (a plan in the
+ * registry) is finished or undone at every boot, whatever the switch says,
+ * because its account stays closed until one or the other.
  *
  * The move only renames files. Nothing in a store, a ledger or the media cache
  * names a path any more (a store finds its set ledger by the ledger's id; a
@@ -230,8 +230,17 @@ export const __accountMigrationTestHooks: {
   },
 };
 
+/** The values of `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS` that turn the pass off; anything else, unset included, leaves it on. */
+const MIGRATION_OFF = ['0', 'false', 'off', 'no'];
+
+/**
+ * Whether this boot starts moves: on by default, off only when the worker's
+ * environment says `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0` (or `false`, `off`,
+ * `no`). The opt-out stays until release testing signs the migration off
+ * (docs/design/source-storage.md, step 4c's retirement list).
+ */
 export function accountFolderMigrationEnabled(env: LayoutEnv = process.env): boolean {
-  return env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim() === '1';
+  return !MIGRATION_OFF.includes(env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? '');
 }
 
 const MESSAGING_SOURCES: readonly string[] = [TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID];

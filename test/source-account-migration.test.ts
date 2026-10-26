@@ -101,10 +101,8 @@ function fixture(extra: Env = {}): { dir: string; env: Env; root: string } {
   return { dir, env, root: olympusDataRoot(env) };
 }
 
-const withoutSwitch = (env: Env): Env => {
-  const { [MIGRATE_ACCOUNT_FOLDERS_ENV]: _removed, ...rest } = env;
-  return rest;
-};
+/** The switch turned off: the pass is on by default, so off is said (`OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0`). */
+const withoutSwitch = (env: Env): Env => ({ ...env, [MIGRATE_ACCOUNT_FOLDERS_ENV]: '0' });
 
 // ---------------------------------------------------------------------------
 // A legacy install
@@ -496,17 +494,32 @@ describe('the move', () => {
   });
 });
 
-describe('with the switch off', () => {
+describe('on by default', () => {
   test.each([
     ['not set', undefined],
-    ['0', '0'],
-    ['true', 'true'],
     ['empty', ''],
+    ['1', '1'],
+    ['true', 'true'],
+  ])('%s: the boot moves an existing account into its folder', (_label, value) => {
+    const { env } = fixture();
+    install(env, 'dropbox.files');
+    const { [MIGRATE_ACCOUNT_FOLDERS_ENV]: _removed, ...unset } = env;
+    const switched = value === undefined ? unset : { ...unset, [MIGRATE_ACCOUNT_FOLDERS_ENV]: value };
+    expect(migrateAccountFolders(switched).moved).toEqual(['dropbox.files']);
+    expect(entryOf(env, 'dropbox.files')!.layout).toBe('folder');
+  });
+});
+
+describe('with the switch off', () => {
+  test.each([
+    ['0', '0'],
+    ['false', 'false'],
+    ['off', ' OFF '],
+    ['no', 'no'],
   ])('%s: the boot changes nothing, not a path, a byte or the registry', (_label, value) => {
     const { env, root } = fixture();
     for (const sourceId of migratableSources()) install(env, sourceId);
-    const clean = withoutSwitch(env);
-    const switched = value === undefined ? clean : { ...clean, [MIGRATE_ACCOUNT_FOLDERS_ENV]: value };
+    const switched = { ...env, [MIGRATE_ACCOUNT_FOLDERS_ENV]: value };
     const before = tree(root);
 
     const report = migrateAccountFolders(switched);
