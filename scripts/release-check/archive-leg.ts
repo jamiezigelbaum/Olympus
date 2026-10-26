@@ -418,7 +418,17 @@ export interface BesideLiveObservation {
    * The source's Delete, and what is left after it. `unpaired`: the source was unpaired on the dashboard first, as the owner must
    * (the engine refuses to delete a paired source's data).
    */
-  deleted?: { ok: boolean; unpaired: boolean; detail?: string; stores: StoreView[]; rowGone: boolean };
+  deleted?: {
+    ok: boolean;
+    unpaired: boolean;
+    detail?: string;
+    stores: StoreView[];
+    rowGone: boolean;
+    /** The engine came back ready after the restart the Delete asked for (absent: not waited for). */
+    engineBack?: boolean;
+    /** How long the source's stores took to be cleared, from the Delete. */
+    goneMs?: number;
+  };
 }
 
 export interface ModelObservation {
@@ -1006,6 +1016,7 @@ export function besideLiveChecks(obs: BesideLiveObservation | undefined, fx: Leg
   else {
     if (!deleted.unpaired) gone.push('the source was not unpaired before its Delete (the engine refuses to delete a paired source\'s data)');
     if (!deleted.ok) gone.push(`the source's Delete failed${deleted.detail ? `: ${deleted.detail}` : ''}`);
+    if (deleted.ok && deleted.engineBack === false) gone.push(deleted.detail ?? 'the engine was not ready after the Delete\'s restart');
     for (const store of deleted.stores) {
       if (store.error) gone.push(`the ${store.tier} store could not be read: ${store.error}`);
       if (store.tokenRows > 0) gone.push(`the ${store.tier} store still holds ${store.tokenRows} row(s) with the archive's content`);

@@ -11,7 +11,7 @@ import {
   type BesideLiveObservation, type RowView,
 } from '../scripts/release-check/archive-leg.ts';
 import { liveSeedHook, registerLiveSeedHook } from '../scripts/release-check/archive-live-seeds.ts';
-import { searchWhenJudged } from '../scripts/release-check/archive-stages.ts';
+import { afterSourceDelete, searchWhenJudged, type ArchiveHost } from '../scripts/release-check/archive-stages.ts';
 
 const fx: LegFixture = {
   role: 'beside',
@@ -71,6 +71,8 @@ describe('an import beside a live input is judged', () => {
     expect(paired.filter((check) => check.status === 'fail').map((check) => check.id)).toEqual(['archive.beside.fixture_chat.deleted']);
     expect(paired.find((check) => check.id === 'archive.beside.fixture_chat.deleted')!.detail).toContain('the source was not unpaired before its Delete');
     expect(failing(good({ deleted: { ok: true, unpaired: false, stores: [], rowGone: true } }))).toEqual(['archive.beside.fixture_chat.deleted']);
+    // The engine did not come back from the restart the Delete asked for: whatever runs next would meet it restarting.
+    expect(failing(good({ deleted: { ok: true, unpaired: true, stores: [], rowGone: true, engineBack: false, detail: 'the engine was not ready after the Delete\'s restart: timeout' } }))).toEqual(['archive.beside.fixture_chat.deleted']);
     expect(failing(good({ start: { ok: true, code: 'started', hasOpenTarget: false, carriesContent: false } }))).toEqual(['archive.beside.fixture_chat.requested']);
   });
 
@@ -161,5 +163,50 @@ describe('the search beside a live input waits for the private model', () => {
     expect(world.calls()).toBe(7);
     expect(world.lines.at(-1)).toContain('NOT cited');
     expect(failing(good({ search }))).toEqual(['archive.beside.fixture_chat.search']);
+  });
+});
+
+// Mac round 2 / Linux round 3, 2026-10-26: the stores were read right after the Delete returned, while the worker had only marked the
+// account and was about to restart; its files go at that boot. The next leg then met the engine restarting.
+describe('a source\'s Delete is judged once it has been applied', () => {
+  const host = (clearAfter: number, engine = true) => {
+    let clock = 0;
+    let reads = 0;
+    const order: string[] = [];
+    const fake = {
+      now: () => clock,
+      sleep: async (ms: number) => { clock += ms; },
+      readSourceStores: () => {
+        reads += 1;
+        order.push('read');
+        const left = reads <= clearAfter ? 2 : 0;
+        return [{ tier: 'private' as const, exists: left > 0, live: left, tokenRows: left }, { tier: 'personal' as const, exists: left > 0, live: left, tokenRows: left }];
+      },
+      awaitEngine: async () => { order.push('engine'); return engine ? { ok: true, ms: 1 } : { ok: false, ms: 1, detail: 'not ready' }; },
+    };
+    return { fake: fake as unknown as ArchiveHost, order, reads: () => reads };
+  };
+
+  test('the stores are read again until the restart has removed them, then the engine is waited for', async () => {
+    const { fake, order, reads } = host(3);
+    const after = await afterSourceDelete(fake, 'telegram', fx.token, 420_000);
+    expect(after.stores.every((store) => store.tokenRows === 0)).toBe(true);
+    expect(after.engineBack).toBe(true);
+    expect(reads()).toBe(4);
+    expect(order.at(-1)).toBe('engine');
+  });
+
+  test('stores never cleared within the bound are the reading judged, and the engine is still waited for', async () => {
+    const { fake, order } = host(Number.MAX_SAFE_INTEGER);
+    const after = await afterSourceDelete(fake, 'telegram', fx.token, 10_000);
+    expect(after.stores.some((store) => store.tokenRows > 0)).toBe(true);
+    expect(order.at(-1)).toBe('engine');
+    expect(failing(good({ deleted: { ok: true, unpaired: true, stores: after.stores, rowGone: true, engineBack: after.engineBack } }))).toEqual(['archive.beside.fixture_chat.deleted']);
+  });
+
+  test('an engine that does not come back is said', async () => {
+    const after = await afterSourceDelete(host(0, false).fake, 'telegram', fx.token, 10_000);
+    expect(after.engineBack).toBe(false);
+    expect(after.detail).toBe('not ready');
   });
 });
