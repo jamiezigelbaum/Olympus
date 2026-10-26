@@ -74232,7 +74232,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
       const boundaryHolds = (name, cursor) => {
         const recorded = readBoundary(tierSet, name);
         if (!recorded || recorded.cursor !== cursor)
-          return true;
+          return false;
         const offset = telegramCaptureCursorOffset(spoolDir, cursor);
         return offset !== undefined && spoolBoundaryHolds(join61(spoolDir, cursorFile(cursor)), offset, recorded.digest);
       };

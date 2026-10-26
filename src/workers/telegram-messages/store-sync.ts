@@ -263,7 +263,9 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       const replacedFiles = new Set<string>();
       const boundaryHolds = (name: string, cursor: string): boolean => {
         const recorded = readBoundary(tierSet, name);
-        if (!recorded || recorded.cursor !== cursor) return true;
+        // Trusted only on a receipt for exactly this cursor: a missing one, or one for another position (a crash
+        // between the cursor's commit and its receipt), proves nothing about the bytes under it.
+        if (!recorded || recorded.cursor !== cursor) return false;
         const offset = telegramCaptureCursorOffset(spoolDir, cursor);
         return offset !== undefined && spoolBoundaryHolds(join(spoolDir, cursorFile(cursor)), offset, recorded.digest);
       };

@@ -456,7 +456,10 @@ message beyond its search context (`src/workers/telegram-messages/`,
   is owner-only (0700, files 0600). Every boundary Telegram records (each
   lane's cursor, where the clearing has reached) keeps the file's identity
   and a digest of the 4 KiB that end at it, checked before the boundary is
-  used. Detected: a file removed and written again, and any change within
+  used. A boundary is trusted only on a receipt for exactly its position: a
+  missing receipt, or one for another position (a crash between a cursor's
+  commit and its receipt, or the first pull after this change), counts as a
+  mismatch, which costs one read of the file again. Detected: a file removed and written again, and any change within
   the 4 KiB before a boundary (a record rewritten under a cursor, longer or
   as another lane's). On a mismatch every boundary in that file is dropped:
   its lanes read it again from its start under the intake rule, and the
