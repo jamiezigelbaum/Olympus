@@ -244,7 +244,7 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   // owner's whatever the readiness label says: another problem's label must
   // not be what decides whether this one is seen.
   if (dashboardCaptureProblem(source) !== undefined) return { status: 'Needs you', mappedUnknown: false };
-  // Kept media filled its storage: new photos and files are names only until the owner makes room.
+  // The computer's disk is nearly full: new media waits to download until the owner frees space.
   if (source.media_storage) return { status: 'Needs you', mappedUnknown: false };
   // A folder source that is connected but has no approved scope has read
   // nothing and will read nothing until the owner chooses folders. Its
@@ -452,7 +452,7 @@ export function dashboardAttentionParts(
 ): { reason: string; capture?: string; media?: string } {
   const capture = dashboardCaptureAttentionReason(source);
   // Kept media that filled its storage: a third half, beside whatever else the source has.
-  const media = source.media_storage ? DASHBOARD_MEDIA_STORAGE_COPY.reason(source.media_storage.left_out_items) : undefined;
+  const media = source.media_storage ? DASHBOARD_MEDIA_STORAGE_COPY.reason : undefined;
   const withCapture = (reason: string): { reason: string; capture?: string; media?: string } => ({
     reason,
     ...(capture ? { capture } : {}),
@@ -574,25 +574,15 @@ export const DASHBOARD_STORAGE_NOTICE_COPY = {
 } as const;
 
 /**
- * A source's kept media has filled its storage limit (DashboardSourceCard
- * `media_storage`). `reason` is the clause after the source's name on its row,
- * and carries the way to make room itself: the panel's row shows only its line,
- * and no page on the computer says more. It counts the owner's own photos and
- * files left out, which making room brings back for new ones (the 2026-08-24
- * ruling is against counts nobody can act on; this one is the size of what
- * the fix restores). `nextAction` is the same step for the setup sheet.
+ * The computer's disk is nearly full, so a source's new media waits to
+ * download (DashboardSourceCard `media_storage`; owner, 2026-10-26). `reason`
+ * is the clause after the source's name on its row, with no counts (owner
+ * ruling, 2026-08-24); `nextAction` is the step on its setup sheet.
  */
 export const DASHBOARD_MEDIA_STORAGE_COPY = {
-  reason: (leftOut: number) => (leftOut === 1
-    ? 'media storage is full, so 1 new photo or file was kept as a name only'
-    : leftOut > 1
-      ? `media storage is full, so ${leftOut} new photos and files were kept as names only`
-      : 'media storage is full, so new photos and files are kept as names only')
-    + ' · ask your agent to raise the media limit or remove media you no longer need',
-  nextAction: (label: string, leftOut: number) => `${label}'s media storage is full, so new photos and files are kept as names only`
-    + (leftOut > 0 ? ` (${leftOut} so far)` : '')
-    + `. Nothing already kept was removed. To keep new media again, ask your agent to raise ${label}'s media storage limit, `
-    + 'or to remove kept media you no longer need.',
+  reason: 'the computer\'s disk is nearly full; new media will download once space is freed',
+  nextAction: (label: string) => `This computer's disk is nearly full, so new photos and files from ${label} wait to download. `
+    + 'Messages still arrive. Free space on this computer, and the waiting media downloads on its own.',
 } as const;
 
 /** The view model's readiness labels that name a cause, in the owner's words. */

@@ -3,7 +3,7 @@
 // advances two trust-separated stores through the shared connector spine.
 
 import { existsSync, readdirSync, rmSync } from 'node:fs';
-import { sweepTelegramMediaTemporaries, telegramMediaStateNow, TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile, type TelegramMediaState } from './media-child.ts';
+import { sweepTelegramMediaTemporaries, telegramMediaDiskLow, TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile, type DiskSpace } from './media-child.ts';
 import { join } from 'node:path';
 import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
@@ -65,7 +65,7 @@ export const TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = 'telegram_spool_secret_re
 // the lane reads the spool again from its start instead of stopping for good.
 export const TELEGRAM_SPOOL_CURSOR_RESET_WARNING = 'telegram_spool_cursor_reset';
 // The capture helper's media quota is full: new photos and files are named only, and nothing kept was evicted.
-export const TELEGRAM_MEDIA_STORAGE_FULL_WARNING = 'telegram_media_storage_full';
+export const TELEGRAM_MEDIA_DISK_LOW_WARNING = 'telegram_media_disk_low';
 // The identity of the day file a lane cursor stands in, kept in the set's ledger.
 const TELEGRAM_SPOOL_FILE_META_PREFIX = 'telegram:spool_file:';
 // Every boundary this source records in its spool (each lane's cursor, where the Secrets clearing has
@@ -127,10 +127,11 @@ export interface TelegramConnectorStoreSyncReceipt {
      * capture. The freshness verdict is then fresh.
      */
     capture_quiet: 0 | 1;
-    /** 1 when the helper's media quota is full: new media is named only until room is made or the quota is raised. */
-    media_storage_full: 0 | 1;
-    /** Media named only for want of room since the store was last not full (the source card says how many). */
-    media_left_out_storage_full: number;
+    /**
+     * 1 when the computer's disk is under the floor where the capture helper pauses new downloads (the larger of 5 GB and
+     * 5% of the disk): messages still arrive, and their media downloads on its own once space is freed.
+     */
+    media_disk_low: 0 | 1;
   } & CaptureFreshnessCounts;
   /**
    * Whether the live feed is running: a pull can succeed on schedule while
@@ -253,6 +254,8 @@ export function createTelegramConnectorStoreSyncHandler(options: {
   secretLocations?: SecretLocationsIndex;
   /** The runtime's live Private embedder, told to the set so the Private-row re-home pass knows whether it is local. */
   privateEmbedder?: SourceEmbeddingProvider;
+  /** Test seam: the spool volume's free and total bytes, for the media disk floor. */
+  diskSpace?: DiskSpace;
 }): TelegramConnectorStoreSyncHandler {
   const env = options.env ?? process.env;
   const spoolDir = options.spoolDir?.trim() || defaultTelegramCaptureSpoolDir(env);
@@ -505,7 +508,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
           now().getTime(),
           staleThresholdSeconds,
         ),
-        telegramMediaStateNow(spoolDir),
+        telegramMediaDiskLow(spoolDir, options.diskSpace),
       );
     },
 
@@ -759,9 +762,8 @@ function telegramSyncReceipt(
   cursorResets: number,
   trustClaimsMoved: number,
   liveness: CaptureFreshness & { quiet: boolean },
-  media: TelegramMediaState | undefined = undefined,
+  mediaDiskLow = false,
 ): TelegramConnectorStoreSyncReceipt {
-  const mediaStorageFull = media?.storageFull === true;
   const { quiet, ...capture } = liveness;
   const runs = [internal, secureLocal];
   const counts = {
@@ -782,8 +784,7 @@ function telegramSyncReceipt(
     spool_cursor_resets: cursorResets,
     trust_claims_moved: trustClaimsMoved,
     capture_quiet: quiet ? 1 as const : 0 as const,
-    media_storage_full: mediaStorageFull ? 1 as const : 0 as const,
-    media_left_out_storage_full: mediaStorageFull ? media!.leftOutItems : 0,
+    media_disk_low: mediaDiskLow ? 1 as const : 0 as const,
     ...captureFreshnessCounts(capture),
   };
   const warnings = [
@@ -791,7 +792,7 @@ function telegramSyncReceipt(
     ...(trustConflictItems > 0 ? [TELEGRAM_TRUST_CONFLICT_WARNING] : []),
     ...(redactionFailed ? [TELEGRAM_SPOOL_REDACTION_FAILED_WARNING] : []),
     ...(cursorResets > 0 ? [TELEGRAM_SPOOL_CURSOR_RESET_WARNING] : []),
-    ...(mediaStorageFull ? [TELEGRAM_MEDIA_STORAGE_FULL_WARNING] : []),
+    ...(mediaDiskLow ? [TELEGRAM_MEDIA_DISK_LOW_WARNING] : []),
   ];
   return {
     status: counts.items_changed > 0 || counts.items_tombstoned > 0 ? 'progress' : 'idle',

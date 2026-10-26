@@ -5,7 +5,7 @@
 // beside its spool. Both are listed by name with the means to read the bytes
 // later, and each child is judged on its own.
 
-import { lstatSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, rmSync, statfsSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { CHILD_ITEM_ID_SEPARATOR, childProviderItemId } from '../../core/child-item-id.ts';
 import type { RawItem } from '../../core/contracts.ts';
@@ -26,26 +26,14 @@ export interface TelegramMediaDescription {
   mimeType?: string;
   /** The field that named it in the export (`photo`, `file`), or the live attachment's kind. */
   kind: string;
-  /** Why the capture helper kept no file for it: over the size limit, or the media quota was full. */
+  /** Why the capture helper has no file for it yet: the computer's disk was under the floor, so its download waits. */
   leftOut?: TelegramMediaLeftOut;
 }
 
-export type TelegramMediaLeftOut = 'too_large' | 'storage_full';
+export type TelegramMediaLeftOut = 'waiting_for_disk';
 
-/** The helper's account of the media it keeps (`.capture-media.json` beside the spool). */
-export interface TelegramMediaState {
-  storedBytes: number;
-  quotaBytes: number;
-  /** New media is named only, never kept, until room is made or the quota is raised; nothing is evicted. */
-  storageFull: boolean;
-  /** Media named only for want of room since the store was last not full. */
-  leftOutItems: number;
-  /** What was kept and reserved when the last download was refused; fewer bytes kept now means room was made. */
-  refusedWithBytes?: number;
-}
-
-const MEDIA_STATE_FILE = '.capture-media.json';
-const MAX_MEDIA_STATE_BYTES = 4096;
+const MEDIA_DISK_FLOOR_BYTES = 5 * 1024 * 1024 * 1024;
+const MEDIA_DISK_FLOOR_SHARE = 0.05;
 // A download in progress: `.<final name>.tmp.<pid>` (telegram-telethon-reader.py).
 const TEMPORARY_MARK = '.tmp.';
 
@@ -129,7 +117,7 @@ export function telegramLiveMediaChild(parent: RawItem, spoolDir: string): RawIt
   const locator = relative ? `${TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX}${relative}` : undefined;
   const kept = locator ? liveMediaPath(spoolDir, locator) : undefined;
   const size = typeof attachment.sizeBytes === 'number' && Number.isSafeInteger(attachment.sizeBytes) ? attachment.sizeBytes : undefined;
-  const leftOut: TelegramMediaLeftOut | undefined = attachment.mediaLeftOut === 'too_large' || attachment.mediaLeftOut === 'storage_full' ? attachment.mediaLeftOut : undefined;
+  const leftOut: TelegramMediaLeftOut | undefined = attachment.mediaLeftOut === 'waiting_for_disk' ? attachment.mediaLeftOut : undefined;
   const description = { name, kind, ...(mimeType ? { mimeType } : {}), ...(leftOut ? { leftOut } : {}) };
   if (kept && locator) return telegramMediaChild(parent, description, { locator, available: true, ...(size !== undefined ? { sizeBytes: size } : {}) });
   const unmarked = parent.identity.sourceVersion?.split(CAPTURE_MARK)[0];
@@ -211,74 +199,30 @@ export function sweepTelegramMediaTemporaries(spoolDir: string): number {
   return removed;
 }
 
-/** The bytes of the files kept under the spool's media folder, measured now; downloads in progress are not kept files. */
-export function telegramKeptMediaBytes(spoolDir: string): number {
-  const root = join(spoolDir, 'media');
-  let total = 0;
-  let chats: string[];
-  try {
-    chats = readdirSync(root);
-  } catch {
-    return 0;
-  }
-  for (const chat of chats) {
-    const folder = join(root, chat);
-    let names: string[];
-    try {
-      if (!lstatSync(folder).isDirectory()) continue;
-      names = readdirSync(folder);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      if (name.startsWith('.') && name.includes(TEMPORARY_MARK)) continue;
-      try {
-        const stat = lstatSync(join(folder, name));
-        if (stat.isFile()) total += stat.size;
-      } catch {
-        // Removed while measured.
-      }
-    }
-  }
-  return total;
+/** Free and total bytes of the volume a path is on (as this user may use them). */
+export type DiskSpace = (path: string) => { free: number; total: number };
+
+export const diskSpaceOf: DiskSpace = (path) => {
+  const stat = statfsSync(path);
+  return { free: Number(stat.bavail) * Number(stat.bsize), total: Number(stat.blocks) * Number(stat.bsize) };
+};
+
+/** The free space new downloads keep: the larger of 5 GB and 5% of the disk (the capture helper keeps the same floor). */
+export function telegramMediaDiskFloor(total: number): number {
+  return Math.max(MEDIA_DISK_FLOOR_BYTES, Math.floor(total * MEDIA_DISK_FLOOR_SHARE));
 }
 
 /**
- * The media account as it stands now, for each pull. The helper's file says
- * whether a download was refused and with how much kept; what is kept is
- * measured again here, so room made since (files removed, a Secret's files
- * taken) clears the full state at the next pull instead of at the next
- * download. Full while what is kept reaches the quota, or while a refusal
- * stands and nothing has been freed since it. Media already left out stays
- * named only; the count is of media left out since the store last filled.
+ * Whether the computer's disk is under the floor where the capture helper pauses new downloads (owner, 2026-10-26: every
+ * message and every media file is ingested; the one safeguard is the computer's own). Read on the spool's volume at each
+ * pull, so the card says so while it lasts and stops once space is freed; the media that waited downloads on its own then.
+ * A volume that cannot be read says nothing.
  */
-export function telegramMediaStateNow(spoolDir: string): TelegramMediaState | undefined {
-  const state = readTelegramMediaState(spoolDir);
-  if (!state || state.quotaBytes <= 0) return state;
-  const kept = telegramKeptMediaBytes(spoolDir);
-  const refusalStands = state.storageFull && kept >= (state.refusedWithBytes ?? state.storedBytes);
-  const storageFull = kept >= state.quotaBytes || refusalStands;
-  return { storedBytes: kept, quotaBytes: state.quotaBytes, storageFull, leftOutItems: refusalStands ? state.leftOutItems : 0 };
-}
-
-/** The helper's media account, or undefined when it has written none. */
-export function readTelegramMediaState(spoolDir: string): TelegramMediaState | undefined {
+export function telegramMediaDiskLow(spoolDir: string, space: DiskSpace = diskSpaceOf): boolean {
   try {
-    const path = join(spoolDir, MEDIA_STATE_FILE);
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.size > MAX_MEDIA_STATE_BYTES) return undefined;
-    const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-    if (value.kind !== 'telegram_capture_media' || value.schema_version !== 1) return undefined;
-    const count = (field: unknown) => (typeof field === 'number' && Number.isSafeInteger(field) && field >= 0 ? field : 0);
-    const storageFull = value.storage_full === true;
-    return {
-      storedBytes: count(value.stored_bytes),
-      quotaBytes: count(value.quota_bytes),
-      storageFull,
-      leftOutItems: storageFull ? count(value.left_out_items) : 0,
-      ...(storageFull && typeof value.refused_with_bytes === 'number' ? { refusedWithBytes: count(value.refused_with_bytes) } : {}),
-    };
+    const { free, total } = space(spoolDir);
+    return free < telegramMediaDiskFloor(total);
   } catch {
-    return undefined;
+    return false;
   }
 }

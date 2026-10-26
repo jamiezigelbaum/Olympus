@@ -658,9 +658,9 @@ function captureProblem(card: DashboardSourceCard): boolean {
 }
 
 /**
- * The media a source keeps filled its storage, and nothing else is wrong. The
- * row's line says how to make room (the agent raises the limit or removes
- * media); Sync now cannot, so the control checks again once room is made.
+ * The computer's disk is nearly full, so the source's new media waits, and
+ * nothing else is wrong. The row's line says what frees it (space on this
+ * computer); Sync now cannot, so the control checks again once space is freed.
  */
 function mediaStorageOnly(card: DashboardSourceCard, options: Parameters<typeof dashboardAttentionParts>[1]): boolean {
   return card.media_storage !== undefined && !captureProblem(card) && dashboardAttentionParts(card, options).reason === '';
@@ -1413,10 +1413,8 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } }
       : {}),
     ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
-    // A state and a count only: the words are vocabulary.ts's.
-    ...(card.media_storage?.state === 'full'
-      ? { media_storage: { state: 'full' as const, left_out_items: count(card.media_storage.left_out_items) } }
-      : {}),
+    // A state only: the words are vocabulary.ts's.
+    ...(card.media_storage?.state === 'disk_low' ? { media_storage: { state: 'disk_low' as const } } : {}),
     ...(card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at)
       && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome)
       ? {

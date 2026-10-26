@@ -634,29 +634,29 @@ Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
   downloaded again under a new name, replaces the old file, and arrives with
   the message's edit. Media can only change through an edit, so the child's
   version moves with it.
-- **Bounded.** `OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES` caps one file (25 MB by
-  default) and is enforced while the bytes arrive, so a photo with no stated
-  size never lands whole. `OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES` caps everything
-  kept (2 GB by default). Either set to 0 keeps no media; a setting that does
-  not read keeps none and never stops capture. The native service passes both
-  settings through. Media over a limit is named only, and its child says why
-  (`mediaLeftOut`: `too_large` or `storage_full`). Nothing kept is ever
-  evicted. A full store is a visible problem instead: the helper writes
-  `.capture-media.json` beside the spool, and the sync receipt carries
-  `media_storage_full`, `media_left_out_storage_full` and the
-  `telegram_media_storage_full` warning until room is made or the quota is
-  raised. The dashboard reads those two counts from any source's receipt, so
-  the card reads Needs you with one line: how many new photos and files were
-  kept as names only, and to ask the agent to raise the media limit or remove
-  media. Overlapping downloads share the quota: each reserves its room under a
-  lock before it starts and may not pass it, and the total is measured from
-  disk when the gateway starts.
-- **Full clears when room is made.** Each pull measures the kept files again:
-  the store is full while they reach the quota, or while a refusal stands and
-  nothing was freed since it. Removing media or raising the quota (the
-  gateway restarts and says what is true then) clears the card at the next
-  pull, without waiting for a download. Media already left out stays named
-  only, and the card's count is of media left out since storage last filled.
+- **Every file, one safeguard** (owner, 2026-10-26: every message and every
+  media file is ingested). No size cap and no total quota: the former
+  `OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES` and `OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES`
+  are gone, and the native service no longer passes them. The one safeguard
+  is the computer's own: while the free space of the volume the spool is on
+  is under the larger of 5 GB and 5% of the disk, new downloads pause. It is
+  checked before a download (with what overlapping downloads reserved of
+  their stated sizes, under a lock) and again every few MB while the bytes
+  arrive. A paused message is still captured and ingested; its attachment
+  says `mediaLeftOut: waiting_for_disk`, so its child does too, and it is
+  listed in `.capture-media-waiting.json` beside the spool.
+- **Filled in once space returns.** Each gateway cycle, once there is room,
+  the helper fetches the waiting messages again, downloads their media and
+  captures them again with it; the newer capture brings the readable child
+  over the waiting one. A message gone from Telegram, or out of the approved
+  chats, is let go; the disk filling again pauses the rest.
+- **Said on the card, with no counts.** Each pull reads the same floor on
+  the spool's volume and the receipt carries `media_disk_low` and the
+  `telegram_media_disk_low` warning while it lasts. The dashboard reads that
+  count from any source's receipt, and the card reads Needs you with one
+  line: "the computer's disk is nearly full; new media will download once
+  space is freed", with Check again. It clears at the next pull once space
+  is freed.
 - **No copy left behind.** A download is written to `.<name>.tmp.<pid>` and
   renamed into place, and the temporary is removed on any failure, the rename
   included. A stopped process's temporaries are swept when the gateway starts
@@ -673,6 +673,9 @@ Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
   attachment's, and any download of it in progress.
 - **Not yet.** Nothing reads the kept bytes until Telegram has an extraction
   roster for its stores (the factory's per-account connector resolution).
+  `fetchItem` hands a reader a kept file whole, up to 64 MB per read; a
+  larger file is kept and listed, and its reading needs a streaming read when
+  that roster lands. That bound is on reading, never on what is kept.
 
 ## To verify before step 4
 

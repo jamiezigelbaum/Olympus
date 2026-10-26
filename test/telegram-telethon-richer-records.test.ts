@@ -151,13 +151,15 @@ print(json.dumps(reader.allocate_capture_seq(Path(${JSON.stringify(spoolDir)}), 
 });
 
 describe('Telethon helper: a captured message\'s media is kept beside the spool', () => {
-  const run = async (limit: string | undefined) => {
+  const run = async () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-telegram-media-keep-'));
     const spoolDir = join(root, 'spool');
     mkdirSync(spoolDir);
     try {
       const out = await python(`
 import asyncio
+# A stand-in disk with room: the floor is the only safeguard (telegram-telethon-media.test.ts).
+reader.disk_space = lambda path: (500 * 1024 ** 3, 1000 * 1024 ** 3)
 class Msg:
     async def download_media(self, file, progress_callback=None):
         with open(file, "wb") as output:
@@ -166,7 +168,7 @@ class Msg:
 normalized = {"id": "5", "conversationId": "-1000001", "attachments": [{"attachmentId": "photo:1", "type": "image"}]}
 asyncio.run(reader.capture_message_media(Msg(), normalized))
 print(json.dumps(normalized["attachments"][0]))
-`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: spoolDir, ...(limit !== undefined ? { OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES: limit } : {}) });
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: spoolDir });
       const folder = join(spoolDir, 'media', '-1000001');
       return { out, kept: existsSync(folder) && readdirSync(folder).some((name) => /^5\.[0-9a-f]{12}\.jpg$/.test(name)), leftovers: existsSync(join(spoolDir, 'media', '-1000001')) ? readdirSync(join(spoolDir, 'media', '-1000001')).filter((name) => name.includes('.tmp.')) : [] };
     } finally {
@@ -174,20 +176,10 @@ print(json.dumps(normalized["attachments"][0]))
     }
   };
 
-  pythonTest('a photo under the limit is kept and named on its attachment', async () => {
-    const { out, kept, leftovers } = await run(undefined);
+  pythonTest('a photo is kept and named on its attachment', async () => {
+    const { out, kept, leftovers } = await run();
     expect(out).toEqual({ attachmentId: 'photo:1', type: 'image', mediaFile: expect.stringMatching(/^media\/-1000001\/5\.[0-9a-f]{12}\.jpg$/), sizeBytes: 20 });
     expect(kept).toBe(true);
     expect(leftovers).toEqual([]);
-  });
-
-  pythonTest('a file over the limit, or with keeping turned off, stays named only', async () => {
-    const over = await run('3');
-    expect(over.out).toEqual({ attachmentId: 'photo:1', type: 'image', mediaLeftOut: 'too_large' });
-    expect(over.kept).toBe(false);
-    expect(over.leftovers).toEqual([]);
-    const off = await run('0');
-    expect(off.out).toEqual({ attachmentId: 'photo:1', type: 'image' });
-    expect(off.kept).toBe(false);
   });
 });

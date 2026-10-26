@@ -135,9 +135,9 @@ describe('native Telegram capture service', () => {
       OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: 'telegram.personal',
       OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: 'telegram.personal:chat:42',
       OLYMPUS_TELEGRAM_GATEWAY_INTERVAL_SECONDS: '23',
-      OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES: '0',
-      OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '1048576',
     });
+    expect(first.env.OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES).toBeUndefined();
+    expect(first.env.OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES).toBeUndefined();
     expect(first.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
@@ -384,7 +384,7 @@ function telegramFixture(options: { publishReadiness?: boolean } = {}) {
     'OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT=telegram.personal',
     'OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES=telegram.personal:chat:42',
     'OLYMPUS_TELEGRAM_GATEWAY_INTERVAL_SECONDS=23',
-    // 0 keeps no media at all: the setting must reach the helper as written.
+    // Media caps are gone (owner, 2026-10-26: every media file is ingested): an old setting must not reach the helper.
     'OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES=0',
     'OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES=1048576',
     `OLYMPUS_TELEGRAM_SESSION_PATH=${staleSessionPath}`,

@@ -1,9 +1,12 @@
 /**
- * The Telethon helper's kept media (#556 review): a download that fails at
- * any point leaves no copy, the size limit holds while the bytes arrive, a
- * total quota stops new media without evicting any, a changed attachment is
- * downloaded again under a new name, and a stopped process's temporaries are
- * swept. Stand-in Telethon objects and synthetic bytes only; no network.
+ * The Telethon helper's kept media. Every media file is kept, whatever its size
+ * (owner, 2026-10-26); the one safeguard is the computer's own free-disk floor
+ * (the larger of 5 GB and 5% of the disk), under which new downloads pause, the
+ * attachment says it is waiting, and the message is filled in once space
+ * returns. A download that fails at any point leaves no copy, a changed
+ * attachment is downloaded again under a new name, and a stopped process's
+ * temporaries are swept. Stand-in Telethon objects, a stand-in disk and
+ * synthetic bytes only; no network.
  */
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +22,8 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+const GB = 1024 ** 3;
+
 async function python(body: string, env: Record<string, string> = {}): Promise<any> {
   const program = `
 import importlib.util, json, sys, os, asyncio, datetime as dt
@@ -26,19 +31,24 @@ spec = importlib.util.spec_from_file_location("reader", ${JSON.stringify(SCRIPT)
 reader = importlib.util.module_from_spec(spec)
 sys.modules["reader"] = reader
 spec.loader.exec_module(reader)
+GB = 1024 ** 3
+# A stand-in disk: free and total bytes, changed by the test.
+disk = {"free": 500 * GB, "total": 1000 * GB}
+reader.disk_space = lambda path: (disk["free"], disk["total"])
 class Photo:
     def __init__(self, pid):
         self.id = pid
         self.access_hash = 99
         self.date = dt.datetime(2026, 10, 20, 9, 0, tzinfo=dt.timezone.utc)
 class Msg:
-    def __init__(self, mid, photo_id=5, payload=b"synthetic jpeg bytes", fail=None, chunks=1):
+    def __init__(self, mid, photo_id=5, payload=b"synthetic jpeg bytes", fail=None, chunks=1, during=None):
         self.id = mid
         self.photo = Photo(photo_id)
         self.document = None
         self.payload = payload
         self.fail = fail
         self.chunks = chunks
+        self.during = during
         self.downloads = 0
         self.written = 0
     async def download_media(self, file=None, progress_callback=None):
@@ -50,6 +60,8 @@ class Msg:
                 out.flush()
                 self.written += len(self.payload[at:at + step])
                 await asyncio.sleep(0)
+                if self.during:
+                    self.during(self.written)
                 if self.fail == "midway":
                     raise RuntimeError("network")
                 if progress_callback:
@@ -63,6 +75,8 @@ def record(mid, chat="-1000001", size=None):
 def files(chat="-1000001"):
     folder = reader.media_dir() / chat
     return sorted(os.listdir(folder)) if folder.is_dir() else []
+def waiting():
+    return reader.read_media_waiting(reader.media_dir().parent)
 ${body}
 `;
   const proc = Bun.spawn([PYTHON ?? 'python3', '-I', '-c', program], {
@@ -79,7 +93,20 @@ function spool(): string {
   return join(root, 'spool');
 }
 
-describe('the helper keeps media with no copy left behind', () => {
+describe('every media file is kept, with no copy left behind', () => {
+  pythonTest('a file of any size is kept: there is no size cap and no total quota', async () => {
+    const dir = spool();
+    const out = await python(`
+big = record(2, size=3 * GB)
+asyncio.run(reader.capture_message_media(Msg(2, payload=b"b" * 4096, chunks=4), big))
+print(json.dumps({"attachment": big["attachments"][0], "files": files(), "caps": [hasattr(reader, name) for name in ("media_max_bytes", "media_quota_bytes")]}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES: '1000', OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '1000' });
+    expect(out.attachment.mediaFile).toMatch(/^media\/-1000001\/2\.[0-9a-f]{12}\.jpg$/);
+    expect(out.attachment.mediaLeftOut).toBeUndefined();
+    expect(out.files).toHaveLength(1);
+    expect(out.caps).toEqual([false, false]);
+  });
+
   pythonTest('a download that fails partway, or a rename that throws, leaves no temporary and no locator', async () => {
     const dir = spool();
     const out = await python(`
@@ -97,36 +124,6 @@ print(json.dumps({"files": files(), "midway": midway["attachments"][0], "renamed
     expect(out.files).toEqual([]);
     expect(out.midway.mediaFile).toBeUndefined();
     expect(out.renamed.mediaFile).toBeUndefined();
-  });
-
-  pythonTest('the size limit stops a photo with no stated size while its bytes arrive, and names why', async () => {
-    const dir = spool();
-    const out = await python(`
-big = record(3)
-message = Msg(3, payload=b"x" * 4000, chunks=40)
-asyncio.run(reader.capture_message_media(message, big))
-print(json.dumps({"files": files(), "attachment": big["attachments"][0], "written": message.written}))
-`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES: '1000' });
-    expect(out.files).toEqual([]);
-    expect(out.attachment).toMatchObject({ mediaLeftOut: 'too_large' });
-    // Stopped once the limit was passed: about 1000 of the 4000 bytes, not all of them.
-    expect(out.written).toBeLessThanOrEqual(1100);
-    expect(out.attachment.mediaFile).toBeUndefined();
-  });
-
-  pythonTest('past the quota new media is named only, the kept files stay, and the state file says the store is full', async () => {
-    const dir = spool();
-    mkdirSync(join(dir, 'media', '-1000001'), { recursive: true });
-    writeFileSync(join(dir, 'media', '-1000001', '9.aaaaaaaaaaaa.jpg'), 'k'.repeat(900));
-    const out = await python(`
-late = record(4)
-asyncio.run(reader.capture_message_media(Msg(4), late))
-print(json.dumps({"files": files(), "attachment": late["attachments"][0]}))
-`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '910' });
-    expect(out.files).toEqual(['9.aaaaaaaaaaaa.jpg']);
-    expect(out.attachment).toMatchObject({ mediaLeftOut: 'storage_full' });
-    const state = JSON.parse(readFileSync(join(dir, '.capture-media.json'), 'utf8'));
-    expect(state).toMatchObject({ kind: 'telegram_capture_media', schema_version: 1, storage_full: true, quota_bytes: 910, stored_bytes: 900 });
   });
 
   pythonTest('a changed attachment is downloaded again under a new name and replaces the old file; the same one is not', async () => {
@@ -150,97 +147,10 @@ print(json.dumps({"files": files(), "first": first["attachments"][0]["mediaFile"
     expect(out.kept).toBe('new photo');
   });
 
-  for (const declared of [true, false]) {
-    pythonTest(`overlapping downloads share the quota (sizes ${declared ? 'stated' : 'not stated'}): one of four 60-byte files fits in 100 bytes`, async () => {
-      const dir = spool();
-      const out = await python(`
-records = [record(20 + n, size=${declared ? 60 : 'None'}) for n in range(4)]
-messages = [Msg(20 + n, photo_id=20 + n, payload=b"m" * 60, chunks=6) for n in range(4)]
-async def overlapping():
-    await asyncio.gather(*(reader.capture_message_media(m, r) for m, r in zip(messages, records)))
-asyncio.run(overlapping())
-folder = reader.media_dir() / "-1000001"
-on_disk = sum(os.path.getsize(folder / name) for name in os.listdir(folder))
-state = json.load(open(reader.media_dir().parent / ".capture-media.json"))
-print(json.dumps({"kept": [r["attachments"][0].get("mediaFile") for r in records], "leftOut": [r["attachments"][0].get("mediaLeftOut") for r in records], "onDisk": on_disk, "files": files(), "state": state}))
-`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '100' });
-      expect(out.kept.filter(Boolean)).toHaveLength(1);
-      expect(out.leftOut.filter((reason: string | null) => reason === 'storage_full')).toHaveLength(3);
-      expect(out.onDisk).toBe(60);
-      expect(out.files.filter((name: string) => name.includes('.tmp.'))).toEqual([]);
-      expect(out.state).toMatchObject({ stored_bytes: 60, quota_bytes: 100, storage_full: true, left_out_items: 3 });
-    });
-  }
-
-  pythonTest('the total is measured from disk at start, so files kept before a restart count against the quota', async () => {
-    const dir = spool();
-    mkdirSync(join(dir, 'media', '-1000001'), { recursive: true });
-    writeFileSync(join(dir, 'media', '-1000001', '9.aaaaaaaaaaaa.jpg'), 'k'.repeat(80));
-    writeFileSync(join(dir, 'media', '-1000001', '.8.aaaaaaaaaaaa.jpg.tmp.999999999'), 'x'.repeat(500));
-    const out = await python(`
-reader.media_usage["bytes"] = 0
-measured = reader.media_stored_bytes(reader.media_dir(), fresh=True)
-late = record(5, size=30)
-asyncio.run(reader.capture_message_media(Msg(5, payload=b"p" * 30), late))
-print(json.dumps({"measured": measured, "attachment": late["attachments"][0]}))
-`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '100' });
-    // A temporary is not a kept file: only the 80 kept bytes count.
-    expect(out.measured).toBe(80);
-    expect(out.attachment).toMatchObject({ mediaLeftOut: 'storage_full' });
-  });
-
-  pythonTest('fill, free, re-measure: the helper\'s own state clears once room is made, and its count starts again', async () => {
-    const dir = spool();
-    mkdirSync(join(dir, 'media', '-1000001'), { recursive: true });
-    writeFileSync(join(dir, 'media', '-1000001', '9.aaaaaaaaaaaa.jpg'), 'k'.repeat(90));
-    const out = await python(`
-refused = record(30, size=60)
-asyncio.run(reader.capture_message_media(Msg(30, payload=b"p" * 60), refused))
-full = json.load(open(reader.media_dir().parent / ".capture-media.json"))
-os.unlink(reader.media_dir() / "-1000001" / "9.aaaaaaaaaaaa.jpg")
-reader.media_stored_bytes(reader.media_dir(), fresh=True)
-cleared = json.load(open(reader.media_dir().parent / ".capture-media.json"))
-fits = record(31, size=60)
-asyncio.run(reader.capture_message_media(Msg(31, payload=b"q" * 60), fits))
-print(json.dumps({"refused": refused["attachments"][0], "full": full, "cleared": cleared, "fits": fits["attachments"][0]}))
-`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '100' });
-    expect(out.refused).toMatchObject({ mediaLeftOut: 'storage_full' });
-    expect(out.full).toMatchObject({ storage_full: true, left_out_items: 1, refused_with_bytes: 90 });
-    expect(out.cleared).toMatchObject({ storage_full: false, left_out_items: 0, stored_bytes: 0 });
-    expect(out.cleared.refused_with_bytes).toBeUndefined();
-    expect(out.fits.mediaFile).toMatch(/^media\/-1000001\/31\./);
-  });
-
-  pythonTest('a gateway start says what is true now: a raised quota clears a full state the last run left', async () => {
-    const dir = spool();
-    mkdirSync(join(dir, 'media', '-1000001'), { recursive: true });
-    writeFileSync(join(dir, 'media', '-1000001', '9.aaaaaaaaaaaa.jpg'), 'k'.repeat(90));
-    writeFileSync(join(dir, '.capture-media.json'), JSON.stringify({ kind: 'telegram_capture_media', schema_version: 1, stored_bytes: 90, quota_bytes: 100, storage_full: true, left_out_items: 4, refused_with_bytes: 90 }));
-    const out = await python(`
-folder = reader.media_dir()
-reader.media_start(folder)
-print(json.dumps(json.load(open(folder.parent / ".capture-media.json"))))
-`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '1000' });
-    expect(out).toMatchObject({ storage_full: false, left_out_items: 0, stored_bytes: 90, quota_bytes: 1000 });
-  });
-
-  pythonTest('0 keeps no media and downloads nothing', async () => {
-    const dir = spool();
-    const out = await python(`
-message = Msg(7)
-off = record(7)
-asyncio.run(reader.capture_message_media(message, off))
-print(json.dumps({"downloads": message.downloads, "attachment": off["attachments"][0]}))
-`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES: '0' });
-    expect(out.downloads).toBe(0);
-    expect(out.attachment.mediaFile).toBeUndefined();
-  });
-
   pythonTest('the sweep removes a stopped process\'s temporaries and keeps a running one\'s', async () => {
     const dir = spool();
     const folder = join(dir, 'media', '-1000001');
     mkdirSync(folder, { recursive: true });
-    // A pid far past any running process, and this test runner's own (running) pid.
     writeFileSync(join(folder, '.10.aaaaaaaaaaaa.jpg.tmp.999999999'), 'half');
     writeFileSync(join(folder, `.11.aaaaaaaaaaaa.jpg.tmp.${process.pid}`), 'in flight');
     writeFileSync(join(folder, '12.aaaaaaaaaaaa.jpg'), 'kept');
@@ -249,5 +159,160 @@ print(json.dumps({"removed": reader.sweep_media_temporaries(reader.media_dir())}
 `, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
     expect(out.removed).toBe(1);
     expect(readdirSync(folder).sort()).toEqual([`.11.aaaaaaaaaaaa.jpg.tmp.${process.pid}`, '12.aaaaaaaaaaaa.jpg']);
+  });
+});
+
+describe('the free-disk floor: the larger of 5 GB and 5% of the disk', () => {
+  pythonTest('the floor is 5 GB on a small disk and 5% on a large one', async () => {
+    const out = await python(`
+print(json.dumps([reader.disk_floor(40 * GB), reader.disk_floor(100 * GB), reader.disk_floor(1000 * GB)]))
+`);
+    expect(out).toEqual([5 * GB, 5 * GB, 50 * GB]);
+  });
+
+  pythonTest('under the floor a download does not start: the attachment says it is waiting and the message is listed', async () => {
+    const dir = spool();
+    const out = await python(`
+disk["free"], disk["total"] = 4 * GB, 100 * GB
+small = record(3)
+small_message = Msg(3)
+asyncio.run(reader.capture_message_media(small_message, small))
+# 5% of a 1 TB disk is 50 GB: 40 GB free is under it.
+disk["free"], disk["total"] = 40 * GB, 1000 * GB
+large = record(4)
+asyncio.run(reader.capture_message_media(Msg(4), large))
+print(json.dumps({"small": small["attachments"][0], "large": large["attachments"][0], "downloads": small_message.downloads, "files": files(), "waiting": waiting()}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.small).toEqual({ attachmentId: 'photo:5', type: 'image', mediaLeftOut: 'waiting_for_disk' });
+    expect(out.large.mediaLeftOut).toBe('waiting_for_disk');
+    expect(out.downloads).toBe(0);
+    expect(out.files).toEqual([]);
+    expect(out.waiting).toEqual([{ chat: '-1000001', message: '3' }, { chat: '-1000001', message: '4' }]);
+  });
+
+  pythonTest('a stated size that would take free space under the floor waits; one that fits is kept', async () => {
+    const dir = spool();
+    const out = await python(`
+disk["free"], disk["total"] = 5 * GB + 100, 100 * GB
+fits = record(5, size=60)
+asyncio.run(reader.capture_message_media(Msg(5, payload=b"f" * 60), fits))
+over = record(6, size=200)
+asyncio.run(reader.capture_message_media(Msg(6, payload=b"o" * 200), over))
+print(json.dumps({"fits": fits["attachments"][0], "over": over["attachments"][0], "waiting": waiting()}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.fits.mediaFile).toBeDefined();
+    expect(out.over.mediaLeftOut).toBe('waiting_for_disk');
+    expect(out.waiting).toEqual([{ chat: '-1000001', message: '6' }]);
+  });
+
+  pythonTest('free space falling under the floor while the bytes arrive stops the download, leaves no copy, and waits', async () => {
+    const dir = spool();
+    const out = await python(`
+reader.MEDIA_DISK_CHECK_BYTES = 1
+def fill_the_disk(written):
+    if written >= 300:
+        disk["free"] = 1 * GB
+message = Msg(7, payload=b"x" * 1000, chunks=10, during=fill_the_disk)
+paused = record(7)
+asyncio.run(reader.capture_message_media(message, paused))
+print(json.dumps({"attachment": paused["attachments"][0], "written": message.written, "files": files(), "waiting": waiting()}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.attachment.mediaLeftOut).toBe('waiting_for_disk');
+    expect(out.attachment.mediaFile).toBeUndefined();
+    expect(out.written).toBeLessThan(1000);
+    expect(out.files).toEqual([]);
+    expect(out.waiting).toEqual([{ chat: '-1000001', message: '7' }]);
+  });
+
+  pythonTest('overlapping downloads share the room above the floor: one of four fits, three wait', async () => {
+    const dir = spool();
+    const out = await python(`
+disk["free"], disk["total"] = 5 * GB + 100, 100 * GB
+records = [record(20 + n, size=60) for n in range(4)]
+messages = [Msg(20 + n, photo_id=20 + n, payload=b"m" * 60, chunks=6) for n in range(4)]
+async def overlapping():
+    await asyncio.gather(*(reader.capture_message_media(m, r) for m, r in zip(messages, records)))
+asyncio.run(overlapping())
+print(json.dumps({"kept": [r["attachments"][0].get("mediaFile") for r in records], "waiting": [r["attachments"][0].get("mediaLeftOut") for r in records], "files": files()}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.kept.filter(Boolean)).toHaveLength(1);
+    expect(out.waiting.filter((reason: string | null) => reason === 'waiting_for_disk')).toHaveLength(3);
+    expect(out.files.filter((name: string) => name.includes('.tmp.'))).toEqual([]);
+  });
+});
+
+describe('waiting media is filled in once space returns', () => {
+  const retry = `
+class Config:
+    account = "telegram.personal"
+    approved_scopes = ["telegram.personal:chat:-1000001"]
+class Client:
+    def __init__(self, messages):
+        self.messages = messages
+        self.asked = []
+    async def get_messages(self, chat, ids=None):
+        self.asked.append([chat, ids])
+        return [self.messages.get(i) for i in ids]
+appended = []
+reader.append_gateway_page = lambda config, scope, page, direction, request_id=None: appended.extend([(scope, m["id"], m["attachments"][0].get("mediaFile")) for m in page["messages"]]) or len(page["messages"])
+reader.normalize_message = lambda message, account, chat, title, kind: record(message.id, chat)
+async def ask(client):
+    return await reader.retry_waiting_media(client, Config(), asyncio.Lock())
+`;
+
+  pythonTest('while the disk is still nearly full nothing is fetched; once it has room each waiting message is captured again with its file', async () => {
+    const dir = spool();
+    const out = await python(`${retry}
+disk["free"], disk["total"] = 1 * GB, 100 * GB
+asyncio.run(reader.capture_message_media(Msg(30), record(30)))
+asyncio.run(reader.capture_message_media(Msg(31), record(31)))
+before = waiting()
+client = Client({30: Msg(30), 31: Msg(31)})
+low = asyncio.run(ask(client))
+asked_while_low = list(client.asked)
+disk["free"] = 500 * GB
+filled = asyncio.run(ask(client))
+print(json.dumps({"before": before, "low": low, "askedWhileLow": asked_while_low, "filled": filled, "appended": appended, "after": waiting(), "files": files()}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.before).toEqual([{ chat: '-1000001', message: '30' }, { chat: '-1000001', message: '31' }]);
+    expect(out.low).toBe(0);
+    expect(out.askedWhileLow).toEqual([]);
+    expect(out.filled).toBe(2);
+    expect(out.appended.map((entry: [string, string, string]) => [entry[0], entry[1]])).toEqual([['telegram.personal:chat:-1000001', '30'], ['telegram.personal:chat:-1000001', '31']]);
+    expect(out.appended.every((entry: [string, string, string]) => /^media\/-1000001\/3[01]\.[0-9a-f]{12}\.jpg$/.test(entry[2]))).toBe(true);
+    expect(out.after).toEqual([]);
+    expect(out.files).toHaveLength(2);
+  });
+
+  pythonTest('a message gone from Telegram, or from a chat no longer approved, is let go', async () => {
+    const dir = spool();
+    const out = await python(`${retry}
+disk["free"], disk["total"] = 1 * GB, 100 * GB
+asyncio.run(reader.capture_message_media(Msg(40), record(40)))
+asyncio.run(reader.capture_message_media(Msg(41), record(41, chat="-2000002")))
+disk["free"] = 500 * GB
+filled = asyncio.run(ask(Client({})))
+print(json.dumps({"filled": filled, "after": waiting()}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.filled).toBe(0);
+    expect(out.after).toEqual([]);
+  });
+
+  pythonTest('the disk filling again partway pauses the fill-in, and what is left keeps waiting', async () => {
+    const dir = spool();
+    const out = await python(`${retry}
+disk["free"], disk["total"] = 1 * GB, 100 * GB
+for n in (50, 51, 52):
+    asyncio.run(reader.capture_message_media(Msg(n), record(n)))
+disk["free"] = 500 * GB
+class Filling(Msg):
+    async def download_media(self, file=None, progress_callback=None):
+        disk["free"] = 1 * GB
+        return await Msg.download_media(self, file=file, progress_callback=progress_callback)
+filled = asyncio.run(ask(Client({50: Filling(50), 51: Msg(51), 52: Msg(52)})))
+print(json.dumps({"filled": filled, "after": waiting()}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.filled).toBe(1);
+    expect(out.after).toEqual([{ chat: '-1000001', message: '51' }, { chat: '-1000001', message: '52' }]);
   });
 });

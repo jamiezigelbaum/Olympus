@@ -51354,7 +51354,7 @@ function dashboardAttentionLine(source, options) {
 }
 function dashboardAttentionParts(source, options) {
   const capture = dashboardCaptureAttentionReason(source);
-  const media = source.media_storage ? DASHBOARD_MEDIA_STORAGE_COPY.reason(source.media_storage.left_out_items) : undefined;
+  const media = source.media_storage ? DASHBOARD_MEDIA_STORAGE_COPY.reason : undefined;
   const withCapture = (reason) => ({
     reason,
     ...capture ? { capture } : {},
@@ -51879,8 +51879,8 @@ var init_vocabulary = __esm(() => {
     }
   };
   DASHBOARD_MEDIA_STORAGE_COPY = {
-    reason: (leftOut) => (leftOut === 1 ? "media storage is full, so 1 new photo or file was kept as a name only" : leftOut > 1 ? `media storage is full, so ${leftOut} new photos and files were kept as names only` : "media storage is full, so new photos and files are kept as names only") + " · ask your agent to raise the media limit or remove media you no longer need",
-    nextAction: (label, leftOut) => `${label}'s media storage is full, so new photos and files are kept as names only` + (leftOut > 0 ? ` (${leftOut} so far)` : "") + `. Nothing already kept was removed. To keep new media again, ask your agent to raise ${label}'s media storage limit, ` + "or to remove kept media you no longer need."
+    reason: "the computer's disk is nearly full; new media will download once space is freed",
+    nextAction: (label) => `This computer's disk is nearly full, so new photos and files from ${label} wait to download. ` + "Messages still arrive. Free space on this computer, and the waiting media downloads on its own."
   };
   READINESS_REASONS = {
     "Reauthenticate this source": DASHBOARD_SIGNED_OUT,
@@ -73623,7 +73623,7 @@ var init_record_builder = __esm(() => {
 });
 
 // src/workers/telegram-messages/media-child.ts
-import { lstatSync as lstatSync26, readdirSync as readdirSync6, readFileSync as readFileSync39, rmSync as rmSync13 } from "node:fs";
+import { lstatSync as lstatSync26, readdirSync as readdirSync6, readFileSync as readFileSync39, rmSync as rmSync13, statfsSync } from "node:fs";
 import { join as join59, resolve as resolve15, sep as sep9 } from "node:path";
 function telegramMediaChild(parent, media, deferredBytes, options = {}) {
   const providerItemId = childProviderItemId(parent.identity.providerItemId, TELEGRAM_CHILD_KEY);
@@ -73690,7 +73690,7 @@ function telegramLiveMediaChild(parent, spoolDir) {
   const locator = relative7 ? `${TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX}${relative7}` : undefined;
   const kept = locator ? liveMediaPath(spoolDir, locator) : undefined;
   const size = typeof attachment.sizeBytes === "number" && Number.isSafeInteger(attachment.sizeBytes) ? attachment.sizeBytes : undefined;
-  const leftOut = attachment.mediaLeftOut === "too_large" || attachment.mediaLeftOut === "storage_full" ? attachment.mediaLeftOut : undefined;
+  const leftOut = attachment.mediaLeftOut === "waiting_for_disk" ? attachment.mediaLeftOut : undefined;
   const description = { name, kind, ...mimeType ? { mimeType } : {}, ...leftOut ? { leftOut } : {} };
   if (kept && locator)
     return telegramMediaChild(parent, description, { locator, available: true, ...size !== undefined ? { sizeBytes: size } : {} });
@@ -73764,72 +73764,25 @@ function sweepTelegramMediaTemporaries(spoolDir) {
   }
   return removed;
 }
-function telegramKeptMediaBytes(spoolDir) {
-  const root = join59(spoolDir, "media");
-  let total = 0;
-  let chats;
+function telegramMediaDiskFloor(total) {
+  return Math.max(MEDIA_DISK_FLOOR_BYTES, Math.floor(total * MEDIA_DISK_FLOOR_SHARE));
+}
+function telegramMediaDiskLow(spoolDir, space = diskSpaceOf) {
   try {
-    chats = readdirSync6(root);
+    const { free, total } = space(spoolDir);
+    return free < telegramMediaDiskFloor(total);
   } catch {
-    return 0;
-  }
-  for (const chat of chats) {
-    const folder = join59(root, chat);
-    let names;
-    try {
-      if (!lstatSync26(folder).isDirectory())
-        continue;
-      names = readdirSync6(folder);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      if (name.startsWith(".") && name.includes(TEMPORARY_MARK))
-        continue;
-      try {
-        const stat2 = lstatSync26(join59(folder, name));
-        if (stat2.isFile())
-          total += stat2.size;
-      } catch {}
-    }
-  }
-  return total;
-}
-function telegramMediaStateNow(spoolDir) {
-  const state = readTelegramMediaState(spoolDir);
-  if (!state || state.quotaBytes <= 0)
-    return state;
-  const kept = telegramKeptMediaBytes(spoolDir);
-  const refusalStands = state.storageFull && kept >= (state.refusedWithBytes ?? state.storedBytes);
-  const storageFull = kept >= state.quotaBytes || refusalStands;
-  return { storedBytes: kept, quotaBytes: state.quotaBytes, storageFull, leftOutItems: refusalStands ? state.leftOutItems : 0 };
-}
-function readTelegramMediaState(spoolDir) {
-  try {
-    const path = join59(spoolDir, MEDIA_STATE_FILE);
-    const stat2 = lstatSync26(path);
-    if (!stat2.isFile() || stat2.size > MAX_MEDIA_STATE_BYTES)
-      return;
-    const value = JSON.parse(readFileSync39(path, "utf8"));
-    if (value.kind !== "telegram_capture_media" || value.schema_version !== 1)
-      return;
-    const count = (field) => typeof field === "number" && Number.isSafeInteger(field) && field >= 0 ? field : 0;
-    const storageFull = value.storage_full === true;
-    return {
-      storedBytes: count(value.stored_bytes),
-      quotaBytes: count(value.quota_bytes),
-      storageFull,
-      leftOutItems: storageFull ? count(value.left_out_items) : 0,
-      ...storageFull && typeof value.refused_with_bytes === "number" ? { refusedWithBytes: count(value.refused_with_bytes) } : {}
-    };
-  } catch {
-    return;
+    return false;
   }
 }
-var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX = "telegram-live-media:v1:", LIVE_MEDIA_MAX_READ_BYTES, CAPTURE_MARK2 = "~at:", MEDIA_STATE_FILE = ".capture-media.json", MAX_MEDIA_STATE_BYTES = 4096, TEMPORARY_MARK = ".tmp.";
+var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX = "telegram-live-media:v1:", LIVE_MEDIA_MAX_READ_BYTES, CAPTURE_MARK2 = "~at:", MEDIA_DISK_FLOOR_BYTES, MEDIA_DISK_FLOOR_SHARE = 0.05, TEMPORARY_MARK = ".tmp.", diskSpaceOf = (path) => {
+  const stat2 = statfsSync(path);
+  return { free: Number(stat2.bavail) * Number(stat2.bsize), total: Number(stat2.blocks) * Number(stat2.bsize) };
+};
 var init_media_child = __esm(() => {
   TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
   LIVE_MEDIA_MAX_READ_BYTES = 64 * 1024 * 1024;
+  MEDIA_DISK_FLOOR_BYTES = 5 * 1024 * 1024 * 1024;
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts
@@ -76203,7 +76156,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
       recordBoundary(tierSet, spoolDir, "secure_local", sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor));
       if (!redactionFailed)
         recordBoundary(tierSet, spoolDir, "cleared", sanitizeTelegramCaptureCursor(tierSet.ledger.readMeta(TELEGRAM_SPOOL_CLEARED_KEY)));
-      return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed, cursorResets, protection.moved, telegramCaptureLiveness(readTelegramCaptureSpoolNewestCapturedAt(spoolDir), readTelegramCaptureHeartbeat(spoolDir), now().getTime(), staleThresholdSeconds), telegramMediaStateNow(spoolDir));
+      return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed, cursorResets, protection.moved, telegramCaptureLiveness(readTelegramCaptureSpoolNewestCapturedAt(spoolDir), readTelegramCaptureHeartbeat(spoolDir), now().getTime(), staleThresholdSeconds), telegramMediaDiskLow(spoolDir, options.diskSpace));
     },
     lastStoreRunCompletedAt() {
       const internal = options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.completedAt;
@@ -76349,8 +76302,7 @@ function cursorParts(cursor) {
   const separator = cursor.lastIndexOf(":");
   return [cursor.slice(0, separator), Number(cursor.slice(separator + 1))];
 }
-function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConflictItems, trustConflictEvictions, redacted, redactionFailed, cursorResets, trustClaimsMoved, liveness, media = undefined) {
-  const mediaStorageFull = media?.storageFull === true;
+function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConflictItems, trustConflictEvictions, redacted, redactionFailed, cursorResets, trustClaimsMoved, liveness, mediaDiskLow = false) {
   const { quiet, ...capture } = liveness;
   const runs = [internal, secureLocal];
   const counts = {
@@ -76368,8 +76320,7 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
     spool_cursor_resets: cursorResets,
     trust_claims_moved: trustClaimsMoved,
     capture_quiet: quiet ? 1 : 0,
-    media_storage_full: mediaStorageFull ? 1 : 0,
-    media_left_out_storage_full: mediaStorageFull ? media.leftOutItems : 0,
+    media_disk_low: mediaDiskLow ? 1 : 0,
     ...captureFreshnessCounts(capture)
   };
   const warnings = [
@@ -76377,7 +76328,7 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
     ...trustConflictItems > 0 ? [TELEGRAM_TRUST_CONFLICT_WARNING] : [],
     ...redactionFailed ? [TELEGRAM_SPOOL_REDACTION_FAILED_WARNING] : [],
     ...cursorResets > 0 ? [TELEGRAM_SPOOL_CURSOR_RESET_WARNING] : [],
-    ...mediaStorageFull ? [TELEGRAM_MEDIA_STORAGE_FULL_WARNING] : []
+    ...mediaDiskLow ? [TELEGRAM_MEDIA_DISK_LOW_WARNING] : []
   ];
   return {
     status: counts.items_changed > 0 || counts.items_tombstoned > 0 ? "progress" : "idle",
@@ -76396,7 +76347,7 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
 function sum(runs, key2) {
   return runs.reduce((total, run) => total + Number(run[key2]), 0);
 }
-var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_PERSONAL_ACCOUNT_SCOPE = "telegram.personal", TELEGRAM_MALFORMED_SPOOL_WARNING = "telegram_malformed_spool_records", TELEGRAM_TRUST_CONFLICT_WARNING = "telegram_trust_conflict_items", TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = "telegram_spool_secret_redaction_failed", TELEGRAM_SPOOL_CURSOR_RESET_WARNING = "telegram_spool_cursor_reset", TELEGRAM_MEDIA_STORAGE_FULL_WARNING = "telegram_media_storage_full", TELEGRAM_SPOOL_FILE_META_PREFIX = "telegram:spool_file:", TELEGRAM_SPOOL_BOUNDARY_META_PREFIX = "telegram:spool_boundary:", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY, DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500, MAX_TELEGRAM_PULL_MAX_ITEMS = 1e4, TELEGRAM_LANE_SYNC, TRUNCATED_CURSOR, SPOOL_CURSOR;
+var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_PERSONAL_ACCOUNT_SCOPE = "telegram.personal", TELEGRAM_MALFORMED_SPOOL_WARNING = "telegram_malformed_spool_records", TELEGRAM_TRUST_CONFLICT_WARNING = "telegram_trust_conflict_items", TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = "telegram_spool_secret_redaction_failed", TELEGRAM_SPOOL_CURSOR_RESET_WARNING = "telegram_spool_cursor_reset", TELEGRAM_MEDIA_DISK_LOW_WARNING = "telegram_media_disk_low", TELEGRAM_SPOOL_FILE_META_PREFIX = "telegram:spool_file:", TELEGRAM_SPOOL_BOUNDARY_META_PREFIX = "telegram:spool_boundary:", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY, DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500, MAX_TELEGRAM_PULL_MAX_ITEMS = 1e4, TELEGRAM_LANE_SYNC, TRUNCATED_CURSOR, SPOOL_CURSOR;
 var init_store_sync = __esm(() => {
   init_media_child();
   init_source_placement();
@@ -79415,7 +79366,7 @@ function dashboardSourceSetupStatus(card) {
     return {
       stage: "source_health",
       condition: "degraded",
-      next_action: DASHBOARD_MEDIA_STORAGE_COPY.nextAction(card.label, card.media_storage.left_out_items),
+      next_action: DASHBOARD_MEDIA_STORAGE_COPY.nextAction(card.label),
       dependencies
     };
   }
@@ -80499,20 +80450,14 @@ function schedulerCaptureFreshness(schedulers, now, pairedAt) {
   return worst;
 }
 function schedulerMediaStorage(schedulers) {
-  let full = false;
-  let leftOut = 0;
   for (const scheduler of new Set(schedulers)) {
     for (const task of scheduler.tasks) {
       const counts = task.last_result?.counts;
-      if (task.kind !== "sync" || !counts || task.last_result?.status === "failed" || counts.media_storage_full !== 1)
-        continue;
-      full = true;
-      const items = counts.media_left_out_storage_full;
-      if (typeof items === "number" && Number.isSafeInteger(items) && items > 0)
-        leftOut += items;
+      if (task.kind === "sync" && counts && task.last_result?.status !== "failed" && counts.media_disk_low === 1)
+        return { state: "disk_low" };
     }
   }
-  return full ? { state: "full", left_out_items: leftOut } : undefined;
+  return;
 }
 function underCurrentPairing(verdict, nowMs, pairedAtMs) {
   const newestAtMs = verdict.age_seconds === undefined ? undefined : nowMs - verdict.age_seconds * 1000;
@@ -124492,7 +124437,7 @@ import {
   renameSync as renameSync18,
   rmSync as rmSync26,
   statSync as statSync34,
-  statfsSync,
+  statfsSync as statfsSync2,
   writeFileSync as writeFileSync20,
   writeSync as writeSync5
 } from "node:fs";
@@ -124657,7 +124602,7 @@ async function installPinnedModel(options) {
 }
 function volumeFreeBytes(path) {
   try {
-    const stats = statfsSync(path);
+    const stats = statfsSync2(path);
     return Number(stats.bavail) * Number(stats.bsize);
   } catch {
     return;
@@ -174227,7 +174172,7 @@ function scrubCard(definition, card) {
     ...isoOrUndefined(card.last_sync_at) ? { last_sync_at: isoOrUndefined(card.last_sync_at) } : {},
     ...card.unreadable_files ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } } : {},
     ...definition.sync_name ? { sync_name: definition.sync_name } : {},
-    ...card.media_storage?.state === "full" ? { media_storage: { state: "full", left_out_items: count(card.media_storage.left_out_items) } } : {},
+    ...card.media_storage?.state === "disk_low" ? { media_storage: { state: "disk_low" } } : {},
     ...card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at) && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome) ? {
       last_manual_sync: {
         at: isoOrUndefined(card.last_manual_sync.at),

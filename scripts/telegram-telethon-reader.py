@@ -17,6 +17,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import sys
 import uuid
 from collections import OrderedDict
@@ -363,6 +364,8 @@ async def run_gateway(run_once: bool = False) -> None:
                         write_json_atomic(config.state_path, state)
 
                 captured += await process_backfill_requests(client, config, state, state_lock)
+                # Media that waited for disk space is filled in once there is room again.
+                captured += await retry_waiting_media(client, config, state_lock)
                 captured += max(
                     0,
                     gateway_event_lane_appended(state) - event_appended_before_cycle,
@@ -1459,13 +1462,19 @@ def display_name_from_entity(entity: Any) -> str | None:
 
 
 MEDIA_DIR_NAME = "media"
-MEDIA_MAX_BYTES_DEFAULT = 25 * 1024 * 1024
-MEDIA_MAX_BYTES_HARD_CAP = 512 * 1024 * 1024
-MEDIA_QUOTA_BYTES_DEFAULT = 2 * 1024 * 1024 * 1024
-MEDIA_QUOTA_BYTES_HARD_CAP = 1024 * 1024 * 1024 * 1024
-# How long a measured total of the media folder is trusted before it is measured again (the plugin removes files too).
-MEDIA_USAGE_TTL_SECONDS = 300
-MEDIA_STATE_NAME = ".capture-media.json"
+# The one safeguard, for the computer itself (owner, 2026-10-26: every message and every media file is ingested): new
+# downloads pause while the volume's free space is under the larger of 5 GB and 5% of the disk. Nothing caps media.
+MEDIA_DISK_FLOOR_BYTES = 5 * 1024 * 1024 * 1024
+MEDIA_DISK_FLOOR_SHARE = 0.05
+# While a download runs, free space is looked at again after at most this many new bytes.
+MEDIA_DISK_CHECK_BYTES = 4 * 1024 * 1024
+# Media waiting for disk space, by chat and message, beside the spool; filled in once space returns.
+MEDIA_WAITING_NAME = ".capture-media-waiting.json"
+# A bound on the bookkeeping only (never on media): past it the oldest waiting entries are let go, named only.
+MEDIA_WAITING_MAX = 100_000
+# Messages fetched again per request when waiting media is filled in.
+MEDIA_RETRY_BATCH = 50
+MEDIA_WAITING = "waiting_for_disk"
 MEDIA_EXTENSIONS = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
     "application/pdf": ".pdf", "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "video/mp4": ".mp4",
@@ -1475,12 +1484,8 @@ MEDIA_EXTENSIONS = {
 MEDIA_TEMPORARY_MARK = ".tmp."
 
 
-class MediaTooLarge(Exception):
-    """A download passed the size limit while its bytes arrived."""
-
-
-class MediaStorageFull(Exception):
-    """A download passed the room it reserved of the media quota."""
+class MediaDiskLow(Exception):
+    """Free space fell under the floor while a download's bytes arrived."""
 
 
 def media_dir() -> Path | None:
@@ -1489,25 +1494,22 @@ def media_dir() -> Path | None:
     return Path(spool) / MEDIA_DIR_NAME if spool else None
 
 
-def media_byte_setting(name: str, default: int, hard_cap: int) -> int:
-    """A media byte setting; 0 keeps none. A setting that does not read keeps none, never stops capture."""
-    value = os.environ.get(name, "").strip()
-    if value == "0":
-        return 0
-    try:
-        return positive_int_env(name, default, hard_cap)
-    except SafeConfigError:
-        return 0
+def disk_space(path: Path) -> tuple[int, int]:
+    """Free bytes (as this user may use them) and total bytes of the volume `path` is on."""
+    usage = shutil.disk_usage(path)
+    return int(usage.free), int(usage.total)
 
 
-def media_max_bytes() -> int:
-    """The largest file the gateway keeps (25 MB by default)."""
-    return media_byte_setting("OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES", MEDIA_MAX_BYTES_DEFAULT, MEDIA_MAX_BYTES_HARD_CAP)
+def disk_floor(total: int) -> int:
+    """The free space new downloads keep: the larger of 5 GB and 5% of the disk (the plugin reads the same floor)."""
+    return max(MEDIA_DISK_FLOOR_BYTES, int(total * MEDIA_DISK_FLOOR_SHARE))
 
 
-def media_quota_bytes() -> int:
-    """The most the gateway keeps in all (2 GB by default). Past it new media is named only, and nothing is evicted."""
-    return media_byte_setting("OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES", MEDIA_QUOTA_BYTES_DEFAULT, MEDIA_QUOTA_BYTES_HARD_CAP)
+def disk_low(folder: Path, need: int = 0) -> bool:
+    """Whether `need` more bytes, and what downloads in flight have reserved, would take free space under the floor."""
+    probe = folder if folder.exists() else folder.parent
+    free, total = disk_space(probe)
+    return free - int(media_usage["reserved"]) - need < disk_floor(total)
 
 
 def pid_is_running(pid: int) -> bool:
@@ -1547,24 +1549,9 @@ def sweep_media_temporaries(folder: Path | None) -> int:
     return removed
 
 
-# What the media folder holds (kept files only, measured from disk), what downloads in flight have reserved of the
-# quota, and how much new media was left out since the store was last not full. Changed only under media_lock, so
-# overlapping downloads cannot each see the same room.
-media_usage: dict[str, Any] = {
-    "bytes": None, "at": 0.0, "reserved": 0, "left_out": 0, "ticket": 0, "refused_at": 0,
-    # What was kept and reserved when the last download was refused; fewer bytes kept than this means room was made.
-    "refused_with": None,
-}
-
-
-def media_refused(folder: Path, quota: int, attachment: dict[str, Any]) -> None:
-    """New media left out for want of room: the store reads full until a download that started after this one lands."""
-    media_usage["ticket"] = int(media_usage["ticket"]) + 1
-    media_usage["refused_at"] = media_usage["ticket"]
-    media_usage["refused_with"] = int(media_usage["bytes"] or 0) + int(media_usage["reserved"])
-    media_usage["left_out"] = int(media_usage["left_out"]) + 1
-    attachment["mediaLeftOut"] = "storage_full"
-    write_media_state(folder, quota, True)
+# What downloads in flight have reserved of the free space (their stated sizes), so overlapping downloads cannot each
+# count the same room. Changed only under media_lock.
+media_usage: dict[str, Any] = {"reserved": 0}
 media_lock_holder: dict[str, asyncio.Lock] = {}
 
 
@@ -1575,72 +1562,46 @@ def media_lock() -> asyncio.Lock:
     return lock
 
 
-def measure_media_bytes(folder: Path) -> int:
-    """The kept files' bytes, from disk; a download in progress counts as its reservation instead."""
-    total = 0
-    if folder.is_dir():
-        for chat in folder.iterdir():
-            if not chat.is_dir() or chat.is_symlink():
-                continue
-            for entry in chat.iterdir():
-                if entry.name.startswith(".") and MEDIA_TEMPORARY_MARK in entry.name:
-                    continue
-                try:
-                    if entry.is_file() and not entry.is_symlink():
-                        total += entry.stat().st_size
-                except OSError:
-                    pass
-    return total
+def read_media_waiting(spool_dir: Path) -> list[dict[str, str]]:
+    """The media waiting for disk space, oldest first: each a chat and a message."""
+    try:
+        value = json.loads((spool_dir / MEDIA_WAITING_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = value.get("items") if isinstance(value, dict) and value.get("kind") == "telegram_capture_media_waiting" else None
+    if not isinstance(items, list):
+        return []
+    return [
+        {"chat": str(item["chat"]), "message": str(item["message"])}
+        for item in items
+        if isinstance(item, dict) and isinstance(item.get("chat"), str) and isinstance(item.get("message"), str)
+    ]
 
 
-def media_stored_bytes(folder: Path, fresh: bool = False) -> int:
-    """The bytes the media folder holds, measured at start and at most every few minutes, and counted on between."""
-    now = dt.datetime.now(dt.timezone.utc).timestamp()
-    if fresh or media_usage["bytes"] is None or now - float(media_usage["at"]) > MEDIA_USAGE_TTL_SECONDS:
-        media_usage["bytes"] = measure_media_bytes(folder)
-        media_usage["at"] = now
-        refused_with = media_usage["refused_with"]
-        if refused_with is not None and int(media_usage["bytes"]) < int(refused_with):
-            # Room was made since the last refusal (files removed): the store is not full on that refusal's account.
-            media_cleared(folder, media_quota_bytes())
-    return int(media_usage["bytes"])
+def write_media_waiting(spool_dir: Path, items: list[dict[str, str]]) -> None:
+    write_json_atomic(spool_dir / MEDIA_WAITING_NAME, {
+        "kind": "telegram_capture_media_waiting",
+        "schema_version": 1,
+        "items": items[-MEDIA_WAITING_MAX:],
+        "updated_at": gateway_now_iso(),
+    })
+
+
+def media_waits(folder: Path, chat: str, message_id: str, attachment: dict[str, Any]) -> None:
+    """New media paused for disk space: named on its message as waiting, and listed to be filled in once space returns."""
+    attachment["mediaLeftOut"] = MEDIA_WAITING
+    try:
+        items = read_media_waiting(folder.parent)
+        if not any(item["chat"] == chat and item["message"] == message_id for item in items):
+            items.append({"chat": chat, "message": message_id})
+            write_media_waiting(folder.parent, items)
+    except Exception:
+        pass
 
 
 def media_start(folder: Path | None) -> None:
-    """At gateway start: sweep a stopped run's temporaries, measure what is kept, and say what is true now."""
-    # Downloads a stopped gateway left half written: no locator names them, so only this sweep removes them.
+    """At gateway start: sweep a stopped run's temporaries (no locator names them, so only this sweep removes them)."""
     sweep_media_temporaries(folder)
-    if not folder:
-        return
-    # What is kept, measured from disk once at start; counted on from here and measured again every few minutes.
-    media_stored_bytes(folder, fresh=True)
-    # A new start may have a new quota: the state says what is true now, with no refusal carried over.
-    if media_quota_bytes() > 0 and (folder.parent / MEDIA_STATE_NAME).exists():
-        media_cleared(folder, media_quota_bytes())
-
-
-def media_cleared(folder: Path, quota: int) -> None:
-    """The store is not full: the count of media left out starts again at the next refusal."""
-    media_usage["left_out"] = 0
-    media_usage["refused_with"] = None
-    write_media_state(folder, quota, int(media_usage["bytes"] or 0) >= quota > 0)
-
-
-def write_media_state(folder: Path, quota: int, storage_full: bool) -> None:
-    """What the plugin shows on the source card: how much is kept, of how much, and whether new media was left out."""
-    try:
-        write_json_atomic(folder.parent / MEDIA_STATE_NAME, {
-            "kind": "telegram_capture_media",
-            "schema_version": 1,
-            "stored_bytes": media_stored_bytes(folder),
-            "quota_bytes": quota,
-            "storage_full": storage_full,
-            "left_out_items": int(media_usage["left_out"]) if storage_full else 0,
-            **({"refused_with_bytes": int(media_usage["refused_with"])} if storage_full and media_usage["refused_with"] is not None else {}),
-            "updated_at": gateway_now_iso(),
-        })
-    except Exception:
-        pass
 
 
 def media_identity_tag(message: Any, kind: str) -> str:
@@ -1653,52 +1614,47 @@ def media_identity_tag(message: Any, kind: str) -> str:
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
-def remove_other_media_versions(target: Path, message_id: str) -> int:
-    """The message's files of an earlier attachment, once the current one is in place. Returns the bytes freed."""
-    freed = 0
+def remove_other_media_versions(target: Path, message_id: str) -> None:
+    """The message's files of an earlier attachment, once the current one is in place."""
     for entry in target.parent.iterdir():
         if entry.name != target.name and entry.name.startswith(f"{message_id}.") and entry.is_file():
             try:
-                size = entry.stat().st_size
                 entry.unlink()
-                freed += size
             except OSError:
                 pass
-    return freed
 
 
 async def capture_message_media(message: Any, normalized: dict[str, Any]) -> None:
     """Keep a captured message's photo or file beside the spool, so its child item can be read.
 
-    Only the gateway keeps media (it has a spool folder), only a photo or a
-    document, only up to the size limit (25 MB by default) and only while all
-    it keeps stays under the quota (2 GB by default); either set to 0 keeps
-    none. The file is named by the chat, the message and which file it is
-    (`<message>.<tag><ext>`, the tag from Telegram's id, access hash, size and
-    date), so a changed attachment is downloaded again and replaces the old
-    one. It is written to `.<name>.tmp.<pid>`, renamed into place, and removed
-    on any failure; a stopped process's temporaries are swept at start and
-    before every Secrets cleanup. The size limit holds while the bytes arrive.
-    A file left out names why on the attachment (`mediaLeftOut`: `too_large`
-    or `storage_full`); anything else that goes wrong leaves the attachment
-    named and unreadable, never the capture failed.
+    Only the gateway keeps media (it has a spool folder), and only a photo or
+    a document; every one is kept, whatever its size. The one safeguard is the
+    computer's own: while the volume's free space is under the floor (the
+    larger of 5 GB and 5% of the disk), new downloads pause, the attachment
+    says so (`mediaLeftOut: waiting_for_disk`) and the message is listed to be
+    filled in once space returns (retry_waiting_media). The floor is checked
+    before a download, with what downloads in flight have reserved, and again
+    while its bytes arrive. The file is named by the chat, the message and
+    which file it is (`<message>.<tag><ext>`, the tag from Telegram's id,
+    access hash, size and date), so a changed attachment is downloaded again
+    and replaces the old one. It is written to `.<name>.tmp.<pid>`, renamed
+    into place, and removed on any failure; a stopped process's temporaries
+    are swept at start and before every Secrets cleanup. Anything else that
+    goes wrong leaves the attachment named and unreadable, never the capture
+    failed.
     """
     attachments = normalized.get("attachments")
     folder = media_dir()
     if not folder or not isinstance(attachments, list) or not attachments:
         return
-    limit = media_max_bytes()
-    quota = media_quota_bytes()
     attachment = attachments[0]
-    if limit <= 0 or quota <= 0 or not isinstance(attachment, dict):
+    if not isinstance(attachment, dict):
         return
     kind = str(attachment.get("attachmentId", "")).split(":", 1)[0]
     if kind not in ("photo", "document"):
         return
     size = attachment.get("sizeBytes")
-    if isinstance(size, int) and size > limit:
-        attachment["mediaLeftOut"] = "too_large"
-        return
+    need = size if isinstance(size, int) and size > 0 else 0
     chat = str(normalized.get("conversationId", ""))
     message_id = str(normalized.get("id", ""))
     if not chat.lstrip("-").isdigit() and not chat.isidentifier():
@@ -1712,66 +1668,45 @@ async def capture_message_media(message: Any, normalized: dict[str, Any]) -> Non
     temporary = target.with_name(f".{name}{MEDIA_TEMPORARY_MARK}{os.getpid()}")
     written: Any = None
     reserved = 0
-    ticket = 0
     try:
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(folder, 0o700)
         os.chmod(target.parent, 0o700)
         if not target.exists():
-            # Room is reserved before the download starts, under the lock: the stated size, or else as much as
-            # the size limit and the room left allow; the download may not pass what it reserved.
+            # Room is reserved before the download starts, under the lock: its stated size, against the free space
+            # left above the floor once what other downloads reserved is taken off.
             async with media_lock():
-                stored = media_stored_bytes(folder)
-                room = quota - stored - int(media_usage["reserved"])
-                reserve = size if isinstance(size, int) else min(limit, room)
-                if reserve > room or room <= 0:
-                    media_refused(folder, quota, attachment)
+                if disk_low(folder, need):
+                    media_waits(folder, chat, message_id, attachment)
                     return
-                media_usage["reserved"] = int(media_usage["reserved"]) + reserve
-                reserved = reserve
-                media_usage["ticket"] = int(media_usage["ticket"]) + 1
-                ticket = media_usage["ticket"]
+                media_usage["reserved"] = int(media_usage["reserved"]) + need
+                reserved = need
+            checked = {"at": 0}
 
-            def bounded(received: int, total: int) -> None:
-                if received > limit or (isinstance(total, int) and total > limit):
-                    raise MediaTooLarge()
-                if received > reserve or (isinstance(total, int) and total > reserve):
-                    raise MediaStorageFull()
+            def floor_holds(received: int, total: int) -> None:
+                # Looked at again every few MB while the bytes arrive: what other downloads write counts too.
+                if received - checked["at"] < MEDIA_DISK_CHECK_BYTES:
+                    return
+                checked["at"] = received
+                free, disk_total = disk_space(folder)
+                if free < disk_floor(disk_total):
+                    raise MediaDiskLow()
 
-            written = await message.download_media(file=str(temporary), progress_callback=bounded)
+            written = await message.download_media(file=str(temporary), progress_callback=floor_holds)
             if not written:
                 return
-            actual = os.path.getsize(temporary)
-            if actual > limit:
-                raise MediaTooLarge()
-            if actual > reserve:
-                raise MediaStorageFull()
             os.chmod(temporary, 0o600)
-            async with media_lock():
-                # Read before the rename: a measurement after it would count this file twice.
-                stored = media_stored_bytes(folder)
-                os.replace(temporary, target)
-                media_usage["reserved"] = int(media_usage["reserved"]) - reserved
-                reserved = 0
-                freed = remove_other_media_versions(target, message_id)
-                media_usage["bytes"] = max(0, stored + actual - freed)
-                # Room again only if this download started after the last one refused: one that started before it
-                # says nothing about whether the refused would fit now.
-                if ticket > int(media_usage["refused_at"]):
-                    media_cleared(folder, quota)
-                else:
-                    write_media_state(folder, quota, True)
+            os.replace(temporary, target)
+            remove_other_media_versions(target, message_id)
+        attachment.pop("mediaLeftOut", None)
         attachment["mediaFile"] = relative
         attachment["sizeBytes"] = os.path.getsize(target)
-    except MediaTooLarge:
-        attachment["mediaLeftOut"] = "too_large"
-    except MediaStorageFull:
-        media_refused(folder, quota, attachment)
+    except MediaDiskLow:
+        media_waits(folder, chat, message_id, attachment)
     except Exception:
         return
     finally:
         if reserved:
-            # A download that did not land gives its reservation back.
             media_usage["reserved"] = max(0, int(media_usage["reserved"]) - reserved)
         for leftover in {str(temporary), str(written) if isinstance(written, (str, Path)) else str(temporary)}:
             try:
@@ -1780,6 +1715,79 @@ async def capture_message_media(message: Any, normalized: dict[str, Any]) -> Non
                 pass
             except OSError:
                 pass
+
+
+async def retry_waiting_media(client: Any, config: GatewayConfig, state_lock: asyncio.Lock) -> int:
+    """Fill in media that waited for disk space, once there is room: the message is fetched again, its media kept, and
+    the message captured again with it (its newer capture brings the readable child). A message gone from Telegram, or out
+    of the approved chats now, is let go; one whose download failed otherwise stays named only, as it would have."""
+    folder = media_dir()
+    if not folder:
+        return 0
+    spool_dir = folder.parent
+    async with media_lock():
+        waiting = read_media_waiting(spool_dir)
+    if not waiting or disk_low(folder):
+        return 0
+    scopes = {str(chat_id_from_scope(scope)): scope for scope in config.approved_scopes}
+    done: set[tuple[str, str]] = set()
+    appended = 0
+    paused = False
+    chats: dict[str, list[str]] = {}
+    for item in waiting:
+        chats.setdefault(item["chat"], []).append(item["message"])
+    for chat, ids in chats.items():
+        if paused:
+            break
+        scope = scopes.get(chat)
+        if not scope:
+            done.update((chat, message_id) for message_id in ids)
+            continue
+        chat_ref = chat_id_from_scope(scope)
+        for start in range(0, len(ids), MEDIA_RETRY_BATCH):
+            batch = ids[start:start + MEDIA_RETRY_BATCH]
+            try:
+                messages = await client.get_messages(chat_ref, ids=[int(message_id) for message_id in batch])
+            except Exception:
+                break
+            for message_id, message in zip(batch, list(messages or [])):
+                if message is None:
+                    done.add((chat, message_id))
+                    continue
+                entity = getattr(message, "chat", None)
+                normalized = normalize_message(
+                    message,
+                    config.account,
+                    chat,
+                    chat_title_from_entity(entity),
+                    chat_type_from_entity(entity) if entity is not None else None,
+                )
+                await capture_message_media(message, normalized)
+                attachment = (normalized.get("attachments") or [{}])[0]
+                if isinstance(attachment, dict) and attachment.get("mediaLeftOut") == MEDIA_WAITING:
+                    paused = True
+                    break
+                done.add((chat, message_id))
+                if not isinstance(attachment, dict) or not attachment.get("mediaFile"):
+                    continue
+                sender_id = normalized.get("senderId")
+                if isinstance(sender_id, str):
+                    try:
+                        display_name = display_name_from_entity(await message.get_sender())
+                    except Exception:
+                        display_name = None
+                    if display_name:
+                        normalized["senderDisplayName"] = display_name
+                        normalized["participantDisplayNames"] = {sender_id: display_name}
+                async with state_lock:
+                    appended += append_gateway_page(config, scope, {"messages": [normalized]}, "forward")
+            if paused:
+                break
+    if done:
+        async with media_lock():
+            current = read_media_waiting(spool_dir)
+            write_media_waiting(spool_dir, [item for item in current if (item["chat"], item["message"]) not in done])
+    return appended
 
 
 def forward_origin_name(forward: Any) -> str | None:
