@@ -244,6 +244,8 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   // owner's whatever the readiness label says: another problem's label must
   // not be what decides whether this one is seen.
   if (dashboardCaptureProblem(source) !== undefined) return { status: 'Needs you', mappedUnknown: false };
+  // Kept media filled its storage: new photos and files are names only until the owner makes room.
+  if (source.media_storage) return { status: 'Needs you', mappedUnknown: false };
   // A folder source that is connected but has no approved scope has read
   // nothing and will read nothing until the owner chooses folders. Its
   // connection state is `connected`, which alone reads Fresh — a green dot and
@@ -436,14 +438,15 @@ export function dashboardAttentionLine(
   source: DashboardSourceCard,
   options?: DashboardVocabularyOptions,
 ): string {
-  const { reason, capture } = dashboardAttentionParts(source, options);
-  return [reason, capture].filter((part): part is string => !!part).join(' · ');
+  const { reason, capture, media } = dashboardAttentionParts(source, options);
+  return [reason, capture, media].filter((part): part is string => !!part).join(' · ');
 }
 
 /**
- * The attention line in its two independent halves: `reason`, the source's
- * own problem (empty when it has none besides capture), and `capture`, the
- * live feed's problem when there is one. A row states both in its one line;
+ * The attention line in its independent parts: `reason`, the source's
+ * own problem (empty when it has none besides capture), `capture`, the
+ * live feed's problem when there is one, and `media`, when the media it keeps
+ * has filled its storage. A row states both in its one line;
  * the Needs you list gives each its own item and its own route, because the
  * route for a late refresh (Sync now) is not the route for a feed that stopped
  * (open the source on the computer). Neither hides the other.
@@ -451,9 +454,15 @@ export function dashboardAttentionLine(
 export function dashboardAttentionParts(
   source: DashboardSourceCard,
   options?: DashboardVocabularyOptions,
-): { reason: string; capture?: string } {
+): { reason: string; capture?: string; media?: string } {
   const capture = dashboardCaptureAttentionReason(source);
-  const withCapture = (reason: string): { reason: string; capture?: string } => (capture ? { reason, capture } : { reason });
+  // Kept media that filled its storage: a third half, beside whatever else the source has.
+  const media = source.media_storage ? DASHBOARD_MEDIA_STORAGE_COPY.reason(source.media_storage.left_out_items) : undefined;
+  const withCapture = (reason: string): { reason: string; capture?: string; media?: string } => ({
+    reason,
+    ...(capture ? { capture } : {}),
+    ...(media ? { media } : {}),
+  });
   const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
@@ -567,6 +576,28 @@ export const DASHBOARD_STORAGE_NOTICE_COPY = {
     unreadable: (label: string) => `Olympus cannot open the folder where ${label}'s files are, so it cannot move them. Ask your agent to check that your user account may open Olympus's data folder.`,
     in_the_way: (label: string) => `${label}'s files are where they have always been and in their own folder too, so Olympus moved nothing. Ask your agent to compare the two before anything is moved.`,
   },
+} as const;
+
+/**
+ * A source's kept media has filled its storage limit (DashboardSourceCard
+ * `media_storage`). `reason` is the clause after the source's name on its row,
+ * and carries the way to make room itself: the panel's row shows only its line,
+ * and no page on the computer says more. It counts the owner's own photos and
+ * files left out, which making room brings back for new ones (the 2026-08-24
+ * ruling is against counts nobody can act on; this one is the size of what
+ * the fix restores). `nextAction` is the same step for the setup sheet.
+ */
+export const DASHBOARD_MEDIA_STORAGE_COPY = {
+  reason: (leftOut: number) => (leftOut === 1
+    ? 'media storage is full, so 1 new photo or file was kept as a name only'
+    : leftOut > 1
+      ? `media storage is full, so ${leftOut} new photos and files were kept as names only`
+      : 'media storage is full, so new photos and files are kept as names only')
+    + ' · ask your agent to raise the media limit or remove media you no longer need',
+  nextAction: (label: string, leftOut: number) => `${label}'s media storage is full, so new photos and files are kept as names only`
+    + (leftOut > 0 ? ` (${leftOut} so far)` : '')
+    + `. Nothing already kept was removed. To keep new media again, ask your agent to raise ${label}'s media storage limit, `
+    + 'or to remove kept media you no longer need.',
 } as const;
 
 /** The view model's readiness labels that name a cause, in the owner's words. */

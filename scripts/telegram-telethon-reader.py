@@ -279,8 +279,7 @@ async def run_gateway(run_once: bool = False) -> None:
     os.chmod(config.state_dir, 0o700)
     os.chmod(config.spool_dir, 0o700)
     with gateway_process_lock(config.state_dir / "gateway.lock"):
-        # Downloads a stopped gateway left half written: no locator names them, so only this sweep removes them.
-        sweep_media_temporaries(media_dir())
+        media_start(media_dir())
         state = read_gateway_state(config.state_path)
         state_lock = asyncio.Lock()
         sender_cache_lock = asyncio.Lock()
@@ -1480,6 +1479,10 @@ class MediaTooLarge(Exception):
     """A download passed the size limit while its bytes arrived."""
 
 
+class MediaStorageFull(Exception):
+    """A download passed the room it reserved of the media quota."""
+
+
 def media_dir() -> Path | None:
     """Where the gateway keeps the media it captures: beside its spool, in the account's folder."""
     spool = first_env("OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR", "OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR")
@@ -1544,27 +1547,83 @@ def sweep_media_temporaries(folder: Path | None) -> int:
     return removed
 
 
-media_usage: dict[str, Any] = {"bytes": None, "at": 0.0}
+# What the media folder holds (kept files only, measured from disk), what downloads in flight have reserved of the
+# quota, and how much new media was left out since the store was last not full. Changed only under media_lock, so
+# overlapping downloads cannot each see the same room.
+media_usage: dict[str, Any] = {
+    "bytes": None, "at": 0.0, "reserved": 0, "left_out": 0, "ticket": 0, "refused_at": 0,
+    # What was kept and reserved when the last download was refused; fewer bytes kept than this means room was made.
+    "refused_with": None,
+}
 
 
-def media_stored_bytes(folder: Path) -> int:
-    """The bytes the media folder holds, measured at most every few minutes and counted on between."""
-    now = dt.datetime.now(dt.timezone.utc).timestamp()
-    if media_usage["bytes"] is None or now - float(media_usage["at"]) > MEDIA_USAGE_TTL_SECONDS:
-        total = 0
-        if folder.is_dir():
-            for chat in folder.iterdir():
-                if not chat.is_dir() or chat.is_symlink():
+def media_refused(folder: Path, quota: int, attachment: dict[str, Any]) -> None:
+    """New media left out for want of room: the store reads full until a download that started after this one lands."""
+    media_usage["ticket"] = int(media_usage["ticket"]) + 1
+    media_usage["refused_at"] = media_usage["ticket"]
+    media_usage["refused_with"] = int(media_usage["bytes"] or 0) + int(media_usage["reserved"])
+    media_usage["left_out"] = int(media_usage["left_out"]) + 1
+    attachment["mediaLeftOut"] = "storage_full"
+    write_media_state(folder, quota, True)
+media_lock_holder: dict[str, asyncio.Lock] = {}
+
+
+def media_lock() -> asyncio.Lock:
+    lock = media_lock_holder.get("lock")
+    if lock is None:
+        lock = media_lock_holder["lock"] = asyncio.Lock()
+    return lock
+
+
+def measure_media_bytes(folder: Path) -> int:
+    """The kept files' bytes, from disk; a download in progress counts as its reservation instead."""
+    total = 0
+    if folder.is_dir():
+        for chat in folder.iterdir():
+            if not chat.is_dir() or chat.is_symlink():
+                continue
+            for entry in chat.iterdir():
+                if entry.name.startswith(".") and MEDIA_TEMPORARY_MARK in entry.name:
                     continue
-                for entry in chat.iterdir():
-                    try:
-                        if entry.is_file() and not entry.is_symlink():
-                            total += entry.stat().st_size
-                    except OSError:
-                        pass
-        media_usage["bytes"] = total
+                try:
+                    if entry.is_file() and not entry.is_symlink():
+                        total += entry.stat().st_size
+                except OSError:
+                    pass
+    return total
+
+
+def media_stored_bytes(folder: Path, fresh: bool = False) -> int:
+    """The bytes the media folder holds, measured at start and at most every few minutes, and counted on between."""
+    now = dt.datetime.now(dt.timezone.utc).timestamp()
+    if fresh or media_usage["bytes"] is None or now - float(media_usage["at"]) > MEDIA_USAGE_TTL_SECONDS:
+        media_usage["bytes"] = measure_media_bytes(folder)
         media_usage["at"] = now
+        refused_with = media_usage["refused_with"]
+        if refused_with is not None and int(media_usage["bytes"]) < int(refused_with):
+            # Room was made since the last refusal (files removed): the store is not full on that refusal's account.
+            media_cleared(folder, media_quota_bytes())
     return int(media_usage["bytes"])
+
+
+def media_start(folder: Path | None) -> None:
+    """At gateway start: sweep a stopped run's temporaries, measure what is kept, and say what is true now."""
+    # Downloads a stopped gateway left half written: no locator names them, so only this sweep removes them.
+    sweep_media_temporaries(folder)
+    if not folder:
+        return
+    # What is kept, measured from disk once at start; counted on from here and measured again every few minutes.
+    media_stored_bytes(folder, fresh=True)
+    # A new start may have a new quota: the state says what is true now, with no refusal carried over.
+    if media_quota_bytes() > 0 and (folder.parent / MEDIA_STATE_NAME).exists():
+        media_cleared(folder, media_quota_bytes())
+
+
+def media_cleared(folder: Path, quota: int) -> None:
+    """The store is not full: the count of media left out starts again at the next refusal."""
+    media_usage["left_out"] = 0
+    media_usage["refused_with"] = None
+    write_media_state(folder, quota, int(media_usage["bytes"] or 0) >= quota > 0)
 
 
 def write_media_state(folder: Path, quota: int, storage_full: bool) -> None:
@@ -1576,6 +1635,8 @@ def write_media_state(folder: Path, quota: int, storage_full: bool) -> None:
             "stored_bytes": media_stored_bytes(folder),
             "quota_bytes": quota,
             "storage_full": storage_full,
+            "left_out_items": int(media_usage["left_out"]) if storage_full else 0,
+            **({"refused_with_bytes": int(media_usage["refused_with"])} if storage_full and media_usage["refused_with"] is not None else {}),
             "updated_at": gateway_now_iso(),
         })
     except Exception:
@@ -1592,14 +1653,18 @@ def media_identity_tag(message: Any, kind: str) -> str:
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
-def remove_other_media_versions(target: Path, message_id: str) -> None:
-    """The message's files of an earlier attachment, once the current one is in place."""
+def remove_other_media_versions(target: Path, message_id: str) -> int:
+    """The message's files of an earlier attachment, once the current one is in place. Returns the bytes freed."""
+    freed = 0
     for entry in target.parent.iterdir():
         if entry.name != target.name and entry.name.startswith(f"{message_id}.") and entry.is_file():
             try:
+                size = entry.stat().st_size
                 entry.unlink()
+                freed += size
             except OSError:
                 pass
+    return freed
 
 
 async def capture_message_media(message: Any, normalized: dict[str, Any]) -> None:
@@ -1646,20 +1711,32 @@ async def capture_message_media(message: Any, normalized: dict[str, Any]) -> Non
     target = folder / chat / name
     temporary = target.with_name(f".{name}{MEDIA_TEMPORARY_MARK}{os.getpid()}")
     written: Any = None
+    reserved = 0
+    ticket = 0
     try:
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(folder, 0o700)
         os.chmod(target.parent, 0o700)
         if not target.exists():
-            stored = media_stored_bytes(folder)
-            if stored + (size if isinstance(size, int) else 0) >= quota:
-                attachment["mediaLeftOut"] = "storage_full"
-                write_media_state(folder, quota, True)
-                return
+            # Room is reserved before the download starts, under the lock: the stated size, or else as much as
+            # the size limit and the room left allow; the download may not pass what it reserved.
+            async with media_lock():
+                stored = media_stored_bytes(folder)
+                room = quota - stored - int(media_usage["reserved"])
+                reserve = size if isinstance(size, int) else min(limit, room)
+                if reserve > room or room <= 0:
+                    media_refused(folder, quota, attachment)
+                    return
+                media_usage["reserved"] = int(media_usage["reserved"]) + reserve
+                reserved = reserve
+                media_usage["ticket"] = int(media_usage["ticket"]) + 1
+                ticket = media_usage["ticket"]
 
             def bounded(received: int, total: int) -> None:
                 if received > limit or (isinstance(total, int) and total > limit):
                     raise MediaTooLarge()
+                if received > reserve or (isinstance(total, int) and total > reserve):
+                    raise MediaStorageFull()
 
             written = await message.download_media(file=str(temporary), progress_callback=bounded)
             if not written:
@@ -1667,22 +1744,35 @@ async def capture_message_media(message: Any, normalized: dict[str, Any]) -> Non
             actual = os.path.getsize(temporary)
             if actual > limit:
                 raise MediaTooLarge()
-            if stored + actual > quota:
-                attachment["mediaLeftOut"] = "storage_full"
-                write_media_state(folder, quota, True)
-                return
+            if actual > reserve:
+                raise MediaStorageFull()
             os.chmod(temporary, 0o600)
-            os.replace(temporary, target)
-            media_usage["bytes"] = stored + actual
-            remove_other_media_versions(target, message_id)
-            write_media_state(folder, quota, False)
+            async with media_lock():
+                # Read before the rename: a measurement after it would count this file twice.
+                stored = media_stored_bytes(folder)
+                os.replace(temporary, target)
+                media_usage["reserved"] = int(media_usage["reserved"]) - reserved
+                reserved = 0
+                freed = remove_other_media_versions(target, message_id)
+                media_usage["bytes"] = max(0, stored + actual - freed)
+                # Room again only if this download started after the last one refused: one that started before it
+                # says nothing about whether the refused would fit now.
+                if ticket > int(media_usage["refused_at"]):
+                    media_cleared(folder, quota)
+                else:
+                    write_media_state(folder, quota, True)
         attachment["mediaFile"] = relative
         attachment["sizeBytes"] = os.path.getsize(target)
     except MediaTooLarge:
         attachment["mediaLeftOut"] = "too_large"
+    except MediaStorageFull:
+        media_refused(folder, quota, attachment)
     except Exception:
         return
     finally:
+        if reserved:
+            # A download that did not land gives its reservation back.
+            media_usage["reserved"] = max(0, int(media_usage["reserved"]) - reserved)
         for leftover in {str(temporary), str(written) if isinstance(written, (str, Path)) else str(temporary)}:
             try:
                 os.unlink(leftover)

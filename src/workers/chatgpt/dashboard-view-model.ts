@@ -468,6 +468,8 @@ function sourceEntry(
         ? scopeFix(definition, card)
         : reconnect ?? (late && captureOnly
           ? captureFix(definition)
+          : late && mediaStorageOnly(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) })
+            ? checkAgainFix()
           // Beside another problem the other problem's fix leads when it has
           // one; a chat source has no Sync now, so Check capture is then the row's fix.
           : late ? sync ?? (capture ? captureFix(definition) : undefined)
@@ -603,6 +605,7 @@ function attentionItem(
   // sentence names both; the fix is the other problem's when it has one
   // (Sync now), with Check capture in the row's menu (sourceEntry).
   const captureOnly = captureProblem(card) && dashboardAttentionParts(card, attentionOptions).reason === '';
+  const mediaOnly = mediaStorageOnly(card, attentionOptions);
   // A late or unresponsive source's fix is Sync now where this worker can
   // sync it: Check again only re-read the page (owner, 2026-10-09).
   const fix = scopePending(card) || missingScope(card)
@@ -611,7 +614,9 @@ function attentionItem(
       ? reconnectFix(definition, card)
       : captureOnly
         ? captureFix(definition)
-        : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
+        : mediaOnly
+          ? checkAgainFix()
+          : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 
@@ -658,6 +663,15 @@ function importAttentionItem(entry: DashboardImportAttention): DashboardItem {
  */
 function captureProblem(card: DashboardSourceCard): boolean {
   return dashboardCaptureProblem(card) !== undefined;
+}
+
+/**
+ * The media a source keeps filled its storage, and nothing else is wrong. The
+ * row's line says how to make room (the agent raises the limit or removes
+ * media); Sync now cannot, so the control checks again once room is made.
+ */
+function mediaStorageOnly(card: DashboardSourceCard, options: Parameters<typeof dashboardAttentionParts>[1]): boolean {
+  return card.media_storage !== undefined && !captureProblem(card) && dashboardAttentionParts(card, options).reason === '';
 }
 
 function captureFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
@@ -1412,6 +1426,10 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } }
       : {}),
     ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
+    // A state and a count only: the words are vocabulary.ts's.
+    ...(card.media_storage?.state === 'full'
+      ? { media_storage: { state: 'full' as const, left_out_items: count(card.media_storage.left_out_items) } }
+      : {}),
     ...(card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at)
       && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome)
       ? {

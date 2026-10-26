@@ -38,6 +38,10 @@ export interface TelegramMediaState {
   quotaBytes: number;
   /** New media is named only, never kept, until room is made or the quota is raised; nothing is evicted. */
   storageFull: boolean;
+  /** Media named only for want of room since the store was last not full. */
+  leftOutItems: number;
+  /** What was kept and reserved when the last download was refused; fewer bytes kept now means room was made. */
+  refusedWithBytes?: number;
 }
 
 const MEDIA_STATE_FILE = '.capture-media.json';
@@ -207,6 +211,56 @@ export function sweepTelegramMediaTemporaries(spoolDir: string): number {
   return removed;
 }
 
+/** The bytes of the files kept under the spool's media folder, measured now; downloads in progress are not kept files. */
+export function telegramKeptMediaBytes(spoolDir: string): number {
+  const root = join(spoolDir, 'media');
+  let total = 0;
+  let chats: string[];
+  try {
+    chats = readdirSync(root);
+  } catch {
+    return 0;
+  }
+  for (const chat of chats) {
+    const folder = join(root, chat);
+    let names: string[];
+    try {
+      if (!lstatSync(folder).isDirectory()) continue;
+      names = readdirSync(folder);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (name.startsWith('.') && name.includes(TEMPORARY_MARK)) continue;
+      try {
+        const stat = lstatSync(join(folder, name));
+        if (stat.isFile()) total += stat.size;
+      } catch {
+        // Removed while measured.
+      }
+    }
+  }
+  return total;
+}
+
+/**
+ * The media account as it stands now, for each pull. The helper's file says
+ * whether a download was refused and with how much kept; what is kept is
+ * measured again here, so room made since (files removed, a Secret's files
+ * taken) clears the full state at the next pull instead of at the next
+ * download. Full while what is kept reaches the quota, or while a refusal
+ * stands and nothing has been freed since it. Media already left out stays
+ * named only; the count is of media left out since the store last filled.
+ */
+export function telegramMediaStateNow(spoolDir: string): TelegramMediaState | undefined {
+  const state = readTelegramMediaState(spoolDir);
+  if (!state || state.quotaBytes <= 0) return state;
+  const kept = telegramKeptMediaBytes(spoolDir);
+  const refusalStands = state.storageFull && kept >= (state.refusedWithBytes ?? state.storedBytes);
+  const storageFull = kept >= state.quotaBytes || refusalStands;
+  return { storedBytes: kept, quotaBytes: state.quotaBytes, storageFull, leftOutItems: refusalStands ? state.leftOutItems : 0 };
+}
+
 /** The helper's media account, or undefined when it has written none. */
 export function readTelegramMediaState(spoolDir: string): TelegramMediaState | undefined {
   try {
@@ -216,7 +270,14 @@ export function readTelegramMediaState(spoolDir: string): TelegramMediaState | u
     const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
     if (value.kind !== 'telegram_capture_media' || value.schema_version !== 1) return undefined;
     const count = (field: unknown) => (typeof field === 'number' && Number.isSafeInteger(field) && field >= 0 ? field : 0);
-    return { storedBytes: count(value.stored_bytes), quotaBytes: count(value.quota_bytes), storageFull: value.storage_full === true };
+    const storageFull = value.storage_full === true;
+    return {
+      storedBytes: count(value.stored_bytes),
+      quotaBytes: count(value.quota_bytes),
+      storageFull,
+      leftOutItems: storageFull ? count(value.left_out_items) : 0,
+      ...(storageFull && typeof value.refused_with_bytes === 'number' ? { refusedWithBytes: count(value.refused_with_bytes) } : {}),
+    };
   } catch {
     return undefined;
   }

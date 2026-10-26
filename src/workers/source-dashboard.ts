@@ -49,6 +49,7 @@ import {
   DASHBOARD_STORAGE_NOTICE_COPY,
   DASHBOARD_CAPTURE_STALE_LABEL,
   DASHBOARD_MANY_UNREADABLE_LABEL,
+  DASHBOARD_MEDIA_STORAGE_COPY,
   dashboardCaptureProblem,
   dashboardNoneReadSentence,
 } from './dashboard/vocabulary.ts';
@@ -859,6 +860,12 @@ export interface DashboardCaptureRuntime {
   paired_at?: string;
 }
 
+export interface DashboardMediaStorage {
+  state: 'full';
+  /** Media kept as names only since the store filled. */
+  left_out_items: number;
+}
+
 export interface DashboardSourceCard {
   corpus_id: string;
   source_id: string;
@@ -1138,6 +1145,14 @@ export interface DashboardSourceCard {
    * places. Whatever else the card says, this is a Needs you row.
    */
   storage_notice?: { kind: SourceStorageNoticeKind; next_action: string };
+  /**
+   * The media this source keeps beside its captured messages has filled its
+   * storage limit, so new photos and files are kept as names only until room is
+   * made or the limit is raised; nothing kept was removed. Read from the last
+   * sync's receipt counts (`media_storage_full`, `media_left_out_storage_full`),
+   * which any source that keeps media may publish. Absent when it is not full.
+   */
+  media_storage?: DashboardMediaStorage;
   /**
    * The metadata-sync phase's own folder-walk evidence, when the corpus
    * publishes it (`metadata_sync_folders_*`).
@@ -2784,6 +2799,7 @@ function sourceCardFromDefinition(
     : baseQueue;
   const refreshFreshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
   const captureFreshness = schedulerCaptureFreshness(schedulers, now, capturePairedAt);
+  const mediaStorage = schedulerMediaStorage(schedulers);
   const freshness = captureFreshness ? { ...refreshFreshness, capture: captureFreshness } : refreshFreshness;
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === 'embedding_lane_disabled');
   const schedule = scheduleFromSchedulers(schedulers);
@@ -2961,6 +2977,7 @@ function sourceCardFromDefinition(
     ...(embeddingLaneDisabled ? { embedding_lane_state: 'embedding_lane_disabled' as const } : {}),
     ...(vlmQueued !== undefined ? { vlm_extraction_queued: vlmQueued } : {}),
     ...(ingestionLedgerRow?.attention.length ? { attention_reasons: [...ingestionLedgerRow.attention] } : {}),
+    ...(mediaStorage ? { media_storage: mediaStorage } : {}),
     ...(metadataSync ? { metadata_sync: metadataSync } : {}),
     ...(definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {}),
     ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
@@ -3095,6 +3112,15 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       next_action: captureProblem.cause === 'helper'
         ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label)
         : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
+      dependencies,
+    };
+  }
+  // Kept media filled its storage: messages still arrive, their new photos and files only by name.
+  if (card.media_storage && card.answer_readiness.state !== 'needs_attention') {
+    return {
+      stage: 'source_health',
+      condition: 'degraded',
+      next_action: DASHBOARD_MEDIA_STORAGE_COPY.nextAction(card.label, card.media_storage.left_out_items),
       dependencies,
     };
   }
@@ -5036,6 +5062,26 @@ function schedulerCaptureFreshness(
     }
   }
   return worst;
+}
+
+/**
+ * Whether a source's kept media is full, from the receipt counts of each sync
+ * task's last successful pull. Any task reporting full makes the card say so;
+ * the counts of media left out add up across tasks.
+ */
+function schedulerMediaStorage(schedulers: readonly SourceSchedulerSourceStatus[]): DashboardMediaStorage | undefined {
+  let full = false;
+  let leftOut = 0;
+  for (const scheduler of new Set(schedulers)) {
+    for (const task of scheduler.tasks) {
+      const counts = task.last_result?.counts;
+      if (task.kind !== 'sync' || !counts || task.last_result?.status === 'failed' || counts.media_storage_full !== 1) continue;
+      full = true;
+      const items = counts.media_left_out_storage_full;
+      if (typeof items === 'number' && Number.isSafeInteger(items) && items > 0) leftOut += items;
+    }
+  }
+  return full ? { state: 'full', left_out_items: leftOut } : undefined;
 }
 
 /** A feed's verdict, read against when the current pairing began (see schedulerCaptureFreshness). */

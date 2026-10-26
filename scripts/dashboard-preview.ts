@@ -1378,6 +1378,9 @@ function previewArchiveRoute(name: string, args: { confirm_account?: unknown; ke
  *   capture-restarting   fresh messages, but WhatsApp's helper has just exited
  *                        and is about to be started again: a quiet row that
  *                        says capture restarting, nothing under Needs you
+ *   capture-media-full   fresh messages, but the media Telegram keeps filled its
+ *                        storage limit, 7 photos and files left out since: a row
+ *                        that says so and how to make room, with Check again
  */
 function capturePreview(state: string): SourceDashboardViewModel {
   const stale = state === 'capture-stale';
@@ -1387,6 +1390,7 @@ function capturePreview(state: string): SourceDashboardViewModel {
   const helperDown = state === 'capture-helper-down';
   const late = state === 'capture-late';
   const restarting = state === 'capture-restarting';
+  const mediaFull = state === 'capture-media-full';
   const status = emptyStatus();
   status.corpora = [
     corpus('internal.telegram.messages', 'chat', 'internal', 'telegram', 4_200, 4_200, { withText: 4_200, embedded: 4_200 }),
@@ -1394,7 +1398,8 @@ function capturePreview(state: string): SourceDashboardViewModel {
   ];
   const pulledAt = at(5 * 60);
   const threshold = 18 * 3_600;
-  const verdictCounts = (newestAgeSeconds: number | undefined) => ({
+  const verdictCounts = (newestAgeSeconds: number | undefined, extra: Record<string, number> = {}) => ({
+    ...extra,
     items_seen: 40,
     items_indexed: 40,
     items_changed: 0,
@@ -1404,7 +1409,7 @@ function capturePreview(state: string): SourceDashboardViewModel {
       threshold,
     )),
   });
-  const captureSource = (sourceId: string, corpusId: string, taskId: string, newestAgeSeconds: number | undefined, lateRefresh = false) => ({
+  const captureSource = (sourceId: string, corpusId: string, taskId: string, newestAgeSeconds: number | undefined, lateRefresh = false, extra: Record<string, number> = {}) => ({
     ...schedulerSource(sourceId, corpusId, lateRefresh ? 30 : 0.1),
     ...(lateRefresh ? { stale_sync_anomaly: true } : {}),
     tasks: [{
@@ -1414,7 +1419,7 @@ function capturePreview(state: string): SourceDashboardViewModel {
       consecutive_failures: 0,
       last_success_at: pulledAt,
       last_attempt_at: pulledAt,
-      last_result: { status: 'idle' as const, counts: verdictCounts(newestAgeSeconds) },
+      last_result: { status: 'idle' as const, counts: verdictCounts(newestAgeSeconds, extra) },
     }] as unknown as ReturnType<typeof schedulerSource>['tasks'],
   });
   const linkedTenMinutesAgo = new Date(NOW.getTime() - 10 * 60 * 1000).toISOString();
@@ -1450,7 +1455,8 @@ function capturePreview(state: string): SourceDashboardViewModel {
       captureSource('whatsapp.personal.messages', 'secure_local.whatsapp.messages', 'whatsapp.personal.messages_store_pull',
         unavailable ? undefined : stale || awaiting || late ? 3 * 86_400 : 2 * 60, late),
       captureSource('telegram.messages', 'internal.telegram.messages', 'telegram.messages_store_pull',
-        unavailable || awaiting ? undefined : stale ? 20 * 3_600 : 4 * 60),
+        unavailable || awaiting ? undefined : stale ? 20 * 3_600 : 4 * 60, false,
+        mediaFull ? { media_storage_full: 1, media_left_out_storage_full: 7 } : {}),
     ]),
     sovereigntyEngine: engine,
     connectedHandleRegistry: registry([]),
@@ -1650,7 +1656,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'local-files-finding', 'local-files-finding-page', 'local-files-sync-checking', 'local-files-sync-checked',
   'local-files-picker', 'local-files-picker-waiting', 'local-files-picker-denied', 'local-files-picker-helper',
   'delete-data', 'delete-data-done',
-  'capture-stale', 'capture-unavailable', 'capture-blocked', 'capture-awaiting', 'capture-helper-down', 'capture-late', 'capture-restarting',
+  'capture-stale', 'capture-unavailable', 'capture-blocked', 'capture-awaiting', 'capture-helper-down', 'capture-late', 'capture-restarting', 'capture-media-full',
   ...ARCHIVE_STATES,
   ...SOURCE_IMPORT_STATES,
 ] as const;
