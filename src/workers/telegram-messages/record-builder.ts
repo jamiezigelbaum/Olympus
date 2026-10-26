@@ -91,6 +91,14 @@ export interface TelegramRecordItems {
 
 export function telegramRecordBuilder(options: {
   trustDomain?: TelegramMessagesCorpusTrustDomain;
+  /**
+   * The live capture's builder: a live record of a message's current version
+   * always says something the store should hear (its reactions and other
+   * metadata change without moving the edit time), so on a version tie it is
+   * applied as one carrying content, as live's word wins a tie. An export's
+   * record at the same version adds only content the stored item lacks.
+   */
+  live?: boolean;
   fetchItem(localItemId: string, options?: SourceConnectorFetchOptions): Promise<RawItem>;
   authenticate?(): Promise<void>;
 }): SourceRecordBuilder<TelegramRecordItems> {
@@ -101,7 +109,7 @@ export function telegramRecordBuilder(options: {
       const authoredAt = index === 0 ? item.metadata['sentAt'] : undefined;
       return {
         identity: item.identity,
-        bringsContent: item.content.kind !== 'metadata_only',
+        bringsContent: options.live === true || item.content.kind !== 'metadata_only',
         ...(typeof authoredAt === 'string' ? { authoredAt } : {}),
       };
     }),

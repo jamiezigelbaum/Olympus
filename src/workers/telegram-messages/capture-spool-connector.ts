@@ -127,6 +127,11 @@ export function createTelegramCaptureSpoolConnector(options: {
    * input stored it (core/source-inputs.ts). Without it, every record applies.
    */
   storedItem?: StoredItemLookup;
+  /**
+   * Records listed ahead of the spool, as this lane's: the newest version of
+   * an item moving into this lane whole (`readTelegramCaptureSpoolNewest`).
+   */
+  carried?: readonly TelegramCaptureSpoolRecord[];
 }): SourceConnector {
   const spoolDir = requiredString(options.spoolDir, 'spool directory');
   const trustDomain = options.trustDomain;
@@ -138,6 +143,7 @@ export function createTelegramCaptureSpoolConnector(options: {
     : { admitThroughCursor: options.admitThroughCursor };
   const builder = telegramRecordBuilder({
     trustDomain,
+    live: true,
     authenticate: async () => { assertTelegramCaptureSpoolDirectory(spoolDir); },
     async fetchItem(localItemId: string): Promise<RawItem> {
       // The newest record of the item wins, so the whole spool is read, a
@@ -178,9 +184,14 @@ export function createTelegramCaptureSpoolConnector(options: {
     // spool is exhausted or the run's budget is spent.
     records(listOptions = {}): AsyncIterable<SourceRecordPage<TelegramRecordItems>> {
       const budget = normalizeBudget(listOptions.limit);
+      const carried = options.carried ?? [];
       return (async function* (): AsyncGenerator<SourceRecordPage<TelegramRecordItems>> {
         let cursor = listOptions.cursor;
         let remaining = budget;
+        if (carried.length > 0) {
+          // Ahead of the spool, and at the lane's own resume point: nothing of the spool is passed by it.
+          yield { records: carried.map((record) => ({ record })), ...(cursor ? { nextCursor: cursor } : {}), done: false };
+        }
         for (;;) {
           // Every page reads on from its cursor (the byte offset of a cursor
           // already met is remembered, so a page does not re-scan the file
@@ -629,7 +640,7 @@ function parseTelegramCaptureSpoolCursor(value: string | undefined): { file: str
   return { file: match[1]!, line };
 }
 
-function parseTelegramCaptureSpoolRecord(line: string): TelegramCaptureSpoolRecord {
+function parseTelegramCaptureSpoolRecord(line: string, asTrust?: TelegramMessagesCorpusTrustDomain): TelegramCaptureSpoolRecord {
   let value: unknown;
   try { value = JSON.parse(line); } catch { throw new Error('Telegram capture spool found invalid JSON.'); }
   const record = requireObject(value, 'record');
@@ -668,12 +679,58 @@ function parseTelegramCaptureSpoolRecord(line: string): TelegramCaptureSpoolReco
     capturedItem: telegramMessageItem({
       account,
       conversationId,
-      trustDomain,
-      corpusId,
+      // A record carried into the stricter lane is built as that lane's.
+      trustDomain: asTrust ?? trustDomain,
+      corpusId: asTrust === 'secure_local' ? PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID : asTrust === 'internal' ? INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID : corpusId,
       message,
       fetchedAt: capturedAt,
     }),
   };
+}
+
+/**
+ * The newest record the spool holds of each item named, whatever lane its
+ * chat was in when it was captured, built as `asTrust`'s: what moves an item
+ * whole into the stricter lane when that lane's claim on it arrives in a
+ * record older than the copy the looser lane holds. The whole spool is read,
+ * a line at a time; damaged lines are passed.
+ */
+export function readTelegramCaptureSpoolNewest(options: {
+  spoolDir: string;
+  localItemIds: ReadonlySet<string>;
+  compareVersions: (a: string, b: string) => number;
+  asTrust: TelegramMessagesCorpusTrustDomain;
+}): Map<string, TelegramCaptureSpoolRecord> {
+  const newest = new Map<string, TelegramCaptureSpoolRecord>();
+  if (options.localItemIds.size === 0) return newest;
+  assertTelegramCaptureSpoolDirectory(options.spoolDir);
+  for (const name of telegramCaptureSpoolFiles(options.spoolDir)) {
+    const path = join(options.spoolDir, name);
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) continue;
+    const fd = openSync(path, 'r');
+    try {
+      for (const line of spoolFileLines(fd, 0, stat.size, MAX_RECORD_BYTES)) {
+        if (line.text === undefined || !line.text.trim()) continue;
+        let record: TelegramCaptureSpoolRecord;
+        try {
+          record = parseTelegramCaptureSpoolRecord(line.text, options.asTrust);
+        } catch {
+          continue;
+        }
+        const identity = record.capturedItem.item.identity;
+        if (!options.localItemIds.has(identity.localItemId)) continue;
+        const held = newest.get(identity.localItemId)?.capturedItem.item.identity.sourceVersion;
+        // A later line of the same version is the later capture (its reactions, say): it wins.
+        if (held === undefined || identity.sourceVersion === undefined || options.compareVersions(identity.sourceVersion, held) >= 0) {
+          newest.set(identity.localItemId, record);
+        }
+      }
+    } finally {
+      closeSync(fd);
+    }
+  }
+  return newest;
 }
 
 /**

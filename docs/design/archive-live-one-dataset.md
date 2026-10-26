@@ -421,7 +421,12 @@ message beyond its search context (`src/workers/telegram-messages/`,
   puts back an older version: both lanes now read the spool as the live
   input of the Telegram connector, through the one record builder
   (`record-builder.ts`) and the intake rule, so a record older than what the
-  stores hold (by its edit time) is not applied (review, #545).
+  stores hold (by its edit time) is not applied (review, #545). A live
+  record at the same version is still applied, so a reaction on a
+  captionless photo lands. A protected lane's claim that arrives in a record
+  older than the copy the ordinary lane holds moves the newest version the
+  spool has into the protected lane whole; if the spool no longer has it, the
+  newer copy stays put and the receipt says so (`trust_claims_kept_newer`).
 - **Quiet is not stale.** After every finished cycle (it read every approved
   chat) the helper writes `.capture-heartbeat.json` beside the spool. The
   receipt's age is from the newer of the newest record and the heartbeat,
