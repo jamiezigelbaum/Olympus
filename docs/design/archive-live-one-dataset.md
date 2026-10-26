@@ -380,8 +380,7 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   item resumes from the record that brought its content, so a pass cut between
   the two does not lose it. The routing plan is keyed by the item's identity,
   its version and a digest of the text and names judged, so two bodies of one
-  version are each judged. Known residual: a deletion of an item no pass ever
-  stored leaves no row, so a later tie or unversioned body can still be stored.
+  version are each judged.
 - **Order and resume (2026-10-26).** A page emits an item before its
   children, and a page cut resumes at the earliest record any unyielded item
   still depends on (a merged names-only item depends on the record that
@@ -408,10 +407,31 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   `names` intent is repaired by replaying its own record; when a newer
   names-only record took an older record's body, the intent also holds that
   record's version (`bodyVersion`, read back as `owedBodyVersion`) so the replay
-  applies that record at the item's version. Residuals: a deletion of a
-  never-stored item leaves no row; an owed `content` or `names` write waits
-  for its own record; a newer names-only record holds behind an earlier run's
-  owed write until that write is finished.
+  applies that record at the item's version; the owed body stays owed through
+  names-only records of any version until a body or a deletion resolves it.
+  Residuals: an owed `content` or `names` write waits for its own record; a newer
+  names-only record holds behind an earlier run's owed write until that write is
+  finished.
+- **Pending states hold the boundary (2026-10-26).** The lookup reads the
+  persisted intent before any row, and no row is never read as absent: a pending
+  Secret or deletion is the item's state (tombstoned, at its version) even when
+  no store holds a row yet, and a pending body or names write is the item at
+  its version, incomplete, with the version of the record whose body is owed,
+  so an older record never replaces it and the owed write is replayed. A deletion of an item no store ever held is
+  recorded as a tombstone row in the Private store (with a `deletion` intent
+  that carries the item's family, so a cut-off write is finished from the intent
+  alone), which also refuses older versions afterwards; rows that are all
+  tombstones the ledger marks as such an unseen deletion are not a lane's item,
+  so a newer record routes it afresh; a tombstone a lane left keeps the lane's
+  placement. A
+  parent's deletion tombstones each leg's child at that leg's own version
+  (a cascade is not an event of the child), under a versionless `deletion`
+  intent written per child before its removal and cleared when it is whole,
+  so a failed removal is finished at the next pass start and hides the child
+  meanwhile, whatever becomes of the parent. A record whose body is empty
+  (text that is blank: authoritative for a connector that sent it, unlike a
+  record with no body at all) replaces the stored text in every leg before the
+  version moves, under a `content` intent so a cut is repeated by its replay.
 - **The hold survives a fetch (2026-10-26).** A held archive item's hold is
   carried by whatever replaces it: the archive input decorates `fetchItem` as
   well as `listItems`, and the local-index lane keeps the hold on both of its
