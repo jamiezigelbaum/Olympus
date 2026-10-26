@@ -2,6 +2,7 @@
 // work stays in the thin whatsmeow bridge; this module only hands captured
 // records to the shared SourceConnector -> LocalConnectorStore spine.
 
+import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
@@ -25,7 +26,7 @@ import {
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
   addCaptureSpoolRedactions,
-  clearCaptureSpoolSecrets,
+  createSpoolSecretJudge,
   sweepCaptureSpoolWhenSecretsChange,
   type CaptureSpoolRedactionResult,
   type SpoolSecretJudge,
@@ -47,6 +48,7 @@ import {
   whatsAppSpoolLineCursor,
   type WhatsAppSpoolPassFindings,
 } from './live-connector.ts';
+import { spoolFileIdentity } from './spool-reader.ts';
 
 export const WHATSAPP_PERSONAL_SOURCE_ID = 'whatsapp.personal.messages';
 export const WHATSAPP_LIVE_CORPUS_ID = 'secure_local.whatsapp.messages';
@@ -361,18 +363,13 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
           const committed = sanitizeWhatsAppLiveCursor(
             tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined,
           );
-          const through = lineCursorOf(committed);
-          const from = lineCursorOf(cursor);
           redacted = clearWhatsAppSpoolSecrets({
             spoolDir,
             account,
             mediaDir,
             relocateMediaPath: whatsappMovedPathMapper(env),
             ledger: tierSet.ledger,
-            ...(from ? { from } : {}),
-            through,
-            // An idle pull read nothing new: no window to clear, only the whole-spool pass when the Secrets changed.
-            windowRead: committed !== cursor,
+            through: lineCursorOf(committed),
           });
         } catch (error) {
           redactionFailed = true;
@@ -404,21 +401,25 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
 /**
  * Clear the Secrets out of the spool lines the set has committed past
  * (connector-store/capture-spool-secrets.ts), and the audio they saved.
+ *
+ * What was cleared is kept per file, by the file's identity and size (in the
+ * set's ledger), never by a line number alone: a file is owed again, from its
+ * start, whenever its identity changed (a replacement, a cursor reset) or it
+ * is shorter than when it was cleared, and an appended file is owed from the
+ * line clearing reached. A pull clears every file it owes, however little it
+ * read, and records a file only once its clearing succeeded, so a failure is
+ * owed until a pull clears it. A pull that owes nothing reads no spool file.
+ * A whole-spool pass still runs when the set of Secrets changed.
  */
 export function clearWhatsAppSpoolSecrets(options: {
   spoolDir: string;
   account: string;
   mediaDir?: string;
   ledger: TierLedger;
-  from?: string;
+  /** Where the set has committed to, `<file>:<lines>`: nothing past it is cleared yet. */
   through: string | undefined;
   /** Maps a media path a spool line names at the account's old place to the account folder (`whatsappMovedPathMapper`). */
   relocateMediaPath?: (path: string) => string;
-  /**
-   * False when the pull read nothing: the window is skipped and only a changed set of Secrets is swept,
-   * unless an earlier window is still owed (it failed), which is cleared first.
-   */
-  windowRead?: boolean;
 }): CaptureSpoolRedactionResult {
   const redact = (window: { from?: string; through: string }, judge: SpoolSecretJudge) => redactWhatsAppLiveSpoolSecrets({
     spoolDir: options.spoolDir,
@@ -428,25 +429,88 @@ export function clearWhatsAppSpoolSecrets(options: {
     ...window,
     judge,
   });
-  // A window a failed pull still owes (where clearing has reached is behind where reading has) is cleared
-  // before an idle pull may skip it: `clearCaptureSpoolSecrets` reaches back to where clearing stopped.
-  const owed = options.through !== undefined
-    && options.ledger.readMeta(`${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_through`) !== options.through;
-  if (options.windowRead === false && options.through !== undefined && !owed) {
-    const through = options.through;
-    return addCaptureSpoolRedactions(sweepCaptureSpoolWhenSecretsChange({
-      ledger: options.ledger,
-      stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
-      sweep: (judge) => redact({ through }, judge),
-    }));
+  const through = options.through === undefined ? undefined : /^(.+):(\d+)$/u.exec(options.through);
+  if (!through) return addCaptureSpoolRedactions();
+  const throughFile = through[1]!;
+  const throughLine = Number(through[2]);
+  const recorded = readClearedFiles(options.ledger);
+  const next: Record<string, ClearedFile> = {};
+  let result = addCaptureSpoolRedactions();
+  let failure: unknown;
+  const judge = createSpoolSecretJudge({ ledger: options.ledger, floor: true });
+  const files = spoolFileNames(options.spoolDir);
+  for (const file of files) {
+    if (file > throughFile) break;
+    const before = spoolFileIdentity(join(options.spoolDir, file));
+    if (!before) continue;
+    // A file before the cursor's is read whole; the cursor's own, up to the cursor.
+    const end = file === throughFile ? throughLine : ALL_LINES;
+    const known = recorded[file];
+    const same = known !== undefined && known.identity === before.identity && known.size <= before.size;
+    if (same && (known.lines === ALL_LINES ? known.size === before.size && end === ALL_LINES : end !== ALL_LINES && known.lines >= end)) {
+      next[file] = known;
+      continue;
+    }
+    const start = same && known.lines !== ALL_LINES ? known.lines : 0;
+    try {
+      result = addCaptureSpoolRedactions(result, redact({
+        from: `${file}:${start}`,
+        through: `${file}:${end === ALL_LINES ? Number.MAX_SAFE_INTEGER : end}`,
+      }, judge));
+    } catch (error) {
+      failure = error;
+      break;
+    }
+    // Clearing a line rewrites it in place, which can change the file's identity (its first line): recorded as it is now.
+    const after = spoolFileIdentity(join(options.spoolDir, file));
+    if (after) next[file] = { identity: after.identity, size: after.size, lines: end };
   }
-  return clearCaptureSpoolSecrets({
+  // Files not reached keep what was recorded of them (a failure stops the pass); files that are gone are forgotten.
+  const present = new Set(files);
+  for (const [file, known] of Object.entries(recorded)) {
+    if (next[file] === undefined && present.has(file) && file >= (failure === undefined ? throughFile : '')) next[file] = known;
+  }
+  options.ledger.writeMeta(CLEARED_FILES_KEY, JSON.stringify(next));
+  if (failure !== undefined) throw failure;
+  const sweep = sweepCaptureSpoolWhenSecretsChange({
     ledger: options.ledger,
     stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
-    ...(options.from ? { from: options.from } : {}),
-    through: options.through,
-    redact,
+    sweep: (sweepJudge) => redact({ through: options.through! }, sweepJudge),
   });
+  return addCaptureSpoolRedactions(result, sweep);
+}
+
+/** What was cleared of one spool file: its identity and size then, and how many lines (`ALL_LINES`: all of it). */
+interface ClearedFile {
+  identity: string;
+  size: number;
+  lines: number;
+}
+
+const ALL_LINES = -1;
+const CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
+
+function readClearedFiles(ledger: TierLedger): Record<string, ClearedFile> {
+  const raw = ledger.readMeta(CLEARED_FILES_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, ClearedFile>;
+    const valid: Record<string, ClearedFile> = {};
+    for (const [file, entry] of Object.entries(parsed)) {
+      if (entry && typeof entry.identity === 'string' && Number.isSafeInteger(entry.size) && Number.isSafeInteger(entry.lines)) valid[file] = entry;
+    }
+    return valid;
+  } catch {
+    return {};
+  }
+}
+
+function spoolFileNames(spoolDir: string): string[] {
+  try {
+    return readdirSync(spoolDir).filter((name) => name.toLowerCase().endsWith('.jsonl')).sort();
+  } catch {
+    return [];
+  }
 }
 
 function whatsappSyncReceipt(

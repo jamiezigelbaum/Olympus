@@ -12,6 +12,7 @@
 
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 
 /** A spool record longer than this is skipped and counted, never parsed. */
 export const WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
@@ -199,20 +200,8 @@ export function isRecordBoundary(path: string, offset: number): boolean {
   }
 }
 
-/**
- * A file's size and its identity: its device, inode and birth time where the
- * platform reports them, so a file put in another's place (even one of the
- * same length) is told apart. Undefined when the file is not there.
- */
-export function spoolFileIdentity(path: string): { size: number; ino?: number; identity: string } | undefined {
-  try {
-    const stats = statSync(path);
-    const birth = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? Math.floor(stats.birthtimeMs) : 0;
-    return { size: stats.size, ...(stats.ino > 0 ? { ino: stats.ino } : {}), identity: `${stats.dev}:${stats.ino}:${birth}` };
-  } catch {
-    return undefined;
-  }
-}
+/** A spool file's identity and size (connector-store/spool-file-identity.ts). */
+export { spoolFileIdentity };
 
 /**
  * The newest record the spool holds, found by reading back from the end of
