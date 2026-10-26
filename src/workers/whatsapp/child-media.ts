@@ -11,7 +11,6 @@ import { parseArchiveInputMedia, readArchiveInputMedia, type ArchiveInputMediaDe
 
 export const WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX = 'whatsapp-media-file:v1:';
 /** The most one read returns when the caller names no limit. */
-const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 
 /** The locator of a file the bridge saved: its path, which only this module reads. */
 export function whatsAppMediaFileLocator(path: string): string {
@@ -35,11 +34,11 @@ export function createWhatsAppChildReader(options: {
 }): WhatsAppChildReader {
   const relocate = options.relocate ?? ((path: string) => path);
   return (locator, read) => {
-    const maxBytes = read.maxBytes ?? DEFAULT_MAX_BYTES;
+    // Every piece of media is kept and read whole (owner, 2026-10-26): a bound comes only from the caller.
     if (parseArchiveInputMedia(locator)) {
       const deps = options.archive?.();
       if (!deps) throw new FileExtractionSourceError('source_item_not_found');
-      return readArchiveInputMedia(locator, deps, { maxBytes });
+      return readArchiveInputMedia(locator, deps, read.maxBytes !== undefined ? { maxBytes: read.maxBytes } : {});
     }
     if (!locator.startsWith(WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX)) throw new FileExtractionSourceError('source_item_not_found');
     const path = locator.slice(WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX.length);
@@ -67,8 +66,9 @@ export function createWhatsAppChildReader(options: {
       if (named.dev !== opened.dev || named.ino !== opened.ino || !insideAny(real, options.mediaRoots)) {
         throw new FileExtractionSourceError('source_permission_denied');
       }
-      if (opened.size > maxBytes) throw new FileExtractionSourceError('source_too_large');
-      return readBounded(fd, maxBytes);
+      if (read.maxBytes !== undefined && opened.size > read.maxBytes) throw new FileExtractionSourceError('source_too_large');
+      // Never more than the file held when it was checked (a saved file is never appended to), nor than the caller asked.
+      return readBounded(fd, Math.min(opened.size, read.maxBytes ?? opened.size));
     } finally {
       closeSync(fd);
     }

@@ -265,7 +265,12 @@ export interface WhatsAppChildRecord {
   locator?: string;
   available: boolean;
   sizeBytes?: number;
+  /** The bridge holds it until this computer has disk space to download it; a later line fills it. */
+  waitingForDiskSpace?: true;
 }
+
+/** The download status the bridge spools for media waiting for disk space (tools/whatsapp-bridge/media_waiting.go). */
+export const WHATSAPP_MEDIA_WAITING_STATUS = 'waiting_for_disk';
 
 export function createWhatsAppLiveSourceConnector(
   options: WhatsAppLiveSourceConnectorOptions,
@@ -483,6 +488,9 @@ function childrenOf(record: WhatsAppRecord): readonly WhatsAppChildRecord[] {
       available: record.downloadStatus === undefined || record.downloadStatus === 'ok',
       ...(record.mediaSizeBytes !== undefined ? { sizeBytes: record.mediaSizeBytes } : {}),
     }];
+  }
+  if (record.downloadStatus === WHATSAPP_MEDIA_WAITING_STATUS) {
+    return [{ key: 'media', name: 'media', mimeType, available: false, waitingForDiskSpace: true }];
   }
   return record.downloadStatus !== undefined ? [{ key: 'media', name: 'media', mimeType, available: false }] : [];
 }
@@ -1258,6 +1266,7 @@ function rawItemFromChild(message: SpoolMessage, child: WhatsAppChildRecord, acc
       fromMe: message.fromMe,
       sentAt: message.timestamp,
       ...(message.mediaType === undefined ? {} : { mediaType: message.mediaType }),
+      ...(child.waitingForDiskSpace ? { mediaState: 'waiting_for_disk_space' } : {}),
     }),
     fetchedAt,
     // A picture, video or file is held Private until its own judgment, live or imported (child-items.md,
@@ -1306,6 +1315,11 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   mediaDir?: string;
   /** The other folders the bridge saves media in (pictures, videos). */
   mediaDirs?: readonly string[];
+  /**
+   * Where the bridge keeps media waiting for disk space (`media/waiting/<stem>.json` of its state folder): a Secret
+   * picture's waiting line is removed, so the bridge never fetches it.
+   */
+  mediaWaitingDir?: string;
   /**
    * Maps a media path a line names at the account's old state folder to the
    * same file in its account folder, for an account the boot migration moved
@@ -1382,6 +1396,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
         // Deleted before the line loses its path; a failure here fails the window, which the next pull clears again.
         deleteOwnedMedia(message);
         deleteMediaTemps(message, mediaRoots);
+        if (options.mediaWaitingDir) removeTemp(join(options.mediaWaitingDir, `${whatsAppMediaFileStem(message.chatJid, message.id)}.json`));
       }
       const namesLeft = message.chatName !== '' || message.senderName !== '' || (message.senderContactName ?? '') !== '';
       // Mentions are display names copied into the text, so they go with it.

@@ -597,6 +597,8 @@ export const DASHBOARD_CAPTURE_COPY = {
   staleNoAge: 'capture stale: nothing captured since linking',
   /** A pull succeeded, and nothing it holds says when a message was captured. */
   unavailable: 'no live messages captured yet',
+  /** Media the helper could not download for want of disk space: its messages are kept, the media follows when there is room. */
+  disk: 'media waiting for disk space',
   /** Linked a moment ago and no message has arrived under this pairing yet. */
   awaiting: 'waiting for the first live message',
   /** The same, over messages kept from an earlier pairing: their age stays visible. */
@@ -625,6 +627,7 @@ export const DASHBOARD_CAPTURE_COPY = {
     stale: (label: string) => `Open ${label} on this computer to check the link and capture. Syncing again will not bring in messages that were never captured.`,
     blocked: (label: string) => `Open ${label} on this computer and link it again so live capture can start.`,
     awaiting: (label: string) => `Keep ${label} linked. The first live message since linking will end this wait; if none arrives within the day, this row says so.`,
+    disk: (label: string) => `Free some space on this computer. Every ${label} message is kept meanwhile, and the waiting pictures, videos and voice notes download on their own once there is room.`,
   },
 } as const;
 
@@ -645,8 +648,11 @@ const CAPTURE_JUDGED_CONNECTION_STATES: ReadonlySet<DashboardConnectionState> = 
 const CAPTURE_UNEXPECTED_STOP_REASONS: ReadonlySet<string> = new Set(['grant_missing', 'handle_unavailable']);
 
 export interface DashboardCaptureProblem {
-  /** `helper`: nothing is capturing. `stale`: the helper may run, but the feed went quiet. */
-  cause: 'helper' | 'stale';
+  /**
+   * `helper`: nothing is capturing. `stale`: the helper may run, but the feed went quiet. `disk`: messages are
+   * captured, and their media waits for disk space on this computer.
+   */
+  cause: 'helper' | 'stale' | 'disk';
   /** The supervisor's reason, for `helper`. */
   reason?: DashboardCaptureSupervisorReason;
 }
@@ -665,6 +671,7 @@ export function dashboardCaptureProblem(source: DashboardSourceCard): DashboardC
     return { cause: 'helper', ...(supervisor.reason ? { reason: supervisor.reason } : {}) };
   }
   if (source.freshness.capture?.state === 'stale') return { cause: 'stale' };
+  if (source.freshness.capture?.media_waiting_for_disk === true) return { cause: 'disk' };
   return undefined;
 }
 
@@ -688,6 +695,7 @@ export function dashboardCaptureAttentionReason(source: DashboardSourceCard): st
       ? DASHBOARD_CAPTURE_COPY.helperUnknown
       : DASHBOARD_CAPTURE_COPY.helper[problem.reason];
   }
+  if (problem.cause === 'disk') return DASHBOARD_CAPTURE_COPY.disk;
   const age = source.freshness.capture?.age_seconds;
   const relative = typeof age === 'number' ? dashboardRelativeFromMs(age * 1_000) : '';
   const base = relative ? DASHBOARD_CAPTURE_COPY.stale(relative) : DASHBOARD_CAPTURE_COPY.staleNoAge;

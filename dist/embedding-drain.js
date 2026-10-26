@@ -36814,11 +36814,9 @@ var init_input_media = __esm(() => {
 });
 
 // src/workers/whatsapp/child-media.ts
-var DEFAULT_MAX_BYTES;
 var init_child_media = __esm(() => {
   init_file_extraction_source();
   init_input_media();
-  DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 });
 
 // src/core/source-inputs.ts

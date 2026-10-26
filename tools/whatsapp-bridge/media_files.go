@@ -1,12 +1,12 @@
 package main
 
-// Saving one piece of media, without ever holding more than its bound and
-// without leaving a copy behind.
+// Saving one piece of media, whatever its size, without ever holding it in
+// memory and without leaving a copy behind.
 //
-//   - A download streams into a temp file in the media folder, through a
-//     writer that refuses past the store's bound (plus the encryption
-//     overhead), so a large attachment is never read into memory and never
-//     written whole. The size WhatsApp states is not trusted.
+//   - A download streams into a temp file in the media folder (whatsmeow's
+//     DownloadMediaWithPathToFile, never Download, which reads it all into
+//     memory), through a writer that stops when the volume falls below its
+//     free-space floor (media_waiting.go). There is no size bound.
 //   - Every temp has one known name:
 //     `.olympus-media-<pid>-<boot>-<stem>-<random>.tmp`, where boot is this
 //     boot's nonce (a pid is unique only within a boot) and the stem is the
@@ -43,43 +43,68 @@ const (
 	mediaTempSuffix = ".tmp"
 	// A temp of an older build (no writer named) older than this is a leftover.
 	mediaTempMaxAge = 30 * time.Minute
-	// What encryption adds to a file's bytes on the wire (padding and the MAC), allowed past the bound.
-	mediaEncryptionOverhead = 64
 )
 
-var errMediaTooLarge = errors.New("media too large")
-
-// mediaDownloader streams one attachment into a file (whatsmeow's DownloadToFile).
+// mediaDownloader streams one attachment into a file (whatsmeow's DownloadMediaWithPathToFile).
 type mediaDownloader interface {
-	DownloadToFile(ctx context.Context, msg whatsmeow.DownloadableMessage, file whatsmeow.File) error
+	DownloadMediaWithPathToFile(
+		ctx context.Context,
+		directPath string,
+		encFileHash, fileHash, mediaKey []byte,
+		mediaType whatsmeow.MediaType,
+		mmsType string,
+		allowNoHash bool,
+		file whatsmeow.File,
+	) error
 }
 
-// cappedFile is a temp file that refuses any write past its limit. It does
-// not embed the file: an embedded *os.File would lend it ReadFrom, through
-// which io.Copy writes without asking Write, so every method is its own.
-type cappedFile struct {
-	file  *os.File
-	limit int64
+// floorFile is a temp file that stops taking bytes when the volume it is on
+// falls below the free-space floor, checked every diskCheckEveryBytes. It
+// does not embed the file: an embedded *os.File would lend it ReadFrom,
+// through which io.Copy writes without asking Write, so every method is its
+// own and its ReadFrom goes through Write.
+type floorFile struct {
+	file      *os.File
+	queue     *mediaWaitQueue
+	dir       string
+	unchecked int64
 }
 
-func (f *cappedFile) Read(p []byte) (int, error)                   { return f.file.Read(p) }
-func (f *cappedFile) ReadAt(p []byte, off int64) (int, error)      { return f.file.ReadAt(p, off) }
-func (f *cappedFile) Seek(offset int64, whence int) (int64, error) { return f.file.Seek(offset, whence) }
-func (f *cappedFile) Stat() (os.FileInfo, error)                   { return f.file.Stat() }
+func (f *floorFile) Read(p []byte) (int, error)                   { return f.file.Read(p) }
+func (f *floorFile) ReadAt(p []byte, off int64) (int, error)      { return f.file.ReadAt(p, off) }
+func (f *floorFile) Seek(offset int64, whence int) (int64, error) { return f.file.Seek(offset, whence) }
+func (f *floorFile) Stat() (os.FileInfo, error)                   { return f.file.Stat() }
+func (f *floorFile) Truncate(size int64) error                    { return f.file.Truncate(size) }
 
-func (f *cappedFile) Write(p []byte) (int, error) {
-	at, err := f.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return 0, err
+// room is asked before every diskCheckEveryBytes written.
+func (f *floorFile) room(n int) error {
+	f.unchecked += int64(n)
+	if f.unchecked < diskCheckEveryBytes {
+		return nil
 	}
-	if at+int64(len(p)) > f.limit {
-		return 0, errMediaTooLarge
+	f.unchecked = 0
+	if !f.queue.hasRoom(f.dir) {
+		return errWaitingForDisk
+	}
+	return nil
+}
+
+func (f *floorFile) Write(p []byte) (int, error) {
+	if err := f.room(len(p)); err != nil {
+		return 0, err
 	}
 	return f.file.Write(p)
 }
 
-// ReadFrom copies within the limit, so io.Copy into this file is capped too.
-func (f *cappedFile) ReadFrom(r io.Reader) (int64, error) {
+func (f *floorFile) WriteAt(p []byte, off int64) (int, error) {
+	if err := f.room(len(p)); err != nil {
+		return 0, err
+	}
+	return f.file.WriteAt(p, off)
+}
+
+// ReadFrom copies through Write, so io.Copy into this file is checked too.
+func (f *floorFile) ReadFrom(r io.Reader) (int64, error) {
 	buf := make([]byte, 32*1024)
 	var total int64
 	for {
@@ -98,20 +123,6 @@ func (f *cappedFile) ReadFrom(r io.Reader) (int64, error) {
 			return total, err
 		}
 	}
-}
-
-func (f *cappedFile) WriteAt(p []byte, off int64) (int, error) {
-	if off+int64(len(p)) > f.limit {
-		return 0, errMediaTooLarge
-	}
-	return f.file.WriteAt(p, off)
-}
-
-func (f *cappedFile) Truncate(size int64) error {
-	if size > f.limit {
-		return errMediaTooLarge
-	}
-	return f.file.Truncate(size)
 }
 
 // bootNonce names this boot in a temp's name: a pid is unique only within a boot.
@@ -202,12 +213,19 @@ func (store *audioMediaStore) sweepTemps(now time.Time) {
 	}
 }
 
-// download streams one attachment into a temp within the bound and saves it
-// under the message's name. It returns the saved path and its size; the temp
-// is gone whatever happened.
+// download streams one attachment into a temp and saves it under the
+// message's name. It returns the saved path and its size; the temp is gone
+// whatever happened. Below the free-space floor it returns errWaitingForDisk.
 func (store *audioMediaStore) download(ctx context.Context, chatJID string, messageID string, mediaMime string, media whatsmeow.DownloadableMessage) (string, int64, error) {
+	return store.downloadPath(ctx, chatJID, messageID, mediaMime, requestOf(media))
+}
+
+func (store *audioMediaStore) downloadPath(ctx context.Context, chatJID string, messageID string, mediaMime string, request mediaRequest) (string, int64, error) {
 	if err := os.MkdirAll(store.dir, 0o700); err != nil {
 		return "", 0, err
+	}
+	if !store.queue.hasRoom(store.dir) {
+		return "", 0, errWaitingForDisk
 	}
 	stem := mediaFileStem(chatJID, messageID)
 	tmp, err := os.CreateTemp(store.dir, mediaTempPattern(stem))
@@ -220,8 +238,8 @@ func (store *audioMediaStore) download(ctx context.Context, chatJID string, mess
 		tmp.Close()
 		return "", 0, err
 	}
-	capped := &cappedFile{file: tmp, limit: store.maxFileBytes + mediaEncryptionOverhead}
-	if err := store.downloader.DownloadToFile(ctx, media, capped); err != nil {
+	file := &floorFile{file: tmp, queue: store.queue, dir: store.dir}
+	if err := store.downloader.DownloadMediaWithPathToFile(ctx, request.directPath, request.encSHA256, request.fileSHA256, request.mediaKey, request.mediaType, "", false, file); err != nil {
 		tmp.Close()
 		return "", 0, err
 	}
@@ -229,10 +247,6 @@ func (store *audioMediaStore) download(ctx context.Context, chatJID string, mess
 	if err != nil {
 		tmp.Close()
 		return "", 0, err
-	}
-	if info.Size() > store.maxFileBytes {
-		tmp.Close()
-		return "", 0, errMediaTooLarge
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()

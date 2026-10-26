@@ -46,22 +46,9 @@ func TestRecordFromMessageSavesPicturesAndVideosInTheirOwnFolders(t *testing.T) 
 	}
 }
 
-func TestPictureOverItsBoundIsNotDownloaded(t *testing.T) {
-	dir := t.TempDir()
-	downloader := &fakeDownloader{bytes: []byte("x")}
-	store := mediaStores(dir, downloader)
-	rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent("big-1", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
-		Mimetype:   proto.String("image/jpeg"),
-		FileLength: proto.Uint64(uint64(imageMediaMaxFileBytes + 1)),
-	}}))
-	if rec.DownloadStatus != "too_large" || rec.MediaPath != "" || downloader.calls != 0 {
-		t.Fatalf("record = %#v, calls = %d", rec, downloader.calls)
-	}
-}
-
 func TestStoresWithoutPictureFoldersKeepMetadataOnly(t *testing.T) {
 	downloader := &fakeDownloader{bytes: []byte("x")}
-	store := &audioMediaStore{dir: t.TempDir(), maxFileBytes: audioMediaMaxFileBytes, quotaBytes: audioMediaQuotaBytes, downloader: downloader}
+	store := &audioMediaStore{dir: t.TempDir(), downloader: downloader}
 	rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent("p-2", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/jpeg")}}))
 	if rec.MediaPath != "" || rec.DownloadStatus != "" || downloader.calls != 0 {
 		t.Fatalf("record = %#v", rec)

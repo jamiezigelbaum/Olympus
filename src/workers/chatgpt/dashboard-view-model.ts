@@ -1437,6 +1437,7 @@ function scrubCaptureFreshness(input: DashboardCaptureFreshness | undefined): { 
       state: input.state,
       threshold_seconds: count(input.threshold_seconds),
       ...(finite(input.age_seconds) ? { age_seconds: count(input.age_seconds) } : {}),
+      ...(input.media_waiting_for_disk === true ? { media_waiting_for_disk: true as const } : {}),
     },
   };
 }

@@ -815,7 +815,16 @@ export interface DashboardCaptureFreshness {
   state: 'fresh' | 'stale' | 'unavailable' | 'awaiting';
   age_seconds?: number;
   threshold_seconds: number;
+  /**
+   * The capture helper holds media it could not download for want of disk
+   * space on this computer (its messages are kept; the media follows once
+   * there is room). Said, never counted.
+   */
+  media_waiting_for_disk?: true;
 }
+
+/** The receipt count (0 or 1, a flag, never a number of items) a live feed says its media waits for disk space by. */
+export const CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT = 'capture_media_waiting_for_disk';
 
 /** Why a capture helper is not running, in the supervisor's own closed vocabulary. */
 export type DashboardCaptureSupervisorReason =
@@ -3058,7 +3067,9 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       condition: 'degraded',
       next_action: captureProblem.cause === 'helper'
         ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label)
-        : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
+        : captureProblem.cause === 'disk'
+          ? DASHBOARD_CAPTURE_COPY.nextAction.disk(card.label)
+          : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
       dependencies,
     };
   }
@@ -4974,12 +4985,14 @@ function schedulerCaptureFreshness(
 ): DashboardCaptureFreshness | undefined {
   const pairedAtMs = pairedAt === undefined ? Number.NaN : Date.parse(pairedAt);
   let worst: DashboardCaptureFreshness | undefined;
+  let mediaWaiting = false;
   for (const scheduler of new Set(schedulers)) {
     for (const task of scheduler.tasks) {
       const counts = task.last_result?.counts;
       if (task.kind !== 'sync' || !counts || task.last_result?.status === 'failed') continue;
       const reading = captureFreshnessFromCounts(counts);
       if (!reading) continue;
+      if (counts[CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT] === 1) mediaWaiting = true;
       const pulledAt = Date.parse(task.last_success_at ?? '');
       const sincePull = Number.isFinite(pulledAt) ? Math.max(0, Math.floor((now.getTime() - pulledAt) / 1_000)) : 0;
       const verdict: DashboardCaptureFreshness = reading.status === 'unavailable' || reading.age_seconds === undefined
@@ -4997,7 +5010,7 @@ function schedulerCaptureFreshness(
       if (!worst || CAPTURE_STATE_RANK[judged.state] > CAPTURE_STATE_RANK[worst.state]) worst = judged;
     }
   }
-  return worst;
+  return worst && mediaWaiting ? { ...worst, media_waiting_for_disk: true } : worst;
 }
 
 /** A feed's verdict, read against when the current pairing began (see schedulerCaptureFreshness). */

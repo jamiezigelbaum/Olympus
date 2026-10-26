@@ -51424,6 +51424,8 @@ function dashboardCaptureProblem(source) {
   }
   if (source.freshness.capture?.state === "stale")
     return { cause: "stale" };
+  if (source.freshness.capture?.media_waiting_for_disk === true)
+    return { cause: "disk" };
   return;
 }
 function dashboardReadinessNamesCapture(source) {
@@ -51436,6 +51438,8 @@ function dashboardCaptureAttentionReason(source) {
   if (problem.cause === "helper") {
     return problem.reason === undefined || problem.reason === "restarting" ? DASHBOARD_CAPTURE_COPY.helperUnknown : DASHBOARD_CAPTURE_COPY.helper[problem.reason];
   }
+  if (problem.cause === "disk")
+    return DASHBOARD_CAPTURE_COPY.disk;
   const age = source.freshness.capture?.age_seconds;
   const relative7 = typeof age === "number" ? dashboardRelativeFromMs(age * 1000) : "";
   const base = relative7 ? DASHBOARD_CAPTURE_COPY.stale(relative7) : DASHBOARD_CAPTURE_COPY.staleNoAge;
@@ -51885,6 +51889,7 @@ var init_vocabulary = __esm(() => {
     stale: (age) => `capture stale: newest message ${age}`,
     staleNoAge: "capture stale: nothing captured since linking",
     unavailable: "no live messages captured yet",
+    disk: "media waiting for disk space",
     awaiting: "waiting for the first live message",
     awaitingWithHistory: (age) => `waiting for the first live message · newest kept message ${age}`,
     helper: {
@@ -51907,7 +51912,8 @@ var init_vocabulary = __esm(() => {
     nextAction: {
       stale: (label) => `Open ${label} on this computer to check the link and capture. Syncing again will not bring in messages that were never captured.`,
       blocked: (label) => `Open ${label} on this computer and link it again so live capture can start.`,
-      awaiting: (label) => `Keep ${label} linked. The first live message since linking will end this wait; if none arrives within the day, this row says so.`
+      awaiting: (label) => `Keep ${label} linked. The first live message since linking will end this wait; if none arrives within the day, this row says so.`,
+      disk: (label) => `Free some space on this computer. Every ${label} message is kept meanwhile, and the waiting pictures, videos and voice notes download on their own once there is room.`
     }
   };
   CAPTURE_JUDGED_CONNECTION_STATES = new Set([
@@ -75729,7 +75735,8 @@ __export(exports_source_dashboard, {
   DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL: () => DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
   DASHBOARD_ARCHIVES_UNREADABLE_LABEL: () => DASHBOARD_ARCHIVES_UNREADABLE_LABEL,
   DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL: () => DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL,
-  DASHBOARD_ARCHIVES_IMPORTING_LABEL: () => DASHBOARD_ARCHIVES_IMPORTING_LABEL
+  DASHBOARD_ARCHIVES_IMPORTING_LABEL: () => DASHBOARD_ARCHIVES_IMPORTING_LABEL,
+  CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT: () => CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT
 });
 import { existsSync as existsSync52, mkdirSync as mkdirSync35 } from "node:fs";
 import { dirname as dirname53 } from "node:path";
@@ -76466,7 +76473,7 @@ function dashboardSourceSetupStatus(card) {
     return {
       stage: "source_health",
       condition: "degraded",
-      next_action: captureProblem.cause === "helper" ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label) : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
+      next_action: captureProblem.cause === "helper" ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label) : captureProblem.cause === "disk" ? DASHBOARD_CAPTURE_COPY.nextAction.disk(card.label) : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
       dependencies
     };
   }
@@ -77523,6 +77530,7 @@ function liveQueueCount(counts, gaugeKeys, jobKeys) {
 function schedulerCaptureFreshness(schedulers, now, pairedAt) {
   const pairedAtMs = pairedAt === undefined ? Number.NaN : Date.parse(pairedAt);
   let worst;
+  let mediaWaiting = false;
   for (const scheduler of new Set(schedulers)) {
     for (const task of scheduler.tasks) {
       const counts = task.last_result?.counts;
@@ -77531,6 +77539,8 @@ function schedulerCaptureFreshness(schedulers, now, pairedAt) {
       const reading = captureFreshnessFromCounts(counts);
       if (!reading)
         continue;
+      if (counts[CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT] === 1)
+        mediaWaiting = true;
       const pulledAt = Date.parse(task.last_success_at ?? "");
       const sincePull = Number.isFinite(pulledAt) ? Math.max(0, Math.floor((now.getTime() - pulledAt) / 1000)) : 0;
       const verdict = reading.status === "unavailable" || reading.age_seconds === undefined ? {
@@ -77547,7 +77557,7 @@ function schedulerCaptureFreshness(schedulers, now, pairedAt) {
         worst = judged;
     }
   }
-  return worst;
+  return worst && mediaWaiting ? { ...worst, media_waiting_for_disk: true } : worst;
 }
 function underCurrentPairing(verdict, nowMs, pairedAtMs) {
   const newestAtMs = verdict.age_seconds === undefined ? undefined : nowMs - verdict.age_seconds * 1000;
@@ -77937,7 +77947,7 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT = "capture_media_waiting_for_disk", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -100236,12 +100246,11 @@ function whatsAppMediaFileLocator(path) {
 function createWhatsAppChildReader(options) {
   const relocate = options.relocate ?? ((path) => path);
   return (locator, read) => {
-    const maxBytes = read.maxBytes ?? DEFAULT_MAX_BYTES;
     if (parseArchiveInputMedia(locator)) {
       const deps = options.archive?.();
       if (!deps)
         throw new FileExtractionSourceError("source_item_not_found");
-      return readArchiveInputMedia(locator, deps, { maxBytes });
+      return readArchiveInputMedia(locator, deps, read.maxBytes !== undefined ? { maxBytes: read.maxBytes } : {});
     }
     if (!locator.startsWith(WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX))
       throw new FileExtractionSourceError("source_item_not_found");
@@ -100270,9 +100279,9 @@ function createWhatsAppChildReader(options) {
       if (named.dev !== opened.dev || named.ino !== opened.ino || !insideAny(real, options.mediaRoots)) {
         throw new FileExtractionSourceError("source_permission_denied");
       }
-      if (opened.size > maxBytes)
+      if (read.maxBytes !== undefined && opened.size > read.maxBytes)
         throw new FileExtractionSourceError("source_too_large");
-      return readBounded2(fd2, maxBytes);
+      return readBounded2(fd2, Math.min(opened.size, read.maxBytes ?? opened.size));
     } finally {
       closeSync22(fd2);
     }
@@ -100305,11 +100314,10 @@ function readBounded2(fd2, maxBytes) {
   }
   return Buffer.concat(chunks, total);
 }
-var WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX = "whatsapp-media-file:v1:", DEFAULT_MAX_BYTES;
+var WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX = "whatsapp-media-file:v1:";
 var init_child_media = __esm(() => {
   init_file_extraction_source();
   init_input_media();
-  DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 });
 
 // src/workers/whatsapp/match-keys.ts
@@ -100609,6 +100617,7 @@ function readWhatsAppCaptureStatus(spoolDir) {
     connected: record2["connected"] === true,
     ...updatedAt ? { updatedAt } : {},
     droppedMessages: typeof dropped === "number" && Number.isSafeInteger(dropped) && dropped > 0 ? dropped : 0,
+    mediaWaitingForDisk: record2["media_waiting_for_disk"] === true,
     ...connectedThrough ? { connectedThrough } : {},
     ...lastDroppedAt ? { lastDroppedAt } : {}
   };
@@ -100791,6 +100800,9 @@ function childrenOf(record2) {
       available: record2.downloadStatus === undefined || record2.downloadStatus === "ok",
       ...record2.mediaSizeBytes !== undefined ? { sizeBytes: record2.mediaSizeBytes } : {}
     }];
+  }
+  if (record2.downloadStatus === WHATSAPP_MEDIA_WAITING_STATUS) {
+    return [{ key: "media", name: "media", mimeType, available: false, waitingForDiskSpace: true }];
   }
   return record2.downloadStatus !== undefined ? [{ key: "media", name: "media", mimeType, available: false }] : [];
 }
@@ -101331,7 +101343,8 @@ function rawItemFromChild(message2, child, account, fetchedAt) {
       senderIsOwner: message2.fromMe,
       fromMe: message2.fromMe,
       sentAt: message2.timestamp,
-      ...message2.mediaType === undefined ? {} : { mediaType: message2.mediaType }
+      ...message2.mediaType === undefined ? {} : { mediaType: message2.mediaType },
+      ...child.waitingForDiskSpace ? { mediaState: "waiting_for_disk_space" } : {}
     }),
     fetchedAt,
     holdContentUntilJudged: true,
@@ -101401,6 +101414,8 @@ function redactWhatsAppLiveSpoolSecrets(options) {
       if (mediaSecret) {
         deleteOwnedMedia(message2);
         deleteMediaTemps(message2, mediaRoots);
+        if (options.mediaWaitingDir)
+          removeTemp(join87(options.mediaWaitingDir, `${whatsAppMediaFileStem(message2.chatJid, message2.id)}.json`));
       }
       const namesLeft = message2.chatName !== "" || message2.senderName !== "" || (message2.senderContactName ?? "") !== "";
       const textKeys = redaction ? ["preview_title", "preview_description", "preview_url", "mentions"].filter((key2) => (key2 in record2)) : [];
@@ -101668,7 +101683,7 @@ function optionalStringRecord(value2) {
 function nowIso3() {
   return new Date().toISOString();
 }
-var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, WHATSAPP_STATUS_CHAT_LABEL = "Status updates", CURSOR2, LEGACY_CURSOR, MEDIA_TEMP, OLDER_MEDIA_TEMP, MEDIA_TEMP_MAX_AGE_MS, MEDIA_TEMP_DEPTH = 2, currentBootNonce;
+var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, WHATSAPP_MEDIA_WAITING_STATUS = "waiting_for_disk", CHILD_MEDIA_TYPES, WHATSAPP_STATUS_CHAT_LABEL = "Status updates", CURSOR2, LEGACY_CURSOR, MEDIA_TEMP, OLDER_MEDIA_TEMP, MEDIA_TEMP_MAX_AGE_MS, MEDIA_TEMP_DEPTH = 2, currentBootNonce;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
@@ -101814,6 +101829,7 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
             account,
             mediaDir,
             mediaDirs,
+            mediaWaitingDir: join88(defaultWhatsAppStateDir(env), "media", "waiting"),
             relocateMediaPath: whatsappMovedPathMapper(env),
             ledger: tierSet.ledger,
             through: lineCursorOf(committed),
@@ -101839,6 +101855,7 @@ function clearWhatsAppSpoolSecrets(options) {
     account: options.account,
     ...options.mediaDir ? { mediaDir: options.mediaDir } : {},
     ...options.mediaDirs ? { mediaDirs: options.mediaDirs } : {},
+    ...options.mediaWaitingDir ? { mediaWaitingDir: options.mediaWaitingDir } : {},
     ...options.relocateMediaPath ? { relocateMediaPath: options.relocateMediaPath } : {},
     ...window2,
     judge: judge3
@@ -102010,6 +102027,7 @@ function whatsappSyncReceipt(run, findings, state, nowMs, staleThresholdSeconds,
     ...findings.unresolvedReactionTargets > 0 ? [WHATSAPP_UNRESOLVED_REACTIONS_WARNING] : [],
     ...findings.cursorsRecovered > 0 || findings.cursorFilesMissing > 0 ? [WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING] : [],
     ...recentDrop && (state.status?.droppedMessages ?? 0) > 0 ? [WHATSAPP_CAPTURE_DROPPED_WARNING] : [],
+    ...state.status?.mediaWaitingForDisk === true ? [WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING] : [],
     ...capture.status === "stale" ? [WHATSAPP_CAPTURE_STALE_WARNING] : [],
     ...capture.stopped ? [WHATSAPP_CAPTURE_DISCONNECTED_WARNING] : [],
     ...capture.status === "unavailable" ? [WHATSAPP_CAPTURE_UNAVAILABLE_WARNING] : [],
@@ -102033,6 +102051,7 @@ function whatsappSyncReceipt(run, findings, state, nowMs, staleThresholdSeconds,
       spool_cursor_file_missing: findings.cursorFilesMissing > 0 ? 1 : 0,
       spool_pass_budget_reached: findings.passBudgetReached > 0 ? 1 : 0,
       capture_dropped_messages: state.status?.droppedMessages ?? 0,
+      capture_media_waiting_for_disk: state.status?.mediaWaitingForDisk === true ? 1 : 0,
       ...captureFreshnessCounts(capture),
       spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
       ...tiered
@@ -102051,7 +102070,7 @@ function whatsappSyncReceipt(run, findings, state, nowMs, staleThresholdSeconds,
 function whatsappCaptureStaleThresholdSeconds(configured, env) {
   return captureStaleThresholdSeconds(configured, env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_STALE_THRESHOLD_SECONDS, "WhatsApp");
 }
-var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_LIVE_CORPUS_ID = "secure_local.whatsapp.messages", WHATSAPP_PERSONAL_ACCOUNT_SCOPE = "personal", WHATSAPP_INTERNAL_CORPUS_ID = "internal.whatsapp.messages", WHATSAPP_PRODUCT_CONNECTOR_ID = "whatsapp_product_spool", WHATSAPP_STORE_PLACEMENT, WHATSAPP_EXTRACTION_SCOPE_KEY = "whatsapp.personal.messages", WHATSAPP_MALFORMED_SPOOL_WARNING = "whatsapp_malformed_spool_lines", WHATSAPP_UNRESOLVED_REACTIONS_WARNING = "whatsapp_unresolved_reaction_targets", WHATSAPP_CAPTURE_STALE_WARNING = "whatsapp_capture_spool_stale", WHATSAPP_CAPTURE_UNAVAILABLE_WARNING = "whatsapp_capture_freshness_unavailable", WHATSAPP_SPOOL_REDACTION_FAILED_WARNING = "whatsapp_spool_secret_redaction_failed", WHATSAPP_OVERSIZED_SPOOL_WARNING = "whatsapp_oversized_spool_records", WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING = "whatsapp_spool_cursor_recovered", WHATSAPP_CAPTURE_DISCONNECTED_WARNING = "whatsapp_capture_disconnected", WHATSAPP_CAPTURE_DROPPED_WARNING = "whatsapp_capture_dropped_messages", WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", ALL_LINES = -1, WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES, CLEARED_FILES_KEY;
+var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_LIVE_CORPUS_ID = "secure_local.whatsapp.messages", WHATSAPP_PERSONAL_ACCOUNT_SCOPE = "personal", WHATSAPP_INTERNAL_CORPUS_ID = "internal.whatsapp.messages", WHATSAPP_PRODUCT_CONNECTOR_ID = "whatsapp_product_spool", WHATSAPP_STORE_PLACEMENT, WHATSAPP_EXTRACTION_SCOPE_KEY = "whatsapp.personal.messages", WHATSAPP_MALFORMED_SPOOL_WARNING = "whatsapp_malformed_spool_lines", WHATSAPP_UNRESOLVED_REACTIONS_WARNING = "whatsapp_unresolved_reaction_targets", WHATSAPP_CAPTURE_STALE_WARNING = "whatsapp_capture_spool_stale", WHATSAPP_CAPTURE_UNAVAILABLE_WARNING = "whatsapp_capture_freshness_unavailable", WHATSAPP_SPOOL_REDACTION_FAILED_WARNING = "whatsapp_spool_secret_redaction_failed", WHATSAPP_OVERSIZED_SPOOL_WARNING = "whatsapp_oversized_spool_records", WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING = "whatsapp_spool_cursor_recovered", WHATSAPP_CAPTURE_DISCONNECTED_WARNING = "whatsapp_capture_disconnected", WHATSAPP_CAPTURE_DROPPED_WARNING = "whatsapp_capture_dropped_messages", WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING = "whatsapp_media_waiting_for_disk_space", WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", ALL_LINES = -1, WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES, CLEARED_FILES_KEY;
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
   init_source_placement();
@@ -174902,7 +174921,8 @@ function scrubCaptureFreshness(input) {
     capture: {
       state: input.state,
       threshold_seconds: count(input.threshold_seconds),
-      ...finite(input.age_seconds) ? { age_seconds: count(input.age_seconds) } : {}
+      ...finite(input.age_seconds) ? { age_seconds: count(input.age_seconds) } : {},
+      ...input.media_waiting_for_disk === true ? { media_waiting_for_disk: true } : {}
     }
   };
 }

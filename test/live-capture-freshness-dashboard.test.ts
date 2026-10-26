@@ -631,3 +631,29 @@ describe('the worst reading across a source\'s pulls', () => {
     expect(card.freshness.capture).toEqual({ state: 'fresh', age_seconds: 360, threshold_seconds: THRESHOLD });
   });
 });
+
+describe('WhatsApp media waiting for disk space', () => {
+  test('a feed whose media waits for disk space is a findable problem with no count, and says what to do', () => {
+    const { card, row, needsYou } = build({ which: 'whatsapp', counts: receiptCounts({ ...fresh(600), capture_media_waiting_for_disk: 1 }) });
+    expect(card.freshness.capture?.media_waiting_for_disk).toBe(true);
+    expect(dashboardStatus({ source: card })).toBe('Needs you');
+    expect(dashboardAttentionLine(card)).toBe('media waiting for disk space');
+    expect(row.status).toBe('Needs you');
+    expect(row.detail).toBe('media waiting for disk space');
+    expect(needsYou).toHaveLength(1);
+    // Said, never counted.
+    expect(needsYou[0]!.sentence).not.toMatch(/\d/u);
+    expect(card.setup?.next_action).toContain('Free some space on this computer');
+  });
+
+  test('a feed with nothing waiting says nothing of disk space', () => {
+    const { card, needsYou } = build({ which: 'whatsapp', counts: receiptCounts({ ...fresh(600), capture_media_waiting_for_disk: 0 }) });
+    expect(card.freshness.capture?.media_waiting_for_disk).toBeUndefined();
+    expect(needsYou).toEqual([]);
+  });
+
+  test('a stale feed keeps saying it is stale, the louder fault', () => {
+    const { card } = build({ which: 'whatsapp', counts: receiptCounts({ ...stale(3 * DAY), capture_media_waiting_for_disk: 1 }) });
+    expect(dashboardAttentionLine(card)).toBe('capture stale: newest message 3d ago');
+  });
+});

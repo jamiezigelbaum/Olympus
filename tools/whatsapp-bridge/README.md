@@ -78,12 +78,17 @@ carries its caption as `"text"` (empty when it has none, and on every other
 media type).
 
 Voice notes, pictures, videos and video notes are saved in the state dir's
-`media/audio`, `media/images` and `media/video` (voice notes and pictures up
-to 25 MiB a file and 5 GiB in all, videos up to 100 MiB and 10 GiB). A saved
-file's line carries `media_path`, `media_mime` and `download_status`; a file
-past a bound is left unsaved and its line says so. Olympus reads a saved
-picture or video as its message's child, and deletes it when the message is
-judged Secrets.
+`media/audio`, `media/images` and `media/video`, whatever their size, with no
+quota: every piece of media is kept. Each download streams into a temp file,
+never into memory. The one safeguard is the computer's: below a free-space
+floor on the volume (the larger of 5 GB and 5% of it) no download starts and
+a running one stops; the message is still spooled with `"download_status":
+"waiting_for_disk"`, its line is kept in `media/waiting/`, and once there is
+room again (checked every minute) the media is downloaded and the message
+spooled again with it. `capture-status.json` says `"media_waiting_for_disk":
+true` meanwhile. A saved file's line carries `media_path`, `media_mime` and
+`download_status`. Olympus reads a saved picture or video as its message's
+child, and deletes it when the picture is judged Secrets.
 
 Only the newest spool file ever grows;
 the daemon fsyncs after every batch. `session.db` holds the device keys —
@@ -215,9 +220,9 @@ replaced, spool write failure) — the daemon is deliberately crash-only.
   collapse harmlessly.
 - Group chats spool with an empty `chat_name` (resolving group subjects would
   need live metadata queries; the connector falls back to the chat JID).
-- Audio messages are downloaded into the private bounded local media cache for
-  the local transcription lane. Other media keeps metadata only; no media or
-  message content leaves the host through this bridge.
+- Voice notes, pictures and videos are downloaded into the private local media
+  folders (above); no media or message content leaves the host through this
+  bridge.
 
 New pairings advertise the linked-device name **Olympus Plugin** using the desktop device type.
 

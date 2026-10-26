@@ -326,6 +326,8 @@ export interface WhatsAppCaptureStatusReceipt {
   /** Messages a full spool queue dropped, over the life of the state folder. */
   droppedMessages: number;
   lastDroppedAt?: string;
+  /** Media the bridge holds until there is disk space to download it (tools/whatsapp-bridge/media_waiting.go). */
+  mediaWaitingForDisk: boolean;
 }
 
 /**
@@ -353,6 +355,7 @@ export function readWhatsAppCaptureStatus(spoolDir: string): WhatsAppCaptureStat
     connected: record['connected'] === true,
     ...(updatedAt ? { updatedAt } : {}),
     droppedMessages: typeof dropped === 'number' && Number.isSafeInteger(dropped) && dropped > 0 ? dropped : 0,
+    mediaWaitingForDisk: record['media_waiting_for_disk'] === true,
     ...(connectedThrough ? { connectedThrough } : {}),
     ...(lastDroppedAt ? { lastDroppedAt } : {}),
   };

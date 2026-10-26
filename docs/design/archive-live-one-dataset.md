@@ -692,13 +692,21 @@ The WhatsApp chat export is an input of the WhatsApp connector
 Live WhatsApp pictures and videos are children of their message, as an
 export's media are (section 5).
 
-- **The bridge saves them** (`tools/whatsapp-bridge`): pictures in
-  `media/images` (25 MiB a file, 5 GiB in all) and videos and video notes
-  in `media/video` (100 MiB a file, 10 GiB in all) of its state folder, beside
-  the voice notes, each kind within its own bounds; a file past a bound is
-  left unsaved and its line says so (`download_status`). A download streams
-  into a temp through a writer that refuses past the bound (the size the
-  message states is not trusted), and every temp has one name,
+- **The bridge saves them all** (`tools/whatsapp-bridge`; owner's ruling,
+  2026-10-26: every message and every piece of media is ingested): pictures
+  in `media/images` and videos and video notes in `media/video` of its state
+  folder, beside the voice notes, with no size bound, no quota and no
+  eviction. A download streams into a temp (`DownloadMediaWithPathToFile`,
+  never whatsmeow's `Download`, which reads it all into memory). The one
+  safeguard is the computer's own: a free-space floor on the volume, the
+  larger of 5 GB and 5% of it (`media_waiting.go`). Below it no download
+  starts, and one running stops (the temp writer checks as it writes); the
+  message is still spooled, its media `waiting_for_disk`, and its line is
+  kept as `media/waiting/<stem>.json`. Every minute, once the volume has
+  room again, the waiting downloads are made in order and each message is
+  spooled again with its media, which fills the waiting child. Until then
+  the capture status says media is waiting (no count), and the card shows
+  "media waiting for disk space" with what to do. Every temp has one name,
   `.olympus-media-<pid>-<boot>-<stem>-*.tmp` (boot: this boot's nonce, since
   a pid is unique only within a boot): removed on every failure, and swept
   at start and before Secrets clearing when its writer is gone (pid dead, or
@@ -720,7 +728,8 @@ export's media are (section 5).
   it really lives under one of the account's media folders (a spool line is
   data and must never name another file): opened once without following a
   link at the end, proved to be that file (device and inode), and read from
-  that descriptor only, within the bound. An export's file is read only
+  that descriptor only, never past what the file held when it was checked
+  or the caller's own bound (there is no content cap). An export's file is read only
   while its import serves it. The connector's `fetchItem`, the live pull and the
   extraction source (`extraction-factory.ts`, built by the runtime and, with
   the archive imports, by the engine) read children through it, by the
@@ -732,6 +741,9 @@ export's media are (section 5).
   folder (or, in the older layout, the audio folder) and the bridge's
   picture and video folders beside it.
 - **Secrets.** Saved media follows the judgment of what it is part of. A
+  Secret picture still waiting for disk space loses its waiting line too, so
+  the bridge never fetches it (and drops what it fetched, should the line go
+  while it downloads). A
   picture or video is judged as its own child (`<id>#child:media`): when it
   is Secrets, its file, every temp of it (by the message's file stem), its
   path and its re-download keys go, whatever the caption's judgment; a

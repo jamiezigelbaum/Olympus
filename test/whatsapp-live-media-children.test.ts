@@ -19,7 +19,13 @@ import { WhatsAppExtractionSource } from '../src/workers/whatsapp/extraction-sou
 import { createWhatsAppLiveSourceConnector, redactWhatsAppLiveSpoolSecrets, whatsAppBootNonce, whatsAppMediaFileStem } from '../src/workers/whatsapp/live-connector.ts';
 import { whatsAppExtractionSourceFactory } from '../src/workers/whatsapp/extraction-factory.ts';
 import type { RawItem } from '../src/core/contracts.ts';
-import { WHATSAPP_LIVE_CORPUS_ID, createWhatsAppTierLane, defaultWhatsAppMediaRoots } from '../src/workers/whatsapp/store-sync.ts';
+import {
+  WHATSAPP_LIVE_CORPUS_ID,
+  WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING,
+  createWhatsAppConnectorStoreSyncHandler,
+  createWhatsAppTierLane,
+  defaultWhatsAppMediaRoots,
+} from '../src/workers/whatsapp/store-sync.ts';
 
 const roots: string[] = [];
 const closers: Array<() => void> = [];
@@ -386,3 +392,85 @@ describe('live pictures and videos are children of their message', () => {
     expect(roots).toEqual(expect.arrayContaining([join(state, 'media', 'images'), join(state, 'media', 'video')]));
   });
 });
+
+describe('every piece of media is kept; the one safeguard is free disk space (owner, 2026-10-26)', () => {
+  test('a picture waiting for disk space is a child that says so, and a later line with the file fills it', async () => {
+    const target = lane();
+    const day = join(target.spoolDir, '2026-07-01.jsonl');
+    writeFileSync(day, spoolLine({ id: 'W1', media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', text: 'the harbour' }));
+    await target.pull();
+    expect(rows(target.root).find((row) => row.id === 'W1#child:media')?.locator ?? '').toBe('');
+    const items: RawItem[] = [];
+    for await (const page of createWhatsAppLiveSourceConnector({ spoolDir: target.spoolDir, account: 'personal' }).listItems()) items.push(...page.items);
+    const child = items.find((item) => item.identity.providerItemId === 'W1#child:media');
+    expect(child?.metadata['mediaState']).toBe('waiting_for_disk_space');
+    expect(child?.deferredBytes?.available).toBe(false);
+    // Space returned: the bridge spools the message again with its media.
+    const photo = join(target.images, 'W1.jpg');
+    writeFileSync(photo, 'jpeg bytes');
+    writeFileSync(day, readFileSync(day, 'utf8') + spoolLine({ id: 'W1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'the harbour' }));
+    await target.pull();
+    expect(rows(target.root).find((row) => row.id === 'W1#child:media')?.locator).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}`);
+  });
+
+  test('clearing a Secret picture that waits for disk space removes its waiting line, so it is never fetched', () => {
+    const target = lane();
+    const waitingDir = join(target.root, 'media', 'waiting');
+    mkdirSync(waitingDir, { recursive: true });
+    const waiting = join(waitingDir, `${whatsAppMediaFileStem(CHAT, 'W2')}.json`);
+    writeFileSync(waiting, '{}');
+    const day = join(target.spoolDir, '2026-07-01.jsonl');
+    writeFileSync(day, spoolLine({ id: 'W2', media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', media_key: 'a2V5', media_direct_path: '/v/t62/fixture' }));
+    const clear = () => redactWhatsAppLiveSpoolSecrets({
+      spoolDir: target.spoolDir,
+      account: 'personal',
+      judge: (identity) => (identity.providerItemId === 'W2#child:media' ? 'content' : undefined),
+      mediaDirs: [target.images, target.video, target.audio],
+      mediaWaitingDir: waitingDir,
+    });
+    // A waiting line that cannot be removed fails the clearing: the keys stay for the next pull.
+    chmodSync(waitingDir, 0o500);
+    try {
+      expect(clear).toThrow();
+      expect(JSON.parse(readFileSync(day, 'utf8'))).toHaveProperty('media_key');
+    } finally {
+      chmodSync(waitingDir, 0o700);
+    }
+    clear();
+    expect(existsSync(waiting)).toBe(false);
+    expect(JSON.parse(readFileSync(day, 'utf8'))).not.toHaveProperty('media_key');
+  });
+
+  test('a pull says media waits for disk space, as a flag and a warning, never a count', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'whatsapp-media-disk-'));
+    roots.push(root);
+    const spoolDir = join(root, 'spool');
+    mkdirSync(spoolDir, { recursive: true });
+    writeFileSync(join(spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'D1', text: 'hello' }));
+    writeFileSync(join(spoolDir, 'capture-status.json'), JSON.stringify({
+      kind: 'whatsapp_capture_status', updated_at: '2026-07-01T13:00:00Z', connected: true, dropped_messages: 0, media_waiting_for_disk: true,
+    }));
+    const store = new LocalConnectorStore({ dbPath: join(root, 'whatsapp.db'), corpusId: WHATSAPP_LIVE_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
+    closers.push(() => store.close());
+    const sync = createWhatsAppConnectorStoreSyncHandler({ store, spoolDir, now: () => new Date('2026-07-01T13:05:00Z') });
+    const receipt = await sync.pull();
+    expect(receipt.counts.capture_media_waiting_for_disk).toBe(1);
+    expect(receipt.warnings).toContain(WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING);
+    writeFileSync(join(spoolDir, 'capture-status.json'), JSON.stringify({
+      kind: 'whatsapp_capture_status', updated_at: '2026-07-01T13:06:00Z', connected: true, dropped_messages: 0,
+    }));
+    const after = await sync.pull();
+    expect(after.counts.capture_media_waiting_for_disk).toBe(0);
+    expect(after.warnings ?? []).not.toContain(WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING);
+  });
+
+  test('a saved file is read whole however large: no content cap, only the caller\'s own bound', () => {
+    const target = lane();
+    const clip = join(target.video, 'V9.mp4');
+    const size = 65 * 1024 * 1024; // past the old 64 MiB cap
+    writeFileSync(clip, Buffer.alloc(size, 7));
+    expect(target.readChild(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${clip}`, {}).byteLength).toBe(size);
+    expect(() => target.readChild(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${clip}`, { maxBytes: 1024 })).toThrow('source_too_large');
+  });
+});
+

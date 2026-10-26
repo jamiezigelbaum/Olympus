@@ -19,14 +19,22 @@ import (
 )
 
 // streamingDownloader writes `chunk` `times` times, then fails with `err` (when set): a large or broken download.
+// `during` runs once, before the first write.
 type streamingDownloader struct {
 	chunk   []byte
 	times   int
 	err     error
 	written int64
+	calls   int
+	during  func()
 }
 
-func (d *streamingDownloader) DownloadToFile(_ context.Context, _ whatsmeow.DownloadableMessage, file whatsmeow.File) error {
+func (d *streamingDownloader) DownloadMediaWithPathToFile(_ context.Context, _ string, _, _, _ []byte, _ whatsmeow.MediaType, _ string, _ bool, file whatsmeow.File) error {
+	d.calls++
+	if d.during != nil {
+		d.during()
+		d.during = nil
+	}
 	for i := 0; i < d.times; i++ {
 		n, err := file.Write(d.chunk)
 		d.written += int64(n)
@@ -52,28 +60,144 @@ func mediaTemps(t *testing.T, dir string) []string {
 	return temps
 }
 
-func TestAPictureLargerThanItsBoundIsAbortedWhileStreaming(t *testing.T) {
+// spaceOf is a volume with `free` of `total` bytes free, for a store's floor.
+func spaceOf(free *uint64, total uint64) func(string) (uint64, uint64, error) {
+	return func(string) (uint64, uint64, error) { return *free, total, nil }
+}
+
+const testVolume = 200 * 1024 * 1024 * 1024 // 200 GiB: a floor of 10 GiB
+
+func TestTheFloorIsTheLargerOfFiveGigabytesAndFivePercent(t *testing.T) {
+	if got := diskFloor(50 * 1024 * 1024 * 1024); got != diskFloorMinBytes {
+		t.Fatalf("floor of 50 GiB = %d, want 5 GiB", got)
+	}
+	if got := diskFloor(testVolume); got != testVolume/20 {
+		t.Fatalf("floor of 200 GiB = %d, want 10 GiB", got)
+	}
+}
+
+// Every piece of media is kept (owner, 2026-10-26): one larger than any old bound is streamed whole, never held in memory.
+func TestAPictureOfAnySizeIsSavedWhole(t *testing.T) {
 	dir := t.TempDir()
-	// The message says it is small; the bytes say otherwise.
-	downloader := &streamingDownloader{chunk: make([]byte, 1024*1024), times: 64}
+	downloader := &streamingDownloader{chunk: make([]byte, 1024*1024), times: 40}
 	store := newAudioMediaStore(dir, downloader)
-	rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent("liar-1", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+	free := uint64(testVolume)
+	store.queue.space = spaceOf(&free, testVolume)
+	rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent("big-1", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
 		Mimetype:   proto.String("image/jpeg"),
 		FileLength: proto.Uint64(10),
 	}}))
-	if rec.DownloadStatus != "too_large" || rec.MediaPath != "" {
+	if rec.DownloadStatus != "ok" || rec.MediaSizeBytes != 40*1024*1024 {
 		t.Fatalf("record = %#v", rec)
 	}
-	// Stopped at the bound, never the whole 64 MiB.
-	if downloader.written > imageMediaMaxFileBytes+mediaEncryptionOverhead {
-		t.Fatalf("written = %d, past the bound %d", downloader.written, imageMediaMaxFileBytes)
+	if info, err := os.Stat(rec.MediaPath); err != nil || info.Size() != 40*1024*1024 {
+		t.Fatalf("saved file: %v", err)
 	}
-	images := filepath.Join(dir, "media", "images")
-	if temps := mediaTemps(t, images); len(temps) != 0 {
+}
+
+func TestBelowTheFloorTheMessageIsKeptAndItsMediaWaits(t *testing.T) {
+	dir := t.TempDir()
+	downloader := &streamingDownloader{chunk: []byte("picture"), times: 1}
+	store := newAudioMediaStore(dir, downloader)
+	free := uint64(4 * 1024 * 1024 * 1024) // under the 10 GiB floor
+	store.queue.space = spaceOf(&free, testVolume)
+	rec, ok := recordFromMessage(context.Background(), nil, store, captionEvent("wait-1", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+		Mimetype: proto.String("image/jpeg"),
+		Caption:  proto.String("the harbour"),
+	}}))
+	if !ok || rec.DownloadStatus != mediaWaitingStatus || rec.MediaPath != "" || rec.Text != "the harbour" {
+		t.Fatalf("record = %#v", rec)
+	}
+	if downloader.calls != 0 {
+		t.Fatalf("a download was started below the floor")
+	}
+	if waiting := store.queue.waiting(); len(waiting) != 1 || filepath.Base(waiting[0]) != mediaFileStem(rec.ChatJID, "wait-1")+".json" {
+		t.Fatalf("waiting = %v", waiting)
+	}
+	if temps := mediaTemps(t, filepath.Join(dir, "media", "images")); len(temps) != 0 {
 		t.Fatalf("temps left: %v", temps)
 	}
-	if entries, _ := os.ReadDir(images); len(entries) != 0 {
-		t.Fatalf("files left: %d", len(entries))
+}
+
+func TestADownloadThatTakesTheVolumeBelowTheFloorStopsAndWaits(t *testing.T) {
+	saved := diskCheckEveryBytes
+	diskCheckEveryBytes = 1024
+	defer func() { diskCheckEveryBytes = saved }()
+	dir := t.TempDir()
+	free := uint64(testVolume)
+	downloader := &streamingDownloader{chunk: make([]byte, 4096), times: 16}
+	store := newAudioMediaStore(dir, downloader)
+	store.queue.space = spaceOf(&free, testVolume)
+	// The volume fills while the video downloads.
+	downloader.during = func() { free = 1024 }
+	rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent("clip-9", &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Mimetype: proto.String("video/mp4")}}))
+	if rec.DownloadStatus != mediaWaitingStatus || rec.MediaPath != "" {
+		t.Fatalf("record = %#v", rec)
+	}
+	if downloader.written > 4096 {
+		t.Fatalf("written = %d after the floor was reached", downloader.written)
+	}
+	if temps := mediaTemps(t, filepath.Join(dir, "media", "video")); len(temps) != 0 {
+		t.Fatalf("temps left: %v", temps)
+	}
+	if len(store.queue.waiting()) != 1 {
+		t.Fatalf("the video does not wait")
+	}
+}
+
+func TestWaitingMediaIsDownloadedWhenSpaceReturnsAndTheMessageSpooledAgain(t *testing.T) {
+	dir := t.TempDir()
+	free := uint64(1024)
+	downloader := &streamingDownloader{chunk: []byte("picture bytes"), times: 1}
+	store := newAudioMediaStore(dir, downloader)
+	store.queue.space = spaceOf(&free, testVolume)
+	status := newCaptureStatus(t.TempDir())
+	store.queue.status = status
+	rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent("later-1", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+		Mimetype:      proto.String("image/jpeg"),
+		MediaKey:      []byte{1, 2, 3},
+		FileEncSHA256: []byte{4, 5, 6},
+		DirectPath:    proto.String("/mms/image"),
+	}}))
+	if rec.DownloadStatus != mediaWaitingStatus || !status.receipt().MediaWaitingForDisk {
+		t.Fatalf("record = %#v, waiting said = %v", rec, status.receipt().MediaWaitingForDisk)
+	}
+	var spooled []spoolRecord
+	spool := func(rec spoolRecord) { spooled = append(spooled, rec) }
+	// Still no room: nothing happens.
+	store.queue.retry(context.Background(), store, spool)
+	if len(spooled) != 0 || downloader.calls != 0 {
+		t.Fatalf("retried below the floor")
+	}
+	free = testVolume
+	store.queue.retry(context.Background(), store, spool)
+	if len(spooled) != 1 || spooled[0].DownloadStatus != "ok" || spooled[0].MediaPath == "" || spooled[0].ID != "later-1" || spooled[0].MediaDirectPath != "/mms/image" {
+		t.Fatalf("spooled = %#v", spooled)
+	}
+	if len(store.queue.waiting()) != 0 || status.receipt().MediaWaitingForDisk {
+		t.Fatalf("still waiting after it was filled")
+	}
+}
+
+func TestWaitingMediaClearedMeanwhileIsNeverKept(t *testing.T) {
+	dir := t.TempDir()
+	free := uint64(1024)
+	downloader := &streamingDownloader{chunk: []byte("secret picture"), times: 1}
+	store := newAudioMediaStore(dir, downloader)
+	store.queue.space = spaceOf(&free, testVolume)
+	rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent("secret-1", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/jpeg")}}))
+	waiting := store.queue.pathOf(rec)
+	free = testVolume
+	// Olympus judges the picture Secret while it downloads, and removes its waiting line.
+	downloader.during = func() { _ = os.Remove(waiting) }
+	var spooled []spoolRecord
+	store.queue.retry(context.Background(), store, func(rec spoolRecord) { spooled = append(spooled, rec) })
+	if len(spooled) != 0 {
+		t.Fatalf("spooled a cleared message: %#v", spooled)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "media", "images"))
+	for _, entry := range entries {
+		t.Fatalf("kept %s for a cleared message", entry.Name())
 	}
 }
 
@@ -81,6 +205,8 @@ func TestAFailedDownloadLeavesNoTemp(t *testing.T) {
 	dir := t.TempDir()
 	downloader := &streamingDownloader{chunk: []byte("partial bytes"), times: 3, err: errors.New("network unavailable")}
 	store := newAudioMediaStore(dir, downloader)
+	free := uint64(testVolume)
+	store.queue.space = spaceOf(&free, testVolume)
 	rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent("cut-1", &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Mimetype: proto.String("video/mp4")}}))
 	if !strings.HasPrefix(rec.DownloadStatus, "failed:") || rec.MediaPath != "" {
 		t.Fatalf("record = %#v", rec)
@@ -99,24 +225,29 @@ func TestATempNamesItsWriterItsBootAndItsMessage(t *testing.T) {
 	}
 }
 
-// io.Copy prefers the destination's ReadFrom; the capped file's own one keeps the cap.
-func TestIoCopyIntoTheCappedFileStopsAtTheBound(t *testing.T) {
-	tmp, err := os.CreateTemp(t.TempDir(), "capped-*")
+// io.Copy prefers the destination's ReadFrom; the floor file's own one goes through Write, so the floor still holds.
+func TestIoCopyIntoTheFloorFileStopsAtTheFloor(t *testing.T) {
+	saved := diskCheckEveryBytes
+	diskCheckEveryBytes = 1
+	defer func() { diskCheckEveryBytes = saved }()
+	tmp, err := os.CreateTemp(t.TempDir(), "floor-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tmp.Close()
-	capped := &cappedFile{file: tmp, limit: 1024}
+	free := uint64(1024)
+	queue := &mediaWaitQueue{space: spaceOf(&free, testVolume)}
+	file := &floorFile{file: tmp, queue: queue, dir: filepath.Dir(tmp.Name())}
 	hasher := sha256.New()
-	n, err := io.Copy(capped, io.TeeReader(bytes.NewReader(make([]byte, 1024*1024)), hasher))
-	if !errors.Is(err, errMediaTooLarge) {
+	n, err := io.Copy(file, io.TeeReader(bytes.NewReader(make([]byte, 1024*1024)), hasher))
+	if !errors.Is(err, errWaitingForDisk) {
 		t.Fatalf("copy err = %v", err)
 	}
 	info, _ := tmp.Stat()
-	if n > 1024 || info.Size() > 1024 {
-		t.Fatalf("copied %d, file %d: past the bound", n, info.Size())
+	if n != 0 || info.Size() != 0 {
+		t.Fatalf("copied %d, file %d below the floor", n, info.Size())
 	}
-	var _ whatsmeow.File = capped
+	var _ whatsmeow.File = file
 }
 
 func TestStartSweepsTempsAKilledBridgeLeftBehind(t *testing.T) {

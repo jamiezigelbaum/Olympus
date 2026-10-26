@@ -89,6 +89,8 @@ export const WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING = 'whatsapp_spool_cursor_re
 export const WHATSAPP_CAPTURE_DISCONNECTED_WARNING = 'whatsapp_capture_disconnected';
 /** The bridge dropped messages from a full queue within the stale threshold. */
 export const WHATSAPP_CAPTURE_DROPPED_WARNING = 'whatsapp_capture_dropped_messages';
+/** The bridge holds media until this computer has disk space for it; every message is kept meanwhile. */
+export const WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING = 'whatsapp_media_waiting_for_disk_space';
 // Where the full-spool Secrets pass stands, kept in the set's tier ledger.
 export const WHATSAPP_SPOOL_REDACTION_STATE_KEY = 'capture_spool_secret_redaction:whatsapp';
 
@@ -116,6 +118,8 @@ export interface WhatsAppConnectorStoreSyncReceipt {
     spool_pass_budget_reached: number;
     /** Messages the bridge dropped from a full queue, over the life of its state folder. */
     capture_dropped_messages: number;
+    /** 1 while the bridge holds media until there is disk space for it (a flag, never a number of items). */
+    capture_media_waiting_for_disk: 0 | 1;
     capture_fresh: number;
     capture_stale: number;
     capture_unavailable: number;
@@ -386,6 +390,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
             account,
             mediaDir,
             mediaDirs,
+            mediaWaitingDir: join(defaultWhatsAppStateDir(env), 'media', 'waiting'),
             relocateMediaPath: whatsappMovedPathMapper(env),
             ledger: tierSet.ledger,
             through: lineCursorOf(committed),
@@ -446,6 +451,8 @@ export function clearWhatsAppSpoolSecrets(options: {
   mediaDir?: string;
   /** Every other folder the bridge saves media in (pictures, videos). */
   mediaDirs?: readonly string[];
+  /** Where the bridge keeps media waiting for disk space. */
+  mediaWaitingDir?: string;
   ledger: TierLedger;
   /** Where the set has committed to, `<file>:<lines>`: nothing past it is cleared yet. */
   through: string | undefined;
@@ -461,6 +468,7 @@ export function clearWhatsAppSpoolSecrets(options: {
     account: options.account,
     ...(options.mediaDir ? { mediaDir: options.mediaDir } : {}),
     ...(options.mediaDirs ? { mediaDirs: options.mediaDirs } : {}),
+    ...(options.mediaWaitingDir ? { mediaWaitingDir: options.mediaWaitingDir } : {}),
     ...(options.relocateMediaPath ? { relocateMediaPath: options.relocateMediaPath } : {}),
     ...window,
     judge,
@@ -689,6 +697,7 @@ function whatsappSyncReceipt(
     ...(findings.unresolvedReactionTargets > 0 ? [WHATSAPP_UNRESOLVED_REACTIONS_WARNING] : []),
     ...(findings.cursorsRecovered > 0 || findings.cursorFilesMissing > 0 ? [WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING] : []),
     ...(recentDrop && (state.status?.droppedMessages ?? 0) > 0 ? [WHATSAPP_CAPTURE_DROPPED_WARNING] : []),
+    ...(state.status?.mediaWaitingForDisk === true ? [WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING] : []),
     ...(capture.status === 'stale' ? [WHATSAPP_CAPTURE_STALE_WARNING] : []),
     ...(capture.stopped ? [WHATSAPP_CAPTURE_DISCONNECTED_WARNING] : []),
     ...(capture.status === 'unavailable' ? [WHATSAPP_CAPTURE_UNAVAILABLE_WARNING] : []),
@@ -712,6 +721,8 @@ function whatsappSyncReceipt(
       spool_cursor_file_missing: findings.cursorFilesMissing > 0 ? 1 : 0,
       spool_pass_budget_reached: findings.passBudgetReached > 0 ? 1 : 0,
       capture_dropped_messages: state.status?.droppedMessages ?? 0,
+      // Read by the card as a findable problem (source-dashboard.ts, CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT).
+      capture_media_waiting_for_disk: state.status?.mediaWaitingForDisk === true ? 1 : 0,
       ...captureFreshnessCounts(capture),
       spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
       ...tiered,
