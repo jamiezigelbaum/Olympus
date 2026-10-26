@@ -11,8 +11,8 @@
 // or by a later reading, deletes the first and clears the second, at once.
 
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
-import { rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import {
   clearInstalledTierClassification,
@@ -29,7 +29,7 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { secretFencedSniffer } from '../src/workers/connector-store/tier-placement.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
-import { FILE_EXTRACTION_JOBS_DB_PATH_ENV, LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
+import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from '../src/workers/file-extraction/job-store.ts';
 import { registerExtractionJobsDbPath, SECRET_ITEM_REDACTIONS_TABLE } from '../src/workers/file-extraction/job-names.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
 import type { RawItem } from '../src/core/contracts.ts';
@@ -74,14 +74,20 @@ function installSniffer(dir: string) {
   return configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: join(dir, 'none.json') }, lane: LANE });
 }
 
-/** Point the default job ledger path at `path` for this test. */
-function pointJobsEnvAt(path: string): void {
-  const previous = process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV];
-  process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV] = path;
+/**
+ * Put the data folder, and so the default job ledger, under `dir` for this
+ * test (no env variable moves the ledger alone), and return the ledger's path.
+ */
+function pointJobsDefaultInto(dir: string): string {
+  const previous = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = join(dir, 'data');
   cleanups.push(() => {
-    if (previous === undefined) delete process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV];
-    else process.env[FILE_EXTRACTION_JOBS_DB_PATH_ENV] = previous;
+    if (previous === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previous;
   });
+  const path = defaultFileExtractionJobsDbPath(process.env);
+  mkdirSync(dirname(path), { recursive: true });
+  return path;
 }
 
 /** One job's name, read without opening the store (which would upgrade an older ledger). */
@@ -255,8 +261,7 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
 
   /** The ledger at the default path (env), or, `opened`, at a path only the runtime that opened it knows. */
   function jobStore(dir: string, how: 'default' | 'opened' = 'default'): LocalFileExtractionJobStore {
-    const path = join(dir, 'file-extraction-jobs.sqlite');
-    if (how === 'default') pointJobsEnvAt(path);
+    const path = how === 'default' ? pointJobsDefaultInto(dir) : join(dir, 'file-extraction-jobs.sqlite');
     const store = new LocalFileExtractionJobStore(path);
     cleanups.push(() => store.close());
     return store;
@@ -325,7 +330,7 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
   test('marked Secret from the command: a job leased in flight loses the name and still records, in a ledger at a non-default path', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
-    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    pointJobsDefaultInto(join(dir, 'not-this-one'));
     const jobs = jobStore(dir, 'opened');
     await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     const [gardenJob] = jobs.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
@@ -349,7 +354,7 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
   test('marked Secret from the command in another process: owed until the worker, which knows its own ledger path, clears it', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
-    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    pointJobsDefaultInto(join(dir, 'not-this-one'));
     const runtimePath = join(dir, 'runtime-jobs.sqlite');
     await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     const before = new LocalFileExtractionJobStore(runtimePath);
@@ -373,7 +378,7 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
   test('marked Secret from the command while the worker is stopped: a ledger at a configured path the worker noted is cleared at once', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
-    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    pointJobsDefaultInto(join(dir, 'not-this-one'));
     const runtimePath = join(dir, 'runtime-jobs.sqlite');
     await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     const runtime = new LocalFileExtractionJobStore(runtimePath);
@@ -391,7 +396,7 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
   test('a ledger only a runtime knew, unreachable when the item became Secret, is still cleared after that runtime is gone', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
-    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    pointJobsDefaultInto(join(dir, 'not-this-one'));
     const runtimePath = join(dir, 'runtime-jobs.sqlite');
     await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     writeFileSync(runtimePath, 'not a database');
@@ -429,8 +434,7 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
   test('a job ledger on the schema before redactions stays owed until it can keep the name out', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
-    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
-    pointJobsEnvAt(jobsPath);
+    const jobsPath = pointJobsDefaultInto(dir);
     await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     const older = new LocalFileExtractionJobStore(jobsPath);
     const [gardenJob] = older.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
@@ -587,7 +591,7 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
   test('a job ledger only a closed runtime knew still has its marker retired on restore', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
-    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    pointJobsDefaultInto(join(dir, 'not-this-one'));
     const runtimePath = join(dir, 'runtime-jobs.sqlite');
     const runtime = new LocalFileExtractionJobStore(runtimePath);
     await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
@@ -669,8 +673,7 @@ describe('a side store that cannot be reached when the item becomes Secret', () 
   test('is left as a ledger debt and cleared at the next tier tick, without the item being listed again', async () => {
     const dir = workspace('olympus-secret-side-debt-');
     const fx = fixture(dir);
-    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
-    pointJobsEnvAt(jobsPath);
+    const jobsPath = pointJobsDefaultInto(dir);
     const spec: FixtureSpec = { id: 'keys', name: `deploy ${FAKE_AWS_KEY}.txt`, text: 'Weekly notes about the deploy runbook.' };
     fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
     await fx.set.sync(fixtureConnector(() => [spec]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
@@ -719,8 +722,7 @@ describe('a Secret whose side stores could not be cleared and whose debt could n
   test('is still found: its generation was never marked cleared, and the next tick clears it', async () => {
     const dir = workspace('olympus-secret-side-debt-');
     const fx = fixture(dir);
-    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
-    pointJobsEnvAt(jobsPath);
+    const jobsPath = pointJobsDefaultInto(dir);
     const spec: FixtureSpec = { id: 'keys', name: 'keys.txt', text: 'Weekly notes.' };
     fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
     await fx.set.sync(fixtureConnector(() => [spec]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
@@ -757,8 +759,7 @@ describe('a Secret whose side stores could not be cleared and whose debt could n
   test('is found again after an earlier clearing completed: a later scrub that failed is not hidden by it', async () => {
     const dir = workspace('olympus-secret-side-rescrub-');
     const fx = fixture(dir);
-    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
-    pointJobsEnvAt(jobsPath);
+    const jobsPath = pointJobsDefaultInto(dir);
     const spec: FixtureSpec = { id: 'keys', name: 'keys.txt', text: 'Weekly notes.' };
     fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
     await fx.set.sync(fixtureConnector(() => [spec]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
@@ -821,7 +822,7 @@ describe('a Secret owed in a store\'s own ledger (no tier set)', () => {
   test('is retried by the worker\'s tier tick', async () => {
     const dir = workspace('olympus-secret-side-debt-');
     const jobsPath = join(dir, 'runtime-jobs.sqlite');
-    pointJobsEnvAt(join(dir, 'not-this-one.sqlite'));
+    pointJobsDefaultInto(join(dir, 'not-this-one'));
     const store = new LocalConnectorStore({
       dbPath: join(dir, 'plain.sqlite'),
       corpusId: 'internal.plain.files',
@@ -879,8 +880,7 @@ describe('a tier ledger written by an earlier build of this change (schema 6)', 
 describe('a legacy item (never routed by a set) judged Secret', () => {
   test('keeps no queued question or job name either', async () => {
     const dir = workspace('olympus-secret-side-legacy-');
-    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
-    pointJobsEnvAt(jobsPath);
+    const jobsPath = pointJobsDefaultInto(dir);
     const ledger = new TierLedger({ dbPath: join(dir, 'legacy.tier-ledger.sqlite') });
     const store = new LocalConnectorStore({
       dbPath: join(dir, 'legacy.sqlite'),
@@ -917,8 +917,7 @@ describe('a legacy item (never routed by a set) judged Secret', () => {
 
   test('whose extracted text turns out Secret keeps no queued question or job name either', async () => {
     const dir = workspace('olympus-secret-side-legacy-');
-    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
-    pointJobsEnvAt(jobsPath);
+    const jobsPath = pointJobsDefaultInto(dir);
     const ledger = new TierLedger({ dbPath: join(dir, 'legacy.tier-ledger.sqlite') });
     const store = new LocalConnectorStore({
       dbPath: join(dir, 'legacy.sqlite'),
@@ -958,8 +957,7 @@ describe('a legacy item (never routed by a set) judged Secret', () => {
 
   test('settled Secret by the extraction sink keeps no queued question or job name, even with no tier decision recorded', async () => {
     const dir = workspace('olympus-secret-side-legacy-');
-    const jobsPath = join(dir, 'file-extraction-jobs.sqlite');
-    pointJobsEnvAt(jobsPath);
+    const jobsPath = pointJobsDefaultInto(dir);
     const ledger = new TierLedger({ dbPath: join(dir, 'legacy.tier-ledger.sqlite') });
     const store = new LocalConnectorStore({
       dbPath: join(dir, 'legacy.sqlite'),
@@ -1004,8 +1002,7 @@ describe('side stores that do not exist', () => {
   test('are not created by an item becoming Secret', async () => {
     const dir = workspace('olympus-secret-side-none-');
     const fx = fixture(dir);
-    const jobsPath = join(dir, 'never-created-jobs.sqlite');
-    pointJobsEnvAt(jobsPath);
+    const jobsPath = pointJobsDefaultInto(dir);
     await fx.set.sync(fixtureConnector(() => [{ id: 'garden', name: 'garden-plan.txt', text: 'Garden notes.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'secrets' });
     expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });

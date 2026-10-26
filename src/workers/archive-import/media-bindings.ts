@@ -52,10 +52,10 @@ import { resolvedRawPath } from '../../core/source-placement.ts';
 import { recordAccountPlacement } from '../../core/source-storage.ts';
 import type { ArchiveManifestCheck } from './manifest.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID } from './state.ts';
+import { archiveStateSiblingPath } from '../../core/olympus-layout.ts';
 
 export const ARCHIVE_MEDIA_BINDINGS_STORE_ID = 'archive-media-bindings';
 const SCHEMA_VERSION = 1;
-export const ARCHIVE_MEDIA_BINDINGS_FILE = 'archive-media-bindings.sqlite' as const;
 
 /**
  * Bindings checked before the verification yields to the scheduler.
@@ -75,7 +75,7 @@ export const ARCHIVE_MEDIA_DEFAULT_READ_BYTES = SCOPE_FILE_MAX_RANGE_BYTES;
  * the layout resolvers give the record and this file alike.
  */
 export function archiveMediaBindingsPath(statePath: string): string {
-  return join(dirname(statePath), ARCHIVE_MEDIA_BINDINGS_FILE);
+  return archiveStateSiblingPath(statePath, 'archive-media-bindings.sqlite');
 }
 
 /**
@@ -83,7 +83,7 @@ export function archiveMediaBindingsPath(statePath: string): string {
  * record's path comes from.
  */
 export function defaultArchiveMediaBindingsPath(env: Record<string, string | undefined> = process.env): string {
-  return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID, ARCHIVE_MEDIA_BINDINGS_FILE, env);
+  return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID, 'archive-media-bindings.sqlite', env);
 }
 
 export interface ArchiveMediaBinding {

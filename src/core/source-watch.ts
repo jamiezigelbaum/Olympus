@@ -1,4 +1,4 @@
-import { olympusDataPath, olympusDataRoot } from './olympus-layout.ts';
+import { olympusDataRoot, sharedDataPath } from './olympus-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -386,7 +386,7 @@ export function defaultSourceWatchDbPath(
   if (!isAbsolute(olympusDataRoot(env))) {
     throw new TypeError('Source watch data home must be an absolute private data root.');
   }
-  return olympusDataPath(env, 'source-watches.sqlite');
+  return sharedDataPath('source-watches', env);
 }
 
 /**

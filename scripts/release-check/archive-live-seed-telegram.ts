@@ -6,13 +6,12 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TELEGRAM_SOURCE_ID } from '../../src/core/olympus-layout.ts';
+import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import { placeOwnedAccount, recordProviderAccount } from '../../src/core/source-storage.ts';
 import {
   TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
   createTelegramConnectorStores,
   createTelegramConnectorStoreSyncHandler,
-  defaultInternalTelegramConnectorStoreDbPath,
-  defaultProtectedTelegramConnectorStoreDbPath,
   defaultTelegramCaptureSpoolDir,
 } from '../../src/workers/telegram-messages/index.ts';
 import { telegramProviderAccountId } from '../../src/workers/telegram-messages/archive-target.ts';
@@ -23,8 +22,8 @@ import { registerLiveSeedHook } from './archive-live-seeds.ts';
 registerLiveSeedHook('telegram', {
   provider: 'telegram',
   stores: ({ env }) => [
-    { tier: 'private', path: defaultProtectedTelegramConnectorStoreDbPath(env) },
-    { tier: 'personal', path: defaultInternalTelegramConnectorStoreDbPath(env) },
+    { tier: 'private', path: resolvedStorePath(TELEGRAM_SOURCE_ID, 'secure_local', env) },
+    { tier: 'personal', path: resolvedStorePath(TELEGRAM_SOURCE_ID, 'internal', env) },
   ],
   async seed({ env }) {
     const account = { sourceId: TELEGRAM_SOURCE_ID };

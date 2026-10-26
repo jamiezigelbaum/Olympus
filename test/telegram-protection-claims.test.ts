@@ -11,7 +11,7 @@
  * Synthetic spool records only.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -160,8 +160,14 @@ describe('the claim is applied fail-closed', () => {
       // Hidden, never deleted: the ordinary row still holds its text for the move to finish from.
       expect(w.readableInInternal('A')).toBe(false);
       expect(w.internal.itemPresence(w.identity('A')).active).toBe(true);
+      // The move's write intent (#540) is still pending: the set reports the item owed at the version being moved.
+      expect(w.set.ledger.writeIntent(w.identity('A'))?.connectorId).toBe('telegram_protection_claim_move');
+      const owed = w.set.storedItem(w.identity('A'), compareTelegramVersions);
+      expect(owed?.incomplete).toBe(true);
+      expect(owed?.version).toContain('2026-10-22T09:00:00Z');
       fail = false;
       await sync.pull();
+      expect(w.set.ledger.writeIntent(w.identity('A'))).toBeUndefined();
       expect(w.readableInInternal('A')).toBe(false);
       // The newer copy moved up; the claim's older record did not replace it.
       expect(w.textIn(w.secureLocal, 'A')).toContain('newer ordinary');
@@ -269,6 +275,38 @@ describe('captures are ordered by when they were captured', () => {
       expect(w.textIn(w.secureLocal, 'C')).toContain('now protected');
       // The others were read again under the intake rule and stand as they were.
       expect(w.textIn(w.internal, 'A')).toContain('markerA first');
+    } finally {
+      w.close();
+    }
+  });
+
+  test('a crash between the cursors moving and their receipts being kept leaves nothing trusted: the next pull reads the file again', async () => {
+    const w = world();
+    try {
+      const records = [1, 2, 3].map((n) => w.capture('2026-10-20.jsonl', { id: `R${n}`, text: `markerR${n} ordinary`, at: '2026-10-20T09:00:00Z', trust: 'internal' }));
+      const sync = w.handler();
+      await sync.pull();
+      // Two more records; the next pull's cursors and clearing move to line 5, then it is killed before the receipts are kept.
+      records.push(w.capture('2026-10-20.jsonl', { id: 'R4', text: 'markerR4 ordinary', at: '2026-10-20T09:00:00Z', trust: 'internal' }));
+      records.push(w.capture('2026-10-20.jsonl', { id: 'R5', text: 'markerR5 ordinary', at: '2026-10-20T09:00:00Z', trust: 'internal' }));
+      const writeMeta = w.set.ledger.writeMeta.bind(w.set.ledger);
+      w.set.ledger.writeMeta = (key: string, value: string) => {
+        if (key.startsWith('telegram:spool_boundary:')) throw new Error('killed before the receipts');
+        writeMeta(key, value);
+      };
+      await expect(sync.pull()).rejects.toThrow('killed before the receipts');
+      w.set.ledger.writeMeta = writeMeta;
+      expect(w.internal.lastCompletedSyncRun('telegram_capture_spool_internal')?.cursor).toBe('2026-10-20.jsonl:5');
+      // Record 3 is rewritten in place, inside both boundary windows: now protected, and holding a Secret.
+      const key = '-----BEGIN RSA ' + 'PRIVATE KEY-----MIIEowIBAAKCAQEA-----END RSA PRIVATE KEY-----';
+      writeFileSync(join(w.spoolDir, '2026-10-20.jsonl'), records.map((record, index) => line(index === 2
+        ? { ...record, trust: 'secure_local', text: `markerR3 protected now ${key}`, capturedAt: '2026-10-21T00:00:00.000Z', seq: 99 }
+        : record)).join(''));
+      const receipt = await sync.pull();
+      expect(receipt.counts.spool_cursor_resets).toBeGreaterThan(0);
+      expect(w.readableInInternal('R3')).toBe(false);
+      // The Secret is cleared out of the spool: the clearing was owed again from the start.
+      expect(readFileSync(join(w.spoolDir, '2026-10-20.jsonl'), 'utf8')).not.toContain('MIIEowIBAAKCAQEA');
     } finally {
       w.close();
     }

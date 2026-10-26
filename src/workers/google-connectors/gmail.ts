@@ -1,5 +1,4 @@
-import { olympusDataPath } from '../../core/olympus-layout.ts';
-import { resolvedStorePath } from '../../core/source-placement.ts';
+import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type {
@@ -783,7 +782,7 @@ export function defaultGmailRequestBudgetStatePath(
 ): string {
   const configured = env[GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured) return configured;
-  return olympusDataPath(env, 'gmail-daily-request-budget.json');
+  return sharedDataPath('gmail-request-budget', env);
 }
 
 function budgetedGmailApiClient(
@@ -904,18 +903,6 @@ function internalDateNumber(metadata: Readonly<Record<string, unknown>>): number
   if (typeof value !== 'string' || !/^\d+$/.test(value)) return undefined;
   const parsed = Number.parseInt(value, 10);
   return Number.isSafeInteger(parsed) ? parsed : undefined;
-}
-
-export function defaultGmailConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  return resolvedStorePath(GMAIL_SOURCE_ID, 'internal', env);
-}
-
-export function defaultGmailSecureConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  return resolvedStorePath(GMAIL_SOURCE_ID, 'secure_local', env);
-}
-
-export function defaultGmailPublicConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  return resolvedStorePath(GMAIL_SOURCE_ID, 'public_safe', env);
 }
 
 class RestGmailApiClient implements GmailApiClient {

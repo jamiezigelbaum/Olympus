@@ -20,12 +20,6 @@ import { X_BOOKMARKS_SOURCE_ID, X_BOOKMARKS_STORE_PLACEMENT } from './connector.
 export const X_BOOKMARKS_SECURE_CORPUS_ID = 'secure_local.x.bookmarks';
 export const X_BOOKMARKS_TIER_SET_ID = 'x.bookmarks';
 
-export function defaultXBookmarksSecureConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'secure_local', env);
-}
-
 export function createXBookmarksTierLane(options: {
   store: LocalConnectorStore;
   env?: Record<string, string | undefined>;
@@ -38,7 +32,7 @@ export function createXBookmarksTierLane(options: {
   onStoreOpened?: (store: LocalConnectorStore) => void;
 }): ExistingStoreTierLane {
   const env = options.env ?? process.env;
-  const secureDbPath = defaultXBookmarksSecureConnectorStoreDbPath(env);
+  const secureDbPath = resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'secure_local', env);
   return createExistingStoreTierLane({
     setId: X_BOOKMARKS_TIER_SET_ID,
     store: options.store,

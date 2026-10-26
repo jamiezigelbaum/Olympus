@@ -48,12 +48,6 @@ export const LOCAL_FILES_TIER_CORPUS_IDS: Readonly<Record<SourceTrustDomain, str
   secure_local: LOCAL_FILES_CORPUS_ID,
 });
 
-export const LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV = 'OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_DB_PATH';
-export const LOCAL_FILES_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV =
-  'OLYMPUS_SOURCE_INDEX_LOCAL_FILES_INTERNAL_CONNECTOR_STORE_DB_PATH';
-export const LOCAL_FILES_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV =
-  'OLYMPUS_SOURCE_INDEX_LOCAL_FILES_PUBLIC_CONNECTOR_STORE_DB_PATH';
-
 /** The source key this connector's exclusion rules are written against. */
 export const LOCAL_FILES_INGESTION_EXCLUSION_SOURCE = LOCAL_FILES_SOURCE_ID;
 
@@ -77,22 +71,6 @@ export function defineLocalFilesCorpus(): SourceIndexCorpusDefinition {
   });
 }
 
-export function defaultLocalFilesConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  return resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'secure_local', env);
-}
-
-export function defaultLocalFilesInternalConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'internal', env);
-}
-
-export function defaultLocalFilesPublicConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'public_safe', env);
-}
-
 /** Where change snapshots for the watched folders are kept. */
 export function localFilesWatchDir(env: Record<string, string | undefined> = process.env): string {
   return resolvedRawPath(LOCAL_FILES_SOURCE_ID, 'watch', env);
@@ -101,9 +79,9 @@ export function localFilesWatchDir(env: Record<string, string | undefined> = pro
 /** Every local files tier store's path: the lifecycle deletes all of them with the source. */
 export function localFilesTierConnectorStoreDbPaths(env: Record<string, string | undefined> = process.env): string[] {
   return [
-    defaultLocalFilesConnectorStoreDbPath(env),
-    defaultLocalFilesInternalConnectorStoreDbPath(env),
-    defaultLocalFilesPublicConnectorStoreDbPath(env),
+    resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'secure_local', env),
+    resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'internal', env),
+    resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'public_safe', env),
   ];
 }
 
@@ -134,7 +112,7 @@ export function createLocalFilesConnectorStore(
 ): LocalConnectorStore {
   const policy = options.policy ?? defaultLocalFilesIngestionPolicy();
   return openConnectorStore({ sourceId: LOCAL_FILES_SOURCE_ID }, {
-    dbPath: defaultLocalFilesConnectorStoreDbPath(env),
+    dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'secure_local', env),
     corpusId: LOCAL_FILES_CORPUS_ID,
     family: 'file',
     trustDomain: 'secure_local',
@@ -151,8 +129,8 @@ export function createLocalFilesTierConnectorStore(
   const policy = options.policy ?? defaultLocalFilesIngestionPolicy();
   return openConnectorStore({ sourceId: LOCAL_FILES_SOURCE_ID }, {
     dbPath: trustDomain === 'internal'
-      ? defaultLocalFilesInternalConnectorStoreDbPath(env)
-      : defaultLocalFilesPublicConnectorStoreDbPath(env),
+      ? resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'internal', env)
+      : resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'public_safe', env),
     corpusId: LOCAL_FILES_TIER_CORPUS_IDS[trustDomain],
     family: 'file',
     trustDomain,
@@ -184,8 +162,8 @@ export function createLocalFilesTierLane(options: {
   const leg = (domain: 'internal' | 'public_safe'): OnDemandTierStore => onDemandTierStore({
     corpusId: LOCAL_FILES_TIER_CORPUS_IDS[domain],
     dbPath: domain === 'internal'
-      ? defaultLocalFilesInternalConnectorStoreDbPath(env)
-      : defaultLocalFilesPublicConnectorStoreDbPath(env),
+      ? resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'internal', env)
+      : resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'public_safe', env),
     create: () => createLocalFilesTierConnectorStore(domain, env, {
       ...(options.policy ? { policy: options.policy } : {}),
       tierLedger: ledger,

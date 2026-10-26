@@ -2345,6 +2345,9 @@ function olympusDataRoot(env = process.env) {
 function olympusDataPath(env, ...segments) {
   return join10(olympusDataRoot(env), ...segments);
 }
+function sharedDataPath(name, env = process.env) {
+  return olympusDataPath(env, SHARED_DATA_FILES[name]);
+}
 function legacyCaptureDataRoot(env = process.env) {
   return join10(xdgDataHome(env), "olympus");
 }
@@ -2366,6 +2369,9 @@ function folderSegment(value, what) {
 function accountFolder(account, env = process.env) {
   return olympusDataPath(env, ACCOUNT_FOLDERS_DIR, folderSegment(account.source_id, "source id"), folderSegment(account.slot, "slot"));
 }
+function hasLegacyLayout(sourceId) {
+  return sourceId in LEGACY_STORES;
+}
 function legacyStoreFile(sourceId, name) {
   if (sourceId === ARCHIVE_IMPORTS) {
     const [family, tier, extra] = name.split(".");
@@ -2380,14 +2386,10 @@ function legacyStoreFile(sourceId, name) {
   return file;
 }
 function legacyOverrideEnvNames(sourceId) {
-  const names = Object.values(LEGACY_STORES[sourceId] ?? {}).flatMap((file) => overrideNamesOf(file));
-  return [...names, ...LEGACY_RAW_OVERRIDES[sourceId] ?? [], ...messagingRawOverrides(sourceId)];
+  return [...messagingRawOverrides(sourceId)];
 }
 function xBookmarksApiUsageDbPath(env = process.env) {
-  return env[X_USAGE_OVERRIDE]?.trim() || olympusDataPath(env, "x-bookmarks-api-usage.sqlite");
-}
-function legacyArchiveStatePath(env) {
-  return env[ARCHIVE_STATE_OVERRIDE]?.trim() || olympusDataPath(env, "archive-imports.json");
+  return sharedDataPath("x-usage", env);
 }
 function accountRawPath(account, name, env = process.env, options = {}) {
   if (RAW_OWNER[name] !== account.source_id)
@@ -2398,9 +2400,6 @@ function accountRawPath(account, name, env = process.env, options = {}) {
   const usage = options.usageDbPath;
   if (name === "x-reconcile.sqlite") {
     if (account.layout === "legacy") {
-      const configured = env[X_RECONCILE_OVERRIDE]?.trim();
-      if (configured)
-        return configured;
       if (usage === ":memory:")
         return ":memory:";
       if (usage?.trim())
@@ -2415,15 +2414,16 @@ function accountRawPath(account, name, env = process.env, options = {}) {
   } else if (account.layout === "legacy") {
     if (name === "watch")
       return olympusDataPath(env, "local-files-watch");
-    const state = legacyArchiveStatePath(env);
-    return name === "archive-imports.json" ? state : join10(dirname7(state), name);
+    return olympusDataPath(env, name);
   }
   return join10(accountFolder(account, env), "raw", name);
 }
 function accountStoreNames(sourceId, archiveFamilies = []) {
-  return sourceId === ARCHIVE_IMPORTS ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`)) : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => file ? [tier] : []);
+  return sourceId === ARCHIVE_IMPORTS ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`)) : FOLDER_ONLY_STORES[sourceId] ? [...FOLDER_ONLY_STORES[sourceId]] : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => file ? [tier] : []);
 }
 function legacyAccountPaths(sourceId, env = process.env, archiveFamilies = []) {
+  if (!hasLegacyLayout(sourceId))
+    return { stores: [], raw: [] };
   const names = accountStoreNames(sourceId, archiveFamilies);
   const stores = names.map((name) => {
     const entry = legacyStoreFile(sourceId, name);
@@ -2561,64 +2561,64 @@ function legacyMessagingPaths(sourceId, env) {
   }
   return { stores: [], raw: [] };
 }
-var ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, TIERS, gmailStore = (infix, overrideInfix) => ({
-  file: `gmail-${infix}connector-store.sqlite`,
-  override: `OLYMPUS_SOURCE_INDEX_GMAIL_${overrideInfix}CONNECTOR_STORE_DB_PATH`
-}), driveStore = (infix, overrideInfix) => ({
-  file: `google-drive-${infix}connector-store.sqlite`,
-  override: `OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_${overrideInfix}CONNECTOR_STORE_DB_PATH`
-}), dropboxStore = (infix, overrideInfix) => ({
-  file: `dropbox-files-${infix}connector-store.sqlite`,
-  override: `OLYMPUS_SOURCE_INDEX_DROPBOX_${overrideInfix}CONNECTOR_STORE_DB_PATH`
-}), localFilesStore = (infix, overrideInfix) => ({
-  file: `local-files-${infix}connector-store.sqlite`,
-  override: `OLYMPUS_SOURCE_INDEX_LOCAL_FILES_${overrideInfix}CONNECTOR_STORE_DB_PATH`
-}), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_LAYOUT_SOURCES, overrideNamesOf = (entry) => entry?.override === undefined ? [] : typeof entry.override === "string" ? [entry.override] : entry.override, RAW_OWNER, ARCHIVE_STATE_OVERRIDE = "OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH", X_USAGE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH", X_RECONCILE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH", LEGACY_RAW_OVERRIDES, TELEGRAM_SOURCE_ID = "telegram.messages", WHATSAPP_SOURCE_ID = "whatsapp.personal.messages", MESSAGING_RAW_NAMES, NATIVE_CAPTURE_OWNER_ENV_NAMES, TELEGRAM_PATH_OVERRIDES, WHATSAPP_PATH_OVERRIDES;
+var SHARED_DATA_FILES, WHATSAPP_SESSION_FILE = "session.db", ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, TIERS, gmailStore = (infix) => ({ file: `gmail-${infix}connector-store.sqlite` }), driveStore = (infix) => ({ file: `google-drive-${infix}connector-store.sqlite` }), dropboxStore = (infix) => ({ file: `dropbox-files-${infix}connector-store.sqlite` }), localFilesStore = (infix) => ({ file: `local-files-${infix}connector-store.sqlite` }), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_ONLY_STORES, FOLDER_LAYOUT_SOURCES, RAW_OWNER, TELEGRAM_SOURCE_ID = "telegram.messages", WHATSAPP_SOURCE_ID = "whatsapp.personal.messages", MESSAGING_RAW_NAMES, NATIVE_CAPTURE_OWNER_ENV_NAMES, TELEGRAM_PATH_OVERRIDES, WHATSAPP_PATH_OVERRIDES;
 var init_olympus_layout = __esm(() => {
   init_linux_engine_layout();
+  SHARED_DATA_FILES = {
+    registry: "registry.json",
+    "data-owner-lock": "data-owner.lock",
+    "remote-connections": "remote-connections.sqlite",
+    "source-dashboard": "source-dashboard.sqlite",
+    "source-scheduler": "source-scheduler.sqlite",
+    "source-watches": "source-watches.sqlite",
+    "file-extraction-jobs": "file-extraction-jobs.sqlite",
+    "ingestion-doctor-state": "source-ingestion-doctor-state.json",
+    "embedding-ledger": "embedding-ledger.jsonl",
+    "classification-ledger": "classification-ledger.jsonl",
+    "answer-latency": "source-answer-latency.jsonl",
+    "x-usage": "x-bookmarks-api-usage.sqlite",
+    "readwise-request-budget": "readwise-daily-request-budget.json",
+    "gmail-request-budget": "gmail-daily-request-budget.json",
+    "google-drive-request-budget": "google-drive-daily-request-budget.json",
+    "credential-broker-state": "credential-broker-state.json",
+    "waiting-private-questions": "waiting-private-questions.sqlite",
+    "tier-migration": "tier-migration",
+    models: "models",
+    "built-in-embedding": "models/built-in-embedding",
+    "built-in-reasoning": "models/built-in-reasoning",
+    "built-in-transcription": "models/built-in-transcription"
+  };
   FOLDER_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
   TIERS = ["secure_local", "internal", "public_safe"];
   LEGACY_STORES = {
     "gmail.email": {
-      internal: gmailStore("", ""),
-      secure_local: gmailStore("secure-", "SECURE_"),
-      public_safe: gmailStore("public-", "PUBLIC_")
+      internal: gmailStore(""),
+      secure_local: gmailStore("secure-"),
+      public_safe: gmailStore("public-")
     },
     "google_drive.docs": {
-      internal: driveStore("", ""),
-      secure_local: driveStore("secure-", "SECURE_"),
-      public_safe: driveStore("public-", "PUBLIC_")
+      internal: driveStore(""),
+      secure_local: driveStore("secure-"),
+      public_safe: driveStore("public-")
     },
     "dropbox.files": {
-      secure_local: dropboxStore("", ""),
-      internal: dropboxStore("internal-", "INTERNAL_"),
-      public_safe: dropboxStore("public-", "PUBLIC_")
+      secure_local: dropboxStore(""),
+      internal: dropboxStore("internal-"),
+      public_safe: dropboxStore("public-")
     },
     "local.files": {
-      secure_local: localFilesStore("", ""),
-      internal: localFilesStore("internal-", "INTERNAL_"),
-      public_safe: localFilesStore("public-", "PUBLIC_")
+      secure_local: localFilesStore(""),
+      internal: localFilesStore("internal-"),
+      public_safe: localFilesStore("public-")
     },
     "readwise.library": {
-      internal: {
-        file: "readwise-connector-store.sqlite",
-        override: "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH"
-      },
-      secure_local: {
-        file: "readwise-secure-connector-store.sqlite",
-        override: "OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH"
-      },
+      internal: { file: "readwise-connector-store.sqlite" },
+      secure_local: { file: "readwise-secure-connector-store.sqlite" },
       public_safe: undefined
     },
     "x.bookmarks": {
-      internal: {
-        file: "x-bookmarks-connector-store.sqlite",
-        override: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH"
-      },
-      secure_local: {
-        file: "x-bookmarks-secure-connector-store.sqlite",
-        override: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_SECURE_CONNECTOR_STORE_DB_PATH"
-      },
+      internal: { file: "x-bookmarks-connector-store.sqlite" },
+      secure_local: { file: "x-bookmarks-secure-connector-store.sqlite" },
       public_safe: undefined
     },
     "archive.imports": { secure_local: undefined, internal: undefined, public_safe: undefined },
@@ -2628,25 +2628,14 @@ var init_olympus_layout = __esm(() => {
       public_safe: undefined
     },
     "whatsapp.personal.messages": {
-      internal: {
-        file: "connector-store-internal.db",
-        override: "OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH",
-        dir: whatsappStateDirs()
-      },
-      secure_local: {
-        file: "connector-store.db",
-        override: [
-          "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH",
-          "OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH",
-          "OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH"
-        ],
-        dir: whatsappStateDirs()
-      },
+      internal: { file: "connector-store-internal.db", dir: whatsappStateDirs() },
+      secure_local: { file: "connector-store.db", dir: whatsappStateDirs() },
       public_safe: undefined
     }
   };
   ARCHIVE_FILE_LABEL = { secure_local: "", internal: "-internal", public_safe: "-public" };
-  FOLDER_LAYOUT_SOURCES = Object.keys(LEGACY_STORES);
+  FOLDER_ONLY_STORES = {};
+  FOLDER_LAYOUT_SOURCES = [...Object.keys(LEGACY_STORES), ...Object.keys(FOLDER_ONLY_STORES)];
   RAW_OWNER = {
     watch: "local.files",
     "x-reconcile.sqlite": "x.bookmarks",
@@ -2654,10 +2643,6 @@ var init_olympus_layout = __esm(() => {
     "archive-import-requests.json": ARCHIVE_IMPORTS,
     "archive-media-bindings.sqlite": ARCHIVE_IMPORTS,
     ...messagingRawOwners()
-  };
-  LEGACY_RAW_OVERRIDES = {
-    "x.bookmarks": [X_USAGE_OVERRIDE, X_RECONCILE_OVERRIDE],
-    [ARCHIVE_IMPORTS]: [ARCHIVE_STATE_OVERRIDE]
   };
   MESSAGING_RAW_NAMES = [
     "telegram-spool",
@@ -2806,7 +2791,7 @@ import {
 import { basename as basename2, dirname as dirname8, isAbsolute as isAbsolute7, join as join11 } from "node:path";
 function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
-  const root = configured || olympusDataPath(env, "models", "built-in-embedding");
+  const root = configured || sharedDataPath("built-in-embedding", env);
   if (!isAbsolute7(root))
     throw new TypeError("The built-in embedding directory must be an absolute path.");
   return {
@@ -5693,9 +5678,6 @@ function isTelegramJsonHead(head) {
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
 }
-function isArchiveCorpusId(corpusId, trustDomain) {
-  return corpusId.startsWith(`${trustDomain}.archive.`);
-}
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
@@ -5903,7 +5885,7 @@ function sourceAccountMovePending(account) {
   return account.migration?.state === "moving" || account.migration?.state === "reverting";
 }
 function sourceRegistryPath(env = process.env) {
-  return olympusDataPath(env, "registry.json");
+  return sharedDataPath("registry", env);
 }
 function readSourceRegistry(env = process.env) {
   return readSourceRegistryAt(sourceRegistryPath(env));
@@ -5996,6 +5978,8 @@ function hasFolderLayout(sourceId) {
 function decideAccountLayout(sourceId, env = process.env) {
   if (!hasFolderLayout(sourceId))
     return { layout: "legacy", why: "its source has no folder layout" };
+  if (!hasLegacyLayout(sourceId))
+    return { layout: "folder", why: "its source never had legacy paths" };
   const pin = pinnedLegacyBy(sourceId, env);
   if (pin)
     return { layout: "legacy", why: `${pin} pins its files` };
@@ -6016,9 +6000,10 @@ function placedAccount(sourceId, env = process.env, slot = DEFAULT_ACCOUNT_SLOT)
   try {
     entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
   } catch (error) {
-    if (error instanceof SourceRegistryError)
-      return { source_id: sourceId, slot, layout: hasAccountFolderOnDisk(sourceId, slot, env) ? "folder" : "legacy" };
-    return { source_id: sourceId, slot, layout: "legacy" };
+    if (error instanceof SourceRegistryError) {
+      return { source_id: sourceId, slot, layout: !hasLegacyLayout(sourceId) || hasAccountFolderOnDisk(sourceId, slot, env) ? "folder" : "legacy" };
+    }
+    return { source_id: sourceId, slot, layout: hasLegacyLayout(sourceId) ? "legacy" : "folder" };
   }
   return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
 }
@@ -6038,43 +6023,6 @@ function hasAccountFolderOnDisk(sourceId, slot, env) {
     return false;
   }
 }
-function storageAccountForCorpus(corpus, registered = []) {
-  const known = [...registered, ...defaultSourceCorpusRegistryConfig().corpora].find((entry) => entry.corpusId === corpus.corpusId);
-  if (known)
-    return { sourceId: known.sourceId };
-  if (isArchiveCorpusId(corpus.corpusId, corpus.trustDomain))
-    return { sourceId: ARCHIVE_IMPORTS_SOURCE_ID };
-  const prefix = `${corpus.trustDomain}.`;
-  const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : "";
-  return { sourceId: unprefixed || corpus.corpusId };
-}
-function declaredConnectorStoreMounts(env = process.env) {
-  const mounts = env[MOUNTS_ENV]?.trim();
-  if (!mounts)
-    return [];
-  let declared;
-  try {
-    declared = JSON.parse(mounts);
-  } catch {
-    return "unreadable";
-  }
-  if (!Array.isArray(declared))
-    return "unreadable";
-  const found = [];
-  for (const entry of declared) {
-    const record = entry && typeof entry === "object" ? entry : {};
-    if (typeof record.corpusId !== "string")
-      continue;
-    const corpusId = record.corpusId.trim();
-    const owner = storageAccountForCorpus({
-      corpusId,
-      trustDomain: typeof record.trustDomain === "string" ? record.trustDomain.trim() : ""
-    });
-    const dbPath = typeof record.dbPath === "string" && record.dbPath.trim() ? record.dbPath.trim() : undefined;
-    found.push({ sourceId: owner.sourceId, corpusId, ...dbPath ? { dbPath } : {} });
-  }
-  return found;
-}
 function pinnedLegacyBy(sourceId, env, withGrant = true) {
   for (const name of legacyOverrideEnvNames(sourceId)) {
     if (env[name]?.trim())
@@ -6083,14 +6031,7 @@ function pinnedLegacyBy(sourceId, env, withGrant = true) {
   const native = nativeCaptureOwnerPin(sourceId, env);
   if (native)
     return native;
-  const grant = withGrant ? captureGrantPin(sourceId, env) : undefined;
-  if (grant)
-    return grant;
-  const mounts = declaredConnectorStoreMounts(env);
-  if (mounts === "unreadable")
-    return `${MOUNTS_ENV} (unreadable)`;
-  const mount = mounts.find((candidate) => candidate.sourceId === sourceId);
-  return mount ? `${MOUNTS_ENV} (${mount.corpusId})` : undefined;
+  return withGrant ? captureGrantPin(sourceId, env) : undefined;
 }
 function captureGrantPin(sourceId, env) {
   const source = sourceId === TELEGRAM_SOURCE_ID ? "telegram" : sourceId === WHATSAPP_SOURCE_ID ? "whatsapp" : undefined;
@@ -6152,7 +6093,6 @@ function legacyFilesState(sourceId, env) {
 function withSqliteFiles(path) {
   return [path, `${path}-wal`, `${path}-shm`];
 }
-var ARCHIVE_IMPORTS_SOURCE_ID = "archive.imports", MOUNTS_ENV = "OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON";
 var init_source_placement = __esm(() => {
   init_archive_formats();
   init_olympus_layout();
@@ -16094,7 +16034,6 @@ function hashString(value) {
 var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_olympus_layout();
-  init_source_placement();
   init_mail_source_scope();
   init_sender_rules();
   init_credential_broker();
@@ -16675,7 +16614,6 @@ function hashString2(value) {
 var GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
   init_olympus_layout();
-  init_source_placement();
   init_source_ingestion_exclusions();
   init_credential_broker();
   init_request_budget();
@@ -18808,6 +18746,7 @@ var init_reconcile_state = __esm(() => {
 // src/workers/x-bookmarks/api-connector.ts
 var X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
 var init_api_connector = __esm(() => {
+  init_source_placement();
   init_credential_broker();
   init_grant_fence();
   init_api2();
@@ -19274,6 +19213,7 @@ var init_qualification2 = __esm(() => {
 
 // src/workers/dropbox-files/tier-set.ts
 var init_tier_set = __esm(() => {
+  init_source_placement();
   init_source_storage();
   init_tiered_store_set();
   init_connector_store2();
@@ -19367,8 +19307,6 @@ var init_store = __esm(() => {
 
 // src/workers/telegram-messages/corpus-adapter.ts
 var init_corpus_adapter4 = __esm(() => {
-  init_olympus_layout();
-  init_source_placement();
   init_source_corpus_registry();
   init_corpus();
 });
@@ -19763,6 +19701,7 @@ var init_archive_target = __esm(() => {
 // src/workers/telegram-messages/store-sync.ts
 var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY;
 var init_store_sync = __esm(() => {
+  init_source_placement();
   init_spool_file_identity();
   init_source_storage();
   init_tiered_store_set();
@@ -20111,6 +20050,7 @@ var init_media_bindings = __esm(() => {
   init_source_placement();
   init_source_storage();
   init_state();
+  init_olympus_layout();
 });
 
 // src/core/account-files.ts
@@ -20833,6 +20773,7 @@ var init_requests = __esm(() => {
   init_source_storage();
   init_manifest2();
   init_state();
+  init_olympus_layout();
   STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
 });
 
@@ -20883,6 +20824,7 @@ var init_remote_oauth_store = __esm(() => {
 var WAITING_QUESTION_LIMITS;
 var init_waiting_private_questions = __esm(() => {
   init_sqlite_migrations();
+  init_olympus_layout();
   WAITING_QUESTION_LIMITS = Object.freeze({
     questionBytes: 2048,
     localQuestionBytes: 8 * 1024,
@@ -20918,7 +20860,7 @@ var init_remote_connections = __esm(() => {
 import { existsSync as existsSync17, mkdirSync as mkdirSync16, readFileSync as readFileSync29, writeFileSync as writeFileSync10 } from "node:fs";
 import { dirname as dirname28 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
-  return olympusDataPath(env, "source-ingestion-doctor-state.json");
+  return sharedDataPath("ingestion-doctor-state", env);
 }
 function readIngestionHealthState(path) {
   try {
@@ -21082,6 +21024,7 @@ var init_source_forget_registry = __esm(() => {
 });
 
 // src/data-lifecycle.ts
+var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
   init_source_placement();
@@ -21104,49 +21047,7 @@ var init_data_lifecycle = __esm(() => {
   init_worker_service();
   init_media_cache();
   init_store_identity();
-});
-
-// src/workers/readwise/tier-set.ts
-var init_tier_set2 = __esm(() => {
-  init_source_placement();
-  init_source_storage();
-  init_tiered_store_set();
-  init_connector();
-});
-
-// src/workers/x-bookmarks/tier-set.ts
-var init_tier_set3 = __esm(() => {
-  init_source_placement();
-  init_source_storage();
-  init_tiered_store_set();
-  init_connector2();
-});
-
-// src/workers/whatsapp/reaction-index.ts
-var init_reaction_index = __esm(() => {
-  init_reactions();
-});
-
-// src/workers/whatsapp/live-connector.ts
-var init_live_connector = __esm(() => {
-  init_capture_spool_secrets();
-  init_reaction_index();
-});
-
-// src/workers/whatsapp/store-sync.ts
-var WHATSAPP_STORE_PLACEMENT;
-var init_store_sync2 = __esm(() => {
-  init_olympus_layout();
-  init_source_placement();
-  init_source_storage();
-  init_tiered_store_set();
-  init_capture_spool_secrets();
-  init_capture_freshness();
-  init_live_connector();
-  WHATSAPP_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S4",
-    trustDomain: "secure_local"
-  });
+  backgroundTrashRemovals = new Set;
 });
 
 // src/workers/source-ingestion-ledger.ts
@@ -21660,6 +21561,7 @@ function formatNumber(value) {
 }
 var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
+  init_source_placement();
   init_config();
   init_source_corpus_registry();
   init_source_ingestion_exclusions();
@@ -21669,13 +21571,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_google_connectors();
   init_source_storage();
   init_data_lifecycle();
-  init_readwise();
-  init_tier_set2();
-  init_x_bookmarks();
-  init_tier_set3();
-  init_store_sync2();
   init_dropbox_files();
-  init_telegram_messages();
   init_store();
   init_archive_formats();
   init_store2();
@@ -26340,7 +26236,7 @@ var SERVICE_ID5 = "olympus-whatsapp-capture";
 var SERVICE_LABEL3 = "WhatsApp capture service";
 var DEFAULT_STARTUP_TIMEOUT_MS2 = Number.POSITIVE_INFINITY;
 var READINESS_FILE2 = "native-service-readiness.json";
-var SESSION_FILE = "session.db";
+var SESSION_FILE = WHATSAPP_SESSION_FILE;
 function createNativeWhatsAppService(options) {
   return createNativeProcessService({
     id: SERVICE_ID5,
@@ -26498,14 +26394,11 @@ var EMBEDDING_SETTING_ENV_NAMES = new Set([
   "OLYMPUS_CONFIG",
   "OLYMPUS_EMAIL_BASE_URL",
   "OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON",
-  "OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH",
   "OLYMPUS_SOVEREIGNTY_CONFIG",
   "OLYMPUS_SOVEREIGNTY_CONFIG_PATH",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_DRIVE_INTERNAL_ENABLED",
-  "OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_DB_PATH",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_ENABLED",
-  "OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_DB_PATH",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_ENABLED",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_ERROR_BACKOFF_SECONDS",
@@ -26530,7 +26423,6 @@ var EMBEDDING_SETTING_ENV_NAMES = new Set([
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_X_BOOKMARKS_ENABLED",
   "OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH",
   "OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY",
-  "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH",
   "OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL",
   "OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH",
   "OLYMPUS_SOURCE_INDEX_EMBEDDING_MEDIA_TIMEOUT_SECONDS",
@@ -26538,13 +26430,6 @@ var EMBEDDING_SETTING_ENV_NAMES = new Set([
   "OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY",
   "OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER",
   "OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS",
-  "OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH",
-  "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH",
-  "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH",
-  "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH",
-  "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH",
-  "OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH",
-  "OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH",
   "OLYMPUS_WHATSAPP_STATE_DIR"
 ]);
 var EMBEDDING_LANE_NAMES = [
@@ -26558,7 +26443,6 @@ var EMBEDDING_LANE_NAMES = [
   "DRIVE_INTERNAL"
 ];
 for (const lane of EMBEDDING_LANE_NAMES) {
-  EMBEDDING_SETTING_ENV_NAMES.add(`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${lane}_DB_PATH`);
   EMBEDDING_SETTING_ENV_NAMES.add(`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${lane}_ENABLED`);
   EMBEDDING_SETTING_ENV_NAMES.add(`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${lane}_CADENCE_PASSES`);
   EMBEDDING_SETTING_ENV_NAMES.add(`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${lane}_MAX_PENDING_CHUNKS`);

@@ -23,7 +23,6 @@ import { ARCHIVE_COMMON_FINDINGS, type ArchiveImportFinding } from '../../core/a
 import { withFileLeaseSync } from '../../core/file-lease.ts';
 import type { ArchiveManifestFile } from './manifest.ts';
 
-export const ARCHIVE_IMPORTS_STATE_PATH_ENV = 'OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH';
 export const ARCHIVE_IMPORTS_SOURCE_ID = 'archive.imports';
 
 /**

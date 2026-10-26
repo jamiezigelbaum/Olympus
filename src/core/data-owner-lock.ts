@@ -27,12 +27,9 @@ import { closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { constants as osConstants } from 'node:os';
 import { dirname } from 'node:path';
-import { olympusDataRoot, olympusDataPath, type LayoutEnv } from './olympus-layout.ts';
+import { olympusDataRoot, SHARED_DATA_FILES, sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
 const runtimeRequire = createRequire(import.meta.url);
-
-/** The lock file, in the data root. */
-const OWNER_LOCK_NAME = 'data-owner.lock';
 
 // <sys/file.h>: the same values on Linux and macOS.
 const LOCK_EX = 2;
@@ -74,12 +71,12 @@ export interface DataOwnerLockOptions {
 
 /** The lock file itself, `<data>/data-owner.lock`. */
 export function dataOwnerLockPath(env: LayoutEnv = process.env): string {
-  return olympusDataPath(env, OWNER_LOCK_NAME);
+  return sharedDataPath('data-owner-lock', env);
 }
 
 /** Whether `name` (a file name, not a path) is the owner lock. */
 export function isDataOwnerLockName(name: string): boolean {
-  return name === OWNER_LOCK_NAME;
+  return name === SHARED_DATA_FILES['data-owner-lock'];
 }
 
 /** Take the lock and hold it until `release()` or the process dies. Throws `DataOwnerBusyError`. */

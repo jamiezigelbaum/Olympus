@@ -123,7 +123,7 @@ describe('native source embedding drain service', () => {
     expect(readStarts(fixture.startsPath)).toEqual([]);
   });
 
-  test('local-only configuration preserves custom paths without a cloud credential', async () => {
+  test('local-only configuration preserves custom settings without a cloud credential, and no store path', async () => {
     const fixture = embeddingFixture();
     writeFileSync(fixture.workerEnvPath, [
       'OLYMPUS_CONFIG=/custom/policy.json',
@@ -139,7 +139,8 @@ describe('native source embedding drain service', () => {
     await service.start({});
     const env = readStarts(fixture.startsPath)[0]!.env;
     expect(env.OLYMPUS_CONFIG).toBe('/custom/policy.json');
-    expect(env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_PROTECTED_TELEGRAM_DB_PATH).toBe('/custom/protected.db');
+    // No env variable relocates a store since source-storage step 6: the drain is handed none.
+    expect(env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_PROTECTED_TELEGRAM_DB_PATH).toBeUndefined();
     expect(env.GEMINI_API_KEY).toBeUndefined();
     expect(env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY).toBeUndefined();
   });

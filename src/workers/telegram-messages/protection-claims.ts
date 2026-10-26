@@ -33,6 +33,7 @@ import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import { moveTieredItem } from '../connector-store/tier-move.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import type { TierWriteIntent } from '../classification/tier-ledger.ts';
 import {
   readTelegramCaptureSpoolNewest,
   type TelegramCaptureSpoolRecord,
@@ -73,7 +74,8 @@ export async function applyTelegramProtectionClaims(args: {
   const readable = (identity: SourceItemIdentity): boolean => readableInOrdinaryLane(args.set, args.internal, identity);
   // A claimed item still served by the ordinary lane, or one whose move an earlier pull began and did not finish (hidden,
   // its content still in the ordinary store): both are moved now.
-  const unfinished = (identity: SourceItemIdentity): boolean => args.set.ledger.getCurrent(identity)?.state === 'moving';
+  const unfinished = (identity: SourceItemIdentity): boolean => args.set.ledger.getCurrent(identity)?.state === 'moving'
+    || isClaimIntent(args.set.ledger.writeIntent(identity));
   const held = args.claims.filter((identity) => readable(identity) || unfinished(identity));
   const ids = new Set([...args.newestKnown.keys(), ...held.map((identity) => identity.localItemId)]);
   const newest = ids.size > 0
@@ -93,7 +95,21 @@ export async function applyTelegramProtectionClaims(args: {
     // and it is purged only once the protected copy is verified. Nothing is deleted on the way, and a move that fails
     // throws with the copy hidden or untouched, never removed: the next pull runs it again.
     adoptIfLegacy(args.set, args.internal, identity);
+    // The move's write intent (the spine's persisted intent, #540) is written first and cleared last: while it is
+    // pending, the set reports the item as owed its body at the version being moved, so no older record is taken
+    // in its place, and a pull a crash cut off finds it unfinished and moves it again.
+    const version = args.internal.storedItemState(identity)?.version
+      ?? args.set.store('secure_local')?.storedItemState(identity)?.version;
+    const intent: TierWriteIntent = {
+      identity: { provider: identity.provider, accountScope: identity.accountScope, providerItemId: identity.providerItemId, ...(identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}), family: identity.family, localItemId: identity.localItemId },
+      kind: 'content',
+      ...(version !== undefined ? { version } : {}),
+      connectorId: TELEGRAM_CLAIM_MOVE_CONNECTOR_ID,
+    };
+    const pending = args.set.ledger.writeIntent(identity);
+    if (!pending || isClaimIntent(pending)) args.set.ledger.putWriteIntent(intent);
     await (args.move ?? moveTieredItem)({ set: args.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+    if (isClaimIntent(args.set.ledger.writeIntent(identity))) args.set.ledger.clearWriteIntent(identity);
     result.moved += 1;
     result.relinquished.push(identity.localItemId);
     if (readable(identity) || unfinished(identity)) throw new Error('Telegram could not take a protected message out of the ordinary lane.');
@@ -103,6 +119,13 @@ export async function applyTelegramProtectionClaims(args: {
     if (!telegramClaimKept(args.set, identity.localItemId)) args.set.ledger.writeMeta(`${CLAIM_META_PREFIX}${identity.localItemId}`, '1');
   }
   return result;
+}
+
+/** The connector id the claim's move writes its intent under. */
+export const TELEGRAM_CLAIM_MOVE_CONNECTOR_ID = 'telegram_protection_claim_move';
+
+function isClaimIntent(intent: TierWriteIntent | undefined): boolean {
+  return intent?.connectorId === TELEGRAM_CLAIM_MOVE_CONNECTOR_ID;
 }
 
 /**

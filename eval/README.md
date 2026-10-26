@@ -112,16 +112,15 @@ local Dropbox index and a reachable Argus lane:
 2. Run against the canonical shared connector store:
 
    ```sh
-   OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH=~/.olympus/indexes/dropbox-files-connector-store.sqlite \
    OLYMPUS_SOURCE_INDEX_ACCOUNT=personal \
    bun run eval:real
    ```
 
-   In the private-host/OpenClaw reference runtime, use the same hydrated connector
-   store configured for the source worker instead of the retired index:
-   `$HOME/.local/share/openclaw/olympus/dropbox-files-connector-store.sqlite`.
-   You can confirm the active path in
-   `~/.config/systemd/user/olympus-email-source.service.d/79-dropbox-connector-store.conf`.
+   The runner reads the Dropbox account's Private store where this install
+   keeps it (its account folder, `sources/dropbox.files/1/stores/secure_local.sqlite`
+   under the data folder, or the legacy `dropbox-files-connector-store.sqlite`
+   until the boot migration moves it). `OLYMPUS_EVAL_DROPBOX_STORE=<path>` names
+   another file, a copy for instance; nothing relocates the worker's own store.
 
    Set `OLYMPUS_EVAL_DROPBOX_APPROVED_SCOPE_KEY` only if the instantiated
    private question set is intentionally limited to one Dropbox approved scope.

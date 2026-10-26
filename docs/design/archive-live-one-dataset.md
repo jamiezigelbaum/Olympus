@@ -90,7 +90,7 @@ decides again.
   item written to one leg only, or left as a Secret's location or a
   deletion's tombstone, still has its version, so an old export never
   restores what was deleted or made a Secret, nor overwrites a partly
-  written item. A record of an incomplete item's own version completes it.
+  written item. A record of an incomplete item's own version completes it (an item is incomplete while a write intent for it is pending).
 - At the same version, a record applies only when it brings content the
   stored item lacks: mail outside the Gmail window is names-only, and a live
   WhatsApp photo is metadata only (the bridge downloads voice notes alone).
@@ -384,6 +384,41 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   its version and a digest of the text and names judged, so two bodies of one
   version are each judged. Known residual: a deletion of an item no pass ever
   stored leaves no row, so a later tie or unversioned body can still be stored.
+- **Order and resume (2026-10-26).** A page emits an item before its
+  children, and a page cut resumes at the earliest record any unyielded item
+  still depends on (a merged names-only item depends on the record that
+  brought its body), so a cut never loses a body or stores a child ahead of
+  its parent.
+- **Write intents (2026-10-26).** An item's legs are written one after the
+  other, so a crash between them used to leave a half state that the next pass
+  had to interpret from the rows (an "incomplete" rule in the intake, a live
+  tie exception, a deferred names-only version move, a hold on skipped
+  incomplete items). That is gone. The ledger holds one **write intent** per
+  item (`tier_write_intents`, schema 10), written in the same transaction as
+  the placement and cleared last, after every leg has its write. Kinds:
+  `deletion` and `secret` (redone from the intent alone), `advance` (a version
+  move over rows that hold the item; the intent is the redo), `content` and
+  `names` (a body or names the legs are owed). At the start of every pass,
+  before any record is read, the set finishes every deletion, secret and
+  advance intent, and the children of a finished deletion go with it. While an
+  intent is pending the lookup reports the intended state (the intent's version
+  and `incomplete`), and reads hide an item with a deletion or Secret intent at
+  once. No path lowers a stored version: a names-only record moves a version by
+  an `advance` intent put in place of the content intent it follows, once every
+  leg has its write. Deviation from "keep the body in the Private held copy":
+  the body and the names are not kept in the ledger, so a `content` or
+  `names` intent is repaired by replaying its own record; when a newer
+  names-only record took an older record's body, the intent also holds that
+  record's version (`bodyVersion`, read back as `owedBodyVersion`) so the replay
+  applies that record at the item's version. Residuals: a deletion of a
+  never-stored item leaves no row; an owed `content` or `names` write waits
+  for its own record; a newer names-only record holds behind an earlier run's
+  owed write until that write is finished.
+- **The hold survives a fetch (2026-10-26).** A held archive item's hold is
+  carried by whatever replaces it: the archive input decorates `fetchItem` as
+  well as `listItems`, and the local-index lane keeps the hold on both of its
+  `fetchItem` replacements. `test/archive-import-hold-guard.test.ts` fails when
+  a connector method is added without a decision (`holds` or `neutral`).
 - **A refused item is told (2026-10-26).** When placement refuses an item (for
   example a trust domain that does not match), the import still completes but
   shows it as a gap, "Not imported" (`item_refused`), with the count, as the
@@ -458,7 +493,10 @@ message beyond its search context (`src/workers/telegram-messages/`,
   is owner-only (0700, files 0600). Every boundary Telegram records (each
   lane's cursor, where the clearing has reached) keeps the file's identity
   and a digest of the 4 KiB that end at it, checked before the boundary is
-  used. Detected: a file removed and written again, and any change within
+  used. A boundary is trusted only on a receipt for exactly its position: a
+  missing receipt, or one for another position (a crash between a cursor's
+  commit and its receipt, or the first pull after this change), counts as a
+  mismatch, which costs one read of the file again. Detected: a file removed and written again, and any change within
   the 4 KiB before a boundary (a record rewritten under a cursor, longer or
   as another lane's). On a mismatch every boundary in that file is dropped:
   its lanes read it again from its start under the intake rule, and the
