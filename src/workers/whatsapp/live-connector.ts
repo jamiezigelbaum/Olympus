@@ -155,6 +155,24 @@ export interface WhatsAppSpoolPassFindings {
   cursorFilesMissing: number;
   /** A listing that stopped at its byte budget, to go on next pass. */
   passBudgetReached: number;
+  /** Media the bridge spooled as waiting for disk space, with what a later download needs (media-fetch.ts). */
+  waitingMedia: WhatsAppWaitingMedia[];
+  /** Messages whose media the bridge has saved itself: nothing is waiting for them any more. */
+  savedMedia: Array<{ chatJid: string; id: string; version: string }>;
+}
+
+/** One message's media waiting for disk space: where it is and the keys to open it, from its spool line. */
+export interface WhatsAppWaitingMedia {
+  chatJid: string;
+  id: string;
+  /** The message's version (its time), which the stored item must still be at. */
+  version: string;
+  mediaType: string;
+  mediaMime?: string;
+  mediaKey?: string;
+  mediaDirectPath: string;
+  mediaFileSha256?: string;
+  mediaFileEncSha256?: string;
 }
 
 export function emptyWhatsAppSpoolPassFindings(): WhatsAppSpoolPassFindings {
@@ -165,6 +183,8 @@ export function emptyWhatsAppSpoolPassFindings(): WhatsAppSpoolPassFindings {
     cursorsRecovered: 0,
     cursorFilesMissing: 0,
     passBudgetReached: 0,
+    waitingMedia: [],
+    savedMedia: [],
   };
 }
 
@@ -250,6 +270,11 @@ export interface WhatsAppRecord extends SpoolMessage {
   reactions?: readonly SourceReaction[];
   /** Archive input only: the media the export carries for this message, each a child item. */
   children?: readonly WhatsAppChildRecord[];
+  /**
+   * Media fetched for a message whose media waited for disk space (media-fetch.ts): the record brings only that
+   * media, at the stored version. A picture or video fills its child alone; a voice note is its message.
+   */
+  mediaFill?: true;
 }
 
 /**
@@ -401,6 +426,13 @@ function createRecordBuilder(
     family: 'chat',
     entriesOf: (record) => {
       const own = recordIdentity(record, account);
+      if (record.mediaFill) {
+        // Fetched media fills what waited for it and restates nothing else: no caption goes out this way.
+        if (record.mediaType !== undefined && CHILD_MEDIA_TYPES.has(record.mediaType)) {
+          return childrenOf(record).map((child) => ({ identity: childIdentity(own, child), bringsContent: child.available && child.locator !== undefined }));
+        }
+        return [{ identity: own, bringsContent: true, authoredAt: record.timestamp }];
+      }
       return [
         {
           identity: own,
@@ -466,6 +498,41 @@ export function createWhatsAppRecordBuilder(options: WhatsAppRecordBuilderOption
 
 /** The media kinds whose bytes are their message's child: a picture or a video is not what was said. */
 const CHILD_MEDIA_TYPES: ReadonlySet<string> = new Set(['image', 'video', 'video_note']);
+
+/** The media kinds the bridge saves, so whose waiting media is fetched later: the children, and voice notes. */
+export const WHATSAPP_FETCHED_MEDIA_TYPES: ReadonlySet<string> = new Set([...CHILD_MEDIA_TYPES, 'audio']);
+
+/** Whether a media type is its message's child (a picture or a video) rather than the message itself. */
+export function isWhatsAppChildMediaType(mediaType: string): boolean {
+  return CHILD_MEDIA_TYPES.has(mediaType);
+}
+
+/** What a listed line says of its media: waiting for disk space (with what a download needs), or saved. */
+function noteMedia(findings: WhatsAppSpoolPassFindings, message: SpoolMessage): void {
+  if (message.mediaType === undefined || !WHATSAPP_FETCHED_MEDIA_TYPES.has(message.mediaType) || message.secretRedacted === true) return;
+  if (message.downloadStatus === WHATSAPP_MEDIA_WAITING_STATUS && message.mediaDirectPath) {
+    findings.waitingMedia.push({
+      chatJid: message.chatJid,
+      id: message.id,
+      version: message.timestamp,
+      mediaType: message.mediaType,
+      mediaDirectPath: message.mediaDirectPath,
+      ...(message.mediaMime !== undefined ? { mediaMime: message.mediaMime } : {}),
+      ...(message.mediaKey !== undefined ? { mediaKey: message.mediaKey } : {}),
+      ...(message.mediaFileSha256 !== undefined ? { mediaFileSha256: message.mediaFileSha256 } : {}),
+      ...(message.mediaFileEncSha256 !== undefined ? { mediaFileEncSha256: message.mediaFileEncSha256 } : {}),
+    });
+  } else if (message.mediaPath !== undefined && message.downloadStatus === 'ok') {
+    findings.savedMedia.push({ chatJid: message.chatJid, id: message.id, version: message.timestamp });
+  }
+}
+
+/** The file name fetched media is kept under in its media folder: the message's stem, marked fetched (media-fetch.ts). */
+export function whatsAppFetchedMediaName(stem: string, ext: string): string {
+  return `${stem}${WHATSAPP_FETCHED_MARK}${ext}`;
+}
+
+const WHATSAPP_FETCHED_MARK = '-fetched';
 
 /**
  * A record's children: the export's media an import listed, or the picture or
@@ -960,6 +1027,7 @@ function readSpoolPage(
           continue;
         }
         messages.push(message);
+        noteMedia(pass.findings, message);
         pageMessages.add(chatScopedKey(message.chatJid, message.id));
         reEmitTargets.delete(chatScopedKey(message.chatJid, message.id));
       }
@@ -1197,6 +1265,11 @@ function recordIdentity(message: SpoolMessage, account: string): SourceItemIdent
   };
 }
 
+/** The local id of a message's media child, as the listing builds it (`recordIdentity`, `childIdentity`). */
+export function whatsAppMediaChildLocalItemId(account: string, chatJid: string, id: string): string {
+  return childProviderItemId(`${account}:${normalizeWhatsAppJid(chatJid)}:${id}`, 'media');
+}
+
 /** Whether a record carries its item's content, not only its names. */
 function recordBringsContent(message: SpoolMessage): boolean {
   if (message.secretRedacted === true) return false;
@@ -1391,6 +1464,8 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
         // Deleted before the line loses its path; a failure here fails the window, which the next pull clears again.
         deleteOwnedMedia(message);
         deleteMediaTemps(message, mediaRoots);
+        // Media fetched for it after it waited for disk space (media-fetch.ts), which no line names.
+        deleteFetchedMedia(message, mediaRoots);
       }
       const namesLeft = message.chatName !== '' || message.senderName !== '' || (message.senderContactName ?? '') !== '';
       // Mentions are display names copied into the text, so they go with it.
@@ -1530,6 +1605,29 @@ function mediaTempFiles(roots: readonly string[], strict: boolean): Array<{ path
   };
   for (const root of roots) walk(root, 0);
   return found;
+}
+
+/**
+ * Removes the media fetched for a message (`<stem>-fetched.<ext>`) from the
+ * media roots and the kind folders in them. A folder that cannot be read
+ * fails the cleanup, as a temp sweep does.
+ */
+function deleteFetchedMedia(message: SpoolMessage, roots: readonly string[]): void {
+  const prefix = `${whatsAppMediaFileStem(message.chatJid, message.id)}${WHATSAPP_FETCHED_MARK}.`;
+  const walk = (dir: string, depth: number): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && depth < MEDIA_TEMP_DEPTH) walk(join(dir, entry.name), depth + 1);
+      else if (entry.isFile() && entry.name.startsWith(prefix)) removeTemp(join(dir, entry.name));
+    }
+  };
+  for (const root of roots) walk(root, 0);
 }
 
 /** Removes a file, failing on anything but its being gone already. */

@@ -8,41 +8,35 @@ package main
 //   - A download is not started below the floor, and one already running
 //     stops when the volume falls below it (the temp writer checks as it
 //     writes). Its message is still spooled at once, with its media "waiting
-//     for disk space" (download_status mediaWaitingStatus).
-//   - What the later download needs is kept as `media/waiting/<stem>.json`
-//     (the message's file stem): where the media is, the keys to open it,
-//     and the digest of the line spooled for the message. Never the line's
-//     words or names: an entry Olympus never grants holds nothing Secret.
+//     for disk space" (download_status mediaWaitingStatus) and everything a
+//     later download needs (where the media is, its keys and hashes, its
+//     type and size). That line is the only record: the bridge keeps no list
+//     of waiting media.
 //   - Waiting media is downloaded only after Olympus has judged its message
-//     not Secret (owner, 2026-10-26). Olympus then writes a grant beside the
-//     entry, `<stem>.grant`: the line it judged, and that line's digest. A
-//     Secret message never gets one, so its media never touches disk.
-//   - Every minute, once the volume is above the floor again, each granted
-//     entry whose grant matches it (the same digest, the same message) is
-//     downloaded in the order it waited, and the message is spooled again
-//     from the grant's line with its media: Olympus fills the waiting child
-//     from that line. An entry without a matching grant is not downloaded.
-//     One that does not fit is skipped, so the smaller ones after it still
-//     go; one that fails for a passing reason (the network) stays; only one
-//     that can never be fetched (gone from WhatsApp's servers, failing its
-//     hash) is spooled as failed. The entry and its grant go only once the
-//     line is written and fsynced, so a crash at any point leaves at most a
-//     granted download, kept or made again (the same bytes reuse the file).
-//   - An entry never granted is dropped after waitingEntryKeep: by then
-//     WhatsApp's servers no longer hold its media anyway.
-//   - A waiting entry is written whole or not at all (a temp renamed into
-//     place); the bridge sweeps a temp a killed bridge left at start and on
-//     every pass.
+//     not Secret (owner, 2026-10-26), and only when Olympus asks: Olympus
+//     alone decides what is fetched. It writes `media/fetch/<stem>.json`
+//     (the message's file stem) once the message it stored is judged not
+//     Secret and the disk is above the floor, and removes it once it no
+//     longer wants the media.
+//   - Every minute, while the volume is above the floor, the bridge
+//     downloads each request that has no answer yet into
+//     `media/fetched/<stem>.part`, fsyncs it, renames it to `<stem><ext>`
+//     and fsyncs the folder. Media that can never be fetched (gone from
+//     WhatsApp's servers, failing its hash) is answered `<stem>.failed`
+//     instead. A passing failure (the network) is left for the next pass.
+//     Nothing is spooled for it, and nothing else is kept: a crash at any
+//     point leaves the request, and the next pass downloads it again.
+//   - Olympus reads the answer into its stored item and removes the answer
+//     and the request; whatever it no longer wants (a message turned Secret,
+//     another version, a request it withdrew) it deletes, whenever the
+//     download finished.
 //   - The capture status receipt says media is waiting for disk space, with
-//     no count, while any entry waits and the volume is below the floor, or a
-//     granted download is still to be made. An entry waiting only for
-//     Olympus's judgment is not a disk problem.
+//     no count, while the volume is below the floor and media waits: a
+//     capture met the floor, or a request cannot be downloaded for it.
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -58,17 +52,18 @@ import (
 
 const (
 	mediaWaitingStatus  = "waiting_for_disk"
-	mediaWaitingDirName = "waiting"
-	mediaGrantSuffix    = ".grant"
-	mediaWaitingTempAge = time.Minute
-	// An entry never granted is dropped after this: WhatsApp's servers keep media for less.
-	waitingEntryKeep   = 30 * 24 * time.Hour
-	diskFloorMinBytes  = 5 * 1024 * 1024 * 1024
-	diskFloorShare     = 20 // one twentieth: 5% of the volume
-	mediaRetryInterval = time.Minute
+	mediaFetchDirName   = "fetch"
+	mediaFetchedDirName = "fetched"
+	mediaPartSuffix     = ".part"
+	mediaFailedSuffix   = ".failed"
+	diskFloorMinBytes   = 5 * 1024 * 1024 * 1024
+	diskFloorShare      = 20 // one twentieth: 5% of the volume
+	mediaFetchInterval  = time.Minute
+	// A request is a few hundred bytes; anything far larger is not Olympus's.
+	mediaRequestMaxBytes = 64 * 1024
 )
 
-// The volume a new queue reads (tests give it one with room).
+// The volume a new floor reads (tests give it one with room).
 var defaultVolumeSpace = volumeSpace
 
 // How many bytes a download writes between two checks of the floor.
@@ -85,22 +80,30 @@ func diskFloor(total uint64) uint64 {
 	return diskFloorMinBytes
 }
 
-// mediaWaitQueue is the one floor and the one list of waiting downloads the
-// three media stores share.
-type mediaWaitQueue struct {
-	dir    string
-	space  func(dir string) (free uint64, total uint64, err error)
-	status *captureStatus
-	mu     sync.Mutex
+// mediaFloor is the one floor the three media stores share, and the
+// downloads Olympus asks for.
+type mediaFloor struct {
+	fetchDir   string
+	fetchedDir string
+	space      func(dir string) (free uint64, total uint64, err error)
+	status     *captureStatus
+	mu         sync.Mutex
+	// A capture met the floor since the volume last had room.
+	metFloor bool
 }
 
-func newMediaWaitQueue(stateDir string) *mediaWaitQueue {
-	return &mediaWaitQueue{dir: filepath.Join(stateDir, "media", mediaWaitingDirName), space: defaultVolumeSpace}
+func newMediaFloor(stateDir string) *mediaFloor {
+	media := filepath.Join(stateDir, "media")
+	return &mediaFloor{
+		fetchDir:   filepath.Join(media, mediaFetchDirName),
+		fetchedDir: filepath.Join(media, mediaFetchedDirName),
+		space:      defaultVolumeSpace,
+	}
 }
 
 // hasRoom says whether the volume holding dir is above the floor. A volume
 // whose space cannot be read is never paused for it.
-func (q *mediaWaitQueue) hasRoom(dir string) bool {
+func (q *mediaFloor) hasRoom(dir string) bool {
 	if q == nil || q.space == nil {
 		return true
 	}
@@ -119,210 +122,236 @@ func existingAncestor(dir string) string {
 	}
 }
 
-// waitingEntry is what a later download needs, and nothing the message said.
-type waitingEntry struct {
-	// The digest of the line spooled for the message (lineDigest): a grant names it.
-	LineSHA256           string `json:"line_sha256"`
-	ChatJID              string `json:"chat_jid"`
-	ID                   string `json:"id"`
-	MediaType            string `json:"media_type"`
-	MediaMime            string `json:"media_mime,omitempty"`
-	MediaDurationSeconds uint32 `json:"media_duration_seconds,omitempty"`
-	MediaKey             string `json:"media_key,omitempty"`
-	MediaDirectPath      string `json:"media_direct_path,omitempty"`
-	MediaFileSHA256      string `json:"media_file_sha256,omitempty"`
-	MediaFileEncSHA256   string `json:"media_file_enc_sha256,omitempty"`
-	MediaKeyTimestamp    int64  `json:"media_key_timestamp,omitempty"`
-}
-
-// mediaGrant is Olympus's leave to download a waiting entry's media: the line
-// it judged not Secret, and that line's digest.
-type mediaGrant struct {
-	LineSHA256 string `json:"line_sha256"`
-	Line       string `json:"line"`
-}
-
-// lineDigest is the digest of a spool line as the spool writer writes it (without its newline).
-func lineDigest(line []byte) string {
-	sum := sha256.Sum256(line)
-	return hex.EncodeToString(sum[:])
-}
-
-func (q *mediaWaitQueue) pathOf(rec spoolRecord) string {
-	return filepath.Join(q.dir, mediaFileStem(rec.ChatJID, rec.ID)+".json")
-}
-
-// grantPathOf is where Olympus writes an entry's grant.
-func grantPathOf(entryPath string) string {
-	return strings.TrimSuffix(entryPath, ".json") + mediaGrantSuffix
-}
-
-// save keeps what a waiting message's download needs, and the digest of the
-// line spooled for it (the same encoding the spool writer uses).
-func (q *mediaWaitQueue) save(rec spoolRecord) {
+// noteWaiting is told when a capture met the floor: the status says so.
+func (q *mediaFloor) noteWaiting() {
 	if q == nil {
 		return
 	}
-	line, err := json.Marshal(rec)
-	if err == nil {
-		entry := waitingEntry{
-			LineSHA256:           lineDigest(line),
-			ChatJID:              rec.ChatJID,
-			ID:                   rec.ID,
-			MediaType:            rec.MediaType,
-			MediaMime:            rec.MediaMime,
-			MediaDurationSeconds: rec.MediaDurationSeconds,
-			MediaKey:             rec.MediaKey,
-			MediaDirectPath:      rec.MediaDirectPath,
-			MediaFileSHA256:      rec.MediaFileSHA256,
-			MediaFileEncSHA256:   rec.MediaFileEncSHA256,
-			MediaKeyTimestamp:    rec.MediaKeyTimestamp,
-		}
-		var payload []byte
-		if payload, err = json.Marshal(entry); err == nil {
-			if err = os.MkdirAll(q.dir, 0o700); err == nil {
-				err = writeFileAtomicPrivate(q.pathOf(rec), payload)
-			}
-		}
+	q.mu.Lock()
+	q.metFloor = true
+	q.mu.Unlock()
+	if q.status != nil {
+		q.status.setMediaWaiting(true)
 	}
-	if err != nil {
-		log.Printf("olympus-whatsapp-bridge: could not keep a message's media waiting for disk space: %v", err)
-	}
-	q.report()
 }
 
-// waiting is the waiting entries, oldest first.
-func (q *mediaWaitQueue) waiting() []string {
-	entries, err := os.ReadDir(q.dir)
+// fetchRequest is Olympus's request for one message's waiting media.
+type fetchRequest struct {
+	ChatJID            string `json:"chat_jid"`
+	ID                 string `json:"id"`
+	MediaType          string `json:"media_type"`
+	MediaMime          string `json:"media_mime,omitempty"`
+	MediaKey           string `json:"media_key,omitempty"`
+	MediaDirectPath    string `json:"media_direct_path"`
+	MediaFileSHA256    string `json:"media_file_sha256,omitempty"`
+	MediaFileEncSHA256 string `json:"media_file_enc_sha256,omitempty"`
+}
+
+// requests is the stems Olympus asks for, oldest first.
+func (q *mediaFloor) requests() []string {
+	entries, err := os.ReadDir(q.fetchDir)
 	if err != nil {
 		return nil
 	}
 	type named struct {
-		path string
+		stem string
 		at   time.Time
 	}
 	var found []named
 	for _, entry := range entries {
-		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") || strings.HasPrefix(entry.Name(), ".") {
+		name := entry.Name()
+		if !entry.Type().IsRegular() || !strings.HasSuffix(name, ".json") || strings.HasPrefix(name, ".") {
 			continue
 		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		found = append(found, named{path: filepath.Join(q.dir, entry.Name()), at: info.ModTime()})
+		found = append(found, named{stem: strings.TrimSuffix(name, ".json"), at: info.ModTime()})
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].at.Before(found[j].at) })
-	paths := make([]string, 0, len(found))
+	stems := make([]string, 0, len(found))
 	for _, each := range found {
-		paths = append(paths, each.path)
+		stems = append(stems, each.stem)
 	}
-	return paths
+	return stems
 }
 
-// report tells the capture status whether media waits for disk space: an
-// entry waits while the volume is below the floor, or a granted one is still
-// to be fetched (an entry waiting only for Olympus's judgment is not a disk
-// problem).
-func (q *mediaWaitQueue) report() {
-	if q == nil || q.status == nil {
-		return
+// readRequest reads a request; ok is false for one that is gone, cannot be
+// read, or is not for the message its name says.
+func (q *mediaFloor) readRequest(stem string) (fetchRequest, bool) {
+	var request fetchRequest
+	path := filepath.Join(q.fetchDir, stem+".json")
+	info, err := os.Stat(path)
+	if err != nil || info.Size() > mediaRequestMaxBytes {
+		return request, false
 	}
-	waiting := false
-	low := !q.hasRoom(q.dir)
-	for _, path := range q.waiting() {
-		if low {
-			waiting = true
-			break
-		}
-		if entry, ok := readEntry(path); ok {
-			if _, granted := grantFor(path, entry); granted {
-				waiting = true
-				break
-			}
-		}
+	raw, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(raw, &request) != nil {
+		return request, false
 	}
-	q.status.setMediaWaiting(waiting)
+	if request.ID == "" || request.MediaDirectPath == "" || mediaFileStem(request.ChatJID, request.ID) != stem {
+		return request, false
+	}
+	return request, true
 }
 
-// sweepTemps removes the temps of waiting entries a killed bridge never
-// renamed into place (`.<stem>.json.tmp<random>`): all of them at start, when
-// none is being written (minAge 0), and on every pass those past
-// mediaWaitingTempAge (an entry is renamed into place at once).
-func (q *mediaWaitQueue) sweepTemps(minAge time.Duration) {
+// answered says whether a request has its answer already: the media, or why it can never be fetched.
+func (q *mediaFloor) answered(stem string, ext string) bool {
+	for _, name := range []string{stem + ext, stem + mediaFailedSuffix} {
+		if _, err := os.Lstat(filepath.Join(q.fetchedDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// sweepParts removes the downloads a killed bridge left unfinished. Run at
+// start, when none is being written.
+func (q *mediaFloor) sweepParts() {
 	if q == nil {
 		return
 	}
-	entries, err := os.ReadDir(q.dir)
+	entries, err := os.ReadDir(q.fetchedDir)
 	if err != nil {
 		return
 	}
 	for _, entry := range entries {
-		if !entry.Type().IsRegular() || !isWaitingTemp(entry.Name()) {
-			continue
-		}
-		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) >= minAge {
-			_ = os.Remove(filepath.Join(q.dir, entry.Name()))
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), mediaPartSuffix) {
+			_ = os.Remove(filepath.Join(q.fetchedDir, entry.Name()))
 		}
 	}
 }
 
-// isWaitingTemp says whether a name is the temp of a waiting entry's write (writeFileAtomicPrivate).
-func isWaitingTemp(name string) bool {
-	return strings.HasPrefix(name, ".") && strings.Contains(name, ".json.tmp")
-}
-
-// readEntry reads a waiting entry; ok is false for one that is gone or cannot be read.
-func readEntry(path string) (waitingEntry, bool) {
-	var entry waitingEntry
-	raw, err := os.ReadFile(path)
-	if err != nil || json.Unmarshal(raw, &entry) != nil || entry.LineSHA256 == "" {
-		return entry, false
-	}
-	return entry, true
-}
-
-// grantFor is the line an entry's grant gives leave to spool again with its
-// media, when there is a grant and it matches the entry: the same digest, a
-// line with that digest, and the same message.
-func grantFor(entryPath string, entry waitingEntry) (spoolRecord, bool) {
-	var rec spoolRecord
-	raw, err := os.ReadFile(grantPathOf(entryPath))
-	if err != nil {
-		return rec, false
-	}
-	var grant mediaGrant
-	if json.Unmarshal(raw, &grant) != nil || grant.LineSHA256 != entry.LineSHA256 || lineDigest([]byte(grant.Line)) != entry.LineSHA256 {
-		return rec, false
-	}
-	if json.Unmarshal([]byte(grant.Line), &rec) != nil || rec.ID != entry.ID || rec.ChatJID != entry.ChatJID {
-		return rec, false
-	}
-	return rec, true
-}
-
-// dropEntry removes an entry and its grant, the grant last.
-func dropEntry(path string) {
-	_ = os.Remove(path)
-	_ = os.Remove(grantPathOf(path))
-}
-
-// run retries the waiting downloads every interval until ctx ends.
-func (q *mediaWaitQueue) run(ctx context.Context, store *audioMediaStore, writer *spoolWriter) {
+// run downloads what Olympus asks for every interval until ctx ends.
+func (q *mediaFloor) run(ctx context.Context, store *audioMediaStore) {
 	if q == nil {
 		return
 	}
-	q.report()
-	ticker := time.NewTicker(mediaRetryInterval)
+	q.fetch(ctx, store)
+	ticker := time.NewTicker(mediaFetchInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			q.retry(ctx, store, func(rec spoolRecord) error { return writer.writeDurably(ctx, rec) })
+			q.fetch(ctx, store)
 		}
 	}
+}
+
+// fetch downloads every request without an answer, oldest first, while the
+// volume is above the floor. One too large for the room there is now is
+// skipped, so the smaller ones after it may still go.
+func (q *mediaFloor) fetch(ctx context.Context, store *audioMediaStore) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	blocked := false
+	for _, stem := range q.requests() {
+		if ctx.Err() != nil {
+			return
+		}
+		request, ok := q.readRequest(stem)
+		if !ok {
+			continue
+		}
+		ext := extensionFromMime(request.MediaMime)
+		if q.answered(stem, ext) {
+			continue
+		}
+		if !q.hasRoom(q.fetchedDir) {
+			blocked = true
+			break
+		}
+		err := q.download(ctx, store, stem, ext, request)
+		switch {
+		case err == nil:
+		case errors.Is(err, errWaitingForDisk):
+			blocked = true
+		case permanentDownloadError(err):
+			if err := writeAnswer(filepath.Join(q.fetchedDir, stem+mediaFailedSuffix), []byte(classifyDownloadError(err))); err != nil {
+				log.Printf("olympus-whatsapp-bridge: could not record media that can never be fetched: %v", err)
+			}
+		default:
+			// A passing failure (the network): the request stays for the next pass.
+			log.Printf("olympus-whatsapp-bridge: a requested media download failed for now: %v", err)
+		}
+	}
+	room := q.hasRoom(q.fetchedDir)
+	if room {
+		q.metFloor = false
+	}
+	if q.status != nil {
+		q.status.setMediaWaiting(!room && (blocked || q.metFloor))
+	}
+}
+
+// download streams one request's media into `<stem>.part`, then gives it its
+// name and makes both durable. The part is gone whatever happened.
+func (q *mediaFloor) download(ctx context.Context, store *audioMediaStore, stem string, ext string, request fetchRequest) error {
+	if store == nil || store.downloader == nil {
+		return errors.New("no downloader")
+	}
+	if err := os.MkdirAll(q.fetchedDir, 0o700); err != nil {
+		return err
+	}
+	part := filepath.Join(q.fetchedDir, stem+mediaPartSuffix)
+	file, err := os.OpenFile(part, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(part)
+	writer := &floorFile{file: file, floor: q, dir: q.fetchedDir}
+	media := fetchRequestOf(request)
+	if err := store.downloader.DownloadMediaWithPathToFile(ctx, media.directPath, media.encSHA256, media.fileSHA256, media.mediaKey, media.mediaType, "", false, writer); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(part, filepath.Join(q.fetchedDir, stem+ext)); err != nil {
+		return err
+	}
+	return syncDir(q.fetchedDir)
+}
+
+// writeAnswer writes a small answer whole and durably: its file fsynced, then its folder.
+func writeAnswer(path string, payload []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+func syncDir(dir string) error {
+	handle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+	return handle.Sync()
 }
 
 // permanentDownloadError says whether a download can never succeed (its
@@ -346,80 +375,6 @@ func permanentDownloadError(err error) bool {
 		}
 	}
 	return false
-}
-
-// retry downloads the granted waiting media while the volume is above the
-// floor, in the order it waited, and spools each message again, from the
-// line Olympus granted, with its media. An entry without a grant that matches
-// it is not downloaded. An entry and its grant go only once `spool` says the
-// line is durably written.
-func (q *mediaWaitQueue) retry(ctx context.Context, store *audioMediaStore, spool func(spoolRecord) error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	defer q.report()
-	q.sweepTemps(mediaWaitingTempAge)
-	for _, path := range q.waiting() {
-		entry, ok := readEntry(path)
-		if !ok {
-			dropEntry(path)
-			continue
-		}
-		rec, granted := grantFor(path, entry)
-		if !granted {
-			// Not judged yet, or judged Secret: nothing is downloaded. One never granted goes in time.
-			if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) >= waitingEntryKeep {
-				dropEntry(path)
-			}
-			continue
-		}
-		kind := store.forMediaType(entry.MediaType)
-		if kind == nil {
-			dropEntry(path)
-			continue
-		}
-		if !q.hasRoom(kind.dir) {
-			return
-		}
-		saved, size, err := kind.downloadPath(ctx, entry.ChatJID, entry.ID, entry.MediaMime, retryRequestOf(entry))
-		if errors.Is(err, errWaitingForDisk) {
-			// Too large for the room there is now: the smaller ones after it may still fit.
-			continue
-		}
-		if err != nil && !permanentDownloadError(err) {
-			// A passing failure (the network): it stays waiting for the next pass.
-			continue
-		}
-		if err != nil {
-			rec.DownloadStatus = "failed:" + classifyDownloadError(err)
-		} else {
-			rec.MediaPath = saved
-			rec.MediaSizeBytes = size
-			rec.DownloadStatus = "ok"
-		}
-		if err := spool(rec); err != nil {
-			// Not written: the entry and its grant stay, and the next pass makes the line again (the
-			// same bytes reuse the file saved now).
-			log.Printf("olympus-whatsapp-bridge: could not spool a message whose media was waiting: %v", err)
-			continue
-		}
-		dropEntry(path)
-	}
-}
-
-// forMediaType is the store a spooled media type saves into.
-func (store *audioMediaStore) forMediaType(mediaType string) *audioMediaStore {
-	if store == nil {
-		return nil
-	}
-	switch mediaType {
-	case "image":
-		return store.images
-	case "video", "video_note":
-		return store.video
-	case "audio":
-		return store
-	}
-	return nil
 }
 
 // mediaRequest is what a download needs: where the media is and the keys to open it.
@@ -446,7 +401,8 @@ func requestOf(media whatsmeow.DownloadableMessage) mediaRequest {
 	return request
 }
 
-func retryRequestOf(rec waitingEntry) mediaRequest {
+// fetchRequestOf is the download Olympus's request names, from the fields the spool line carried.
+func fetchRequestOf(rec fetchRequest) mediaRequest {
 	decode := func(value string) []byte {
 		if value == "" {
 			return nil

@@ -65,7 +65,7 @@ type mediaDownloader interface {
 // own and its ReadFrom goes through Write.
 type floorFile struct {
 	file      *os.File
-	queue     *mediaWaitQueue
+	floor     *mediaFloor
 	dir       string
 	unchecked int64
 }
@@ -83,7 +83,7 @@ func (f *floorFile) room(n int) error {
 		return nil
 	}
 	f.unchecked = 0
-	if !f.queue.hasRoom(f.dir) {
+	if !f.floor.hasRoom(f.dir) {
 		return errWaitingForDisk
 	}
 	return nil
@@ -184,7 +184,7 @@ func (store *audioMediaStore) sweepTemps(now time.Time) {
 	if store == nil {
 		return
 	}
-	store.queue.sweepTemps(0)
+	store.floor.sweepParts()
 	for _, each := range []*audioMediaStore{store, store.images, store.video} {
 		if each == nil {
 			continue
@@ -225,7 +225,7 @@ func (store *audioMediaStore) downloadPath(ctx context.Context, chatJID string, 
 	if err := os.MkdirAll(store.dir, 0o700); err != nil {
 		return "", 0, err
 	}
-	if !store.queue.hasRoom(store.dir) {
+	if !store.floor.hasRoom(store.dir) {
 		return "", 0, errWaitingForDisk
 	}
 	stem := mediaFileStem(chatJID, messageID)
@@ -239,7 +239,7 @@ func (store *audioMediaStore) downloadPath(ctx context.Context, chatJID string, 
 		tmp.Close()
 		return "", 0, err
 	}
-	file := &floorFile{file: tmp, queue: store.queue, dir: store.dir}
+	file := &floorFile{file: tmp, floor: store.floor, dir: store.dir}
 	if err := store.downloader.DownloadMediaWithPathToFile(ctx, request.directPath, request.encSHA256, request.fileSHA256, request.mediaKey, request.mediaType, "", false, file); err != nil {
 		tmp.Close()
 		return "", 0, err

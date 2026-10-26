@@ -36862,7 +36862,7 @@ var init_spool_reader = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, MEDIA_TEMP_MAX_AGE_MS;
+var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, WHATSAPP_FETCHED_MEDIA_TYPES, MEDIA_TEMP_MAX_AGE_MS;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
@@ -36875,16 +36875,18 @@ var init_live_connector = __esm(() => {
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
   TARGET_READ_CHUNK_BYTES = 4 * 1024;
   CHILD_MEDIA_TYPES = new Set(["image", "video", "video_note"]);
+  WHATSAPP_FETCHED_MEDIA_TYPES = new Set([...CHILD_MEDIA_TYPES, "audio"]);
   MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
 });
 
-// src/workers/whatsapp/media-grants.ts
-var ENTRY_MAX_BYTES;
-var init_media_grants = __esm(() => {
+// src/workers/whatsapp/media-fetch.ts
+var DISK_FLOOR_MIN_BYTES;
+var init_media_fetch = __esm(() => {
+  init_source_inputs();
+  init_live_connector();
   init_spool_index();
   init_spool_reader();
-  init_live_connector();
-  ENTRY_MAX_BYTES = 64 * 1024;
+  DISK_FLOOR_MIN_BYTES = 5 * 1024 * 1024 * 1024;
 });
 
 // src/workers/whatsapp/store-sync.ts
@@ -36900,7 +36902,7 @@ var init_store_sync2 = __esm(() => {
   init_spool_reader();
   init_spool_file_identity();
   init_spool_index();
-  init_media_grants();
+  init_media_fetch();
   init_child_media();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",

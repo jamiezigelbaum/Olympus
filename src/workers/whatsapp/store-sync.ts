@@ -53,8 +53,8 @@ import {
 } from './live-connector.ts';
 import { offsetAfterLines, terminatedLinesEnd } from './spool-reader.ts';
 import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
-import { WhatsAppSpoolIndex, type SpoolPlace } from './spool-index.ts';
-import { grantWhatsAppWaitingMedia } from './media-grants.ts';
+import { WhatsAppSpoolIndex } from './spool-index.ts';
+import { runWhatsAppMediaFetch, type WhatsAppVolumeSpace } from './media-fetch.ts';
 import { createWhatsAppChildReader, type WhatsAppChildReader } from './child-media.ts';
 
 export const WHATSAPP_PERSONAL_SOURCE_ID = 'whatsapp.personal.messages';
@@ -232,16 +232,6 @@ function byteOffsetOf(cursor: string | undefined): number | undefined {
   return found ? Number(found[1]) : undefined;
 }
 
-/**
- * The spool place a committed cursor stands at: every line starting before it
- * was judged. Without a byte offset only the files before the cursor's count.
- */
-function committedPlaceOf(cursor: string | undefined): SpoolPlace | undefined {
-  const line = lineCursorOf(cursor);
-  const file = line === undefined ? undefined : /^(.+):\d+$/u.exec(line)?.[1];
-  return file === undefined ? undefined : { file, offset: byteOffsetOf(cursor) ?? 0 };
-}
-
 /** A committed cursor in the `<file>:<lines>` form the spool's Secrets clearing counts by. */
 function lineCursorOf(cursor: string | undefined): string | undefined {
   if (cursor === undefined) return undefined;
@@ -327,6 +317,8 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   mediaDir?: string;
   /** Reads a child's bytes by its locator (default: the bridge's media folders only; child-media.ts). */
   readChild?: WhatsAppChildReader;
+  /** The space on the media folders' volume (test seam; media-fetch.ts). */
+  mediaVolumeSpace?: WhatsAppVolumeSpace;
   /**
    * The lane's per-tier stores (createWhatsAppTierLane), whose secure leg is
    * `store`. Absent: the single-store lane exactly as before.
@@ -384,6 +376,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
       let tiered: TieredLaneReceiptCounts = {};
       let redacted: CaptureSpoolRedactionResult | undefined;
       let redactionFailed = false;
+      let mediaWaitingForDisk = false;
       if (tierSet) {
         const setRun = await tierSet.sync(connector, sync);
         run = mergedTieredLaneRun(setRun, 'secure_local').sync;
@@ -412,22 +405,25 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
             `[olympus:whatsapp] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
           );
         }
-        // Media waiting for disk space is fetched only once its message is judged not Secrets (media-grants.ts).
-        // After the clearing, which a failure skips; a grant that cannot be written is tried again next pull.
+        // Media waiting for disk space is fetched only once its message is judged not Secrets, and only as
+        // Olympus asks (media-fetch.ts). After the clearing, which a failure skips; the next pull goes on.
         if (!redactionFailed) {
           try {
-            grantWhatsAppWaitingMedia({
-              waitingDir: join(defaultWhatsAppStateDir(env), 'media', 'waiting'),
+            const media = join(defaultWhatsAppStateDir(env), 'media');
+            mediaWaitingForDisk = (await runWhatsAppMediaFetch({
               spoolDir,
               account,
-              ledger: tierSet.ledger,
-              committed: committedPlaceOf(
-                sanitizeWhatsAppLiveCursor(tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined),
-              ),
-            });
+              mediaRoot: media,
+              folders: { image: join(media, 'images'), video: join(media, 'video'), audio: mediaDir },
+              tierSet,
+              findings,
+              sync,
+              readChild,
+              ...(options.mediaVolumeSpace ? { space: options.mediaVolumeSpace } : {}),
+            })).waitingForDisk;
           } catch (error) {
             console.error(
-              `[olympus:whatsapp] media_grant_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
+              `[olympus:whatsapp] media_fetch_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
             );
           }
         }
@@ -443,6 +439,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
         tiered,
         redacted,
         redactionFailed,
+        mediaWaitingForDisk,
       );
     },
 
@@ -702,7 +699,10 @@ function whatsappSyncReceipt(
   tiered: TieredLaneReceiptCounts = {},
   redacted?: CaptureSpoolRedactionResult,
   redactionFailed = false,
+  /** Olympus's own word: media it keeps waiting while the volume is below the floor (media-fetch.ts). */
+  olympusMediaWaiting = false,
 ): WhatsAppConnectorStoreSyncReceipt {
+  const mediaWaiting = state.status?.mediaWaitingForDisk === true || olympusMediaWaiting;
   // The bridge's heartbeat tells a quiet account from a stopped capture; a
   // bridge that writes none is judged by its newest message, as before.
   const capture = captureLiveness(
@@ -723,7 +723,7 @@ function whatsappSyncReceipt(
     ...(findings.unresolvedReactionTargets > 0 ? [WHATSAPP_UNRESOLVED_REACTIONS_WARNING] : []),
     ...(findings.cursorsRecovered > 0 || findings.cursorFilesMissing > 0 ? [WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING] : []),
     ...(recentDrop && (state.status?.droppedMessages ?? 0) > 0 ? [WHATSAPP_CAPTURE_DROPPED_WARNING] : []),
-    ...(state.status?.mediaWaitingForDisk === true ? [WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING] : []),
+    ...(mediaWaiting ? [WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING] : []),
     ...(capture.status === 'stale' ? [WHATSAPP_CAPTURE_STALE_WARNING] : []),
     ...(capture.stopped ? [WHATSAPP_CAPTURE_DISCONNECTED_WARNING] : []),
     ...(capture.status === 'unavailable' ? [WHATSAPP_CAPTURE_UNAVAILABLE_WARNING] : []),
@@ -748,7 +748,7 @@ function whatsappSyncReceipt(
       spool_pass_budget_reached: findings.passBudgetReached > 0 ? 1 : 0,
       capture_dropped_messages: state.status?.droppedMessages ?? 0,
       // Read by the card as a findable problem (source-dashboard.ts, CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT).
-      capture_media_waiting_for_disk: state.status?.mediaWaitingForDisk === true ? 1 : 0,
+      capture_media_waiting_for_disk: mediaWaiting ? 1 : 0,
       ...captureFreshnessCounts(capture),
       spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
       ...tiered,

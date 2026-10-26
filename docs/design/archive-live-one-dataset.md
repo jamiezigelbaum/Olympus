@@ -701,24 +701,21 @@ export's media are (section 5).
   safeguard is the computer's own: a free-space floor on the volume, the
   larger of 5 GB and 5% of it (`media_waiting.go`). Below it no download
   starts, and one running stops (the temp writer checks as it writes); the
-  message is still spooled, its media `waiting_for_disk`, and what the
-  download needs is kept as `media/waiting/<stem>.json`: the message's ids,
-  its media keys and the digest of the line spooled for it, never its words
-  or names. The bridge alone writes and removes an entry (written whole; a
-  temp a killed bridge left is swept at start and on every pass). Waiting
-  media is downloaded only after Olympus has judged its message not Secret
-  (owner, 2026-10-26; see Secrets below). Every minute, once the volume has
-  room again, the granted downloads are made in order (one too large for
-  the room is skipped, the smaller ones after it still go; a passing
-  failure stays waiting; only media gone from WhatsApp's servers is spooled
-  as failed) and each message is spooled again with its media, which fills
-  the waiting child. An entry and its grant go only once that line is
-  written and fsynced, so a crash leaves a granted download that is made
-  again (the same bytes reuse the saved file). An entry never granted is
-  dropped after 30 days, when WhatsApp's servers no longer hold its media.
-  While media waits below the floor, or a granted download is still to be
-  made, the capture status says media is waiting (no count), and the card
-  shows "media waiting for disk space" with what to do. Every temp has one name,
+  message is still spooled, its media `waiting_for_disk`, with what a later
+  download needs on the line (where the media is, its keys and hashes, its
+  type and size). That line is the only record: the bridge keeps no list of
+  waiting media. Waiting media is downloaded only after Olympus has judged
+  its message not Secret, and only when Olympus asks (owner, 2026-10-26;
+  review round 8 on #558: Olympus alone owns what is fetched; see Secrets
+  below). The bridge downloads each request in `media/fetch/` into
+  `media/fetched/<stem>.part`, fsyncs it, renames it to `<stem><ext>` and
+  fsyncs the folder, every minute while the volume is above the floor (one
+  too large for the room is skipped, the smaller ones after it still go; a
+  passing failure is left for the next pass; media gone from WhatsApp's
+  servers is answered `<stem>.failed`). It spools nothing for it, so a
+  crash leaves at most a request to do again. While media waits below the
+  floor the capture status says so (no count), as does Olympus's own pass,
+  and the card shows "media waiting for disk space" with what to do. Every temp has one name,
   `.olympus-media-<pid>-<boot>-<stem>-*.tmp` (boot: this boot's nonce, since
   a pid is unique only within a boot): removed on every failure, and swept
   at start and before Secrets clearing when its writer is gone (pid dead, or
@@ -753,19 +750,34 @@ export's media are (section 5).
   folder (or, in the older layout, the audio folder) and the bridge's
   picture and video folders beside it.
 - **Secrets.** Saved media follows the judgment of what it is part of.
-  Media waiting for disk space is pulled, not pushed (`media-grants.ts`):
-  after each pull's clearing, Olympus writes `<stem>.grant` beside a
-  waiting entry once the line the entry names is the message's newest
-  line, the tier set has committed past it, and the ledger's judgment of
-  the message is neither pending nor Secrets (nor is its media child's).
-  The grant holds that line and its digest, made exclusively and fsynced.
-  The bridge downloads only an entry whose grant matches it (the same
-  digest, the same message) and spools the grant's line with the media. A
-  message judged Secrets never gets a grant, so its media is never
-  fetched, and Olympus takes back a grant whose message turned Secrets
-  before the bridge used it, or whose entry is gone. A line the clearing
-  rewrote no longer matches its entry, so it is never granted. Olympus
-  never writes or removes an entry.
+  Media waiting for disk space is fetched only as Olympus asks
+  (`media-fetch.ts`). The listing notes each waiting line, and Olympus keeps
+  one row per message (`media-fetch.sqlite` beside the spool index). After
+  each pull's clearing it makes the bridge's folders match that state and
+  the stores:
+  - **Requests.** A message stored at the row's version and judged not
+    Secret (nor its media child), whose names are settled, gets
+    `media/fetch/<stem>.json` while the disk is above the floor. An
+    uncaptioned picture qualifies: the test is "not Secret", not "content
+    judged". The request is written to a temp, fsynced, linked into place
+    and its folder fsynced; a request that says something else is
+    replaced.
+  - **Answers.** An answer is kept in its media folder as
+    `<stem>-fetched<ext>` and read into the stored item through the
+    connector's own record builder (`mediaFill`). That fills the picture's
+    or video's child, or the voice note itself, and nothing else: no
+    caption goes out this way. Extraction and judgment follow as for any
+    media. Once the fill is committed, the request and answer go, and the
+    row is kept as done, so a replayed line is not asked for again.
+  - **Withdrawals.** Whatever Olympus no longer wants is deleted, whenever
+    its download finished. For a message that turned Secret, is stored at
+    another version, or is gone, that means its request, answer and
+    fetched copy. It also means any request, answer or part whose message
+    has no row. So a download that lands after its message turned Secret
+    is deleted on the next pass.
+
+  The clearing deletes a fetched copy whose media is later judged Secret,
+  though no line names it.
 - **Reading large media.** Keeping every file does not mean reading every
   file into memory: the extraction source hands a file reader the media as
   a file (`fetchFile`), copied a chunk at a time from the descriptor the

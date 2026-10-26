@@ -200,8 +200,8 @@ type spoolRecord struct {
 	MediaFileSHA256      string            `json:"media_file_sha256,omitempty"`
 	MediaFileEncSHA256   string            `json:"media_file_enc_sha256,omitempty"`
 	MediaKeyTimestamp    int64             `json:"media_key_timestamp,omitempty"`
-	// Set by Olympus on a line it cleared as Secrets (live-connector.ts); kept
-	// whenever the bridge spools a line again, so it is judged Secrets again.
+	// Set by Olympus on a line it cleared as Secrets (live-connector.ts), so a
+	// replay of the line is judged Secrets again.
 	SecretRedacted bool `json:"secret_redacted,omitempty"`
 	// Reaction payload. Present only on media_type "reaction" lines, which stay
 	// empty-text records with every required field populated so an older
@@ -387,8 +387,8 @@ func startManualPairing(stateDir string, spoolDir string, allowed map[string]str
 	// What a bridge killed mid-download left behind goes before anything is captured.
 	audioStore.sweepTemps(time.Now())
 	// Media waiting for disk space is downloaded once the volume has room again, and said in the status receipt.
-	audioStore.queue.status = writer.status
-	go audioStore.queue.run(ctx, audioStore, writer)
+	audioStore.floor.status = writer.status
+	go audioStore.floor.run(ctx, audioStore)
 	go writer.run()
 
 	fatalEvents := make(chan string, 1)
@@ -808,8 +808,8 @@ func startNativeCapture(stateDir string, spoolDir string, native nativeCaptureCo
 	// What a bridge killed mid-download left behind goes before anything is captured.
 	audioStore.sweepTemps(time.Now())
 	// Media waiting for disk space is downloaded once the volume has room again, and said in the status receipt.
-	audioStore.queue.status = writer.status
-	go audioStore.queue.run(ctx, audioStore, writer)
+	audioStore.floor.status = writer.status
+	go audioStore.floor.run(ctx, audioStore)
 	go writer.run()
 
 	fatalEvents := make(chan string, 1)
@@ -1021,10 +1021,6 @@ func recordFromMessage(ctx context.Context, client *whatsmeow.Client, audioStore
 		} else if note := evt.Message.GetPtvMessage(); note != nil && audioStore.video != nil {
 			rec.applyAudioCapture(audioStore.video.captureMedia(ctx, rec.ChatJID, rec.ID, note, note.GetSeconds()))
 		}
-	}
-	// Media waiting for disk space: the line is kept until it can be downloaded (media_waiting.go).
-	if rec.DownloadStatus == mediaWaitingStatus && audioStore != nil {
-		audioStore.queue.save(rec)
 	}
 	return rec, true
 }
@@ -1275,7 +1271,7 @@ type audioMediaStore struct {
 	dir        string
 	downloader mediaDownloader
 	// The free-space floor and the downloads waiting for it, shared by every kind (media_waiting.go).
-	queue *mediaWaitQueue
+	floor *mediaFloor
 	// Pictures and videos are saved beside the voice notes, each kind in its
 	// own folder (nil: that kind keeps metadata only).
 	images *audioMediaStore
@@ -1305,13 +1301,13 @@ type audioCaptureResult struct {
 }
 
 func newAudioMediaStore(stateDir string, downloader mediaDownloader) *audioMediaStore {
-	queue := newMediaWaitQueue(stateDir)
+	floor := newMediaFloor(stateDir)
 	return &audioMediaStore{
 		dir:        filepath.Join(stateDir, "media", "audio"),
 		downloader: downloader,
-		queue:      queue,
-		images:     &audioMediaStore{dir: filepath.Join(stateDir, "media", "images"), downloader: downloader, queue: queue},
-		video:      &audioMediaStore{dir: filepath.Join(stateDir, "media", "video"), downloader: downloader, queue: queue},
+		floor:      floor,
+		images:     &audioMediaStore{dir: filepath.Join(stateDir, "media", "images"), downloader: downloader, floor: floor},
+		video:      &audioMediaStore{dir: filepath.Join(stateDir, "media", "video"), downloader: downloader, floor: floor},
 	}
 }
 
@@ -1335,7 +1331,9 @@ func (store *audioMediaStore) captureMedia(ctx context.Context, chatJID string, 
 	// Streamed into a temp (media_files.go): never held in memory, however large.
 	path, size, err := store.download(ctx, chatJID, messageID, result.MediaMime, media)
 	if errors.Is(err, errWaitingForDisk) {
+		// Spooled with what a later download needs; Olympus asks for it once the message is judged (media_waiting.go).
 		result.DownloadStatus = mediaWaitingStatus
+		store.floor.noteWaiting()
 		return result
 	}
 	if err != nil {
@@ -1541,7 +1539,7 @@ func contactDisplayName(ctx context.Context, contacts contactLookup, jid types.J
 // fsync each.
 type spoolWriter struct {
 	spoolDir string
-	records  chan spoolItem
+	records  chan spoolRecord
 	done     chan struct{}
 	status   *captureStatus
 
@@ -1549,17 +1547,10 @@ type spoolWriter struct {
 	fileDate string
 }
 
-// spoolItem is one line to spool; `written`, when set, is told once the line
-// is written and fsynced (or why it was not).
-type spoolItem struct {
-	rec     spoolRecord
-	written chan<- error
-}
-
 func newSpoolWriter(spoolDir string) *spoolWriter {
 	return &spoolWriter{
 		spoolDir: spoolDir,
-		records:  make(chan spoolItem, spoolQueueSize),
+		records:  make(chan spoolRecord, spoolQueueSize),
 		done:     make(chan struct{}),
 		status:   newCaptureStatus(spoolDir),
 	}
@@ -1567,7 +1558,7 @@ func newSpoolWriter(spoolDir string) *spoolWriter {
 
 func (w *spoolWriter) enqueue(rec spoolRecord) {
 	select {
-	case w.records <- spoolItem{rec: rec}:
+	case w.records <- rec:
 	default:
 		// Queue full means the disk has been failing writes for thousands of
 		// messages; losing this line is the lesser evil vs. blocking the
@@ -1575,25 +1566,6 @@ func (w *spoolWriter) enqueue(rec spoolRecord) {
 		// receipt, which Olympus reports, not only logged.
 		w.status.recordDrop()
 		log.Print("olympus-whatsapp-bridge: spool queue full, dropping one message")
-	}
-}
-
-// writeDurably spools one line and returns once it is written and fsynced:
-// what removes the line's only other copy (a media waiting entry) waits for it.
-// It waits for room in the queue rather than dropping, since nothing else
-// holds the line once its caller lets go.
-func (w *spoolWriter) writeDurably(ctx context.Context, rec spoolRecord) error {
-	written := make(chan error, 1)
-	select {
-	case w.records <- spoolItem{rec: rec, written: written}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	select {
-	case err := <-written:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
@@ -1609,8 +1581,8 @@ func (w *spoolWriter) run() {
 		close(stopStatus)
 		<-statusDone
 	}()
-	for item := range w.records {
-		batch := []spoolItem{item}
+	for rec := range w.records {
+		batch := []spoolRecord{rec}
 	drain:
 		for {
 			select {
@@ -1623,19 +1595,10 @@ func (w *spoolWriter) run() {
 				break drain
 			}
 		}
-		records := make([]spoolRecord, 0, len(batch))
-		for _, each := range batch {
-			records = append(records, each.rec)
-		}
-		if err := w.writeBatch(records); err != nil {
+		if err := w.writeBatch(batch); err != nil {
 			// A spool that cannot be written means capture is silently dead.
 			// Exit loudly; systemd restarts us and offline sync re-delivers.
 			log.Fatalf("olympus-whatsapp-bridge: spool write failed: %v", err)
-		}
-		for _, each := range batch {
-			if each.written != nil {
-				each.written <- nil
-			}
 		}
 	}
 	if w.file != nil {

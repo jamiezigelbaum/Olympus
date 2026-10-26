@@ -83,13 +83,13 @@ quota: every piece of media is kept. Each download streams into a temp file,
 never into memory. The one safeguard is the computer's: below a free-space
 floor on the volume (the larger of 5 GB and 5% of it) no download starts and
 a running one stops; the message is still spooled with `"download_status":
-"waiting_for_disk"`, and what the download needs (never the message's words)
-is kept in `media/waiting/`. The media is downloaded only once Olympus has
-judged the message not Secret and written a grant beside the entry
-(`<stem>.grant`, the judged line and its digest); then, once there is room
-again (checked every minute), the message is spooled again from that line
-with its media. `capture-status.json` says `"media_waiting_for_disk": true`
-meanwhile. A saved file's line carries `media_path`, `media_mime` and
+"waiting_for_disk"` and what a later download needs, and the bridge keeps
+nothing else. The media is downloaded only once Olympus asks: it writes
+`media/fetch/<stem>.json` after judging the message not Secret, and the
+bridge, every minute while there is room, downloads it to
+`media/fetched/<stem><ext>` (or answers `<stem>.failed` for media that can
+never be fetched), spooling nothing. `capture-status.json` says
+`"media_waiting_for_disk": true` while media waits below the floor. A saved file's line carries `media_path`, `media_mime` and
 `download_status`. Olympus reads a saved picture or video as its message's
 child, and deletes it when the picture is judged Secrets.
 
