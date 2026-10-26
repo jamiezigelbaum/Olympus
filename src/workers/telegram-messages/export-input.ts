@@ -20,6 +20,7 @@ import {
   type TelegramExportRecordContext,
 } from './export-records.ts';
 import type { TelegramRecordItems } from './record-builder.ts';
+import { telegramExportFacts } from './export-facts.ts';
 
 /** The locator of a media file an archive input bound, in the shared shape (archive-import/input-media.ts, WhatsApp lane). */
 export function telegramExportMediaLocator(archiveId: string, bindingId: string): string {
@@ -105,7 +106,12 @@ export function telegramExportInput(
           };
         },
         account(section, ordinal, value) {
-          const built = telegramAccountEntryRecord(context, section, ordinal, value, { exportedAt: new Date(file.version.mtimeMs).toISOString() });
+          const facts = telegramExportFacts(archive.root, file);
+          const occurrence = facts.contactOccurrences.get(`${section.name}:${ordinal}`);
+          const built = telegramAccountEntryRecord(context, section, ordinal, value, {
+            ...(facts.contentTime ? { contentTime: facts.contentTime } : {}),
+            ...(occurrence ? { occurrence } : {}),
+          });
           return { unit: { record: built.record }, mediaFiles: built.mediaFiles };
         },
       });

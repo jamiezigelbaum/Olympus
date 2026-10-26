@@ -59,11 +59,9 @@ export interface ParentRef {
   identity?: TierLedgerIdentity;
 }
 
-/**
- * The separator between a parent's `providerItemId` and its child's key in the
- * child's own `providerItemId` (docs/design/child-items.md, "Contract").
- */
-export const CHILD_ITEM_ID_SEPARATOR = '#child:';
+// The separator between a parent's `providerItemId` and its child's key, from the one place child ids are built.
+import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
+export { CHILD_ITEM_ID_SEPARATOR };
 
 /**
  * The parent's identity, from a child's: the contract gives a child the

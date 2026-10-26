@@ -14087,6 +14087,7 @@ function writeIntentFromRow(row) {
     kind: row.kind,
     ...row.location === 1 ? { location: true } : {},
     ...row.body_version !== null ? { bodyVersion: row.body_version } : {},
+    ...row.item_family !== null ? { itemFamily: row.item_family } : {},
     connectorId: row.connector_id
   };
 }
@@ -15862,9 +15863,9 @@ class TierLedger {
   putWriteIntent(intent) {
     this.db.query(`
       INSERT OR REPLACE INTO tier_write_intents (
-        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null);
+        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version, item_family
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null);
   }
   writeIntent(identity) {
     const row = this.db.query(`
@@ -16743,6 +16744,7 @@ function tierLedgerMigrations() {
             connector_id TEXT NOT NULL DEFAULT '',
             written_at TEXT NOT NULL,
             body_version TEXT,
+            item_family TEXT,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);
@@ -19236,6 +19238,9 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
+// src/core/child-item-id.ts
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
 // src/workers/connector-store/child-visibility.ts
 function parentIdentityOf(child) {
   const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
@@ -19374,7 +19379,7 @@ function hiddenChildKeys(lane, probes) {
   }
   return childrenWithHiddenParents(lane, links);
 }
-var CHILD_ITEM_ID_SEPARATOR = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   HIDDEN = { visible: false, gone: false };
@@ -23716,7 +23721,7 @@ var init_local_index = __esm(() => {
             content: { kind: "metadata_only" },
             metadata: {},
             fetchedAt: startedAt
-          }, options.connectorId, "observed", syncRunId, options.trustTier, true);
+          }, options.connectorId, "observed", syncRunId, options.trustTier, options.insert !== true);
         })();
       } finally {
         if (!this.db.inTransaction)
@@ -33604,9 +33609,9 @@ var init_record_builder = __esm(() => {
 });
 
 // src/workers/telegram-messages/media-child.ts
-var TELEGRAM_CHILD_KEY = "media", CHILD_ITEM_ID_SEPARATOR2 = "#child:", TELEGRAM_MEDIA_CHILD_SUFFIX, LIVE_MEDIA_MAX_READ_BYTES;
+var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, LIVE_MEDIA_MAX_READ_BYTES;
 var init_media_child = __esm(() => {
-  TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR2}${TELEGRAM_CHILD_KEY}`;
+  TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
   LIVE_MEDIA_MAX_READ_BYTES = 64 * 1024 * 1024;
 });
 
@@ -33920,12 +33925,23 @@ var init_connector4 = __esm(() => {
   SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
   LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
 });
+// src/workers/telegram-messages/export-facts.ts
+var SCAN_CHUNK_BYTES, remembered;
+var init_export_facts = __esm(() => {
+  init_byte_source();
+  init_json_stream();
+  init_message();
+  SCAN_CHUNK_BYTES = 1 << 20;
+  remembered = new Map;
+});
+
 // src/workers/telegram-messages/export-records.ts
 var init_export_records = __esm(() => {
   init_message();
   init_account();
   init_corpus_adapter4();
   init_capture_spool_connector();
+  init_export_facts();
 });
 
 // src/workers/telegram-messages/export-input.ts
@@ -33934,6 +33950,7 @@ var init_export_input = __esm(() => {
   init_media_child();
   init_connector4();
   init_export_records();
+  init_export_facts();
 });
 
 // src/workers/telegram-messages/archive-target.ts

@@ -25,6 +25,7 @@ import {
 } from './corpus-adapter.ts';
 import { telegramMessageItem, type TelegramCaptureSpoolRecord } from './capture-spool-connector.ts';
 import { telegramPeerId } from './peer-id.ts';
+import { telegramContactBaseKey } from './export-facts.ts';
 
 /** The chat types Telegram Desktop writes, as live capture names them (`chat_type_from_entity`). */
 const LIVE_CHAT_TYPES: Readonly<Record<string, string>> = {
@@ -171,9 +172,14 @@ export type TelegramExportOutcome =
   | { kind: 'skipped'; reason: 'message_without_text' }
   | { kind: 'gap'; reason: 'message_unreadable' | 'message_content_unsupported' | 'chat_unknown' };
 
-/** The time an export was made, when the input knows it (its file's modification time): what an account entry's version says. */
+/**
+ * What orders two exports' snapshots of an account entry: the export's content time, the newest time it
+ * holds (export-facts.ts). An export with none says nothing of when it was made: its entries never replace.
+ */
 export interface TelegramExportClock {
-  exportedAt?: string;
+  contentTime?: string;
+  /** The entry's place among the contacts of its export that share its key. */
+  occurrence?: number;
 }
 
 const SERVICE_FIELDS = ['title', 'new_title', 'members', 'duration_seconds', 'duration', 'discard_reason', 'period', 'amount', 'currency', 'boosts', 'inviter'];
@@ -316,17 +322,18 @@ export function telegramAccountConversation(section: AccountSection): string {
  * it began, the profile and other data as the one entry they are. Otherwise
  * its content.
  */
-export function telegramAccountEntryKey(section: AccountSection, value: unknown, ordinal: number): string {
+export function telegramAccountEntryKey(section: AccountSection, value: unknown, ordinal: number, occurrence = 0): string {
   if (section.whole) return section.name;
+  if (isRecord(value) && (section.name === 'contacts' || section.name === 'frequent_contacts')) {
+    // Who a contact is: its user id, else its number, else its names and the date it was added; contacts of one
+    // export that still share a key are told apart by their place among them, never merged by name.
+    const base = telegramContactBaseKey(value);
+    return occurrence > 0 ? `${base}~${occurrence}` : base;
+  }
   if (isRecord(value)) {
-    const userId = telegramScalar(value.user_id);
-    if ((section.name === 'contacts' || section.name === 'frequent_contacts') && userId) return `user${userId}`;
     const parts = section.name === 'sessions' || section.name === 'web_sessions'
       ? [value.device_model, value.platform, value.application_name, value.domain, value.bot_username, value.created_unixtime ?? value.created]
-      : section.name === 'contacts' || section.name === 'frequent_contacts'
-        // A contact is who its number is (a renamed contact is the same one); without a number, its names.
-        ? (telegramScalar(value.phone_number) ? [value.phone_number] : [value.first_name, value.last_name, value.name, value.category])
-        : [];
+      : [];
     const known = parts.map((part) => telegramScalar(part) ?? '');
     if (known.some((part) => part !== '')) return sha256(known.join('\x1f')).slice(0, 24);
   }
@@ -348,11 +355,12 @@ export function telegramAccountEntryRecord(
 ): { record: TelegramCaptureSpoolRecord; mediaFiles: number } {
   const content = accountEntryContent(section, value);
   const conversationId = telegramAccountConversation(section);
-  const id = telegramAccountEntryKey(section, value, ordinal);
-  // An entry has no time of its own: its version is when the export was made, so a later export's snapshot of
-  // the same entry is newer (its text may have changed) and an older export's never replaces it.
-  const exportedAt = liveIso(clock.exportedAt) ?? '';
-  const sourceVersion = `${context.account}:${conversationId}:${id}:text:${sha256(content.text).slice(0, 16)}:${exportedAt}`;
+  const id = telegramAccountEntryKey(section, value, ordinal, clock.occurrence ?? 0);
+  // An entry has no time of its own: its version is the export's content time, so a later export's snapshot of
+  // the same entry is newer and an older export's never replaces it. Two snapshots at the same content time, or
+  // one with no time, are a tie, and a tie keeps what is stored.
+  const contentTime = liveIso(clock.contentTime) ?? '';
+  const sourceVersion = `${context.account}:${conversationId}:${id}:text:${sha256(content.text).slice(0, 16)}${contentTime ? `:${contentTime}` : ''}`;
   const capturedItem = telegramMessageItem({
     account: context.account,
     conversationId,

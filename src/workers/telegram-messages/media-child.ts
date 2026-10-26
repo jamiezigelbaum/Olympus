@@ -7,14 +7,12 @@
 
 import { lstatSync, readFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
+import { CHILD_ITEM_ID_SEPARATOR, childProviderItemId } from '../../core/child-item-id.ts';
 import type { RawItem } from '../../core/contracts.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 
-// The child's key within its message: Telegram's `media`. The child id is
-// `<parent>#child:<key>`, the rule of src/core/child-item-id.ts (#550), written
-// out here until that lands.
+// The child's key within its message: Telegram's `media`; its id comes from the one builder (child-item-id.ts).
 const TELEGRAM_CHILD_KEY = 'media';
-const CHILD_ITEM_ID_SEPARATOR = '#child:';
 export const TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
 
 /** The live capture's locator of a kept media file: the file's path under the spool. */
@@ -37,7 +35,7 @@ export function telegramMediaChild(
   deferredBytes: RawItem['deferredBytes'],
   options: { version?: string } = {},
 ): RawItem {
-  const providerItemId = `${parent.identity.providerItemId}${TELEGRAM_MEDIA_CHILD_SUFFIX}`;
+  const providerItemId = childProviderItemId(parent.identity.providerItemId, TELEGRAM_CHILD_KEY);
   const version = options.version ?? parent.identity.sourceVersion;
   const identity: SourceItemIdentity = {
     family: parent.identity.family,

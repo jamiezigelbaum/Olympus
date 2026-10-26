@@ -17300,6 +17300,9 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
+// src/core/child-item-id.ts
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
 // src/workers/connector-store/child-visibility.ts
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
@@ -19361,7 +19364,7 @@ var init_record_builder = __esm(() => {
 });
 
 // src/workers/telegram-messages/media-child.ts
-var TELEGRAM_CHILD_KEY = "media", CHILD_ITEM_ID_SEPARATOR = "#child:", TELEGRAM_MEDIA_CHILD_SUFFIX, LIVE_MEDIA_MAX_READ_BYTES;
+var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, LIVE_MEDIA_MAX_READ_BYTES;
 var init_media_child = __esm(() => {
   TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
   LIVE_MEDIA_MAX_READ_BYTES = 64 * 1024 * 1024;
@@ -19677,12 +19680,23 @@ var init_connector4 = __esm(() => {
   SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
   LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
 });
+// src/workers/telegram-messages/export-facts.ts
+var SCAN_CHUNK_BYTES, remembered;
+var init_export_facts = __esm(() => {
+  init_byte_source();
+  init_json_stream();
+  init_message();
+  SCAN_CHUNK_BYTES = 1 << 20;
+  remembered = new Map;
+});
+
 // src/workers/telegram-messages/export-records.ts
 var init_export_records = __esm(() => {
   init_message();
   init_account();
   init_corpus_adapter4();
   init_capture_spool_connector();
+  init_export_facts();
 });
 
 // src/workers/telegram-messages/export-input.ts
@@ -19691,6 +19705,7 @@ var init_export_input = __esm(() => {
   init_media_child();
   init_connector4();
   init_export_records();
+  init_export_facts();
 });
 
 // src/workers/telegram-messages/archive-target.ts
