@@ -7,15 +7,17 @@
 // connector builds it exactly as it builds a live message
 // (live-connector.ts, createWhatsAppRecordBuilder), into the account's stores.
 //
-// - Matching (match-keys.ts): a message's key is its chat, its time slot, its
-//   sender and its text without media markers, and messages with equal keys
-//   are counted on the key itself, in the export's order. The k-th export
-//   message with a key is the k-th live message with it (the live side is
-//   the spool index's digests of live capture's current versions, caught up
-//   within a budget, never a rescan of the spool). One it does not find gets
-//   an id of its own, recorded in the match ledger (match-ledger.ts) by its
-//   key and occurrence: the same in a second import, and the item a live
-//   message found later with the same key and occurrence is stored as.
+// - Matching (match-keys.ts), on this side only and strictly: a message's key
+//   is its chat, its time slot (after the zone is applied), its sender and
+//   its text or caption without media markers. An export message is a live
+//   message already stored only when exactly one export message has the key
+//   (the whole slot is counted, past a page's end too) and exactly one live
+//   message ever had it, in any version, as its current one (the spool
+//   index's digests, caught up within a budget, never a rescan). Media
+//   without words is never matched. Anything else is its own item, with an
+//   id from its key and occurrence: the same in a second import. A live
+//   message always keeps its own id: one delivered after an import brought
+//   it is a second item, a visible duplicate (design section 4).
 // - Time zone (export-zone.ts): chosen once, on the first pass, from the
 //   export's messages in the window live capture covers (its first and last
 //   message, a day either side): this computer's zone first, then any zone
@@ -62,7 +64,6 @@ import {
   unsentKey,
   type TimePrecision,
 } from './match-keys.ts';
-import { WhatsAppMatchLedger } from './match-ledger.ts';
 import { WhatsAppSpoolIndex } from './spool-index.ts';
 import { catchUpWhatsAppSpoolIndex } from './live-connector.ts';
 import { chooseExportTimeZone, isKnownTimeZone, wallTimeToUtcMs } from './export-zone.ts';
@@ -78,6 +79,10 @@ const SAMPLE_MESSAGES = 50_000;
 const SAMPLE_BYTES = 1024 * 1024 * 1024;
 /** How much of the live spool one pass may index before matching (the rest is matched the other way, later). */
 const LIVE_INDEX_BYTES = 64 * 1024 * 1024;
+/** How many messages past a page's end are read to count the time slot it ends in; a slot fuller than this is in doubt. */
+const SLOT_LOOKAHEAD_MESSAGES = 1_000;
+/** How much of the export that lookahead may read. */
+const SLOT_LOOKAHEAD_BYTES = 4 * 1024 * 1024;
 const DAY_MS = 24 * 3_600_000;
 
 export const WHATSAPP_INPUT_FINDINGS = {
@@ -216,8 +221,7 @@ export function createWhatsAppExportInput(options: WhatsAppExportInputOptions): 
         // Live capture's side, as the spool index holds it: caught up within a budget first.
         catchUpWhatsAppSpoolIndex(options.spoolDir, LIVE_INDEX_BYTES);
         const index = WhatsAppSpoolIndex.open(options.spoolDir);
-        const ledger = WhatsAppMatchLedger.open(options.spoolDir);
-        const matching: Matching = { index, ledger };
+        const matching: Matching = { index };
         try {
           let decided: InputState;
           if (decoded.state) {
@@ -248,12 +252,25 @@ export function createWhatsAppExportInput(options: WhatsAppExportInputOptions): 
             ...(listing.limit !== undefined ? { limit: listing.limit } : {}),
           })) {
             const records: WhatsAppRecord[] = [];
-            page.items.forEach((item, at) => {
+            const keyed = page.items.flatMap((item, at) => {
               const message = exportMessageOf(item);
-              if (!message) return;
-              const place = positions[at] ?? { fileIndex: message.sourceFileIndex, offset: 0 };
-              records.push(recordOf(message, decided, matching, media, (finding) => archive.report({ ...finding, fileIndex: place.fileIndex, offset: place.offset })));
+              return message ? [{ message, at, keyed: keyOf(message, decided, matching) }] : [];
             });
+            // How many export messages hold each key in all: the slot open when the previous page ended (carried), this
+            // page, and the rest of the slot this page ends in, read ahead.
+            const totals = new Map<string, number>();
+            const carried = decided.g;
+            for (const { keyed: { key, slot } } of keyed) totals.set(key, (totals.get(key) ?? (carried?.s === slot ? carried.c[key] ?? 0 : 0)) + 1);
+            const last = keyed.at(-1);
+            if (last && !page.done && page.nextCursor !== undefined) {
+              const ahead = await countSlotAhead(archive, page.nextCursor, last.keyed.slot, decided, matching);
+              for (const [key, count] of ahead) totals.set(key, (totals.get(key) ?? 0) + count);
+            }
+            for (const { message, at, keyed: k } of keyed) {
+              const place = positions[at] ?? { fileIndex: message.sourceFileIndex, offset: 0 };
+              records.push(recordOf(message, k, totals.get(k.key) ?? 1, decided, matching, media,
+                (finding) => archive.report({ ...finding, fileIndex: place.fileIndex, offset: place.offset })));
+            }
             positions = [];
             const nextCursor = page.nextCursor !== undefined ? encodeCursor(decided, page.nextCursor) : undefined;
             yield page.truncated === true
@@ -262,17 +279,15 @@ export function createWhatsAppExportInput(options: WhatsAppExportInputOptions): 
           }
         } finally {
           index?.close();
-          ledger?.close();
         }
       })();
     },
   };
 }
 
-/** Live capture's side of the matching, and what the inputs agreed so far. */
+/** Live capture's side of the matching. */
 interface Matching {
   index: WhatsAppSpoolIndex | undefined;
-  ledger: WhatsAppMatchLedger | undefined;
 }
 
 /**
@@ -408,42 +423,109 @@ function createMediaLocator(archive: ArchiveConnectorInput): MediaLocator {
   };
 }
 
-/**
- * One export message as the bridge's record: live's message when the counted
- * key says it is one (under the imported id when a live message already took
- * one), else its own, recorded in the match ledger by key and occurrence.
- */
-function recordOf(
-  message: ExportMessage,
-  state: InputState,
-  matching: Matching,
-  media: MediaLocator,
-  report: (finding: Omit<ArchiveImportFinding, 'fileIndex' | 'offset'>) => void,
-): WhatsAppRecord {
+/** An export message's key, and what it is made of. */
+interface KeyedMessage {
+  ms: number;
+  chatJid: string;
+  owner: boolean;
+  caption: string;
+  files: string[];
+  omitted: boolean;
+  key: string;
+  /** The chat and time slot: the messages whose keys are counted together. */
+  slot: string;
+}
+
+function keyOf(message: ExportMessage, state: InputState, matching: Matching): KeyedMessage {
   const ms = wallTimeToUtcMs(message.wall, state.z) ?? Date.parse(`${message.wall}Z`);
   const chatJid = chatOf(state, matching, message.chat);
   const owner = state.m !== undefined && hash(nameKey(message.sender)) === state.m;
   const sender = owner ? OWNER_SENDER : nameKey(message.sender);
   const { caption, files, omitted } = splitMedia(message.text);
-  const text = textKey(caption);
-  const key = exactKey(chatJid, ms, message.precision, sender, text);
-  // Messages with equal keys are counted on the key itself, in the export's order; the count carries over a
-  // page that ends inside a time slot, and starts again at the next slot.
-  const slot = `${chatJid}\u0000${timeSlot(ms, message.precision)}`;
+  return {
+    ms,
+    chatJid,
+    owner,
+    caption,
+    files,
+    omitted,
+    key: exactKey(chatJid, ms, message.precision, sender, textKey(caption)),
+    slot: `${chatJid}\u0000${timeSlot(ms, message.precision)}`,
+  };
+}
+
+/**
+ * The keys of the export messages after a page's end that are still in the
+ * slot the page ended in (an export is in time order, so the slot's rest is
+ * next), read quietly within a bound. A slot fuller than the bound counts
+ * every key in it twice: in doubt, nothing in it is matched.
+ */
+async function countSlotAhead(
+  archive: ArchiveConnectorInput,
+  cursor: string,
+  slot: string,
+  state: InputState,
+  matching: Matching,
+): Promise<Map<string, number>> {
+  const quiet = createWhatsAppArchiveConnector({
+    ...archive,
+    report: () => undefined,
+    reportPosition: () => undefined,
+    reportItemPositions: () => undefined,
+    maxBytesPerListing: SLOT_LOOKAHEAD_BYTES,
+    pageSize: 100,
+  });
+  const counts = new Map<string, number>();
+  let read = 0;
+  for await (const page of quiet.listItems({ cursor })) {
+    for (const item of page.items) {
+      const message = exportMessageOf(item);
+      if (!message) continue;
+      // The join decision is the import's own; a peek never makes one.
+      const keyed = keyOf(message, { ...state, j: { ...state.j } }, matching);
+      if (keyed.slot !== slot) return counts;
+      counts.set(keyed.key, (counts.get(keyed.key) ?? 0) + 1);
+      read += 1;
+      if (read >= SLOT_LOOKAHEAD_MESSAGES) {
+        for (const key of counts.keys()) counts.set(key, 2);
+        return counts;
+      }
+    }
+    if (page.truncated === true) {
+      // Out of bytes before the slot ended: in doubt.
+      for (const key of counts.keys()) counts.set(key, 2);
+      return counts;
+    }
+  }
+  return counts;
+}
+
+/**
+ * One export message as the bridge's record: the live message already stored
+ * when the match is certain (one export message and one live message hold the
+ * key, see the header), else its own, with an id from its key and occurrence.
+ */
+function recordOf(
+  message: ExportMessage,
+  keyed: KeyedMessage,
+  total: number,
+  state: InputState,
+  matching: Matching,
+  media: MediaLocator,
+  report: (finding: Omit<ArchiveImportFinding, 'fileIndex' | 'offset'>) => void,
+): WhatsAppRecord {
+  const { ms, chatJid, owner, caption, files, omitted, key, slot } = keyed;
+  // Messages with equal keys are counted in the export's order; the count carries over a page that ends inside a
+  // time slot, and starts again at the next slot.
   if (state.g?.s !== slot) state.g = { s: slot, c: {} };
   const ordinal = state.g.c[key] ?? 0;
   state.g.c[key] = ordinal + 1;
-  // A picture or file with no words is never merged by key: the key says nothing of which picture it is.
-  const wordless = text === '' && (files.length > 0 || omitted);
-  const matched = wordless ? undefined : matching.index?.liveWithKey(message.precision, key, ordinal);
-  const taken = matched ? matching.ledger?.aliasOf(matched.chatJid, matched.id) : undefined;
-  let id: string;
-  if (matched) {
-    id = taken ?? matched.id;
-  } else {
-    id = matching.ledger?.exportAt(message.precision, key, ordinal) ?? exportMessageId(key, ordinal);
-    matching.ledger?.recordExport(message.precision, key, ordinal, id, chatJid);
-    if (matching.index?.liveBetween(chatJid, ms - 60_000, ms + 60_000)) report({ kind: WHATSAPP_INPUT_FINDINGS.nearMiss, class: 'skipped' });
+  // A picture or file with no words is never matched: the key says nothing of which picture it is.
+  const wordless = textKey(caption) === '' && (files.length > 0 || omitted);
+  const matched = wordless || total !== 1 ? undefined : matching.index?.uniqueLiveWithKey(message.precision, key);
+  const id = matched ? matched.id : exportMessageId(key, ordinal);
+  if (!matched && matching.index?.liveBetween(chatJid, ms - 60_000, ms + 60_000)) {
+    report({ kind: WHATSAPP_INPUT_FINDINGS.nearMiss, class: 'skipped' });
   }
 
   const mediaType = matched?.mediaType ?? (files[0] !== undefined ? whatsAppMediaTypeOf(files[0]) : omitted ? 'media' : undefined);

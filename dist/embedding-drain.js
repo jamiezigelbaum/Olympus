@@ -33722,7 +33722,7 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "whatsapp.personal.messages",
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once; WhatsApp notices left out)", "Status posts as their own kind"],
+      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
       dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
       supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],
@@ -36036,11 +36036,6 @@ var init_spool_index = __esm(() => {
 // src/workers/whatsapp/spool-resets.ts
 var init_spool_resets = () => {};
 
-// src/workers/whatsapp/match-ledger.ts
-var init_match_ledger = __esm(() => {
-  init_reaction_index();
-});
-
 // src/workers/whatsapp/match-keys.ts
 var init_match_keys = __esm(() => {
   init_reaction_index();
@@ -36065,7 +36060,6 @@ var init_live_connector = __esm(() => {
   init_reaction_index();
   init_spool_index();
   init_spool_resets();
-  init_match_ledger();
   init_match_keys();
   init_spool_reader();
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
@@ -49372,7 +49366,6 @@ init_zip_reader();
 // src/workers/whatsapp/archive-input.ts
 init_zip_reader();
 init_match_keys();
-init_match_ledger();
 init_spool_index();
 init_live_connector();
 
@@ -49382,6 +49375,7 @@ var formatters = new Map;
 // src/workers/whatsapp/archive-input.ts
 var SAMPLE_BYTES = 1024 * 1024 * 1024;
 var LIVE_INDEX_BYTES = 64 * 1024 * 1024;
+var SLOT_LOOKAHEAD_BYTES = 4 * 1024 * 1024;
 var DAY_MS2 = 24 * 3600000;
 
 // src/workers/whatsapp/archive-target.ts

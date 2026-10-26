@@ -98,7 +98,6 @@ import {
 import { WhatsAppSpoolIndex, comparePlaces, type SpoolPlace } from './spool-index.ts';
 import { WhatsAppSpoolResets } from './spool-resets.ts';
 import { CHILD_ITEM_ID_SEPARATOR, childProviderItemId } from '../../core/child-item-id.ts';
-import { WhatsAppMatchLedger } from './match-ledger.ts';
 import { OWNER_SENDER, liveMatchKeys, nameKey } from './match-keys.ts';
 import {
   WHATSAPP_SPOOL_MAX_RECORD_BYTES,
@@ -282,16 +281,7 @@ export function createWhatsAppLiveSourceConnector(
   };
 
   const fetchItem = async (localItemId: string): Promise<RawItem> => {
-    const asked = localItemIdParts(localItemId, account);
-    // An imported id a live message took (match-ledger.ts): read as that live message, under the imported id.
-    const ledger = asked.providerItemId.startsWith('wx') ? WhatsAppMatchLedger.open(spoolDir) : undefined;
-    const live = ledger?.liveOf(asked.providerItemId);
-    ledger?.close();
-    if (live) {
-      const item = await fetchItem(`${account}:${normalizeWhatsAppJid(live.chatJid)}:${live.liveId}`);
-      return { ...item, identity: { ...item.identity, providerItemId: asked.providerItemId, localItemId } };
-    }
-    const { chatJid, providerItemId } = asked;
+    const { chatJid, providerItemId } = localItemIdParts(localItemId, account);
     // A re-fetch is a full restatement of the item, so it carries the
     // reactions too: the store overwrites everything an emit repeats. Both
     // come from the spool index (the message's newest line and its
@@ -611,8 +601,6 @@ interface SpoolPassState {
   maxRecordBytes: number;
   findings: WhatsAppSpoolPassFindings;
   index: WhatsAppSpoolIndex | undefined;
-  /** What the export inputs agreed with live capture: a live message an import holds already is stored as that item. */
-  ledger?: WhatsAppMatchLedger | undefined;
   /** The spool's durable reset counter; a listing never reads without it. */
   resets: WhatsAppSpoolResets;
   /** The reset count the cursors this listing hands out carry. */
@@ -639,7 +627,6 @@ async function* liveRecords(
     resets.close();
     throw new Error('The WhatsApp spool index cannot be opened.');
   }
-  const ledger = WhatsAppMatchLedger.open(spoolDir);
   const pass: SpoolPassState = {
     budget: { bytesLeft: options.passByteBudget },
     maxRecordBytes: options.maxRecordBytes,
@@ -647,7 +634,6 @@ async function* liveRecords(
     index,
     resets,
     reset: resets.current(),
-    ledger,
   };
   try {
     // The index is trusted only for the files that are there, as they are. A file that broke the spool contract
@@ -672,7 +658,7 @@ async function* liveRecords(
       const page = readSpoolPage(spoolDir, position, options.limit, pass);
       position = page.position;
       yield {
-        records: pageRecords(spoolDir, page, pass).map((record) => aliased(record, ledger)),
+        records: pageRecords(spoolDir, page, pass),
         ...(position === undefined ? {} : { nextCursor: cursorFromPosition(position, pass.reset) }),
         done: page.exhausted,
       };
@@ -686,7 +672,6 @@ async function* liveRecords(
     }
   } finally {
     index.close();
-    ledger?.close();
     resets.close();
   }
 }
@@ -744,7 +729,6 @@ export function catchUpWhatsAppSpoolIndex(spoolDir: string, budgetBytes: number)
     index.close();
     throw error;
   }
-  const ledger = WhatsAppMatchLedger.open(spoolDir);
   try {
     // A file that broke the spool contract, or a rebuilt index, counts one reset before the index forgets, as a
     // listing counts it.
@@ -760,21 +744,26 @@ export function catchUpWhatsAppSpoolIndex(spoolDir: string, budgetBytes: number)
       maxRecordBytes: WHATSAPP_SPOOL_MAX_RECORD_BYTES,
       findings: emptyWhatsAppSpoolPassFindings(),
       index,
-      ledger,
       resets,
       reset: resets.current(),
     };
     // Up to the file's end as it is now (a stat, no read): a fragment being written is not a record, so indexing
-    // stops at the last whole line and the high-water mark says where; the next catch-up goes on from there.
-    return catchUpIndex(spoolDir, index, { file: last, line: 0, offset: end.size }, pass);
+    // stops at the last whole line and the high-water mark says where (never past it); the next catch-up goes on
+    // from there.
+    return catchUpIndex(spoolDir, index, { file: last, line: 0, offset: end.size }, pass, false);
   } finally {
     index.close();
-    ledger?.close();
     resets.close();
   }
 }
 
-function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolPosition | undefined, pass: SpoolPassState): boolean {
+/**
+ * `atBoundary`: `until` is a record boundary (a cursor's place), so files the
+ * index passes on the way (gone ones) count as indexed up to it. Otherwise
+ * (a file's size) the index stops at the last whole line it read: a fragment
+ * being written is never passed.
+ */
+function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolPosition | undefined, pass: SpoolPassState, atBoundary = true): boolean {
   if (until === undefined) return true;
   const mark = index.highWater() ?? { file: '', offset: 0 };
   const target = { file: until.file, offset: until.offset ?? 0 };
@@ -794,7 +783,7 @@ function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolP
           break;
         }
         if (offset >= end) break;
-        if (record.kind === 'line') noteLine(index, record.text, { file, offset }, pass.ledger);
+        if (record.kind === 'line') noteLine(index, record.text, { file, offset });
         offset = record.endOffset;
         if (offset >= end) break;
       }
@@ -803,12 +792,12 @@ function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolP
     });
     if (paused || pass.budget.bytesLeft <= 0) return comparePlaces(index.highWater() ?? mark, target) >= 0;
   }
-  index.advance(target);
+  if (atBoundary) index.advance(target);
   return true;
 }
 
 /** Records one consumed line in the index: a message's newest line, or an actor's reaction. */
-function noteLine(index: WhatsAppSpoolIndex, line: string, place: SpoolPlace, ledger?: WhatsAppMatchLedger): void {
+function noteLine(index: WhatsAppSpoolIndex, line: string, place: SpoolPlace): void {
   if (line.trim() === '') return;
   const message = parseSpoolLine(line);
   if (message === undefined) return;
@@ -827,7 +816,7 @@ function noteLine(index: WhatsAppSpoolIndex, line: string, place: SpoolPlace, le
     text: message.text,
   });
   if (!keys) return;
-  const firstSeen = index.noteMatchKeys({
+  index.noteMatchKeys({
     chatJid: message.chatJid,
     id: message.id,
     fromMe: message.fromMe,
@@ -838,31 +827,6 @@ function noteLine(index: WhatsAppSpoolIndex, line: string, place: SpoolPlace, le
       ? { chatNameKey: 'status@broadcast' }
       : message.chatName ? { chatNameKey: nameKey(message.chatName) } : {}),
   }, place);
-  // The other direction: an import that ran first gave this message an id of its own, and this is the message's
-  // first line (it was never stored under its own id: a stored item's id never changes, and a later line is
-  // another version, which never claims anything). The live message takes that item's id only when the match
-  // is certain: one live message and one imported one hold the key, and the message is not a picture or file
-  // with no words (whose key says nothing of which picture it is). When in doubt, no merge.
-  if (!ledger || !firstSeen || ledger.aliasOf(message.chatJid, message.id) !== undefined) return;
-  if (message.mediaType !== undefined && textKeyIsEmpty(message.text)) return;
-  for (const [precision, key] of [['minute', keys.exactMinute], ['second', keys.exactSecond]] as const) {
-    if (index.countWithKey(precision, key) !== 1 || ledger.exportCount(precision, key) !== 1) continue;
-    const imported = ledger.exportAt(precision, key, 0);
-    if (imported !== undefined && !ledger.claimed(imported)) {
-      ledger.alias(message.chatJid, message.id, imported);
-      return;
-    }
-  }
-}
-
-function textKeyIsEmpty(text: string): boolean {
-  return text.trim() === '';
-}
-
-/** A record of a live message an import holds already, under that item's id. */
-function aliased(record: WhatsAppRecord, ledger: WhatsAppMatchLedger | undefined): WhatsAppRecord {
-  const imported = ledger?.aliasOf(record.chatJid, record.id);
-  return imported === undefined ? record : { ...record, id: imported };
 }
 
 function readSpoolPage(
@@ -934,7 +898,7 @@ function readSpoolPage(
           pass.findings.malformedLines += 1;
           continue;
         }
-        if (index && !index.covers(place)) noteLine(index, line, place, pass.ledger);
+        if (index && !index.covers(place)) noteLine(index, line, place);
         if (isWhatsAppReactionLine(message)) {
           reactions.push(message);
           const targetId = message.reactionTargetId;
@@ -1325,9 +1289,6 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
     const real = existingRealPath(relocate(message.mediaPath));
     if (real) owners.get(real)?.delete(chatScopedKey(message.chatJid, message.id));
   };
-  // A live message an import holds already is judged under that item's id.
-  const ledger = WhatsAppMatchLedger.open(options.spoolDir);
-  try {
   return redactCaptureSpoolLines({
     dir: options.spoolDir,
     files: listSpoolFiles(options.spoolDir),
@@ -1340,7 +1301,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
       const identity = {
         provider: PROVIDER,
         accountScope: account,
-        providerItemId: ledger?.aliasOf(message.chatJid, message.id) ?? message.id,
+        providerItemId: message.id,
         providerConversationId: message.chatJid,
       };
       const alreadyRedacted = message.secretRedacted === true;
@@ -1381,9 +1342,6 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
       return JSON.stringify(record);
     },
   });
-  } finally {
-    ledger?.close();
-  }
 }
 
 /**

@@ -44,7 +44,7 @@ import type { WhatsAppReactionEntry } from './reaction-index.ts';
 import { normalizeWhatsAppJid } from './reaction-index.ts';
 
 export const WHATSAPP_SPOOL_INDEX_FILE = 'spool-index.sqlite';
-const SCHEMA = 6;
+const SCHEMA = 7;
 
 export interface SpoolPlace {
   file: string;
@@ -98,23 +98,30 @@ export class WhatsAppSpoolIndex {
           DROP TABLE IF EXISTS meta;
           DROP TABLE IF EXISTS files;
           DROP TABLE IF EXISTS live_keys;
+          DROP TABLE IF EXISTS live_version_keys;
           DROP TABLE IF EXISTS chat_names;
           CREATE TABLE live_keys (
             chat TEXT NOT NULL, id TEXT NOT NULL, chat_jid TEXT NOT NULL, from_me INTEGER NOT NULL, time_ms INTEGER NOT NULL,
             media_type TEXT, media_saved INTEGER NOT NULL,
             exact_m TEXT NOT NULL, exact_s TEXT NOT NULL, loose_m TEXT NOT NULL, loose_s TEXT NOT NULL,
             unsent_m TEXT NOT NULL, unsent_s TEXT NOT NULL,
-            file TEXT NOT NULL, offset INTEGER NOT NULL, first_file TEXT NOT NULL, first_offset INTEGER NOT NULL,
+            file TEXT NOT NULL, offset INTEGER NOT NULL,
             PRIMARY KEY (chat, id)
           ) WITHOUT ROWID;
-          CREATE INDEX live_keys_exact_m ON live_keys (exact_m, first_file, first_offset);
-          CREATE INDEX live_keys_exact_s ON live_keys (exact_s, first_file, first_offset);
+          CREATE INDEX live_keys_exact_m ON live_keys (exact_m);
+          CREATE INDEX live_keys_exact_s ON live_keys (exact_s);
           CREATE INDEX live_keys_loose_m ON live_keys (loose_m);
           CREATE INDEX live_keys_loose_s ON live_keys (loose_s);
           CREATE INDEX live_keys_unsent_m ON live_keys (unsent_m);
           CREATE INDEX live_keys_unsent_s ON live_keys (unsent_s);
           CREATE INDEX live_keys_chat_time ON live_keys (chat, time_ms);
           CREATE INDEX live_keys_file ON live_keys (file);
+          -- Every exact key any version of a live message had: a historical version is a candidate too.
+          CREATE TABLE live_version_keys (
+            key TEXT NOT NULL, chat TEXT NOT NULL, id TEXT NOT NULL, file TEXT NOT NULL,
+            PRIMARY KEY (key, chat, id)
+          ) WITHOUT ROWID;
+          CREATE INDEX live_version_keys_file ON live_version_keys (file);
           CREATE TABLE chat_names (name TEXT NOT NULL, chat TEXT NOT NULL, chat_jid TEXT NOT NULL, PRIMARY KEY (name, chat)) WITHOUT ROWID;
           CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL, indexed_to INTEGER NOT NULL, boundary TEXT NOT NULL) WITHOUT ROWID;
           CREATE TABLE messages (
@@ -258,6 +265,7 @@ export class WhatsAppSpoolIndex {
       this.db.query('DELETE FROM messages WHERE file = ?').run(file);
       this.db.query('DELETE FROM reactions WHERE file = ?').run(file);
       this.db.query('DELETE FROM live_keys WHERE file = ?').run(file);
+      this.db.query('DELETE FROM live_version_keys WHERE file = ?').run(file);
       this.db.query('DELETE FROM files WHERE name = ?').run(file);
       const mark = this.highWater();
       if (mark !== undefined && mark.file >= file) {
@@ -286,8 +294,9 @@ export class WhatsAppSpoolIndex {
   }
 
   /**
-   * A message's match keys (match-keys.ts: digests, no text), the newest
-   * line of a message being the one kept, and the name of its chat.
+   * A message's match keys (match-keys.ts: digests, no text): the newest
+   * line's are the message's current keys, and every version's exact keys
+   * are kept too. Also the name of its chat.
    */
   noteMatchKeys(input: {
     chatJid: string;
@@ -297,13 +306,12 @@ export class WhatsAppSpoolIndex {
     mediaSaved: boolean;
     keys: LiveMatchKeys;
     chatNameKey?: string;
-  }, place: SpoolPlace): boolean {
+  }, place: SpoolPlace): void {
     const chat = normalizeWhatsAppJid(input.chatJid);
-    const seen = this.db.query('SELECT 1 FROM live_keys WHERE chat = ? AND id = ?').get(chat, input.id) !== null;
     this.db.query(`
       INSERT INTO live_keys (chat, id, chat_jid, from_me, time_ms, media_type, media_saved,
-        exact_m, exact_s, loose_m, loose_s, unsent_m, unsent_s, file, offset, first_file, first_offset)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        exact_m, exact_s, loose_m, loose_s, unsent_m, unsent_s, file, offset)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (chat, id) DO UPDATE SET chat_jid = excluded.chat_jid, from_me = excluded.from_me, time_ms = excluded.time_ms,
         media_type = excluded.media_type, media_saved = excluded.media_saved,
         exact_m = excluded.exact_m, exact_s = excluded.exact_s, loose_m = excluded.loose_m, loose_s = excluded.loose_s,
@@ -311,27 +319,29 @@ export class WhatsAppSpoolIndex {
       WHERE excluded.file > live_keys.file OR (excluded.file = live_keys.file AND excluded.offset > live_keys.offset)
     `).run(chat, input.id, input.chatJid, input.fromMe ? 1 : 0, input.keys.timeMs, input.mediaType ?? null, input.mediaSaved ? 1 : 0,
       input.keys.exactMinute, input.keys.exactSecond, input.keys.looseMinute, input.keys.looseSecond,
-      input.keys.unsentMinute, input.keys.unsentSecond, place.file, place.offset, place.file, place.offset);
+      input.keys.unsentMinute, input.keys.unsentSecond, place.file, place.offset);
+    for (const key of [input.keys.exactMinute, input.keys.exactSecond]) {
+      this.db.query('INSERT OR IGNORE INTO live_version_keys (key, chat, id, file) VALUES (?, ?, ?, ?)').run(key, chat, input.id, place.file);
+    }
     if (input.chatNameKey) {
       this.db.query('INSERT OR IGNORE INTO chat_names (name, chat, chat_jid) VALUES (?, ?, ?)').run(input.chatNameKey, chat, input.chatJid);
     }
-    // Whether this is the message's first line: a later one is another version of a message already seen.
-    return !seen;
   }
 
-  /** How many live messages hold this exact key now. */
-  countWithKey(precision: TimePrecision, key: string): number {
-    const column = precision === 'second' ? 'exact_s' : 'exact_m';
-    return (this.db.query(`SELECT COUNT(*) AS n FROM live_keys WHERE ${column} = ?`).get(key) as { n: number }).n;
-  }
-
-  /** The `ordinal`-th live message (from 0, in spool order) with this exact key, at this precision. */
-  liveWithKey(precision: TimePrecision, key: string, ordinal: number): IndexedLiveMessage | undefined {
+  /**
+   * The one live message an exact key names, strictly: exactly one message
+   * ever had the key in any of its versions (a historical version is a
+   * candidate too), and the key is that message's current one. Otherwise
+   * none: in doubt, no match.
+   */
+  uniqueLiveWithKey(precision: TimePrecision, key: string): IndexedLiveMessage | undefined {
+    const candidates = this.db.query('SELECT chat, id FROM live_version_keys WHERE key = ? LIMIT 2').all(key) as Array<{ chat: string; id: string }>;
+    if (candidates.length !== 1) return undefined;
     const column = precision === 'second' ? 'exact_s' : 'exact_m';
     const row = this.db.query(`
-      SELECT id, chat_jid, from_me, time_ms, media_type, media_saved FROM live_keys WHERE ${column} = ?
-      ORDER BY first_file, first_offset LIMIT 1 OFFSET ?
-    `).get(key, ordinal) as { id: string; chat_jid: string; from_me: number; time_ms: number; media_type: string | null; media_saved: number } | null;
+      SELECT id, chat_jid, from_me, time_ms, media_type, media_saved FROM live_keys WHERE chat = ? AND id = ? AND ${column} = ?
+    `).get(candidates[0]!.chat, candidates[0]!.id, key) as
+      { id: string; chat_jid: string; from_me: number; time_ms: number; media_type: string | null; media_saved: number } | null;
     return row ? {
       id: row.id,
       chatJid: row.chat_jid,
@@ -340,14 +350,6 @@ export class WhatsAppSpoolIndex {
       ...(row.media_type !== null ? { mediaType: row.media_type } : {}),
       mediaSaved: row.media_saved === 1,
     } : undefined;
-  }
-
-  /** How many live messages with this exact key come before a place in the spool: a live message's rank among its key's. */
-  rankOf(precision: TimePrecision, key: string, place: SpoolPlace): number {
-    const column = precision === 'second' ? 'exact_s' : 'exact_m';
-    return (this.db.query(`
-      SELECT COUNT(*) AS n FROM live_keys WHERE ${column} = ? AND (file < ? OR (file = ? AND offset < ?))
-    `).get(key, place.file, place.file, place.offset) as { n: number }).n;
   }
 
   hasLooseKey(precision: TimePrecision, key: string): boolean {

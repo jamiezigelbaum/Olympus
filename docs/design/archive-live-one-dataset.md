@@ -134,9 +134,15 @@ unchanged.
   its minute, its sender and its text (caption included). The sender is
   "me" for the owner's own messages, and otherwise the contact's saved name
   from the bridge's contact store, which is what the export shows, falling
-  back to the push name. Messages with equal keys are counted on each side,
-  and the dataset keeps as many as the side with more: each side's count is
-  at most the truth, so identical messages are neither lost nor doubled.
+  back to the push name. Matching is strict, and done on the import side
+  only, against the live messages already stored: an export message is one
+  of them only when exactly one export message holds its key (its whole
+  minute counted) and exactly one live message ever held it, in any version,
+  as its current one. Media without words is never matched. Anything else is
+  its own item: when in doubt, a visible duplicate, never a wrong merge. A
+  live message always keeps its own id, so one the bridge delivers after an
+  export already brought it is a second item. That is an accepted residual:
+  exports are mostly past history, and a stored id never changes.
   Live capture periods cannot replace this: the bridge receives missed
   messages after a reconnect with their original times, and a full queue
   drops a message while capture is running.
@@ -489,8 +495,7 @@ Live WhatsApp capture, with no change to identities or stores
   other durable write that comes before the one
   that depends on it is safe to repeat: a Secrets rewrite before its cleared
   record (redone, the same rewrite), the index's rows before the tier set's
-  cursor (read again from the old cursor, the rows already there), the match
-  ledger's ids and aliases before the store (the same ids again), and the
+  cursor (read again from the old cursor, the rows already there), and the
   index's refresh after clearing (a missed refresh reads as a replacement,
   counted and read again).
 - **One builder, the intake rule.** The spool is the WhatsApp connector's
@@ -593,30 +598,29 @@ The WhatsApp chat export is an input of the WhatsApp connector
   (its second when the export shows seconds), its sender and its text
   without media markers; keys are digests. The sender is "me" for the
   owner; otherwise the contact's saved name, which the bridge now spools
-  (`sender_contact_name`), else the push name. Occurrences are counted on
-  the key itself in the export's order (two photos in one minute are two),
-  the count carried in the resume point across a page that ends inside a
-  minute. The live side is the spool index's digests of each live
-  message's current version (`live_keys`, built as the spool is indexed,
-  within a read budget; no rescan of the spool, no text). The export's k-th
-  message with a key is the k-th live message with it, so intake keeps one
-  item. An unmatched message with a live message of the chat within a
-  minute is counted as a near-miss (`match_near_miss`, How it was read).
-- **Both directions** (`match-ledger.ts`, `export-matches.sqlite` in the
-  spool folder, durable, digests and ids only). An export message live does
-  not hold gets an id of its own, recorded by its key and occurrence: a
-  re-import reuses it. When the bridge delivers that message later (it was
-  offline), indexing it finds the recorded id under the same key and
-  occurrence and aliases the live message to it: live capture stores it as
-  the imported item, never a second copy, and reads, reactions and Secrets
-  clearing follow the alias. (Rows are never re-keyed, as section 7 says;
-  the live message takes the item's id instead.)
+  (`sender_contact_name`), else the push name. On the export side a key's
+  messages are counted over its whole minute: the count carries in the
+  resume point across a page that ends inside a minute, and the rest of
+  that minute is read ahead (bounded; a fuller minute is in doubt). The
+  live side is the spool index's digests (`live_keys` for each message's
+  current version, `live_version_keys` for every key any version had;
+  built as the spool is indexed, within a read budget; no rescan, no
+  text). A message is the stored live one only when one export message and
+  one live message hold the key, and it is that message's current key;
+  media without words never. Otherwise it is its own item, with an id from
+  its key and occurrence, so a re-import reuses it. An unmatched message
+  with a live message of the chat within a minute is counted as a
+  near-miss (`match_near_miss`, How it was read).
+- **One direction.** Matching is the import's alone: live capture never
+  claims an imported item, and a live message keeps its own id always. A
+  message the bridge delivers after an import brought it is a second item,
+  a visible duplicate (section 4).
 - **The owner.** The export shows the owner's own name. The name under which
   the sample's messages match live capture's own messages most is taken as
   the owner's.
 - **Time zone.** Chosen on the first pass from the export's messages in the
   window live capture covers (its first and last message, a day either
-  side; up to 2,000 messages within 256 MiB of the export): this computer's
+  side; up to 50,000 messages within 1 GiB of the export): this computer's
   zone first, then every zone whose offsets on the sample's days differ,
   keeping the one under which most keys match; converted with each line's
   own date. No overlap or no match: this computer's zone, reported as
