@@ -40,6 +40,8 @@ export type CaptureFreshnessCounts = {
   capture_age_seconds?: number;
   /** Present only for a feed whose helper reports that it is running (see captureLiveness). */
   capture_quiet?: number;
+  /** Present with `capture_quiet`: 1 when the helper says capture has stopped (disconnected past the grace). */
+  capture_stopped?: number;
 };
 
 /**
@@ -49,7 +51,12 @@ export type CaptureFreshnessCounts = {
  */
 export interface CaptureLiveness extends CaptureFreshness {
   quiet: boolean;
+  /** The helper says it is not capturing (disconnected) and has said so past the grace: stale, whatever its last word. */
+  stopped: boolean;
 }
+
+/** How long a helper may say it is disconnected before capture reads as stopped: a reconnect usually takes seconds. */
+export const CAPTURE_STOPPED_GRACE_SECONDS = 600;
 
 /**
  * The verdict for the newest captured message time. A missing or unreadable
@@ -86,6 +93,12 @@ export function captureLiveness(
   heartbeatAt: string | undefined,
   nowMs: number,
   thresholdSeconds: number,
+  /**
+   * The helper says it is not capturing, since `stoppedAt` (its last connected
+   * time, else when it said so). Past the grace the feed is stale and
+   * `stopped`, with no quiet: a known disconnect is never a quiet account.
+   */
+  disconnected?: { stoppedAt?: string },
 ): CaptureLiveness {
   const record = captureFreshness(newestRecordAt, nowMs, thresholdSeconds);
   const heartbeat = captureFreshness(heartbeatAt, nowMs, thresholdSeconds);
@@ -93,7 +106,20 @@ export function captureLiveness(
     && (record.age_seconds === undefined || heartbeat.age_seconds < record.age_seconds)
     ? heartbeat
     : record;
-  return { ...newer, quiet: heartbeat.status === 'fresh' && record.status !== 'fresh' };
+  if (disconnected) {
+    const stoppedMs = Date.parse(disconnected.stoppedAt ?? '');
+    const stoppedFor = Number.isFinite(stoppedMs) ? Math.max(0, Math.floor((nowMs - stoppedMs) / 1_000)) : Number.POSITIVE_INFINITY;
+    if (stoppedFor > CAPTURE_STOPPED_GRACE_SECONDS) {
+      return {
+        status: 'stale',
+        threshold_seconds: thresholdSeconds,
+        ...(newer.age_seconds !== undefined ? { age_seconds: newer.age_seconds } : {}),
+        quiet: false,
+        stopped: true,
+      };
+    }
+  }
+  return { ...newer, quiet: heartbeat.status === 'fresh' && record.status !== 'fresh', stopped: false };
 }
 
 /** The verdict as scheduler counts: non-negative whole numbers, no timestamp. */
@@ -104,7 +130,7 @@ export function captureFreshnessCounts(capture: CaptureFreshness | CaptureLivene
     capture_unavailable: capture.status === 'unavailable' ? 1 : 0,
     capture_stale_threshold_seconds: capture.threshold_seconds,
     ...(capture.age_seconds !== undefined ? { capture_age_seconds: capture.age_seconds } : {}),
-    ...('quiet' in capture ? { capture_quiet: capture.quiet ? 1 : 0 } : {}),
+    ...('quiet' in capture ? { capture_quiet: capture.quiet ? 1 : 0, capture_stopped: capture.stopped ? 1 : 0 } : {}),
   };
 }
 

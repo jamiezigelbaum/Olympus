@@ -33525,9 +33525,12 @@ var init_corpus_adapter4 = __esm(() => {
   init_corpus();
 });
 // src/workers/connector-store/capture-spool-secrets.ts
+var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES;
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
   init_secrets_disposition();
+  SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
+  SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts
@@ -35971,9 +35974,17 @@ var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
 
+// src/core/source-inputs.ts
+var init_source_inputs = () => {};
+
 // src/workers/whatsapp/reaction-index.ts
 var init_reaction_index = __esm(() => {
   init_reactions();
+});
+
+// src/workers/whatsapp/spool-index.ts
+var init_spool_index = __esm(() => {
+  init_reaction_index();
 });
 
 // src/workers/whatsapp/spool-reader.ts
@@ -35988,8 +35999,10 @@ var init_spool_reader = __esm(() => {
 // src/workers/whatsapp/live-connector.ts
 var DEFAULT_PASS_BYTE_BUDGET;
 var init_live_connector = __esm(() => {
+  init_source_inputs();
   init_capture_spool_secrets();
   init_reaction_index();
+  init_spool_index();
   init_spool_reader();
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
 });
@@ -48417,6 +48430,7 @@ init_tiered_store_set();
 
 // src/workers/archive-import/source-input.ts
 init_archive_formats();
+init_source_inputs();
 
 // src/workers/archive-import/sync.ts
 init_media_bindings();

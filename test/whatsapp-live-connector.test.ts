@@ -127,7 +127,7 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
 
     const pages = await drain(connector.listItems({ limit: 3 }));
     expect(ids([...(pages[0]?.items ?? [])])).toEqual(['a1', 'a2', 'b1']);
-    expect(pages[0]?.nextCursor).toBe('2026-06-11.jsonl:1');
+    expect(pages[0]?.nextCursor).toStartWith('2026-06-11.jsonl:1@');
     expect(pages[0]?.done).toBe(false);
 
     // Resume exactly where the cursor points, in a fresh listItems call.
@@ -160,7 +160,7 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     const pages = await drain(connector.listItems());
     expect(ids([...(pages.at(-1)?.items ?? [])])).toEqual(['b1', 'b2']);
     const cursor = pages.at(-1)?.nextCursor ?? '';
-    expect(cursor).toBe(`${file}:2`);
+    expect(cursor).toStartWith(`${file}:2@`);
 
     // The daemon appends two more messages and a new day starts.
     appendFileSync(join(dir, file), spoolLine({ id: 'b3' }));
@@ -181,7 +181,7 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     const pages = await drain(connector.listItems());
     expect(ids(pages.flatMap((page) => [...page.items]))).toEqual(['b1']);
     const cursor = pages.at(-1)?.nextCursor ?? '';
-    expect(cursor).toBe(`${file}:1`);
+    expect(cursor).toStartWith(`${file}:1@`);
 
     // The daemon finishes the write; resume picks the completed line up.
     appendFileSync(join(dir, file), partial.slice(partial.length - 10));
@@ -488,7 +488,7 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     // Malformed lines are skipped (documented) but still advance the cursor.
     const pages = await drain(connectorFor(dir).listItems());
     expect(ids(pages.flatMap((page) => [...page.items]))).toEqual(['a1', 'a2', 'b1']);
-    expect(pages.at(-1)?.nextCursor).toBe('2026-06-11.jsonl:2');
+    expect(pages.at(-1)?.nextCursor).toStartWith('2026-06-11.jsonl:2@');
     // The skip is surfaced as a gap count for ingest wiring to report.
     const status = readWhatsAppLiveSpoolStatus(dir);
     expect(status.malformedLines).toBe(3);
@@ -518,7 +518,7 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     expect(status?.metadata).toMatchObject({ recordKind: 'status', chat: 'Status updates' });
     expect(status?.identity.providerConversationId).toBe('status@broadcast');
     expect(items.find((item) => item.identity.providerItemId === 'chat-1')?.metadata['recordKind']).toBeUndefined();
-    expect(pages.at(-1)?.nextCursor).toBe('2026-06-10.jsonl:3');
+    expect(pages.at(-1)?.nextCursor).toStartWith('2026-06-10.jsonl:3@');
     const fetched = await connector.fetchItem(`${ACCOUNT}:status@broadcast:status-1`);
     expect(fetched.metadata['recordKind']).toBe('status');
   });
@@ -595,7 +595,7 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
       expect(summary.itemsSeen).toBe(3);
       expect(summary.itemsIndexed).toBe(3);
       expect(summary.itemsRejected).toBe(0);
-      expect(summary.cursor).toBe('2026-06-11.jsonl:2');
+      expect(summary.cursor).toStartWith('2026-06-11.jsonl:2@');
       expect(summary.policy.trustDomain).toBe('secure_local');
 
       const rows = store.searchItems('falafel', 5);
@@ -615,7 +615,7 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
       const cursor = store.status().lastSyncRun?.cursor ?? '';
       const second = await store.syncFromConnector(connectorFor(dir), { cursor, fetchContent: true });
       expect(second.itemsSeen).toBe(1);
-      expect(second.cursor).toBe('2026-06-11.jsonl:3');
+      expect(second.cursor).toStartWith('2026-06-11.jsonl:3@');
     } finally {
       store.close();
     }

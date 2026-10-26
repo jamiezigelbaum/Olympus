@@ -71,15 +71,15 @@ describe('captureLiveness', () => {
 
   test('ages a feed by the newer of its newest record and its heartbeat', () => {
     expect(captureLiveness('2026-10-25T10:00:00Z', '2026-10-25T11:58:00Z', now, 3_600))
-      .toEqual({ status: 'fresh', threshold_seconds: 3_600, age_seconds: 120, quiet: true });
+      .toEqual({ status: 'fresh', threshold_seconds: 3_600, age_seconds: 120, quiet: true, stopped: false });
     expect(captureLiveness('2026-10-25T11:59:00Z', '2026-10-25T11:58:00Z', now, 3_600))
-      .toEqual({ status: 'fresh', threshold_seconds: 3_600, age_seconds: 60, quiet: false });
+      .toEqual({ status: 'fresh', threshold_seconds: 3_600, age_seconds: 60, quiet: false, stopped: false });
     expect(captureLiveness(undefined, '2026-10-25T11:58:00Z', now, 3_600))
-      .toEqual({ status: 'fresh', threshold_seconds: 3_600, age_seconds: 120, quiet: true });
+      .toEqual({ status: 'fresh', threshold_seconds: 3_600, age_seconds: 120, quiet: true, stopped: false });
     expect(captureLiveness('2026-10-25T08:00:00Z', undefined, now, 3_600))
-      .toEqual({ status: 'stale', threshold_seconds: 3_600, age_seconds: 14_400, quiet: false });
+      .toEqual({ status: 'stale', threshold_seconds: 3_600, age_seconds: 14_400, quiet: false, stopped: false });
     expect(captureLiveness(undefined, undefined, now, 3_600))
-      .toEqual({ status: 'unavailable', threshold_seconds: 3_600, quiet: false });
+      .toEqual({ status: 'unavailable', threshold_seconds: 3_600, quiet: false, stopped: false });
   });
 
   test('a liveness verdict carries capture_quiet; a plain one does not', () => {
@@ -97,7 +97,7 @@ describe('bounded streaming spool reads', () => {
     const pages = await drain(connector.listItems());
     expect(ids(pages)).toEqual(['a', 'b']);
     expect(findings.oversizedRecords).toBe(1);
-    expect(pages.at(-1)?.nextCursor).toBe('2026-10-25.jsonl:3');
+    expect(pages.at(-1)?.nextCursor).toStartWith('2026-10-25.jsonl:3@');
   });
 
   test('one listing stops at its byte budget with a cursor, and the next goes on without repeats', async () => {
@@ -162,7 +162,7 @@ describe('cursor recovery', () => {
     const pages = await drain(connector.listItems({ cursor: '2026-10-25.jsonl:40' }));
     expect(ids(pages)).toEqual(['new-1', 'new-2']);
     expect(findings.cursorsRecovered).toBe(1);
-    expect(pages.at(-1)?.nextCursor).toBe('2026-10-25.jsonl:2');
+    expect(pages.at(-1)?.nextCursor).toStartWith('2026-10-25.jsonl:2@');
   });
 
   test('a cursor at the end of its file is not a recovery', async () => {

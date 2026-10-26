@@ -363,32 +363,56 @@ input yet, so nothing changes for a real install until steps 4 to 7.
 
 ## Built, step 3: WhatsApp
 
-Live WhatsApp capture, with no change to identities, cursors' format or
-stores (`src/workers/whatsapp/spool-reader.ts`, `live-connector.ts`,
-`store-sync.ts`, `tools/whatsapp-bridge/capture_status.go`; tests in
-`test/whatsapp-live-capture-fixes.test.ts` and
+Live WhatsApp capture, with no change to identities or stores
+(`src/workers/whatsapp/spool-reader.ts`, `spool-index.ts`,
+`live-connector.ts`, `store-sync.ts`,
+`tools/whatsapp-bridge/capture_status.go`; tests in
+`test/whatsapp-live-capture-fixes.test.ts`,
+`test/whatsapp-live-review-fixes.test.ts` and
 `tools/whatsapp-bridge/capture_status_test.go`).
 
+- **One builder, the intake rule.** The spool is the WhatsApp connector's
+  live input: its records become items through the connector's one record
+  builder under the shared intake rule (`core/source-inputs.ts`), versions
+  ordered by the message's time. A record read again (a recovered cursor, a
+  redelivery) never replaces a newer version the stores hold. A record that
+  restates a message's reactions applies at the same version, as live's word.
 - **Streaming reads with bounds.** A spool file is read in 256 KiB chunks
-  from the resume point, never whole. A record over 1 MiB is skipped unread
-  and counted (`oversized_spool_records`). One pull reads at most 64 MiB and
-  ends with a cursor for the next (`spool_pass_budget_reached`). The pull no
-  longer scans the whole spool for its receipt: the newest message time is
-  read back from the end of the spool (4 MiB at most), and malformed lines
-  and unresolved reactions are counted for the lines this pull read, not the
-  whole spool again. Left as is: a page that carries a reaction still builds
-  the reaction aggregate over the whole spool (streamed, so memory-bounded),
-  and `fetchItem` still scans the spool; neither runs on a pull of plain
-  messages.
-- **Cursor recovery.** The cursor stays `<file>:<lines>`, so a rollback
-  reads it as before. A cursor's file only grows, so one holding fewer lines
-  than its cursor was replaced (the spool folder removed and capture started
-  again the same day): it is read again from its start, which the store
-  collapses, and counted (`spool_cursor_recovered`); before, its first lines
-  were skipped silently. A cursor whose file has gone is counted
+  from the resume point, never whole. The cursor is `<file>:<lines>@<offset>`
+  and a resume seeks to the offset (a cursor from before offsets is resolved
+  by counting its lines once). Every byte read is spent from the pull's
+  budget (64 MiB), and a read pauses once it is spent: between records, or
+  inside an over-long record (over 1 MiB), which is never held, is counted
+  once (`oversized_spool_records`) and is skipped on from the place the
+  cursor names (`…@<offset>s`), never read again. A record within the bound
+  is finished before a pause, so a pull reads at most its budget plus one
+  record's bound. The pull no longer scans the whole spool for its receipt:
+  the newest message time is read back from the end of the spool (4 MiB at
+  most), and malformed lines and unresolved reactions are counted for what
+  this pull read.
+- **Reactions from a persistent index.** `spool-index.sqlite` beside the
+  spool keeps each message's newest line (by position) and each actor's
+  current reaction to each message, built as the listing reads, within its
+  budget; an index started on an existing spool catches up from the spool's
+  start, a budget at a time, before a page is aggregated. A page's reactions
+  are aggregated from a few rows and the reacted-to message is read from its
+  one line; memory does not grow with the spool's history. The index holds
+  ids, positions and reactions, never a message's text, and is a cache:
+  deleting it costs one catch-up. `fetchItem` reads from it too, and scans
+  the spool only for a message the index does not hold.
+- **Cursor recovery.** A cursor's file only grows, so one shorter than its
+  cursor, or where the cursor's offset is not the start of a line, was
+  replaced (the spool folder removed and capture started again the same
+  day): it is read again from its start, its index rows dropped, and
+  counted (`spool_cursor_recovered`); the intake rule keeps what the stores
+  hold newer. A cursor whose file has gone is counted
   (`spool_cursor_file_missing`) and listing goes on at the next file. Not
-  covered: a replaced file that has grown past the old cursor before the
-  next pull, and a file named earlier than the cursor's (a clock set back).
+  covered: a replaced file whose bytes at the old offset happen to start a
+  line, and a file named earlier than the cursor's (a clock set back).
+- **Secrets clearing.** The shared rewrite streams its files
+  (`connector-store/capture-spool-secrets.ts`, from the Telegram lane). A
+  pull that read nothing new skips the window and runs only the whole-spool
+  pass when the set of Secrets changed.
 - **Counted bridge drops.** The bridge writes `spool/capture-status.json`
   every minute and on connect and disconnect: connected, the last time it
   knew it was connected, and the messages a full queue dropped, carried
@@ -399,12 +423,16 @@ stores (`src/workers/whatsapp/spool-reader.ts`, `live-connector.ts`,
   (before, it was taken for protocol noise and not spooled at all). The
   connector reads a captioned media line as a text item with its media type
   kept; Secrets are judged and cleared on the caption like any text.
-- **Freshness told apart from quiet.** `captureLiveness` in
-  `connector-store/capture-freshness.ts` ages a feed by the newer of its
+- **Freshness told apart from quiet, and from stopped.** `captureLiveness`
+  in `connector-store/capture-freshness.ts` ages a feed by the newer of its
   newest message and the bridge's last connected time, and reports
-  `capture_quiet` when the bridge is connected and no message arrived
-  within the threshold. A bridge that writes no receipt is judged by its
-  newest message, as before. The Telegram lane adopts the same rule.
+  `capture_quiet` when the bridge is connected and no message arrived within
+  the threshold. A bridge that says it is disconnected for more than ten
+  minutes is stale and stopped (`capture_stopped`, warning
+  `whatsapp_capture_disconnected`), never quiet; the stale route on the card
+  is to open WhatsApp on this computer and link it. A bridge that writes no
+  receipt is judged by its newest message, as before. The Telegram lane
+  adopts the same rule.
   Open: the dashboard's stale wording says "newest message" for an age that
   can now be the bridge's last connected time.
 

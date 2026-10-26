@@ -27,18 +27,46 @@ const CAPTURE_STATUS_MAX_BYTES = 64 * 1024;
 
 export type SpoolRecordRead =
   | { kind: 'line'; text: string; endOffset: number }
-  | { kind: 'oversized'; endOffset: number };
+  /** A record over the per-record bound, skipped unread. `continued`: its start was skipped by an earlier pass, which counted it. */
+  | { kind: 'oversized'; endOffset: number; continued?: true }
+  /**
+   * The read budget ran out. `offset` is where to go on: the start of the next
+   * record, or, with `skipping`, a place inside an over-long record whose
+   * rest is still to be skipped.
+   */
+  | { kind: 'paused'; offset: number; skipping?: true; firstSeen?: true };
+
+/** `firstSeen`: the over-long record being skipped was found by this read, so this read counts it. */
+function pauseAt(offset: number, skipping: boolean, continued: boolean): SpoolRecordRead {
+  if (!skipping) return { kind: 'paused', offset };
+  return continued ? { kind: 'paused', offset, skipping: true } : { kind: 'paused', offset, skipping: true, firstSeen: true };
+}
+
+/** How much one read may take; shared by every file a listing reads. */
+export interface SpoolReadBudget {
+  bytesLeft: number;
+}
 
 /**
  * The terminated records of one spool file from `startOffset`, each with the
  * offset just past its newline. A final fragment without a newline is a write
- * in progress and is not returned. A file that cannot be opened reads as
- * empty (it vanished between listing and reading).
+ * in progress and is not returned (one longer than the per-record bound is
+ * skipped as it grows). A file that cannot be opened reads as empty (it
+ * vanished between listing and reading).
+ *
+ * With a budget, every byte read is spent from it, and the read pauses once
+ * it is spent: at the next record's start, or inside an over-long record
+ * (which is never held, so a pause there loses nothing and the next read goes
+ * on skipping it). A record within the bound is finished before a pause, so a
+ * read takes at most its budget plus one record's bound.
+ * `skipping` starts the read inside an over-long record an earlier read paused in.
  */
 export function* spoolRecords(
   path: string,
   startOffset = 0,
   maxRecordBytes = WHATSAPP_SPOOL_MAX_RECORD_BYTES,
+  budget?: SpoolReadBudget,
+  skipping = false,
 ): Generator<SpoolRecordRead> {
   let fd: number;
   try {
@@ -50,11 +78,23 @@ export function* spoolRecords(
     const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
     let pending: Buffer[] = [];
     let pendingBytes = 0;
-    let oversized = false;
+    let oversized = skipping;
+    let continued = skipping;
     let position = startOffset;
     for (;;) {
-      const read = readSync(fd, chunk, 0, CHUNK_BYTES, position);
-      if (read === 0) return;
+      // A pause between records, or inside one being skipped; never inside one being held.
+      if (budget && budget.bytesLeft <= 0 && pendingBytes === 0) {
+        yield pauseAt(position, oversized, continued);
+        return;
+      }
+      const want = budget && oversized ? Math.max(1, Math.min(CHUNK_BYTES, budget.bytesLeft)) : CHUNK_BYTES;
+      const read = readSync(fd, chunk, 0, want, position);
+      if (read === 0) {
+        // An over-long fragment at the end is never read again: the next read goes on past it.
+        if (oversized) yield pauseAt(position, true, continued);
+        return;
+      }
+      if (budget) budget.bytesLeft -= read;
       let cursor = 0;
       while (cursor < read) {
         const found = chunk.indexOf(NEWLINE, cursor);
@@ -74,7 +114,7 @@ export function* spoolRecords(
         if (end === -1) break;
         const endOffset = position + end + 1;
         if (oversized) {
-          yield { kind: 'oversized', endOffset };
+          yield continued ? { kind: 'oversized', endOffset, continued: true } : { kind: 'oversized', endOffset };
         } else {
           const bytes = pending.length > 0 ? Buffer.concat(pending, pendingBytes) : segment;
           const text = bytes.toString('utf8');
@@ -83,7 +123,13 @@ export function* spoolRecords(
         pending = [];
         pendingBytes = 0;
         oversized = false;
+        continued = false;
         cursor = end + 1;
+        // Spent between two records of one chunk: pause at the next one's start.
+        if (budget && budget.bytesLeft <= 0 && cursor < read) {
+          yield { kind: 'paused', offset: position + cursor };
+          return;
+        }
       }
       position += read;
     }
@@ -93,8 +139,8 @@ export function* spoolRecords(
 }
 
 /** The terminated lines of a spool file, oversized records left out. */
-export function* spoolFileLines(path: string): Generator<string> {
-  for (const record of spoolRecords(path)) {
+export function* spoolFileLines(path: string, startOffset = 0): Generator<string> {
+  for (const record of spoolRecords(path, startOffset)) {
     if (record.kind === 'line') yield record.text;
   }
 }
@@ -229,6 +275,8 @@ export function newestSpoolRecord<T>(
 
 export interface WhatsAppCaptureStatusReceipt {
   connected: boolean;
+  /** When the bridge last wrote the receipt (ISO). */
+  updatedAt?: string;
   /** The last time the bridge knew it was connected (ISO). */
   connectedThrough?: string;
   /** Messages a full spool queue dropped, over the life of the state folder. */
@@ -256,8 +304,10 @@ export function readWhatsAppCaptureStatus(spoolDir: string): WhatsAppCaptureStat
   const dropped = record['dropped_messages'];
   const connectedThrough = isoTime(record['connected_through']);
   const lastDroppedAt = isoTime(record['last_dropped_at']);
+  const updatedAt = isoTime(record['updated_at']);
   return {
     connected: record['connected'] === true,
+    ...(updatedAt ? { updatedAt } : {}),
     droppedMessages: typeof dropped === 'number' && Number.isSafeInteger(dropped) && dropped > 0 ? dropped : 0,
     ...(connectedThrough ? { connectedThrough } : {}),
     ...(lastDroppedAt ? { lastDroppedAt } : {}),
