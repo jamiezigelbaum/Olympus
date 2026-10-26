@@ -82,6 +82,8 @@ export interface TierWriteIntent {
    * record of a newer version took an older record's body): that record, replayed, is what finishes the write.
    */
   bodyVersion?: string;
+  /** The item's family: what a location row written from the intent alone needs. */
+  family?: string;
   connectorId: string;
 }
 
@@ -96,6 +98,7 @@ interface TierWriteIntentRow {
   location: number;
   connector_id: string;
   body_version: string | null;
+  family: string | null;
 }
 
 function writeIntentFromRow(row: TierWriteIntentRow): TierWriteIntent {
@@ -111,6 +114,7 @@ function writeIntentFromRow(row: TierWriteIntentRow): TierWriteIntent {
     kind: row.kind,
     ...(row.location === 1 ? { location: true as const } : {}),
     ...(row.body_version !== null ? { bodyVersion: row.body_version } : {}),
+    ...(row.family !== null ? { family: row.family } : {}),
     connectorId: row.connector_id,
   };
 }
@@ -2997,11 +3001,11 @@ export class TierLedger {
   putWriteIntent(intent: TierWriteIntent): void {
     this.db.query(`
       INSERT OR REPLACE INTO tier_write_intents (
-        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version, family
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       ...idParams(intent.identity), intent.identity.localItemId ?? '', intent.version ?? null, intent.kind,
-      intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null,
+      intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.family ?? null,
     );
   }
 
@@ -4308,6 +4312,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
             connector_id TEXT NOT NULL DEFAULT '',
             written_at TEXT NOT NULL,
             body_version TEXT,
+            family TEXT,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);
