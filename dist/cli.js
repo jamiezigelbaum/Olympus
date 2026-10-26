@@ -60608,7 +60608,7 @@ class TieredStoreSet {
         version: pending.version,
         hasContent: false,
         incomplete: true,
-        ...owesBody2 && pending.bodyVersion !== undefined ? { owedBodyVersion: pending.bodyVersion } : {}
+        ...owesBody2 ? { owedBodyVersion: pending.bodyVersion ?? pending.version } : {}
       };
     }
     const newest = found.reduce((best, leg) => leg.version !== undefined && (best === undefined || compareVersions(leg.version, best) > 0) ? leg.version : best, undefined);
@@ -60622,7 +60622,7 @@ class TieredStoreSet {
     const owedLeads = owesBody && owed.version !== undefined && (newest === undefined || compareVersions(owed.version, newest) > 0);
     const owedBody = owesBody && owed.version !== undefined && (owedLeads || !tombstoned);
     const incomplete = owedBody;
-    const owedBodyVersion = owedBody ? owed?.bodyVersion : undefined;
+    const owedBodyVersion = owedBody ? owed?.bodyVersion ?? owed?.version : undefined;
     const moving = pending?.kind === "advance" && pending.version !== undefined && (newest === undefined || compareVersions(pending.version, newest) > 0) ? pending.version : undefined;
     const version = intentLeads ? hidden : moving !== undefined ? moving : owedBody && (newest === undefined || compareVersions(owed.version, newest) > 0) ? owed.version : newest;
     return {
