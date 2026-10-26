@@ -2878,7 +2878,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 throw new EmailSourceWorkerError(400, 'invalid_request', 'Give either confirm_account or keep_apart.');
               }
               const answer = { ...(confirmAccount ? { confirmAccount: true as const } : {}), ...(keepApart ? { keepApart: true as const } : {}) };
-              return json(await archiveImports.approve(key !== undefined ? { key, ...answer } : { requestId: requestId!, ...answer }));
+              // A source's own Import an archive names its card: only that source's exports are taken.
+              const sourceId = asOptionalString(record.source_id);
+              if (sourceId !== undefined && key === undefined) {
+                throw new EmailSourceWorkerError(400, 'invalid_request', 'source_id goes with a chosen key.');
+              }
+              return json(await archiveImports.approve(key !== undefined ? { key, ...(sourceId !== undefined ? { sourceId } : {}), ...answer } : { requestId: requestId!, ...answer }));
             });
           }
           if (url.pathname === '/dashboard/archive-import/stop') {

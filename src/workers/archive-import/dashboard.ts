@@ -18,18 +18,21 @@
  */
 import { homedir } from 'node:os';
 import { posix } from 'node:path';
-import { getArchiveFormat } from '../../core/archive-formats.ts';
+import { getArchiveFormat, type ArchiveFormatDefinition } from '../../core/archive-formats.ts';
 import { ScopeRoot, ScopeSafeError } from '../../core/scope-safe-fs.ts';
 import type {
   ArchiveBrowseList,
   ComputerArchiveEntry,
   ComputerArchiveRequest,
+  ComputerArchiveSourceMeta,
   ComputerArchivesMeta,
   ComputerSourceImportEntry,
   ComputerSourceImportsMeta,
 } from '../chatgpt/dashboard-contract.ts';
 import { SourceStorageUnavailableError } from '../../core/source-storage.ts';
 import type { LocalFilesArchiveBrowser } from '../local-files/scope-browser.ts';
+import { archivePickIntro } from '../dashboard/vocabulary.ts';
+import type { ArchiveSourceTarget } from './source-targets.ts';
 import { createArchiveImportAgent, type ArchiveImportAgent } from './agent.ts';
 import { SCHEDULER_SOURCE_IDS } from '../source-scheduler.ts';
 import { archiveFileDigestSteps, findProbableCopies, verifyArchiveManifest } from './manifest.ts';
@@ -94,8 +97,9 @@ export function archiveImportScheduling(scheduler: { enabled: boolean; sourceIds
   return selected.length > 0 && !selected.includes(SCHEDULER_SOURCE_IDS.archiveImports) ? 'not_selected' : 'on';
 }
 
+// A start names the source the import joined (`source`, its card); absent when it stays under Other archives.
 export type ArchiveApproveResult =
-  | { ok: true; status: 'started'; archive_id: string; name: string }
+  | { ok: true; status: 'started'; archive_id: string; name: string; source?: { id: string; label: string } }
   /**
    * The export is of a source this computer holds an account of, and nothing in
    * it proves the account is that one: nothing was imported. The sheet asks the
@@ -117,7 +121,12 @@ export interface ArchiveAccountAnswer {
 
 export interface ArchiveImportDashboard {
   browse(request: { parentKey?: string; cursor?: string }): Promise<ArchiveBrowseList>;
-  approve(request: ({ key: string } | { requestId: string }) & ArchiveAccountAnswer): Promise<ArchiveApproveResult>;
+  /**
+   * `sourceId` (a source's card, as `archiveSources` lists it) is that card's
+   * own Import an archive: only the source's formats are recognised, and any
+   * other export is refused with the route to Import another archive.
+   */
+  approve(request: ({ key: string; sourceId?: string } | { requestId: string }) & ArchiveAccountAnswer): Promise<ArchiveApproveResult>;
   decline(requestId: string): ArchiveSimpleResult;
   remove(archiveId: string): ArchiveSimpleResult;
   /**
@@ -138,6 +147,11 @@ export interface ArchiveImportDashboard {
    * held, and the history the inputs cover.
    */
   sourceImports(): ComputerSourceImportsMeta[];
+  /**
+   * The sources whose cards import their own exports: those whose connector
+   * reads archives as inputs (source-targets.ts), by card.
+   */
+  archiveSources(): ComputerArchiveSourceMeta[];
   /**
    * What an agent may do (agent.ts): ask for an import or a removal, and
    * read the same list. It approves and removes nothing; only the methods
@@ -213,6 +227,8 @@ export const ARCHIVE_APPROVE_COPY = {
   not_an_input: 'Only an import that is part of a source can be stopped. Remove stops and deletes an archive.',
   not_importing: 'This import is not running.',
   source_unavailable: 'The source this export belongs to is being deleted or moved. Try again once that has finished.',
+  not_this_source: "This isn't a {source} export. From the {source} card, Olympus imports only these: {formats}. For any other export, use Import another archive under Other archives.",
+  unknown_source: "Olympus can't import archives into this source. Use Import another archive.",
 } as const;
 
 /**
@@ -334,6 +350,27 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   };
 
   const refusal = (code: string, message: string): ArchiveApproveResult => ({ ok: false, code, message });
+
+  // The card an import joined, for the line that says where it shows.
+  const joinedSource = (record: ArchiveImportRecord): { source?: { id: string; label: string } } => {
+    if (!record.target) return {};
+    const target = options.runtime.targets.forSource(record.target.source_id);
+    return { source: { id: target?.cardId ?? record.target.source_id, label: named(target?.label ?? record.target.source_id) } };
+  };
+  // The formats a source's connector reads, as this build knows them.
+  const sourceFormats = (target: ArchiveSourceTarget): ArchiveFormatDefinition[] =>
+    target.formats.flatMap((formatId) => {
+      const format = getArchiveFormat(formatId);
+      return format ? [format] : [];
+    });
+  // The source a card's Import an archive names, by its card id.
+  const targetOfCard = (cardId: string): ArchiveSourceTarget | undefined => {
+    for (const sourceId of options.runtime.targets.sourceIds()) {
+      const target = options.runtime.targets.forSource(sourceId);
+      if (target && (target.cardId ?? target.sourceId) === cardId) return target;
+    }
+    return undefined;
+  };
 
   const outcome = (requestId: string, result: ArchiveImportStart): void => {
     if (result.kind === 'started') {
@@ -460,6 +497,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     path: string,
     from?: { requestId: string; status: 'pending' | 'failed' },
     answer: ArchiveAccountAnswer = {},
+    only?: ArchiveSourceTarget,
   ): Promise<ArchiveApproveResult> => {
     const name = named(posix.basename(path));
     // An agent's request becomes the import or its check; Try again starts afresh.
@@ -467,7 +505,15 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     const answered = (): void => {
       if (from) requests.remove(from.requestId);
     };
-    const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets });
+    // A source's own Import an archive recognises that source's exports only.
+    const formats = only ? sourceFormats(only) : undefined;
+    const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets, ...(formats ? { formats } : {}) });
+    if (prepared.kind === 'unsupported' && only && formats) {
+      return refusal('not_this_source', fill(ARCHIVE_APPROVE_COPY.not_this_source, {
+        source: named(only.label),
+        formats: formats.map((format) => format.label).join(', '),
+      }));
+    }
     if (prepared.kind === 'unsupported') {
       const said = fill(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(', ') });
       return refusal('unsupported', prepared.advice ? `${said} ${prepared.advice}` : said);
@@ -503,7 +549,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         answered();
         if (again) {
           refresh();
-          return { ok: true, status: 'started', archive_id: again.archive_id, name };
+          return { ok: true, status: 'started', archive_id: again.archive_id, name, ...joinedSource(again) };
         }
         return { ok: true, status: 'already_imported', archive_id: archive.archive_id, name, archive_name: named(archive.label) };
       }
@@ -512,7 +558,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       const resumed = resumeStopped(prepared.archive);
       if (resumed) {
         refresh();
-        return { ok: true, status: 'started', archive_id: resumed.archive_id, name };
+        return { ok: true, status: 'started', archive_id: resumed.archive_id, name, ...joinedSource(resumed) };
       }
       return { ok: true, status: 'already_imported', archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
@@ -550,7 +596,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           if (result.kind === 'started') {
             answered();
             refresh();
-            return { ok: true, status: 'started', archive_id: result.archive.archive_id, name };
+            return { ok: true, status: 'started', archive_id: result.archive.archive_id, name, ...joinedSource(result.archive) };
           }
           if (result.kind === 'already_imported') {
             answered();
@@ -856,9 +902,14 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
         return approvePath(resolved.path, { requestId: waiting.request_id, status: 'pending' }, answer);
       }
+      let only: ArchiveSourceTarget | undefined;
+      if (request.sourceId !== undefined) {
+        only = targetOfCard(request.sourceId);
+        if (!only) return refusal('unknown_source', ARCHIVE_APPROVE_COPY.unknown_source);
+      }
       const resolved = await options.browser.resolve(request.key);
       if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
-      return approvePath(resolved.path, undefined, answer);
+      return approvePath(resolved.path, undefined, answer, only);
     },
 
     decline(requestId) {
@@ -936,6 +987,22 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         // Any archive here: its import or removal would not run, and neither would Remove.
         ...(setting !== 'on' && records.length > 0 ? { notRunning: setting } : {}),
       };
+    },
+
+    archiveSources() {
+      // Every import, a source's included, is recorded in the one list: while it cannot be read, no card imports, so
+      // nothing overwrites it (the Archives row says why).
+      try {
+        state.list();
+      } catch {
+        return [];
+      }
+      return options.runtime.targets.sourceIds().flatMap((sourceId): ComputerArchiveSourceMeta[] => {
+        const target = options.runtime.targets.forSource(sourceId);
+        const formats = target ? sourceFormats(target) : [];
+        if (!target || formats.length === 0) return [];
+        return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats) }];
+      });
     },
 
     sourceImports() {

@@ -40,6 +40,11 @@ export interface ChatGptDashboardClientConfig {
   deleteDataTool: string;
   /** Disconnect (olympus_disconnect_source); its confirmation says the indexed data stays. */
   disconnectTool: string;
+  /**
+   * The Archives card's source id: shown in its own section below Sources
+   * (Other archives), for exports that are not from one of the sources above.
+   */
+  archivesSourceId: string;
   connection: typeof DASHBOARD_CHATGPT_CONNECTION_COPY;
   page: typeof DASHBOARD_CHATGPT_PAGE_COPY;
   statusTone: Record<DashboardStatus, DashboardStatusColorToken>;
@@ -815,8 +820,15 @@ export function chatgptDashboardClient(
       // Tell Olympus what's private, and the Privacy row's Edit, open the Privacy screen in place.
       action = () => openPrivacy(key);
     } else if (fix.archiveImport === true && picker) {
-      // Import an archive (computer only): the picker over this computer's files, in place.
-      action = () => startArchivePick(key);
+      // Import an archive (computer only): the picker over this computer's files, in place; from a
+      // source's ⋯ menu, for that source's exports only.
+      action = () => {
+        // Back on the dashboard after the picker, the ⋯ menu it came from is closed, and focus returns to
+        // the menu's own button, which is in sight (the entry inside the closed menu is not).
+        const fromMenu = key.indexOf('menu:') === 0;
+        if (fromMenu && source) state.open['menu:' + source.id] = false;
+        startArchivePick(fromMenu ? 'summary:' + key.slice(0, key.lastIndexOf(':')) : key, typeof fix.archiveSource === 'string' ? fix.archiveSource : '');
+      };
     } else if (typeof fix.archiveFocus === 'string' && fix.archiveFocus) {
       // A Needs you line about one archive or request (computer only): straight to it, in place.
       action = () => focusArchive(String(fix.archiveFocus));
@@ -1052,7 +1064,7 @@ export function chatgptDashboardClient(
     return !!label && typeof item.sentence === 'string' && item.sentence.indexOf(label + ' — ') === 0;
   }
 
-  function sourceRow(source: Any): HTMLElement {
+  function sourceRow(source: Any, other?: boolean): HTMLElement {
     const id = String(source.id || source.label);
     const status = String(source.status || '');
     // The Archives row on the computer: its own list, and Import an archive in place.
@@ -1064,7 +1076,10 @@ export function chatgptDashboardClient(
     const main = el('div', 'source-main');
     const dot = el('span', 'dot tone-' + tone);
     dot.setAttribute('aria-hidden', 'true');
-    const head = add(el('p', 'source-head'), dot, el('span', 'source-name', String(source.label || '')));
+    // Under Other archives the section names the row; its line says which exports it is for.
+    const head = add(el('p', 'source-head'), dot, other
+      ? add(el('span', 'source-name source-for', P.otherArchives.line), el('span', 'sr', ' — ' + String(source.label || '')))
+      : el('span', 'source-name', String(source.label || '')));
     // The dot and the line under the name carry the state; the word is for screen readers only.
     const off = status === 'Off' && !item;
     if (!off) add(head, el('span', 'sr', ' — ' + (item ? P.needsYou : status)));
@@ -1131,9 +1146,23 @@ export function chatgptDashboardClient(
     // and no second Sync now while one is checking.
     const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry: Any) => archiveFix(archives, entry)).filter((entry: Any) =>
       (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    // Under Other archives, Import another archive is the section's own button, always in sight, never in ⋯.
+    if (other) {
+      const importing = (entry: Any) => !!entry && (entry.archiveImport === true || entry.label === H.copy.archives.importAction);
+      const shown = menu.filter(importing)[0];
+      if (shown && !importing(fix)) add(controls, fixControl(shown, 'import:' + id, 'plain', true, context));
+      for (let at = menu.length - 1; at >= 0; at -= 1) if (importing(menu[at])) menu.splice(at, 1);
+    }
     // Unpair for a paired chat app, on the computer only: the pairing lives here.
     const unpair = unpairEntry(id);
     if (unpair) menu.push(unpair);
+    // A source that reads its own exports imports them from its ⋯ menu (computer only).
+    const own = archiveSourceMeta(id);
+    // It sits before Disconnect and Delete, which stay last.
+    if (own) {
+      const destructive = menu.findIndex((entry: Any) => !!entry && entry.destructive === true);
+      menu.splice(destructive < 0 ? menu.length : destructive, 0, { label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own.sourceId });
+    }
     let menuBox: HTMLElement | null = null;
     if (menu.length) {
       const glyph = el('span', '', '⋯');
@@ -1291,13 +1320,31 @@ export function chatgptDashboardClient(
       || (Array.isArray(meta.requests) && meta.requests.some((entry: Any) => !!entry && entry.status === 'checking'));
   }
 
-  /** Import an archive: the picker over this computer's files; its one line says what came of the choice. */
-  function startArchivePick(key: string): void {
+  /**
+   * Import an archive: the picker over this computer's files; its one line says
+   * what came of the choice. From a source's ⋯ menu (`sourceId`) the picker is
+   * titled for that source, says which of its exports to choose, and the engine
+   * takes only those.
+   */
+  function startArchivePick(key: string, sourceId: string): void {
     supersede();
     state.notice = '';
     state.confirming = '';
+    const A = H.copy.archives;
+    const own = sourceId ? archiveSourceMeta(sourceId) : null;
+    const words = own
+      ? { ...A.pick, title: fill(A.sourceImport.title, { source: String(own.label) }), intro: String(own.intro), account: A.account }
+      : { ...A.pick, account: A.account };
     // Names in the line are the person's own files, shown only on this computer.
-    picker!.pickArchive({ ...H.copy.archives.pick, account: H.copy.archives.account }, (picked: ChatGptArchivePicked | null) => closeScreen(picked ? archiveOutcome(picked) : '', true, key));
+    picker!.pickArchive(words, (picked: ChatGptArchivePicked | null) => closeScreen(picked ? archiveOutcome(picked) : '', true, key), own ? String(own.sourceId) : '');
+  }
+
+  /** The source whose card imports its own exports, from the computer meta (computer only). */
+  function archiveSourceMeta(id: string): Any {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.archiveSources)) return null;
+    return meta.archiveSources.filter((entry: Any) => !!entry && entry.sourceId === id
+      && typeof entry.label === 'string' && !!entry.label && typeof entry.intro === 'string' && !!entry.intro)[0] || null;
   }
 
   /** The one line after an approval: started, checking, or already imported. */
@@ -1308,7 +1355,10 @@ export function chatgptDashboardClient(
     const archive = typeof outcome.archiveName === 'string' ? outcome.archiveName : typeof outcome.archive_name === 'string' ? outcome.archive_name : '';
     if (outcome.status === 'checking') return fill(A.checking, { name });
     if (outcome.status === 'already_imported') return archive ? fill(A.already, { name, archive }) : fill(A.alreadyUnnamed, { name });
-    return outcome.status === 'started' ? fill(A.started, { name }) : '';
+    // A start says where the import shows: the card of the source it joined, or Other archives.
+    const source = outcome.source && typeof outcome.source.label === 'string' ? outcome.source.label : '';
+    if (outcome.status === 'started') return source ? fill(A.startedIn, { name, source }) : fill(A.started, { name });
+    return '';
   }
 
   /** What an Archives row control did, from the list read before it (names are the computer's own). */
@@ -2075,6 +2125,22 @@ export function chatgptDashboardClient(
     return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
   }
 
+  function isArchivesCard(source: Any): boolean {
+    return !!source && String(source.id) === config.archivesSourceId;
+  }
+
+  /**
+   * Below Sources: the Archives card, for an export that is not from one of the
+   * sources above (owner, 2026-10-25). Its button imports any export and still
+   * routes one to its source when a source reads it; a source's own exports are
+   * imported from that source's ⋯ menu.
+   */
+  function otherArchivesSection(source: Any): HTMLElement | null {
+    if (!source) return null;
+    const section = add(el('section', 'section other-archives'), el('h2', '', P.otherArchives.title));
+    return add(section, add(el('ul', 'rows'), sourceRow(source, true)));
+  }
+
   function sourcesSection(sources: Any[]): HTMLElement {
     const section = add(el('section', 'section'), el('h2', '', P.sources));
     if (!sources.length) return add(section, el('p', 'muted', P.noSources));
@@ -2435,7 +2501,10 @@ export function chatgptDashboardClient(
     const listed = Array.isArray(data.sources) ? data.sources : [];
     add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : [])
       .filter((item: Any) => item && !listed.some((source: Any) => aboutSource(item, source)))));
-    add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
+    // The Archives card has its own section below Sources: exports that are not from one of them.
+    const allSources = Array.isArray(data.sources) ? data.sources : [];
+    add(page, sourcesSection(allSources.filter((source: Any) => !isArchivesCard(source))));
+    add(page, otherArchivesSection(allSources.filter(isArchivesCard)[0]));
     add(page, privacySection(data));
     const sourceList = Array.isArray(data.sources) ? data.sources : [];
     add(page, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data.progress, true));
