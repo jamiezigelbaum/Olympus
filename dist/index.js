@@ -20983,13 +20983,19 @@ var init_spool_index = __esm(() => {
   init_reaction_index();
 });
 
+// src/workers/connector-store/spool-file-identity.ts
+var SPOOL_IDENTITY_HEAD_BYTES;
+var init_spool_file_identity = __esm(() => {
+  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+});
+
 // src/workers/whatsapp/spool-reader.ts
-var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES, NEWEST_RECORD_SCAN_BYTES, HEAD_FINGERPRINT_BYTES, CAPTURE_STATUS_MAX_BYTES;
+var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
 var init_spool_reader = __esm(() => {
+  init_spool_file_identity();
   WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
   CHUNK_BYTES = 256 * 1024;
   NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
-  HEAD_FINGERPRINT_BYTES = 4 * 1024;
   CAPTURE_STATUS_MAX_BYTES = 64 * 1024;
 });
 
