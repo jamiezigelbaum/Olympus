@@ -33,6 +33,9 @@ const ALLOWED: Record<string, string> = {
   // Imported archives' state outside the stores.
   'src/workers/archive-import/media-bindings.ts':
     'the archives\' media bindings: per-archive state, not a tier store; it sits in the account\'s raw/ folder (beside the record for a legacy account), each archive\'s rows are forgotten when it is removed, and the file goes with the account\'s folder (accountStateSqlite) on Delete',
+  // WhatsApp's capture spool state outside the stores.
+  'src/workers/whatsapp/spool-index.ts':
+    'WhatsApp\'s spool index: a cache of message positions, reactions and match digests (no text), not a tier store; it sits in the spool folder (raw/whatsapp/spool), is opened per listing and closed after, and goes with the account\'s folder on Delete',
   'src/data-lifecycle.ts': 'the deleter and exporter, which step 5 rebuilds on the registry',
   // Generic code that reopens sidecars of stores already opened through the
   // service, found by path: no source is in scope there.
