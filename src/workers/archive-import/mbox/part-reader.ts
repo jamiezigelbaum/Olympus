@@ -1,7 +1,7 @@
 /**
  * One MIME part of one message of an imported mbox, read again later by the
  * extraction factory from the locator its child row keeps
- * (`mbox-part1:<archive>:<file>:<offset>:<part>`, gmail-input.ts).
+ * (`mbox-part1:<archive>:<file>:<offset>:<digest>:<message>:<part>`, gmail-input.ts).
  *
  * Bytes are read only from the import's own approved files, through the
  * scope-safe reader: the folder must be the one approved and every file the
@@ -15,7 +15,7 @@ import { ScopeRoot, ScopeSafeError } from '../../../core/scope-safe-fs.ts';
 import { archiveFileEntries, verifyArchiveManifest } from '../manifest.ts';
 import type { ArchiveImportStateStore } from '../state.ts';
 import { gmailChildProviderId, GMAIL_OWN_ID_PREFIX } from '../../google-connectors/gmail-mail-record.ts';
-import { ownId, parseMboxPartLocator, takeoutMessageId } from './gmail-input.ts';
+import { mboxMessageDigest, ownId, parseMboxPartLocator, takeoutMessageId } from './gmail-input.ts';
 import { parseMboxMessage } from './parse.ts';
 import { MimePartTooLargeError, mimePartBytes } from './mime-parts.ts';
 import { MBOX_DEFAULT_MAX_MESSAGE_BYTES, MboxFormatError, MboxSplitter } from './split.ts';
@@ -79,7 +79,10 @@ export async function readMboxPart(input: {
       if (!span) throw new FileExtractionSourceError('source_version_gone');
       // A message over the splitter's bound is not held in memory: its parts keep their names only.
       if (!span.raw) throw new FileExtractionSourceError('source_too_large');
-      // The message at this place must be the child's parent: Takeout's id says so, or the id of its own.
+      // The message at this place must be the one imported there: its bytes have the digest the import
+      // recorded, whatever form the parent's id takes. And it must be the child's parent: Takeout's id
+      // says so, or the id of its own.
+      if (mboxMessageDigest(span.raw) !== where.digest) throw new FileExtractionSourceError('source_version_gone');
       const takeout = takeoutMessageId(span.separator);
       if (takeout !== undefined && takeout !== where.parentId) throw new FileExtractionSourceError('source_content_unavailable');
       if (takeout === undefined && where.parentId.startsWith(GMAIL_OWN_ID_PREFIX)) {

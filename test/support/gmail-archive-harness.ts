@@ -74,6 +74,8 @@ export interface GmailArchiveHarness {
   /** Active rows of the Gmail stores: provider item id, whether it holds text, its leg. */
   rows(): Array<{ id: string; chunks: number; domain: string; parent: string | null; tombstoned: number }>;
   textOf(providerItemId: string): string;
+  /** The locator a child's row keeps for reading its bytes later, from whichever store holds it. */
+  locatorOf(providerItemId: string): string | undefined;
   close(): void;
 }
 
@@ -95,7 +97,7 @@ function fakeGmail(mailbox: GmailArchiveHarness['mailbox']): GmailApiClient {
       };
     },
     async getMessage(id, options) {
-      mailbox.calls.push(`message:${id}`);
+      mailbox.calls.push(options?.format === 'metadata' ? `metadata:${id}` : `message:${id}`);
       const found = mailbox.messages.find((entry) => entry.id === id);
       if (!found) throw new Error(`Gmail API request failed (404): unknown ${id}`);
       if (options?.format !== 'metadata') return found;
@@ -273,6 +275,13 @@ export function gmailArchiveHarness(
         }
       }
       return found;
+    },
+    locatorOf(providerItemId) {
+      for (const store of [internalStore, secureStore]) {
+        const state = store.deferredBytesStateOfLocalItem(`${ACCOUNT}:${providerItemId}`);
+        if (state.state === 'ready') return state.locator;
+      }
+      return undefined;
     },
     textOf(providerItemId) {
       return [internalStore, secureStore].flatMap((store) => store.localContent(`${ACCOUNT}:${providerItemId}`)?.chunks ?? []).join(' ');

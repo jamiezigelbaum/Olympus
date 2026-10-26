@@ -7,7 +7,7 @@
  * - `gmail-part1:<message>:<part>`: live Gmail, through the Gmail lane's
  *   connector (the message once, then the part inline or by its attachment
  *   id), only while live Gmail is connected and its mail approval current;
- * - `mbox-part1:<import>:<file>:<offset>:<message>:<part>`: an imported mbox, from the
+ * - `mbox-part1:<import>:<file>:<offset>:<digest>:<message>:<part>`: an imported mbox, from the
  *   import's own approved files (archive-import/mbox/part-reader.ts).
  *
  * A readable attachment brings its text through the shared extraction runner,
@@ -22,6 +22,8 @@ import { FileExtractionSourceError, type ExtractionCandidateReader } from '../..
 import { parseMboxMessage } from '../archive-import/mbox/parse.ts';
 import { readMboxPart } from '../archive-import/mbox/part-reader.ts';
 import type { ArchiveImportStateStore } from '../archive-import/state.ts';
+import { tierLedgerIdentityKey } from '../classification/tier-ledger.ts';
+import { hiddenByParentIdentity, itemVerdicts, type ChildProbe, type ChildVisibilityLane } from '../connector-store/child-visibility.ts';
 import { connectorStoreExtractionCandidateReader } from '../connector-store/extraction-candidate-reader.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import type { TieredExtractionView } from '../connector-store/tiered-extraction.ts';
@@ -147,6 +149,19 @@ export function gmailAttachmentConnector(input: {
   };
 }
 
+/**
+ * Whether a child may still be read and landed: its own row is not gone (not
+ * tombstoned in every store) and its parent may be seen (child visibility: a
+ * deleted or hidden parent hides it). Asked before its bytes are fetched and
+ * again before its text is accepted; a queued job for a child that fails it is
+ * closed and its text dropped.
+ */
+export function gmailChildStillServed(lane: ChildVisibilityLane, child: ChildProbe): boolean {
+  const own = itemVerdicts(lane, [child]).get(tierLedgerIdentityKey(child));
+  if (!own || own.gone) return false;
+  return hiddenByParentIdentity(lane, [child]).size === 0;
+}
+
 /** Only attachment children are candidates (their ids carry the child separator). */
 export function gmailAttachmentCandidates(reader: ExtractionCandidateReader): ExtractionCandidateReader {
   return {
@@ -199,6 +214,15 @@ export function createGmailAttachmentExtractionRuntime(input: {
       },
     ]]),
     tierSets: new Map(GMAIL_ATTACHMENT_CORPUS_IDS.map((corpusId) => [corpusId, input.set] as const)),
+    // Rechecked before candidates are listed, before bytes are fetched and before text is accepted: a child
+    // whose parent was deleted (or which was removed itself) while its job waited is never read or landed.
+    scopeGuard: {
+      assertAuthorized: () => {},
+      allowsRef: ({ ref }) => gmailChildStillServed(
+        { ledger: () => input.set.ledger, stores: () => input.set.openStores() },
+        { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId },
+      ),
+    },
     ...(input.extractors ? { extractors: input.extractors } : {}),
     ...(input.jobsDbPath ? { jobsDbPath: input.jobsDbPath } : {}),
     ...(input.warn ? { warn: input.warn } : {}),

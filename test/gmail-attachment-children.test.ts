@@ -176,7 +176,10 @@ describe('attachments are children of their message, one dataset', () => {
     const started = await h.approve('takeout.mbox', takeoutWithTwoAttachments());
     if (!started.ok || started.status !== 'started') throw new Error(JSON.stringify(started));
     await h.importAll(started.archive_id);
-    const locatorOf = (part: string, parent = message.id) => `mbox-part1:${started.archive_id}:0:0:${parent}:${part}`;
+    // The locator the import recorded for part 1, re-aimed at other parts and parents.
+    const stored = h.locatorOf(childOf('1'))!;
+    expect(stored.startsWith(`mbox-part1:${started.archive_id}:0:0:`)).toBe(true);
+    const locatorOf = (part: string, parent = message.id) => stored.replace(/:[^:]+:[^:]*$/, `:${parent}:${part}`);
     const read = (locator: string, child: string, more: { sourceId?: string; maxBytes?: number } = {}) => readMboxPart({
       state: h.runtime.state,
       sourceId: more.sourceId ?? 'gmail.email',

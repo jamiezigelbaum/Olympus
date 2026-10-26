@@ -553,19 +553,27 @@ connector; any other mbox stays under Archives, as before.
   with one reader for both locators. Each locator is bound to its child: it
   names the message and the part, and a read for any other child fails
   closed. `gmail-part1:<message>:<part>` reads through the Gmail lane's
-  connector under the current mail scope: the approval is checked again
-  before each request, the message is fetched and checked against the scope
-  (a parent now outside it is refused, and its child keeps its names only),
-  the part's declared size is checked before its bytes are asked for and its
-  decoded size after (an understated part is too large), under the lane's day
-  budget. `mbox-part1:<import>:<file>:<offset>:<message>:<part>` reads from
+  connector under the current mail scope. The approval is checked again
+  before every HTTP attempt, a retry after a backoff included. The message
+  is checked against the scope as it is now: fetched whole the first time,
+  and by a fresh metadata read (labels and sender) before each later part of
+  the same message. A parent now outside the scope is refused, and its child
+  keeps its names only; one deleted in Gmail is not found. The part's
+  declared size is checked before its bytes are asked for and its decoded
+  size after (an understated part is too large), under the lane's day budget.
+  `mbox-part1:<import>:<file>:<offset>:<digest>:<message>:<part>` reads from
   the import's own approved files (`archive-import/mbox/part-reader.ts`: the
-  folder and every file the versions imported, the message at the offset
-  must be the named parent, the part bounded before it is decoded, only for
-  an import joined to Gmail and not being removed). A forwarded message is
-  read as its headers and text. The product keeps one live reader per
-  account and approval revision for up to five minutes, so a message is
-  fetched once for all its parts. **Follow-up:** a child live listed first
+  folder and every file the versions imported; the message at the offset
+  must have the bytes the import recorded there, by the digest of their
+  SHA-256, whatever form the parent's id takes, and be the named parent; the
+  part bounded before it is decoded; only for an import joined to Gmail and
+  not being removed). A forwarded message is read as its headers and text.
+  Before a child's bytes are fetched, and again before its text is accepted,
+  the child must still be there and its parent visible (child visibility);
+  a queued read of a child whose parent was deleted meanwhile is closed and
+  its text dropped. The product keeps one live reader per account and
+  approval revision for up to five minutes, so a message's body is fetched
+  once for all its parts. **Follow-up:** a child live listed first
   keeps only its live locator when an import later brings the same message
   (intake skips the same version), so once live Gmail is disconnected its
   bytes wait although the import holds them; a second locator per child, or

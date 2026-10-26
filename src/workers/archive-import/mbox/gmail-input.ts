@@ -19,7 +19,7 @@
  *   `Opened` and `Archived` are the absence of `UNREAD` and `INBOX`, so they
  *   are dropped. Spam and Trash are skipped, as live Gmail lists neither.
  * - **Attachments.** Each MIME part with a file name, by its part path, with a
- *   locator into this archive (`mbox-part1:<file>:<offset>:<part>`). Whether
+ *   locator into this archive (`mbox-part1:<import>:<file>:<offset>:<digest>:<message>:<part>`). Whether
  *   they become child items is the Gmail lane's choice, the same for both
  *   inputs; when they do not, they are counted as not read, as before.
  */
@@ -151,15 +151,27 @@ export function gmailLabelIds(names: readonly string[], byName?: ReadonlyMap<str
  * approved files by it, and reads only for the child it names
  * (mbox/part-reader.ts).
  */
-export function mboxPartLocator(archiveId: string, fileIndex: number, offset: number, parentId: string, partId: string): string {
-  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${parentId}:${partId}`;
+/**
+ * Where one part of an imported message is: the import, the file, the
+ * message's offset, the digest of the message's bytes as imported (the first
+ * 32 hex digits of their SHA-256), the parent's id and the part's path. A read
+ * finds the message at the offset and refuses it unless its bytes have that
+ * digest, whatever form the parent's id takes.
+ */
+export function mboxPartLocator(archiveId: string, fileIndex: number, offset: number, digest: string, parentId: string, partId: string): string {
+  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${digest}:${parentId}:${partId}`;
 }
 
-export function parseMboxPartLocator(locator: string): { archiveId: string; fileIndex: number; offset: number; parentId: string; partId: string } | undefined {
+/** The digest a part locator records for a message's raw bytes. */
+export function mboxMessageDigest(raw: Uint8Array): string {
+  return sha256(raw).slice(0, 32);
+}
+
+export function parseMboxPartLocator(locator: string): { archiveId: string; fileIndex: number; offset: number; digest: string; parentId: string; partId: string } | undefined {
   if (!locator.startsWith(MBOX_PART_LOCATOR_PREFIX)) return undefined;
-  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([A-Za-z0-9_-]{1,128}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
+  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([0-9a-f]{32}):([A-Za-z0-9_-]{1,128}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
   if (!match) return undefined;
-  return { archiveId: match[1]!, fileIndex: Number(match[2]), offset: Number(match[3]), parentId: match[4]!, partId: match[5]! };
+  return { archiveId: match[1]!, fileIndex: Number(match[2]), offset: Number(match[3]), digest: match[4]!, parentId: match[5]!, partId: match[6]! };
 }
 
 function recordOf(
@@ -192,7 +204,7 @@ function recordOf(
       filename: part.filename,
       ...(part.mimeType ? { mimeType: part.mimeType } : {}),
       size: part.size,
-      locator: mboxPartLocator(archiveId, fileIndex, span.offset, id, part.partId),
+      locator: mboxPartLocator(archiveId, fileIndex, span.offset, mboxMessageDigest(span.raw!), id, part.partId),
       ...(part.nested ? { nested: true } : {}),
     })),
     sourceVersion: parsed.messageHash.slice(0, 32),

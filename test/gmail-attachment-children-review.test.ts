@@ -161,7 +161,7 @@ describe('attachment children, review round 1', () => {
     // The forward is read as the message it is: its text, not its own attachment's bytes.
     const reader = gmailAttachmentConnector({ account: ACCOUNT, imports: imported.runtime.state, live: () => undefined });
     const forward = await reader.fetchItemWithin(`${ACCOUNT}:${childOf('2')}`, {
-      deferredBytes: { locator: `mbox-part1:${started.archive_id}:0:0:${message.id}:2` },
+      deferredBytes: { locator: imported.locatorOf(childOf('2'))! },
       maxBytes: 100_000,
     });
     expect(forward.content.kind).toBe('bytes');
@@ -171,7 +171,7 @@ describe('attachment children, review round 1', () => {
     expect(text).toContain('fixtureforwardword');
     expect(text).not.toContain('%PDF');
     const pdf = await reader.fetchItemWithin(`${ACCOUNT}:${childOf('2.1')}`, {
-      deferredBytes: { locator: `mbox-part1:${started.archive_id}:0:0:${message.id}:2.1` },
+      deferredBytes: { locator: imported.locatorOf(childOf('2.1'))! },
       maxBytes: 100_000,
     });
     expect(pdf.content.kind === 'bytes' ? Buffer.from(pdf.content.bytes).toString() : '').toBe(PDF_BYTES);
@@ -208,7 +208,7 @@ describe('attachment children, review round 1', () => {
     expect(h.mailbox.calls).toEqual([`message:${lease.id}`]);
   });
 
-  test('one live reader fetches a message once for all of its parts', async () => {
+  test('one live reader fetches a message once for all of its parts, and asks only for its labels again', async () => {
     const h = gmailArchiveHarness(cleanups, { build: { children: true } });
     h.mailbox.messages = [liveWithForward()];
     h.mailbox.attachments['att-logo'] = b64url(PNG_BYTES);
@@ -217,7 +217,8 @@ describe('attachment children, review round 1', () => {
     for (const part of ['1', '2.1']) {
       await reader.fetchItemWithin(`${ACCOUNT}:${childOf(part)}`, { deferredBytes: { locator: `gmail-part1:${message.id}:${part}` }, maxBytes: 10_000 });
     }
-    expect(h.mailbox.calls).toEqual([`message:${message.id}`, `attachment:${message.id}:att-logo`, `attachment:${message.id}:att-pdf`]);
+    // The message once; before the second part only its current labels, by a metadata read.
+    expect(h.mailbox.calls).toEqual([`message:${message.id}`, `attachment:${message.id}:att-logo`, `metadata:${message.id}`, `attachment:${message.id}:att-pdf`]);
   });
 
   test('a live part is bounded by its declared size before it is fetched, and by its decoded size when the declaration understated it', async () => {

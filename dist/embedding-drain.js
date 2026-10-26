@@ -10532,11 +10532,22 @@ class GoogleGmailSourceConnector {
     if (localItemId !== wanted && `${this.account}:${localItemId}` !== wanted)
       throw new FileExtractionSourceError("source_content_unavailable");
     const client = await this.clientForRequest();
+    const gone = (error) => {
+      if (error instanceof Error && /Gmail API request failed \(404\)/.test(error.message))
+        throw new FileExtractionSourceError("source_item_not_found");
+      throw error;
+    };
     let message2 = this.messagesById.get(where.messageId);
-    if (!message2) {
+    if (message2) {
       this.beforeEachRequest?.();
       this.providerRequests += 1;
-      message2 = await client.getMessage(where.messageId);
+      const current2 = await client.getMessage(where.messageId, { format: "metadata", metadataHeaders: ["From"] }).catch(gone);
+      if (this.scope && !gmailMessageInScope(current2, this.scope))
+        throw new FileExtractionSourceError("source_permission_denied");
+    } else {
+      this.beforeEachRequest?.();
+      this.providerRequests += 1;
+      message2 = await client.getMessage(where.messageId).catch(gone);
       this.messagesById.set(where.messageId, message2);
     }
     if (this.scope && !gmailMessageInScope(message2, this.scope))
@@ -10621,7 +10632,8 @@ class GoogleGmailSourceConnector {
       ...this.requestBudget ? { requestBudget: this.requestBudget } : {},
       provenance: this.provenance,
       ...this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {},
-      ...this.sleepImpl ? { sleep: this.sleepImpl } : {}
+      ...this.sleepImpl ? { sleep: this.sleepImpl } : {},
+      ...this.beforeEachRequest ? { beforeEachAttempt: this.beforeEachRequest } : {}
     });
   }
   queryForWatermark(watermarkMs) {
@@ -10765,7 +10777,9 @@ class RestGmailApiClient {
   sleep;
   requestBudget;
   provenance;
+  beforeEachAttempt;
   constructor(options) {
+    this.beforeEachAttempt = options.beforeEachAttempt;
     this.token = options.token;
     this.fetchImpl = options.fetch;
     this.baseUrl = options.baseUrl;
@@ -10826,6 +10840,7 @@ class RestGmailApiClient {
   async getJson(path) {
     let attempt = 0;
     for (;; ) {
+      this.beforeEachAttempt?.();
       this.requestBudget?.reserve(this.provenance);
       const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
         headers: {
@@ -49831,6 +49846,8 @@ init_manifest3();
 init_gmail_mail_record();
 
 // src/workers/google-connectors/gmail-attachment-extraction.ts
+init_tier_ledger();
+init_child_visibility();
 init_gmail();
 
 // src/workers/email-source/server.ts

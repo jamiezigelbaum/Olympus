@@ -700,11 +700,22 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     // A locator read for another child than its own fails closed.
     if (localItemId !== wanted && `${this.account}:${localItemId}` !== wanted) throw new FileExtractionSourceError('source_content_unavailable');
     const client = await this.clientForRequest();
+    const gone = (error: unknown): never => {
+      if (error instanceof Error && /Gmail API request failed \(404\)/.test(error.message)) throw new FileExtractionSourceError('source_item_not_found');
+      throw error;
+    };
     let message = this.messagesById.get(where.messageId);
-    if (!message) {
+    if (message) {
+      // The message's parts are known; its labels may have changed since (moved to Trash, a skipped label):
+      // the parent is checked against the scope as it is now, by a fresh metadata read, before any part.
       this.beforeEachRequest?.();
       this.providerRequests += 1;
-      message = await client.getMessage(where.messageId);
+      const current = await client.getMessage(where.messageId, { format: 'metadata', metadataHeaders: ['From'] }).catch(gone);
+      if (this.scope && !gmailMessageInScope(current, this.scope)) throw new FileExtractionSourceError('source_permission_denied');
+    } else {
+      this.beforeEachRequest?.();
+      this.providerRequests += 1;
+      message = await client.getMessage(where.messageId).catch(gone);
       this.messagesById.set(where.messageId, message);
     }
     if (this.scope && !gmailMessageInScope(message, this.scope)) throw new FileExtractionSourceError('source_permission_denied');
@@ -808,6 +819,8 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       provenance: this.provenance,
       ...(this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {}),
       ...(this.sleepImpl ? { sleep: this.sleepImpl } : {}),
+      // The approval is asked before every HTTP attempt, retries included: a backoff can outlast it.
+      ...(this.beforeEachRequest ? { beforeEachAttempt: this.beforeEachRequest } : {}),
     });
   }
 
@@ -1141,6 +1154,7 @@ class RestGmailApiClient implements GmailApiClient {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly requestBudget: GmailRequestCounter | undefined;
   private readonly provenance: SourceInvocationProvenance;
+  private readonly beforeEachAttempt: (() => void) | undefined;
 
   constructor(options: {
     token: string;
@@ -1150,7 +1164,10 @@ class RestGmailApiClient implements GmailApiClient {
     provenance?: SourceInvocationProvenance;
     maxRetries?: number;
     sleep?: (ms: number) => Promise<void>;
+    /** Called before every HTTP attempt, retries included; throws to stop the request. */
+    beforeEachAttempt?: () => void;
   }) {
+    this.beforeEachAttempt = options.beforeEachAttempt;
     this.token = options.token;
     this.fetchImpl = options.fetch;
     this.baseUrl = options.baseUrl;
@@ -1231,6 +1248,8 @@ class RestGmailApiClient implements GmailApiClient {
   private async getJson(path: string): Promise<unknown> {
     let attempt = 0;
     for (;;) {
+      // An authorization revoked during a backoff stops the retry before it is sent.
+      this.beforeEachAttempt?.();
       // The retry loop is the request boundary. Reserving here makes one
       // ledger increment correspond to one real provider request. Gmail's own
       // 429 is handled below and binds every provenance: the budget exemption

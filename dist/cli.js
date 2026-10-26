@@ -54789,11 +54789,22 @@ class GoogleGmailSourceConnector {
     if (localItemId !== wanted && `${this.account}:${localItemId}` !== wanted)
       throw new FileExtractionSourceError("source_content_unavailable");
     const client = await this.clientForRequest();
+    const gone = (error) => {
+      if (error instanceof Error && /Gmail API request failed \(404\)/.test(error.message))
+        throw new FileExtractionSourceError("source_item_not_found");
+      throw error;
+    };
     let message2 = this.messagesById.get(where.messageId);
-    if (!message2) {
+    if (message2) {
       this.beforeEachRequest?.();
       this.providerRequests += 1;
-      message2 = await client.getMessage(where.messageId);
+      const current2 = await client.getMessage(where.messageId, { format: "metadata", metadataHeaders: ["From"] }).catch(gone);
+      if (this.scope && !gmailMessageInScope(current2, this.scope))
+        throw new FileExtractionSourceError("source_permission_denied");
+    } else {
+      this.beforeEachRequest?.();
+      this.providerRequests += 1;
+      message2 = await client.getMessage(where.messageId).catch(gone);
       this.messagesById.set(where.messageId, message2);
     }
     if (this.scope && !gmailMessageInScope(message2, this.scope))
@@ -54878,7 +54889,8 @@ class GoogleGmailSourceConnector {
       ...this.requestBudget ? { requestBudget: this.requestBudget } : {},
       provenance: this.provenance,
       ...this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {},
-      ...this.sleepImpl ? { sleep: this.sleepImpl } : {}
+      ...this.sleepImpl ? { sleep: this.sleepImpl } : {},
+      ...this.beforeEachRequest ? { beforeEachAttempt: this.beforeEachRequest } : {}
     });
   }
   queryForWatermark(watermarkMs) {
@@ -55107,7 +55119,9 @@ class RestGmailApiClient {
   sleep;
   requestBudget;
   provenance;
+  beforeEachAttempt;
   constructor(options) {
+    this.beforeEachAttempt = options.beforeEachAttempt;
     this.token = options.token;
     this.fetchImpl = options.fetch;
     this.baseUrl = options.baseUrl;
@@ -55168,6 +55182,7 @@ class RestGmailApiClient {
   async getJson(path) {
     let attempt = 0;
     for (;; ) {
+      this.beforeEachAttempt?.();
       this.requestBudget?.reserve(this.provenance);
       const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
         headers: {
@@ -169013,16 +169028,19 @@ function gmailLabelIds(names, byName) {
   }
   return ids;
 }
-function mboxPartLocator(archiveId, fileIndex, offset, parentId, partId) {
-  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${parentId}:${partId}`;
+function mboxPartLocator(archiveId, fileIndex, offset, digest4, parentId, partId) {
+  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${digest4}:${parentId}:${partId}`;
+}
+function mboxMessageDigest(raw) {
+  return sha2567(raw).slice(0, 32);
 }
 function parseMboxPartLocator(locator) {
   if (!locator.startsWith(MBOX_PART_LOCATOR_PREFIX))
     return;
-  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([A-Za-z0-9_-]{1,128}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
+  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([0-9a-f]{32}):([A-Za-z0-9_-]{1,128}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
   if (!match)
     return;
-  return { archiveId: match[1], fileIndex: Number(match[2]), offset: Number(match[3]), parentId: match[4], partId: match[5] };
+  return { archiveId: match[1], fileIndex: Number(match[2]), offset: Number(match[3]), digest: match[4], parentId: match[5], partId: match[6] };
 }
 function recordOf(children, archiveId, parsed, span, fileIndex, id, labelsByName) {
   const threadId = parsed.gmailThread ? gmailIdFromDecimal(parsed.gmailThread) : parsed.threadRoot ? `mid:${sha2567(parsed.threadRoot).slice(0, 24)}` : undefined;
@@ -169044,7 +169062,7 @@ function recordOf(children, archiveId, parsed, span, fileIndex, id, labelsByName
       filename: part.filename,
       ...part.mimeType ? { mimeType: part.mimeType } : {},
       size: part.size,
-      locator: mboxPartLocator(archiveId, fileIndex, span.offset, id, part.partId),
+      locator: mboxPartLocator(archiveId, fileIndex, span.offset, mboxMessageDigest(span.raw), id, part.partId),
       ...part.nested ? { nested: true } : {}
     })),
     sourceVersion: parsed.messageHash.slice(0, 32)
@@ -171153,6 +171171,8 @@ async function readMboxPart(input) {
         throw new FileExtractionSourceError("source_version_gone");
       if (!span.raw)
         throw new FileExtractionSourceError("source_too_large");
+      if (mboxMessageDigest(span.raw) !== where2.digest)
+        throw new FileExtractionSourceError("source_version_gone");
       const takeout = takeoutMessageId(span.separator);
       if (takeout !== undefined && takeout !== where2.parentId)
         throw new FileExtractionSourceError("source_content_unavailable");
@@ -171268,6 +171288,12 @@ function gmailAttachmentConnector(input) {
     classificationSignals: () => ({})
   };
 }
+function gmailChildStillServed(lane, child) {
+  const own3 = itemVerdicts(lane, [child]).get(tierLedgerIdentityKey(child));
+  if (!own3 || own3.gone)
+    return false;
+  return hiddenByParentIdentity(lane, [child]).size === 0;
+}
 function gmailAttachmentCandidates(reader) {
   return {
     async extractionCandidates(options) {
@@ -171304,6 +171330,10 @@ function createGmailAttachmentExtractionRuntime(input) {
       }
     ]]),
     tierSets: new Map(GMAIL_ATTACHMENT_CORPUS_IDS.map((corpusId) => [corpusId, input.set])),
+    scopeGuard: {
+      assertAuthorized: () => {},
+      allowsRef: ({ ref }) => gmailChildStillServed({ ledger: () => input.set.ledger, stores: () => input.set.openStores() }, { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId })
+    },
     ...input.extractors ? { extractors: input.extractors } : {},
     ...input.jobsDbPath ? { jobsDbPath: input.jobsDbPath } : {},
     ...input.warn ? { warn: input.warn } : {}
@@ -171314,6 +171344,8 @@ var init_gmail_attachment_extraction = __esm(() => {
   init_file_extraction_source();
   init_parse4();
   init_part_reader();
+  init_tier_ledger();
+  init_child_visibility();
   init_connector_source();
   init_file_extraction_runtime();
   init_gmail();
