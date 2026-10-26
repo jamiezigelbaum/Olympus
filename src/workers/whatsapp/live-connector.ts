@@ -107,6 +107,7 @@ import {
   spoolFileIdentity,
   spoolFileLines,
   spoolRecords,
+  terminatedLinesEnd,
   type SpoolReadBudget,
   type WhatsAppCaptureStatusReceipt,
 } from './spool-reader.ts';
@@ -402,7 +403,8 @@ function createRecordBuilder(
           bringsContent: recordBringsContent(record) || record.reactions !== undefined,
           authoredAt: record.timestamp,
         },
-        ...(record.children ?? []).map((child) => ({ identity: childIdentity(own, child), bringsContent: false })),
+        // A child whose bytes can be read brings content: a later record that has them fills one that had not.
+        ...(record.children ?? []).map((child) => ({ identity: childIdentity(own, child), bringsContent: child.available && child.locator !== undefined })),
       ];
     },
     compareVersions: compareWhatsAppVersions,
@@ -694,6 +696,39 @@ function resolveStart(spoolDir: string, start: SpoolPosition | undefined, pass: 
  * Indexes the spool from the index's high-water mark up to `until`, within
  * the pass's budget. True when the index reaches it.
  */
+/**
+ * Brings the spool index up to the end of the spool, within `budgetBytes`:
+ * what an export input matches against (its match keys, digests only) without
+ * reading the spool itself. True when the index reached the end. The listing
+ * of the live input catches up the same way; whichever runs first indexes.
+ */
+export function catchUpWhatsAppSpoolIndex(spoolDir: string, budgetBytes: number): boolean {
+  const index = WhatsAppSpoolIndex.open(spoolDir);
+  if (!index) return false;
+  const ledger = WhatsAppMatchLedger.open(spoolDir);
+  try {
+    index.reconcile(spoolDir);
+    const files = listSpoolFiles(spoolDir);
+    const last = files.at(-1);
+    if (last === undefined) return true;
+    const end = spoolFileIdentity(join(spoolDir, last));
+    if (!end) return false;
+    const pass: SpoolPassState = {
+      budget: { bytesLeft: budgetBytes },
+      maxRecordBytes: WHATSAPP_SPOOL_MAX_RECORD_BYTES,
+      findings: emptyWhatsAppSpoolPassFindings(),
+      index,
+      ledger,
+    };
+    // Up to the last whole line: a fragment being written is indexed when it is whole.
+    const offset = terminatedLinesEnd(join(spoolDir, last))?.offset ?? 0;
+    return catchUpIndex(spoolDir, index, { file: last, line: 0, offset }, pass);
+  } finally {
+    index.close();
+    ledger?.close();
+  }
+}
+
 function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolPosition | undefined, pass: SpoolPassState): boolean {
   if (until === undefined) return true;
   const mark = index.highWater() ?? { file: '', offset: 0 };
