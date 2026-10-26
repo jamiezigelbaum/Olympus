@@ -82,6 +82,8 @@ export interface TierWriteIntent {
    * record of a newer version took an older record's body): that record, replayed, is what finishes the write.
    */
   bodyVersion?: string;
+  /** The item's family: what a location row written from the intent alone needs. */
+  itemFamily?: string;
   connectorId: string;
 }
 
@@ -96,6 +98,7 @@ interface TierWriteIntentRow {
   location: number;
   connector_id: string;
   body_version: string | null;
+  item_family: string | null;
 }
 
 function writeIntentFromRow(row: TierWriteIntentRow): TierWriteIntent {
@@ -111,6 +114,7 @@ function writeIntentFromRow(row: TierWriteIntentRow): TierWriteIntent {
     kind: row.kind,
     ...(row.location === 1 ? { location: true as const } : {}),
     ...(row.body_version !== null ? { bodyVersion: row.body_version } : {}),
+    ...(row.item_family !== null ? { itemFamily: row.item_family } : {}),
     connectorId: row.connector_id,
   };
 }
@@ -2997,11 +3001,11 @@ export class TierLedger {
   putWriteIntent(intent: TierWriteIntent): void {
     this.db.query(`
       INSERT OR REPLACE INTO tier_write_intents (
-        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version, item_family
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       ...idParams(intent.identity), intent.identity.localItemId ?? '', intent.version ?? null, intent.kind,
-      intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null,
+      intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null,
     );
   }
 
@@ -3011,6 +3015,20 @@ export class TierLedger {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).get(...idParams(identity)) as TierWriteIntentRow | null;
     return row ? writeIntentFromRow(row) : undefined;
+  }
+
+  /**
+   * The tombstone row kept for a deletion of an item no store ever held is marked here, so a newer record routes
+   * the item afresh; a tombstone of an item a lane held stays the lane's.
+   */
+  markUnseenDeletion(identity: TierLedgerIdentity): void {
+    this.db.query('INSERT OR IGNORE INTO tier_unseen_deletions (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)')
+      .run(...idParams(identity));
+  }
+
+  isUnseenDeletion(identity: TierLedgerIdentity): boolean {
+    return this.db.query('SELECT 1 FROM tier_unseen_deletions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?')
+      .get(...idParams(identity)) !== null;
   }
 
   /** Every write not yet cleared, oldest first. */
@@ -4308,6 +4326,14 @@ function tierLedgerMigrations(): SqliteMigration[] {
             connector_id TEXT NOT NULL DEFAULT '',
             written_at TEXT NOT NULL,
             body_version TEXT,
+            item_family TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TABLE IF NOT EXISTS tier_unseen_deletions (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);

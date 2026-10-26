@@ -19620,6 +19620,7 @@ function writeIntentFromRow(row) {
     kind: row.kind,
     ...row.location === 1 ? { location: true } : {},
     ...row.body_version !== null ? { bodyVersion: row.body_version } : {},
+    ...row.item_family !== null ? { itemFamily: row.item_family } : {},
     connectorId: row.connector_id
   };
 }
@@ -21395,9 +21396,9 @@ class TierLedger {
   putWriteIntent(intent) {
     this.db.query(`
       INSERT OR REPLACE INTO tier_write_intents (
-        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null);
+        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version, item_family
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null);
   }
   writeIntent(identity2) {
     const row = this.db.query(`
@@ -21405,6 +21406,12 @@ class TierLedger {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).get(...idParams(identity2));
     return row ? writeIntentFromRow(row) : undefined;
+  }
+  markUnseenDeletion(identity2) {
+    this.db.query("INSERT OR IGNORE INTO tier_unseen_deletions (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)").run(...idParams(identity2));
+  }
+  isUnseenDeletion(identity2) {
+    return this.db.query("SELECT 1 FROM tier_unseen_deletions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?").get(...idParams(identity2)) !== null;
   }
   writeIntents() {
     return this.db.query("SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id").all().map(writeIntentFromRow);
@@ -22276,6 +22283,14 @@ function tierLedgerMigrations() {
             connector_id TEXT NOT NULL DEFAULT '',
             written_at TEXT NOT NULL,
             body_version TEXT,
+            item_family TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TABLE IF NOT EXISTS tier_unseen_deletions (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);
@@ -32407,7 +32422,7 @@ var init_local_index = __esm(() => {
             content: { kind: "metadata_only" },
             metadata: {},
             fetchedAt: startedAt
-          }, options.connectorId, "observed", syncRunId, options.trustTier, true);
+          }, options.connectorId, "observed", syncRunId, options.trustTier, options.insert !== true);
         })();
       } finally {
         if (!this.db.inTransaction)
@@ -60471,13 +60486,20 @@ class TieredStoreSet {
   }
   removeChild(child) {
     try {
+      const { sourceVersion: _own, ...bare } = child;
+      this.ledger.putWriteIntent({
+        identity: bare,
+        kind: "deletion",
+        connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+        itemFamily: child.family
+      });
       this.ledger.removeCopies(child);
-      this.ledger.clearWriteIntent(child);
       this.secrets()?.remove(child);
       for (const store of this.openStores()) {
-        store.tombstoneCopy(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
-        store.retireSecretLocation(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+        store.tombstoneCopy(bare, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+        store.retireSecretLocation(bare, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
       }
+      this.ledger.clearWriteIntent(child);
       return true;
     } catch {
       return false;
@@ -60773,12 +60795,22 @@ class TieredStoreSet {
     if (this.finishPendingIntents())
       await this.sweepOrphanedChildren();
   }
+  intentSuperseded(intent) {
+    const identity2 = { ...intent.identity, ...intent.version !== undefined ? { sourceVersion: intent.version } : {} };
+    if (intent.version === undefined) {
+      return this.anyLegHasRow(identity2) && TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity2).active !== true);
+    }
+    return TIER_DOMAIN_ORDER.some((domain) => {
+      const row = this.store(domain)?.storedItemState(identity2);
+      return row?.tombstoned === true && row.version === intent.version;
+    });
+  }
   finishPendingIntents() {
     let removed = false;
     for (const intent of this.ledger.writeIntents()) {
       const identity2 = { ...intent.identity, ...intent.version !== undefined ? { sourceVersion: intent.version } : {} };
       if (intent.kind === "content" || intent.kind === "names") {
-        if (this.anyLegHasRow(identity2) && TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity2).active !== true))
+        if (this.intentSuperseded(intent))
           this.ledger.clearWriteIntent(intent.identity);
         continue;
       }
@@ -60796,12 +60828,24 @@ class TieredStoreSet {
             continue;
           store.tombstoneCopy(identity2, { connectorId: intent.connectorId || TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, ...intent.kind === "secret" ? { trustTier: "S5" } : {} });
           store.advanceItemVersion(identity2, { onlyTombstoned: true });
+          if (intent.version === undefined)
+            store.retireSecretLocation(identity2, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
         }
         this.ledger.removeCopies(intent.identity);
         removed = true;
       }
-      if (intent.location === true && !this.anyLegHasRow(identity2))
-        continue;
+      if (intent.location === true && !this.anyLegHasRow(identity2)) {
+        if (intent.itemFamily === undefined)
+          continue;
+        this.store(SECRET_LOCATION_DOMAIN, { create: true })?.tombstoneCopy({ ...identity2, family: intent.itemFamily }, {
+          connectorId: intent.connectorId || TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+          ...intent.kind === "secret" ? { trustTier: "S5" } : {},
+          insert: true
+        });
+        if (intent.kind === "deletion")
+          this.ledger.markUnseenDeletion(intent.identity);
+        removed = true;
+      }
       this.ledger.clearWriteIntent(intent.identity);
     }
     return removed;
@@ -60854,22 +60898,39 @@ class TieredStoreSet {
       if (state)
         found.push({ domain, ...state });
     }
-    if (found.length === 0)
-      return;
+    const pending = this.ledger.writeIntent(identity2);
+    const hidden = (pending?.kind === "deletion" || pending?.kind === "secret") && pending.version !== undefined ? pending.version : undefined;
+    if (found.length === 0) {
+      if (pending?.version === undefined)
+        return;
+      if (hidden !== undefined)
+        return { version: hidden, hasContent: false, tombstoned: true };
+      const owesBody2 = pending.kind === "content" || pending.kind === "names";
+      return {
+        version: pending.version,
+        hasContent: false,
+        incomplete: true,
+        ...owesBody2 && pending.bodyVersion !== undefined ? { owedBodyVersion: pending.bodyVersion } : {}
+      };
+    }
     const newest = found.reduce((best, leg) => leg.version !== undefined && (best === undefined || compareVersions(leg.version, best) > 0) ? leg.version : best, undefined);
     const top = newest === undefined ? found : found.filter((leg) => leg.version !== undefined && compareVersions(leg.version, newest) === 0);
     const below = found.filter((leg) => !top.includes(leg));
     const topActive = top.filter((leg) => !leg.tombstoned);
-    const tombstoned = topActive.length === 0;
+    const intentLeads = hidden !== undefined && (newest === undefined || compareVersions(hidden, newest) > 0);
+    const tombstoned = topActive.length === 0 || intentLeads;
     const owed = this.ledger.writeIntent(identity2);
-    const owedBody = (owed?.kind === "content" || owed?.kind === "names") && owed.version !== undefined && !tombstoned;
+    const owesBody = owed?.kind === "content" || owed?.kind === "names";
+    const owedLeads = owesBody && owed.version !== undefined && (newest === undefined || compareVersions(owed.version, newest) > 0);
+    const owedBody = owesBody && owed.version !== undefined && (owedLeads || !tombstoned);
     const incomplete = owedBody;
     const owedBodyVersion = owedBody ? owed?.bodyVersion : undefined;
-    const version = owedBody && (newest === undefined || compareVersions(owed.version, newest) > 0) ? owed.version : newest;
+    const moving = pending?.kind === "advance" && pending.version !== undefined && (newest === undefined || compareVersions(pending.version, newest) > 0) ? pending.version : undefined;
+    const version = intentLeads ? hidden : moving !== undefined ? moving : owedBody && (newest === undefined || compareVersions(owed.version, newest) > 0) ? owed.version : newest;
     return {
       ...version !== undefined ? { version } : {},
-      hasContent: topActive.some((leg) => leg.chunkCount > 0),
-      ...tombstoned ? { tombstoned: true } : {},
+      hasContent: !intentLeads && !owedLeads && topActive.some((leg) => leg.chunkCount > 0),
+      ...tombstoned && !owedLeads ? { tombstoned: true } : {},
       ...incomplete ? { incomplete: true } : {},
       ...owedBodyVersion !== undefined ? { owedBodyVersion } : {}
     };
@@ -61115,6 +61176,7 @@ class TieredRoutingRun {
   copyRemovals;
   intents;
   namesAdvance;
+  emptied;
   owedAlready;
   pendingWithdrawals;
   set;
@@ -61131,6 +61193,7 @@ class TieredRoutingRun {
     this.pendingWithdrawals = new Map;
     this.intents = new Map;
     this.namesAdvance = new Map;
+    this.emptied = new Map;
     this.owedAlready = new Set;
     this.counts = {
       itemsRouted: 0,
@@ -61174,13 +61237,16 @@ class TieredRoutingRun {
   }
   writeIntent(connectorId, identity2, kind, run, settle, bodyVersion) {
     this.intents.set(identityKey(identity2), identity2);
-    if (kind !== "advance")
+    if (kind !== "advance") {
       this.namesAdvance.delete(identityKey(identity2));
+      this.emptied.delete(identityKey(identity2));
+    }
     return this.set.ledger.withWriteIntent({
       identity: identity2,
       ...identity2.sourceVersion !== undefined ? { version: identity2.sourceVersion } : {},
       kind,
       ...bodyVersion !== undefined ? { bodyVersion } : {},
+      itemFamily: identity2.family,
       connectorId
     }, run, settle);
   }
@@ -61196,6 +61262,9 @@ class TieredRoutingRun {
     this.copyRemovals.clear();
     for (const [key2, identity2] of this.intents) {
       const intent = this.set.ledger.writeIntent(identity2);
+      if (this.emptied.has(key2))
+        for (const domain of TIER_DOMAIN_ORDER)
+          this.set.store(domain)?.stripCopyContent(identity2);
       const moveTo = intent?.kind === "advance" ? identity2 : this.namesAdvance.get(key2);
       if (moveTo && intent && intent.kind !== "advance")
         this.set.ledger.putWriteIntent({ identity: intent.identity, version: moveTo.sourceVersion, kind: "advance", connectorId: intent.connectorId });
@@ -61206,6 +61275,7 @@ class TieredRoutingRun {
     }
     this.intents.clear();
     this.namesAdvance.clear();
+    this.emptied.clear();
   }
   routeFor(plan, corpusId, domain) {
     switch (plan.kind) {
@@ -61236,18 +61306,23 @@ class TieredRoutingRun {
       if (item.metadata["deletedIdentityResolved"] !== false) {
         this.set.retireSecretPresence(identity2, { record: ledger.itemIsSecret(identity2) });
       }
-      if (!routed) {
+      const location = !routed && (!hasRow || ledger.isUnseenDeletion(identity2)) && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined && item.identity.sourceVersion !== undefined;
+      if (!routed && !location) {
         this.counts.itemsLegacy += 1;
         return { kind: "legacy" };
       }
       this.counts.routedDeletions += 1;
       this.writeIntent(connector.id, identity2, "deletion", () => {
         return;
-      });
+      }, () => location ? { location: true } : undefined);
       for (const domain of TIER_DOMAIN_ORDER)
         this.set.store(domain)?.advanceItemVersion(identity2, { onlyTombstoned: true });
       this.copyRemovals.set(identityKey(identity2), identity2);
-      return { kind: "delete", corpora: new Set(ledger.copies(identity2).map((copy) => copy.corpusId)), reason: "provider_deleted" };
+      if (location) {
+        this.routedDomains.add(SECRET_LOCATION_DOMAIN);
+        ledger.markUnseenDeletion(identity2);
+      }
+      return { kind: "delete", corpora: new Set(ledger.copies(identity2).map((copy) => copy.corpusId)), reason: "provider_deleted", ...location ? { location: true } : {} };
     }
     const deferred = this.set.readsContentLater(item);
     const text2 = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
@@ -61262,7 +61337,8 @@ class TieredRoutingRun {
     this.recordSecretLocation(input, text2, decision);
     const contentRead = decision.contentRead && !input.contentFetchFailed;
     if (!routed) {
-      if (hasRow || !deferred && (!contentRead || input.metadataOnly)) {
+      const laneRow = hasRow && (TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity2).active === true) || !ledger.isUnseenDeletion(identity2));
+      if (laneRow || !deferred && (!contentRead || input.metadataOnly)) {
         this.counts.itemsLegacy += 1;
         return { kind: "legacy" };
       }
@@ -61271,6 +61347,15 @@ class TieredRoutingRun {
         this.counts.contentUnreadHeld += 1;
         const key2 = identityKey(identity2);
         const owed = ledger.writeIntent(identity2);
+        const emptied = text2 !== undefined && text2.trim() === "" && item.content.kind !== "metadata_only" && !input.contentFetchFailed;
+        if (emptied && !((owed?.kind === "content" || owed?.kind === "names") && !this.intents.has(key2) && owed.version !== identity2.sourceVersion)) {
+          this.writeIntent(connector.id, identity2, "content", () => {
+            return;
+          }, undefined, typeof item.metadata["contentVersion"] === "string" && item.metadata["contentVersion"] !== identity2.sourceVersion ? item.metadata["contentVersion"] : undefined);
+          this.emptied.set(key2, identity2);
+          this.namesAdvance.set(key2, identity2);
+          return { kind: "hold", reason: "content_unread" };
+        }
         if (owed?.kind === "content" || owed?.kind === "names") {
           if (this.intents.has(key2))
             this.namesAdvance.set(key2, identity2);

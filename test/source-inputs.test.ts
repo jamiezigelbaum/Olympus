@@ -256,7 +256,6 @@ describe('inputs through a real store set', () => {
     expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true });
     // A run stops after one leg: the body it wrote is owed to the other, and the ledger holds the write's intent.
     const owed = { ...f.identity('a'), localItemId: `${ACCOUNT}:a` };
-    expect(f.stores.internal.tombstoneCopy({ ...owed, family: 'file' }, { connectorId: 'test' })).toBe(true);
     f.set.ledger.putWriteIntent({ identity: owed, version: '1', kind: 'content', connectorId: 'test' });
     expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true, incomplete: true });
     // An older record does not apply to it: the version boundary holds although a leg is missing.
