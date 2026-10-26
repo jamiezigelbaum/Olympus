@@ -259,7 +259,8 @@ Ordinary cloud models never judge.
 - **Shared, not per format.** An archive import lane sets one lane option,
   `holdContentUntilJudged`, on its store's tier classification
   (`tier-placement.ts`); only a module under `src/workers/archive-import/`
-  may set it (`test/tier-hold-until-judged-guard.test.ts`). The shared
+  may set it (`test/tier-hold-until-judged-guard.test.ts`; the one
+  exception is a Gmail attachment child, held live too, child-items.md). The shared
   classifier then holds content without a verdict as for own-record items,
   never sets `content:personal_first`, and records
   `content:held_until_judged`, which every later pass (re-judge, migration,
