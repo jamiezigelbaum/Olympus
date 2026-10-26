@@ -125265,17 +125265,17 @@ class LocalFileExtractionJobStore {
     const { sql, params } = this.unreadJobsQuery(request);
     return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
   }
-  itemTextOwed(item) {
+  itemExtractionState(item) {
     const rows = this.db.query(`
       SELECT DISTINCT status FROM extraction_jobs
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
     `).all(item.provider, item.accountScope, item.providerItemId);
     if (rows.length === 0)
-      return true;
+      return "none";
     const statuses = new Set(rows.map((row) => row.status));
     if (statuses.has("indexed"))
-      return false;
-    return statuses.has("queued") || statuses.has("leased") || statuses.has("failed_retryable");
+      return "settled";
+    return statuses.has("queued") || statuses.has("leased") || statuses.has("failed_retryable") ? "active" : "settled";
   }
   unreadJobsQuery(request) {
     const lane = requireLaneKey(request);
@@ -169558,14 +169558,17 @@ class TierSnifferService {
   }
   waitingForExtraction(ledger, row, identity2) {
     try {
-      if (!this.options.extractionOwed || row.family !== "file" || !row.routed)
+      if (!this.options.extractionState || row.family !== "file" || !row.routed)
         return false;
       const copies = ledger.copies(identity2);
       if (copies.length === 0)
         return false;
       if (copies.some((copy) => copy.state === "current" && copy.layers !== "metadata"))
         return false;
-      return this.options.extractionOwed(identity2);
+      const state = this.options.extractionState(identity2);
+      if (state === "active")
+        return true;
+      return state === "none" && this.clockMs() - Date.parse(row.decidedAt) < EXTRACTION_ENQUEUE_GRACE_MS;
     } catch {
       return false;
     }
@@ -169843,7 +169846,7 @@ function positiveInteger7(value2, fallback, minimum) {
   const parsed = Number(value2);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_tier_move();
   init_secret_locations();
@@ -169863,6 +169866,7 @@ var init_sniffer_service = __esm(() => {
   init_tier_media_judgment_sweep();
   init_tier_ledger();
   DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
+  EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
   DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
   DEFAULT_STALE_MOVE_MS = 60 * 60000;
 });
@@ -192722,7 +192726,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       startModel: () => snifferRuntime.builtIn.startIfIdle?.(),
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
-    ...fileExtractionRuntime ? { extractionOwed: (identity2) => fileExtractionRuntime.jobs.itemTextOwed(identity2) } : {},
+    ...fileExtractionRuntime ? { extractionState: (identity2) => fileExtractionRuntime.jobs.itemExtractionState(identity2) } : {},
     ownerContext: privacyOwnerWords,
     budgetStatePath: join116(dirname91(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,

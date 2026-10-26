@@ -49425,6 +49425,7 @@ import { existsSync as existsSync27 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
+var EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
 var DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
 var DEFAULT_STALE_MOVE_MS = 60 * 60000;
 var BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)";
@@ -50001,14 +50002,17 @@ class TierSnifferService {
   }
   waitingForExtraction(ledger, row, identity) {
     try {
-      if (!this.options.extractionOwed || row.family !== "file" || !row.routed)
+      if (!this.options.extractionState || row.family !== "file" || !row.routed)
         return false;
       const copies = ledger.copies(identity);
       if (copies.length === 0)
         return false;
       if (copies.some((copy) => copy.state === "current" && copy.layers !== "metadata"))
         return false;
-      return this.options.extractionOwed(identity);
+      const state = this.options.extractionState(identity);
+      if (state === "active")
+        return true;
+      return state === "none" && this.clockMs() - Date.parse(row.decidedAt) < EXTRACTION_ENQUEUE_GRACE_MS;
     } catch {
       return false;
     }
