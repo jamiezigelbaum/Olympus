@@ -64495,7 +64495,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
   };
 }
 function releaseInputs(detail) {
-  const namesOnly = new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []].filter((index) => (detail.pack.candidates[index]?.chunks.length ?? 1) === 0 && !detail.pack.candidates[index]?.tables?.length));
+  const namesOnly = new Set(detail.pack.candidates.flatMap((candidate, index) => candidate.chunks.length === 0 && !candidate.tables?.length && !candidate.facts?.length ? [index] : []));
   const items = detail.pack.candidates.map((candidate, index) => {
     const item = candidate.provenance.sourceItem;
     return {
