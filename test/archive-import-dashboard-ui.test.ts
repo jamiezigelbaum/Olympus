@@ -318,7 +318,7 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     // Not in the Sources list too.
     const list = Array.from(page.doc.querySelectorAll('section')).find((node) => node.querySelector('h2')?.textContent === DASHBOARD_CHATGPT_PAGE_COPY.sources)!;
     expect(list.textContent).not.toContain('Import another archive');
-    expect(list.textContent).not.toContain('No archives imported yet');
+    expect(list.textContent).not.toContain("For an export that isn't from one of your sources above.");
   });
 
   test('with archives imported, Import another archive stays the section\'s own button, never in ⋯', async () => {
@@ -337,7 +337,9 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
 
   test('with no card importing (none registered, or a list that cannot be read), no ⋯ menu offers it', async () => {
     const page = await mount({ [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', undefined) });
-    expect(page.buttons().map((node) => node.textContent)).not.toContain('Import an archive');
+    for (const label of ['Gmail', 'Telegram', 'WhatsApp']) {
+      expect(Array.from(sourceRow(page, label).querySelectorAll('button')).map((node) => node.textContent)).not.toContain('Import an archive');
+    }
     expect(page.hasButton('Import another archive')).toBe(true);
   });
 
@@ -352,7 +354,7 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     await settle();
     (Array.from(row.querySelectorAll('.menu-panel button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
     await settle();
-    expect(page.text()).toContain('Import a Telegram archive');
+    expect(page.text()).toContain('Import an archive into Telegram');
     expect(page.text()).toContain(TELEGRAM.intro);
     expect(page.text()).not.toContain(A.pick.intro);
     (page.doc.querySelector('[data-key="picker:open:/Users/you/Telegram exports"]') as HTMLButtonElement).click();
@@ -440,7 +442,72 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     const section = page.doc.querySelector('section.other-archives');
     expect(section).not.toBeNull();
     expect(section!.textContent).toContain('Import another archive');
-    expect(page.buttons().map((node) => node.textContent)).not.toContain('Import an archive');
+    // A live source's own Import an archive is the computer's (its picker); in ChatGPT no live source's card offers it.
+    for (const label of ['Gmail', 'Telegram', 'WhatsApp']) {
+      expect(Array.from(sourceRow(page, label).querySelectorAll('button')).map((node) => node.textContent)).not.toContain('Import an archive');
+    }
+  });
+});
+
+describe('Reflect, Roam and Evernote: import-only sources with cards of their own (step 7)', () => {
+  /** A state's answer as the computer sends it: Reflect and Roam imports on their cards, not under Other archives. */
+  function split(state: string) {
+    return previewState(state);
+  }
+
+  function cardRow(page: Page, label: string): Element {
+    const row = Array.from(page.doc.querySelectorAll('li.row.source')).find((node) => node.querySelector('.source-name')?.textContent === label);
+    if (!row) throw new Error(`no ${label} row in: ${page.text()}`);
+    return row;
+  }
+
+  test('each is a row in Sources; an import of its format is listed in its own row with its Remove, not under Other archives', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => split('archives-notes-reflect') });
+    const sources = Array.from(page.doc.querySelectorAll('section')).find((node) => node.querySelector('h2')?.textContent === DASHBOARD_CHATGPT_PAGE_COPY.sources)!;
+    for (const label of ['Reflect', 'Roam', 'Evernote']) expect(sources.textContent).toContain(label);
+    const reflect = cardRow(page, 'Reflect');
+    expect(reflect.querySelector('li.archive .archive-name')?.textContent).toBe('Reflect export.zip');
+    expect(Array.from(reflect.querySelectorAll('li.archive button')).map((node) => node.textContent)).toContain(A.remove);
+    const other = page.doc.querySelector('section.other-archives')!;
+    expect(other.querySelector('li.archive')).toBeNull();
+  });
+
+  test('a card with nothing imported offers Import an archive, which opens the picker for its exports and names it on approval', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => split('archives-none'),
+      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    });
+    const evernote = cardRow(page, 'Evernote');
+    const button = Array.from(evernote.querySelectorAll('.source-actions button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement;
+    expect(button).toBeDefined();
+    // Never twice: the ⋯ menu does not repeat the row's own Import an archive.
+    expect(Array.from(evernote.querySelectorAll('.menu-panel button')).map((node) => node.textContent)).not.toContain('Import an archive');
+    button.click();
+    await settle();
+    expect(page.text()).toContain('Import an archive into Evernote');
+    expect(page.text()).toContain('an Evernote export');
+    (page.doc.querySelector('[data-key="picker:open:/Users/you/Notes exports"]') as HTMLButtonElement).click();
+    await settle();
+    page.button(fill(A.pick.makePrivateFor, { name: 'Field notes.enex' })).click();
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes('Importing Field notes.enex into Evernote.'));
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)[0]!.arguments).toEqual({ key: '/Users/you/Notes exports/Field notes.enex', source_id: 'evernote.archive' });
+    expect(page.text()).toContain('Importing Field notes.enex into Evernote. It shows in Evernote as it is read.');
+  });
+
+  test('Remove on a card\'s import names it in the line, as on Other archives', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => split('archives-notes'),
+      [ARCHIVE_REMOVE_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Removing.' }], structuredContent: { status: 'removing' } }),
+    });
+    const roam = cardRow(page, 'Roam');
+    (Array.from(roam.querySelectorAll('li.archive button')).find((node) => node.textContent === A.remove) as HTMLButtonElement).click();
+    await settle();
+    const confirm = page.buttons().find((node) => (node.textContent ?? '').toLowerCase().includes(A.remove.toLowerCase()) && node.getAttribute('data-key')?.endsWith(':yes'));
+    expect(confirm).toBeDefined();
+    confirm!.click();
+    await until(() => page.text().includes(fill(A.removing, { name: 'Roam-Export-1760180000000.zip' })));
+    expect(page.text()).toContain(fill(A.removing, { name: 'Roam-Export-1760180000000.zip' }));
   });
 });
 

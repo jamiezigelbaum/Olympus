@@ -51267,13 +51267,13 @@ function dashboardSubLine(source, options) {
     case "Failing":
       return dashboardAttentionLine(source, options);
     case "Working":
-      return workingLine(source);
+      return source.connection.action.kind === "archive_import" && source.coverage.indexed_items === 0 && source.connection.label ? source.connection.label : workingLine(source);
     case "Waiting":
       return waitingLine(source);
     case "Fresh":
       return freshLine(source, options?.now ?? new Date);
     case "Off":
-      return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && !dashboardUnsettledWithData(source) ? DASHBOARD_DISCONNECTED_DATA_KEPT : source.connection.label;
+      return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && source.connection.action.kind !== "archive_import" && !dashboardUnsettledWithData(source) ? DASHBOARD_DISCONNECTED_DATA_KEPT : source.connection.label;
   }
 }
 function dashboardIsUnconnectedState(source) {
@@ -52155,7 +52155,7 @@ var init_vocabulary = __esm(() => {
   };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import another archive",
-    sourceImport: { action: "Import an archive", title: "Import a {source} archive" },
+    sourceImport: { action: "Import an archive", title: "Import an archive into {source}" },
     pick: {
       back: "Back to Olympus",
       title: "Import another archive",
@@ -79161,7 +79161,7 @@ var init_source_dashboard = __esm(() => {
     },
     ...archiveSourceCards().map((card) => ({
       source_id: card.id,
-      primary_corpus_id: archiveCorpusId("secure_local", card.formats[0].family),
+      primary_corpus_id: card.id,
       corpus_source_ids: [],
       owns_corpus: () => false,
       ingestion_ledger_source_id: card.id,
@@ -172859,7 +172859,7 @@ function buildChatGptDashboardViewModel(view3, options = {}) {
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...degraded ? { degradedCredentials: degraded } : {} });
     const credentials = dashboardCredentialProblem(scrubbed, degraded);
     const imports = scrubbed.connection.imports_attention ?? [];
-    const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) || imports.length > 0 ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
+    const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) || imports.length > 0 || definition.public_source_id !== undefined ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
     const progress2 = measured?.progress;
     let status = connecting || credentials || missingScope(scrubbed) ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress2);
     if (imports.length > 0)

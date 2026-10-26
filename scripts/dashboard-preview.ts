@@ -814,7 +814,8 @@ function archivesPreview(state: string): SourceDashboardViewModel {
     connectedHandleRegistry: registry([]),
     apiKeyAvailability: {},
     importedArchives: previewImportedArchives(previewSplitArchives(meta).archives),
-    importedArchivesByCard: Object.fromEntries(previewSplitArchives(meta).cards.map((card) => [card.sourceId, previewImportedArchives(card)])),
+    // While the list cannot be read, each card says so too (dashboard.ts presentCards).
+    importedArchivesByCard: Object.fromEntries(previewSplitArchives(meta).cards.map((card) => [card.sourceId, previewImportedArchives(meta.unreadable ? { ...card, unreadable: meta.unreadable } : card)])),
     now: NOW,
   });
 }

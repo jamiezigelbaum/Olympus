@@ -20,6 +20,8 @@ import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
 import { createLocalFilesArchiveBrowser } from '../src/workers/local-files/scope-browser.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { reflectJson, reflectNotes } from './support/archive-fixtures-reflect.ts';
+import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
+import { DASHBOARD_DISCONNECTED_DATA_KEPT } from '../src/workers/dashboard/vocabulary.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -162,5 +164,17 @@ describe('an import-only source\'s card', () => {
     const archivesRow = chatgpt.sources.find((source) => source.id === 'archive.imports')!;
     expect(roamRow.primary?.label).toBe('Import an archive');
     expect(archivesRow.primary?.label).toBe('Import another archive');
+  });
+
+  test('a card with nothing imported, beside notes another card imported, never reads as a disconnected account', () => {
+    // An Evernote import is the only one: its items sit in the notes store set Other archives owns.
+    const result = previewDashboardToolResult('archives-notes-evernote', false) as unknown as { structuredContent: { sources: Array<{ id: string; detail?: string }> } };
+    const detail = (id: string) => result.structuredContent.sources.find((source) => source.id === id)?.detail ?? '';
+    // The card whose import is running says so in its own words, not a corpus's first sync.
+    expect(detail('evernote.archive')).toMatch(/^importing/i);
+    for (const id of ['reflect.archive', 'roam.archive', 'archive.imports']) {
+      expect(detail(id)).not.toBe(DASHBOARD_DISCONNECTED_DATA_KEPT);
+      expect(detail(id)).toMatch(/no archives imported yet/i);
+    }
   });
 });

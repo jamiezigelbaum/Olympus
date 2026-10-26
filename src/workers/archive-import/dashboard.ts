@@ -158,7 +158,9 @@ export interface ArchiveImportDashboard {
    * Remove). Empty while the list of imports cannot be read.
    */
   cardViews(): ComputerArchivesMeta[];
-  /** The same cards' connection, by card id (`importedArchivesByCard`). */
+  /**
+   * The connection of the same cards, by card id (`importedArchivesByCard`).
+   */
   presentCards(): Record<string, DashboardImportedArchives>;
   /**
    * What an agent may do (agent.ts): ask for an import or a removal, and

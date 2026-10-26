@@ -237,7 +237,10 @@ export function buildChatGptDashboardViewModel(
     const imports = scrubbed.connection.imports_attention ?? [];
     // A first connect the provider refused has nothing behind it: no progress,
     // exactly as an Off source has none, but it stays in Needs you.
+    // A card that is a view of another source's imports (an import-only source: Reflect, Roam) owns no corpus to
+    // measure: each import's progress is shown with it, in the card's list.
     const measured = connecting || vocabularyStatus === 'Off' || refusedFirstConnect(scrubbed) || imports.length > 0
+      || definition.public_source_id !== undefined
       ? undefined
       : measuredSourceProgress(card, scrubbed, embedding,
         // A sign-in already under way is not a signed-out source: its row keeps

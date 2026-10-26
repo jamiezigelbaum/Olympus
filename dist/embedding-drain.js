@@ -33985,7 +33985,7 @@ var init_source_dashboard = __esm(() => {
     },
     ...archiveSourceCards().map((card) => ({
       source_id: card.id,
-      primary_corpus_id: archiveCorpusId("secure_local", card.formats[0].family),
+      primary_corpus_id: card.id,
       corpus_source_ids: [],
       owns_corpus: () => false,
       ingestion_ledger_source_id: card.id,
@@ -34313,7 +34313,7 @@ var init_vocabulary = __esm(() => {
   };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import another archive",
-    sourceImport: { action: "Import an archive", title: "Import a {source} archive" },
+    sourceImport: { action: "Import an archive", title: "Import an archive into {source}" },
     pick: {
       back: "Back to Olympus",
       title: "Import another archive",

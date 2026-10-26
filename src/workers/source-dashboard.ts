@@ -1998,7 +1998,8 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
   // of its own; its connection is its imports (importedArchivesByCard).
   ...archiveSourceCards().map((card): DashboardSupportedSourceDefinition => ({
     source_id: card.id,
-    primary_corpus_id: archiveCorpusId('secure_local', card.formats[0]!.family),
+    // No corpus is this card's: the family's store set holds every import-only source's notes, and Other archives owns it.
+    primary_corpus_id: card.id,
     corpus_source_ids: [],
     owns_corpus: () => false,
     ingestion_ledger_source_id: card.id,
