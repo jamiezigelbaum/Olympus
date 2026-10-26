@@ -84,6 +84,13 @@ export interface BesideLiveSpec {
   seedHook: string;
   /** The export of the account the hook seeds, with the token in a record the live input does not hold. */
   small(token: string): { bytes: Uint8Array; expect: BesideLiveExpectation };
+  /**
+   * The export does not name its account (a WhatsApp chat export), so the dashboard asks the owner whether it is the connected
+   * account's, and the journey answers "Add to <sourceLabel>".
+   */
+  confirmAccount?: true;
+  /** The source as the dashboard's account question names it ("WhatsApp"). */
+  sourceLabel?: string;
 }
 
 export interface ArchiveFixtureSpec {
@@ -104,7 +111,15 @@ export interface ArchiveFixtureSpec {
    * an export of ANOTHER account, so it stays under Archives and keeps covering that path.
    */
   besideLive?: BesideLiveSpec;
+  /**
+   * The format's exports do not name their account, so once the source holds one (the beside-live seed made it) the dashboard asks
+   * whether `small` is that account's: the agent journey answers "Keep it under Archives", which is how such an export stays apart.
+   */
+  keepApart?: true;
 }
+
+/** The account question the dashboard asks after Import, and the answer the journey gives. */
+export type AccountAnswer = { answer: 'add'; sourceLabel: string } | { answer: 'apart' };
 
 /** What the model-off and changed-file stages need besides `small`. */
 export interface ArchiveStressSpec extends ArchiveFixtureSpec {
@@ -523,6 +538,8 @@ export interface LegFixture {
   /** The folder and file under the home directory, with the separators the machine uses. */
   relPath: string;
   expect: ArchiveExpectation;
+  /** The account question this fixture's import is asked after Import, and the answer the journey gives. */
+  accountQuestion?: AccountAnswer;
   /** The `beside` role: what its import beside the live input must come to. */
   beside?: BesideLiveExpectation;
   bytes: Uint8Array;
@@ -560,12 +577,18 @@ export function legFixture(role: FixtureRole, seed: string, format: string = STR
     if (!beside) throw new Error(`the "${format}" fixtures have no import beside a live input`);
     const made = beside.small(token);
     const expect: ArchiveExpectation = { label: formatOf.label, citationLabel: made.expect.citationLabel, family: formatOf.family, messages: made.expect.read, earliest: '', latest: '', notImported: [], howRead: [] };
-    return { role, format, fileName: `rc-beside-${format}${formatOf.extension}`, token, relPath: `${FIXTURE_FOLDER}/rc-beside-${format}${formatOf.extension}`, expect, beside: made.expect, bytes: made.bytes };
+    return {
+      role, format, fileName: `rc-beside-${format}${formatOf.extension}`, token, relPath: `${FIXTURE_FOLDER}/rc-beside-${format}${formatOf.extension}`, expect, beside: made.expect, bytes: made.bytes,
+      ...(beside.confirmAccount ? { accountQuestion: { answer: 'add' as const, sourceLabel: beside.sourceLabel ?? formatOf.label } } : {}),
+    };
   }
   if (role === 'held') built = stressSpec().plain(token);
   else if (role === 'bulk') built = { bytes: stressSpec().bulk(token, count), expect: { label: spec.label, citationLabel: spec.citationLabel, family: spec.family, messages: count, earliest: '', latest: '', notImported: [], howRead: [] } };
   else built = spec.small(token);
-  return { role, format, fileName, token, relPath: `${FIXTURE_FOLDER}/${fileName}`, expect: built.expect, bytes: built.bytes };
+  return {
+    role, format, fileName, token, relPath: `${FIXTURE_FOLDER}/${fileName}`, expect: built.expect, bytes: built.bytes,
+    ...(role === 'agent' && spec.keepApart ? { accountQuestion: { answer: 'apart' as const } } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

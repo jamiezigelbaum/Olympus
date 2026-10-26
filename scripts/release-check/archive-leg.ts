@@ -449,9 +449,37 @@ export function approveRequestSteps(fx: LegFixture, fullPath: string, startS = 1
       ],
       timeoutMs: openS * 1_000,
     },
-    {
+    ...(fx.accountQuestion ? accountQuestionSteps(fx, startS) : [{
       name: 'Press Import on the agent\'s request',
-      do: { click: { role: 'button', name: A.approve, within: { css: 'li.archive.request[data-request="pending"]' } }, frame: 'panel' },
+      do: { click: { role: 'button', name: A.approve, within: { css: 'li.archive.request[data-request="pending"]' } }, frame: 'panel' as const },
+      expect: [{ present: rowTarget(fx.fileName), frame: 'panel' as const }],
+      timeoutMs: startS * 1_000,
+    }]),
+  ];
+}
+
+/**
+ * For an export that does not name its account: Import, then the dashboard asks whether it is the connected account's, and the
+ * journey answers: "Add to <source>" (it joins the source) or "Keep it under Archives" (it stays apart). Either way the row follows.
+ */
+function accountQuestionSteps(fx: LegFixture, startS: number): Journey['steps'] {
+  const question = fx.accountQuestion!;
+  const pending = { css: 'li.archive.request[data-request="pending"]' };
+  const [askedBefore = ''] = A.account.line.split('{name}');
+  const answer = question.answer === 'add' ? fill(A.account.add, { source: question.sourceLabel }) : A.account.apart;
+  return [
+    {
+      name: 'Press Import on the agent\'s request: the dashboard asks which account the export is of',
+      do: { click: { role: 'button', name: A.approve, within: pending }, frame: 'panel' },
+      expect: [
+        { text: new RegExp(`${escapeRe(askedBefore)}${escapeRe(fx.fileName)}`), frame: 'panel' },
+        { present: { role: 'button', name: answer, within: pending }, frame: 'panel' },
+      ],
+      timeoutMs: startS * 1_000,
+    },
+    {
+      name: question.answer === 'add' ? `Answer ${answer}: the export joins the source` : `Answer ${answer}: the export stays apart`,
+      do: { click: { role: 'button', name: answer, within: pending }, frame: 'panel' },
       expect: [{ present: rowTarget(fx.fileName), frame: 'panel' }],
       timeoutMs: startS * 1_000,
     },
