@@ -14074,6 +14074,23 @@ import { dirname as dirname16 } from "node:path";
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
 }
+function writeIntentFromRow(row) {
+  return {
+    identity: {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.conversation_key !== "" ? { providerConversationId: row.conversation_key } : {},
+      ...row.local_item_id !== "" ? { localItemId: row.local_item_id } : {}
+    },
+    ...row.source_version !== null ? { version: row.source_version } : {},
+    kind: row.kind,
+    ...row.location === 1 ? { location: true } : {},
+    ...row.body_version !== null ? { bodyVersion: row.body_version } : {},
+    ...row.item_family !== null ? { itemFamily: row.item_family } : {},
+    connectorId: row.connector_id
+  };
+}
 function idParams(identity) {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
 }
@@ -15089,6 +15106,19 @@ class TierLedger {
           else
             result.set(key, [copyFromRow(row)]);
         }
+        const pending = this.db.query(`
+          SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
+          WHERE kind IN ('deletion', 'secret')
+            AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
+        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
+        for (const row of pending) {
+          const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+          if (hidden) {
+            for (const copy of hidden)
+              if (copy.state !== "superseded")
+                copy.state = "superseded";
+          }
+        }
       }
     })();
     return result;
@@ -15819,6 +15849,46 @@ class TierLedger {
         return override.kind === "tier" && override.tier === "secrets";
       });
     })();
+  }
+  withWriteIntent(intent, run, settle) {
+    return this.db.transaction(() => {
+      this.putWriteIntent(intent);
+      const result = run();
+      const final = settle?.(result);
+      if (final)
+        this.putWriteIntent({ ...intent, ...final });
+      return result;
+    })();
+  }
+  putWriteIntent(intent) {
+    this.db.query(`
+      INSERT OR REPLACE INTO tier_write_intents (
+        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version, item_family
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null);
+  }
+  writeIntent(identity) {
+    const row = this.db.query(`
+      SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
+    return row ? writeIntentFromRow(row) : undefined;
+  }
+  markUnseenDeletion(identity) {
+    this.db.query("INSERT OR IGNORE INTO tier_unseen_deletions (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)").run(...idParams(identity));
+  }
+  isUnseenDeletion(identity) {
+    return this.db.query("SELECT 1 FROM tier_unseen_deletions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?").get(...idParams(identity)) !== null;
+  }
+  writeIntents() {
+    return this.db.query("SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id").all().map(writeIntentFromRow);
+  }
+  clearWriteIntent(identity, written) {
+    this.db.query(`
+      DELETE FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        ${written ? "AND kind = ? AND COALESCE(source_version, '') = ?" : ""}
+    `).run(...idParams(identity), ...written ? [written.kind, written.version ?? ""] : []);
   }
   removeCopies(identity) {
     let removed = [];
@@ -16617,7 +16687,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 9,
       name: "secret_redaction_retirement",
       up(db) {
         const item = `provider = NEW.provider AND account_scope = NEW.account_scope
@@ -16662,10 +16732,40 @@ function tierLedgerMigrations() {
           END;
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "tier_write_intents",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_write_intents (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            local_item_id TEXT NOT NULL DEFAULT '',
+            source_version TEXT,
+            kind TEXT NOT NULL CHECK (kind IN ('content', 'names', 'advance', 'deletion', 'secret')),
+            location INTEGER NOT NULL DEFAULT 0,
+            connector_id TEXT NOT NULL DEFAULT '',
+            written_at TEXT NOT NULL,
+            body_version TEXT,
+            item_family TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TABLE IF NOT EXISTS tier_unseen_deletions (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 10, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -18415,7 +18515,7 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const override = read?.override;
   const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
   const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
-  const holdUntilJudged = options?.holdContentUntilJudged === true || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
+  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
   const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
@@ -21424,6 +21524,9 @@ function namesOnlyKept(db, itemPks) {
 function migrationFingerprint(contentHash, chunkHashes) {
   return createHash13("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
+function carryHold(listed, fetched) {
+  return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
+}
 function textFromRawItem(item) {
   if (item.content.kind === "text")
     return item.content.text;
@@ -23314,6 +23417,15 @@ var init_local_index = __esm(() => {
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND provider_conversation_id IS NOT NULL
     `).all(identity.provider, identity.accountScope, identity.providerItemId).map((row) => row.provider_conversation_id);
     }
+    advanceItemVersion(identity, options = {}) {
+      if (identity.sourceVersion === undefined)
+        return;
+      this.db.query(`
+      UPDATE items SET source_version = ?
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        ${options.onlyTombstoned === true ? "AND tombstoned = 1" : ""}
+    `).run(identity.sourceVersion, identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+    }
     hasItemRow(identity) {
       return this.db.query(`
       SELECT 1 FROM items
@@ -23619,7 +23731,7 @@ var init_local_index = __esm(() => {
             content: { kind: "metadata_only" },
             metadata: {},
             fetchedAt: startedAt
-          }, options.connectorId, "observed", syncRunId, options.trustTier, true);
+          }, options.connectorId, "observed", syncRunId, options.trustTier, options.insert !== true);
         })();
       } finally {
         if (!this.db.inTransaction)
@@ -24500,6 +24612,23 @@ var init_local_index = __esm(() => {
       if (!row || row.tombstoned === 1)
         return;
       return { chunkCount: row.chunk_count, ...row.authored_at ? { authoredAt: row.authored_at } : {} };
+    }
+    storedItemState(identity) {
+      const row = this.db.query(`
+      SELECT source_version, tombstoned,
+             (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = items.item_pk) AS chunk_count
+      FROM items
+      WHERE provider = ? AND account_scope = ?
+        AND normalized_conversation = ? AND provider_item_id = ?
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      if (!row)
+        return;
+      return {
+        ...row.source_version ? { version: row.source_version } : {},
+        chunkCount: row.tombstoned === 1 ? 0 : row.chunk_count,
+        tombstoned: row.tombstoned === 1
+      };
     }
     itemPresence(identity) {
       const row = this.db.query(`
@@ -26444,7 +26573,7 @@ var init_local_index = __esm(() => {
             let contentFetchFailed = false;
             if (!metadataOnly && !deferMetadataOnlyContent && classification && fetchContent && item.content.kind === "metadata_only") {
               try {
-                itemForStorage = await connector.fetchItem(item.identity.localItemId);
+                itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
                 consecutiveContentFetchFailures = 0;
               } catch {
                 contentFetchFailed = true;
@@ -26951,8 +27080,10 @@ var init_local_index = __esm(() => {
          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         if (existing && (!activeOnly || existing.tombstoned === 0)) {
           this.db.query(`
-          UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, trust_tier = ?, sync_run_id = ? WHERE item_pk = ?
-        `).run(now, now, tombstoneTrustTier, syncRunId, existing.item_pk);
+          UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, trust_tier = ?, sync_run_id = ?,
+            source_version = COALESCE(?, source_version)
+          WHERE item_pk = ?
+        `).run(now, now, tombstoneTrustTier, syncRunId, identity.sourceVersion ?? null, existing.item_pk);
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(existing.item_pk);
           this.deleteFtsForItem(existing.item_pk);
           if (tombstoneTrustTier === "S5")
@@ -26968,10 +27099,10 @@ var init_local_index = __esm(() => {
         INSERT INTO items (
           provider, family, account_scope, provider_item_id, provider_conversation_id,
           local_item_id, mime_type, fetched_at, indexed_at, trust_tier,
-          tombstoned, deleted_at, sync_run_id, parent_local_item_id
+          tombstoned, deleted_at, sync_run_id, parent_local_item_id, source_version
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-      `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? null, identity.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId, identity.parent?.localItemId ?? null);
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+      `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? null, identity.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId, identity.parent?.localItemId ?? null, identity.sourceVersion ?? null);
         const inserted = this.db.query(`SELECT item_pk FROM items
          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
@@ -27010,7 +27141,7 @@ var init_local_index = __esm(() => {
       if (text2 === undefined && item.content.kind === "metadata_only") {
         let fetched;
         try {
-          fetched = await connector.fetchItem(item.identity.localItemId);
+          fetched = carryHold(item, await connector.fetchItem(item.identity.localItemId));
           onContentFetchSuccess?.();
         } catch {
           gaps.push(contentFetchFailedGap(item));
@@ -33991,6 +34122,7 @@ var init_vocabulary = __esm(() => {
     deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
     deleteDataConfirmMessages: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.",
     deleteDataConfirmMessagesMedia: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.",
+    deleteDataImports: "Archives you imported into {source} are part of it: their history goes too, and the archive files themselves stay where they are.",
     deleteDataDone: "Indexed data deleted",
     disconnectConfirm: "Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
@@ -34073,6 +34205,43 @@ var init_vocabulary = __esm(() => {
       other: { why: "The import stopped.", fix: "Remove this archive and import it again." }
     },
     thisFile: "A file of this archive",
+    account: {
+      line: "{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?",
+      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.",
+      add: "Add to {source}",
+      apart: "Keep it under Archives",
+      addFor: "Add {name} to {source}",
+      apartFor: "Keep {name} under Archives",
+      sourceFallback: "this source",
+      reconfirm: {
+        line: "{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?",
+        note: "To keep it apart instead, delete this import from the {source} card, then import it again under Other archives."
+      }
+    },
+    inSource: {
+      listLabel: "Imported archives",
+      importingLine: "{percent}% read · {items} from this archive so far",
+      importingLineNone: "{percent}% read",
+      importedLine: "{items} from this archive",
+      importedWhen: " · imported {when}",
+      alreadyThere: { one: ", of which 1 was already there", many: ", of which {n} were already there" },
+      notRunningLine: "{percent}% read. It goes on from there once imports can run.",
+      stop: "Stop",
+      stopped: "Stopped {name}. What it imported stays.",
+      covers: { imported: "History imported up to {to}", live: "live since {since}" },
+      stoppedWhy: {
+        stopped_by_owner: { why: "You stopped this import. What it imported stays.", fix: "To go on from here, choose the same file again with Import an archive." },
+        file_changed: { why: "{file} changed after the import started.", fix: "Choose the file again with Import an archive once it has stopped changing. What is already here is not added twice." },
+        file_missing: { why: "{file} is no longer where it was.", fix: "Choose it again with Import an archive from where it is now. What is already here is not added twice." },
+        file_unreadable: { why: "Olympus could not read {file}.", fix: "Check that your user account can open it, then choose it again with Import an archive." },
+        resume_point_invalid: { why: "Olympus lost its place in this archive.", fix: "It cannot go on from here, and choosing the file again does not change that. What it imported stays; deleting the source removes it with the rest of its history." },
+        format_unavailable: { why: "This version of Olympus cannot read this kind of archive.", fix: "Update Olympus, then choose the file again with Import an archive." },
+        root_changed: { why: "The folder it was in was moved or replaced.", fix: "Choose it again with Import an archive from where it is now. What is already here is not added twice." },
+        account_changed: { why: "The account this source holds now is not the one this export belongs to, so nothing more was imported.", fix: "What it imported stays. To import it into the account it belongs to, connect that account first, then choose the file again with Import an archive." },
+        source_unavailable: { why: "This source was being deleted or moved, so nothing more was imported.", fix: "Once that has finished, choose the file again with Import an archive if you still want it." },
+        other: { why: "The import stopped.", fix: "Choose the file again with Import an archive. What is already here is not added twice." }
+      }
+    },
     gaps: {
       message_too_large: { one: "1 message too large to read", many: "{n} messages too large to read" },
       message_unreadable: { one: "1 message could not be read", many: "{n} messages could not be read" },
@@ -34101,6 +34270,7 @@ var init_vocabulary = __esm(() => {
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       item_repeated: { one: "1 message was in more than one export file and was imported once", many: "{n} messages were in more than one export file and were imported once" },
+      item_refused: { one: "1 item was not imported because the place it belongs in would not take it (nothing was stored in the wrong place)", many: "{n} items were not imported because the place they belong in would not take them (nothing was stored in the wrong place)" },
       files_not_looked_at: { one: "1 file in what you chose was not looked at, so it was not imported if it is an export", many: "{n} files in what you chose were not looked at, so any of them that are exports were not imported" },
       files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
@@ -34116,6 +34286,7 @@ var init_vocabulary = __esm(() => {
       item_truncated: "not_imported",
       section_not_imported: "not_imported",
       file_damaged: "not_imported",
+      item_refused: "not_imported",
       files_not_looked_at: "not_imported",
       files_unconfirmed: "not_imported",
       time_zone_assumed: "how_read",
@@ -36118,7 +36289,7 @@ var init_source_watch = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-contract.ts
-var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_BROWSE_TOOL_NAME = "olympus_archive_browse", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var DASHBOARD_TOOL_NAME = "olympus_dashboard", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_BROWSE_TOOL_NAME = "olympus_archive_browse", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop", PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
@@ -36142,7 +36313,8 @@ var init_dashboard_contract = __esm(() => {
     ARCHIVE_BROWSE_TOOL_NAME,
     ARCHIVE_APPROVE_TOOL_NAME,
     ARCHIVE_DECLINE_TOOL_NAME,
-    ARCHIVE_REMOVE_TOOL_NAME
+    ARCHIVE_REMOVE_TOOL_NAME,
+    ARCHIVE_STOP_TOOL_NAME
   ];
 });
 
@@ -36172,6 +36344,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     hostReadOnly: false,
     hostLinks: {},
     computerMeta: null,
+    archiveConfirm: {},
     unreadablePages: {},
     landing: "",
     landed: null,
@@ -36357,7 +36530,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!result || !result.isError)
       return "";
     const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
-    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool)))
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool)))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
     const text2 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
@@ -36418,7 +36591,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         redraw();
         return;
       }
-      if ((name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool) && result && !result.isError) {
+      if ((name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool) && result && !result.isError) {
         const said = archiveNotice(name, args, result);
         refresh();
         state.notice = said;
@@ -36774,7 +36947,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         const run = action;
         wrap.className = "fix confirm";
         const sourceWords = source ? String(source.label || "") : "";
-        const named = sourceWords && fix.tool === config.deleteDataTool ? fill2(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords }) : sourceWords && fix.tool === config.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords }) : "";
+        const importsGo = source && sourceImportsMeta(source.id) ? " " + fill2(P.deleteDataImports, { source: sourceWords }) : "";
+        const named = sourceWords && fix.tool === config.deleteDataTool ? fill2(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords }) + importsGo : sourceWords && fix.tool === config.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords }) : "";
         add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : named || P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key2 + ":yes", run, "danger"), button(P.cancel, key2 + ":no", () => {
           state.confirming = "";
           render(key2);
@@ -36992,13 +37166,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
     }
-    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null);
+    const joined = sourceImportsMeta(id);
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null) || (joined ? archiveNotRunning(joined, id) : null);
     if (why)
       add(main, why);
-    else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives)))
+    else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives)) && !(joined && sourceImportsNeed(joined)))
       row.className += " landed";
     if (archives)
       add(main, archiveList(archives));
+    if (joined)
+      add(main, sourceImportList(joined));
     add(row, main);
     const controls = el("div", "source-actions");
     const context2 = { id, label: String(source.label || id) };
@@ -37129,6 +37306,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return box;
   }
   function archivesMoving() {
+    const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
+    if (joined.some((group) => !!group && !archiveSetting(group) && Array.isArray(group.imports) && group.imports.some((entry) => !!entry && entry.status === "importing")))
+      return true;
     const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
     if (!meta || typeof meta !== "object")
       return false;
@@ -37138,7 +37318,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     supersede();
     state.notice = "";
     state.confirming = "";
-    picker.pickArchive(H.copy.archives.pick, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2));
+    picker.pickArchive({ ...H.copy.archives.pick, account: H.copy.archives.account }, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2));
   }
   function archiveOutcome(outcome) {
     const A = H.copy.archives;
@@ -37161,11 +37341,29 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const removed = meta && Array.isArray(meta.archives) ? meta.archives.filter((entry) => entry && entry.id === target)[0] : null;
       return removed && typeof removed.name === "string" ? fill2(A.removing, { name: removed.name }) : "";
     }
+    if (name === H.archiveStopTool) {
+      const groups = state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
+      const stopped = groups.flatMap((group) => group && Array.isArray(group.imports) ? group.imports : []).filter((entry) => entry && entry.id === (args && args.archive_id))[0];
+      return stopped && typeof stopped.name === "string" ? fill2(A.inSource.stopped, { name: stopped.name }) : "";
+    }
     if (name === H.archiveDeclineTool) {
       const request2 = meta && Array.isArray(meta.requests) ? meta.requests.filter((entry) => entry && entry.id === (args && args.request_id))[0] : null;
       if (request2 && request2.status === "checking" && typeof request2.name === "string")
         return fill2(A.cancelled, { name: request2.name });
+      if (args && typeof args.request_id === "string")
+        delete state.archiveConfirm[args.request_id];
       return request2 && request2.status === "pending" ? A.declined : "";
+    }
+    if (name === H.archiveApproveTool) {
+      const content = result && result.structuredContent;
+      const requestId = args && typeof args.request_id === "string" ? args.request_id : "";
+      if (requestId) {
+        if (content && content.status === "confirm_account") {
+          const source = content.source && typeof content.source.label === "string" ? content.source.label : "";
+          state.archiveConfirm[requestId] = { source, ...content.reconfirm === true ? { reconfirm: true } : {} };
+        } else
+          delete state.archiveConfirm[requestId];
+      }
     }
     return archiveOutcome(result && result.structuredContent);
   }
@@ -37203,6 +37401,113 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(list, archiveItem(archive, String(meta.privateModel || ""), archiveSetting(meta)));
     return list;
   }
+  function sourceImportsMeta(id) {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.sourceImports))
+      return null;
+    const found = meta.sourceImports.filter((group) => !!group && group.sourceId === id && Array.isArray(group.imports))[0];
+    return found && found.imports.filter(validArchive).length > 0 ? found : null;
+  }
+  function sourceImportNeedsPerson(entry) {
+    return entry.status === "stopped" && !(entry.stop && entry.stop.code === "stopped_by_owner");
+  }
+  function sourceImportsNeed(group) {
+    return group.imports.filter(validArchive).some(sourceImportNeedsPerson);
+  }
+  function sourceImportList(group) {
+    const S = H.copy.archives.inSource;
+    const box = el("div", "archive-source");
+    const covers = group.covers && typeof group.covers === "object" ? group.covers : {};
+    const parts = [];
+    if (typeof covers.importedTo === "string" && covers.importedTo)
+      parts.push(fill2(S.covers.imported, { to: covers.importedTo }));
+    if (typeof covers.liveSince === "string" && covers.liveSince)
+      parts.push(fill2(S.covers.live, { since: covers.liveSince }));
+    if (parts.length) {
+      const line = parts.join(" · ");
+      add(box, el("p", "muted archive-facts archive-covers", line.charAt(0).toUpperCase() + line.slice(1)));
+    }
+    const list = el("ul", "archives");
+    list.setAttribute("aria-label", S.listLabel);
+    const setting = archiveSetting(group);
+    for (const entry of group.imports.filter(validArchive))
+      add(list, sourceImportItem(entry, setting));
+    return add(box, list);
+  }
+  function alreadyThereNote(entry) {
+    const n = wholeCount(entry.alreadyThere);
+    const S = H.copy.archives.inSource;
+    return n > 0 ? fill2(n === 1 ? S.alreadyThere.one : S.alreadyThere.many, { n: count(n) }) : "";
+  }
+  function sourceImportItem(entry, setting) {
+    const A = H.copy.archives;
+    const S = A.inSource;
+    const ownStop = entry.status === "stopped" && !sourceImportNeedsPerson(entry);
+    const needs = sourceImportNeedsPerson(entry);
+    const item = el("li", "archive" + (needs ? " stopped" : ""));
+    item.setAttribute("data-archive", entry.status);
+    item.setAttribute("data-source-import", "true");
+    if (archiveLanded("archive:" + entry.id, needs))
+      item.className += " landed";
+    const halted = !!setting && entry.status === "importing";
+    if (halted)
+      item.setAttribute("data-not-running", setting);
+    add(item, add(el("p", "archive-head"), el("span", "archive-name", entry.name), el("span", "ftag", halted ? A.status.notRunning : A.status[entry.status])));
+    const facts = [entry.format, entry.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
+    const earliest = typeof entry.earliest === "string" ? entry.earliest : "";
+    const latest = typeof entry.latest === "string" ? entry.latest : "";
+    if (earliest && latest) {
+      facts.push(el("span", "archive-dates", earliest === latest ? earliest : fill2(A.dates, { earliest, latest })));
+      const snapshot = archiveNouns(entry).snapshot;
+      if (typeof snapshot === "string" && snapshot)
+        facts.push(el("span", "archive-snapshot", snapshot));
+    }
+    if (facts.length) {
+      const line = el("p", "muted archive-facts");
+      facts.forEach((fact, index) => {
+        if (index)
+          add(line, doc.createTextNode(" · "));
+        add(line, fact);
+      });
+      add(item, line);
+    }
+    const read = wholeCount(entry.read);
+    if (halted) {
+      const pct = typeof entry.percent === "number" && isFinite(entry.percent) ? entry.percent : 0;
+      add(item, el("p", "muted", fill2(S.notRunningLine, { percent: percent(pct) })));
+    } else if (entry.status === "importing") {
+      const pct = typeof entry.percent === "number" && isFinite(entry.percent) ? entry.percent : 0;
+      const line = read > 0 ? fill2(S.importingLine, { percent: percent(pct), items: itemCount(entry, read) }) + alreadyThereNote(entry) : fill2(S.importingLineNone, { percent: percent(pct) });
+      add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
+    } else if (entry.status === "imported") {
+      const when = typeof entry.importedAt === "string" ? ago(entry.importedAt) : "";
+      if (read === 0) {
+        const none = archiveNouns(entry).none;
+        if (archiveHasReasons(entry)) {
+          const None = none.charAt(0).toUpperCase() + none.slice(1);
+          add(item, el("p", "muted", when ? fill2(A.nothingImportedWhen, { None, when }) : fill2(A.nothingImported, { None })));
+        } else {
+          add(item, el("p", "muted", when ? fill2(A.emptyImportWhen, { none, when }) : fill2(A.emptyImport, { none })));
+        }
+      } else {
+        add(item, el("p", "muted", fill2(S.importedLine, { items: itemCount(entry, read) }) + alreadyThereNote(entry) + (when ? fill2(S.importedWhen, { when }) : "")));
+      }
+    } else {
+      const stop = entry.stop && typeof entry.stop === "object" ? entry.stop : {};
+      const words2 = Object.prototype.hasOwnProperty.call(S.stoppedWhy, String(stop.code)) ? S.stoppedWhy[String(stop.code)] : S.stoppedWhy.other;
+      const file = typeof stop.file === "string" && stop.file ? stop.file : A.thisFile;
+      add(item, el("p", ownStop ? "muted" : "reason strong", fill2(words2.why, { file })), el("p", "muted", words2.fix));
+      if (read > 0)
+        add(item, el("p", "muted", fill2(S.importedLine, { items: itemCount(entry, read) }) + alreadyThereNote(entry)));
+    }
+    const why = archiveWhy(entry);
+    if (why)
+      add(item, why);
+    if (entry.status === "importing") {
+      add(item, add(el("div", "archive-actions"), fixControl({ label: S.stop, tool: H.archiveStopTool, args: { archive_id: entry.id } }, "archive-stop:" + entry.id, "plain", false)));
+    }
+    return item;
+  }
   function isolatedLine(cls, template, values) {
     const line = el("p", cls);
     for (const part of template.split(/(\{[a-z]+\})/)) {
@@ -37238,6 +37543,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         destructive: true,
         confirmText: fill2(A.removeConfirm, { name: request2.name })
       }, key2 + ":remove", "plain", true), fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
+      return item;
+    }
+    const asked = state.archiveConfirm[request2.id];
+    if (request2.status === "pending" && asked) {
+      const source = asked.source || A.account.sourceFallback;
+      add(item, isolatedLine("", asked.reconfirm ? A.account.reconfirm.line : A.account.line, { name: request2.name, source }));
+      add(item, el("p", "muted", fill2(asked.reconfirm ? A.account.reconfirm.note : A.account.note, { source })));
+      add(item, add(el("div", "archive-actions"), fixControl({ label: fill2(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request2.id, confirm_account: true } }, key2 + ":confirm", "plain", false), ...asked.reconfirm ? [] : [fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request2.id, keep_apart: true } }, key2 + ":apart", "plain", false)], fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
       return item;
     }
     if (request2.status === "pending") {
@@ -38835,13 +39148,14 @@ function chatgptPickerProgram(kit) {
     const text2 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
     return text2 ? String(text2.text) : "";
   }
-  function approveArchive(key2, name) {
+  function approveArchive(key2, name, answer) {
     if (!archiveMode() || p.loading || p.saving)
       return;
     p.saving = true;
     p.savingKey = key2;
     p.saveError = "";
     p.saveAccess = null;
+    p.confirm = null;
     kit.render("picker:pick:" + key2);
     const mine = session;
     const refused = (text2, access) => {
@@ -38853,13 +39167,21 @@ function chatgptPickerProgram(kit) {
       p.saveAccess = access && typeof access.message === "string" && access.message ? access : null;
       kit.render("picker:archive-error");
     };
-    kit.call(T.archiveApprove, { key: key2 }).then((result) => {
+    kit.call(T.archiveApprove, answer ? { key: key2, ...answer } : { key: key2 }).then((result) => {
       if (mine !== session || !p)
         return;
       const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
       const status = content ? content.status : "";
-      if (!result || result.isError || status !== "started" && status !== "checking" && status !== "already_imported") {
+      if (!result || result.isError || status !== "started" && status !== "checking" && status !== "already_imported" && status !== "confirm_account") {
         refused(errorSentence(result), content ? content.access : null);
+        return;
+      }
+      if (status === "confirm_account") {
+        const source = content.source && typeof content.source === "object" && typeof content.source.label === "string" ? content.source.label : "";
+        p.saving = false;
+        p.savingKey = "";
+        p.confirm = { key: key2, name: typeof content.name === "string" && content.name ? content.name : name, source, reconfirm: content.reconfirm === true };
+        kit.render("picker:confirm");
         return;
       }
       const done = p.pick.archive.done;
@@ -38895,6 +39217,7 @@ function chatgptPickerProgram(kit) {
       discarding: false,
       savingKey: "",
       saveAccess: null,
+      confirm: null,
       roots: [],
       rootCursor: "",
       branches: new Map,
@@ -39709,6 +40032,24 @@ function chatgptPickerProgram(kit) {
       error.setAttribute("role", "alert");
       add(error, add(el("div", "banner-body"), el("p", "", p.error), add(el("div", "actions"), kit.button(Q.tryAgain, "picker:retry", () => p.retry && p.retry(), "plain"))));
       add(body, error);
+    }
+    if (archiveMode() && p.confirm) {
+      const words2 = p.pick.words.account;
+      const source = p.confirm.source || words2.sourceFallback;
+      const name = p.confirm.name;
+      const ask = el("div", "banner");
+      ask.setAttribute("role", "group");
+      ask.setAttribute("aria-label", fill2(words2.line, { name, source }));
+      const answer = (extra, label, labelFor2, focus, style) => {
+        const control = kit.button(label, focus, p.saving ? null : () => approveArchive(p.confirm.key, p.confirm.name, extra), style);
+        control.setAttribute("aria-label", labelFor2);
+        return control;
+      };
+      add(ask, add(el("div", "banner-body"), el("p", "", fill2(p.confirm.reconfirm ? words2.reconfirm.line : words2.line, { name, source })), el("p", "muted", fill2(p.confirm.reconfirm ? words2.reconfirm.note : words2.note, { name, source })), add(el("div", "actions"), answer({ confirm_account: true }, fill2(words2.add, { name, source }), fill2(words2.addFor, { name, source }), "picker:confirm", "main"), ...p.confirm.reconfirm ? [] : [answer({ keep_apart: true }, words2.apart, fill2(words2.apartFor, { name, source }), "picker:confirm-apart", "plain")], kit.button(p.pick.words.chooseAnother, "picker:confirm-other", () => {
+        p.confirm = null;
+        kit.render(p.path.length ? "picker:up" : "picker:back");
+      }, "plain"))));
+      add(body, ask);
     }
     if (archiveMode() && p.saveError) {
       const error = el("div", "banner");
@@ -40894,6 +41235,7 @@ function chatgptDashboardPageHtml(options = {}) {
       archiveApproveTool: ARCHIVE_APPROVE_TOOL_NAME,
       archiveDeclineTool: ARCHIVE_DECLINE_TOOL_NAME,
       archiveRemoveTool: ARCHIVE_REMOVE_TOOL_NAME,
+      archiveStopTool: ARCHIVE_STOP_TOOL_NAME,
       landedMs: CHATGPT_DASHBOARD_LANDED_MS,
       copy: DASHBOARD_COMPUTER_PANEL_COPY
     }
@@ -42338,6 +42680,78 @@ var init_ingestion_health_state = __esm(() => {
   init_olympus_layout();
 });
 
+// src/workers/archive-import/continuation-cache.ts
+function sameKey(a, b) {
+  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
+}
+
+class ContinuationCache {
+  entries = [];
+  maxEntries;
+  maxBytes;
+  maxIdleMs;
+  now;
+  constructor(options = {}) {
+    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
+    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
+    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
+    this.now = options.now ?? Date.now;
+  }
+  get size() {
+    this.expire();
+    return this.entries.length;
+  }
+  get retainedBytes() {
+    this.expire();
+    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
+  }
+  put(key2, continuation) {
+    this.expire();
+    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
+    if (continuation.retainedBytes > this.maxBytes)
+      return;
+    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
+    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
+      this.entries.shift();
+  }
+  take(key2, offset) {
+    this.expire();
+    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
+    if (index < 0)
+      return;
+    const [parked] = this.entries.splice(index, 1);
+    return parked.continuation.position === offset ? parked.continuation : undefined;
+  }
+  dropArchive(archiveId) {
+    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
+  }
+  clear() {
+    this.entries = [];
+  }
+  retainedTotal() {
+    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
+  }
+  expire() {
+    const cutoff = this.now() - this.maxIdleMs;
+    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
+      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
+    }
+  }
+}
+var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
+var init_continuation_cache = __esm(() => {
+  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
+  archiveContinuations = new ContinuationCache;
+});
+
+// src/workers/archive-import/forget.ts
+var init_forget = __esm(() => {
+  init_continuation_cache();
+  init_media_bindings();
+  init_state();
+});
+
 // src/core/this-computer.ts
 var init_this_computer = __esm(() => {
   init_atomic_file();
@@ -42367,6 +42781,8 @@ var init_source_forget_registry = __esm(() => {
   init_source_scope_approval();
   init_mail_source_scope();
   init_source_account_binding();
+  init_forget();
+  init_state();
   init_this_computer();
   init_source_dashboard();
   init_source_scheduler_state();
@@ -47702,71 +48118,7 @@ var decodableCharsets = new Map;
 // src/workers/archive-import/whatsapp/connector.ts
 init_archive_formats();
 init_byte_source();
-
-// src/workers/archive-import/continuation-cache.ts
-var CONTINUATION_CACHE_MAX_ENTRIES = 4;
-var CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
-var CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
-function sameKey(a, b) {
-  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
-}
-
-class ContinuationCache {
-  entries = [];
-  maxEntries;
-  maxBytes;
-  maxIdleMs;
-  now;
-  constructor(options = {}) {
-    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
-    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
-    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
-    this.now = options.now ?? Date.now;
-  }
-  get size() {
-    this.expire();
-    return this.entries.length;
-  }
-  get retainedBytes() {
-    this.expire();
-    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
-  }
-  put(key2, continuation) {
-    this.expire();
-    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
-    if (continuation.retainedBytes > this.maxBytes)
-      return;
-    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
-    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
-      this.entries.shift();
-  }
-  take(key2, offset) {
-    this.expire();
-    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
-    if (index < 0)
-      return;
-    const [parked] = this.entries.splice(index, 1);
-    return parked.continuation.position === offset ? parked.continuation : undefined;
-  }
-  dropArchive(archiveId) {
-    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
-  }
-  clear() {
-    this.entries = [];
-  }
-  retainedTotal() {
-    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
-  }
-  expire() {
-    const cutoff = this.now() - this.maxIdleMs;
-    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
-      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
-    }
-  }
-}
-var archiveContinuations = new ContinuationCache;
-
-// src/workers/archive-import/whatsapp/connector.ts
+init_continuation_cache();
 init_stop_errors();
 init_zip_reader();
 
@@ -47833,6 +48185,7 @@ init_archive_formats();
 // src/workers/archive-import/notes/archive.ts
 init_archive_formats();
 init_byte_source();
+init_continuation_cache();
 init_json_stream();
 init_record_probe();
 
@@ -47966,9 +48319,40 @@ var LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.
 init_lane();
 init_media_bindings();
 
+// src/workers/archive-import/source-targets.ts
+class ArchiveSourceTargets {
+  bySource = new Map;
+  byFormat = new Map;
+  register(target) {
+    this.bySource.set(target.sourceId, target);
+    for (const format of target.formats)
+      this.byFormat.set(format, target);
+  }
+  unregister(sourceId) {
+    const target = this.bySource.get(sourceId);
+    if (!target)
+      return;
+    this.bySource.delete(sourceId);
+    for (const format of target.formats)
+      if (this.byFormat.get(format) === target)
+        this.byFormat.delete(format);
+  }
+  forSource(sourceId) {
+    return this.bySource.get(sourceId);
+  }
+  forFormat(formatId) {
+    return this.byFormat.get(formatId);
+  }
+  sourceIds() {
+    return [...this.bySource.keys()];
+  }
+}
+var archiveSourceTargets = new ArchiveSourceTargets;
+
 // src/workers/archive-import/start.ts
 init_archive_formats();
 init_scope_safe_fs();
+init_source_storage();
 init_manifest3();
 
 // src/workers/archive-import/runtime.ts
@@ -47978,6 +48362,7 @@ init_store2();
 // src/workers/archive-import/dashboard.ts
 init_archive_formats();
 init_scope_safe_fs();
+init_source_storage();
 
 // src/workers/archive-import/agent.ts
 init_open_targets();
@@ -48002,6 +48387,7 @@ var ARCHIVE_AGENT_COPY = {
   },
   existingNote: "A matching path does not show that this file is the one imported: it may have been replaced since, so Olympus recorded a request for the file as it is now. When the person approves, Olympus opens the file, compares it with what it already holds, and says if it is the same export.",
   removing: "{name} is already being removed. Call archive_import with status to see when it is gone.",
+  partOfSource: "{name} is part of a source's own history: its items are held together with what the source reads live, so it cannot be removed on its own. It is deleted with the whole source, by the person, from the source's card.",
   heldNote: {
     ready: DASHBOARD_ARCHIVE_COPY.heldWhy.ready,
     waiting: DASHBOARD_ARCHIVE_COPY.heldWhy.waiting,
@@ -48022,6 +48408,7 @@ init_manifest3();
 // src/workers/archive-import/removal.ts
 init_source_forget_registry();
 init_source_storage();
+init_continuation_cache();
 init_lane();
 init_state();
 init_store2();
@@ -48061,8 +48448,15 @@ init_embeddings();
 
 // src/workers/archive-import/sync.ts
 init_archive_formats();
+init_archive_formats();
 init_scope_safe_fs();
+init_source_storage();
 init_tiered_store_set();
+
+// src/workers/archive-import/source-input.ts
+init_archive_formats();
+
+// src/workers/archive-import/sync.ts
 init_media_bindings();
 init_manifest3();
 init_state();

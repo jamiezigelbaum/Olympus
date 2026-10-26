@@ -2871,7 +2871,21 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               if ((key === undefined) === (requestId === undefined)) {
                 throw new EmailSourceWorkerError(400, 'invalid_request', 'Give either key or request_id.');
               }
-              return json(await archiveImports.approve(key !== undefined ? { key } : { requestId: requestId! }));
+              // The owner's answer to "which account is this export of", when asked: at most one.
+              const confirmAccount = asOptionalBoolean(record.confirm_account) === true;
+              const keepApart = asOptionalBoolean(record.keep_apart) === true;
+              if (confirmAccount && keepApart) {
+                throw new EmailSourceWorkerError(400, 'invalid_request', 'Give either confirm_account or keep_apart.');
+              }
+              const answer = { ...(confirmAccount ? { confirmAccount: true as const } : {}), ...(keepApart ? { keepApart: true as const } : {}) };
+              return json(await archiveImports.approve(key !== undefined ? { key, ...answer } : { requestId: requestId!, ...answer }));
+            });
+          }
+          if (url.pathname === '/dashboard/archive-import/stop') {
+            return await withDashboardGrantMutation(async () => {
+              const archiveId = asOptionalString(record.archive_id);
+              if (!archiveId) throw new EmailSourceWorkerError(400, 'invalid_request', 'archive_id is required.');
+              return json(archiveImports.stop(archiveId));
             });
           }
           if (url.pathname === '/dashboard/archive-import/decline') {

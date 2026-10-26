@@ -524,6 +524,58 @@ export interface ComputerDashboardMeta {
    * person reaches both surfaces as Needs you items, by name only.
    */
   archives?: ComputerArchivesMeta;
+  /**
+   * The archives that are one input of a source (design archive-live-one-dataset.md,
+   * section 5), each source's own, shown inside that source's card: progress,
+   * findings, how many of its items the source already held, and Stop. The
+   * Archives row lists only the imports that stay under Archives.
+   */
+  sourceImports?: ComputerSourceImportsMeta[];
+}
+
+/** The imports that joined one source, and the history that source's inputs cover. */
+export interface ComputerSourceImportsMeta {
+  /** The dashboard row (the source's card) these belong under. */
+  sourceId: string;
+  imports: ComputerSourceImportEntry[];
+  /**
+   * The history each input covers: what the imports hold (their earliest and
+   * latest item dates, YYYY-MM-DD) and the day the source began reading live.
+   * Absent parts are not known.
+   */
+  covers?: { importedFrom?: string; importedTo?: string; liveSince?: string };
+  /** An import here is importing but would never run: Olympus's background syncing is off (`disabled`) or leaves archives out (`not_selected`). */
+  notRunning?: 'disabled' | 'not_selected';
+}
+
+/**
+ * One import inside its source's card. Names, folders and paths are written
+ * for display like the Archives row's (workers/dashboard/display-text.ts).
+ */
+export interface ComputerSourceImportEntry {
+  id: string;
+  name: string;
+  format: string;
+  /** The source family ("email", "chat"): what its items are called. */
+  family?: string;
+  /** The folder it is in, home folder shown as ~. */
+  where: string;
+  /** Stopped keeps everything imported so far. */
+  status: 'importing' | 'imported' | 'stopped';
+  /** Items this archive held, as far as it was read: counted once each. */
+  read: number;
+  /** Of those, how many the source already held (it read them live, or from another archive). */
+  alreadyThere: number;
+  /** While importing: how much of its bytes are read, 0 to 99. */
+  percent?: number;
+  earliest?: string;
+  latest?: string;
+  startedAt: string;
+  importedAt?: string;
+  /** Why it stopped: a closed code (`stopped_by_owner` is the person's own Stop). */
+  stop?: { code: string; file?: string };
+  gaps: Array<{ kind: string; count: number; file?: string }>;
+  skipped: Array<{ kind: string; count: number }>;
 }
 
 /** The Archives row's own list, on the computer only. */
@@ -687,8 +739,12 @@ export const ARCHIVE_BROWSE_TOOL_NAME = 'olympus_archive_browse';
 /**
  * Computer only: import the chosen file or folder (`{key}`, a picker key), or
  * an agent's waiting request (`{request_id}`). Answers `{status: 'started' |
- * 'checking' | 'already_imported'}`; a check reads the files whole and its
- * outcome arrives with a later dashboard read.
+ * 'checking' | 'already_imported' | 'confirm_account'}`; a check reads the
+ * files whole and its outcome arrives with a later dashboard read.
+ * `confirm_account` (an export of a source that cannot be matched to the
+ * connected account) imports nothing: the call is made again with
+ * `{confirm_account: true}` to add it to that account, or `{keep_apart: true}`
+ * to keep it under Archives.
  */
 export const ARCHIVE_APPROVE_TOOL_NAME = 'olympus_archive_approve';
 /** Computer only: decline an agent's request (to import or to remove), or dismiss a finished check (`{request_id}`). */
@@ -698,6 +754,11 @@ export const ARCHIVE_DECLINE_TOOL_NAME = 'olympus_archive_decline';
  * (`{archive_id}`), or approve an agent's request to remove one (`{request_id}`).
  */
 export const ARCHIVE_REMOVE_TOOL_NAME = 'olympus_archive_remove';
+/**
+ * Computer only: stop one import that is an input of a source (`{archive_id}`).
+ * What it imported so far stays in the source; nothing is deleted.
+ */
+export const ARCHIVE_STOP_TOOL_NAME = 'olympus_archive_stop';
 /**
  * The archive tools only the person at this computer's dashboard may use: a
  * local-grade control session (workers/http.ts), never the worker bearer nor
@@ -709,6 +770,7 @@ export const COMPUTER_LOCAL_SESSION_TOOL_NAMES: readonly string[] = [
   ARCHIVE_APPROVE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
+  ARCHIVE_STOP_TOOL_NAME,
 ];
 
 /** One level of the archive picker. */
@@ -751,6 +813,7 @@ export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [
   ARCHIVE_APPROVE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
+  ARCHIVE_STOP_TOOL_NAME,
 ];
 
 /** The `_meta` key carrying the picker's names to the widget only. */

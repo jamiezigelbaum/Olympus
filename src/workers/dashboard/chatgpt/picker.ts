@@ -119,6 +119,11 @@ export interface ChatGptArchivePickWords extends ChatGptFolderPickWords {
   busy: string;
   /** Beside an approval the engine refused, to go on choosing. */
   chooseAnother: string;
+  /**
+   * When the engine asks which account an export belongs to: the question, what
+   * each answer does, and the two answers (`{name}` the file, `{source}` the source).
+   */
+  account: { line: string; note: string; add: string; apart: string; addFor: string; apartFor: string; sourceFallback: string; reconfirm: { line: string; note: string } };
 }
 
 /** What came of an archive choice (the approval's answer), for the caller's one line. */
@@ -410,12 +415,13 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
    * with the engine's reason, and the Mac's own note when it is the Mac's
    * privacy rules.
    */
-  function approveArchive(key: string, name: string): void {
+  function approveArchive(key: string, name: string, answer?: Any): void {
     if (!archiveMode() || p.loading || p.saving) return;
     p.saving = true;
     p.savingKey = key;
     p.saveError = '';
     p.saveAccess = null;
+    p.confirm = null;
     kit.render('picker:pick:' + key);
     const mine = session;
     const refused = (text: string, access: Any) => {
@@ -426,12 +432,21 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       p.saveAccess = access && typeof access.message === 'string' && access.message ? access : null;
       kit.render('picker:archive-error');
     };
-    kit.call(T.archiveApprove, { key }).then((result) => {
+    kit.call(T.archiveApprove, answer ? { key, ...answer } : { key }).then((result) => {
       if (mine !== session || !p) return;
       const content = result && result.structuredContent && typeof result.structuredContent === 'object' ? result.structuredContent : null;
       const status = content ? content.status : '';
-      if (!result || result.isError || (status !== 'started' && status !== 'checking' && status !== 'already_imported')) {
+      if (!result || result.isError || (status !== 'started' && status !== 'checking' && status !== 'already_imported' && status !== 'confirm_account')) {
         refused(errorSentence(result), content ? content.access : null);
+        return;
+      }
+      if (status === 'confirm_account') {
+        // Nothing was imported: the sheet asks which account this is, in place, and the choice answers it.
+        const source = content.source && typeof content.source === 'object' && typeof content.source.label === 'string' ? content.source.label : '';
+        p.saving = false;
+        p.savingKey = '';
+        p.confirm = { key, name: typeof content.name === 'string' && content.name ? content.name : name, source, reconfirm: content.reconfirm === true };
+        kit.render('picker:confirm');
         return;
       }
       const done = p.pick.archive.done;
@@ -454,8 +469,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       title: title || (mail ? Q.mailTitle : Q.foldersTitle),
       loading: 'root', loaded: false, error: '', retry: null, generation: '', revision: '',
       edited: false, saving: false, saveError: '', discarding: false,
-      // archive mode: the row being approved, and the Mac's note on a refusal
-      savingKey: '', saveAccess: null,
+      // archive mode: the row being approved, the Mac's note on a refusal, and the account question
+      savingKey: '', saveAccess: null, confirm: null,
       // folders
       roots: [], rootCursor: '', branches: new Map(), cursors: new Map(), catalog: new Map(),
       // Per level ('' is the root): how many more folders follow ("N more"), and levels Olympus could not list in full.
@@ -1296,6 +1311,31 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       add(error, add(el('div', 'banner-body'), el('p', '', p.error),
         add(el('div', 'actions'), kit.button(Q.tryAgain, 'picker:retry', () => p.retry && p.retry(), 'plain'))));
       add(body, error);
+    }
+    if (archiveMode() && p.confirm) {
+      // The export does not prove which account it is of: ask, in place, before anything is imported.
+      const words = p.pick.words.account;
+      const source = p.confirm.source || words.sourceFallback;
+      const name = p.confirm.name;
+      const ask = el('div', 'banner');
+      ask.setAttribute('role', 'group');
+      ask.setAttribute('aria-label', fill(words.line, { name, source }));
+      const answer = (extra: Any, label: string, labelFor: string, focus: string, style: 'main' | 'plain') => {
+        const control = kit.button(label, focus, p.saving ? null : () => approveArchive(p.confirm.key, p.confirm.name, extra), style);
+        control.setAttribute('aria-label', labelFor);
+        return control;
+      };
+      add(ask, add(el('div', 'banner-body'),
+        el('p', '', fill(p.confirm.reconfirm ? words.reconfirm.line : words.line, { name, source })),
+        el('p', 'muted', fill(p.confirm.reconfirm ? words.reconfirm.note : words.note, { name, source })),
+        add(el('div', 'actions'),
+          answer({ confirm_account: true }, fill(words.add, { name, source }), fill(words.addFor, { name, source }), 'picker:confirm', 'main'),
+          ...(p.confirm.reconfirm ? [] : [answer({ keep_apart: true }, words.apart, fill(words.apartFor, { name, source }), 'picker:confirm-apart', 'plain')]),
+          kit.button(p.pick.words.chooseAnother, 'picker:confirm-other', () => {
+            p.confirm = null;
+            kit.render(p.path.length ? 'picker:up' : 'picker:back');
+          }, 'plain'))));
+      add(body, ask);
     }
     if (archiveMode() && p.saveError) {
       // Why the engine would not import that choice, and the Mac's own note when it is its privacy rules.

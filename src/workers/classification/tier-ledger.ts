@@ -39,7 +39,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 9;
+export const TIER_LEDGER_SCHEMA_VERSION = 10;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -66,6 +66,62 @@ export type TierLedgerIdentity = Pick<SourceItemIdentity, 'provider' | 'accountS
 /** The stored conversation key: the store's own normalization. */
 export function tierLedgerConversationKey(identity: Pick<TierLedgerIdentity, 'providerConversationId'>): string {
   return identity.providerConversationId ?? '';
+}
+
+export type TierWriteIntentKind = 'content' | 'names' | 'advance' | 'deletion' | 'secret';
+
+/**
+ * What an item's legs are about to receive. `advance` (a version move over rows that hold the item), `deletion` and
+ * `secret` are finished from the intent alone: the next pass does it before anything reads the item. `content` (a
+ * body) and `names` (an item written by its names) are owed until their own record is read again, since the body
+ * and the names are not kept here.
+ */
+export interface TierWriteIntent {
+  identity: TierLedgerIdentity & { localItemId?: string };
+  version?: string;
+  kind: TierWriteIntentKind;
+  /** A Secret no store holds a row for: its location row is written by the store's own pass, so the intent stays owed. */
+  location?: boolean;
+  /**
+   * The version of the record whose body this `content` write carries, when it is older than `version` (a names-only
+   * record of a newer version took an older record's body): that record, replayed, is what finishes the write.
+   */
+  bodyVersion?: string;
+  /** The item's family: what a location row written from the intent alone needs. */
+  itemFamily?: string;
+  connectorId: string;
+}
+
+interface TierWriteIntentRow {
+  provider: string;
+  account_scope: string;
+  conversation_key: string;
+  provider_item_id: string;
+  local_item_id: string;
+  source_version: string | null;
+  kind: TierWriteIntentKind;
+  location: number;
+  connector_id: string;
+  body_version: string | null;
+  item_family: string | null;
+}
+
+function writeIntentFromRow(row: TierWriteIntentRow): TierWriteIntent {
+  return {
+    identity: {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.conversation_key !== '' ? { providerConversationId: row.conversation_key } : {}),
+      ...(row.local_item_id !== '' ? { localItemId: row.local_item_id } : {}),
+    } as TierLedgerIdentity & { localItemId?: string },
+    ...(row.source_version !== null ? { version: row.source_version } : {}),
+    kind: row.kind,
+    ...(row.location === 1 ? { location: true as const } : {}),
+    ...(row.body_version !== null ? { bodyVersion: row.body_version } : {}),
+    ...(row.item_family !== null ? { itemFamily: row.item_family } : {}),
+    connectorId: row.connector_id,
+  };
 }
 
 function idParams(identity: TierLedgerIdentity): [string, string, string, string] {
@@ -1786,6 +1842,17 @@ export class TierLedger {
           if (existing) existing.push(copyFromRow(row));
           else result.set(key, [copyFromRow(row)]);
         }
+        // An item whose deletion or Secret is under way (an intent not yet cleared) is hidden at once: a read in
+        // the same snapshot sees every copy as superseded, whichever legs have been written so far.
+        const pending = this.db.query(`
+          SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
+          WHERE kind IN ('deletion', 'secret')
+            AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')})
+        `).all(...batch.flatMap((identity) => [...idParams(identity)])) as Array<{ provider: string; account_scope: string; conversation_key: string; provider_item_id: string }>;
+        for (const row of pending) {
+          const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row as never)));
+          if (hidden) for (const copy of hidden) if (copy.state !== 'superseded') copy.state = 'superseded';
+        }
       }
     })();
     return result;
@@ -2915,6 +2982,72 @@ export class TierLedger {
         return override.kind === 'tier' && override.tier === 'secrets';
       });
     })();
+  }
+
+  /**
+   * The write an item's legs are about to receive (`TierWriteIntent`). One row per item: a newer write replaces
+   * the older one, and the row is cleared only after every leg has been written. `withWriteIntent` records it in
+   * the same transaction as the ledger change it belongs to; reads hide an item with a deletion or Secret intent at once.
+   */
+  withWriteIntent<T>(
+    intent: TierWriteIntent,
+    run: () => T,
+    settle?: (result: T) => Partial<Pick<TierWriteIntent, 'kind' | 'location'>> | undefined,
+  ): T {
+    return this.db.transaction(() => {
+      this.putWriteIntent(intent);
+      const result = run();
+      const final = settle?.(result);
+      if (final) this.putWriteIntent({ ...intent, ...final });
+      return result;
+    })();
+  }
+
+  putWriteIntent(intent: TierWriteIntent): void {
+    this.db.query(`
+      INSERT OR REPLACE INTO tier_write_intents (
+        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version, item_family
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      ...idParams(intent.identity), intent.identity.localItemId ?? '', intent.version ?? null, intent.kind,
+      intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null,
+    );
+  }
+
+  writeIntent(identity: TierLedgerIdentity): TierWriteIntent | undefined {
+    const row = this.db.query(`
+      SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) as TierWriteIntentRow | null;
+    return row ? writeIntentFromRow(row) : undefined;
+  }
+
+  /**
+   * The tombstone row kept for a deletion of an item no store ever held is marked here, so a newer record routes
+   * the item afresh; a tombstone of an item a lane held stays the lane's.
+   */
+  markUnseenDeletion(identity: TierLedgerIdentity): void {
+    this.db.query('INSERT OR IGNORE INTO tier_unseen_deletions (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)')
+      .run(...idParams(identity));
+  }
+
+  isUnseenDeletion(identity: TierLedgerIdentity): boolean {
+    return this.db.query('SELECT 1 FROM tier_unseen_deletions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?')
+      .get(...idParams(identity)) !== null;
+  }
+
+  /** Every write not yet cleared, oldest first. */
+  writeIntents(): TierWriteIntent[] {
+    return (this.db.query('SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id').all() as TierWriteIntentRow[]).map(writeIntentFromRow);
+  }
+
+  /** Clear an item's write after every leg has it. Only the intent that was written is cleared: a newer one stays. */
+  clearWriteIntent(identity: TierLedgerIdentity, written?: { version?: string; kind: TierWriteIntentKind }): void {
+    this.db.query(`
+      DELETE FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        ${written ? 'AND kind = ? AND COALESCE(source_version, \'\') = ?' : ''}
+    `).run(...idParams(identity), ...(written ? [written.kind, written.version ?? ''] : []));
   }
 
   removeCopies(identity: TierLedgerIdentity): TierCopy[] {
@@ -4133,7 +4266,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // item's tiers (a listing, an override, a move landing, a legacy
       // decision, another process) is caught in its own transaction. Becoming
       // Secrets again cancels a retirement not yet carried out.
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 9,
       name: 'secret_redaction_retirement',
       up(db) {
         const item = `provider = NEW.provider AND account_scope = NEW.account_scope
@@ -4176,6 +4309,38 @@ function tierLedgerMigrations(): SqliteMigration[] {
           BEGIN
             DELETE FROM secret_redaction_retirement WHERE ${item};
           END;
+        `);
+      },
+    },
+    {
+      // The write an item's legs are about to receive, kept until every leg has it: a crash between the legs
+      // leaves this row, and the next pass finishes the write from it before anything else reads the item.
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'tier_write_intents',
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_write_intents (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            local_item_id TEXT NOT NULL DEFAULT '',
+            source_version TEXT,
+            kind TEXT NOT NULL CHECK (kind IN ('content', 'names', 'advance', 'deletion', 'secret')),
+            location INTEGER NOT NULL DEFAULT 0,
+            connector_id TEXT NOT NULL DEFAULT '',
+            written_at TEXT NOT NULL,
+            body_version TEXT,
+            item_family TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TABLE IF NOT EXISTS tier_unseen_deletions (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
         `);
       },
     },

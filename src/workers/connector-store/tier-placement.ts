@@ -200,9 +200,12 @@ export function decideItemTiers(
   const sniffer = options?.sniffer && ledger && read
     ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh })
     : options?.sniffer;
-  // The lane's hold, or the one its stored decision carries (a store whose
-  // recording did not bring the lane's option still holds the same way).
+  // The lane's hold, the item's own (an item built from an archive record
+  // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
+  // (a store whose recording did not bring the lane's option still holds the
+  // same way, and a later version of a held item stays held until judged).
   const holdUntilJudged = options?.holdContentUntilJudged === true
+    || item.holdContentUntilJudged === true
     || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
   const parentContext = item.identity.parent
     ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId)

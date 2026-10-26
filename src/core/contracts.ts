@@ -11,6 +11,13 @@
 // receipts in config/source-pipeline-contract-version.json. No change may
 // invent parallel types or branch on a specific source/question downstream of
 // SourceConnector.
+//
+// Version 2.2.0 (docs/design/archive-live-one-dataset.md) lets a source's one
+// connector read more than one input: the live reader and each imported
+// archive, each with its own cursor, through the same record-to-item code, with
+// a per-record intake rule decided against what the store holds and a
+// per-item hold until the private model has judged. 2.1.0 added child items;
+// 2.0.0 moved the tier decision out of the connector.
 
 import type {
   SourceFamily,
@@ -58,11 +65,78 @@ export interface RawItem {
   metadata: Readonly<Record<string, unknown>>;
   fetchedAt: string;
   deferredBytes?: RawItemDeferredBytes;
+  // 2.2.0: this item's content stays Private until the private model has judged
+  // it (docs/design/archive-live-one-dataset.md, section 3). Placement honours
+  // it exactly as it honours the lane option of the same name, through first
+  // classification and child extraction, and the persisted hold keeps applying
+  // to the item's later versions until it has been judged. An item built only
+  // from live records never carries it.
+  holdContentUntilJudged?: true;
 }
+
+// 2.2.0: what the store holds of one item, as the store lane tells the
+// connector before it builds the item. `version` is the newest
+// `identity.sourceVersion` any row of the item holds, by the connector's own
+// order (the lookup is given it); `hasContent` is whether the item's rows at
+// that version hold content (chunks), as against its names alone. Absent only
+// when the store holds no row of the item at all: a tombstoned row (deleted,
+// or a Secret kept as a location only) and a row on one leg alone are still
+// the item's, so the version boundary never depends on how completely the
+// item was written or whether its row is visible.
+//
+// `incomplete` says the item is not whole at its newest version: an older or
+// unversioned row is still active beside it, or a leg that should hold it has
+// no active row, or a body is still owed to a leg. A record of that version or a
+// newer one completes it; an older one never applies, except the record whose
+// body is owed (`owedBodyVersion`, older than `version` when a newer names-only
+// record took an older record's body): replaying it finishes the write. `tombstoned` says the rows at the newest version
+// are all tombstones (deleted, or a Secret kept as a location): only a newer
+// record, or live's own word at the same version, brings the item back.
+export interface StoredItemState {
+  version?: string;
+  hasContent: boolean;
+  incomplete?: true;
+  owedBodyVersion?: string;
+  tombstoned?: true;
+}
+
+// 2.2.0: looks up one item in the store set the listing writes into. The
+// connector gives its own order of versions, which only it can say.
+export type StoredItemLookup = (
+  identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  compareVersions: (a: string, b: string) => number,
+) => StoredItemState | undefined;
 
 export interface SourceConnectorListOptions {
   cursor?: string;
   limit?: number;
+  // 2.2.0: the store lane's lookup of the stored version, given to a listing
+  // so the connector can decide, per record and before it builds the item,
+  // whether the record applies. Absent where no store is behind the listing.
+  storedItem?: StoredItemLookup;
+}
+
+// 2.2.0: a source's records as its live reader writes them (a Telegram message
+// record, a WhatsApp bridge record, a parsed mail). The shape is the
+// connector's own and opaque to everything else. The two arms mirror
+// SourceConnectorListPage: a truncated page is a prefix, and its `nextCursor`
+// resumes inside the same provider page.
+export type SourceRecordPage<R = unknown> =
+  | { records: readonly R[]; nextCursor?: string; done: boolean; truncated?: false }
+  | { records: readonly R[]; nextCursor?: string; done: false; truncated: true };
+
+export type SourceInputKind = 'live' | 'archive';
+
+// 2.2.0: one way records reach a source's one connector. The live reader is one
+// input; each imported archive is another, emitting the live reader's own
+// record shape. Each input keeps its own cursor under its own `inputId` (the
+// connector id sync runs record it under), so an archive never moves the live
+// cursor. Inputs live below `RawItem`: nothing downstream learns which input an
+// item came from.
+export interface SourceConnectorInput<R = unknown> {
+  readonly inputId: string;
+  readonly kind: SourceInputKind;
+  records(options?: { cursor?: string; limit?: number }): AsyncIterable<SourceRecordPage<R>>;
 }
 
 // `truncated` means the connector cut the page short of what the provider
@@ -135,6 +209,11 @@ export interface SourceConnector {
   listItems(options?: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage>;
   fetchItem(localItemId: string, options?: SourceConnectorFetchOptions): Promise<RawItem>;
   classificationSignals(item: RawItem): SourceClassificationSignals;
+  // 2.2.0: a source that reads more than one input returns a connector for one
+  // of them: its id is the input's, its listing reads that input's records, and
+  // it builds every item with this connector's own record-to-item code. The
+  // only writer of the source's items stays this connector's code.
+  forInput?(input: SourceConnectorInput): SourceConnector;
 }
 
 // --- Contract 2: EvidencePack ---------------------------------------------

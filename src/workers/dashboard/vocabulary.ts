@@ -1942,6 +1942,13 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    */
   deleteDataConfirmMessages: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.',
   deleteDataConfirmMessagesMedia: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.',
+  /**
+   * Added to that confirmation, on the computer, for a source with archives
+   * imported into it: their items are the source's own, so the delete takes
+   * them too, and the person's archive files are not touched. {source} is the
+   * source's name.
+   */
+  deleteDataImports: 'Archives you imported into {source} are part of it: their history goes too, and the archive files themselves stay where they are.',
   deleteDataDone: 'Indexed data deleted',
   disconnectConfirm: 'Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.',
   syncCheckingLine: dashboardManualSyncPendingLine('{source}'),
@@ -2133,6 +2140,57 @@ export const DASHBOARD_ARCHIVE_COPY = {
   /** A file of the archive, when the stop names none. */
   thisFile: 'A file of this archive',
   /**
+   * An export of a source Olympus already reads, whose account the export does
+   * not prove is the connected one: the import sheet asks, and nothing is
+   * imported until the person answers.
+   */
+  account: {
+    line: '{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?',
+    note: 'Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.',
+    add: 'Add to {source}',
+    apart: 'Keep it under Archives',
+    addFor: 'Add {name} to {source}',
+    apartFor: 'Keep {name} under Archives',
+    sourceFallback: 'this source',
+    /** The same question for an import already inside a source, stopped because the source now holds another account. */
+    reconfirm: {
+      line: '{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?',
+      note: 'To keep it apart instead, delete this import from the {source} card, then import it again under Other archives.',
+    },
+  },
+  /**
+   * An import that is one input of a source, inside that source's card: its own
+   * progress and findings, how much of it the source already had, and Stop.
+   * It has no Remove: its items are the source's, deleted with the whole source.
+   */
+  inSource: {
+    listLabel: 'Imported archives',
+    importingLine: '{percent}% read · {items} from this archive so far',
+    importingLineNone: '{percent}% read',
+    importedLine: '{items} from this archive',
+    importedWhen: ' · imported {when}',
+    /** Appended to a count line when the source already had some of the archive's items. */
+    alreadyThere: { one: ', of which 1 was already there', many: ', of which {n} were already there' },
+    notRunningLine: '{percent}% read. It goes on from there once imports can run.',
+    stop: 'Stop',
+    stopped: 'Stopped {name}. What it imported stays.',
+    /** What the card says about the history its inputs cover. */
+    covers: { imported: 'History imported up to {to}', live: 'live since {since}' },
+    /** Why an import stopped and what to do: none of them has a Remove, so each says how to go on. */
+    stoppedWhy: {
+      stopped_by_owner: { why: 'You stopped this import. What it imported stays.', fix: 'To go on from here, choose the same file again with Import an archive.' },
+      file_changed: { why: '{file} changed after the import started.', fix: 'Choose the file again with Import an archive once it has stopped changing. What is already here is not added twice.' },
+      file_missing: { why: '{file} is no longer where it was.', fix: 'Choose it again with Import an archive from where it is now. What is already here is not added twice.' },
+      file_unreadable: { why: 'Olympus could not read {file}.', fix: 'Check that your user account can open it, then choose it again with Import an archive.' },
+      resume_point_invalid: { why: 'Olympus lost its place in this archive.', fix: 'It cannot go on from here, and choosing the file again does not change that. What it imported stays; deleting the source removes it with the rest of its history.' },
+      format_unavailable: { why: 'This version of Olympus cannot read this kind of archive.', fix: 'Update Olympus, then choose the file again with Import an archive.' },
+      root_changed: { why: 'The folder it was in was moved or replaced.', fix: 'Choose it again with Import an archive from where it is now. What is already here is not added twice.' },
+      account_changed: { why: 'The account this source holds now is not the one this export belongs to, so nothing more was imported.', fix: 'What it imported stays. To import it into the account it belongs to, connect that account first, then choose the file again with Import an archive.' },
+      source_unavailable: { why: 'This source was being deleted or moved, so nothing more was imported.', fix: 'Once that has finished, choose the file again with Import an archive if you still want it.' },
+      other: { why: 'The import stopped.', fix: 'Choose the file again with Import an archive. What is already here is not added twice.' },
+    },
+  },
+  /**
    * One sentence for each kind of finding an archive reports. Which of the two
    * lists a kind is shown in (`lists`) is `listOf`, directly below.
    */
@@ -2172,6 +2230,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
     section_not_imported: { one: '1 part of the archive is not imported', many: '{n} parts of the archive are not imported' },
     file_damaged: { one: '1 file in the archive looks damaged, so what was read from it may be wrong', many: '{n} files in the archive look damaged, so what was read from them may be wrong' },
     item_repeated: { one: '1 message was in more than one export file and was imported once', many: '{n} messages were in more than one export file and were imported once' },
+    item_refused: { one: '1 item was not imported because the place it belongs in would not take it (nothing was stored in the wrong place)', many: '{n} items were not imported because the place they belong in would not take them (nothing was stored in the wrong place)' },
     files_not_looked_at: { one: '1 file in what you chose was not looked at, so it was not imported if it is an export', many: '{n} files in what you chose were not looked at, so any of them that are exports were not imported' },
     files_unconfirmed: { one: '1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)', many: '{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)' },
     other: { one: '1 item not read fully', many: '{n} items not read fully' },
@@ -2202,6 +2261,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
     item_truncated: 'not_imported',
     section_not_imported: 'not_imported',
     file_damaged: 'not_imported',
+    item_refused: 'not_imported',
     files_not_looked_at: 'not_imported',
     files_unconfirmed: 'not_imported',
     time_zone_assumed: 'how_read',

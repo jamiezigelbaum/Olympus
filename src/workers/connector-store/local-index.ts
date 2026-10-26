@@ -3171,6 +3171,27 @@ export class LocalConnectorStore {
   }
 
   /** Whether this store has ANY row for the identity, active or tombstoned. */
+  /**
+   * A Secret version accepted for an item this store already holds a row for (its copy rows may be gone): the
+   * row's version moves to it, so the intake lookup reports the newest Secret version and an older record can
+   * not bring the item back. Only the version changes; no names, text or chunks are written.
+   */
+  advanceItemVersion(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId' | 'sourceVersion'>, options: { onlyTombstoned?: boolean } = {}): void {
+    if (identity.sourceVersion === undefined) return;
+    // A live row is moved only with its own tombstone (`tombstoneItem`), never ahead of it.
+    this.db.query(`
+      UPDATE items SET source_version = ?
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        ${options.onlyTombstoned === true ? 'AND tombstoned = 1' : ''}
+    `).run(
+      identity.sourceVersion,
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    );
+  }
+
   hasItemRow(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): boolean {
     return this.db.query(`
       SELECT 1 FROM items
@@ -3624,11 +3645,12 @@ export class LocalConnectorStore {
   /**
    * Tombstone this store's copy of an item outside a sync: Secrets found on a
    * routed item, or a provider deletion of one. Chunks, FTS rows and vectors
-   * go, as for any tombstone; the identity row stays.
+   * go, as for any tombstone; the identity row stays. With `insert` an item this store never saw gets a
+   * tombstone row of its own (a Secret's location, or a deletion's version).
    */
   tombstoneCopy(
     identity: SourceItemIdentity,
-    options: { connectorId: string; trustTier?: SourceTrustTier },
+    options: { connectorId: string; trustTier?: SourceTrustTier; insert?: true },
   ): boolean {
     const syncRunId = `connector-tier-copy-${randomUUID()}`;
     const startedAt = nowIso();
@@ -3652,7 +3674,7 @@ export class LocalConnectorStore {
           'observed',
           syncRunId,
           options.trustTier,
-          true,
+          options.insert !== true,
         );
       })();
     } finally {
@@ -4969,6 +4991,37 @@ export class LocalConnectorStore {
     ) as { authored_at: string | null; tombstoned: number; chunk_count: number } | null;
     if (!row || row.tombstoned === 1) return undefined;
     return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
+  }
+
+  /**
+   * What this store holds of one item for the intake lookup (contracts.ts
+   * `StoredItemState`): its stored version and how many chunks it has. A
+   * metadata-only row has none. A tombstoned row (a provider deletion, or a
+   * Secret kept as a location only) is reported too, `tombstoned`, with the
+   * version it kept: the version boundary does not depend on whether the row
+   * is visible. Undefined only when there is no row. A deferred child (bytes
+   * read later) counts as holding no content until its chunks land.
+   */
+  storedItemState(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): { version?: string; chunkCount: number; tombstoned: boolean } | undefined {
+    const row = this.db.query(`
+      SELECT source_version, tombstoned,
+             (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = items.item_pk) AS chunk_count
+      FROM items
+      WHERE provider = ? AND account_scope = ?
+        AND normalized_conversation = ? AND provider_item_id = ?
+      LIMIT 1
+    `).get(
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    ) as { source_version: string | null; tombstoned: number; chunk_count: number } | null;
+    if (!row) return undefined;
+    return {
+      ...(row.source_version ? { version: row.source_version } : {}),
+      chunkCount: row.tombstoned === 1 ? 0 : row.chunk_count,
+      tombstoned: row.tombstoned === 1,
+    };
   }
 
   itemPresence(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): ConnectorStoreItemPresence {
@@ -8030,7 +8083,8 @@ export class LocalConnectorStore {
             && item.content.kind === 'metadata_only'
           ) {
             try {
-              itemForStorage = await connector.fetchItem(item.identity.localItemId);
+              // The hold belongs to the listed item for its input, not to the object: a fetched replacement keeps it.
+              itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
               consecutiveContentFetchFailures = 0;
             } catch {
               contentFetchFailed = true;
@@ -8967,9 +9021,13 @@ export class LocalConnectorStore {
       ) as { item_pk: number; tombstoned: number } | null;
 
       if (existing && (!activeOnly || existing.tombstoned === 0)) {
+        // The tombstone carries the version of the item that made it (a Secret in version 9 is version 9 here),
+        // so an older record is judged against it; an identity with no version leaves the stored one.
         this.db.query(`
-          UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, trust_tier = ?, sync_run_id = ? WHERE item_pk = ?
-        `).run(now, now, tombstoneTrustTier, syncRunId, existing.item_pk);
+          UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, trust_tier = ?, sync_run_id = ?,
+            source_version = COALESCE(?, source_version)
+          WHERE item_pk = ?
+        `).run(now, now, tombstoneTrustTier, syncRunId, identity.sourceVersion ?? null, existing.item_pk);
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(existing.item_pk);
         this.deleteFtsForItem(existing.item_pk);
         if (tombstoneTrustTier === 'S5') this.keepSecretsLocationOnly(existing.item_pk);
@@ -8991,9 +9049,9 @@ export class LocalConnectorStore {
         INSERT INTO items (
           provider, family, account_scope, provider_item_id, provider_conversation_id,
           local_item_id, mime_type, fetched_at, indexed_at, trust_tier,
-          tombstoned, deleted_at, sync_run_id, parent_local_item_id
+          tombstoned, deleted_at, sync_run_id, parent_local_item_id, source_version
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
       `).run(
         identity.provider,
         identity.family,
@@ -9008,6 +9066,7 @@ export class LocalConnectorStore {
         now,
         syncRunId,
         identity.parent?.localItemId ?? null,
+        identity.sourceVersion ?? null,
       );
       const inserted = this.db.query(
         `SELECT item_pk FROM items
@@ -9117,7 +9176,7 @@ export class LocalConnectorStore {
     if (text === undefined && item.content.kind === 'metadata_only') {
       let fetched: RawItem;
       try {
-        fetched = await connector.fetchItem(item.identity.localItemId);
+        fetched = carryHold(item, await connector.fetchItem(item.identity.localItemId));
         onContentFetchSuccess?.();
       } catch {
         gaps.push(contentFetchFailedGap(item));
@@ -13962,6 +14021,11 @@ function migrationFingerprint(contentHash: string | null, chunkHashes: readonly 
     .update('\u0000')
     .update(chunkHashes.join('\u0000'))
     .digest('hex');
+}
+
+/** An item fetched in place of a listed one keeps the listed item's hold until the private model has judged it. */
+function carryHold(listed: RawItem, fetched: RawItem): RawItem {
+  return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
 }
 
 /** The text the store would chunk for an item, exactly as the store reads it. */

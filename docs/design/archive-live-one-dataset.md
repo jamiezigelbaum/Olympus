@@ -85,13 +85,22 @@ decides again.
   source's own order (Telegram: edit date, then reactions; WhatsApp: the
   message time; mail does not change), whichever input it came from. An
   older record never overwrites a newer one, so a queued live record cannot
-  undo a later edit the archive holds.
+  undo a later edit the archive holds. The stored version is the newest any
+  row of the item holds, whatever the item's completeness or visibility: an
+  item written to one leg only, or left as a Secret's location or a
+  deletion's tombstone, still has its version, so an old export never
+  restores what was deleted or made a Secret, nor overwrites a partly
+  written item. A record of an incomplete item's own version completes it (an item is incomplete while a write intent for it is pending).
 - At the same version, a record applies only when it brings content the
   stored item lacks: mail outside the Gmail window is names-only, and a live
   WhatsApp photo is metadata only (the bridge downloads voice notes alone).
   Otherwise the stored item stays, and live is kept on a tie.
 - A second archive of the same history adds only what is newer or missing.
   Re-importing an export is caught by its file identity, as today.
+- Each version of an item an input brings is accepted, classified and routed
+  on its own (an edit that adds a key is a Secret even if the version before
+  it was ordinary), and the input's resume point never passes a record whose
+  accepted version no store has taken.
 
 ### 3. The hold travels with the item
 
@@ -267,11 +276,11 @@ ownership and the delete paths do not change.
 
 ## Order
 
-1. Child items spine (2.1.0, in progress).
-2. One-pipeline spine (2.2.0): connector inputs and their cursors, the
-   intake lookup and rule, the hold on the item, the import record inside a
-   source card with its counts; proved with a fixture source that has a live
-   and an archive input.
+1. Child items spine (2.1.0, merged).
+2. One-pipeline spine (2.2.0, built, awaiting critical review): connector
+   inputs and their cursors, the intake lookup and rule, the hold on the item,
+   the import record inside a source card with its counts; proved with a
+   fixture source that has a live and an archive input (see "Built, step 2").
 3. Live capture fixes from "Best of both", each with its own tests:
    streaming spool reads with bounds, cursor recovery, counted bridge
    drops, WhatsApp captions, freshness told apart from quiet.
@@ -292,10 +301,174 @@ archive leg, which gains an import-beside-live case per source with a
 fixture live input. The owner canary with a paired phone checks the real
 apps.
 
+## Built, step 2
+
+Contract 2.2.0 and the machinery, proved with a fixture source and no real
+source or format (`test/support/one-pipeline-harness.ts`,
+`test/one-pipeline-spine.test.ts`, `test/source-inputs.test.ts`,
+`test/eval-one-pipeline.test.ts`). No production source registers an archive
+input yet, so nothing changes for a real install until steps 4 to 7.
+
+- **Where things live.** The intake rule and the connector that applies it
+  are `src/core/source-inputs.ts` (`decideIntake`, `inputConnector`); the
+  lookup is `TieredStoreSet.storedItem`, over the stores' existing columns.
+  The archive layer binds an input's cursor to its files, holds its items,
+  and counts what it read (`src/workers/archive-import/source-input.ts`,
+  `sync.ts`); a source registers what only it knows in `source-targets.ts`.
+- **Cursors.** Each input is a connector id in the set's sync runs: the live
+  input's own, and `archive.<archive id>` per import. An archive's cursor is
+  prefixed with its manifest digest, so a cursor of other files stops the
+  import instead of reading different bytes from where the old ones ended.
+- **Account and lock.** Resolution happens at approval (`start.ts`) and again
+  at every pass, inside the source's exclusive runner when the source has an
+  account guard. A pass whose account is no longer the export's stops with
+  `account_changed` and writes nothing more.
+- **Stop** keeps what was imported. Merged imports have no Remove, so
+  choosing the same export again resumes a stopped import from its cursor.
+- **What the design left unstated.** A newer archive record over an item
+  that live already stored as Personal raises the item to Private (the hold
+  is the item's, so it applies to the replacement). A raise that queued a
+  move would hide the old body and later copy it, never the newer one, and
+  the archive's resume point had already passed the record, so the set
+  replaces the item in one write instead: the lower copies go first, then
+  the new body lands in the Private store, held until judged. A record whose
+  item is in the middle of a move cannot be stored yet: the set keeps its
+  resume point and the import is not complete until it is, so the next pass
+  reads the record again. (A names-only newer record over an item whose text
+  was not read still leaves the stored copies as they are, as every lane
+  does.) At the same version none of this arises unless the stored item
+  lacked its content. Revisit when the first real source adopts inputs.
+- **Item budget.** A listing's limit counts items, not records: a record
+  that expands into a parent and children is cut inside the record when the
+  budget runs out, and the page carries a cursor that resumes inside it
+  (parent stored, children pending). An import is marked imported only when
+  the stores consumed the listing's last page.
+- **Account confirmation.** The owner's yes is bound to the account it was
+  given for (the registry account's incarnation and its provider account),
+  recorded with the import and checked at every pass. A source bound to
+  another account since, or an account that is gone, stops the import with
+  nothing more written; choosing the export again asks the question again.
+- **Delete.** An import record that cannot be read fails the whole-source
+  delete (no store is removed; the owner runs it again once the file reads),
+  so no import survives to put the history back.
+- **Delete wording.** The delete confirmation on the computer says that the
+  archives imported into the source go with it and the files stay where they
+  are. The ChatGPT surface has no imports list, so its confirmation says
+  nothing of them (open).
+- **Read back before moving on (2026-10-26).** The set's resume point passes a
+  listing only once every item the input accepted is read back through the
+  stores with the lookup intake uses (`storedItem`): its version is the one
+  reported or a newer one, brought content is there and complete, a deletion or
+  Secret is no longer active. Anything else counts as unstored, so the import
+  is not marked imported and the next pass replays it. Copy rows and deferred
+  removals are cleanup and moves only; they do not decide completion. A newer
+  names-only record over stored content moves the stored version (the text
+  stays), and a Secret or deletion moves a tombstone's version with the
+  tombstone, or on its own for a row that already is one.
+- **One record per item in a page (2026-10-26).** A page is reduced, per item
+  and independently for parents and children, to its newest accepted record
+  (same version: a deletion beats content, otherwise the later record). A
+  newer names-only record keeps the content an older record of the page
+  brought. A record without a version is accepted as the version the store
+  holds and keeps it. The page's provisional state records deletions and
+  carries content a names-only record did not remove. Children that only a
+  superseded parent listed stay (they are items of their own). Names alone
+  never bring a deletion or a Secret back, within a page or across pages: a
+  names-only record after a deletion stays a deletion at the newer version, and
+  only content from after the item's last deletion is carried forward. A merged
+  item resumes from the record that brought its content, so a pass cut between
+  the two does not lose it. The routing plan is keyed by the item's identity,
+  its version and a digest of the text and names judged, so two bodies of one
+  version are each judged.
+- **Order and resume (2026-10-26).** A page emits an item before its
+  children, and a page cut resumes at the earliest record any unyielded item
+  still depends on (a merged names-only item depends on the record that
+  brought its body), so a cut never loses a body or stores a child ahead of
+  its parent.
+- **Write intents (2026-10-26).** An item's legs are written one after the
+  other, so a crash between them used to leave a half state that the next pass
+  had to interpret from the rows (an "incomplete" rule in the intake, a live
+  tie exception, a deferred names-only version move, a hold on skipped
+  incomplete items). That is gone. The ledger holds one **write intent** per
+  item (`tier_write_intents`, schema 10), written in the same transaction as
+  the placement and cleared last, after every leg has its write. Kinds:
+  `deletion` and `secret` (redone from the intent alone), `advance` (a version
+  move over rows that hold the item; the intent is the redo), `content` and
+  `names` (a body or names the legs are owed). At the start of every pass,
+  before any record is read, the set finishes every deletion, secret and
+  advance intent, and the children of a finished deletion go with it. While an
+  intent is pending the lookup reports the intended state (the intent's version
+  and `incomplete`), and reads hide an item with a deletion or Secret intent at
+  once. No path lowers a stored version: a names-only record moves a version by
+  an `advance` intent put in place of the content intent it follows, once every
+  leg has its write. Deviation from "keep the body in the Private held copy":
+  the body and the names are not kept in the ledger, so a `content` or
+  `names` intent is repaired by replaying its own record; when a newer
+  names-only record took an older record's body, the intent also holds that
+  record's version (`bodyVersion`, read back as `owedBodyVersion`) so the replay
+  applies that record at the item's version; the owed body stays owed through
+  names-only records of any version until a body or a deletion resolves it.
+  Residuals: an owed `content` or `names` write waits for its own record; a newer
+  names-only record holds behind an earlier run's owed write until that write is
+  finished.
+- **Pending states hold the boundary (2026-10-26).** The lookup reads the
+  persisted intent before any row, and no row is never read as absent: a pending
+  Secret or deletion is the item's state (tombstoned, at its version) even when
+  no store holds a row yet, and a pending body or names write is the item at
+  its version, incomplete, with the version of the record whose body is owed,
+  so an older record never replaces it and the owed write is replayed. A deletion of an item no store ever held is
+  recorded as a tombstone row in the Private store (with a `deletion` intent
+  that carries the item's family, so a cut-off write is finished from the intent
+  alone), which also refuses older versions afterwards; rows that are all
+  tombstones the ledger marks as such an unseen deletion are not a lane's item,
+  so a newer record routes it afresh; a tombstone a lane left keeps the lane's
+  placement. A
+  parent's deletion tombstones each leg's child at that leg's own version
+  (a cascade is not an event of the child), under a versionless `deletion`
+  intent written per child before its removal and cleared when it is whole,
+  so a failed removal is finished at the next pass start and hides the child
+  meanwhile, whatever becomes of the parent. A record whose body is empty
+  (text that is blank: authoritative for a connector that sent it, unlike a
+  record with no body at all) replaces the stored text in every leg before the
+  version moves, under a `content` intent so a cut is repeated by its replay.
+- **The hold survives a fetch (2026-10-26).** A held archive item's hold is
+  carried by whatever replaces it: the archive input decorates `fetchItem` as
+  well as `listItems`, and the local-index lane keeps the hold on both of its
+  `fetchItem` replacements. `test/archive-import-hold-guard.test.ts` fails when
+  a connector method is added without a decision (`holds` or `neutral`).
+- **A refused item is told (2026-10-26).** When placement refuses an item (for
+  example a trust domain that does not match), the import still completes but
+  shows it as a gap, "Not imported" (`item_refused`), with the count, as the
+  other fail-closed skips do.
+- **Counting.** An import counts its own run ("N items from this archive, of
+  which M were already there"), advanced under the position of the record it
+  last read so a replay after a crash counts each record once; the card counts
+  each item once.
+
 ## To verify before step 4
 
 - Telegram Desktop writes bare chat ids, with the type telling the marked
-  form. Check against a real export.
+  form. **Checked 2026-10-25** against the owner's full-account JSON export
+  (133 chats and 85 left chats, about 449,000 messages). A script read field
+  names and the form of ids only, never names or text.
+  - Chat ids are bare positive integers, and the type gives the marked form:
+    `private_group` takes `-id` and `private_supergroup` takes `-100id`. The
+    export held only groups and supergroups, so direct chats, bots and
+    channels are still unchecked.
+  - Senders are `user<id>` or `channel<id>`. Edits carry `edited_unixtime`;
+    reactions carry `reactions`.
+  - **History from before a group became a supergroup** is listed under the
+    supergroup with negative message ids: 475 messages in 18 supergroups, all
+    but one dated before the migration. Live capture would see these under
+    the old group's id, with positive ids, so they cannot match exactly.
+    Step 4 imports them as items of their own under the supergroup. A
+    duplicate is possible only if live capture also read the old group, and
+    it reads the newest 150 messages of a chat.
+  - **Left chats repeat some messages byte for byte** (5 chats, about 2,000
+    messages). They are imported once, by id.
+  - **The export can carry no account information.** This one has no
+    `personal_information`, so it gives no account hash. It joins the account
+    at the owner's confirmation, like a single-chat export (section 7).
 - Takeout's mbox separator line carries the Gmail message id in decimal (the
   API id is its hex). If not, mail matches by its headers only.
 - The WhatsApp export's chat names equal the bridge's contact names for

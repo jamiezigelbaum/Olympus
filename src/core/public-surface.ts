@@ -265,6 +265,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/archive-import/approve' },
   { method: 'POST', path: '/dashboard/archive-import/decline' },
   { method: 'POST', path: '/dashboard/archive-import/remove' },
+  { method: 'POST', path: '/dashboard/archive-import/stop' },
   // Remote agent connections: mint a pairing code, create a key (shown once),
   // revoke, and turn remote access on or off. Same control-session custody as
   // every route above.

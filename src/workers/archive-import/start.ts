@@ -25,7 +25,9 @@ import {
   detectArchiveFormat,
   type ArchiveFormatDefinition,
 } from '../../core/archive-formats.ts';
+import type { LayoutEnv } from '../../core/olympus-layout.ts';
 import { ScopeRoot, ScopeSafeError, joinRelative } from '../../core/scope-safe-fs.ts';
+import { importAccountIdentity, resolveImportAccount } from '../../core/source-storage.ts';
 import {
   archiveFileSha256,
   archiveManifestSha256,
@@ -36,7 +38,8 @@ import {
   probeArchivePath,
   verifyArchiveManifest,
 } from './manifest.ts';
-import type { ArchiveImportRecord, ArchiveImportStateStore, NewArchiveImportRecord } from './state.ts';
+import type { ArchiveAccountEvidence, ArchiveSourceTargets } from './source-targets.ts';
+import type { ArchiveImportRecord, ArchiveImportStateStore, ArchiveImportTarget, NewArchiveImportRecord } from './state.ts';
 
 export type ArchiveImportStart =
   | { kind: 'started'; archive: ArchiveImportRecord }
@@ -57,6 +60,13 @@ export interface PreparedArchiveImport {
    * Completed imports these files may be a copy of; empty when they cannot be.
    */
   copies: ArchiveImportRecord[];
+  /**
+   * The source whose connector can read this format as one of its inputs, and
+   * what the export says of its account. Present only when a source is
+   * registered for the format (source-targets.ts); `resolveArchiveTarget`
+   * then decides whether the import joins it.
+   */
+  source?: { sourceId: string; evidence: ArchiveAccountEvidence };
 }
 
 export type ArchiveImportPreparation =
@@ -73,6 +83,11 @@ export function prepareArchiveImport(input: {
    * Test seam: the formats to detect among.
    */
   formats?: readonly ArchiveFormatDefinition[];
+  /**
+   * The sources an archive can be an input of. Without them every import
+   * stays under Archives.
+   */
+  targets?: ArchiveSourceTargets;
 }): ArchiveImportPreparation {
   const path = input.path;
   if (!path.startsWith('/') || path.includes('\0')) return { kind: 'unreadable', code: 'escape' };
@@ -121,11 +136,23 @@ export function prepareArchiveImport(input: {
     const records = input.state.list();
     const same = findSameVersionImport(records, files);
     if (same) return { kind: 'already_imported', archive: same };
+    // The source that reads this format as one of its inputs, and what the export says of its account.
+    const sourceTarget = input.targets?.forFormat(detection.format.id);
+    let evidence: ArchiveAccountEvidence | undefined;
+    if (sourceTarget) {
+      try {
+        evidence = sourceTarget.identify({ format: detection.format.id, root, chosenRelPath, files });
+      } catch {
+        // An export whose profile could not be read cannot be shown to belong to the account: it stays apart.
+        evidence = { kind: 'archives' };
+      }
+    }
     handedOver = true;
     return {
       kind: 'ready',
       root,
       copies: findProbableCopies(records, files),
+      ...(sourceTarget && evidence ? { source: { sourceId: sourceTarget.sourceId, evidence } } : {}),
       record: {
         format: detection.format.id,
         provider: detection.format.provider,
@@ -145,6 +172,104 @@ export function prepareArchiveImport(input: {
   } finally {
     if (!handedOver) root.close();
   }
+}
+
+/**
+ * Where a prepared import goes (docs/design/archive-live-one-dataset.md,
+ * section 7): `joined` (into the account of the source it is an input of,
+ * recorded on `prepared.record.target`), `unproven` (the export cannot be
+ * matched to the account: the import sheet asks the owner, then asks again
+ * with `ownerConfirmed`), or `apart` (it stays under Archives: a different
+ * account, an export the source cannot take, or the owner's choice).
+ * A format no source reads is `apart` with no reason to say.
+ */
+export type ArchiveTargetResolution =
+  | { kind: 'joined'; target: ArchiveImportTarget }
+  | { kind: 'unproven'; sourceId: string }
+  | { kind: 'apart'; reason: 'no_source' | 'not_this_source' | 'different_account' | 'owner_choice' };
+
+/**
+ * Resolves the account a prepared import joins, recording what that
+ * establishes (a new account, the export's account on an entry that named
+ * none, labels it did not have): inside the source's exclusive runner when it
+ * has one, so an account guard cannot bind another account in between. Each
+ * pass resolves the account again before it writes. Throws what the storage
+ * service throws for an account that is being deleted or moved.
+ */
+export async function resolveArchiveTarget(
+  prepared: PreparedArchiveImport,
+  options: {
+    targets: ArchiveSourceTargets;
+    env: LayoutEnv;
+    ownerConfirmed?: boolean;
+    keepApart?: boolean;
+  },
+): Promise<ArchiveTargetResolution> {
+  const source = prepared.source;
+  if (!source) return { kind: 'apart', reason: 'no_source' };
+  const target = options.targets.forSource(source.sourceId);
+  if (!target) return { kind: 'apart', reason: 'no_source' };
+  if (options.keepApart === true) return { kind: 'apart', reason: 'owner_choice' };
+  if (source.evidence.kind === 'archives') return { kind: 'apart', reason: 'not_this_source' };
+  const importAccountId = source.evidence.kind === 'account' ? source.evidence.importAccountId : undefined;
+  // The account the owner's yes is about is read in the same step that resolved it, under the same lock.
+  const resolve = () => {
+    const resolution = resolveImportAccount(source.sourceId, importAccountId, {
+      env: options.env,
+      ...(options.ownerConfirmed === true ? { ownerConfirmed: true } : {}),
+    });
+    // An account this very step created (no entry before, none named by the export) is bound as the confirmed
+    // one: nothing else could have been confirmed about it, and the first pass must see it as the same account.
+    const created = resolution.match === 'new' && resolution.account !== undefined;
+    const identity = (options.ownerConfirmed === true || created) && resolution.account ? importAccountIdentity(source.sourceId, options.env) : undefined;
+    return { resolution, identity };
+  };
+  const { resolution: resolved, identity } = target.exclusive ? await target.exclusive(async () => resolve()) : resolve();
+  if (resolved.match === 'different') return { kind: 'apart', reason: 'different_account' };
+  if (resolved.match === 'unproven' || !resolved.account) return { kind: 'unproven', sourceId: source.sourceId };
+  const joined: ArchiveImportTarget = {
+    source_id: source.sourceId,
+    slot: resolved.account.slot,
+    ...(importAccountId !== undefined ? { import_account_id: importAccountId } : {}),
+    ...(options.ownerConfirmed === true || (resolved.match === 'new' && identity !== undefined) ? { owner_confirmed: true as const } : {}),
+    ...(identity !== undefined ? { confirmed_account: identity } : {}),
+  };
+  prepared.record.target = joined;
+  return { kind: 'joined', target: joined };
+}
+
+/**
+ * An import the owner confirmed stopped because the source holds another account
+ * now (`account_changed`): the owner is asked again, and a yes about the account
+ * the source holds today puts the import back to importing from where it stopped,
+ * bound to that account. Resolved inside the source's exclusive runner like the
+ * first answer. Returns the resumed record, or undefined when the export does not
+ * join the account that is there (the import stays stopped).
+ */
+export async function reconfirmArchiveTarget(
+  state: ArchiveImportStateStore,
+  archive: ArchiveImportRecord,
+  options: { targets: ArchiveSourceTargets },
+): Promise<ArchiveImportRecord | undefined> {
+  const joined = archive.target;
+  if (!joined) return undefined;
+  const target = options.targets.forSource(joined.source_id);
+  if (!target) return undefined;
+  const settle = (): string | undefined => {
+    const resolved = resolveImportAccount(joined.source_id, joined.import_account_id, { env: state.env, ownerConfirmed: true });
+    if ((resolved.match !== 'same' && resolved.match !== 'new') || !resolved.account) return undefined;
+    return importAccountIdentity(joined.source_id, state.env);
+  };
+  const identity = target.exclusive ? await target.exclusive(async () => settle()) : settle();
+  if (identity === undefined) return undefined;
+  const record = state.update(archive.archive_id, (entry) => {
+    if (entry.status !== 'stopped' || entry.stop?.code !== 'account_changed' || !entry.target) return false;
+    entry.target.owner_confirmed = true;
+    entry.target.confirmed_account = identity;
+    entry.status = 'importing';
+    delete entry.stop;
+  });
+  return record?.status === 'importing' ? record : undefined;
 }
 
 /**

@@ -691,7 +691,8 @@ describe('Delete and export treat the bindings as the person\'s file names', () 
     const home = temp();
     const env = { HOME: home, XDG_DATA_HOME: join(home, 'xdg') };
     mkdirSync(olympusDataRoot(env), { recursive: true });
-    writeFileSync(join(olympusDataRoot(env), 'archive-imports.json'), '');
+    // A readable record with no imports in it: a record that cannot be read fails the whole-source delete.
+    writeFileSync(join(olympusDataRoot(env), 'archive-imports.json'), JSON.stringify({ version: 1, archives: [] }));
     const path = defaultArchiveMediaBindingsPath(env);
     expect(path).toBe(join(olympusDataRoot(env), 'archive-media-bindings.sqlite'));
     const bindings = new ArchiveMediaBindingStore({ path, env });

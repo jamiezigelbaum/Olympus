@@ -86,6 +86,8 @@ export interface ChatGptDashboardClientConfig {
     archiveApproveTool: string;
     archiveDeclineTool: string;
     archiveRemoveTool: string;
+    /** Stops an import that is an input of a source (`{archive_id}`): what it imported stays. */
+    archiveStopTool: string;
     /** How long the place an open link landed on stays outlined (`.landed`). */
     landedMs: number;
     copy: typeof DASHBOARD_COMPUTER_PANEL_COPY;
@@ -158,6 +160,8 @@ export function chatgptDashboardClient(
     computerMeta: Any;
     /** Computer only: further pages of a source's unreadable files read since the last dashboard result. */
     unreadablePages: Record<string, { files: Array<{ name: string; token?: string }>; more: number; after: string }>;
+    /** Computer only: an agent's request whose export did not prove its account, by request id, until the person answers. */
+    archiveConfirm: Record<string, { source: string; reconfirm?: boolean }>;
     /** Computer only: the source an open link asked to land on, until the panel has landed there. */
     landing: string;
     /** The source row outlined after landing, until `until` (ms). */
@@ -185,6 +189,8 @@ export function chatgptDashboardClient(
     hostReadOnly: false,
     hostLinks: {},
     computerMeta: null,
+    // Agent requests whose export did not prove its account: asked in the request's own row, by request id.
+    archiveConfirm: {},
     unreadablePages: {},
     landing: '',
     landed: null,
@@ -392,7 +398,7 @@ export function chatgptDashboardClient(
     const code = result.structuredContent && typeof result.structuredContent.error === 'string' ? result.structuredContent.error : '';
     // Unpair's refusals, opening a file and the Archives row's controls are the computer's own sentences: always beside the control.
     if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool
-      || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool))) return '';
+      || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool))) return '';
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
     return text ? String(text.text) : '';
@@ -463,7 +469,7 @@ export function chatgptDashboardClient(
         redraw();
         return;
       }
-      if ((name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool) && result && !result.isError) {
+      if ((name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool) && result && !result.isError) {
         // The Archives row says what it did; the list itself arrives with the read.
         const said = archiveNotice(name, args, result);
         refresh();
@@ -855,8 +861,10 @@ export function chatgptDashboardClient(
         wrap.className = 'fix confirm';
         // Delete and Disconnect say in the source's name what they do and do not touch.
         const sourceWords = source ? String(source.label || '') : '';
+        // On the computer, a source with archives imported into it says they go with it: their items are the source's own.
+        const importsGo = source && sourceImportsMeta(source.id) ? ' ' + fill(P.deleteDataImports, { source: sourceWords }) : '';
         const named = sourceWords && fix.tool === config.deleteDataTool
-          ? fill(fix.deletesCopies === 'messages_and_media' ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === 'messages' ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords })
+          ? fill(fix.deletesCopies === 'messages_and_media' ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === 'messages' ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords }) + importsGo
           : sourceWords && fix.tool === config.disconnectTool
             ? fill(P.disconnectConfirm, { source: sourceWords })
             : '';
@@ -1098,13 +1106,17 @@ export function chatgptDashboardClient(
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : '')));
     }
     // A pause the row shows (not one a Sync now line stands in for) gets its See why.
+    // The archives that are inputs of this source, shown in its own card (computer only).
+    const joined = sourceImportsMeta(id);
     const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual)
-      || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null);
+      || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null)
+      || (joined ? archiveNotRunning(joined, id) : null);
     if (why) add(main, why);
     // Landed on a source with nothing to see why about now: the row itself is
     // outlined, or on the Archives row each archive and request that needs the person.
-    else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives))) row.className += ' landed';
+    else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives)) && !(joined && sourceImportsNeed(joined))) row.className += ' landed';
     if (archives) add(main, archiveList(archives));
+    if (joined) add(main, sourceImportList(joined));
     add(row, main);
     const controls = el('div', 'source-actions');
     const context = { id, label: String(source.label || id) };
@@ -1268,6 +1280,10 @@ export function chatgptDashboardClient(
 
   /** An import being read, removed or checked keeps the page reading often. */
   function archivesMoving(): boolean {
+    // An import that joined a source is read like any other: the page keeps reading while one moves.
+    const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
+    if (joined.some((group: Any) => !!group && !archiveSetting(group) && Array.isArray(group.imports)
+      && group.imports.some((entry: Any) => !!entry && entry.status === 'importing'))) return true;
     const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
     if (!meta || typeof meta !== 'object') return false;
     // Imports this computer's settings keep from running are not moving.
@@ -1281,7 +1297,7 @@ export function chatgptDashboardClient(
     state.notice = '';
     state.confirming = '';
     // Names in the line are the person's own files, shown only on this computer.
-    picker!.pickArchive(H.copy.archives.pick, (picked: ChatGptArchivePicked | null) => closeScreen(picked ? archiveOutcome(picked) : '', true, key));
+    picker!.pickArchive({ ...H.copy.archives.pick, account: H.copy.archives.account }, (picked: ChatGptArchivePicked | null) => closeScreen(picked ? archiveOutcome(picked) : '', true, key));
   }
 
   /** The one line after an approval: started, checking, or already imported. */
@@ -1308,11 +1324,30 @@ export function chatgptDashboardClient(
       const removed = meta && Array.isArray(meta.archives) ? meta.archives.filter((entry: Any) => entry && entry.id === target)[0] : null;
       return removed && typeof removed.name === 'string' ? fill(A.removing, { name: removed.name }) : '';
     }
+    if (name === H.archiveStopTool) {
+      const groups = state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
+      const stopped = groups
+        .flatMap((group: Any) => (group && Array.isArray(group.imports) ? group.imports : []))
+        .filter((entry: Any) => entry && entry.id === (args && args.archive_id))[0];
+      return stopped && typeof stopped.name === 'string' ? fill(A.inSource.stopped, { name: stopped.name }) : '';
+    }
     if (name === H.archiveDeclineTool) {
       // Decline answers an agent's request, Cancel stops a check; Dismiss only clears a finished one.
       const request = meta && Array.isArray(meta.requests) ? meta.requests.filter((entry: Any) => entry && entry.id === (args && args.request_id))[0] : null;
       if (request && request.status === 'checking' && typeof request.name === 'string') return fill(A.cancelled, { name: request.name });
+      if (args && typeof args.request_id === 'string') delete state.archiveConfirm[args.request_id];
       return request && request.status === 'pending' ? A.declined : '';
+    }
+    if (name === H.archiveApproveTool) {
+      // An agent's request whose export did not prove its account: asked in its own row until answered.
+      const content = result && result.structuredContent;
+      const requestId = args && typeof args.request_id === 'string' ? args.request_id : '';
+      if (requestId) {
+        if (content && content.status === 'confirm_account') {
+          const source = content.source && typeof content.source.label === 'string' ? content.source.label : '';
+          state.archiveConfirm[requestId] = { source, ...(content.reconfirm === true ? { reconfirm: true } : {}) };
+        } else delete state.archiveConfirm[requestId];
+      }
     }
     return archiveOutcome(result && result.structuredContent);
   }
@@ -1365,6 +1400,125 @@ export function chatgptDashboardClient(
     return list;
   }
 
+  /** The imports that joined this source (computer only): their meta, or null when it has none. */
+  function sourceImportsMeta(id: string): Any {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.sourceImports)) return null;
+    const found = meta.sourceImports.filter((group: Any) => !!group && group.sourceId === id && Array.isArray(group.imports))[0];
+    return found && found.imports.filter(validArchive).length > 0 ? found : null;
+  }
+
+  /** An import stopped for a reason that is not the person's own Stop needs them. */
+  function sourceImportNeedsPerson(entry: Any): boolean {
+    return entry.status === 'stopped' && !(entry.stop && entry.stop.code === 'stopped_by_owner');
+  }
+
+  function sourceImportsNeed(group: Any): boolean {
+    return group.imports.filter(validArchive).some(sourceImportNeedsPerson);
+  }
+
+  /**
+   * Under a source's card: the history its inputs cover, then each import that
+   * joined it with its own progress, what it found, how much of it the source
+   * already had, and Stop. The card counts every item once: these lines count
+   * only what each archive held.
+   */
+  function sourceImportList(group: Any): HTMLElement {
+    const S = H.copy.archives.inSource;
+    const box = el('div', 'archive-source');
+    const covers = group.covers && typeof group.covers === 'object' ? group.covers : {};
+    const parts: string[] = [];
+    if (typeof covers.importedTo === 'string' && covers.importedTo) parts.push(fill(S.covers.imported, { to: covers.importedTo }));
+    if (typeof covers.liveSince === 'string' && covers.liveSince) parts.push(fill(S.covers.live, { since: covers.liveSince }));
+    if (parts.length) {
+      const line = parts.join(' · ');
+      add(box, el('p', 'muted archive-facts archive-covers', line.charAt(0).toUpperCase() + line.slice(1)));
+    }
+    const list = el('ul', 'archives');
+    list.setAttribute('aria-label', S.listLabel);
+    const setting = archiveSetting(group);
+    for (const entry of group.imports.filter(validArchive)) add(list, sourceImportItem(entry, setting));
+    return add(box, list);
+  }
+
+  /** ", of which M were already there" when the source already had some of an import's items. */
+  function alreadyThereNote(entry: Any): string {
+    const n = wholeCount(entry.alreadyThere);
+    const S = H.copy.archives.inSource;
+    return n > 0 ? fill(n === 1 ? S.alreadyThere.one : S.alreadyThere.many, { n: count(n) }) : '';
+  }
+
+  /** One import inside its source's card; `setting` names what keeps imports from running ('' when they run). */
+  function sourceImportItem(entry: Any, setting: string): HTMLElement {
+    const A = H.copy.archives;
+    const S = A.inSource;
+    const ownStop = entry.status === 'stopped' && !sourceImportNeedsPerson(entry);
+    const needs = sourceImportNeedsPerson(entry);
+    const item = el('li', 'archive' + (needs ? ' stopped' : ''));
+    item.setAttribute('data-archive', entry.status);
+    item.setAttribute('data-source-import', 'true');
+    if (archiveLanded('archive:' + entry.id, needs)) item.className += ' landed';
+    const halted = !!setting && entry.status === 'importing';
+    if (halted) item.setAttribute('data-not-running', setting);
+    add(item, add(el('p', 'archive-head'), el('span', 'archive-name', entry.name), el('span', 'ftag', halted ? A.status.notRunning : (A.status as Any)[entry.status])));
+    const facts: HTMLElement[] = [entry.format, entry.where]
+      .filter((part: Any) => typeof part === 'string' && part)
+      .map((part: string) => el('span', '', part));
+    const earliest = typeof entry.earliest === 'string' ? entry.earliest : '';
+    const latest = typeof entry.latest === 'string' ? entry.latest : '';
+    if (earliest && latest) {
+      facts.push(el('span', 'archive-dates', earliest === latest ? earliest : fill(A.dates, { earliest, latest })));
+      const snapshot = archiveNouns(entry).snapshot;
+      if (typeof snapshot === 'string' && snapshot) facts.push(el('span', 'archive-snapshot', snapshot));
+    }
+    if (facts.length) {
+      const line = el('p', 'muted archive-facts');
+      facts.forEach((fact, index) => {
+        if (index) add(line, doc.createTextNode(' · '));
+        add(line, fact);
+      });
+      add(item, line);
+    }
+    const read = wholeCount(entry.read);
+    if (halted) {
+      const pct = typeof entry.percent === 'number' && isFinite(entry.percent) ? entry.percent : 0;
+      add(item, el('p', 'muted', fill(S.notRunningLine, { percent: percent(pct) })));
+    } else if (entry.status === 'importing') {
+      const pct = typeof entry.percent === 'number' && isFinite(entry.percent) ? entry.percent : 0;
+      const line = read > 0
+        ? fill(S.importingLine, { percent: percent(pct), items: itemCount(entry, read) }) + alreadyThereNote(entry)
+        : fill(S.importingLineNone, { percent: percent(pct) });
+      add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line)));
+    } else if (entry.status === 'imported') {
+      const when = typeof entry.importedAt === 'string' ? ago(entry.importedAt) : '';
+      if (read === 0) {
+        const none = archiveNouns(entry).none;
+        if (archiveHasReasons(entry)) {
+          const None = none.charAt(0).toUpperCase() + none.slice(1);
+          add(item, el('p', 'muted', when ? fill(A.nothingImportedWhen, { None, when }) : fill(A.nothingImported, { None })));
+        } else {
+          add(item, el('p', 'muted', when ? fill(A.emptyImportWhen, { none, when }) : fill(A.emptyImport, { none })));
+        }
+      } else {
+        add(item, el('p', 'muted', fill(S.importedLine, { items: itemCount(entry, read) }) + alreadyThereNote(entry) + (when ? fill(S.importedWhen, { when }) : '')));
+      }
+    } else {
+      // Stopped: why, and the way to go on. The person's own Stop is not a problem.
+      const stop = entry.stop && typeof entry.stop === 'object' ? entry.stop : {};
+      const words = Object.prototype.hasOwnProperty.call(S.stoppedWhy, String(stop.code)) ? (S.stoppedWhy as Any)[String(stop.code)] : S.stoppedWhy.other;
+      const file = typeof stop.file === 'string' && stop.file ? stop.file : A.thisFile;
+      add(item, el('p', ownStop ? 'muted' : 'reason strong', fill(words.why, { file })), el('p', 'muted', words.fix));
+      if (read > 0) add(item, el('p', 'muted', fill(S.importedLine, { items: itemCount(entry, read) }) + alreadyThereNote(entry)));
+    }
+    const why = archiveWhy(entry);
+    if (why) add(item, why);
+    if (entry.status === 'importing') {
+      add(item, add(el('div', 'archive-actions'),
+        fixControl({ label: S.stop, tool: H.archiveStopTool, args: { archive_id: entry.id } }, 'archive-stop:' + entry.id, 'plain', false)));
+    }
+    return item;
+  }
+
   /**
    * A line from a template whose {keys} are names, folders or paths the
    * person did not choose (an agent asked): each is its own <bdi>, so
@@ -1410,6 +1564,18 @@ export function chatgptDashboardClient(
           destructive: true,
           confirmText: fill(A.removeConfirm, { name: request.name }),
         }, key + ':remove', 'plain', true),
+        fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':decline', 'plain', false)));
+      return item;
+    }
+    const asked = state.archiveConfirm[request.id];
+    if (request.status === 'pending' && asked) {
+      // The export does not prove which account it is of: asked here, and nothing is imported until answered.
+      const source = asked.source || A.account.sourceFallback;
+      add(item, isolatedLine('', asked.reconfirm ? A.account.reconfirm.line : A.account.line, { name: request.name, source }));
+      add(item, el('p', 'muted', fill(asked.reconfirm ? A.account.reconfirm.note : A.account.note, { source })));
+      add(item, add(el('div', 'archive-actions'),
+        fixControl({ label: fill(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request.id, confirm_account: true } }, key + ':confirm', 'plain', false),
+        ...(asked.reconfirm ? [] : [fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request.id, keep_apart: true } }, key + ':apart', 'plain', false)]),
         fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':decline', 'plain', false)));
       return item;
     }

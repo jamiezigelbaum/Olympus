@@ -37,7 +37,7 @@
  * - the computer imports archives: `olympus_archive_browse` lists files and
  *   folders for the picker (names in the picker's `_meta` only),
  *   `olympus_archive_approve`, `olympus_archive_decline` and
- *   `olympus_archive_remove` reach the worker's archive routes, which run
+ *   `olympus_archive_remove` and `olympus_archive_stop` reach the worker's archive routes, which run
  *   under the dashboard grant guard, and `_meta['olympus/computer']
  *   archives` lists the imported archives and the imports waiting on the
  *   person for the Archives row.
@@ -47,6 +47,7 @@ import {
   ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
+  ARCHIVE_STOP_TOOL_NAME,
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_META_KEY,
   COMPUTER_UNREADABLE_FILES_LIMIT,
@@ -59,6 +60,7 @@ import {
   unreadableNames,
   type ComputerArchivesMeta,
   type ComputerDashboardMeta,
+  type ComputerSourceImportsMeta,
   type ComputerUnpairEntry,
   type ComputerUnreadableEntry,
 } from '../chatgpt/dashboard-contract.ts';
@@ -124,6 +126,12 @@ export interface DashboardPanelToolsOptions {
    * the person's files, so only ever in the computer meta. Absent: no row list.
    */
   archives?: () => ComputerArchivesMeta | undefined;
+  /**
+   * The imports that joined a source (archive-import/dashboard.ts), shown
+   * inside that source's card. Names and folders of the person's files, so
+   * only ever in the computer meta.
+   */
+  sourceImports?: () => ComputerSourceImportsMeta[] | undefined;
 }
 
 /** Why an archive control did nothing for a session that is not this computer's own. */
@@ -225,7 +233,7 @@ function archiveArg(value: unknown): value is string {
  */
 async function archiveRoute(
   options: DashboardPanelToolsOptions,
-  route: 'browse' | 'approve' | 'decline' | 'remove',
+  route: 'browse' | 'approve' | 'decline' | 'remove' | 'stop',
   body: Record<string, unknown>,
   context: DashboardPanelCallContext,
 ): Promise<{ ok: true; parsed: Record<string, unknown> } | { ok: false; result: ChatGptToolResult }> {
@@ -289,19 +297,39 @@ async function archiveBrowse(options: DashboardPanelToolsOptions, args: Record<s
 
 /** Import the chosen file or folder, or approve an agent's request: answered at once (started, checking, already imported). */
 async function archiveApprove(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
-  const keys = Object.keys(args);
+  // The chosen key or the request, and at most one answer to "which account is this export of": add it to
+  // the connected account, or keep it under Archives.
+  const keys = Object.keys(args).filter((key) => key !== 'confirm_account' && key !== 'keep_apart');
   const byKey = keys.length === 1 && keys[0] === 'key' && archiveArg(args.key);
   const byRequest = keys.length === 1 && keys[0] === 'request_id' && archiveArg(args.request_id);
+  const answers = [args.confirm_account, args.keep_apart];
   if (!byKey && !byRequest) return refused('Give the chosen key or a request id.', 'invalid_params');
+  if (answers.some((value) => value !== undefined && value !== true) || answers.filter((value) => value === true).length > 1) {
+    return refused('Say either confirm_account or keep_apart, as true.', 'invalid_params');
+  }
   const answer = await archiveRoute(options, 'approve', args, context);
   if (!answer.ok) return answer.result;
   const status = answer.parsed.status;
-  if (status !== 'started' && status !== 'checking' && status !== 'already_imported') return refused('Olympus could not do that. Try again.', 'internal');
+  if (status !== 'started' && status !== 'checking' && status !== 'already_imported' && status !== 'confirm_account') {
+    return refused('Olympus could not do that. Try again.', 'internal');
+  }
   const name = typeof answer.parsed.name === 'string' ? answer.parsed.name : '';
   const archiveName = typeof answer.parsed.archive_name === 'string' ? answer.parsed.archive_name : '';
+  const source = answer.parsed.source && typeof answer.parsed.source === 'object' ? answer.parsed.source as { id?: unknown; label?: unknown } : undefined;
+  const sourceId = typeof source?.id === 'string' ? source.id : '';
+  const sourceLabel = typeof source?.label === 'string' ? source.label : '';
   return {
-    content: [{ type: 'text', text: status === 'started' ? 'Importing.' : status === 'checking' ? 'Checking.' : 'Already imported.' }],
-    structuredContent: { status, name, ...(archiveName ? { archive_name: archiveName } : {}) },
+    content: [{
+      type: 'text',
+      text: status === 'started' ? 'Importing.' : status === 'checking' ? 'Checking.' : status === 'confirm_account' ? 'Waiting for which account.' : 'Already imported.',
+    }],
+    structuredContent: {
+      status,
+      name,
+      ...(archiveName ? { archive_name: archiveName } : {}),
+      ...(status === 'confirm_account' && sourceId ? { source: { id: sourceId, label: sourceLabel } } : {}),
+      ...(status === 'confirm_account' && answer.parsed.reconfirm === true ? { reconfirm: true } : {}),
+    },
   };
 }
 
@@ -327,6 +355,25 @@ async function archiveRemove(options: DashboardPanelToolsOptions, args: Record<s
   const answer = await archiveRoute(options, 'remove', { ...(byArchive ? { archive_id: args.archive_id } : { request_id: args.request_id }), acknowledge: true }, context);
   if (!answer.ok) return answer.result;
   return { content: [{ type: 'text', text: 'Removing.' }], structuredContent: { status: 'removing' } };
+}
+
+/** Stop one import that is an input of a source: what it imported stays. */
+async function archiveStop(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  if (keys.length !== 1 || keys[0] !== 'archive_id' || !archiveArg(args.archive_id)) return refused('archive_id is required.', 'invalid_params');
+  const answer = await archiveRoute(options, 'stop', args, context);
+  if (!answer.ok) return answer.result;
+  return { content: [{ type: 'text', text: 'Stopped.' }], structuredContent: { status: 'stopped' } };
+}
+
+/** The imports that joined a source, or undefined when they cannot be read: a card then shows without them. */
+function sourceImportsMeta(options: DashboardPanelToolsOptions): ComputerSourceImportsMeta[] | undefined {
+  try {
+    const imports = options.sourceImports?.();
+    return imports && imports.length > 0 ? imports : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The Archives row's list, or undefined when it cannot be read: the row then shows the card alone. */
@@ -479,6 +526,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (name === ARCHIVE_APPROVE_TOOL_NAME) return await archiveApprove(options, args, context);
       if (name === ARCHIVE_DECLINE_TOOL_NAME) return await archiveDecline(options, args, context);
       if (name === ARCHIVE_REMOVE_TOOL_NAME) return await archiveRemove(options, args, context);
+      if (name === ARCHIVE_STOP_TOOL_NAME) return await archiveStop(options, args, context);
       const signal = context.signal ?? new AbortController().signal;
       const base = options.surface();
       // Keep the view the dashboard result is built from, for Unpair's entries.
@@ -501,7 +549,8 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
         : [];
       const waiting = context.localSession === true ? waitingCount(options) : 0;
       const archives = archivesMeta(options);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives) return result;
+      const sourceImports = sourceImportsMeta(options);
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports) return result;
       const meta: ComputerDashboardMeta = {
         ...(missingFolders.length ? { missingFolders } : {}),
         ...(permissionSettings.length ? { permissionSettings } : {}),
@@ -510,6 +559,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
         ...(unreadable.length > 0 ? { unreadable } : {}),
         ...(waiting > 0 ? { waitingPrivateQuestions: waiting } : {}),
         ...(archives ? { archives } : {}),
+        ...(sourceImports ? { sourceImports } : {}),
       };
       const existing = result._meta && typeof result._meta === 'object' ? result._meta as Record<string, unknown> : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta } };

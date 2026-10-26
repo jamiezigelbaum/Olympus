@@ -463,6 +463,41 @@ export function resolveImportAccount(
   return { match: 'same', account };
 }
 
+/**
+ * Which account an owner's confirmation was about: the registry account (the
+ * incarnation that was created, so a deleted and created-again account is
+ * another) and the provider account its history names. Recorded with the
+ * confirmation and compared at every pass (`sameImportAccount`), because the
+ * account guard may bind other stores over this slot, and a confirmation of
+ * one account must never carry to another. Undefined when the source has no
+ * entry. An account being deleted or moved fails the call.
+ */
+export function importAccountIdentity(sourceId: string, env: LayoutEnv = process.env): string | undefined {
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, sourceId, DEFAULT_STORAGE_SLOT);
+  const entry = findRegistryAccount(registry, sourceId, DEFAULT_STORAGE_SLOT);
+  return entry ? JSON.stringify([entry.created_at, entry.provider_account_hash ?? null]) : undefined;
+}
+
+/**
+ * Whether the account the registry holds now is the one `confirmed` named:
+ * the same incarnation, and the same provider account (one that only gained
+ * labels is the same; one that was unnamed and is named now, or the reverse,
+ * is not, because the owner confirmed an account that could not be told apart).
+ */
+export function sameImportAccount(confirmed: string | undefined, current: string | undefined): boolean {
+  if (confirmed === undefined || current === undefined) return false;
+  try {
+    const [thenAt, thenAccount] = JSON.parse(confirmed) as [string, string | null];
+    const [nowAt, nowAccount] = JSON.parse(current) as [string, string | null];
+    if (thenAt !== nowAt) return false;
+    if (thenAccount === null || nowAccount === null) return thenAccount === nowAccount;
+    return compareProviderAccounts(thenAccount, nowAccount) === 'same';
+  } catch {
+    return false;
+  }
+}
+
 function placeSidecar(env: LayoutEnv, account: StorageAccount, path: string, readOnly?: boolean): void {
   const registry = readSourceRegistry(env);
   assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);

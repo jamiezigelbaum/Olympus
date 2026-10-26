@@ -79,6 +79,13 @@ interface SourceConnector {
   listItems(options?): AsyncIterable<SourceConnectorListPage>;  // live sync OR archive import
   fetchItem(localItemId: string, options?: { deferredBytes?: { locator: string } }): Promise<RawItem>;  // 2.1.0: the locator of a child's deferred bytes
   classificationSignals(item: RawItem): SourceClassificationSignals;  // source facts, never a tier
+  forInput?(input: SourceConnectorInput): SourceConnector;  // 2.2.0: the same connector over another input
+}
+
+interface SourceConnectorInput<R = unknown> {            // 2.2.0
+  readonly inputId: string;                              // the connector id its sync runs and cursor are recorded under
+  readonly kind: 'live' | 'archive';
+  records(options?: { cursor?: string; limit?: number }): AsyncIterable<SourceRecordPage<R>>;
 }
 
 interface SourceClassificationSignals {
@@ -127,6 +134,29 @@ Notes:
   factory reads it later through `fetchItem(localItemId, { deferredBytes })`.
   The connector publishes no tier for it; the classifier judges the child on
   its own. See [child items](design/child-items.md).
+- **Inputs (2.2.0).** A source has one connector and it is the only writer of
+  the source's items. The live reader is one input; each imported archive is
+  another, emitting the live reader's own record shape through the same
+  record-to-item code (`SourceConnector.forInput`, `src/core/source-inputs.ts`).
+  Each input keeps its own cursor under its own `inputId`, so an archive never
+  moves the live cursor, and a crash replays the input from its last committed
+  cursor. Before a record's item is built, the connector asks the store lane
+  what it holds (`SourceConnectorListOptions.storedItem`, given the source's
+  own order of versions and answering with the newest version any row of the
+  item holds, whether it holds content, and whether it is incomplete or
+  tombstoned) and applies the record only if it is newer in that order, or at
+  the same version brings content the stored item lacks or completes an item
+  cut off between legs (the write's own record, `owedBodyVersion`, even when it
+  is older); an older record never applies, whatever the
+  completeness or visibility of what is stored (it never restores a deleted
+  item or a Secret, nor overwrites an item written to one leg only); on a tie
+  the live record is kept. The rule
+  keeps no state of its own: the store is the record of what applied. An item
+  built from an archive record carries `RawItem.holdContentUntilJudged`, which
+  placement honours like the lane option of the same name and which keeps
+  applying to the item's later versions, a live replacement included, until
+  the private model has judged it. See
+  [archives and live connectors](design/archive-live-one-dataset.md).
 - Storage placement is the store lane's declaration
   (`ConnectorStoreSyncOptions.placement`), not the connector's. In 2.0.0 each
   lane declares exactly what its connector's `classify()` used to return, so
@@ -325,6 +355,62 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-25 (v2.2.0, additive): **one pipeline for a source's two ways in**
+  (owner direction 2026-10-25; `docs/design/archive-live-one-dataset.md`,
+  reviewed in two rounds). Additive and optional, no existing field changes:
+  `RawItem.holdContentUntilJudged`, `SourceConnectorListOptions.storedItem`
+  (a `StoredItemLookup`, given the connector's own order of versions,
+  answering with a `StoredItemState`: the newest version any row of the item
+  holds, tombstones and a lone leg included, whether the item holds content,
+  and whether it is `incomplete` or `tombstoned`), and `SourceConnector.forInput` (a
+  `SourceConnectorInput`: `inputId`, `kind` of `live` or `archive`, and
+  `records` as `SourceRecordPage`s, the connector's own record shape). A
+  connector that omits them, and a consumer that ignores them, behave as under
+  2.1.0. One connector per source, the only writer; the live reader and each
+  imported archive are inputs of it, each with its own cursor recorded under
+  its own connector id in the set's sync runs, so an archive never moves the
+  live cursor. The shared intake rule (`decideIntake`, `inputConnector` in
+  `src/core/source-inputs.ts`) decides per record, before the item is built:
+  newer in the source's own order applies; older never does, whatever the
+  completeness or visibility of what is stored (an old record never restores a
+  deleted item or a Secret kept as a location, nor overwrites an item that
+  was written to one leg only); at the same version a record applies if it
+  brings content the stored item lacks or completes an incomplete item; on a
+  tie live wins. Each version of an item an input brings is classified and
+  routed on its own. It keeps no state of its own, so a crash replays a
+  record and decides again. The hold moves to the item: placement honours
+  `holdContentUntilJudged` through first classification and child extraction,
+  and a persisted hold keeps applying to later versions, a live replacement
+  included, until the private model has judged the item, so a live replacement
+  of a held item errs Private; a newer archive record over an item live stored
+  as Personal replaces it in one write (the lower copies go first and the new
+  body lands in the Private store, so no queued move is left to copy the old
+  body over it), and a record no store can take yet (its item is in the middle
+  of a move) is not passed: the set keeps its resume point and the import is
+  not complete until the record is stored. Items built only from live records
+  are unchanged. Beside the contracts, the archive import layer
+  (not a versioned contract) resolves which account an export joins
+  (`resolveImportAccount`: same or new writes into that account's stores;
+  unproven asks the owner in the import sheet; different stays under Archives),
+  runs a pass inside the source's own exclusive runner, shows each import in
+  its source's card with its own counts ("N items from this archive, of which
+  M were already there"), progress, findings and Stop, and removes merged
+  imports only with the whole source (a new forget step,
+  `archive-imports-of-source`). No stored data is migrated: the connector store
+  schema, embedding models and epochs are unchanged. No production source
+  adopts inputs in this step; the fixture source in
+  `test/support/one-pipeline-harness.ts` proves the machinery.
+  Version: 2.2.0. Fingerprint: `config/source-pipeline-contract-version.json`
+  (`bun run contracts:check`).
+  Migration/compatibility: see the version entry.
+  Eval: the fixture held-out harness gains a question whose answer needs items
+  from both inputs, each cited, and one whose archive item is not yet judged
+  and stays out of what is released (`test/eval-one-pipeline.test.ts`). The
+  instantiated private run (`bun run eval:real`) needs the owner-private
+  dataset and is pending the owner's decision; no exception is claimed.
+  Critical-review gate: a source-contract change; it needs fresh independent
+  review of its head before merge, alongside required CI under
+  `docs/ENGINEERING_PROCESS.md`.
 - 2026-10-25 (v2.1.0, additive): **child items** (owner direction
   2026-10-25; `docs/design/child-items.md`, reviewed by Astra in two rounds).
   An attachment or a piece of media that came inside another item is an item of
@@ -711,7 +797,9 @@ previously frozen shapes without a runtime or data migration. `1.1.0`
 (2026-09-23) replaces `SourceConnector.classify` with `classificationSignals`;
 see both change logs. `2.1.0` (2026-10-25) adds the optional child-item
 fields (`parent`, `deferredBytes`, `fetchItem`'s locator argument,
-`parentLabel`); see the change log.
+`parentLabel`); see the change log. `2.2.0` (2026-10-25) adds connector inputs
+with their own cursors (`forInput`), the intake lookup (`storedItem`) and the
+per-item hold (`holdContentUntilJudged`); see the change log.
 
 ## Change log
 

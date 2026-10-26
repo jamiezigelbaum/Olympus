@@ -18,6 +18,7 @@ import {
   ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
+  ARCHIVE_STOP_TOOL_NAME,
   COMPUTER_LOCAL_SESSION_TOOL_NAMES,
   DASHBOARD_TOOL_NAME,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
@@ -51,6 +52,8 @@ function archives() {
     async approve() { reached.push('approve'); return { ok: true, status: 'started', archive_id: ARCHIVE_ID, name: 'Takeout.mbox' }; },
     decline() { reached.push('decline'); return { ok: true }; },
     remove() { reached.push('remove'); return { ok: true }; },
+    stop() { reached.push('stop'); return { ok: true }; },
+    sourceImports: () => [],
     approveRemoval() { reached.push('remove'); return { ok: true }; },
     // The agent's side only records requests (archive-import-agent.test.ts); nothing here reaches it.
     agent: {} as ArchiveImportDashboard['agent'],
@@ -91,6 +94,7 @@ const BODIES: Record<string, unknown> = {
   '/dashboard/archive-import/approve': { key: '/Users/someone/Mail exports/Takeout.mbox' },
   '/dashboard/archive-import/decline': { request_id: REQUEST_ID },
   '/dashboard/archive-import/remove': { archive_id: ARCHIVE_ID, acknowledge: true },
+  '/dashboard/archive-import/stop': { archive_id: ARCHIVE_ID },
 };
 
 function post(path: string, headers: Record<string, string>): Request {
@@ -186,7 +190,7 @@ describe('approving, declining and removing an archive take this computer\'s own
       const allowed = await f.fetch(post(path, session));
       expect(allowed.status).toBe(200);
     }
-    expect(f.reached).toEqual(['browse', 'approve', 'decline', 'remove']);
+    expect(f.reached).toEqual(['browse', 'approve', 'decline', 'remove', 'stop']);
   });
 
   test('the worker route itself refuses a call that carries no local grade (an in-process caller)', async () => {
@@ -219,6 +223,7 @@ describe('the panel\'s archive tools', () => {
     [ARCHIVE_APPROVE_TOOL_NAME, { key: '/Users/someone/Mail exports/Takeout.mbox' }],
     [ARCHIVE_DECLINE_TOOL_NAME, { request_id: REQUEST_ID }],
     [ARCHIVE_REMOVE_TOOL_NAME, { archive_id: ARCHIVE_ID }],
+    [ARCHIVE_STOP_TOOL_NAME, { archive_id: ARCHIVE_ID }],
   ];
 
   test('through /dashboard/tools/call with the bearer (the OpenClaw tab) or a bearer\'s session: refused, nothing sent', async () => {
@@ -242,6 +247,7 @@ describe('the panel\'s archive tools', () => {
       { path: '/dashboard/archive-import/approve', grade: 'local' },
       { path: '/dashboard/archive-import/decline', grade: 'local' },
       { path: '/dashboard/archive-import/remove', grade: 'local' },
+      { path: '/dashboard/archive-import/stop', grade: 'local' },
     ]);
   });
 });
