@@ -34,7 +34,7 @@ import type { WhatsAppReactionEntry } from './reaction-index.ts';
 import { normalizeWhatsAppJid } from './reaction-index.ts';
 
 export const WHATSAPP_SPOOL_INDEX_FILE = 'spool-index.sqlite';
-const SCHEMA = 2;
+const SCHEMA = 3;
 
 export interface SpoolPlace {
   file: string;
@@ -76,7 +76,7 @@ export class WhatsAppSpoolIndex {
           DROP TABLE IF EXISTS reactions;
           DROP TABLE IF EXISTS meta;
           DROP TABLE IF EXISTS files;
-          CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL) WITHOUT ROWID;
+          CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
           CREATE TABLE messages (
             chat TEXT NOT NULL, id TEXT NOT NULL, chat_jid TEXT NOT NULL, file TEXT NOT NULL, offset INTEGER NOT NULL,
             PRIMARY KEY (chat, id)
@@ -132,20 +132,22 @@ export class WhatsAppSpoolIndex {
    * identity): a file that is gone loses its rows; one whose identity changed
    * loses them and is indexed again from its start.
    */
-  reconcile(present: ReadonlyMap<string, string>): void {
-    const known = this.db.query('SELECT name, identity FROM files').all() as Array<{ name: string; identity: string }>;
-    for (const { name, identity } of known) {
+  reconcile(present: ReadonlyMap<string, { identity: string; size: number }>): void {
+    const known = this.db.query('SELECT name, identity, size FROM files').all() as Array<{ name: string; identity: string; size: number }>;
+    for (const { name, identity, size } of known) {
       const now = present.get(name);
-      if (now === identity) continue;
+      // The same file, as long or longer: it was only appended to.
+      if (now !== undefined && now.identity === identity && now.size >= size) continue;
       this.forgetFile(name);
-      if (now === undefined) this.db.query('DELETE FROM files WHERE name = ?').run(name);
     }
   }
 
-  /** The file a line is indexed from, with its identity, so a later replacement is found. */
-  noteFile(name: string, identity: string): void {
-    this.db.query('INSERT INTO files (name, identity) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET identity = excluded.identity')
-      .run(name, identity);
+  /** The file a line is indexed from, with its identity and size, so a later replacement is found. */
+  noteFile(name: string, identity: string, size: number): void {
+    this.db.query(`
+      INSERT INTO files (name, identity, size) VALUES (?, ?, ?)
+      ON CONFLICT (name) DO UPDATE SET identity = excluded.identity, size = MAX(files.size, excluded.size)
+    `).run(name, identity, size);
   }
 
   /** A file was replaced or is gone: what was indexed of it is dropped, and it is indexed again from its start. */

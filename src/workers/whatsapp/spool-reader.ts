@@ -10,6 +10,7 @@
 // the bridge's own word on whether it is connected and how many messages a
 // full queue dropped (tools/whatsapp-bridge/capture_status.go).
 
+import { createHash } from 'node:crypto';
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -19,6 +20,8 @@ const CHUNK_BYTES = 256 * 1024;
 const NEWLINE = 0x0a;
 /** How far back from the end of the spool the newest record is looked for. */
 const NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
+/** How much of a file's start its identity fingerprints. */
+const HEAD_FINGERPRINT_BYTES = 4 * 1024;
 
 export const WHATSAPP_CAPTURE_STATUS_FILE = 'capture-status.json';
 const CAPTURE_STATUS_KIND = 'whatsapp_capture_status';
@@ -201,16 +204,44 @@ export function isRecordBoundary(path: string, offset: number): boolean {
 
 /**
  * A file's size and its identity: its device, inode and birth time where the
- * platform reports them, so a file put in another's place (even one of the
- * same length) is told apart. Undefined when the file is not there.
+ * platform reports them, and a digest of its first line (at most 4 KiB), so
+ * a file put in another's place is told apart even when the platform reuses
+ * the inode and keeps no birth time. Only the first line is fingerprinted:
+ * the bridge appends, so it never changes as the file grows, and the time of
+ * the last change is left out for the same reason. Clearing a Secret from the
+ * first line changes it, which reads as a replacement and costs one rebuild.
+ * The digest is hashed, never kept as text. Undefined when the file is not there.
  */
 export function spoolFileIdentity(path: string): { size: number; ino?: number; identity: string } | undefined {
   try {
     const stats = statSync(path);
     const birth = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? Math.floor(stats.birthtimeMs) : 0;
-    return { size: stats.size, ...(stats.ino > 0 ? { ino: stats.ino } : {}), identity: `${stats.dev}:${stats.ino}:${birth}` };
+    return {
+      size: stats.size,
+      ...(stats.ino > 0 ? { ino: stats.ino } : {}),
+      identity: `${stats.dev}:${stats.ino}:${birth}:${firstLineDigest(path)}`,
+    };
   } catch {
     return undefined;
+  }
+}
+
+function firstLineDigest(path: string): string {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return '-';
+  }
+  try {
+    const head = Buffer.alloc(HEAD_FINGERPRINT_BYTES);
+    const read = readSync(fd, head, 0, HEAD_FINGERPRINT_BYTES, 0);
+    const newline = head.subarray(0, read).indexOf(NEWLINE);
+    // Only a whole first line: a file still being written has none yet, and its fragment would change.
+    if (newline < 0 && read < HEAD_FINGERPRINT_BYTES) return 'none';
+    return createHash('sha256').update(head.subarray(0, newline < 0 ? read : newline + 1)).digest('hex').slice(0, 16);
+  } finally {
+    closeSync(fd);
   }
 }
 

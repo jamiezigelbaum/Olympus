@@ -504,10 +504,10 @@ async function* liveRecords(
   try {
     // The index is trusted only for the files that are there, as they are.
     if (index) {
-      const present = new Map<string, string>();
+      const present = new Map<string, { identity: string; size: number }>();
       for (const file of listSpoolFiles(spoolDir)) {
         const identity = spoolFileIdentity(join(spoolDir, file));
-        if (identity) present.set(file, identity.identity);
+        if (identity) present.set(file, { identity: identity.identity, size: identity.size });
       }
       index.reconcile(present);
     }
@@ -586,7 +586,7 @@ function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolP
     const identity = spoolFileIdentity(join(spoolDir, file));
     if (!identity) continue;
     index.transaction(() => {
-      index.noteFile(file, identity.identity);
+      index.noteFile(file, identity.identity, identity.size);
       for (const record of spoolRecords(join(spoolDir, file), offset, pass.maxRecordBytes, pass.budget)) {
         if (record.kind === 'paused') {
           // Inside an over-long record the rest of it reads as one unparsable line next time: nothing is indexed from it.
@@ -657,7 +657,7 @@ function readSpoolPage(
       const skipping = fromStart && start.skipping === true;
       position = { file, line: lineIndex, offset, ...(skipping ? { skipping: true as const } : {}) };
       const identity = spoolFileIdentity(join(spoolDir, file));
-      if (index && identity) index.noteFile(file, identity.identity);
+      if (index && identity) index.noteFile(file, identity.identity, identity.size);
       for (const record of spoolRecords(join(spoolDir, file), offset, pass.maxRecordBytes, pass.budget, skipping)) {
         if (record.kind === 'paused') {
           if (record.firstSeen) pass.findings.oversizedRecords += 1;

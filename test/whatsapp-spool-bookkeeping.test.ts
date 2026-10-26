@@ -1,0 +1,249 @@
+// WhatsApp spool bookkeeping under churn (review round 3 on #547): Secrets
+// cleanup is owed per file identity, a file's identity survives inode reuse,
+// and a seeded run of appends, prunes, replacements, cleanup failures and
+// cursor resets never leaves a known Secret in the spool after a pull that
+// succeeded, nor emits a reaction from a file that is gone. Synthetic data.
+
+import { afterEach, describe, expect, test } from 'bun:test';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { RawItem, SourceConnectorListPage } from '../src/core/contracts.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { createWhatsAppLiveSourceConnector, emptyWhatsAppSpoolPassFindings } from '../src/workers/whatsapp/live-connector.ts';
+import {
+  WHATSAPP_LIVE_CORPUS_ID,
+  WHATSAPP_SPOOL_REDACTION_FAILED_WARNING,
+  createWhatsAppConnectorStoreSyncHandler,
+  createWhatsAppTierLane,
+} from '../src/workers/whatsapp/store-sync.ts';
+
+const roots: string[] = [];
+const closers: Array<() => void> = [];
+
+afterEach(() => {
+  for (const close of closers.splice(0).reverse()) close();
+  for (const root of roots.splice(0)) {
+    for (const file of existsSync(join(root, 'spool')) ? readdirSync(join(root, 'spool')) : []) {
+      try { chmodSync(join(root, 'spool', file), 0o600); } catch { /* gone */ }
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Key-shaped fixture assembled at run time, so no literal key sits in the repository.
+const keyFor = (n: number): string => ['sk', '_live_', `k9Xp2LmQ7vRt4WzY8bNc${String(n).padStart(4, '0')}`].join('');
+
+function line(id: string, fields: Record<string, unknown> = {}): string {
+  return `${JSON.stringify({
+    id,
+    chat_jid: 'chat-1@s.whatsapp.net',
+    chat_name: 'Harbour club',
+    sender_jid: 'sender-1@s.whatsapp.net',
+    sender_name: 'Rowan',
+    from_me: false,
+    timestamp: '2026-10-25T09:00:00Z',
+    text: `message ${id}`,
+    ...fields,
+  })}\n`;
+}
+
+function reaction(id: string, target: string, key: string, actor: string): string {
+  return line(id, {
+    sender_jid: actor,
+    sender_name: 'Kit',
+    media_type: 'reaction',
+    text: '',
+    reaction_target_id: target,
+    reaction_target_chat_jid: 'chat-1@s.whatsapp.net',
+    reaction_key: key,
+  });
+}
+
+function lane() {
+  const root = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-'));
+  roots.push(root);
+  const spoolDir = join(root, 'spool');
+  mkdirSync(spoolDir, { recursive: true });
+  const store = new LocalConnectorStore({ dbPath: join(root, 'whatsapp.db'), corpusId: WHATSAPP_LIVE_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
+  const tier = createWhatsAppTierLane({
+    store,
+    env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'whatsapp-internal.db') },
+  });
+  closers.push(() => {
+    tier.newStores.internal?.current()?.close();
+    store.close();
+  });
+  const sync = createWhatsAppConnectorStoreSyncHandler({ store, spoolDir, tierSet: tier.set, now: () => new Date('2026-10-25T12:00:00Z') });
+  return { root, spoolDir, sync };
+}
+
+/** Puts new bytes in a file's place as a new file (the inode differs). */
+function replaceByRename(path: string, content: string): void {
+  writeFileSync(`${path}.new`, content);
+  renameSync(`${path}.new`, path);
+}
+
+async function drain(pages: AsyncIterable<SourceConnectorListPage>): Promise<SourceConnectorListPage[]> {
+  const collected: SourceConnectorListPage[] = [];
+  for await (const page of pages) collected.push(page);
+  return collected;
+}
+
+describe('Secrets cleanup is owed per file identity', () => {
+  test('a cursor reset onto a shorter replacement with a known Secret, and one failed cleanup, still clears it', async () => {
+    const target = lane();
+    const file = join(target.spoolDir, '2026-10-25.jsonl');
+    const secret = line('s1', { text: `prod key ${keyFor(1)}` });
+    writeFileSync(file, line('a') + line('b') + secret);
+    await target.sync.pull();
+    expect(readFileSync(file, 'utf8')).not.toContain(keyFor(1));
+    // The folder is replaced the same day: one line, the same Secret message again; the first cleanup fails.
+    replaceByRename(file, secret);
+    chmodSync(file, 0o400);
+    const failed = await target.sync.pull();
+    expect(failed.counts.spool_cursor_recovered).toBe(1);
+    expect(failed.warnings).toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
+    chmodSync(file, 0o600);
+    const retried = await target.sync.pull();
+    expect(retried.warnings ?? []).not.toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
+    expect(readFileSync(file, 'utf8')).not.toContain(keyFor(1));
+  });
+});
+
+describe('a file keeps its identity across inode reuse', () => {
+  test('a file rewritten in place (the same inode) with other lines of the same length is indexed again', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-inode-'));
+    roots.push(dir);
+    const day = join(dir, '2026-10-24.jsonl');
+    writeFileSync(day, line('m1', { text: 'xxxx' }) + line('m2', { text: 'yyyy' }));
+    const first = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems());
+    // The same inode, the same length, the lines in another order.
+    writeFileSync(day, line('m2', { text: 'yyyy' }) + line('m1', { text: 'xxxx' }));
+    writeFileSync(join(dir, '2026-10-25.jsonl'), reaction('r1', 'm1', '👍', 'sender-2@s.whatsapp.net'));
+    const findings = emptyWhatsAppSpoolPassFindings();
+    const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, findings }).listItems({ cursor: first.at(-1)!.nextCursor! }));
+    const item = pages.flatMap((page) => [...page.items]).find((entry) => entry.identity.providerItemId === 'm1');
+    expect(findings.unresolvedReactionTargets).toBe(0);
+    expect(item?.content).toEqual({ kind: 'text', text: 'xxxx' });
+  });
+});
+
+/** A small deterministic generator (mulberry32). */
+function random(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Each actor's current reaction to each target in the files that are there, in spool order: what may be emitted. */
+function truth(spoolDir: string): Map<string, Map<string, string | undefined>> {
+  const byTarget = new Map<string, Map<string, string | undefined>>();
+  for (const file of readdirSync(spoolDir).filter((name) => name.endsWith('.jsonl')).sort()) {
+    for (const raw of readFileSync(join(spoolDir, file), 'utf8').split('\n')) {
+      if (!raw.trim()) continue;
+      let record: Record<string, unknown>;
+      try { record = JSON.parse(raw) as Record<string, unknown>; } catch { continue; }
+      if (record['media_type'] !== 'reaction' || typeof record['reaction_target_id'] !== 'string') continue;
+      const actors = byTarget.get(record['reaction_target_id']) ?? new Map<string, string | undefined>();
+      actors.set(String(record['sender_jid']), typeof record['reaction_key'] === 'string' ? record['reaction_key'] : undefined);
+      byTarget.set(record['reaction_target_id'], actors);
+    }
+  }
+  return byTarget;
+}
+
+describe('spool bookkeeping under churn', () => {
+  for (const seed of [1, 7, 42, 1234]) {
+    test(`seed ${seed}: no known Secret survives a successful pull, and no reaction is emitted from a file that is gone`, async () => {
+      const next = random(seed);
+      const target = lane();
+      const days = ['2026-10-21.jsonl', '2026-10-22.jsonl', '2026-10-23.jsonl', '2026-10-24.jsonl', '2026-10-25.jsonl'];
+      const secrets: string[] = [];
+      let counter = 0;
+      let listCursor: string | undefined;
+      let failing: string | undefined;
+      const pathOf = (day: string) => join(target.spoolDir, day);
+      const present = () => days.filter((day) => existsSync(pathOf(day)));
+      const messageIds = () => present().flatMap((day) => readFileSync(pathOf(day), 'utf8').split('\n').filter(Boolean)
+        .map((raw) => JSON.parse(raw) as Record<string, unknown>).filter((record) => record['media_type'] !== 'reaction').map((record) => String(record['id'])));
+      for (let step = 0; step < 40; step += 1) {
+        const roll = next();
+        const day = days[Math.min(days.length - 1, Math.floor(next() * days.length))]!;
+        counter += 1;
+        if (roll < 0.35) {
+          appendFileSync(pathOf(day), line(`m${counter}`));
+        } else if (roll < 0.5) {
+          const key = keyFor(counter);
+          secrets.push(key);
+          appendFileSync(pathOf(day), line(`s${counter}`, { text: `deploy key ${key}` }));
+        } else if (roll < 0.65) {
+          const ids = messageIds();
+          if (ids.length > 0) {
+            const targetId = ids[Math.floor(next() * ids.length)]!;
+            appendFileSync(pathOf(day), reaction(`r${counter}`, targetId, ['👍', '❤️', '😂'][Math.floor(next() * 3)]!, `actor-${Math.floor(next() * 4)}@s.whatsapp.net`));
+          }
+        } else if (roll < 0.72) {
+          // Prune an older file.
+          const older = present().slice(0, -1);
+          if (older.length > 0) rmSync(pathOf(older[Math.floor(next() * older.length)]!));
+        } else if (roll < 0.82) {
+          // Replace a file: the same lines reordered (same length), in place or as a new file, or a shorter one.
+          const existing = present();
+          if (existing.length > 0) {
+            const victim = pathOf(existing[Math.floor(next() * existing.length)]!);
+            const lines = readFileSync(victim, 'utf8').split('\n').filter(Boolean);
+            const kind = next();
+            const content = kind < 0.66 ? `${[...lines].reverse().join('\n')}\n` : `${lines.slice(0, Math.max(1, Math.floor(lines.length / 2))).join('\n')}\n`;
+            if (lines.length > 0) {
+              if (kind < 0.33) writeFileSync(victim, content);
+              else replaceByRename(victim, content);
+            }
+          }
+        } else if (roll < 0.9) {
+          // The next cleanup fails: a file cannot be opened for writing for one pull.
+          const existing = present();
+          if (existing.length > 0) {
+            failing = pathOf(existing[Math.floor(next() * existing.length)]!);
+            chmodSync(failing, 0o400);
+          }
+        } else {
+          // A cursor reset: the listing starts over from the spool's start.
+          listCursor = undefined;
+        }
+        const receipt = await target.sync.pull();
+        if (failing) {
+          chmodSync(failing, 0o600);
+          failing = undefined;
+        }
+        if (!(receipt.warnings ?? []).includes(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING)) {
+          // A pull whose cleanup succeeded leaves no known Secret in any file of the spool.
+          for (const day of present()) {
+            const text = readFileSync(pathOf(day), 'utf8');
+            for (const key of secrets) expect(text.includes(key), `${day} still holds a Secret at step ${step}`).toBe(false);
+          }
+        }
+        // What a listing emits about reactions comes only from the files that are there.
+        const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: target.spoolDir }).listItems(listCursor ? { cursor: listCursor } : {}));
+        listCursor = pages.at(-1)?.nextCursor ?? listCursor;
+        const facts = truth(target.spoolDir);
+        for (const item of pages.flatMap((page) => [...page.items]) as RawItem[]) {
+          const reactions = item.metadata['reactions'] as Array<{ key: string; count: number; actors?: Array<{ providerActorId?: string }> }> | undefined;
+          for (const entry of reactions ?? []) {
+            const actors = facts.get(item.identity.providerItemId);
+            const holding = [...(actors?.entries() ?? [])].filter(([, key]) => key === entry.key);
+            expect(entry.count, `${item.identity.providerItemId} ${entry.key} at step ${step}`).toBeLessThanOrEqual(holding.length);
+            for (const actor of entry.actors ?? []) {
+              expect(actors?.get(actor.providerActorId ?? ''), `actor of ${item.identity.providerItemId} at step ${step}`).toBe(entry.key);
+            }
+          }
+        }
+      }
+    }, 120_000);
+  }
+});

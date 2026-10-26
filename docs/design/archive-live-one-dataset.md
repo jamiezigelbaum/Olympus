@@ -440,7 +440,10 @@ Live WhatsApp capture, with no change to identities or stores
   ids, positions and reactions, never a message's text, and is a cache:
   deleting it costs one catch-up. `fetchItem` reads from it too, and scans
   the spool only for a message the index does not hold. Each indexed file
-  is known by its identity (device, inode, birth time), and every listing
+  is known by its identity (device, inode, birth time where the platform
+  keeps one, and a digest of its first line, so a replacement on a reused
+  inode is told apart; the time of the last change is left out, since every
+  append changes it) and its size, and every listing
   reconciles the index with the files that are there before trusting it: a
   file that is gone loses its rows (its reactions stop counting), and one
   put in another's place, even of the same length, is indexed again. A
@@ -457,11 +460,18 @@ Live WhatsApp capture, with no change to identities or stores
   covered: a replaced file whose bytes at the old offset happen to start a
   line, and a file named earlier than the cursor's (a clock set back).
 - **Secrets clearing.** The shared rewrite streams its files
-  (`connector-store/capture-spool-secrets.ts`, from the Telegram lane). A
-  pull that read nothing new skips the window and runs only the whole-spool
-  pass when the set of Secrets changed, unless a window an earlier pull
-  failed to clear is still owed (where clearing reached is behind where
-  reading reached): that window is cleared first.
+  (`connector-store/capture-spool-secrets.ts`, from the Telegram lane). What
+  was cleared is kept per file, by the file's identity and size, never by a
+  line number alone: a file is owed again from its start whenever its
+  identity changed (a replacement, a cursor reset) or it is shorter than
+  when it was cleared, and an appended file from the line clearing reached.
+  Every pull clears whatever it owes, however little it read, and records a
+  file only once its clearing succeeded; a pull that owes nothing reads no
+  spool file. The whole-spool pass still runs when the set of Secrets
+  changed. A seeded test runs appends, prunes, replacements (same and other
+  length, inodes reused), failed cleanups and cursor resets, and checks that
+  no known Secret survives a pull that succeeded and that no reaction from a
+  file that is gone is emitted (`test/whatsapp-spool-bookkeeping.test.ts`).
 - **Counted bridge drops.** The bridge writes `spool/capture-status.json`
   every minute and on connect and disconnect: connected, the last time it
   knew it was connected, and the messages a full queue dropped, carried
