@@ -1275,7 +1275,8 @@ describe('multi-source source dashboard', () => {
 
     expect(response.status).toBe(200);
     expect(body.kind).toBe('source_dashboard');
-    expect(body.sources).toHaveLength(9);
+    // Nine sources and the import-only sources' cards (Reflect, Roam, Evernote).
+    expect(body.sources).toHaveLength(12);
     expect(body.sources.some((source: { source_id: string }) => source.source_id === 'venice.api')).toBe(false);
     expect(body.answer_lanes).toEqual([
       expect.objectContaining({

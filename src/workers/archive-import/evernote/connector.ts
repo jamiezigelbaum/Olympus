@@ -39,17 +39,19 @@ import {
 } from '../../../core/archive-formats.ts';
 import type {
   RawItem,
+  RawItemProviderText,
   SourceClassificationSignals,
   SourceConnector,
   SourceConnectorFetchOptions,
   SourceConnectorListOptions,
   SourceConnectorListPage,
 } from '../../../core/contracts.ts';
+import { childProviderItemId } from '../../../core/child-item-id.ts';
 import { FileExtractionSourceError } from '../../../core/file-extraction-source.ts';
 import type { ScopeFileReader } from '../../../core/scope-safe-fs.ts';
 import { fileByteSource, type ArchiveByteSource } from '../byte-source.ts';
 import { archiveStopFromScopeError } from '../stop-errors.ts';
-import { XmlStreamError, XmlStreamReader, xmlChild, xmlChildren, xmlText, type XmlElement } from '../xml-stream.ts';
+import { XmlStreamError, XmlStreamReader, decodeXmlEntities, xmlChild, xmlChildren, xmlText, type XmlElement } from '../xml-stream.ts';
 import { NOTE_FINDINGS, NOTE_MAX_RECORD_BYTES, buildNoteItem, cleanTags, noteClassificationSignals } from '../notes/note.ts';
 import { enmlToText } from './enml.ts';
 import { recognizedText } from './recognition.ts';
@@ -111,6 +113,34 @@ const BASE64 = (() => {
  * skipped, stopping after `cap` bytes. Anything that is not base64 refuses
  * the read.
  */
+/** Evernote's reading of one attachment is read up to this size; a longer one is not used. */
+export const EVERNOTE_MAX_RECOGNITION_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Evernote's reading of an attachment, from its place in the file (the locator's last part): the likeliest
+ * word of each place in reading order, the other candidates as search terms. Undefined when the attachment
+ * has none, when it is too long to read, or when it names no word.
+ */
+export function recognitionOf(reader: ScopeFileReader, place: string, fileSize: number): RawItemProviderText | undefined {
+  if (place === '-') return undefined;
+  const parts = place.slice(1).split('.').map((part) => part.split('-').map(Number) as [number, number]);
+  let total = 0;
+  for (const [start, end] of parts) {
+    if (!(start < end) || end > fileSize) throw new FileExtractionSourceError('source_version_gone');
+    total += end - start;
+  }
+  if (total > EVERNOTE_MAX_RECOGNITION_BYTES) return undefined;
+  const raw = parts.map(([start, end]) => Buffer.from(reader.readAt(start, end - start)).toString('utf8')).join('');
+  const recognized = recognizedText(place.startsWith('e') ? decodeXmlEntities(raw) : raw);
+  if (recognized.words === 0) return undefined;
+  return {
+    text: recognized.text,
+    form: 'recognized_words',
+    label: 'Evernote',
+    ...(recognized.alternatives.length > 0 ? { terms: recognized.alternatives } : {}),
+  };
+}
+
 export function decodeBase64Range(reader: ScopeFileReader, start: number, end: number, cap: number): Uint8Array {
   const out: Uint8Array[] = [];
   let total = 0;
@@ -233,15 +263,17 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
       const encoding = (data?.attributes['encoding'] ?? 'base64').toLowerCase();
       const readable = data !== undefined && encoding === 'base64' && data.rangeEntities !== true && ranges.length === 1;
       const range = readable ? ranges[0]! : undefined;
-      const locator = range
-        ? `${prefix}${fileIndex}:${range.start}:${range.end}:${Buffer.from(mime).toString('base64url')}`
-        : `${prefix}none`;
+      // Evernote's reading of the attachment (`<recognition>`) is read with its bytes, from its place in the
+      // file, and handed to the extractor as provider text (RawItem.providerText): never held at listing.
       const recognition = xmlChild(resource, 'recognition');
-      const recognized = recognition ? recognizedText(xmlText(recognition)) : undefined;
-      // Once RawItem.providerText exists (docs/design/child-items.md, "Text the provider supplies"), the child
-      // carries `recognized.text` there (form `recognized_words`, label Evernote) and `recognized.alternatives`
-      // as search terms. Until then only how many words Evernote read is kept: metadata is never judged content.
-      const providerItemId = sha256(`${parent.identity.providerItemId}\u0000resource\u0000${index}`).slice(0, 32);
+      const recognitionPlace = recognition?.ranges && recognition.ranges.length > 0
+        ? `${recognition.rangeEntities === true ? 'e' : 'r'}${recognition.ranges.map((part) => `${part.start}-${part.end}`).join('.')}`
+        : '-';
+      const locator = range
+        ? `${prefix}${fileIndex}:${range.start}:${range.end}:${Buffer.from(mime).toString('base64url')}:${recognitionPlace}`
+        : `${prefix}none`;
+      // The child's id is its parent's and its place among the note's resources (child-item-id.ts).
+      const providerItemId = childProviderItemId(parent.identity.providerItemId, `resource-${index}`);
       const authoredAt = parent.metadata['authoredAt'];
       items.push({
         identity: {
@@ -260,7 +292,6 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
           name,
           mimeType: mime,
           ...(typeof authoredAt === 'string' ? { authoredAt } : {}),
-          ...(recognized && recognized.words > 0 ? { recognizedWords: recognized.words } : {}),
         }),
         fetchedAt: new Date().toISOString(),
         deferredBytes: { locator, available: readable },
@@ -306,7 +337,8 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
       };
       const xml = new XmlStreamReader(watched, {
         recordPaths: [RECORD_PATH],
-        rangeElements: ['data'],
+        // An attachment's bytes and Evernote's reading of it are read later, from their place in the file.
+        rangeElements: ['data', 'recognition'],
         maxRecordBytes: NOTE_MAX_RECORD_BYTES,
         ...(cursor.offset > 0 ? { open: [RECORD_PATH[0]] } : {}),
       });
@@ -374,7 +406,7 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
   const readAttachment = (localItemId: string, options: SourceConnectorFetchOptions | undefined, cap: number): RawItem => {
     const locator = options?.deferredBytes?.locator;
     if (!locator) throw new FileExtractionSourceError('source_item_not_found');
-    const match = /^enex1:([0-9a-f]{16}):(\d+):(\d+):(\d+):([A-Za-z0-9_-]*)$/.exec(locator);
+    const match = /^enex1:([0-9a-f]{16}):(\d+):(\d+):(\d+):([A-Za-z0-9_-]*):(-|[er]\d+-\d+(?:\.\d+-\d+)*)$/.exec(locator);
     if (!match || match[1] !== tag) throw new FileExtractionSourceError('source_version_gone');
     const fileIndex = Number(match[2]);
     const start = Number(match[3]);
@@ -385,6 +417,7 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
     const reader = input.root.openFile(file.relPath, { expected: file.version });
     try {
       const bytes = decodeBase64Range(reader, start, end, cap);
+      const providerText = recognitionOf(reader, match[6]!, file.version.size);
       reader.assertCurrent();
       const scopePrefix = `${input.accountScope}:`;
       const providerItemId = localItemId.startsWith(scopePrefix) ? localItemId.slice(scopePrefix.length) : localItemId;
@@ -400,6 +433,7 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
         content: { kind: 'bytes', mimeType: mime, bytes },
         metadata: Object.freeze({}),
         fetchedAt: new Date().toISOString(),
+        ...(providerText ? { providerText } : {}),
       };
     } finally {
       reader.close();

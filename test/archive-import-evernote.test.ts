@@ -146,14 +146,15 @@ describe('listing', () => {
     expect(textOf(board)).toContain('Tags: work');
     for (const child of [photo, scan]) {
       expect(child.identity.parent).toEqual({ providerItemId: board.identity.providerItemId, localItemId: board.identity.localItemId });
+      // The child's id names its parent, so the shared readers find the parent from the child alone.
+      expect(child.identity.providerItemId.startsWith(`${board.identity.providerItemId}#child:`)).toBe(true);
       expect(child.content).toEqual({ kind: 'metadata_only' });
       expect(child.deferredBytes?.available).toBe(true);
       expect(child.identity.provider).toBe('evernote');
       expect(child.holdContentUntilJudged).toBeUndefined();
     }
     expect(photo.mimeType).toBe('image/png');
-    expect(photo.metadata['recognizedWords']).toBe(4);
-    // What Evernote read is never in an item's metadata, which is not judged as content.
+    // What Evernote read is never in an item's metadata, which is not judged as content: it comes with the bytes.
     expect(JSON.stringify(items.map((item) => item.metadata))).not.toContain('noon');
     expect(findings).toEqual([]);
   });
@@ -167,6 +168,8 @@ describe('listing', () => {
     const read = await opened.connector.fetchItem(photo.identity.localItemId, { deferredBytes: { locator } });
     expect(read.content.kind === 'bytes' ? Array.from(read.content.bytes) : []).toEqual(Array.from(pngBytes(1)));
     expect(read.mimeType).toBe('image/png');
+    // Evernote's reading of the picture comes with its bytes, as provider text: the likeliest word of each place.
+    expect(read.providerText).toEqual({ text: 'meet Sam\nat noon', form: 'recognized_words', label: 'Evernote', terms: expect.arrayContaining(['Sarn', 'moon', 'rneet']) });
     const pdf = await opened.connector.fetchItem(scan.identity.localItemId, { deferredBytes: { locator: scan.deferredBytes!.locator } });
     expect(pdf.content.kind === 'bytes' ? pdf.content.bytes.length : 0).toBe(1000);
     const within = await (opened.connector as unknown as { fetchItemWithin: (id: string, o: object) => Promise<RawItem> })
