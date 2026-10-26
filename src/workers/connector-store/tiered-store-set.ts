@@ -1120,7 +1120,8 @@ export class TieredStoreSet {
    * a newer active row (a Secret's location from an earlier version) and the
    * old leg's tombstone after a move are not the item's state. When the rows
    * at the newest version are all tombstones (deleted, or a Secret kept as a
-   * location) it is `tombstoned`. It is undefined only when no leg holds a row.
+   * location) it is `tombstoned`. It is undefined only when no leg holds a row and no write is pending: a pending write (the ledger's intent) is the item's
+   * state at its version before any row exists.
    */
   storedItem(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
@@ -1135,7 +1136,20 @@ export class TieredStoreSet {
     // any row that is older: the intent is read first.
     const pending = this.ledger.writeIntent(identity);
     const hidden = (pending?.kind === 'deletion' || pending?.kind === 'secret') && pending.version !== undefined ? pending.version : undefined;
-    if (found.length === 0) return hidden === undefined ? undefined : { version: hidden, hasContent: false, tombstoned: true as const };
+    if (found.length === 0) {
+      // No row is not "absent": every pending write is the item's boundary at its version. A deletion or Secret is
+      // tombstoned there; a body or names owed is incomplete (its own record, or a newer one, replays it); a version
+      // move is the version alone.
+      if (pending?.version === undefined) return undefined;
+      if (hidden !== undefined) return { version: hidden, hasContent: false, tombstoned: true as const };
+      const owesBody = pending.kind === 'content' || pending.kind === 'names';
+      return {
+        version: pending.version,
+        hasContent: false,
+        incomplete: true as const,
+        ...(owesBody && pending.bodyVersion !== undefined ? { owedBodyVersion: pending.bodyVersion } : {}),
+      };
+    }
     const newest = found.reduce<string | undefined>(
       (best, leg) => (leg.version !== undefined && (best === undefined || compareVersions(leg.version, best) > 0) ? leg.version : best),
       undefined,
@@ -1152,7 +1166,9 @@ export class TieredStoreSet {
     const owedBody = (owed?.kind === 'content' || owed?.kind === 'names') && owed.version !== undefined && !tombstoned;
     const incomplete = owedBody;
     const owedBodyVersion = owedBody ? owed?.bodyVersion : undefined;
-    const version = intentLeads ? hidden : owedBody && (newest === undefined || compareVersions(owed.version!, newest) > 0) ? owed.version : newest;
+    // A pending version move is the item's version too, ahead of rows that are older.
+    const moving = pending?.kind === 'advance' && pending.version !== undefined && (newest === undefined || compareVersions(pending.version, newest) > 0) ? pending.version : undefined;
+    const version = intentLeads ? hidden : moving !== undefined ? moving : owedBody && (newest === undefined || compareVersions(owed.version!, newest) > 0) ? owed.version : newest;
     return {
       ...(version !== undefined ? { version } : {}),
       hasContent: !intentLeads && topActive.some((leg) => leg.chunkCount > 0),

@@ -44,6 +44,32 @@ describe('a pending write holds the version boundary before any row exists', () 
   });
 });
 
+describe('no row is not an absent item', () => {
+  test('a body owed to a new item whose first write was cut off before any row is not replaced by an older record', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive();
+    // The write's intent is committed; the run stops before the first leg writes a row.
+    const orig = h.set.ledger.withWriteIntent.bind(h.set.ledger);
+    let thrown = false;
+    h.set.ledger.withWriteIntent = ((...args: Parameters<typeof orig>) => {
+      const out = orig(...args);
+      if (!thrown) { thrown = true; throw new Error('injected crash'); }
+      return out;
+    }) as typeof orig;
+    await h.pull(await h.startImport('nine.mbox', [rec('a', 9, 'the ninth words')])).catch(() => undefined);
+    expect(h.rows().filter((row) => row.providerItemId === 'a')).toEqual([]);
+    expect(h.set.ledger.writeIntents().map((intent) => [intent.kind, intent.version])).toEqual([['content', '9']]);
+    expect(stateOf(h, 'a')).toMatchObject({ version: '9', incomplete: true });
+
+    await h.importAll(await h.startImport('older.mbox', [rec('a', 5, 'the fifth words')]));
+    expect(h.textOf('a')).toBe('');
+    // The record of the owed version finishes it.
+    await h.importAll(await h.startImport('nine-again.mbox', [rec('a', 9, 'the ninth words')]));
+    expect(h.textOf('a')).toBe('the ninth words');
+    expect(h.set.ledger.writeIntents()).toEqual([]);
+  });
+});
+
 describe('a cascade never lowers a version', () => {
   test('a parent\'s deletion tombstones each leg\'s child at its own version, not the version of the other leg\'s row', async () => {
     const h = onePipelineHarness(cleanups);
