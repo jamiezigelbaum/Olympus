@@ -140,16 +140,20 @@ export class WhatsAppSpoolIndex {
    * identity): a file that is gone loses its rows; one whose identity changed
    * loses them and is indexed again from its start.
    */
-  reconcile(spoolDir: string): void {
+  reconcile(spoolDir: string): string[] {
     const known = this.db.query('SELECT name, identity, indexed_to, boundary FROM files').all() as
       Array<{ name: string; identity: string; indexed_to: number; boundary: string }>;
+    const replaced: string[] = [];
     for (const { name, identity, indexed_to: indexedTo, boundary } of known) {
       const path = join(spoolDir, name);
       const now = spoolFileIdentity(path);
       // The same file, holding the same bytes up to where indexing reached: it was only appended to.
       if (now !== undefined && now.identity === identity && now.size >= indexedTo && spoolBoundaryHolds(path, indexedTo, boundary)) continue;
       this.forgetFile(name);
+      if (now !== undefined) replaced.push(name);
     }
+    // The files that are there but no longer the ones indexed: a listing reads them again from their start.
+    return replaced.sort();
   }
 
   /** Where indexing reached in a file, with the file's identity and the digest that ends there. */

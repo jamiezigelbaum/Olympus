@@ -425,8 +425,17 @@ Live WhatsApp capture, with no change to identities or stores
   every boundary kept in a file (cleared-through, indexed-through) the
   digest of the 4 KiB ending there is kept too, and is read again before the
   boundary is trusted (`connector-store/spool-file-identity.ts`). A mismatch
-  is a file read again from its start: cleared again in full, its index rows
-  rebuilt.
+  is a file read again from its start, keeping none of its old boundaries:
+  cleared again in full from byte 0, its index rows rebuilt, and the
+  listing's cursor moved back to it. Detected: a file replaced, cut shorter
+  than a boundary, or rewritten in the 4 KiB before one. Not detected: a
+  rewrite in place elsewhere in the file by anything but the bridge or
+  Olympus; finding it would mean reading the whole prefix on every pass,
+  which the read bounds forbid, so the contract is held by who can write:
+  the spool folder is the owner's alone (0700, files 0600, the bridge
+  making it so at start), written only by the bridge and by Olympus.
+  Index rows, the files' records and the high-water mark commit in one
+  transaction.
 - **One builder, the intake rule.** The spool is the WhatsApp connector's
   live input: its records become items through the connector's one record
   builder under the shared intake rule (`core/source-inputs.ts`), versions

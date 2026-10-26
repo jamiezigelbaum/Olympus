@@ -48,7 +48,7 @@ import {
   whatsAppSpoolLineCursor,
   type WhatsAppSpoolPassFindings,
 } from './live-connector.ts';
-import { offsetAfterLines } from './spool-reader.ts';
+import { offsetAfterLines, terminatedLinesEnd } from './spool-reader.ts';
 import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import { WhatsAppSpoolIndex } from './spool-index.ts';
 
@@ -458,19 +458,18 @@ export function clearWhatsAppSpoolSecrets(options: {
     const path = join(options.spoolDir, file);
     const before = spoolFileIdentity(path);
     if (!before) continue;
-    // A file before the cursor's is read whole; the cursor's own, up to the cursor.
-    const end = file === throughFile ? throughLine : ALL_LINES;
     const known = recorded[file];
     // The same file holding the same bytes up to where clearing reached: anything after it was appended.
     const same = known !== undefined && known.identity === before.identity && before.size >= known.offset
       && spoolBoundaryHolds(path, known.offset, known.boundary);
-    if (same && (end === ALL_LINES
-      ? known.lines === ALL_LINES && before.size === known.offset
-      : known.lines !== ALL_LINES && known.lines >= end)) {
+    // A file before the cursor's is cleared whole; the cursor's own, up to the cursor. A file that broke the
+    // spool contract (or was never cleared) keeps none of its old boundaries: it is cleared whole, from its start.
+    const end = same && file === throughFile ? throughLine : ALL_LINES;
+    if (same && (end === ALL_LINES ? before.size === known.size : known.lines >= end)) {
       next[file] = known;
       continue;
     }
-    const start = same && known.lines !== ALL_LINES ? known.lines : 0;
+    const start = same ? known.lines : 0;
     try {
       const cleared = redact({
         from: `${file}:${start}`,
@@ -486,6 +485,7 @@ export function clearWhatsAppSpoolSecrets(options: {
     // digest of the bytes that end where clearing reached.
     const entry = clearedFileNow(path, end, end === ALL_LINES ? undefined : options.throughOffset);
     if (entry) next[file] = entry;
+    else delete next[file];
   }
   // Files not reached keep what was recorded of them (a failure stops the pass); files that are gone are forgotten.
   const present = new Set(files);
@@ -503,7 +503,8 @@ export function clearWhatsAppSpoolSecrets(options: {
   if (sweep && sweep.recordsRedacted + sweep.recordsBlanked > 0) {
     // A whole-spool pass may have rewritten any file: every record of a file is taken again, at the boundary it had.
     for (const [file, known] of Object.entries(next)) {
-      const entry = clearedFileNow(join(options.spoolDir, file), known.lines, known.offset);
+      // Taken again at the boundary it had, never past it: the sweep cleared only what the window had.
+      const entry = clearedFileNow(join(options.spoolDir, file), known.lines, known.offset, known.size);
       if (entry) next[file] = entry;
       else delete next[file];
     }
@@ -514,29 +515,35 @@ export function clearWhatsAppSpoolSecrets(options: {
 }
 
 /**
- * What was cleared of one spool file: its identity then, how many lines
- * (`ALL_LINES`: all of it), the byte offset clearing reached, and the digest
- * of the 4 KiB that end there (connector-store/spool-file-identity.ts).
+ * What was cleared of one spool file: its identity then, how many of its
+ * lines, the byte offset just past them and the digest of the 4 KiB that end
+ * there (connector-store/spool-file-identity.ts), and the file's size then
+ * (a fragment being written past the last line included).
  */
 interface ClearedFile {
   identity: string;
   lines: number;
   offset: number;
   boundary: string;
+  size: number;
 }
 
 const ALL_LINES = -1;
 const CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 
-/** A file's cleared record as the file is now: through `lines`, at `offset` (else the end, or where the lines end). */
-function clearedFileNow(path: string, lines: number, offset: number | undefined): ClearedFile | undefined {
+/**
+ * A file's cleared record as the file is now: through `lines` lines at
+ * `offset` (`ALL_LINES`: every terminated line, counted now), never past what
+ * was cleared.
+ */
+function clearedFileNow(path: string, lines: number, offset: number | undefined, size?: number): ClearedFile | undefined {
   const identity = spoolFileIdentity(path);
   if (!identity) return undefined;
-  const at = lines === ALL_LINES ? identity.size : offset ?? offsetAfterLines(path, lines);
-  if (at === undefined) return undefined;
-  const boundary = spoolBoundaryDigest(path, at);
+  const reached = lines === ALL_LINES ? terminatedLinesEnd(path) : { lines, offset: offset ?? offsetAfterLines(path, lines) };
+  if (reached === undefined || reached.offset === undefined) return undefined;
+  const boundary = spoolBoundaryDigest(path, reached.offset);
   if (boundary === undefined) return undefined;
-  return { identity: identity.identity, lines, offset: at, boundary };
+  return { identity: identity.identity, lines: reached.lines, offset: reached.offset, boundary, size: size ?? identity.size };
 }
 
 function refreshIndex(spoolDir: string, files: ReadonlySet<string>): void {
@@ -558,7 +565,8 @@ function readClearedFiles(ledger: TierLedger): Record<string, ClearedFile> {
     const valid: Record<string, ClearedFile> = {};
     for (const [file, entry] of Object.entries(parsed)) {
       if (entry && typeof entry.identity === 'string' && typeof entry.boundary === 'string'
-        && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines)) valid[file] = entry;
+        && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines) && entry.lines >= 0
+        && Number.isSafeInteger(entry.size)) valid[file] = entry;
     }
     return valid;
   } catch {

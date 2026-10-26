@@ -9,11 +9,14 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnectorListPage } from '../src/core/contracts.ts';
+import { Database } from 'bun:sqlite';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { WHATSAPP_SPOOL_INDEX_FILE, WhatsAppSpoolIndex } from '../src/workers/whatsapp/spool-index.ts';
 import { createWhatsAppLiveSourceConnector, emptyWhatsAppSpoolPassFindings } from '../src/workers/whatsapp/live-connector.ts';
 import {
   WHATSAPP_LIVE_CORPUS_ID,
   WHATSAPP_SPOOL_REDACTION_FAILED_WARNING,
+  clearWhatsAppSpoolSecrets,
   createWhatsAppConnectorStoreSyncHandler,
   createWhatsAppTierLane,
 } from '../src/workers/whatsapp/store-sync.ts';
@@ -75,7 +78,7 @@ function lane() {
     store.close();
   });
   const sync = createWhatsAppConnectorStoreSyncHandler({ store, spoolDir, tierSet: tier.set, now: () => new Date('2026-10-25T12:00:00Z') });
-  return { root, spoolDir, sync };
+  return { root, spoolDir, sync, ledger: tier.set.ledger };
 }
 
 /** Puts new bytes in a file's place as a new file (the inode differs). */
@@ -158,6 +161,73 @@ describe('the append-only contract, checked at every boundary', () => {
     const idle = await target.sync.pull();
     expect(idle.warnings ?? []).not.toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
     expect(idle.counts.spool_records_redacted).toBe(0);
+  });
+});
+
+describe('review round 5', () => {
+  test('a three-line file written again in place as four lines of the same size is cleared through all four', async () => {
+    const target = lane();
+    const file = join(target.spoolDir, '2026-10-25.jsonl');
+    const original = line('a') + line('b') + line('c', { text: 'w'.repeat(600) });
+    writeFileSync(file, original);
+    await target.sync.pull();
+    // Four lines, the last holding a Secret, padded to the three lines' size exactly.
+    const secret = line('s4', { text: `prod key ${keyFor(44)}` });
+    const head = line('a') + line('b');
+    const pad = Buffer.byteLength(original) - Buffer.byteLength(head) - Buffer.byteLength(secret) - Buffer.byteLength(line('p', { text: '' }));
+    expect(pad).toBeGreaterThan(0);
+    const rewritten = head + line('p', { text: 'q'.repeat(pad) }) + secret;
+    expect(Buffer.byteLength(rewritten)).toBe(Buffer.byteLength(original));
+    writeFileSync(file, rewritten);
+    const receipt = await target.sync.pull();
+    expect(receipt.warnings ?? []).not.toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
+    expect(readFileSync(file, 'utf8')).not.toContain(keyFor(44));
+  });
+
+  test('cleanup alone, at a cursor that still says three lines, clears a same-size four-line rewrite whole', async () => {
+    const target = lane();
+    const file = join(target.spoolDir, '2026-10-25.jsonl');
+    const original = line('a') + line('b') + line('c', { text: 'w'.repeat(600) });
+    writeFileSync(file, original);
+    await target.sync.pull();
+    const secret = line('s5', { text: `prod key ${keyFor(55)}` });
+    const head = line('a') + line('b');
+    const pad = Buffer.byteLength(original) - Buffer.byteLength(head) - Buffer.byteLength(secret) - Buffer.byteLength(line('p', { text: '' }));
+    writeFileSync(file, head + line('p', { text: 'q'.repeat(pad) }) + secret);
+    // The cursor has not moved (nothing told the listing): the cleanup's own boundary check must not trust its line count.
+    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:3' });
+    expect(readFileSync(file, 'utf8')).not.toContain(keyFor(55));
+  });
+
+  test('an index page commits whole: a failure before its files are recorded leaves no rows behind', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-atomic-'));
+    roots.push(dir);
+    writeFileSync(join(dir, '2026-10-24.jsonl'), line('m1') + reaction('r1', 'm1', '👍', 'actor-1@s.whatsapp.net'));
+    const original = WhatsAppSpoolIndex.prototype.noteFile;
+    WhatsAppSpoolIndex.prototype.noteFile = function failing() { throw new Error('crash before the file is recorded'); };
+    try {
+      await expect(drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems())).rejects.toThrow('crash before');
+    } finally {
+      WhatsAppSpoolIndex.prototype.noteFile = original;
+    }
+    const db = new Database(join(dir, WHATSAPP_SPOOL_INDEX_FILE), { readonly: true });
+    try {
+      const count = (table: string) => (db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+      expect([count('messages'), count('reactions'), count('files')]).toEqual([0, 0, 0]);
+      expect(db.query("SELECT value FROM meta WHERE key = 'high_water'").get()).toBeNull();
+    } finally {
+      db.close();
+    }
+    // The next listing reads it all again, and every row has its file recorded.
+    await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems());
+    const after = new Database(join(dir, WHATSAPP_SPOOL_INDEX_FILE), { readonly: true });
+    try {
+      const orphans = after.query('SELECT COUNT(*) AS n FROM reactions r WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.name = r.file)').get() as { n: number };
+      expect(orphans.n).toBe(0);
+      expect((after.query('SELECT COUNT(*) AS n FROM reactions').get() as { n: number }).n).toBe(1);
+    } finally {
+      after.close();
+    }
   });
 });
 
