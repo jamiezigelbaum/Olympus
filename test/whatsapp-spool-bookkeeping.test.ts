@@ -346,7 +346,8 @@ describe('one reset counter (review round 8)', () => {
     writeFileSync(join(dir, '2026-10-24.jsonl'), line('a'));
     writeFileSync(join(dir, '2026-10-25.jsonl'), line('b'));
     const cursor = (await list(dir)).at(-1)!.nextCursor!;
-    expect(cursor).toMatch(/~r0$/u);
+    // The first index build the counter sees counts one.
+    expect(cursor).toMatch(/~r1$/u);
     // The same place without a count (an older cursor): it cannot say no reset happened since, so a is read again.
     const findings = emptyWhatsAppSpoolPassFindings();
     const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, findings }).listItems({ cursor: cursor.replace(/~r\d+$/u, '') }));
@@ -418,8 +419,9 @@ describe('one reset counter (review round 8)', () => {
     for (const suffix of ['', '-wal', '-shm']) rmSync(join(dir, `${WHATSAPP_SPOOL_RESET_FILE}${suffix}`), { force: true });
     mkdirSync(join(dir, WHATSAPP_SPOOL_RESET_FILE));
     await expect(list(dir, cursor)).rejects.toThrow('reset counter');
-    // The index still holds the file as it was: with the counter back (empty, so the old cursor's count matches),
-    // the rewrite is still found, counted and read. Had the failed pass forgotten the file, c would be missed.
+    // The index still holds the file as it was: with the counter back (empty; it counts the build it first sees, so
+    // the old cursor's count matches), the rewrite is still found, counted and read. Had the failed pass forgotten
+    // the file, c would be missed.
     rmSync(join(dir, WHATSAPP_SPOOL_RESET_FILE), { recursive: true, force: true });
     const replay = await settle(dir, cursor);
     expect(replay.ids).toContain('c');
@@ -440,6 +442,74 @@ describe('one reset counter (review round 8)', () => {
       if (read.length >= ids.length) break;
     }
     expect(read).toEqual(ids);
+  });
+});
+
+describe('review round 9', () => {
+  /** What the content judge records for a message found to be Secrets. */
+  const judgeSecret = (ledger: ReturnType<typeof lane>['ledger'], id: string) => {
+    ledger.recordContentDecision({ provider: 'whatsapp', accountScope: 'personal', providerItemId: id, providerConversationId: 'chat-1@s.whatsapp.net' }, {
+      contentTier: 'secrets',
+      decidedBy: 'secret_detector',
+      reasons: ['content:secret_fixture'],
+      contentPending: false,
+      engineVersion: 'fixture',
+      mapRevision: 'fixture',
+      snifferId: 'fixture',
+    });
+  };
+  const idsOf = (pages: readonly SourceConnectorListPage[]) => pages.flatMap((page) => page.items.map((item: RawItem) => item.identity.providerItemId));
+
+  test('a reset never delays clearing a known Secret: the first pull after the rewrite clears it, at one item a pull', async () => {
+    const target = lane();
+    const day1 = join(target.spoolDir, '2026-10-24.jsonl');
+    const day2 = join(target.spoolDir, '2026-10-25.jsonl');
+    writeFileSync(day1, line('a') + line('b') + line('c') + line('d'));
+    const secret = line('s9', { text: `prod key ${keyFor(9)}` });
+    writeFileSync(day2, secret);
+    await target.sync.pull();
+    expect(readFileSync(day2, 'utf8')).not.toContain(keyFor(9));
+    // Day 2 is put back as it was captured, Secret included: the listing restarts at day 1, one item a pull.
+    replaceByRename(day2, secret);
+    for (let pull = 0; pull < 3; pull += 1) {
+      const receipt = await target.sync.pull({ max_items: 1 });
+      expect(receipt.warnings ?? []).not.toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
+      expect(readFileSync(day2, 'utf8')).not.toContain(keyFor(9));
+    }
+  });
+
+  test('clearing ahead of the cursor is bounded by bytes, one whole file a pull at least, and reaches every file', () => {
+    const target = lane();
+    // Three files ahead of a cursor in the first, each holding a Secret the ledger already knows.
+    writeFileSync(join(target.spoolDir, '2026-10-20.jsonl'), line('a'));
+    const ahead = ['2026-10-21.jsonl', '2026-10-22.jsonl', '2026-10-23.jsonl'];
+    ahead.forEach((name, n) => writeFileSync(join(target.spoolDir, name), line(`k${n}`, { text: `prod key ${keyFor(20 + n)}` })));
+    for (const [n] of ahead.entries()) judgeSecret(target.ledger, `k${n}`);
+    const left = () => ahead.filter((name) => readFileSync(join(target.spoolDir, name), 'utf8').includes('prod key'));
+    // A budget of one byte: one file a pull, in order.
+    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
+    expect(left()).toEqual(ahead.slice(1));
+    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
+    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
+    expect(left()).toEqual([]);
+  });
+
+  test('an index that cannot be opened hands out no cursor', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-noindex-'));
+    roots.push(dir);
+    writeFileSync(join(dir, '2026-10-24.jsonl'), line('a'));
+    mkdirSync(join(dir, WHATSAPP_SPOOL_INDEX_FILE));
+    await expect(drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems())).rejects.toThrow('index cannot be opened');
+  });
+
+  test('a cursor handed out before the counter saw any build reads the spool again once an index is made', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-firstbuild-'));
+    roots.push(dir);
+    const day = join(dir, '2026-10-24.jsonl');
+    // A cursor of count 0 past [a, b], from before any index was made; b was rewritten as e since.
+    writeFileSync(day, line('a') + line('e'));
+    const cursor = `2026-10-24.jsonl:2@${Buffer.byteLength(line('a') + line('e'))}~r0`;
+    expect(idsOf(await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor })))).toContain('e');
   });
 });
 

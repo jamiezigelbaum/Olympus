@@ -150,7 +150,7 @@ describe('the byte budget bounds every read', () => {
     const first = line('a');
     writeFileSync(join(dir, '2026-10-25.jsonl'), first + line('b'));
     // A cursor whose line count disagrees with its offset: the offset is where reading goes on.
-    const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor: `2026-10-25.jsonl:7@${Buffer.byteLength(first)}~r0` }));
+    const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor: `2026-10-25.jsonl:7@${Buffer.byteLength(first)}~r1` }));
     expect(pages.flatMap((page) => page.items.map((item: RawItem) => item.identity.providerItemId))).toEqual(['b']);
     expect(pages.at(-1)?.nextCursor).toStartWith(`2026-10-25.jsonl:8@${Buffer.byteLength(first + line('b'))}`);
   });
