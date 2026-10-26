@@ -97,6 +97,15 @@ export interface TierSnifferServiceOptions {
    * the download finishes instead of waiting for an answer to start it.
    */
   startModel?: () => void;
+  /**
+   * Where extraction stands for an item's text (job-store.ts
+   * itemExtractionState). Its content question can only exist once that
+   * text lands, so an unread file with an active job is waiting for
+   * extraction, not missing a question, and recovery leaves it pending; so
+   * is one with no job yet, for a short grace after it was listed. Absent:
+   * nothing is owed.
+   */
+  extractionState?: (identity: TierLedgerIdentity) => 'active' | 'none' | 'settled';
   /** The owner's own words about privacy (privacy-profile.ts), quoted into the prompt. */
   ownerContext?: () => string | undefined;
   /** Where the day's call count is kept across restarts (owner-only JSON). */
@@ -173,6 +182,8 @@ export interface TierSnifferServiceOptions {
 export const DEFAULT_AUTO_MOVES_PER_PASS = 25;
 /** A pass running longer than this is aborted at the next tick. */
 export const DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60_000;
+/** How long a listed file with no extraction job yet waits to be queued before recovery settles it. */
+const EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60_000;
 /** An overrun pass still unsettled this long after its abort is abandoned. */
 export const DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60_000;
 export const DEFAULT_STALE_MOVE_MS = 60 * 60_000;
@@ -845,6 +856,12 @@ export class TierSnifferService {
               }
               continue;
             }
+            // Unread content whose text extraction still owes has no content
+            // question yet, by design: it is waiting to be read, not lost.
+            // Names recovery proceeds; the content half stays pending.
+            const waitingForText = missingContent && !row.contentRead && row.contentPending
+              && this.waitingForExtraction(ledger, row, identity);
+            if (waitingForText && !missingMetadata) continue;
             if (!missingMetadata && !missingContent) continue;
             // Preserve the existing content-question repair where the stored
             // body and configured classifier can reconstruct the question.
@@ -863,7 +880,7 @@ export class TierSnifferService {
             }
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
-              missingMetadata, missingContent,
+              missingMetadata, missingContent: missingContent && !waitingForText,
               snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, 'metadata'))
                 && (!missingContent || !queue.questionFor(identity, 'content')),
@@ -879,6 +896,29 @@ export class TierSnifferService {
       } catch {
         // A queue/ledger that cannot be read remains held, retried next tick.
       }
+    }
+  }
+
+  /**
+   * An unread file that no store holds text for yet, and extraction still
+   * owes it. Only a routed file has an extraction lane at all: a message,
+   * a note or a legacy unrouted row with no job is genuinely unread, and
+   * keeps the fail-safe settlement rather than waiting for a job that will
+   * never come. A file with no job waits only for EXTRACTION_ENQUEUE_GRACE_MS
+   * after it was listed: past that, nothing will queue it (a names-only
+   * folder, a job deleted when its scope changed) and it settles as before.
+   */
+  private waitingForExtraction(ledger: TierLedger, row: TierLedgerRecord, identity: TierLedgerIdentity): boolean {
+    try {
+      if (!this.options.extractionState || row.family !== 'file' || !row.routed) return false;
+      const copies = ledger.copies(identity);
+      if (copies.length === 0) return false;
+      if (copies.some(copy => copy.state === 'current' && copy.layers !== 'metadata')) return false;
+      const state = this.options.extractionState(identity);
+      if (state === 'active') return true;
+      return state === 'none' && this.clockMs() - Date.parse(row.decidedAt) < EXTRACTION_ENQUEUE_GRACE_MS;
+    } catch {
+      return false;
     }
   }
 
