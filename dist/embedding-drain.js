@@ -12409,6 +12409,22 @@ import { dirname as dirname13 } from "node:path";
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
 }
+function writeIntentFromRow(row) {
+  return {
+    identity: {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.conversation_key !== "" ? { providerConversationId: row.conversation_key } : {},
+      ...row.local_item_id !== "" ? { localItemId: row.local_item_id } : {}
+    },
+    ...row.source_version !== null ? { version: row.source_version } : {},
+    kind: row.kind,
+    ...row.location === 1 ? { location: true } : {},
+    ...row.body_version !== null ? { bodyVersion: row.body_version } : {},
+    connectorId: row.connector_id
+  };
+}
 function idParams(identity) {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
 }
@@ -13424,6 +13440,19 @@ class TierLedger {
           else
             result.set(key, [copyFromRow(row)]);
         }
+        const pending = this.db.query(`
+          SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
+          WHERE kind IN ('deletion', 'secret')
+            AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
+        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
+        for (const row of pending) {
+          const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+          if (hidden) {
+            for (const copy of hidden)
+              if (copy.state !== "superseded")
+                copy.state = "superseded";
+          }
+        }
       }
     })();
     return result;
@@ -14154,6 +14183,40 @@ class TierLedger {
         return override.kind === "tier" && override.tier === "secrets";
       });
     })();
+  }
+  withWriteIntent(intent, run, settle) {
+    return this.db.transaction(() => {
+      this.putWriteIntent(intent);
+      const result = run();
+      const final = settle?.(result);
+      if (final)
+        this.putWriteIntent({ ...intent, ...final });
+      return result;
+    })();
+  }
+  putWriteIntent(intent) {
+    this.db.query(`
+      INSERT OR REPLACE INTO tier_write_intents (
+        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null);
+  }
+  writeIntent(identity) {
+    const row = this.db.query(`
+      SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
+    return row ? writeIntentFromRow(row) : undefined;
+  }
+  writeIntents() {
+    return this.db.query("SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id").all().map(writeIntentFromRow);
+  }
+  clearWriteIntent(identity, written) {
+    this.db.query(`
+      DELETE FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        ${written ? "AND kind = ? AND COALESCE(source_version, '') = ?" : ""}
+    `).run(...idParams(identity), ...written ? [written.kind, written.version ?? ""] : []);
   }
   removeCopies(identity) {
     let removed = [];
@@ -14952,7 +15015,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 9,
       name: "secret_redaction_retirement",
       up(db) {
         const item = `provider = NEW.provider AND account_scope = NEW.account_scope
@@ -14997,10 +15060,32 @@ function tierLedgerMigrations() {
           END;
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "tier_write_intents",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_write_intents (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            local_item_id TEXT NOT NULL DEFAULT '',
+            source_version TEXT,
+            kind TEXT NOT NULL CHECK (kind IN ('content', 'names', 'advance', 'deletion', 'secret')),
+            location INTEGER NOT NULL DEFAULT 0,
+            connector_id TEXT NOT NULL DEFAULT '',
+            written_at TEXT NOT NULL,
+            body_version TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 10, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -19976,6 +20061,9 @@ function namesOnlyKept(db, itemPks) {
 }
 function migrationFingerprint(contentHash, chunkHashes) {
   return createHash11("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+}
+function carryHold(listed, fetched) {
+  return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
 }
 function textFromRawItem(item) {
   if (item.content.kind === "text")
@@ -25023,7 +25111,7 @@ var init_local_index = __esm(() => {
             let contentFetchFailed = false;
             if (!metadataOnly && !deferMetadataOnlyContent && classification && fetchContent && item.content.kind === "metadata_only") {
               try {
-                itemForStorage = await connector.fetchItem(item.identity.localItemId);
+                itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
                 consecutiveContentFetchFailures = 0;
               } catch {
                 contentFetchFailed = true;
@@ -25591,7 +25679,7 @@ var init_local_index = __esm(() => {
       if (text2 === undefined && item.content.kind === "metadata_only") {
         let fetched;
         try {
-          fetched = await connector.fetchItem(item.identity.localItemId);
+          fetched = carryHold(item, await connector.fetchItem(item.identity.localItemId));
           onContentFetchSuccess?.();
         } catch {
           gaps.push(contentFetchFailedGap(item));
