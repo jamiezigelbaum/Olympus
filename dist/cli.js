@@ -72885,8 +72885,74 @@ var init_capture_spool_secrets = __esm(() => {
   SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
 
+// src/workers/connector-store/spool-file-identity.ts
+import { createHash as createHash47 } from "node:crypto";
+import { closeSync as closeSync16, openSync as openSync16, readSync as readSync4, statSync as statSync22 } from "node:fs";
+function spoolFileIdentity(path) {
+  try {
+    const stats = statSync22(path);
+    const birth = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? Math.floor(stats.birthtimeMs) : 0;
+    return {
+      size: stats.size,
+      ...stats.ino > 0 ? { ino: stats.ino } : {},
+      identity: `${stats.dev}:${stats.ino}:${birth}:${firstLineDigest(path)}`
+    };
+  } catch {
+    return;
+  }
+}
+function sameSpoolFile(recorded, path) {
+  return spoolFileIdentity(path)?.identity === recorded;
+}
+function firstLineDigest(path) {
+  let fd2;
+  try {
+    fd2 = openSync16(path, "r");
+  } catch {
+    return "-";
+  }
+  try {
+    const head = Buffer.alloc(SPOOL_IDENTITY_HEAD_BYTES);
+    const read = readSync4(fd2, head, 0, SPOOL_IDENTITY_HEAD_BYTES, 0);
+    const newline = head.subarray(0, read).indexOf(NEWLINE);
+    if (newline < 0 && read < SPOOL_IDENTITY_HEAD_BYTES)
+      return "none";
+    return createHash47("sha256").update(head.subarray(0, newline < 0 ? read : newline + 1)).digest("hex").slice(0, 16);
+  } finally {
+    closeSync16(fd2);
+  }
+}
+function spoolBoundaryDigest(path, offset) {
+  if (!Number.isSafeInteger(offset) || offset < 0)
+    return;
+  let fd2;
+  try {
+    fd2 = openSync16(path, "r");
+  } catch {
+    return;
+  }
+  try {
+    const start = Math.max(0, offset - SPOOL_BOUNDARY_WINDOW_BYTES);
+    const window2 = Buffer.alloc(offset - start);
+    const read = window2.length === 0 ? 0 : readSync4(fd2, window2, 0, window2.length, start);
+    if (read < window2.length)
+      return;
+    return createHash47("sha256").update(`${offset}\x00`).update(window2).digest("hex").slice(0, 24);
+  } finally {
+    closeSync16(fd2);
+  }
+}
+function spoolBoundaryHolds(path, offset, recorded) {
+  return spoolBoundaryDigest(path, offset) === recorded;
+}
+var SPOOL_IDENTITY_HEAD_BYTES, NEWLINE = 10, SPOOL_BOUNDARY_WINDOW_BYTES;
+var init_spool_file_identity = __esm(() => {
+  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
+});
+
 // src/workers/telegram-messages/spool-lines.ts
-import { readSync as readSync4 } from "node:fs";
+import { readSync as readSync5 } from "node:fs";
 function* spoolFileLines(fd2, start, size, maxLineBytes) {
   const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
   let position = start;
@@ -72894,7 +72960,7 @@ function* spoolFileLines(fd2, start, size, maxLineBytes) {
   let held = 0;
   let oversize = false;
   while (position < size) {
-    const read = readSync4(fd2, buffer, 0, Math.min(CHUNK_BYTES, size - position), position);
+    const read = readSync5(fd2, buffer, 0, Math.min(CHUNK_BYTES, size - position), position);
     if (read <= 0)
       break;
     let from = 0;
@@ -72926,8 +72992,11 @@ function* spoolFileLines(fd2, start, size, maxLineBytes) {
 function rememberSpoolOffset(path, stat2, line, offset) {
   if (line <= 0)
     return;
+  const digest3 = spoolBoundaryDigest(path, offset);
+  if (!digest3)
+    return;
   const list = (hints.get(path) ?? []).filter((hint) => hint.line !== line && hint.dev === stat2.dev && hint.ino === stat2.ino);
-  list.push({ dev: stat2.dev, ino: stat2.ino, line, offset });
+  list.push({ dev: stat2.dev, ino: stat2.ino, line, offset, digest: digest3 });
   list.sort((a, b) => a.line - b.line);
   while (list.length > MAX_HINTS_PER_FILE)
     list.shift();
@@ -72945,7 +73014,9 @@ function spoolLineOffset(fd2, path, stat2, line) {
   for (const hint of hints.get(path) ?? []) {
     if (hint.line > line || hint.dev !== stat2.dev || hint.ino !== stat2.ino || hint.offset > stat2.size)
       continue;
-    if (hint.offset > 0 && (readSync4(fd2, byte, 0, 1, hint.offset - 1) !== 1 || byte[0] !== 10))
+    if (hint.offset > 0 && (readSync5(fd2, byte, 0, 1, hint.offset - 1) !== 1 || byte[0] !== 10))
+      continue;
+    if (!spoolBoundaryHolds(path, hint.offset, hint.digest))
       continue;
     if (hint.line >= fromLine) {
       fromLine = hint.line;
@@ -72958,7 +73029,7 @@ function spoolLineOffset(fd2, path, stat2, line) {
   let position = fromOffset;
   let counted = fromLine;
   while (position < stat2.size) {
-    const read = readSync4(fd2, buffer, 0, Math.min(CHUNK_BYTES, stat2.size - position), position);
+    const read = readSync5(fd2, buffer, 0, Math.min(CHUNK_BYTES, stat2.size - position), position);
     if (read <= 0)
       break;
     let from = 0;
@@ -72980,6 +73051,7 @@ function spoolLineOffset(fd2, path, stat2, line) {
 }
 var CHUNK_BYTES, MAX_HINT_FILES = 64, MAX_HINTS_PER_FILE = 16, hints;
 var init_spool_lines = __esm(() => {
+  init_spool_file_identity();
   CHUNK_BYTES = 1 << 20;
   hints = new Map;
 });
@@ -73420,13 +73492,16 @@ function compareTelegramVersions(a, b) {
   const [rightVersion = "", rightMark] = b.split(CAPTURE_MARK);
   const left = VERSION_TIME.exec(leftVersion);
   const right = VERSION_TIME.exec(rightVersion);
-  if (!left || !right)
-    return 0;
-  const difference = Date.parse(left[1]) - Date.parse(right[1]);
-  if (!Number.isFinite(difference))
-    return 0;
-  if (difference !== 0)
-    return Math.sign(difference);
+  if (!left || !right) {
+    if (left || right || leftVersion !== rightVersion)
+      return !left && right ? -1 : left && !right ? 1 : -1;
+  } else {
+    const difference = Date.parse(left[1]) - Date.parse(right[1]);
+    if (!Number.isFinite(difference))
+      return 0;
+    if (difference !== 0)
+      return Math.sign(difference);
+  }
   if (leftMark === rightMark)
     return 0;
   if (leftMark === undefined)
@@ -73489,8 +73564,8 @@ var init_record_builder = __esm(() => {
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts
-import { createHash as createHash47 } from "node:crypto";
-import { closeSync as closeSync16, existsSync as existsSync49, lstatSync as lstatSync26, openSync as openSync16, readSync as readSync5, readdirSync as readdirSync6 } from "node:fs";
+import { createHash as createHash48 } from "node:crypto";
+import { closeSync as closeSync17, existsSync as existsSync49, lstatSync as lstatSync26, openSync as openSync17, readSync as readSync6, readdirSync as readdirSync6 } from "node:fs";
 import { join as join59 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
   return resolvedRawPath(TELEGRAM_SOURCE_ID, "telegram-spool", env);
@@ -73542,6 +73617,11 @@ function createTelegramCaptureSpoolConnector(options) {
         let remaining = budget;
         if (carried.length > 0) {
           yield { records: carried.map((record) => ({ record })), ...cursor ? { nextCursor: cursor } : {}, done: false };
+          if (remaining !== undefined) {
+            remaining -= carried.length;
+            if (remaining <= 0)
+              return;
+          }
         }
         for (;; ) {
           const result = readTelegramCaptureSpool({
@@ -73608,7 +73688,9 @@ function readTelegramCaptureSpool(options) {
       if (!stat2.isFile() || stat2.isSymbolicLink()) {
         throw new Error("Telegram capture spool refuses non-regular JSONL files.");
       }
-      const fd2 = openSync16(path, "r");
+      const fd2 = openSync17(path, "r");
+      let lastLine = 0;
+      let lastEnd = 0;
       try {
         const startLine = cursor?.file === name ? cursor.line : 0;
         const startOffset = spoolLineOffset(fd2, path, stat2, startLine);
@@ -73625,7 +73707,8 @@ function readTelegramCaptureSpool(options) {
           linesRead += 1;
           bytesRead = bytesBefore + (line.end - startOffset);
           resumeCursor = `${name}:${lineIndex}`;
-          rememberSpoolOffset(path, stat2, lineIndex, line.end);
+          lastLine = lineIndex;
+          lastEnd = line.end;
           const atEnd = isLastFile && line.end >= stat2.size;
           const spent = bytesRead >= maxReadBytes || linesRead >= MAX_LINES_PER_READ;
           const stop = () => {
@@ -73682,7 +73765,9 @@ function readTelegramCaptureSpool(options) {
             break outer;
         }
       } finally {
-        closeSync16(fd2);
+        if (lastLine > 0)
+          rememberSpoolOffset(path, stat2, lastLine, lastEnd);
+        closeSync17(fd2);
       }
     }
   return {
@@ -73701,11 +73786,11 @@ function telegramCaptureCursorOffset(spoolDir, cursorText) {
     const stat2 = lstatSync26(path);
     if (!stat2.isFile() || stat2.isSymbolicLink())
       return;
-    const fd2 = openSync16(path, "r");
+    const fd2 = openSync17(path, "r");
     try {
       return spoolLineOffset(fd2, path, stat2, cursor.line);
     } finally {
-      closeSync16(fd2);
+      closeSync17(fd2);
     }
   } catch {
     return;
@@ -73722,11 +73807,11 @@ function telegramCaptureSpoolCursorState(spoolDir, cursorText, names = telegramC
   const stat2 = lstatSync26(path);
   if (!stat2.isFile() || stat2.isSymbolicLink())
     return "ok";
-  const fd2 = openSync16(path, "r");
+  const fd2 = openSync17(path, "r");
   try {
     return spoolLineOffset(fd2, path, stat2, cursor.line) === undefined ? "reset" : "ok";
   } finally {
-    closeSync16(fd2);
+    closeSync17(fd2);
   }
 }
 function readTelegramCaptureSpoolNewestCapturedAt(spoolDir) {
@@ -73762,11 +73847,11 @@ function readTelegramCaptureHeartbeat(spoolDir) {
     if (!stat2.isFile() || stat2.isSymbolicLink() || stat2.size > MAX_HEARTBEAT_BYTES)
       return;
     const buffer = Buffer.alloc(stat2.size);
-    const fd2 = openSync16(path, "r");
+    const fd2 = openSync17(path, "r");
     try {
-      readSync5(fd2, buffer, 0, buffer.length, 0);
+      readSync6(fd2, buffer, 0, buffer.length, 0);
     } finally {
-      closeSync16(fd2);
+      closeSync17(fd2);
     }
     const value = JSON.parse(buffer.toString("utf8"));
     if (!isRecordValue(value) || value.kind !== "telegram_capture_heartbeat" || value.schema_version !== 1)
@@ -73783,11 +73868,11 @@ function spoolTailLines(path) {
     return [];
   const start = Math.max(0, stat2.size - MAX_TAIL_SCAN_BYTES);
   const buffer = Buffer.alloc(stat2.size - start);
-  const fd2 = openSync16(path, "r");
+  const fd2 = openSync17(path, "r");
   try {
     let read = 0;
     while (read < buffer.length) {
-      const got = readSync5(fd2, buffer, read, buffer.length - read, start + read);
+      const got = readSync6(fd2, buffer, read, buffer.length - read, start + read);
       if (got <= 0)
         break;
       read += got;
@@ -73801,7 +73886,7 @@ function spoolTailLines(path) {
       lines.shift();
     return lines;
   } finally {
-    closeSync16(fd2);
+    closeSync17(fd2);
   }
 }
 function redactTelegramCaptureSpoolSecrets(options) {
@@ -73966,7 +74051,7 @@ function readTelegramCaptureSpoolNewest(options) {
     const stat2 = lstatSync26(path);
     if (!stat2.isFile() || stat2.isSymbolicLink())
       continue;
-    const fd2 = openSync16(path, "r");
+    const fd2 = openSync17(path, "r");
     try {
       let lineNumber = 0;
       for (const line of spoolFileLines(fd2, 0, stat2.size, MAX_RECORD_BYTES)) {
@@ -73988,7 +74073,7 @@ function readTelegramCaptureSpoolNewest(options) {
         }
       }
     } finally {
-      closeSync16(fd2);
+      closeSync17(fd2);
     }
   }
   return newest;
@@ -74188,7 +74273,7 @@ function normalizeBudget(value) {
   return value;
 }
 function sha2563(value) {
-  return createHash47("sha256").update(value).digest("hex");
+  return createHash48("sha256").update(value).digest("hex");
 }
 function telegramConversationKind(chatType) {
   switch (chatType?.toLowerCase()) {
@@ -74240,72 +74325,6 @@ var init_capture_spool_connector = __esm(() => {
     "boosts",
     "inviter"
   ]);
-});
-
-// src/workers/connector-store/spool-file-identity.ts
-import { createHash as createHash48 } from "node:crypto";
-import { closeSync as closeSync17, openSync as openSync17, readSync as readSync6, statSync as statSync22 } from "node:fs";
-function spoolFileIdentity(path) {
-  try {
-    const stats = statSync22(path);
-    const birth = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? Math.floor(stats.birthtimeMs) : 0;
-    return {
-      size: stats.size,
-      ...stats.ino > 0 ? { ino: stats.ino } : {},
-      identity: `${stats.dev}:${stats.ino}:${birth}:${firstLineDigest(path)}`
-    };
-  } catch {
-    return;
-  }
-}
-function sameSpoolFile(recorded, path) {
-  return spoolFileIdentity(path)?.identity === recorded;
-}
-function firstLineDigest(path) {
-  let fd2;
-  try {
-    fd2 = openSync17(path, "r");
-  } catch {
-    return "-";
-  }
-  try {
-    const head = Buffer.alloc(SPOOL_IDENTITY_HEAD_BYTES);
-    const read = readSync6(fd2, head, 0, SPOOL_IDENTITY_HEAD_BYTES, 0);
-    const newline = head.subarray(0, read).indexOf(NEWLINE);
-    if (newline < 0 && read < SPOOL_IDENTITY_HEAD_BYTES)
-      return "none";
-    return createHash48("sha256").update(head.subarray(0, newline < 0 ? read : newline + 1)).digest("hex").slice(0, 16);
-  } finally {
-    closeSync17(fd2);
-  }
-}
-function spoolBoundaryDigest(path, offset) {
-  if (!Number.isSafeInteger(offset) || offset < 0)
-    return;
-  let fd2;
-  try {
-    fd2 = openSync17(path, "r");
-  } catch {
-    return;
-  }
-  try {
-    const start = Math.max(0, offset - SPOOL_BOUNDARY_WINDOW_BYTES);
-    const window2 = Buffer.alloc(offset - start);
-    const read = window2.length === 0 ? 0 : readSync6(fd2, window2, 0, window2.length, start);
-    if (read < window2.length)
-      return;
-    return createHash48("sha256").update(`${offset}\x00`).update(window2).digest("hex").slice(0, 24);
-  } finally {
-    closeSync17(fd2);
-  }
-}
-function spoolBoundaryHolds(path, offset, recorded) {
-  return spoolBoundaryDigest(path, offset) === recorded;
-}
-var SPOOL_IDENTITY_HEAD_BYTES, NEWLINE = 10, SPOOL_BOUNDARY_WINDOW_BYTES;
-var init_spool_file_identity = __esm(() => {
-  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
-  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
 });
 
 // src/workers/telegram-messages/protection-claims.ts
@@ -75226,13 +75245,13 @@ function contactOccurrencesOf(root, file) {
   try {
     const json = new JsonStreamReader(telegramJsonSource(fileByteSource(reader)), {
       itemPaths: [
-        ...CONTACT_SECTIONS.map((section) => [section, "list", "*"]),
-        ["sessions", "about"],
-        ["web_sessions", "about"],
+        ...CONTACT_SECTIONS.map((section) => [section, "list"]),
+        ["sessions"],
+        ["web_sessions"],
         ["other_data"],
-        ["chats", "about"],
-        ["left_chats", "about"],
-        ["messages", "*"]
+        ["chats"],
+        ["left_chats"],
+        ["messages"]
       ],
       maxItemBytes: 1024 * 1024
     });
@@ -75747,7 +75766,15 @@ function createTelegramConnectorStores(env = process.env) {
   };
 }
 function sanitizeTelegramCaptureCursor(cursor) {
-  return cursor && /^\d{4}-\d{2}-\d{2}\.jsonl:[0-9]+$/.test(cursor) ? cursor : undefined;
+  return cursor && (SPOOL_CURSOR.test(cursor) || TRUNCATED_CURSOR.test(cursor)) ? cursor : undefined;
+}
+function telegramSpoolPosition(cursor) {
+  if (!cursor)
+    return;
+  const cut = TRUNCATED_CURSOR.exec(cursor);
+  if (cut)
+    return cut[1] ? cut[1] : undefined;
+  return SPOOL_CURSOR.test(cursor) ? cursor : undefined;
 }
 function reconcileTelegramTrustStores(stores, options = {}) {
   return stores.internal.reconcileAgainstStricterStore({
@@ -75784,14 +75811,20 @@ function createTelegramConnectorStoreSyncHandler(options) {
       let cursorResets = 0;
       const replacedFiles = new Set;
       const boundaryHolds = (name, cursor) => {
+        const position = telegramSpoolPosition(cursor);
+        if (!position)
+          return true;
         const recorded = readBoundary(tierSet, name);
         if (!recorded || recorded.cursor !== cursor)
           return false;
-        const offset = telegramCaptureCursorOffset(spoolDir, cursor);
-        return offset !== undefined && spoolBoundaryHolds(join60(spoolDir, cursorFile(cursor)), offset, recorded.digest);
+        const offset = telegramCaptureCursorOffset(spoolDir, position);
+        return offset !== undefined && spoolBoundaryHolds(join60(spoolDir, cursorFile(position)), offset, recorded.digest);
       };
       const fileHolds = (cursor) => {
-        const file = cursorFile(cursor);
+        const position = telegramSpoolPosition(cursor);
+        if (!position)
+          return true;
+        const file = cursorFile(position);
         const recorded = tierSet.ledger.readMeta(`${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`);
         return recorded === undefined || !existsSync50(join60(spoolDir, file)) || sameSpoolFile(recorded, join60(spoolDir, file));
       };
@@ -75800,8 +75833,9 @@ function createTelegramConnectorStoreSyncHandler(options) {
         secureLocal: sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor)
       };
       for (const [name, cursor] of [["internal", laneCursors.internal], ["secure_local", laneCursors.secureLocal]]) {
-        if (cursor && (!fileHolds(cursor) || !boundaryHolds(name, cursor)))
-          replacedFiles.add(cursorFile(cursor));
+        const position = telegramSpoolPosition(cursor);
+        if (cursor && position && (!fileHolds(cursor) || !boundaryHolds(name, cursor)))
+          replacedFiles.add(cursorFile(position));
       }
       const cleared = tierSet.ledger.readMeta(TELEGRAM_SPOOL_CLEARED_KEY);
       if (cleared && sanitizeTelegramCaptureCursor(cleared) && (!fileHolds(cleared) || !boundaryHolds("cleared", cleared))) {
@@ -75813,7 +75847,10 @@ function createTelegramConnectorStoreSyncHandler(options) {
       const placed = (cursor) => {
         if (!cursor)
           return cursor;
-        if (!replacedFiles.has(cursorFile(cursor)) && telegramCaptureSpoolCursorState(spoolDir, cursor) === "ok")
+        const position = telegramSpoolPosition(cursor);
+        if (!position)
+          return cursor;
+        if (!replacedFiles.has(cursorFile(position)) && telegramCaptureSpoolCursorState(spoolDir, position) === "ok")
           return cursor;
         cursorResets += 1;
         return;
@@ -75822,7 +75859,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
         internal: placed(laneCursors.internal),
         secureLocal: placed(laneCursors.secureLocal)
       };
-      const preflightCursor = cursors.internal && cursors.secureLocal ? earlierCursor(cursors.internal, cursors.secureLocal) : undefined;
+      const preflightCursor = cursors.internal && cursors.secureLocal ? earlierPosition(cursors.internal, cursors.secureLocal) : undefined;
       const preflight = (options.preflightRead ?? readTelegramCaptureSpool)({
         spoolDir,
         malformedPolicy: "skip",
@@ -75882,9 +75919,10 @@ function createTelegramConnectorStoreSyncHandler(options) {
       const internal = run.byDomain.internal.sync;
       const secureLocal = run.byDomain.secure_local.sync;
       for (const cursor of [lanesReadThrough(options.stores), sanitizeTelegramCaptureCursor(options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor), sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor)]) {
-        if (!cursor)
+        const position = telegramSpoolPosition(cursor);
+        if (!position)
           continue;
-        const file = cursor.slice(0, cursor.lastIndexOf(":"));
+        const file = cursorFile(position);
         const identity2 = spoolFileIdentity(join60(spoolDir, file))?.identity;
         const key2 = `${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`;
         if (identity2 && tierSet.ledger.readMeta(key2) !== identity2)
@@ -75952,7 +75990,7 @@ function clearTelegramSpoolSecrets(options) {
 function lanesReadThrough(stores) {
   const internal = sanitizeTelegramCaptureCursor(stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor);
   const secureLocal = sanitizeTelegramCaptureCursor(stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor);
-  return internal && secureLocal ? earlierCursor(internal, secureLocal) : undefined;
+  return internal && secureLocal ? earlierPosition(internal, secureLocal) : undefined;
 }
 function telegramCaptureLiveness(newestRecordAt, heartbeatAt, nowMs, thresholdSeconds) {
   const heartbeatMs = heartbeatAt ? Date.parse(heartbeatAt) : Number.NaN;
@@ -76016,15 +76054,21 @@ function readBoundary(set, name) {
   }
 }
 function recordBoundary(set, spoolDir, name, cursor) {
-  if (!cursor)
+  const position = telegramSpoolPosition(cursor);
+  if (!cursor || !position)
     return;
-  const offset = telegramCaptureCursorOffset(spoolDir, cursor);
-  const digest3 = offset === undefined ? undefined : spoolBoundaryDigest(join60(spoolDir, cursorFile(cursor)), offset);
+  const offset = telegramCaptureCursorOffset(spoolDir, position);
+  const digest3 = offset === undefined ? undefined : spoolBoundaryDigest(join60(spoolDir, cursorFile(position)), offset);
   if (!digest3)
     return;
   const value = JSON.stringify({ cursor, digest: digest3 });
   if (set.ledger.readMeta(`${TELEGRAM_SPOOL_BOUNDARY_META_PREFIX}${name}`) !== value)
     set.ledger.writeMeta(`${TELEGRAM_SPOOL_BOUNDARY_META_PREFIX}${name}`, value);
+}
+function earlierPosition(left, right) {
+  const a = telegramSpoolPosition(left);
+  const b = telegramSpoolPosition(right);
+  return a && b ? earlierCursor(a, b) : undefined;
 }
 function earlierCursor(left, right) {
   const [leftFile, leftLine] = cursorParts(left);
@@ -76080,7 +76124,7 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
 function sum(runs, key2) {
   return runs.reduce((total, run) => total + Number(run[key2]), 0);
 }
-var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_PERSONAL_ACCOUNT_SCOPE = "telegram.personal", TELEGRAM_MALFORMED_SPOOL_WARNING = "telegram_malformed_spool_records", TELEGRAM_TRUST_CONFLICT_WARNING = "telegram_trust_conflict_items", TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = "telegram_spool_secret_redaction_failed", TELEGRAM_SPOOL_CURSOR_RESET_WARNING = "telegram_spool_cursor_reset", TELEGRAM_SPOOL_FILE_META_PREFIX = "telegram:spool_file:", TELEGRAM_SPOOL_BOUNDARY_META_PREFIX = "telegram:spool_boundary:", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY, DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500, MAX_TELEGRAM_PULL_MAX_ITEMS = 1e4, TELEGRAM_LANE_SYNC;
+var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_PERSONAL_ACCOUNT_SCOPE = "telegram.personal", TELEGRAM_MALFORMED_SPOOL_WARNING = "telegram_malformed_spool_records", TELEGRAM_TRUST_CONFLICT_WARNING = "telegram_trust_conflict_items", TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = "telegram_spool_secret_redaction_failed", TELEGRAM_SPOOL_CURSOR_RESET_WARNING = "telegram_spool_cursor_reset", TELEGRAM_SPOOL_FILE_META_PREFIX = "telegram:spool_file:", TELEGRAM_SPOOL_BOUNDARY_META_PREFIX = "telegram:spool_boundary:", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY, DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500, MAX_TELEGRAM_PULL_MAX_ITEMS = 1e4, TELEGRAM_LANE_SYNC, TRUNCATED_CURSOR, SPOOL_CURSOR;
 var init_store_sync = __esm(() => {
   init_source_placement();
   init_spool_file_identity();
@@ -76099,6 +76143,8 @@ var init_store_sync = __esm(() => {
     internal: { placement: { trustTier: "S3", trustDomain: "internal" }, fetchContent: true, deferMetadataOnlyContent: true },
     secure_local: { placement: { trustTier: "S4", trustDomain: "secure_local" }, fetchContent: true, deferMetadataOnlyContent: true }
   };
+  TRUNCATED_CURSOR = /^~in1~\d+~\d+~((?:\d{4}-\d{2}-\d{2}\.jsonl:[0-9]+)?)$/;
+  SPOOL_CURSOR = /^\d{4}-\d{2}-\d{2}\.jsonl:[0-9]+$/;
 });
 
 // src/workers/telegram-messages/index.ts

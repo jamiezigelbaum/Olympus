@@ -33570,9 +33570,17 @@ var init_capture_spool_secrets = __esm(() => {
   SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
 
+// src/workers/connector-store/spool-file-identity.ts
+var SPOOL_IDENTITY_HEAD_BYTES, SPOOL_BOUNDARY_WINDOW_BYTES;
+var init_spool_file_identity = __esm(() => {
+  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
+});
+
 // src/workers/telegram-messages/spool-lines.ts
 var CHUNK_BYTES, hints;
 var init_spool_lines = __esm(() => {
+  init_spool_file_identity();
   CHUNK_BYTES = 1 << 20;
   hints = new Map;
 });
@@ -33641,13 +33649,6 @@ var init_capture_spool_connector = __esm(() => {
     "boosts",
     "inviter"
   ]);
-});
-
-// src/workers/connector-store/spool-file-identity.ts
-var SPOOL_IDENTITY_HEAD_BYTES, SPOOL_BOUNDARY_WINDOW_BYTES;
-var init_spool_file_identity = __esm(() => {
-  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
-  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
 });
 
 // src/workers/telegram-messages/protection-claims.ts

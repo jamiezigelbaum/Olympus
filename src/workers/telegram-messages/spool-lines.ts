@@ -6,10 +6,13 @@
 // helper only appends (and trims a torn tail back to its last newline), and a
 // Secrets rewrite keeps every record at its own byte length. So an offset
 // once found for a line stays that line's offset while the file is the same
-// file. Offsets are remembered in this process only; a cold start counts
-// newlines once, in chunks, without holding the file.
+// file. Offsets are remembered in this process only, each with a digest of
+// the 4 KiB that end at it, checked before it is used (the spool contract,
+// spool-file-identity.ts); a cold start counts newlines once, in chunks,
+// without holding the file.
 
 import { readSync, type Stats } from 'node:fs';
+import { spoolBoundaryDigest, spoolBoundaryHolds } from '../connector-store/spool-file-identity.ts';
 
 const CHUNK_BYTES = 1 << 20;
 const MAX_HINT_FILES = 64;
@@ -68,6 +71,8 @@ interface OffsetHint {
   ino: number;
   line: number;
   offset: number;
+  /** The digest of the bytes that end at the offset (spool-file-identity.ts): a file rewritten under it fails it. */
+  digest: string;
 }
 
 const hints = new Map<string, OffsetHint[]>();
@@ -75,8 +80,10 @@ const hints = new Map<string, OffsetHint[]>();
 /** Remember where line `line` of the file at `path` starts. */
 export function rememberSpoolOffset(path: string, stat: Stats, line: number, offset: number): void {
   if (line <= 0) return;
+  const digest = spoolBoundaryDigest(path, offset);
+  if (!digest) return;
   const list = (hints.get(path) ?? []).filter((hint) => hint.line !== line && hint.dev === stat.dev && hint.ino === stat.ino);
-  list.push({ dev: stat.dev, ino: stat.ino, line, offset });
+  list.push({ dev: stat.dev, ino: stat.ino, line, offset, digest });
   list.sort((a, b) => a.line - b.line);
   while (list.length > MAX_HINTS_PER_FILE) list.shift();
   hints.delete(path);
@@ -103,6 +110,9 @@ export function spoolLineOffset(fd: number, path: string, stat: Stats, line: num
   for (const hint of hints.get(path) ?? []) {
     if (hint.line > line || hint.dev !== stat.dev || hint.ino !== stat.ino || hint.offset > stat.size) continue;
     if (hint.offset > 0 && (readSync(fd, byte, 0, 1, hint.offset - 1) !== 1 || byte[0] !== 0x0a)) continue;
+    // The bytes before the offset must be the ones it was found after: a file truncated and written again under
+    // the same inode can put a newline at the same offset with another number of lines before it.
+    if (!spoolBoundaryHolds(path, hint.offset, hint.digest)) continue;
     if (hint.line >= fromLine) {
       fromLine = hint.line;
       fromOffset = hint.offset;
