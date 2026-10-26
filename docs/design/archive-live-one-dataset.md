@@ -563,7 +563,14 @@ connector; any other mbox stays under Archives, as before.
   folder and every file the versions imported, the message at the offset
   must be the named parent, the part bounded before it is decoded, only for
   an import joined to Gmail and not being removed). A forwarded message is
-  read as its headers and text. Only children are
+  read as its headers and text. The product keeps one live reader per
+  account and approval revision for up to five minutes, so a message is
+  fetched once for all its parts. **Follow-up:** a child live listed first
+  keeps only its live locator when an import later brings the same message
+  (intake skips the same version), so once live Gmail is disconnected its
+  bytes wait although the import holds them; a second locator per child, or
+  an index from message to its place in the import, would let the import
+  serve it. Only children are
   candidates. A readable attachment's text is read, held, judged and stored
   like any file's; one over the readers' limits keeps its names and is listed
   as a file Olympus could not read. The Gmail source (live, or the one with no

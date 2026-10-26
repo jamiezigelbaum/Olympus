@@ -208,6 +208,18 @@ describe('attachment children, review round 1', () => {
     expect(h.mailbox.calls).toEqual([`message:${lease.id}`]);
   });
 
+  test('one live reader fetches a message once for all of its parts', async () => {
+    const h = gmailArchiveHarness(cleanups, { build: { children: true } });
+    h.mailbox.messages = [liveWithForward()];
+    h.mailbox.attachments['att-logo'] = b64url(PNG_BYTES);
+    h.mailbox.attachments['att-pdf'] = b64url(PDF_BYTES);
+    const reader = h.liveReader({ scope: {} });
+    for (const part of ['1', '2.1']) {
+      await reader.fetchItemWithin(`${ACCOUNT}:${childOf(part)}`, { deferredBytes: { locator: `gmail-part1:${message.id}:${part}` }, maxBytes: 10_000 });
+    }
+    expect(h.mailbox.calls).toEqual([`message:${message.id}`, `attachment:${message.id}:att-logo`, `attachment:${message.id}:att-pdf`]);
+  });
+
   test('a live part is bounded by its declared size before it is fetched, and by its decoded size when the declaration understated it', async () => {
     const h = gmailArchiveHarness(cleanups, { build: { children: true } });
     const declaredBig = liveWithLease(403, 50_000);

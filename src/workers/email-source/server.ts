@@ -507,6 +507,8 @@ import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWrit
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
+/** How long one live Gmail attachment reader (and the messages it fetched) serves before a fresh one is made. */
+const GMAIL_ATTACHMENT_READER_REUSE_MS = 5 * 60_000;
 
 type MessagingCaptureSource = 'telegram' | 'whatsapp';
 type WorkerMessagingCaptureSupervisor = Pick<MessagingCaptureSupervisor, 'reconcile' | 'stop'>
@@ -3867,6 +3869,9 @@ export async function main(): Promise<void> {
       env: process.env, pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
       provider: 'gmail', capability: 'gmail.email.sync', handles: readActiveConnectedHandles(process.env),
     });
+    // One live reader per account, handle and approval revision, reused for a few minutes: a message with several
+    // attachments is fetched once, not once per part; a new approval or a stale reader gets a fresh one.
+    let liveReader: { key: string; at: number; reader: GoogleGmailSourceConnector } | undefined;
     const runtime = createGmailAttachmentExtractionRuntime({
       stores: [gmailInternalConnectorStore, gmailSecureConnectorStore, ...(publicStore ? [publicStore] : [])],
       set: createLaneTieredStoreSet({
@@ -3891,9 +3896,11 @@ export async function main(): Promise<void> {
           } catch {
             return undefined;
           }
+          const readerKey = [handle.handle, accountScope, scopeRef.accountGeneration, scopeRef.revision].join('\u0000');
+          if (liveReader?.key === readerKey && Date.now() - liveReader.at < GMAIL_ATTACHMENT_READER_REUSE_MS) return liveReader.reader;
           // The scope as it stands now: the parent is re-checked against it before a part is read, and the
           // approval is asked again before every provider call.
-          return new GoogleGmailSourceConnector({
+          const reader = new GoogleGmailSourceConnector({
             credentialHandle: handle.handle,
             account: accountScope,
             requestBudget: gmailRequestBudget,
@@ -3901,6 +3908,8 @@ export async function main(): Promise<void> {
             scope: gmailConnectorScopeFromApproval(approval),
             beforeEachRequest: () => { fileSourceScopeAuthority.assertCurrentMail(scopeRef); },
           });
+          liveReader = { key: readerKey, at: Date.now(), reader };
+          return reader;
         },
       }),
       env: process.env,

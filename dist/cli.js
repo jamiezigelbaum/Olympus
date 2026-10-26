@@ -194053,6 +194053,7 @@ ${key2}`;
       capability: "gmail.email.sync",
       handles: readActiveConnectedHandles(process.env)
     });
+    let liveReader;
     const runtime = createGmailAttachmentExtractionRuntime({
       stores: [gmailInternalConnectorStore, gmailSecureConnectorStore, ...publicStore ? [publicStore] : []],
       set: createLaneTieredStoreSet({
@@ -194078,7 +194079,10 @@ ${key2}`;
           } catch {
             return;
           }
-          return new GoogleGmailSourceConnector({
+          const readerKey = [handle.handle, accountScope, scopeRef.accountGeneration, scopeRef.revision].join("\x00");
+          if (liveReader?.key === readerKey && Date.now() - liveReader.at < GMAIL_ATTACHMENT_READER_REUSE_MS)
+            return liveReader.reader;
+          const reader = new GoogleGmailSourceConnector({
             credentialHandle: handle.handle,
             account: accountScope,
             requestBudget: gmailRequestBudget,
@@ -194088,6 +194092,8 @@ ${key2}`;
               fileSourceScopeAuthority.assertCurrentMail(scopeRef);
             }
           });
+          liveReader = { key: readerKey, at: Date.now(), reader };
+          return reader;
         }
       }),
       env: process.env,
@@ -196624,7 +196630,7 @@ function googleFilePage(locator) {
     return false;
   }
 }
-var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch, dataOwnerLock;
+var GMAIL_ATTACHMENT_READER_REUSE_MS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch, dataOwnerLock;
 var init_server5 = __esm(async () => {
   init_source_placement();
   init_vocabulary();
@@ -196775,6 +196781,7 @@ var init_server5 = __esm(async () => {
   init_embedding_ledger();
   init_agent_connections();
   init_remote_access_control();
+  GMAIL_ATTACHMENT_READER_REUSE_MS = 5 * 60000;
   INGESTION_DISPOSITION_SOURCES = [
     {
       sourceId: DROPBOX_INGESTION_EXCLUSION_SOURCE,

@@ -51165,6 +51165,7 @@ init_embedding_ledger();
 init_http();
 
 // src/workers/email-source/server.ts
+var GMAIL_ATTACHMENT_READER_REUSE_MS = 5 * 60000;
 function requireSourceEmbeddingDimension(options) {
   const configuredKey = options.envKeys.find((key2) => Boolean(options.env[key2]?.trim()));
   if (options.envKeys.every((key2) => options.env[key2] === undefined)) {
