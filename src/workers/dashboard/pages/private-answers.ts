@@ -249,6 +249,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       delete: W.delete,
       deleteAllConfirm: W.deleteAllConfirm,
       deleted: W.deleted,
+      deleteAllNothing: W.deleteAllNothing,
       retrying: W.retrying,
       queued: W.queued,
       checkUnavailable: W.checkUnavailable,
@@ -463,7 +464,10 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       var id = row.getAttribute('data-pa-question');
       var outcome = await send({ action: 'delete', id: id });
       button.disabled = false;
-      if (!outcome.ok) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
+      // What the server says it removed, for the release check to read (never shown).
+      root.setAttribute('data-pa-removed', String(outcome.ok && typeof outcome.result.removed === 'number' ? outcome.result.removed : 0));
+      // A delete that removed nothing keeps its row and says why.
+      if (!outcome.ok || outcome.result.removed !== 1) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
       if (selected === id) { selected = null; ++readVersion; }
       row.remove();
       empty();
@@ -483,10 +487,13 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     all.disabled = true;
     var outcome = await send({ action: 'delete_all' });
     all.disabled = false;
-    if (outcome.ok) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); }
+    var removed = outcome.ok && typeof outcome.result.removed === 'number' ? outcome.result.removed : 0;
+    root.setAttribute('data-pa-removed', String(removed));
+    // Rows go only when the server removed something: none removed while rows are shown is not a deletion.
+    if (outcome.ok && (removed > 0 || rows().length === 0)) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); }
     else {
       var note = root.querySelector('[data-pa-missing]');
-      if (note) { note.hidden = false; note.textContent = errorText(outcome); }
+      if (note) { note.hidden = false; note.textContent = outcome.ok ? config.copy.deleteAllNothing : errorText(outcome); }
     }
   });
   function openFragment() {

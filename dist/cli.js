@@ -52602,6 +52602,9 @@ var init_vocabulary = __esm(() => {
     deleteAll: "Delete all",
     deleteAllConfirm: "Delete every question and answer in your private inbox?",
     deleted: "That answer was deleted",
+    deleteNotFound: "Olympus could not find this answer, so nothing was deleted. Reload to see your inbox as it is now.",
+    deleteUnavailable: "Private answers cannot be changed right now, so nothing was deleted. Try again in a moment.",
+    deleteAllNothing: "Nothing was deleted. Reload to see your inbox as it is now.",
     retrying: "Retrying on this computer…",
     queued: "Queued on this computer. Automatic answers wait for their turn.",
     checkUnavailable: "Couldn't check this answer right now",
@@ -123089,17 +123092,22 @@ function createLocalPrivateAnswers(options) {
         return { status: 200, body: { ok: true, status: marked ? "read" : "kept" } };
       }
       if (action === "delete" || action === "delete_all") {
+        const answers = store();
+        if (!answers)
+          return refused(503, "unavailable", DASHBOARD_PRIVATE_ANSWERS_COPY.deleteUnavailable);
         try {
-          const removed = action === "delete_all" ? store()?.dismissAll() ?? 0 : typeof body.id === "string" && store()?.dismiss(body.id) ? 1 : 0;
+          const removed = action === "delete_all" ? answers.dismissAll() : typeof body.id === "string" && answers.dismiss(body.id) ? 1 : 0;
           if (action === "delete_all")
             opens.clear();
           else
             for (const [id, entry] of opens)
               if (entry.ref?.id === body.id)
                 opens.delete(id);
+          if (action === "delete" && removed === 0)
+            return refused(410, "not_found", DASHBOARD_PRIVATE_ANSWERS_COPY.deleteNotFound);
           return { status: 200, body: { ok: true, status: "deleted", removed } };
         } catch {
-          return refused(503, "unavailable", "Private answers cannot be changed right now.");
+          return refused(503, "unavailable", DASHBOARD_PRIVATE_ANSWERS_COPY.deleteUnavailable);
         }
       }
       if (action === "open") {
@@ -144028,6 +144036,7 @@ function privateAnswersClientScript(input) {
       delete: DASHBOARD_PRIVATE_ANSWERS_COPY.delete,
       deleteAllConfirm: DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAllConfirm,
       deleted: DASHBOARD_PRIVATE_ANSWERS_COPY.deleted,
+      deleteAllNothing: DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAllNothing,
       retrying: DASHBOARD_PRIVATE_ANSWERS_COPY.retrying,
       queued: DASHBOARD_PRIVATE_ANSWERS_COPY.queued,
       checkUnavailable: DASHBOARD_PRIVATE_ANSWERS_COPY.checkUnavailable,
@@ -144242,7 +144251,10 @@ function privateAnswersClientScript(input) {
       var id = row.getAttribute('data-pa-question');
       var outcome = await send({ action: 'delete', id: id });
       button.disabled = false;
-      if (!outcome.ok) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
+      // What the server says it removed, for the release check to read (never shown).
+      root.setAttribute('data-pa-removed', String(outcome.ok && typeof outcome.result.removed === 'number' ? outcome.result.removed : 0));
+      // A delete that removed nothing keeps its row and says why.
+      if (!outcome.ok || outcome.result.removed !== 1) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
       if (selected === id) { selected = null; ++readVersion; }
       row.remove();
       empty();
@@ -144262,10 +144274,13 @@ function privateAnswersClientScript(input) {
     all.disabled = true;
     var outcome = await send({ action: 'delete_all' });
     all.disabled = false;
-    if (outcome.ok) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); }
+    var removed = outcome.ok && typeof outcome.result.removed === 'number' ? outcome.result.removed : 0;
+    root.setAttribute('data-pa-removed', String(removed));
+    // Rows go only when the server removed something: none removed while rows are shown is not a deletion.
+    if (outcome.ok && (removed > 0 || rows().length === 0)) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); }
     else {
       var note = root.querySelector('[data-pa-missing]');
-      if (note) { note.hidden = false; note.textContent = errorText(outcome); }
+      if (note) { note.hidden = false; note.textContent = outcome.ok ? config.copy.deleteAllNothing : errorText(outcome); }
     }
   });
   function openFragment() {
