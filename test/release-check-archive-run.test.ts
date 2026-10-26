@@ -89,8 +89,11 @@ const failedIds = (report: Report): string[] => checksOf(report).filter((c) => c
 describe('the archive-import leg in a run', () => {
   test('runs after the install checks, in the order the machine needs, and tells each verb what to do', async () => {
     const report = await runReleaseCheck(options());
-    expect(verbs()).toEqual(['archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-model', 'archive-model', 'archive-remove', 'archive-changed', 'archive-cleanup', 'archive-collect']);
-    const [picker, agent, telegram, whatsapp, reflect, roam, off, on, remove, changed] = archiveCalls();
+    // The Telegram source's live input is seeded before the other formats (its own export is imported beside it once the seed works:
+    // scripted here to do nothing, so that import is not made).
+    expect(verbs()).toEqual(['archive-import', 'archive-import', 'archive-seed-live', 'archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-model', 'archive-model', 'archive-remove', 'archive-changed', 'archive-cleanup', 'archive-collect']);
+    const [picker, agent, seedLive, telegram, whatsapp, reflect, roam, off, on, remove, changed] = archiveCalls();
+    expect(seedLive).toBe('archive-seed-live --format telegram_json');
     // The picker goes first, on an empty list, with the folder reset; the agent path waits for the model to judge, then searches.
     expect(picker).toMatch(/^archive-import --role picker --format mbox --seed \S+ --via picker --reset-folder --clean$/);
     expect(agent).toMatch(/^archive-import --role agent --format mbox --seed \S+ --via request --drain-s \d+ --search$/);
