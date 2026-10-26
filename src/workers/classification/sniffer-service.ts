@@ -856,7 +856,7 @@ export class TierSnifferService {
             // question yet, by design: it is waiting to be read, not lost.
             // Names recovery proceeds; the content half stays pending.
             const waitingForText = missingContent && !row.contentRead && row.contentPending
-              && this.waitingForExtraction(ledger, identity);
+              && this.waitingForExtraction(ledger, row, identity);
             if (waitingForText && !missingMetadata) continue;
             if (!missingMetadata && !missingContent) continue;
             // Preserve the existing content-question repair where the stored
@@ -895,11 +895,19 @@ export class TierSnifferService {
     }
   }
 
-  /** An unread item that no store holds text for yet, and extraction still owes it. */
-  private waitingForExtraction(ledger: TierLedger, identity: TierLedgerIdentity): boolean {
+  /**
+   * An unread file that no store holds text for yet, and extraction still
+   * owes it. Only a routed file has an extraction lane at all: a message,
+   * a note or a legacy unrouted row with no job is genuinely unread, and
+   * keeps the fail-safe settlement rather than waiting for a job that will
+   * never come.
+   */
+  private waitingForExtraction(ledger: TierLedger, row: TierLedgerRecord, identity: TierLedgerIdentity): boolean {
     try {
-      if (!this.options.extractionOwed) return false;
-      if (ledger.copies(identity).some(copy => copy.state === 'current' && copy.layers !== 'metadata')) return false;
+      if (!this.options.extractionOwed || row.family !== 'file' || !row.routed) return false;
+      const copies = ledger.copies(identity);
+      if (copies.length === 0) return false;
+      if (copies.some(copy => copy.state === 'current' && copy.layers !== 'metadata')) return false;
       return this.options.extractionOwed(identity);
     } catch {
       return false;

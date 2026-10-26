@@ -184,3 +184,22 @@ test('an item an older build settled fail-safe with its text unread is judged wh
   expect(state.prompts.some((request) => request.prompt.includes('pruning plan'))).toBe(true);
   expect(f.lane.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentPending: false, contentRead: true, contentTier: 'private' });
 });
+
+for (const shape of [
+  { what: 'a message (not a file)', set: `family = 'message'` },
+  { what: 'a legacy unrouted row', set: `routed = 0` },
+]) test(`unread content of ${shape.what} has no extraction lane, so it is settled fail-safe Private even with no job`, async () => {
+  const f = await connected();
+  // Owed says "no job yet", which for anything extraction does not serve is never going to change.
+  const state = { ready: false, owed: true, prompts: [] as AnalystModelRequest[] };
+  const { service } = serviceFor(f, state);
+  const db = new Database(f.lane.ledger.dbPath);
+  db.query(`UPDATE tier_items SET state = 'pending', metadata_pending = 0, content_pending = 1, content_read = 0, ${shape.set},
+    decided_at = ?`).run(new Date(Date.now() - 24 * 3_600_000).toISOString());
+  if (shape.set === 'routed = 0') db.query('DELETE FROM tier_copies').run();
+  db.close();
+  await service.runOnce();
+  const settled = f.lane.ledger.getCurrent(identity)!;
+  expect(settled).toMatchObject({ state: 'current', contentTier: 'secure', contentRead: false });
+  expect(settled.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(true);
+});
