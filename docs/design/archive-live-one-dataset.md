@@ -139,9 +139,18 @@ unchanged.
   its minute, its sender and its text (caption included). The sender is
   "me" for the owner's own messages, and otherwise the contact's saved name
   from the bridge's contact store, which is what the export shows, falling
-  back to the push name. Messages with equal keys are counted on each side,
-  and the dataset keeps as many as the side with more: each side's count is
-  at most the truth, so identical messages are neither lost nor doubled.
+  back to the push name. Matching is strict, and done on the import side
+  only, against the live messages already stored: an export message is one
+  of them only when its minute is certain (read whole, at most 200
+  messages), exactly one export message in it holds its key, and exactly
+  one live message ever held it, in any version, as its current one, by a
+  live index caught up to the spool's end. Media without words is never
+  matched. Anything else is its own item, with an id from what it is (its
+  content and the names of the files it carries, never its place in the
+  export): when in doubt, a visible duplicate, never a wrong merge. A
+  live message always keeps its own id, so one the bridge delivers after an
+  export already brought it is a second item. That is an accepted residual:
+  exports are mostly past history, and a stored id never changes.
   Live capture periods cannot replace this: the bridge receives missed
   messages after a reconnect with their original times, and a full queue
   drops a message while capture is running.
@@ -167,11 +176,15 @@ unchanged.
 
 Each source has one representation of its media, and both inputs use it.
 
-- **WhatsApp** keeps live's form: a media message is one row with the media
-  type and its extracted content. The archive input emits the bridge's media
-  record, and the import's media folder is registered as a readable root of
-  the account. If those files go, what was extracted stays and unread media
-  is reported as unavailable, as the child-items design reports it.
+- **WhatsApp** (revised 2026-10-26, step 5): a voice note keeps live's form,
+  one row with the media type and its transcript. A photo, video or
+  document is the message (its caption, the bridge's text since step 3) with
+  the media as a child keyed by the file's name in the export, read later by
+  a locator into the import (`archive-import/input-media.ts`). The caption
+  and the picture are two things to judge, so they are two items. A voice
+  note the bridge already saved is not added again from the export. Media
+  the export left out is a child that cannot be read, counted. Live images
+  and video become the same children in step 8.
 - **Telegram and mail** use child items, with keys both inputs can compute:
   Telegram `media` (one per message), mail the MIME part path. A photo the
   archive brings to a message live also holds is its child; if live capture
@@ -302,6 +315,7 @@ Each source's Import an archive appears as its step registers it.
    shared archive-input media reader and the Telegram extraction roster.
 5. WhatsApp: the export becomes an input (counted keys, zone alignment,
    chat joining); the bridge's records carry the contact's saved name.
+   Built (see "Built, step 5: WhatsApp").
 6. Mail: live Gmail requests `Message-ID`, and gains attachments as children;
    mbox of a Gmail account becomes a Gmail input (built, PR #546, see "Built,
    step 6"; attachments are children, read by one extraction lane, in the PR
@@ -955,8 +969,7 @@ Live WhatsApp capture, with no change to identities or stores
   other durable write that comes before the one
   that depends on it is safe to repeat: a Secrets rewrite before its cleared
   record (redone, the same rewrite), the index's rows before the tier set's
-  cursor (read again from the old cursor, the rows already there), the match
-  ledger's ids and aliases before the store (the same ids again), and the
+  cursor (read again from the old cursor, the rows already there), and the
   index's refresh after clearing (a missed refresh reads as a replacement,
   counted and read again).
 - **One builder, the intake rule.** The spool is the WhatsApp connector's
@@ -1042,6 +1055,82 @@ Live WhatsApp capture, with no change to identities or stores
   adopts the same rule.
   Open: the dashboard's stale wording says "newest message" for an age that
   can now be the bridge's last connected time.
+
+## Built, step 5: WhatsApp
+
+The WhatsApp chat export is an input of the WhatsApp connector
+(`src/workers/whatsapp/archive-input.ts`, `export-match.ts`, `export-zone.ts`,
+`archive-target.ts`; the record builder in `live-connector.ts`; tests in
+`test/whatsapp-export-input.test.ts`, `test/archive-input-media.test.ts`).
+
+- **One builder.** The export reader (`archive-import/whatsapp`) reads the
+  export with its bounds, resume points and findings; the input turns each
+  message into the bridge's record, and the WhatsApp connector builds it
+  with the same code as a live message, under the intake rule, held until
+  judged, into the account's stores.
+- **Matching** (`match-keys.ts`). A message's key is its chat, its minute
+  (its second when the export shows seconds), its sender and its text
+  without media markers; keys are digests. The sender is "me" for the
+  owner; otherwise the contact's saved name, which the bridge now spools
+  (`sender_contact_name`), else the push name. Doubt is per minute: a
+  minute is certain only when it was read whole (the count carries in the
+  resume point across a page that ends inside it, and its rest is read
+  ahead within a byte bound) and holds at most 200 messages; otherwise
+  nothing in it is matched. The resume point holds the current minute
+  only, within that cap. The
+  live side is the spool index's digests (`live_keys` for each message's
+  current version, `live_version_keys` for every key any version had;
+  built as the spool is indexed, within a read budget; no rescan, no
+  text). A message is the stored live one only when one export message and
+  one live message hold the key, and it is that message's current key;
+  media without words never. Otherwise it is its own item, with an id from
+  its chat, minute, sender, whole text with its file names (WhatsApp names
+  each file apart) and its number among exactly identical messages, so a
+  re-import, or a fuller or shorter export, gives it the same id. A media
+  file one export left out is never guessed to be one a later export has.
+  The import matches only against a live index caught up to the spool's
+  end: a pass that finds it still catching up decides nothing and waits
+  for the next. An unmatched message
+  with a live message of the chat within a minute is counted as a
+  near-miss (`match_near_miss`, How it was read).
+- **One direction.** Matching is the import's alone: live capture never
+  claims an imported item, and a live message keeps its own id always. A
+  message the bridge delivers after an import brought it is a second item,
+  a visible duplicate (section 4).
+- **The owner.** The export shows the owner's own name. The name under which
+  the sample's messages match live capture's own messages most is taken as
+  the owner's.
+- **Time zone.** Chosen on the first pass from the export's messages in the
+  window live capture covers (its first and last message, a day either
+  side; up to 50,000 messages within 1 GiB of the export): this computer's
+  zone first, then every zone whose offsets on the sample's days differ,
+  keeping the one under which most keys match; converted with each line's
+  own date. No overlap or no match: this computer's zone, reported as
+  assumed (How it was read).
+- **Chats.** An export's chat joins the live chat of the same name when
+  exactly one has it; the status chat (`status@broadcast`) joins the status
+  posts. Otherwise it is a conversation of its own in the WhatsApp source.
+  The decision is kept in the input's resume point, so a chat never splits
+  across passes. Open: the "join to a chat" control on the import record is
+  not built.
+- **Status posts** are a record kind (`recordKind: 'status'`, conversation
+  "Status updates"), live and imported; live capture no longer skips them.
+- **Notices** from WhatsApp itself stay left out (owner).
+- **Media** become children (section 5), keyed `media` as live capture keys
+  its own, so a picture both inputs bring is one child; a child that can be
+  read brings content, so a later export (or live capture) with the bytes
+  fills one an earlier export left out. Reading them is the shared reader
+  of an input's media (`archive-import/input-media.ts`: a folder binding or a
+  zip member by its place, served only while the import is an input of a
+  source and not being removed); wiring it into WhatsApp's extraction is
+  step 8's.
+- **Account.** An export names no account: it joins the source's account at
+  the owner's confirmation in the import sheet, or creates it, or stays
+  under Archives by the owner's choice. WhatsApp has no exclusive runner:
+  the scheduler key keeps an import from running beside a live pull.
+- **Release check.** `ARCHIVE_FORMATS.whatsapp_chat` has an import beside a
+  seeded live input (`archive-live-seed-whatsapp.ts`): the account question
+  is answered Add, and the Archives case answers Keep apart.
 
 ## To verify before step 4
 

@@ -37,8 +37,13 @@
 //   counted in the listing's findings, which the pull reports as a gap.
 //   They are not silently invisible.
 // - A media line's text is its caption (bridges before captions wrote none).
-// - WhatsApp Status broadcasts (status@broadcast) are SKIPPED: they are not
-//   conversations and should not enter secure chat evidence.
+// - WhatsApp Status posts (status@broadcast) are their own record kind: an
+//   item with `recordKind: 'status'` in the "Status updates" conversation,
+//   judged like any message (docs/design/archive-live-one-dataset.md, section
+//   9). An export's status chat joins the same conversation.
+// - The sender is labelled by the name saved in the phone's contacts when the
+//   bridge read one (`sender_contact_name`), else by the push name; that is
+//   what a chat export shows, so an export of the same chat matches.
 // - Lines with a media_type note carry no text by daemon design; they map to
 //   metadata_only RawItems with their real media MIME and local locator. The
 //   shared extraction factory owns any derived text.
@@ -92,6 +97,8 @@ import {
 } from './reaction-index.ts';
 import { WhatsAppSpoolIndex, comparePlaces, type SpoolPlace } from './spool-index.ts';
 import { WhatsAppSpoolResets } from './spool-resets.ts';
+import { CHILD_ITEM_ID_SEPARATOR, childProviderItemId } from '../../core/child-item-id.ts';
+import { OWNER_SENDER, liveMatchKeys, nameKey } from './match-keys.ts';
 import {
   WHATSAPP_SPOOL_MAX_RECORD_BYTES,
   isRecordBoundary,
@@ -101,6 +108,7 @@ import {
   spoolFileIdentity,
   spoolFileLines,
   spoolRecords,
+  terminatedLinesEnd,
   type SpoolReadBudget,
   type WhatsAppCaptureStatusReceipt,
 } from './spool-reader.ts';
@@ -189,6 +197,8 @@ interface SpoolMessage {
   chatName: string;
   senderJid: string;
   senderName: string;
+  /** The name saved in the phone's contacts, when the bridge read one. */
+  senderContactName?: string;
   fromMe: boolean;
   timestamp: string;
   text: string;
@@ -233,6 +243,23 @@ interface SpoolPosition {
 export interface WhatsAppRecord extends SpoolMessage {
   /** Present: the record restates the message's reactions (an empty list clears them). Absent: it says nothing of them. */
   reactions?: readonly SourceReaction[];
+  /** Archive input only: the media the export carries for this message, each a child item. */
+  children?: readonly WhatsAppChildRecord[];
+}
+
+/**
+ * A piece of media an export carries for a message: a child item keyed by its
+ * file's name in the export (docs/design/child-items.md), read later through
+ * its locator (archive-import/input-media.ts).
+ */
+export interface WhatsAppChildRecord {
+  key: string;
+  name: string;
+  mimeType: string;
+  /** Absent with `available: false`: the export left the media out. */
+  locator?: string;
+  available: boolean;
+  sizeBytes?: number;
 }
 
 export function createWhatsAppLiveSourceConnector(
@@ -274,7 +301,7 @@ export function createWhatsAppLiveSourceConnector(
     for (const file of listSpoolFiles(spoolDir)) {
       for (const line of spoolFileLines(join(spoolDir, file))) {
         const message = parseSpoolLine(line);
-        if (message === undefined || isWhatsAppStatusBroadcast(message.chatJid)) continue;
+        if (message === undefined) continue;
         if (message.reactionTargetId === providerItemId) reactionIndex.add(message);
         if (isWhatsAppReactionLine(message)) continue;
         // Last occurrence wins: re-deliveries append the newest version —
@@ -357,25 +384,109 @@ function createRecordBuilder(
   account: string,
   fetchItem: (localItemId: string) => Promise<RawItem>,
   authenticate: () => Promise<void>,
+  readChild?: (locator: string, options: { maxBytes?: number }) => Uint8Array,
 ): SourceRecordBuilder<WhatsAppRecord> {
   return {
     family: 'chat',
-    entriesOf: (record) => [{
-      identity: recordIdentity(record, account),
-      // A restatement of the reactions is something to apply, as live's word at the same version.
-      bringsContent: recordBringsContent(record) || record.reactions !== undefined,
-      authoredAt: record.timestamp,
-    }],
+    entriesOf: (record) => {
+      const own = recordIdentity(record, account);
+      return [
+        {
+          identity: own,
+          // A restatement of the reactions is something to apply, as live's word at the same version.
+          bringsContent: recordBringsContent(record) || record.reactions !== undefined,
+          authoredAt: record.timestamp,
+        },
+        // A child whose bytes can be read brings content: a later record that has them fills one that had not.
+        ...(record.children ?? []).map((child) => ({ identity: childIdentity(own, child), bringsContent: child.available && child.locator !== undefined })),
+      ];
+    },
     compareVersions: compareWhatsAppVersions,
     build: (record, wanted) => {
-      const item = rawItemFromSpoolMessage(record, account, nowIso(), record.reactions);
-      return wanted.has(item.identity.localItemId) ? [item] : [];
+      const fetchedAt = nowIso();
+      const items: RawItem[] = [];
+      const own = rawItemFromSpoolMessage(record, account, fetchedAt, record.reactions);
+      if (wanted.has(own.identity.localItemId)) items.push(own);
+      for (const child of record.children ?? []) {
+        const item = rawItemFromChild(record, child, account, fetchedAt);
+        if (wanted.has(item.identity.localItemId)) items.push(item);
+      }
+      return items;
     },
-    fetchItem: (localItemId) => fetchItem(localItemId),
+    async fetchItem(localItemId, fetchOptions) {
+      const locator = fetchOptions?.deferredBytes?.locator;
+      if (locator === undefined || !localItemId.includes(CHILD_ITEM_ID_SEPARATOR)) return fetchItem(localItemId);
+      // A child an export brought is read by its locator.
+      if (!readChild) throw new Error('This WhatsApp account cannot read imported media yet.');
+      const bytes = readChild(locator, {});
+      return {
+        identity: childIdentityFromLocalId(localItemId, account),
+        mimeType: 'application/octet-stream',
+        content: { kind: 'bytes', mimeType: 'application/octet-stream', bytes },
+        metadata: Object.freeze({}),
+        fetchedAt: nowIso(),
+      };
+    },
     classificationSignals: whatsAppClassificationSignals,
     authenticate,
   };
 }
+
+/** What the WhatsApp record builder needs that only the account has. */
+export interface WhatsAppRecordBuilderOptions {
+  spoolDir: string;
+  account?: string;
+  /** Reads a child's bytes by its locator (archive-import/input-media.ts); absent: children cannot be read yet. */
+  readChild?: (locator: string, options: { maxBytes?: number }) => Uint8Array;
+}
+
+/**
+ * The WhatsApp connector's one record builder, for an input other than the
+ * spool (an imported export): the same code the spool's own listing builds
+ * with. A record's own item is its message; the media an export carries are
+ * its children.
+ */
+export function createWhatsAppRecordBuilder(options: WhatsAppRecordBuilderOptions): SourceRecordBuilder<WhatsAppRecord> {
+  const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp account');
+  const live = createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account });
+  return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), () => live.authenticate(), options.readChild);
+}
+
+/** A child's identity: `<parent providerItemId>#child:<key>`, in the parent's conversation and version (2.1.0). */
+function childIdentity(parent: SourceItemIdentity, child: WhatsAppChildRecord): SourceItemIdentity {
+  return {
+    ...parent,
+    providerItemId: childProviderItemId(parent.providerItemId, child.key),
+    // The local id is built the same way, from the parent's local id.
+    localItemId: childProviderItemId(parent.localItemId, child.key),
+    parent: { providerItemId: parent.providerItemId, localItemId: parent.localItemId },
+  };
+}
+
+function childIdentityFromLocalId(localItemId: string, account: string): SourceItemIdentity {
+  const { chatJid, providerItemId } = localItemIdParts(localItemId, account);
+  const parentId = providerItemId.slice(0, providerItemId.indexOf(CHILD_ITEM_ID_SEPARATOR));
+  const parentLocal = localItemId.slice(0, localItemId.indexOf(CHILD_ITEM_ID_SEPARATOR));
+  return {
+    family: 'chat',
+    provider: PROVIDER,
+    accountScope: account,
+    providerItemId,
+    ...(chatJid ? { providerConversationId: chatJid } : {}),
+    localItemId,
+    parent: { providerItemId: parentId, localItemId: parentLocal },
+  };
+}
+
+/** A spool line as a record, for an input that reads the live spool (the archive input's matching). */
+export function parseWhatsAppSpoolRecord(line: string): WhatsAppRecord | undefined {
+  return parseSpoolLine(line);
+}
+
+export { isWhatsAppReactionLine as isWhatsAppReactionRecord };
+
+/** The conversation label of the status updates chat, as the status posts are found under it. */
+export const WHATSAPP_STATUS_CHAT_LABEL = 'Status updates';
 
 /** The message line at a place in the spool, or undefined when there is none there now. */
 function readMessageAt(spoolDir: string, file: string, offset: number, budget?: SpoolReadBudget): SpoolMessage | undefined {
@@ -417,7 +528,7 @@ export function readWhatsAppLiveSpoolStatus(spoolDir: string): WhatsAppLiveSpool
       } else {
         messages += 1;
         newestMessageTimestamp = message.timestamp;
-        if (!isWhatsAppStatusBroadcast(message.chatJid)) reactionIndex.add(message);
+        reactionIndex.add(message);
       }
     }
   }
@@ -602,7 +713,57 @@ function resolveStart(spoolDir: string, start: SpoolPosition | undefined, pass: 
  * Indexes the spool from the index's high-water mark up to `until`, within
  * the pass's budget. True when the index reaches it.
  */
-function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolPosition | undefined, pass: SpoolPassState): boolean {
+/**
+ * Brings the spool index up to the end of the spool, within `budgetBytes`:
+ * what an export input matches against (its match keys, digests only) without
+ * reading the spool itself. True when the index reached the end. The listing
+ * of the live input catches up the same way; whichever runs first indexes.
+ */
+export function catchUpWhatsAppSpoolIndex(spoolDir: string, budgetBytes: number): boolean {
+  const index = WhatsAppSpoolIndex.open(spoolDir);
+  if (!index) return false;
+  let resets: WhatsAppSpoolResets;
+  try {
+    resets = WhatsAppSpoolResets.open(spoolDir);
+  } catch (error) {
+    index.close();
+    throw error;
+  }
+  try {
+    // A file that broke the spool contract, or a rebuilt index, counts one reset before the index forgets, as a
+    // listing counts it.
+    resets.noteIndexBuild(index.generation());
+    index.reconcile(spoolDir, () => { resets.bump(); });
+    const files = listSpoolFiles(spoolDir);
+    const last = files.at(-1);
+    if (last === undefined) return true;
+    const end = spoolFileIdentity(join(spoolDir, last));
+    if (!end) return false;
+    const pass: SpoolPassState = {
+      budget: { bytesLeft: budgetBytes },
+      maxRecordBytes: WHATSAPP_SPOOL_MAX_RECORD_BYTES,
+      findings: emptyWhatsAppSpoolPassFindings(),
+      index,
+      resets,
+      reset: resets.current(),
+    };
+    // Up to the file's end as it is now (a stat, no read): a fragment being written is not a record, so indexing
+    // stops at the last whole line and the high-water mark says where (never past it); the next catch-up goes on
+    // from there.
+    return catchUpIndex(spoolDir, index, { file: last, line: 0, offset: end.size }, pass, false);
+  } finally {
+    index.close();
+    resets.close();
+  }
+}
+
+/**
+ * `atBoundary`: `until` is a record boundary (a cursor's place), so files the
+ * index passes on the way (gone ones) count as indexed up to it. Otherwise
+ * (a file's size) the index stops at the last whole line it read: a fragment
+ * being written is never passed.
+ */
+function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolPosition | undefined, pass: SpoolPassState, atBoundary = true): boolean {
   if (until === undefined) return true;
   const mark = index.highWater() ?? { file: '', offset: 0 };
   const target = { file: until.file, offset: until.offset ?? 0 };
@@ -631,7 +792,7 @@ function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolP
     });
     if (paused || pass.budget.bytesLeft <= 0) return comparePlaces(index.highWater() ?? mark, target) >= 0;
   }
-  index.advance(target);
+  if (atBoundary) index.advance(target);
   return true;
 }
 
@@ -639,13 +800,33 @@ function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolP
 function noteLine(index: WhatsAppSpoolIndex, line: string, place: SpoolPlace): void {
   if (line.trim() === '') return;
   const message = parseSpoolLine(line);
-  if (message === undefined || isWhatsAppStatusBroadcast(message.chatJid)) return;
+  if (message === undefined) return;
   if (isWhatsAppReactionLine(message)) {
     const reaction = whatsAppReactionEntryOf(message);
     if (reaction) index.noteReaction(reaction.targetId, reaction.entry, place);
     return;
   }
   index.noteMessage(message.chatJid, message.id, place);
+  // A Secret's line has no text left to match by.
+  if (message.secretRedacted === true) return;
+  const keys = liveMatchKeys({
+    chatJid: message.chatJid,
+    timestamp: message.timestamp,
+    sender: message.fromMe ? OWNER_SENDER : nameKey(message.senderContactName || message.senderName || ''),
+    text: message.text,
+  });
+  if (!keys) return;
+  index.noteMatchKeys({
+    chatJid: message.chatJid,
+    id: message.id,
+    fromMe: message.fromMe,
+    ...(message.mediaType !== undefined ? { mediaType: message.mediaType } : {}),
+    mediaSaved: message.mediaPath !== undefined,
+    keys,
+    ...(isWhatsAppStatusBroadcast(message.chatJid)
+      ? { chatNameKey: 'status@broadcast' }
+      : message.chatName ? { chatNameKey: nameKey(message.chatName) } : {}),
+  }, place);
 }
 
 function readSpoolPage(
@@ -718,7 +899,6 @@ function readSpoolPage(
           continue;
         }
         if (index && !index.covers(place)) noteLine(index, line, place);
-        if (isWhatsAppStatusBroadcast(message.chatJid)) continue;
         if (isWhatsAppReactionLine(message)) {
           reactions.push(message);
           const targetId = message.reactionTargetId;
@@ -808,7 +988,6 @@ function resolveReactionTargets(spoolDir: string, targetIds: ReadonlySet<string>
       if (message === undefined) continue;
       if (!targetIds.has(message.id)) continue;
       if (isWhatsAppReactionLine(message)) continue;
-      if (isWhatsAppStatusBroadcast(message.chatJid)) continue;
       targets.set(message.id, message);
     }
   }
@@ -884,6 +1063,9 @@ function parseSpoolLine(line: string): SpoolMessage | undefined {
     chatName: optionalString(record['chat_name']),
     senderJid: optionalString(record['sender_jid']),
     senderName: optionalString(record['sender_name']),
+    ...(nonEmptyString(record['sender_contact_name']) === undefined
+      ? {}
+      : { senderContactName: nonEmptyString(record['sender_contact_name'])! }),
     fromMe,
     timestamp,
     text,
@@ -991,18 +1173,21 @@ function rawItemFromSpoolMessage(
   const redacted = message.secretRedacted === true;
   const text = spoolMessageText(message);
   const hasPreviewEnrichment = text !== resolveMentionText(message.text, message.mentions);
+  const status = isWhatsAppStatusBroadcast(message.chatJid);
+  const senderName = message.senderContactName || message.senderName;
   return {
     identity,
     mimeType: isMedia ? (message.mediaMime ?? 'application/octet-stream') : TEXT_MIME_TYPE,
     content: isMedia || redacted ? { kind: 'metadata_only' } : { kind: 'text', text },
     metadata: Object.freeze({
-      chat: message.chatName || message.chatJid,
-      sender: message.senderName || message.senderJid,
+      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
+      sender: senderName || message.senderJid,
       senderId: message.senderJid || undefined,
-      senderLabel: message.senderName || message.senderJid || undefined,
+      senderLabel: senderName || message.senderJid || undefined,
       senderIsOwner: message.fromMe,
       fromMe: message.fromMe,
       sentAt: message.timestamp,
+      ...(status ? { recordKind: 'status' } : {}),
       // Absent means "this emit says nothing about reactions" and preserves
       // what is stored; an empty array is how a message whose reactions were
       // all taken back clears them.
@@ -1014,6 +1199,34 @@ function rawItemFromSpoolMessage(
       ...mediaMetadata(message),
     }),
     fetchedAt,
+  };
+}
+
+function rawItemFromChild(message: SpoolMessage, child: WhatsAppChildRecord, account: string, fetchedAt: string): RawItem {
+  const parent = recordIdentity(message, account);
+  const status = isWhatsAppStatusBroadcast(message.chatJid);
+  const senderName = message.senderContactName || message.senderName;
+  return {
+    identity: childIdentity(parent, child),
+    mimeType: child.mimeType,
+    content: { kind: 'metadata_only' },
+    metadata: Object.freeze({
+      name: child.name,
+      title: child.name,
+      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
+      sender: senderName || message.senderJid,
+      senderLabel: senderName || message.senderJid || undefined,
+      senderIsOwner: message.fromMe,
+      fromMe: message.fromMe,
+      sentAt: message.timestamp,
+      ...(message.mediaType === undefined ? {} : { mediaType: message.mediaType }),
+    }),
+    fetchedAt,
+    deferredBytes: {
+      locator: child.locator ?? '',
+      available: child.available && child.locator !== undefined,
+      ...(child.sizeBytes !== undefined ? { sizeBytes: child.sizeBytes } : {}),
+    },
   };
 }
 
@@ -1083,7 +1296,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
     ...(through ? { through } : {}),
     redact: (line) => {
       const message = parseSpoolLine(line);
-      if (message === undefined || isWhatsAppStatusBroadcast(message.chatJid)) return undefined;
+      if (message === undefined) return undefined;
       if (isWhatsAppReactionLine(message)) return undefined;
       const identity = {
         provider: PROVIDER,
@@ -1100,7 +1313,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
       // Deleted before the line loses its path; a failure here fails the
       // window, which the next pull clears again.
       deleteOwnedMedia(message);
-      const namesLeft = message.chatName !== '' || message.senderName !== '';
+      const namesLeft = message.chatName !== '' || message.senderName !== '' || (message.senderContactName ?? '') !== '';
       if (alreadyRedacted && (redaction !== 'names' || !namesLeft)) return undefined;
       const record = JSON.parse(line) as Record<string, unknown>;
       // Mentions are display names copied into the text, so they go with it.
@@ -1122,6 +1335,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
       if (redaction === 'names') {
         record['chat_name'] = '';
         record['sender_name'] = '';
+        if ('sender_contact_name' in record) record['sender_contact_name'] = '';
       }
       record['secret_redacted'] = true;
       releaseMedia(message);

@@ -39,11 +39,12 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
+import type { LiveMatchKeys, TimePrecision } from './match-keys.ts';
 import type { WhatsAppReactionEntry } from './reaction-index.ts';
 import { normalizeWhatsAppJid } from './reaction-index.ts';
 
 export const WHATSAPP_SPOOL_INDEX_FILE = 'spool-index.sqlite';
-const SCHEMA = 4;
+const SCHEMA = 7;
 
 export interface SpoolPlace {
   file: string;
@@ -53,6 +54,17 @@ export interface SpoolPlace {
 export function comparePlaces(a: SpoolPlace, b: SpoolPlace): number {
   if (a.file !== b.file) return a.file < b.file ? -1 : 1;
   return a.offset - b.offset;
+}
+
+/** One live message, as much as matching needs of it. */
+export interface IndexedLiveMessage {
+  id: string;
+  chatJid: string;
+  fromMe: boolean;
+  timestamp: string;
+  mediaType?: string;
+  /** The bridge saved its media: the live item already holds that media's content. */
+  mediaSaved: boolean;
 }
 
 export interface IndexedMessage {
@@ -85,6 +97,32 @@ export class WhatsAppSpoolIndex {
           DROP TABLE IF EXISTS reactions;
           DROP TABLE IF EXISTS meta;
           DROP TABLE IF EXISTS files;
+          DROP TABLE IF EXISTS live_keys;
+          DROP TABLE IF EXISTS live_version_keys;
+          DROP TABLE IF EXISTS chat_names;
+          CREATE TABLE live_keys (
+            chat TEXT NOT NULL, id TEXT NOT NULL, chat_jid TEXT NOT NULL, from_me INTEGER NOT NULL, time_ms INTEGER NOT NULL,
+            media_type TEXT, media_saved INTEGER NOT NULL,
+            exact_m TEXT NOT NULL, exact_s TEXT NOT NULL, loose_m TEXT NOT NULL, loose_s TEXT NOT NULL,
+            unsent_m TEXT NOT NULL, unsent_s TEXT NOT NULL,
+            file TEXT NOT NULL, offset INTEGER NOT NULL,
+            PRIMARY KEY (chat, id)
+          ) WITHOUT ROWID;
+          CREATE INDEX live_keys_exact_m ON live_keys (exact_m);
+          CREATE INDEX live_keys_exact_s ON live_keys (exact_s);
+          CREATE INDEX live_keys_loose_m ON live_keys (loose_m);
+          CREATE INDEX live_keys_loose_s ON live_keys (loose_s);
+          CREATE INDEX live_keys_unsent_m ON live_keys (unsent_m);
+          CREATE INDEX live_keys_unsent_s ON live_keys (unsent_s);
+          CREATE INDEX live_keys_chat_time ON live_keys (chat, time_ms);
+          CREATE INDEX live_keys_file ON live_keys (file);
+          -- Every exact key any version of a live message had: a historical version is a candidate too.
+          CREATE TABLE live_version_keys (
+            key TEXT NOT NULL, chat TEXT NOT NULL, id TEXT NOT NULL, file TEXT NOT NULL,
+            PRIMARY KEY (key, chat, id)
+          ) WITHOUT ROWID;
+          CREATE INDEX live_version_keys_file ON live_version_keys (file);
+          CREATE TABLE chat_names (name TEXT NOT NULL, chat TEXT NOT NULL, chat_jid TEXT NOT NULL, PRIMARY KEY (name, chat)) WITHOUT ROWID;
           CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL, indexed_to INTEGER NOT NULL, boundary TEXT NOT NULL) WITHOUT ROWID;
           CREATE TABLE messages (
             chat TEXT NOT NULL, id TEXT NOT NULL, chat_jid TEXT NOT NULL, file TEXT NOT NULL, offset INTEGER NOT NULL,
@@ -226,6 +264,8 @@ export class WhatsAppSpoolIndex {
     this.db.transaction(() => {
       this.db.query('DELETE FROM messages WHERE file = ?').run(file);
       this.db.query('DELETE FROM reactions WHERE file = ?').run(file);
+      this.db.query('DELETE FROM live_keys WHERE file = ?').run(file);
+      this.db.query('DELETE FROM live_version_keys WHERE file = ?').run(file);
       this.db.query('DELETE FROM files WHERE name = ?').run(file);
       const mark = this.highWater();
       if (mark !== undefined && mark.file >= file) {
@@ -251,6 +291,93 @@ export class WhatsAppSpoolIndex {
       ON CONFLICT (target, actor) DO UPDATE SET file = excluded.file, offset = excluded.offset, entry = excluded.entry
       WHERE excluded.file > reactions.file OR (excluded.file = reactions.file AND excluded.offset > reactions.offset)
     `).run(targetId, entry.actorKey, place.file, place.offset, JSON.stringify(entry));
+  }
+
+  /**
+   * A message's match keys (match-keys.ts: digests, no text): the newest
+   * line's are the message's current keys, and every version's exact keys
+   * are kept too. Also the name of its chat.
+   */
+  noteMatchKeys(input: {
+    chatJid: string;
+    id: string;
+    fromMe: boolean;
+    mediaType?: string;
+    mediaSaved: boolean;
+    keys: LiveMatchKeys;
+    chatNameKey?: string;
+  }, place: SpoolPlace): void {
+    const chat = normalizeWhatsAppJid(input.chatJid);
+    this.db.query(`
+      INSERT INTO live_keys (chat, id, chat_jid, from_me, time_ms, media_type, media_saved,
+        exact_m, exact_s, loose_m, loose_s, unsent_m, unsent_s, file, offset)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (chat, id) DO UPDATE SET chat_jid = excluded.chat_jid, from_me = excluded.from_me, time_ms = excluded.time_ms,
+        media_type = excluded.media_type, media_saved = excluded.media_saved,
+        exact_m = excluded.exact_m, exact_s = excluded.exact_s, loose_m = excluded.loose_m, loose_s = excluded.loose_s,
+        unsent_m = excluded.unsent_m, unsent_s = excluded.unsent_s, file = excluded.file, offset = excluded.offset
+      WHERE excluded.file > live_keys.file OR (excluded.file = live_keys.file AND excluded.offset > live_keys.offset)
+    `).run(chat, input.id, input.chatJid, input.fromMe ? 1 : 0, input.keys.timeMs, input.mediaType ?? null, input.mediaSaved ? 1 : 0,
+      input.keys.exactMinute, input.keys.exactSecond, input.keys.looseMinute, input.keys.looseSecond,
+      input.keys.unsentMinute, input.keys.unsentSecond, place.file, place.offset);
+    for (const key of [input.keys.exactMinute, input.keys.exactSecond]) {
+      this.db.query('INSERT OR IGNORE INTO live_version_keys (key, chat, id, file) VALUES (?, ?, ?, ?)').run(key, chat, input.id, place.file);
+    }
+    if (input.chatNameKey) {
+      this.db.query('INSERT OR IGNORE INTO chat_names (name, chat, chat_jid) VALUES (?, ?, ?)').run(input.chatNameKey, chat, input.chatJid);
+    }
+  }
+
+  /**
+   * The one live message an exact key names, strictly: exactly one message
+   * ever had the key in any of its versions (a historical version is a
+   * candidate too), and the key is that message's current one. Otherwise
+   * none: in doubt, no match.
+   */
+  uniqueLiveWithKey(precision: TimePrecision, key: string): IndexedLiveMessage | undefined {
+    const candidates = this.db.query('SELECT chat, id FROM live_version_keys WHERE key = ? LIMIT 2').all(key) as Array<{ chat: string; id: string }>;
+    if (candidates.length !== 1) return undefined;
+    const column = precision === 'second' ? 'exact_s' : 'exact_m';
+    const row = this.db.query(`
+      SELECT id, chat_jid, from_me, time_ms, media_type, media_saved FROM live_keys WHERE chat = ? AND id = ? AND ${column} = ?
+    `).get(candidates[0]!.chat, candidates[0]!.id, key) as
+      { id: string; chat_jid: string; from_me: number; time_ms: number; media_type: string | null; media_saved: number } | null;
+    return row ? {
+      id: row.id,
+      chatJid: row.chat_jid,
+      fromMe: row.from_me === 1,
+      timestamp: new Date(row.time_ms).toISOString(),
+      ...(row.media_type !== null ? { mediaType: row.media_type } : {}),
+      mediaSaved: row.media_saved === 1,
+    } : undefined;
+  }
+
+  hasLooseKey(precision: TimePrecision, key: string): boolean {
+    const column = precision === 'second' ? 'loose_s' : 'loose_m';
+    return this.db.query(`SELECT 1 FROM live_keys WHERE ${column} = ? LIMIT 1`).get(key) !== null;
+  }
+
+  /** Whether the owner sent a live message with this key without a sender. */
+  ownerSentUnsent(precision: TimePrecision, key: string): boolean {
+    const column = precision === 'second' ? 'unsent_s' : 'unsent_m';
+    return this.db.query(`SELECT 1 FROM live_keys WHERE ${column} = ? AND from_me = 1 LIMIT 1`).get(key) !== null;
+  }
+
+  /** The live chats by this name. */
+  chatsNamed(name: string): string[] {
+    return (this.db.query('SELECT chat_jid FROM chat_names WHERE name = ?').all(name) as Array<{ chat_jid: string }>).map((row) => row.chat_jid);
+  }
+
+  /** Whether live holds any message of this chat between two instants. */
+  liveBetween(chatJid: string, fromMs: number, toMs: number): boolean {
+    return this.db.query('SELECT 1 FROM live_keys WHERE chat = ? AND time_ms BETWEEN ? AND ? LIMIT 1')
+      .get(normalizeWhatsAppJid(chatJid), fromMs, toMs) !== null;
+  }
+
+  /** The earliest and latest live message times, when live holds any. */
+  liveWindow(): { fromMs: number; toMs: number } | undefined {
+    const row = this.db.query('SELECT MIN(time_ms) AS a, MAX(time_ms) AS b FROM live_keys').get() as { a: number | null; b: number | null };
+    return row.a === null || row.b === null ? undefined : { fromMs: row.a, toMs: row.b };
   }
 
   /** Every actor's current reaction to a target, in spool order. */
