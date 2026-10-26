@@ -10,14 +10,17 @@
 // - Matching (match-keys.ts), on this side only and strictly: a message's key
 //   is its chat, its time slot (after the zone is applied), its sender and
 //   its text or caption without media markers. An export message is a live
-//   message already stored only when exactly one export message has the key
-//   (the whole slot is counted, past a page's end too) and exactly one live
-//   message ever had it, in any version, as its current one (the spool
-//   index's digests, caught up within a budget, never a rescan). Media
-//   without words is never matched. Anything else is its own item, with an
-//   id from its key and occurrence: the same in a second import. A live
-//   message always keeps its own id: one delivered after an import brought
-//   it is a second item, a visible duplicate (design section 4).
+//   message already stored only when its time slot is certain (read whole,
+//   past a page's end too, and holding at most SLOT_CAP messages), exactly
+//   one export message in it has the key, and exactly one live message ever
+//   had the key, in any version, as its current one (the spool index's
+//   digests, caught up to the spool's end first: an index still catching up
+//   proves nothing, so the import waits for it). Media without words is
+//   never matched. Anything else is its own item, with an id from what it is
+//   (exportMessageId: content and file names, never its place in the
+//   export), so a second, fuller or shorter export gives it the same id. A
+//   live message always keeps its own id: one delivered after an import
+//   brought it is a second item, a visible duplicate (design section 4).
 // - Time zone (export-zone.ts): chosen once, on the first pass, from the
 //   export's messages in the window live capture covers (its first and last
 //   message, a day either side): this computer's zone first, then any zone
@@ -40,6 +43,7 @@
 // so every pass of one import reads the export the same way.
 
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { posix } from 'node:path';
 import {
   ARCHIVE_COMMON_FINDINGS,
@@ -79,9 +83,9 @@ const SAMPLE_MESSAGES = 50_000;
 const SAMPLE_BYTES = 1024 * 1024 * 1024;
 /** How much of the live spool one pass may index before matching (the rest is matched the other way, later). */
 const LIVE_INDEX_BYTES = 64 * 1024 * 1024;
-/** How many messages past a page's end are read to count the time slot it ends in; a slot fuller than this is in doubt. */
-const SLOT_LOOKAHEAD_MESSAGES = 1_000;
-/** How much of the export that lookahead may read. */
+/** The most messages a time slot may hold and still be certain: a fuller one is in doubt, and nothing in it is matched. */
+const SLOT_CAP = 200;
+/** How much of the export reading the rest of a slot past a page's end may take; a slot not read whole is in doubt. */
 const SLOT_LOOKAHEAD_BYTES = 4 * 1024 * 1024;
 const DAY_MS = 24 * 3_600_000;
 
@@ -98,8 +102,12 @@ interface InputState {
   m?: string;
   /** Each chat met so far, by its name's hash: the live chat it joined, or '' for one of its own. */
   j: Record<string, string>;
-  /** The time slot the export was in when the page ended, and how many messages of each key it held so far. */
-  g?: { s: string; c: Record<string, number> };
+  /**
+   * The time slot the export was in when the page ended: how many messages it
+   * held so far, and how many of each key (at most SLOT_CAP keys; `d` once the
+   * slot is in doubt, with no keys). Only this one slot is ever kept.
+   */
+  g?: { s: string; n: number; c?: Record<string, number>; d?: 1 };
 }
 
 function hash(value: string): string {
@@ -204,6 +212,8 @@ export interface WhatsAppExportInputOptions {
   spoolDir: string;
   /** Zones to try (test seam); defaults to every zone the runtime knows, this computer's first. */
   zones?: readonly string[];
+  /** How much of the live spool one pass may index before the import waits for the next (default 64 MiB; test seam). */
+  liveIndexBudgetBytes?: number;
 }
 
 /**
@@ -218,8 +228,13 @@ export function createWhatsAppExportInput(options: WhatsAppExportInputOptions): 
     records(listing = {}): AsyncIterable<SourceRecordPage<WhatsAppRecord>> {
       return (async function* (): AsyncGenerator<SourceRecordPage<WhatsAppRecord>> {
         const decoded = decodeCursor(listing.cursor);
-        // Live capture's side, as the spool index holds it: caught up within a budget first.
-        catchUpWhatsAppSpoolIndex(options.spoolDir, LIVE_INDEX_BYTES);
+        // Live capture's side, as the spool index holds it: caught up to the spool's end first. An index still
+        // catching up proves nothing about uniqueness, so this pass decides nothing and gives no id: it waits, and
+        // the next pass goes on (ids come from what a message is, so a decision put off is the same decision).
+        if (existsSync(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
+          yield { records: [], ...(listing.cursor !== undefined ? { nextCursor: listing.cursor } : {}), done: false };
+          return;
+        }
         const index = WhatsAppSpoolIndex.open(options.spoolDir);
         const matching: Matching = { index };
         try {
@@ -256,19 +271,46 @@ export function createWhatsAppExportInput(options: WhatsAppExportInputOptions): 
               const message = exportMessageOf(item);
               return message ? [{ message, at, keyed: keyOf(message, decided, matching) }] : [];
             });
-            // How many export messages hold each key in all: the slot open when the previous page ended (carried), this
-            // page, and the rest of the slot this page ends in, read ahead.
-            const totals = new Map<string, number>();
+            // Each slot's count and each key's count in all: the slot open when the previous page ended (carried),
+            // this page, and the rest of the slot this page ends in, read ahead. A slot is certain only when it was
+            // read whole and holds at most SLOT_CAP messages.
             const carried = decided.g;
-            for (const { keyed: { key, slot } } of keyed) totals.set(key, (totals.get(key) ?? (carried?.s === slot ? carried.c[key] ?? 0 : 0)) + 1);
+            const slotCount = new Map<string, number>();
+            const keyCount = new Map<string, number>();
+            const doubt = new Set<string>();
+            if (carried) {
+              slotCount.set(carried.s, carried.n);
+              if (carried.d) doubt.add(carried.s);
+              for (const [key, count] of Object.entries(carried.c ?? {})) keyCount.set(key, count);
+            }
+            for (const { keyed: { key, slot } } of keyed) {
+              slotCount.set(slot, (slotCount.get(slot) ?? 0) + 1);
+              keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
+            }
             const last = keyed.at(-1);
             if (last && !page.done && page.nextCursor !== undefined) {
               const ahead = await countSlotAhead(archive, page.nextCursor, last.keyed.slot, decided, matching);
-              for (const [key, count] of ahead) totals.set(key, (totals.get(key) ?? 0) + count);
+              if (!ahead.whole) doubt.add(last.keyed.slot);
+              slotCount.set(last.keyed.slot, (slotCount.get(last.keyed.slot) ?? 0) + ahead.count);
+              for (const [key, count] of ahead.keys) keyCount.set(key, (keyCount.get(key) ?? 0) + count);
+            }
+            for (const [slot, count] of slotCount) if (count > SLOT_CAP) doubt.add(slot);
+            // What carries to the next page: the slot this page ends in, as it stands (never what was read ahead).
+            if (last) {
+              const slot = last.keyed.slot;
+              const seen = (carried?.s === slot ? carried.n : 0) + keyed.filter((entry) => entry.keyed.slot === slot).length;
+              const inDoubt = seen > SLOT_CAP || (carried?.s === slot && carried.d === 1);
+              const counts: Record<string, number> = {};
+              if (!inDoubt) {
+                if (carried?.s === slot) Object.assign(counts, carried.c ?? {});
+                for (const entry of keyed) if (entry.keyed.slot === slot) counts[entry.keyed.key] = (counts[entry.keyed.key] ?? 0) + 1;
+              }
+              decided.g = inDoubt ? { s: slot, n: seen, d: 1 } : { s: slot, n: seen, c: counts };
             }
             for (const { message, at, keyed: k } of keyed) {
               const place = positions[at] ?? { fileIndex: message.sourceFileIndex, offset: 0 };
-              records.push(recordOf(message, k, totals.get(k.key) ?? 1, decided, matching, media,
+              const certain = !doubt.has(k.slot) && keyCount.get(k.key) === 1;
+              records.push(recordOf(message, k, certain, decided, matching, media,
                 (finding) => archive.report({ ...finding, fileIndex: place.fileIndex, offset: place.offset })));
             }
             positions = [];
@@ -455,10 +497,11 @@ function keyOf(message: ExportMessage, state: InputState, matching: Matching): K
 }
 
 /**
- * The keys of the export messages after a page's end that are still in the
- * slot the page ended in (an export is in time order, so the slot's rest is
- * next), read quietly within a bound. A slot fuller than the bound counts
- * every key in it twice: in doubt, nothing in it is matched.
+ * The rest of the slot a page ended in (an export is in time order, so the
+ * slot's rest is next): how many messages and of which keys, read quietly.
+ * `whole` only when the slot's end was seen (a message of another slot, or
+ * the export's end) within the cap and the byte bound; otherwise the slot is
+ * in doubt.
  */
 async function countSlotAhead(
   archive: ArchiveConnectorInput,
@@ -466,7 +509,7 @@ async function countSlotAhead(
   slot: string,
   state: InputState,
   matching: Matching,
-): Promise<Map<string, number>> {
+): Promise<{ whole: boolean; count: number; keys: Map<string, number> }> {
   const quiet = createWhatsAppArchiveConnector({
     ...archive,
     report: () => undefined,
@@ -475,29 +518,25 @@ async function countSlotAhead(
     maxBytesPerListing: SLOT_LOOKAHEAD_BYTES,
     pageSize: 100,
   });
-  const counts = new Map<string, number>();
-  let read = 0;
+  const keys = new Map<string, number>();
+  let count = 0;
   for await (const page of quiet.listItems({ cursor })) {
     for (const item of page.items) {
       const message = exportMessageOf(item);
       if (!message) continue;
       // The join decision is the import's own; a peek never makes one.
       const keyed = keyOf(message, { ...state, j: { ...state.j } }, matching);
-      if (keyed.slot !== slot) return counts;
-      counts.set(keyed.key, (counts.get(keyed.key) ?? 0) + 1);
-      read += 1;
-      if (read >= SLOT_LOOKAHEAD_MESSAGES) {
-        for (const key of counts.keys()) counts.set(key, 2);
-        return counts;
-      }
+      if (keyed.slot !== slot) return { whole: true, count, keys };
+      count += 1;
+      keys.set(keyed.key, (keys.get(keyed.key) ?? 0) + 1);
+      if (count > SLOT_CAP) return { whole: false, count, keys };
     }
-    if (page.truncated === true) {
-      // Out of bytes before the slot ended: in doubt.
-      for (const key of counts.keys()) counts.set(key, 2);
-      return counts;
-    }
+    if (page.done) return { whole: true, count, keys };
+    // Out of bytes (or cut short) before the slot ended: in doubt.
+    if (page.truncated === true) return { whole: false, count, keys };
   }
-  return counts;
+  // The listing ended without saying it was done (its byte bound): the slot was not read whole.
+  return { whole: false, count, keys };
 }
 
 /**
@@ -508,22 +547,18 @@ async function countSlotAhead(
 function recordOf(
   message: ExportMessage,
   keyed: KeyedMessage,
-  total: number,
+  certain: boolean,
   state: InputState,
   matching: Matching,
   media: MediaLocator,
   report: (finding: Omit<ArchiveImportFinding, 'fileIndex' | 'offset'>) => void,
 ): WhatsAppRecord {
-  const { ms, chatJid, owner, caption, files, omitted, key, slot } = keyed;
-  // Messages with equal keys are counted in the export's order; the count carries over a page that ends inside a
-  // time slot, and starts again at the next slot.
-  if (state.g?.s !== slot) state.g = { s: slot, c: {} };
-  const ordinal = state.g.c[key] ?? 0;
-  state.g.c[key] = ordinal + 1;
+  const { ms, chatJid, owner, caption, files, omitted, key } = keyed;
   // A picture or file with no words is never matched: the key says nothing of which picture it is.
   const wordless = textKey(caption) === '' && (files.length > 0 || omitted);
-  const matched = wordless || total !== 1 ? undefined : matching.index?.uniqueLiveWithKey(message.precision, key);
-  const id = matched ? matched.id : exportMessageId(key, ordinal);
+  const matched = wordless || !certain ? undefined : matching.index?.uniqueLiveWithKey(message.precision, key);
+  // Its own id from what it is: the whole text (the file names in it included) and its number among identical ones.
+  const id = matched ? matched.id : exportMessageId(chatJid, ms, message.precision, owner ? OWNER_SENDER : nameKey(message.sender), textKey(message.text), message.occurrence);
   if (!matched && matching.index?.liveBetween(chatJid, ms - 60_000, ms + 60_000)) {
     report({ kind: WHATSAPP_INPUT_FINDINGS.nearMiss, class: 'skipped' });
   }

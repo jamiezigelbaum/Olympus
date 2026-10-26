@@ -94,7 +94,7 @@ async function pullLive(target: Lane): Promise<void> {
 }
 
 /** Imports an export file through the connector's archive input, as the archive layer does, to its end. */
-async function importExport(target: Lane, name: string, text: string | Uint8Array, findings: ArchiveImportFinding[] = [], extra: Record<string, string> = {}, sync: { maxItems: number; pageSize: number } = { maxItems: 4, pageSize: 3 }) {
+async function importExport(target: Lane, name: string, text: string | Uint8Array, findings: ArchiveImportFinding[] = [], extra: Record<string, string> = {}, sync: { maxItems: number; pageSize: number; liveIndexBudgetBytes?: number; onCursor?: (cursor: string) => void } = { maxItems: 4, pageSize: 3 }) {
   mkdirSync(join(target.exportDir, name, '..'), { recursive: true });
   writeFileSync(join(target.exportDir, name), text);
   for (const [file, body] of Object.entries(extra)) writeFileSync(join(target.exportDir, file), body);
@@ -122,12 +122,16 @@ async function importExport(target: Lane, name: string, text: string | Uint8Arra
     },
     spoolDir: target.spoolDir,
     zones: ZONES,
+    ...(sync.liveIndexBudgetBytes !== undefined ? { liveIndexBudgetBytes: sync.liveIndexBudgetBytes } : {}),
   });
   const connector = holdingItems(target.connector.forInput!(input));
-  for (let pass = 0; pass < 50; pass += 1) {
+  for (let pass = 0; pass < 200; pass += 1) {
     const cursor = target.set.committedCursor(connector.id)?.cursor ?? undefined;
+    if (cursor) sync.onCursor?.(cursor);
     await target.set.sync(connector, { ...WHATSAPP_LANE_SYNC, maxItems: sync.maxItems, ...(cursor ? { cursor } : {}) });
-    if (pass > 0 && target.set.committedCursor(connector.id)?.cursor === cursor) break;
+    const next = target.set.committedCursor(connector.id)?.cursor ?? undefined;
+    // Done when a pass leaves the cursor where it was; a pass that waited for the live index commits nothing yet.
+    if (pass > 0 && next === cursor && next !== undefined) break;
   }
   return findings;
 }
@@ -406,7 +410,7 @@ describe('review round 1 on #551: one matching model', () => {
     expect(activeIds(target)).toEqual(['L1']);
   });
 
-  test('media left out of one export is filled in by a later export that has it', async () => {
+  test('media left out of one export is never guessed to be a file a later export has: each is its own', async () => {
     const target = lane();
     writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), direct({ id: 'L1', timestamp: '2026-07-01T13:00:10Z', text: 'Ferry at nine?' }));
     await pullLive(target);
@@ -423,9 +427,10 @@ describe('review round 1 on #551: one matching model', () => {
     ], { style: 'android-24-dmy' });
     await importExport(target, 'again/WhatsApp Chat with Rowan Hale.txt', second, [], { 'again/IMG-20260701-WA0007.jpg': 'bytes' });
     const after = rows(target).filter((row) => row.tombstoned === 0 && row.id.endsWith('#child:media'));
-    expect(after).toHaveLength(1);
-    expect(after[0]!.id).toBe(before!.id);
-    expect(after[0]!.locator).toStartWith('archive-input-media:v1:');
+    // The left-out one says nothing of which picture it was: the named file is a message and a child of their own.
+    expect(after).toHaveLength(2);
+    expect(after.find((row) => row.id === before!.id)?.locator ?? '').toBe('');
+    expect(after.find((row) => row.id !== before!.id)?.locator).toStartWith('archive-input-media:v1:');
   });
 });
 
@@ -609,6 +614,90 @@ describe('review round 3 on #551: strict matching on the import side only', () =
       db.close();
     }
   });
+});
+
+describe('review round 4 on #551: ids from content, doubt per minute, no matching against a partial index', () => {
+  const direct = (fields: Record<string, unknown>) => spoolLine({ chat_jid: ROWAN, chat_name: 'Rowan Hale', ...fields });
+  const active = (target: Lane) => rows(target).filter((row) => row.tombstoned === 0 && !row.id.includes('#child:'));
+
+  test('a minute fuller than the cap is in doubt whole: nothing in it is merged, across page breaks too', async () => {
+    const target = lane();
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), [
+      direct({ id: 'L0', timestamp: '2026-07-01T12:00:00Z', text: 'anchor' }),
+      direct({ id: 'L1', timestamp: '2026-07-01T13:00:10Z', text: 'the one that matches' }),
+    ].join(''));
+    await pullLive(target);
+    // 250 messages in one minute; one of them is live's L1, uniquely keyed, early in the minute.
+    const crowd: SyntheticMessage[] = Array.from({ length: 250 }, (_, at) => ({ at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: at === 3 ? 'the one that matches' : `crowd ${at}` }));
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', chatText([
+      { at: '2026-07-01T08:00:00', sender: 'Rowan Hale', text: 'anchor' },
+      ...crowd,
+    ], { style: 'android-24-dmy' }), [], {}, { maxItems: 500, pageSize: 7 });
+    const ids = active(target).map((row) => row.id);
+    expect(ids).toContain('L1');
+    expect(ids.filter((id) => id.startsWith('wx'))).toHaveLength(250);
+  }, 60_000);
+
+  test('a later, fuller export keeps the ids of the photos an earlier one brought', async () => {
+    const target = lane();
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), direct({ id: 'L0', timestamp: '2026-07-01T12:00:00Z', text: 'anchor' }));
+    await pullLive(target);
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', chatText([
+      { at: '2026-07-01T08:00:00', sender: 'Rowan Hale', text: 'anchor' },
+      { at: '2026-07-01T09:05:00', sender: 'Rowan Hale', text: 'IMG-20260701-WA0005.jpg (file attached)' },
+    ], { style: 'android-24-dmy' }), [], { 'IMG-20260701-WA0005.jpg': 'five' });
+    const first = active(target).map((row) => row.id).filter((id) => id.startsWith('wx'));
+    expect(first).toHaveLength(1);
+    // The fuller export has an earlier photo in the same minute, before it.
+    await importExport(target, 'again/WhatsApp Chat with Rowan Hale.txt', chatText([
+      { at: '2026-07-01T08:00:00', sender: 'Rowan Hale', text: 'anchor' },
+      { at: '2026-07-01T09:05:00', sender: 'Rowan Hale', text: 'IMG-20260701-WA0004.jpg (file attached)' },
+      { at: '2026-07-01T09:05:00', sender: 'Rowan Hale', text: 'IMG-20260701-WA0005.jpg (file attached)' },
+    ], { style: 'android-24-dmy' }), [], { 'again/IMG-20260701-WA0004.jpg': 'four', 'again/IMG-20260701-WA0005.jpg': 'five' });
+    const second = active(target).map((row) => row.id).filter((id) => id.startsWith('wx'));
+    // Two photos, two items, and the first export's photo kept its id.
+    expect(second).toHaveLength(2);
+    expect(second).toContain(first[0]!);
+  });
+
+  test('an index still catching up is never taken as proof that a message is unique', async () => {
+    const target = lane();
+    // L1 and L2 say the same thing in the same minute, far apart in the spool.
+    const filler = Array.from({ length: 200 }, (_, at) => direct({ id: `F${at}`, timestamp: '2026-07-01T12:30:00Z', text: `filler ${at} ${'x'.repeat(100)}` }));
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), [
+      direct({ id: 'L0', timestamp: '2026-07-01T12:00:00Z', text: 'anchor' }),
+      direct({ id: 'L1', timestamp: '2026-07-01T13:00:10Z', text: 'ok' }),
+      ...filler,
+      direct({ id: 'L2', timestamp: '2026-07-01T13:00:40Z', text: 'ok' }),
+    ].join(''));
+    await pullLive(target);
+    // The disposable index is gone (a rebuild): the import's passes may index only a little of the spool each.
+    rmSync(join(target.spoolDir, WHATSAPP_SPOOL_INDEX_FILE), { force: true });
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', chatText([
+      { at: '2026-07-01T08:00:00', sender: 'Rowan Hale', text: 'anchor' },
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'ok' },
+    ], { style: 'android-24-dmy' }), [], {}, { maxItems: 4, pageSize: 3, liveIndexBudgetBytes: 4 * 1024 });
+    const ids = active(target).map((row) => row.id);
+    // Two live messages hold the key: the export's "ok" is its own.
+    expect(ids).toContain('L1');
+    expect(ids).toContain('L2');
+    expect(ids.filter((id) => id.startsWith('wx'))).toHaveLength(1);
+  }, 60_000);
+
+  test('a resume point holds one minute at most, within the cap, however crowded the export', async () => {
+    const target = lane();
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), direct({ id: 'L0', timestamp: '2026-07-01T12:00:00Z', text: 'anchor' }));
+    await pullLive(target);
+    const crowd: SyntheticMessage[] = Array.from({ length: 600 }, (_, at) => ({ at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: `crowd ${at}` }));
+    const cursors: string[] = [];
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', chatText([
+      { at: '2026-07-01T08:00:00', sender: 'Rowan Hale', text: 'anchor' },
+      ...crowd,
+    ], { style: 'android-24-dmy' }), [], {}, { maxItems: 50, pageSize: 50, onCursor: (cursor) => cursors.push(cursor) });
+    expect(cursors.length).toBeGreaterThan(2);
+    // At most the cap's worth of key digests (32 hex characters each) plus the reader's own place.
+    for (const cursor of cursors) expect(cursor.length).toBeLessThan(24 * 1024);
+  }, 60_000);
 });
 
 describe('live status posts', () => {
