@@ -15,7 +15,7 @@ import {
   type FixtureRole, type LegFixture,
 } from './archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed,
+  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed, unpairJourney,
   shownPath, startViewOf, statusViewOf, stoppedJourney,
   type BesideLiveObservation, type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
   type SearchView, type SeedLiveObservation, type StatusView, type StoreView,
@@ -244,13 +244,20 @@ export async function besideLiveStage(host: ArchiveHost, args: { format: string;
       const cited = { ...fx, expect: { ...fx.expect, citationLabel: fx.beside!.citationLabel } };
       obs.search = await searchWhenJudged(host, cited, (args.drainS ?? drainBoundS(host.os)) * 1_000);
       obs.stores = host.readSourceStores!(beside.seedHook, fx.token);
-      // The history goes only with the source: its Delete, then nothing of the archive in its stores or on the page.
+      // The history goes only with the source: the owner unpairs it (the engine refuses to delete a paired source's data), then
+      // its Delete, then nothing of the archive in its stores or on the page.
+      const unpair = await runJourney(driver, unpairJourney(beside.sourceId, beside.sourceLabel, {
+        ...(args.openS !== undefined ? { openS: args.openS } : {}),
+      }));
+      obs.traces.push(unpair);
+      host.say(`${unpair.id}: ${unpair.ok ? 'ok' : 'FAILED'} (${Math.round(unpair.ms / 1000)} s)`);
       const deleted = host.deleteSourceData!(beside.sourceId);
       const deleteOk = deleted.code === 0 && (deleted.json === undefined || (deleted.json as { ok?: unknown }).ok !== false);
       await driver.go('/dashboard');
       const panel = await until(host, () => readPanel(driver), 15_000, 500);
       obs.deleted = {
         ok: deleteOk,
+        unpaired: unpair.ok,
         ...(deleteOk ? {} : { detail: (deleted.stderr || JSON.stringify(deleted.json ?? null)).slice(0, 200) }),
         stores: host.readSourceStores!(beside.seedHook, fx.token),
         rowGone: panel !== undefined && rowNamed(panel, fx.fileName) === undefined,
