@@ -148,9 +148,11 @@ function localFilesListing(options: LocalFilesFolderScopeBrowserOptions, mode: '
       throw new Error('This folder could not be read. It may have moved or its disk may be unmounted.');
     }
     // A link is never followed, so it is not offered; a file is not a folder,
-    // except in archive mode, which offers every regular file but hidden ones.
+    // except in archive mode, which offers every regular file. Archive mode
+    // hides hidden (dot) folders and files: an export is never kept in one.
     const offered = (entry: Dirent): boolean => !entry.isSymbolicLink()
-      && (entry.isDirectory() || (mode === 'archive' && entry.isFile() && !entry.name.startsWith('.')));
+      && !(mode === 'archive' && entry.name.startsWith('.'))
+      && (entry.isDirectory() || (mode === 'archive' && entry.isFile()));
     return entries
       .filter(offered)
       .map((entry) => {
