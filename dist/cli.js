@@ -64494,6 +64494,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
   };
 }
 function releaseInputs(detail) {
+  const namesOnly = new Set(detail.namesOnlyCandidateIndexes ?? []);
   const items = detail.pack.candidates.map((candidate, index) => {
     const item = candidate.provenance.sourceItem;
     return {
@@ -64502,7 +64503,8 @@ function releaseInputs(detail) {
       accountScope: item.accountScope ?? "",
       providerItemId: item.providerItemId,
       ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {},
-      privateAtAnswer: isSecureSensitivity(candidate)
+      privateAtAnswer: isSecureSensitivity(candidate),
+      ...namesOnly.has(index) ? { layer: "names" } : {}
     };
   });
   return [...items, ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])];
