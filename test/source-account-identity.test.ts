@@ -180,6 +180,19 @@ describe('an import finds its account', () => {
     expect(resolveImportAccount('gmail.email', undefined, { env, ownerConfirmed: true }).match).toBe('same');
   });
 
+  test('an import known by its address alone always asks the owner, and another address is another account', () => {
+    // The entry is known by the same address alone: still the owner's yes, since an address can change hands.
+    entry('gmail.email', ADDRESS);
+    expect(resolveImportAccount('gmail.email', ADDRESS, { env }).match).toBe('unproven');
+    expect(resolveImportAccount('gmail.email', ADDRESS, { env, ownerConfirmed: true }).match).toBe('same');
+    expect(hashOf('gmail.email')).toBe(ADDRESS);
+    // An entry that carries another address, beside an immutable label: not this account, whatever the owner says.
+    rmSync(dir, { recursive: true, force: true });
+    entry('gmail.email', composeProviderAccountId([SUB, googleAccountIdFromAddress('other@example.com')])!);
+    expect(resolveImportAccount('gmail.email', ADDRESS, { env }).match).toBe('different');
+    expect(resolveImportAccount('gmail.email', ADDRESS, { env, ownerConfirmed: true }).match).toBe('different');
+  });
+
   test('an account being deleted takes no import', () => {
     entry('telegram.messages', 'telegram:0123456789abcdef', 'deleting');
     expect(() => resolveImportAccount('telegram.messages', 'telegram:0123456789abcdef', { env })).toThrow(SourceStorageUnavailableError);

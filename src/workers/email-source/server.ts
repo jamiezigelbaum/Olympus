@@ -158,6 +158,7 @@ import {
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
   GoogleDailyRequestBudget,
+  GoogleGmailSourceConnector,
   createGmailConnectorStoreSyncHandler,
   gmailCursorConnectorId,
   createGmailDailyRequestBudget,
@@ -365,6 +366,7 @@ import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/a
 import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
+  createGmailImportedHistorySchedulerSource,
   createGoogleDriveConnectorStoreSchedulerSource,
   createCanonicalDropboxSchedulerSource,
   createReadwiseSchedulerSource,
@@ -439,14 +441,36 @@ import {
 import { fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import {
+  GMAIL_IMPORT_CONNECTOR_PREFIX,
+  gmailArchiveTarget,
+  gmailHoldsImportedHistory,
+  gmailImportedHistoryEmbeddingTargets,
+  gmailItemAccountScope,
+} from '../google-connectors/gmail-archive-target.ts';
+import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
+import {
+  GMAIL_IMPORT_LABELS_COST,
+  GMAIL_IMPORT_MAX_RETRIES,
+  GmailImportWaitError,
+  gmailImportAllowance,
+  gmailImportBudget,
+  gmailImportWait,
+} from '../google-connectors/gmail-import-allowance.ts';
+import type { GmailApiClient } from '../google-connectors/gmail.ts';
+import { readSourceRegistry } from '../../core/source-registry.ts';
+import { gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
+import { archiveSourceTargets } from '../archive-import/source-targets.ts';
+import { createLaneTieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import {
   SourceAccountChangedError,
   guardAccountBoundLanes,
   createSourceAccountGuard,
+  runExclusiveForSource,
   runGuarded,
   type SourceAccountGuard,
   type SourceAccountGuardOptions,
 } from '../source-account-guard.ts';
-import { dropboxOwnRootFolderIds, dropboxOwnsOneOfFolders, type AccountBoundProvider } from '../../core/provider-account-identity.ts';
+import { compareProviderAccounts, dropboxOwnRootFolderIds, dropboxOwnsOneOfFolders, googleAccountIdFromAddress, type AccountBoundProvider } from '../../core/provider-account-identity.ts';
 import type { AccountBoundSourceId } from '../../core/source-account-binding.ts';
 import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
 import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
@@ -835,10 +859,16 @@ export function localPrivateEmbeddingTargets(input: {
   };
   connectorStoreAccountScopes: ReadonlyMap<string, string>;
   gmailAccountScope?: string | undefined;
+  /**
+   * The account scope of Gmail's imported mail: with no live mail approval,
+   * the Private store's imported items (and only they) are still embedded
+   * privately. Live approval governs live reads.
+   */
+  gmailImportAccountScope?: string | undefined;
 }) {
   const { source, sovereigntyEngine, secureLocalPolicyEmbeddingProvider, sourceCorpusRegistry,
     scopeRefs, connectorStores, fullCorpusDefinitions, fileSourceScopeAuthority,
-    readScope: connectorStoreReadScope, connectorStoreAccountScopes, gmailAccountScope } = input;
+    readScope: connectorStoreReadScope, connectorStoreAccountScopes, gmailAccountScope, gmailImportAccountScope } = input;
   const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
   if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== 'built-in'
     || (policy?.activationMode !== 'hybrid_shadow' && policy?.activationMode !== 'hybrid_primary')) return [];
@@ -852,6 +882,16 @@ export function localPrivateEmbeddingTargets(input: {
     const registered = sourceCorpusRegistry.definitions().find(entry => entry.corpusId === store.corpusId);
     if (!definition || definition.activationMode === 'lexical_only' || definition.embeddingPolicy === 'disabled'
       || registered?.activationMode === 'lexical_only' || registered?.embeddingPolicy === 'disabled') return [];
+    // Gmail with no live mail approval: what its imports brought, which the owner approved one by one.
+    if (source.sourceId === SCHEDULER_SOURCE_IDS.gmail && (!ref || !fileSourceScopeAuthority)) {
+      if (!gmailImportAccountScope) return [];
+      return [{
+        store,
+        provider: secureLocalPolicyEmbeddingProvider,
+        accountScope: gmailImportAccountScope,
+        filters: { provider: 'gmail', observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX },
+      }];
+    }
     // Scope-gated source adapters must supply their current binding.
     if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles].some(id => id === source.sourceId) && (!ref || !fileSourceScopeAuthority)) return [];
     const scope = connectorStoreReadScope(store);
@@ -864,6 +904,7 @@ export function localPrivateEmbeddingTargets(input: {
     const filters = mail ? {
       provider: 'gmail',
       observedConnectorId: gmailCursorConnectorId(accountScope!, { generation: ref!.accountGeneration, revision: ref!.revision }),
+      observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX,
     } : scope.contentFilters;
     const provider = ref && fileSourceScopeAuthority
       ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref)
@@ -2796,6 +2837,135 @@ export async function main(): Promise<void> {
         }),
       })
     : undefined;
+  // The account scope Gmail's items are kept under (gmail-archive-target.ts
+  // `gmailItemAccountScope`): the handle's role, unless the stores already
+  // hold the account's mail under one other scope (an import made before the
+  // connect), which every reader and writer then keeps using.
+  const gmailItemScopeFor = (handle: { accountRole?: string; handle?: string } | undefined): string => {
+    const role = handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle);
+    return gmailInternalConnectorStore && gmailSecureConnectorStore
+      ? gmailItemAccountScope([gmailInternalConnectorStore, gmailSecureConnectorStore], role)
+      : role;
+  };
+  // An mbox export of a Gmail account is an input of the Gmail connector
+  // (docs/design/archive-live-one-dataset.md, step 6): its mail joins the
+  // Gmail stores, matched by Gmail's own ids, under the account it proves and
+  // the owner confirms. Without the Gmail lane, every mbox stays under
+  // Archives, as before.
+  if (gmailInternalConnectorStore && gmailSecureConnectorStore) {
+    let gmailArchiveSet: { key: string; set: ReturnType<typeof createLaneTieredStoreSet> } | undefined;
+    // Every Gmail request an import makes passes one gate: imports keep to their share of the day.
+    const gmailImportGate = gmailImportAllowance({ usage: () => gmailRequestBudget?.status() });
+    // The account's labels, read once a day while the owner's rules stay the same.
+    let gmailLabelCache: { key: string; map: ReadonlyMap<string, string> } | undefined;
+    archiveSourceTargets.register(gmailArchiveTarget({
+      concurrencyKey: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+      exclusive: (task) => connectedHandleRegistryPath
+        ? runExclusiveForSource(connectedHandleRegistryPath, GMAIL_SOURCE_ID, task)
+        : task(),
+      lane: () => {
+        const handle = selectedSourceCredentialHandle({
+          env: process.env, pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
+          provider: 'gmail', capability: 'gmail.email.sync', handles: readActiveConnectedHandles(process.env),
+        });
+        // The owner's "always Private" rules of the current mail approval, as the live lane applies them.
+        const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
+        let ownerRules: NonNullable<ReturnType<typeof gmailConnectorScopeFromApproval>['ownerTierRules']> = [];
+        let approved = false;
+        try {
+          const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
+          if (approval) {
+            ownerRules = gmailConnectorScopeFromApproval(approval).ownerTierRules ?? [];
+            approved = true;
+          }
+        } catch {
+          // No current approval: no owner rules apply, as live reads nothing without one.
+        }
+        // The imports' one Gmail client for the pass: every attempt, retries included, is charged at its transport
+        // to the imports' allowance, then to the lane's day counter. Undefined without a current mail approval.
+        let importClientPromise: Promise<GmailApiClient> | undefined;
+        const importClient = (): Promise<GmailApiClient> | undefined => {
+          if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority) return undefined;
+          fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+          importClientPromise ??= new GoogleGmailSourceConnector({
+            credentialHandle: handle.handle,
+            ...(handle.accountRole ? { account: handle.accountRole } : {}),
+            requestBudget: gmailImportBudget(gmailRequestBudget, gmailImportGate),
+            maxRetries: GMAIL_IMPORT_MAX_RETRIES,
+          }).apiClientForTooling();
+          return importClientPromise;
+        };
+        // An import embeds what it writes as live does: under the live scope binding when there is an approval,
+        // else with the lane's own providers (the owner approved the import itself).
+        const bound = (provider: SourceEmbeddingProvider | undefined): SourceEmbeddingProvider | undefined => provider && approved && scopeRef && fileSourceScopeAuthority
+          ? scopeBoundEmbeddingProvider(provider, fileSourceScopeAuthority, scopeRef)
+          : provider;
+        const internalEmbedder = bound(sourceIndexEmbeddingProvider);
+        const secureEmbedder = secureLocalPolicyEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider)
+          ? bound(secureLocalPolicyEmbeddingProvider)
+          : undefined;
+        const key = JSON.stringify([ownerRules, approved ? scopeRef?.revision ?? null : null]);
+        if (gmailArchiveSet?.key !== key) {
+          gmailArchiveSet = {
+            key,
+            set: createLaneTieredStoreSet({
+              setId: GMAIL_SOURCE_ID,
+              internalStore: gmailInternalConnectorStore,
+              secureStore: gmailSecureConnectorStore,
+              ...(gmailTierLane?.publicStore ? { publicLeg: gmailTierLane.publicStore } : {}),
+              ...(gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {}),
+              tierClassification: { ...(ownerRules.length > 0 ? { rules: [...ownerRules] } : {}) },
+              ...(internalEmbedder ? { internalEmbeddingProvider: internalEmbedder } : {}),
+              ...(secureEmbedder ? { secureEmbeddingProvider: secureEmbedder } : {}),
+            }),
+          };
+        }
+        return {
+          set: gmailArchiveSet.set,
+          sync: gmailLaneSyncOptions(ownerRules),
+          // The account scope live Gmail writes under, so both inputs name one item.
+          account: gmailItemScopeFor(handle),
+          // Takeout names user labels; the account's list gives their ids, so an owner rule on a label id applies.
+          labelIds: async () => {
+            const cacheKey = `${new Date().toISOString().slice(0, 10)}\n${key}`;
+            if (gmailLabelCache?.key === cacheKey) return gmailLabelCache.map;
+            const client = importClient();
+            if (!client) return { unavailable: 'gmail_labels_unavailable' };
+            // Begun only when the allowance holds the list at its worst; a refusal spends nothing.
+            const room = gmailImportGate.check(GMAIL_IMPORT_LABELS_COST);
+            if (room !== true) {
+              const wait = gmailImportWait(room);
+              return { unavailable: wait.later, ...(wait.minimum !== undefined ? { minimum: wait.minimum } : {}) };
+            }
+            const api = await client;
+            if (!api.listLabels) return { unavailable: 'gmail_labels_unavailable' };
+            try {
+              const map = new Map((await api.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id] as const));
+              gmailLabelCache = { key: cacheKey, map };
+              return map;
+            } catch (error) {
+              if (error instanceof GmailImportWaitError) {
+                const wait = gmailImportWait(error.reason);
+                return { unavailable: wait.later, ...(wait.minimum !== undefined ? { minimum: wait.minimum } : {}) };
+              }
+              if (error instanceof GoogleRequestBudgetError) return { unavailable: 'gmail_requests_spent' };
+              throw error;
+            }
+          },
+          // A message without Takeout's id is matched by asking Gmail, under the live lane's day budget, and only
+          // while the owner's mail approval is current: nothing of the mailbox is read without one.
+          match: gmailHeaderMatch(async () => importClient(), {
+            allowance: gmailImportGate,
+            // The token's mailbox must not be another account than the one the registry names for Gmail.
+            sameAccount: (address) => {
+              const named = readSourceRegistry(process.env).accounts.find((entry) => entry.source_id === GMAIL_SOURCE_ID)?.provider_account_hash;
+              return named === undefined || compareProviderAccounts(named, googleAccountIdFromAddress(address)) !== 'different';
+            },
+          }),
+        };
+      },
+    }));
+  }
   // Exactly one Drive day counter per runtime, durable across restart.
   // Constructing it before the stores also keeps an invalid budget env from
   // creating the store files at all.
@@ -3553,7 +3723,12 @@ export async function main(): Promise<void> {
         env: process.env, pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
         provider: 'gmail', capability: 'gmail.email.sync', handles: readActiveConnectedHandles(process.env),
       });
-      return gmailPrivateStoreStatusScope({ authority: fileSourceScopeAuthority, handle });
+      return gmailPrivateStoreStatusScope({
+        authority: fileSourceScopeAuthority,
+        handle: handle ? { accountRole: gmailItemScopeFor(handle) } : undefined,
+        // Mail an import brought in counts whether or not live Gmail is connected and approved.
+        importAccountScope: gmailItemScopeFor(handle),
+      });
     }
     if (store === gmailInternalConnectorStore) return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
     const readScope = connectorStoreReadScope(store);
@@ -3762,7 +3937,7 @@ export async function main(): Promise<void> {
         ? { secureEmbeddingProvider: scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, scopeRef) }
         : {}),
       ...(handle?.handle ? { credentialHandle: handle.handle } : {}),
-      ...(handle?.accountRole ? { account: handle.accountRole } : {}),
+      account: gmailItemScopeFor(handle),
     })
     : undefined;
   };
@@ -4718,6 +4893,16 @@ export async function main(): Promise<void> {
         },
       ),
     ].filter((source): source is SourceSchedulerSource => source !== undefined);
+    // Gmail with no live lane (not connected, or no mail approval) whose stores hold mail an import brought in: a
+    // source with no sync of its own, so the embedding sweep and the private meaning backfill below still drain
+    // the imported history. Live approval governs live reads, not the account's own stores.
+    // Only mail an import brought in counts: kept live mail waits for its own lane's approval.
+    let gmailImportedHistory: SourceSchedulerSource | undefined;
+    if (!sources.some((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail) && gmailInternalConnectorStore && gmailSecureConnectorStore
+      && gmailHoldsImportedHistory([gmailInternalConnectorStore, gmailSecureConnectorStore, gmailTierLane?.publicStore?.current()])) {
+      gmailImportedHistory = createGmailImportedHistorySchedulerSource({ config: olympusConfig });
+      sources.push(gmailImportedHistory);
+    }
     // One embedding sweep per source that embeds, built once here from the
     // worker's own store registry: every mounted store of the source's corpora
     // (tier legs included, resolved per pass) with the identity it embeds
@@ -4740,6 +4925,17 @@ export async function main(): Promise<void> {
           && definition.activationMode !== 'lexical_only'
           && definition.embeddingPolicy !== 'disabled';
       };
+      // Gmail with no live lane: only what the imports brought, each store store-wide on its current provider
+      // (never a queue a live sync left under an approval that may no longer stand).
+      if (source === gmailImportedHistory) {
+        const importScope = gmailItemScopeFor(currentGmailHandle);
+        const importTargets = () => gmailImportedHistoryEmbeddingTargets({
+          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
+          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
+          accountScope: importScope,
+        });
+        return importTargets().length > 0 ? importTargets : undefined;
+      }
       const targets = () => connectorStores.flatMap((store) => {
         if (!corpusIds.has(store.corpusId)) return [];
         const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
@@ -4760,7 +4956,8 @@ export async function main(): Promise<void> {
       source, sovereigntyEngine, secureLocalPolicyEmbeddingProvider, sourceCorpusRegistry,
       scopeRefs, connectorStores, fullCorpusDefinitions, fileSourceScopeAuthority,
       readScope: connectorStoreReadScope, connectorStoreAccountScopes,
-      gmailAccountScope: currentGmailHandle?.accountRole,
+      gmailAccountScope: currentGmailHandle ? gmailItemScopeFor(currentGmailHandle) : undefined,
+      gmailImportAccountScope: gmailItemScopeFor(currentGmailHandle),
     }));
     const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
     return {

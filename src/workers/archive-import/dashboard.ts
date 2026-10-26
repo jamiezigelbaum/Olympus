@@ -768,7 +768,10 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       startedAt: record.created_at,
       ...(record.completed_at ? { importedAt: record.completed_at } : {}),
       ...(record.status === 'stopped' && record.stop ? { stop: { code: record.stop.code, ...(stopFile ? { file: stopFile } : {}) } } : {}),
-      gaps: gapsOf(record),
+      // Why it waits, as one plain line of its list: a limit too small says the least it must be.
+      gaps: record.status === 'importing' && record.waiting
+        ? [...gapsOf(record), { kind: record.waiting.reason, count: Math.max(1, Math.floor(record.waiting.minimum ?? 1)) }]
+        : gapsOf(record),
       skipped: tallies(record.findings.skipped),
     };
   };
@@ -1104,6 +1107,10 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         // The owner's own Stop is not something that needs them. An import-only source's import is its card's (presentCards).
         if (cardOf(record)) continue;
         if (record.status === 'stopped' && record.stop?.code !== 'stopped_by_owner') attention.push({ kind: 'stopped', id: record.archive_id, name: record.label });
+        // An import that waits for a limit only the owner can raise.
+        if (record.status === 'importing' && record.waiting?.minimum !== undefined) {
+          attention.push({ kind: 'waiting', id: record.archive_id, name: record.label, reason: record.waiting.reason, minimum: record.waiting.minimum });
+        }
       }
       // An import or a removal the scheduler will never run, and the setting why.
       const setting = scheduling();
