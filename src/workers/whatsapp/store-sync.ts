@@ -24,8 +24,11 @@ import {
 } from '../connector-store/tiered-store-set.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
+  addCaptureSpoolRedactions,
   clearCaptureSpoolSecrets,
+  sweepCaptureSpoolWhenSecretsChange,
   type CaptureSpoolRedactionResult,
+  type SpoolSecretJudge,
 } from '../connector-store/capture-spool-secrets.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import {
@@ -38,8 +41,10 @@ import {
   WHATSAPP_LIVE_CONNECTOR_ID,
   createWhatsAppLiveSourceConnector,
   emptyWhatsAppSpoolPassFindings,
+  isWhatsAppSpoolCursor,
   readWhatsAppLiveCaptureState,
   redactWhatsAppLiveSpoolSecrets,
+  whatsAppSpoolLineCursor,
   type WhatsAppSpoolPassFindings,
 } from './live-connector.ts';
 
@@ -72,6 +77,8 @@ export const WHATSAPP_SPOOL_REDACTION_FAILED_WARNING = 'whatsapp_spool_secret_re
 export const WHATSAPP_OVERSIZED_SPOOL_WARNING = 'whatsapp_oversized_spool_records';
 /** The resume point's file was replaced or has gone; see the counts. */
 export const WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING = 'whatsapp_spool_cursor_recovered';
+/** The bridge says it is disconnected: capture has stopped until it links again. */
+export const WHATSAPP_CAPTURE_DISCONNECTED_WARNING = 'whatsapp_capture_disconnected';
 /** The bridge dropped messages from a full queue within the stale threshold. */
 export const WHATSAPP_CAPTURE_DROPPED_WARNING = 'whatsapp_capture_dropped_messages';
 // Where the full-spool Secrets pass stands, kept in the set's tier ledger.
@@ -108,6 +115,8 @@ export interface WhatsAppConnectorStoreSyncReceipt {
     capture_age_seconds?: number;
     /** 1 when the bridge reports capture running and no message arrived within the threshold. */
     capture_quiet?: number;
+    /** 1 when the bridge says it is disconnected (past a short grace): capture has stopped. */
+    capture_stopped?: number;
     /**
      * Spool lines whose message was judged Secrets and that this pull
      * rewrote without their text (blanked ones included).
@@ -183,13 +192,25 @@ export function whatsAppLiveSyncScriptPaths(
 }
 
 // The store may also contain archive-import runs. Only a cursor shaped like the
-// live connector's file/line position can resume the live spool traversal.
+// live connector's spool position (`<file>:<lines>@<offset>`, or the older
+// `<file>:<lines>`) can resume the live spool traversal, as can the listing's
+// own resume point inside a page of one (core/source-inputs.ts).
 export function sanitizeWhatsAppLiveCursor(cursor: string | undefined): string | undefined {
   if (cursor === undefined) return undefined;
-  const separator = cursor.lastIndexOf(':');
-  const file = separator > 0 ? cursor.slice(0, separator) : '';
-  const line = separator > 0 ? cursor.slice(separator + 1) : '';
-  return file && /^\d+$/.test(line) ? cursor : undefined;
+  return isWhatsAppSpoolCursor(cursor) || isWhatsAppSpoolCursor(spoolPositionOf(cursor) ?? '') ? cursor : undefined;
+}
+
+/** The spool position a cursor stands at: itself, or the page start a resume point inside a page names. */
+function spoolPositionOf(cursor: string): string | undefined {
+  const inside = /^~in1~\d+~\d+~([\s\S]+)$/u.exec(cursor);
+  return inside ? inside[1] : cursor;
+}
+
+/** A committed cursor in the `<file>:<lines>` form the spool's Secrets clearing counts by. */
+function lineCursorOf(cursor: string | undefined): string | undefined {
+  if (cursor === undefined) return undefined;
+  const position = spoolPositionOf(cursor);
+  return position === undefined ? undefined : whatsAppSpoolLineCursor(position);
 }
 
 export function defaultWhatsAppInternalConnectorStoreDbPath(
@@ -337,16 +358,21 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
         // pass runs when the set of Secrets changed. The stores already hold
         // none of it; a failure is reported and retried on the next pull.
         try {
+          const committed = sanitizeWhatsAppLiveCursor(
+            tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined,
+          );
+          const through = lineCursorOf(committed);
+          const from = lineCursorOf(cursor);
           redacted = clearWhatsAppSpoolSecrets({
             spoolDir,
             account,
             mediaDir,
             relocateMediaPath: whatsappMovedPathMapper(env),
             ledger: tierSet.ledger,
-            ...(cursor ? { from: cursor } : {}),
-            through: sanitizeWhatsAppLiveCursor(
-              tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined,
-            ),
+            ...(from ? { from } : {}),
+            through,
+            // An idle pull read nothing new: no window to clear, only the whole-spool pass when the Secrets changed.
+            windowRead: committed !== cursor,
           });
         } catch (error) {
           redactionFailed = true;
@@ -388,20 +414,31 @@ export function clearWhatsAppSpoolSecrets(options: {
   through: string | undefined;
   /** Maps a media path a spool line names at the account's old place to the account folder (`whatsappMovedPathMapper`). */
   relocateMediaPath?: (path: string) => string;
+  /** False when the pull read nothing: the window is skipped and only a changed set of Secrets is swept. */
+  windowRead?: boolean;
 }): CaptureSpoolRedactionResult {
+  const redact = (window: { from?: string; through: string }, judge: SpoolSecretJudge) => redactWhatsAppLiveSpoolSecrets({
+    spoolDir: options.spoolDir,
+    account: options.account,
+    ...(options.mediaDir ? { mediaDir: options.mediaDir } : {}),
+    ...(options.relocateMediaPath ? { relocateMediaPath: options.relocateMediaPath } : {}),
+    ...window,
+    judge,
+  });
+  if (options.windowRead === false && options.through !== undefined) {
+    const through = options.through;
+    return addCaptureSpoolRedactions(sweepCaptureSpoolWhenSecretsChange({
+      ledger: options.ledger,
+      stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
+      sweep: (judge) => redact({ through }, judge),
+    }));
+  }
   return clearCaptureSpoolSecrets({
     ledger: options.ledger,
     stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
     ...(options.from ? { from: options.from } : {}),
     through: options.through,
-    redact: (window, judge) => redactWhatsAppLiveSpoolSecrets({
-      spoolDir: options.spoolDir,
-      account: options.account,
-      ...(options.mediaDir ? { mediaDir: options.mediaDir } : {}),
-      ...(options.relocateMediaPath ? { relocateMediaPath: options.relocateMediaPath } : {}),
-      ...window,
-      judge,
-    }),
+    redact,
   });
 }
 
@@ -422,6 +459,10 @@ function whatsappSyncReceipt(
     state.status?.connectedThrough,
     nowMs,
     staleThresholdSeconds,
+    // The bridge says it is not connected: capture has stopped, however recent its last word.
+    state.status !== undefined && !state.status.connected
+      ? { ...(state.status.connectedThrough ?? state.status.updatedAt ? { stoppedAt: (state.status.connectedThrough ?? state.status.updatedAt)! } : {}) }
+      : undefined,
   );
   const lastDroppedMs = Date.parse(state.status?.lastDroppedAt ?? '');
   const recentDrop = Number.isFinite(lastDroppedMs) && nowMs - lastDroppedMs <= staleThresholdSeconds * 1_000;
@@ -432,6 +473,7 @@ function whatsappSyncReceipt(
     ...(findings.cursorsRecovered > 0 || findings.cursorFilesMissing > 0 ? [WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING] : []),
     ...(recentDrop && (state.status?.droppedMessages ?? 0) > 0 ? [WHATSAPP_CAPTURE_DROPPED_WARNING] : []),
     ...(capture.status === 'stale' ? [WHATSAPP_CAPTURE_STALE_WARNING] : []),
+    ...(capture.stopped ? [WHATSAPP_CAPTURE_DISCONNECTED_WARNING] : []),
     ...(capture.status === 'unavailable' ? [WHATSAPP_CAPTURE_UNAVAILABLE_WARNING] : []),
     ...(redactionFailed ? [WHATSAPP_SPOOL_REDACTION_FAILED_WARNING] : []),
   ];
