@@ -311,6 +311,31 @@ describe('live pictures and videos are children of their message', () => {
     expect(JSON.parse(readFileSync(day, 'utf8'))).not.toHaveProperty('media_key');
   });
 
+  test('a media folder that cannot be read fails a Secret picture\'s cleanup: never certified past it', () => {
+    const target = lane();
+    const photo = join(target.images, 'U1.jpg');
+    writeFileSync(photo, 'secret picture');
+    const day = join(target.spoolDir, '2026-07-01.jsonl');
+    const original = spoolLine({ id: 'U1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', media_key: 'a2V5' });
+    writeFileSync(day, original);
+    const clear = () => redactWhatsAppLiveSpoolSecrets({
+      spoolDir: target.spoolDir,
+      account: 'personal',
+      judge: (identity) => (identity.providerItemId === 'U1#child:media' ? 'content' : undefined),
+      mediaDirs: [join(target.root, 'media')],
+    });
+    // The video folder can be written and entered, never listed: a temp of U1 there could not be found.
+    chmodSync(target.video, 0o300);
+    try {
+      expect(clear).toThrow();
+      expect(readFileSync(day, 'utf8')).toBe(original);
+    } finally {
+      chmodSync(target.video, 0o700);
+    }
+    clear();
+    expect(JSON.parse(readFileSync(day, 'utf8'))).not.toHaveProperty('media_key');
+  });
+
   test('a live media child is held until its own judgment', async () => {
     const target = lane();
     const photo = join(target.images, 'H1.jpg');

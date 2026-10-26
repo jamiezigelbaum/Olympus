@@ -101482,19 +101482,22 @@ function processAlive3(pid) {
     return error.code === "EPERM";
   }
 }
-function mediaTempFiles(roots) {
+function mediaTempFiles(roots, strict) {
   const seen = new Set;
   const found = [];
   const walk = (dir, depth2) => {
-    const real = existingRealPath(dir);
-    if (real === undefined || seen.has(real))
-      return;
-    seen.add(real);
+    let real;
     let entries;
     try {
+      real = realPathUnlessGone(dir);
+      if (real === undefined || seen.has(real))
+        return;
+      seen.add(real);
       entries = readdirSync18(real, { withFileTypes: true });
-    } catch {
-      return;
+    } catch (error) {
+      if (error.code === "ENOENT" || !strict)
+        return;
+      throw error;
     }
     for (const entry of entries) {
       if (entry.isDirectory() && depth2 < MEDIA_TEMP_DEPTH)
@@ -101517,7 +101520,7 @@ function removeTemp(path) {
 }
 function sweepOrphanMediaTemps(roots, nowMs = Date.now()) {
   const boot = whatsAppBootNonce();
-  for (const { path, name } of mediaTempFiles(roots)) {
+  for (const { path, name } of mediaTempFiles(roots, false)) {
     const named = MEDIA_TEMP.exec(name);
     if (named) {
       if (named[2] === boot && processAlive3(Number(named[1])))
@@ -101537,7 +101540,7 @@ function sweepOrphanMediaTemps(roots, nowMs = Date.now()) {
 }
 function deleteMediaTemps(message2, roots) {
   const stem = whatsAppMediaFileStem(message2.chatJid, message2.id);
-  for (const { path, name } of mediaTempFiles(roots)) {
+  for (const { path, name } of mediaTempFiles(roots, true)) {
     if (MEDIA_TEMP.exec(name)?.[3] === stem)
       removeTemp(path);
   }

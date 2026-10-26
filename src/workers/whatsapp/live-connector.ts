@@ -1494,20 +1494,25 @@ function processAlive(pid: number): boolean {
  * Every media temp under the roots, walked to MEDIA_TEMP_DEPTH (a folder
  * account's media root holds the images and video folders), each folder once.
  * The one list both the sweep and a message's cleanup read, so they never
- * look in different places.
+ * look in different places. `strict` (a Secret message's cleanup): a folder
+ * that cannot be read for any reason but its being gone fails the walk, so
+ * the cleanup is never certified past a folder it could not look in; the
+ * routine sweep passes over it.
  */
-function mediaTempFiles(roots: readonly string[]): Array<{ path: string; name: string }> {
+function mediaTempFiles(roots: readonly string[], strict: boolean): Array<{ path: string; name: string }> {
   const seen = new Set<string>();
   const found: Array<{ path: string; name: string }> = [];
   const walk = (dir: string, depth: number): void => {
-    const real = existingRealPath(dir);
-    if (real === undefined || seen.has(real)) return;
-    seen.add(real);
+    let real: string | undefined;
     let entries: Dirent[];
     try {
+      real = realPathUnlessGone(dir);
+      if (real === undefined || seen.has(real)) return;
+      seen.add(real);
       entries = readdirSync(real, { withFileTypes: true });
-    } catch {
-      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' || !strict) return;
+      throw error;
     }
     for (const entry of entries) {
       if (entry.isDirectory() && depth < MEDIA_TEMP_DEPTH) walk(join(real, entry.name), depth + 1);
@@ -1534,7 +1539,7 @@ function removeTemp(path: string): void {
  */
 function sweepOrphanMediaTemps(roots: readonly string[], nowMs = Date.now()): void {
   const boot = whatsAppBootNonce();
-  for (const { path, name } of mediaTempFiles(roots)) {
+  for (const { path, name } of mediaTempFiles(roots, false)) {
     const named = MEDIA_TEMP.exec(name);
     if (named) {
       if (named[2] === boot && processAlive(Number(named[1]))) continue;
@@ -1557,7 +1562,7 @@ function sweepOrphanMediaTemps(roots: readonly string[], nowMs = Date.now()): vo
 /** Removes every temp of one message's media, whoever was writing it; a temp that cannot be removed fails the cleanup. */
 function deleteMediaTemps(message: SpoolMessage, roots: readonly string[]): void {
   const stem = whatsAppMediaFileStem(message.chatJid, message.id);
-  for (const { path, name } of mediaTempFiles(roots)) {
+  for (const { path, name } of mediaTempFiles(roots, true)) {
     if (MEDIA_TEMP.exec(name)?.[3] === stem) removeTemp(path);
   }
 }
