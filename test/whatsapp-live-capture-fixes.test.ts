@@ -169,8 +169,8 @@ describe('cursor recovery', () => {
     const dir = spoolDir({ '2026-10-25.jsonl': line('a') + line('b') });
     const findings = emptyWhatsAppSpoolPassFindings();
     const connector = createWhatsAppLiveSourceConnector({ spoolDir: dir, findings });
-    // A cursor of the current reset count (0: the spool was never reset).
-    const pages = await drain(connector.listItems({ cursor: `2026-10-25.jsonl:2@${Buffer.byteLength(line('a') + line('b'))}~r0` }));
+    // A cursor of the current reset count (1: the first index build this spool's counter sees).
+    const pages = await drain(connector.listItems({ cursor: `2026-10-25.jsonl:2@${Buffer.byteLength(line('a') + line('b'))}~r1` }));
     expect(ids(pages)).toEqual([]);
     expect(findings).toEqual(emptyWhatsAppSpoolPassFindings());
   });
@@ -179,7 +179,7 @@ describe('cursor recovery', () => {
     const dir = spoolDir({ '2026-10-26.jsonl': line('next-day') });
     const findings = emptyWhatsAppSpoolPassFindings();
     const connector = createWhatsAppLiveSourceConnector({ spoolDir: dir, findings });
-    const pages = await drain(connector.listItems({ cursor: '2026-10-25.jsonl:7@512~r0' }));
+    const pages = await drain(connector.listItems({ cursor: '2026-10-25.jsonl:7@512~r1' }));
     expect(ids(pages)).toEqual(['next-day']);
     expect(findings.cursorFilesMissing).toBe(1);
   });

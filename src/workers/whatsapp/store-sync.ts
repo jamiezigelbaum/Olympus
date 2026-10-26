@@ -410,6 +410,15 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
  * read, and records a file only once its clearing succeeded, so a failure is
  * owed until a pull clears it. A pull that owes nothing reads no spool file.
  * A whole-spool pass still runs when the set of Secrets changed.
+ *
+ * Clearing the Secrets already known never waits on the listing: a file past
+ * the cursor that was never cleared, or that no longer holds what clearing
+ * recorded of it (rewritten, replaced, or a reset sent the cursor back past
+ * it), is cleared of them from its start on every pull until it is recorded,
+ * whatever the cursor or the pull's item limit. That clearing is bounded by
+ * bytes per pull (at least one whole file), and certifies none of its lines
+ * for a later judgment: those lines are cleared again as the cursor reaches
+ * them.
  */
 export function clearWhatsAppSpoolSecrets(options: {
   spoolDir: string;
@@ -422,6 +431,8 @@ export function clearWhatsAppSpoolSecrets(options: {
   throughOffset?: number;
   /** Maps a media path a spool line names at the account's old place to the account folder (`whatsappMovedPathMapper`). */
   relocateMediaPath?: (path: string) => string;
+  /** The bytes a pull may read clearing known Secrets ahead of the cursor (default 32 MiB; at least one whole file). */
+  aheadBudgetBytes?: number;
 }): CaptureSpoolRedactionResult {
   const redact = (window: { from?: string; through: string }, judge: SpoolSecretJudge) => redactWhatsAppLiveSpoolSecrets({
     spoolDir: options.spoolDir,
@@ -449,17 +460,17 @@ export function clearWhatsAppSpoolSecrets(options: {
     const before = spoolFileIdentity(path);
     if (!before) continue;
     const known = recorded[file];
-    // The same file holding the same bytes up to where clearing reached: anything after it was appended.
-    const same = known !== undefined && known.identity === before.identity && before.size >= known.offset
-      && spoolBoundaryHolds(path, known.offset, known.boundary);
+    const same = holds(path, before, known);
+    // How far the record is certified for a later judgment: a file cleared ahead of the cursor, none of it.
+    const certified = known?.judgedLines ?? known?.lines ?? 0;
     // A file before the cursor's is cleared whole; the cursor's own, up to the cursor. A file that broke the
     // spool contract (or was never cleared) keeps none of its old boundaries: it is cleared whole, from its start.
     const end = same && file === throughFile ? throughLine : ALL_LINES;
-    if (same && (end === ALL_LINES ? before.size === known.size : known.lines >= end)) {
-      next[file] = known;
+    if (same && (end === ALL_LINES ? before.size === known!.size && certified === known!.lines : certified >= end)) {
+      next[file] = known!;
       continue;
     }
-    const start = same ? known.lines : 0;
+    const start = same ? Math.min(certified, known!.lines) : 0;
     // Where this scan stops is fixed before it starts: the lines the file holds now (a whole file) or the cursor's.
     // A line appended while it runs is past that boundary, so it is owed to the next pull, never certified unread.
     const scanned = end === ALL_LINES
@@ -477,13 +488,41 @@ export function clearWhatsAppSpoolSecrets(options: {
     // Recorded at the boundary scanned, as the file is after its own rewrite (its first line may have changed): the
     // size is the one before the scan, so anything written since is owed.
     const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size);
-    if (entry) next[file] = entry;
+    // The cursor's own file cleared whole: what lies past the cursor is not judged yet, so it is not certified.
+    if (entry) next[file] = file === throughFile && end === ALL_LINES && scanned.lines > throughLine ? { ...entry, judgedLines: throughLine } : entry;
     else delete next[file];
   }
   // Files not reached keep what was recorded of them (a failure stops the pass); files that are gone are forgotten.
   const present = new Set(files);
   for (const [file, known] of Object.entries(recorded)) {
     if (next[file] === undefined && present.has(file) && file >= (failure === undefined ? throughFile : '')) next[file] = known;
+  }
+  // Ahead of the cursor: every file never cleared, or no longer as clearing recorded it, is cleared of the Secrets
+  // already known, from its start, within the byte budget (one whole file at least). Its lines stay uncertified.
+  if (failure === undefined) {
+    let budget = options.aheadBudgetBytes ?? WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES;
+    for (const file of files) {
+      if (file <= throughFile) continue;
+      const path = join(options.spoolDir, file);
+      const before = spoolFileIdentity(path);
+      if (!before) continue;
+      if (holds(path, before, next[file])) continue;
+      if (budget <= 0) break;
+      const scanned = terminatedLinesEnd(path);
+      if (scanned === undefined) continue;
+      try {
+        const cleared = redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge);
+        if (cleared.recordsRedacted + cleared.recordsBlanked > 0) rewritten.add(file);
+        result = addCaptureSpoolRedactions(result, cleared);
+      } catch (error) {
+        failure = error;
+        break;
+      }
+      budget -= scanned.offset;
+      const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size);
+      if (entry) next[file] = { ...entry, judgedLines: 0 };
+      else delete next[file];
+    }
   }
   options.ledger.writeMeta(CLEARED_FILES_KEY, JSON.stringify(next));
   refreshIndex(options.spoolDir, rewritten);
@@ -519,9 +558,22 @@ interface ClearedFile {
   offset: number;
   boundary: string;
   size: number;
+  /**
+   * Present on a file cleared ahead of the cursor: the lines of it certified
+   * for a later judgment (none). Absent: all `lines`.
+   */
+  judgedLines?: number;
 }
 
 const ALL_LINES = -1;
+/** What a pull may read clearing known Secrets ahead of the cursor (at least one whole file). */
+export const WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
+
+/** The same file holding the same bytes up to where clearing reached: anything after it was appended. */
+function holds(path: string, now: { identity: string; size: number }, known: ClearedFile | undefined): known is ClearedFile {
+  return known !== undefined && known.identity === now.identity && now.size >= known.offset
+    && spoolBoundaryHolds(path, known.offset, known.boundary);
+}
 const CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 
 /**
@@ -558,7 +610,8 @@ function readClearedFiles(ledger: TierLedger): Record<string, ClearedFile> {
     for (const [file, entry] of Object.entries(parsed)) {
       if (entry && typeof entry.identity === 'string' && typeof entry.boundary === 'string'
         && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines) && entry.lines >= 0
-        && Number.isSafeInteger(entry.size)) valid[file] = entry;
+        && Number.isSafeInteger(entry.size)
+        && (entry.judgedLines === undefined || (Number.isSafeInteger(entry.judgedLines) && entry.judgedLines >= 0))) valid[file] = entry;
     }
     return valid;
   } catch {

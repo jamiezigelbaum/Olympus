@@ -13,8 +13,10 @@
 //   and a breach is rare enough for it to be cheap.
 // - Nothing is owed or settled per reader: a reader is caught up exactly when
 //   its cursor carries the current count.
-// - It fails closed: a listing that cannot open or write it fails before the
-//   index forgets anything, never reads on without it.
+// - It fails closed: a listing that cannot open or write it (or open the
+//   index) fails before the index forgets anything, and hands out no cursor.
+// - The first index build it sees counts too: a cursor handed out before the
+//   counter knew any build cannot say what that build missed.
 
 import { Database } from 'bun:sqlite';
 import { chmodSync } from 'node:fs';
@@ -66,17 +68,16 @@ export class WhatsAppSpoolResets {
   }
 
   /**
-   * The index in use is the build `build` (spool-index.ts, `build`): a build
-   * other than the last one seen (the index was deleted or rebuilt since)
-   * counts one reset. Returns the current count.
+   * The index in use is the build `build` (spool-index.ts, `generation`): a
+   * build other than the last one seen (the index was deleted or rebuilt
+   * since, or none was seen yet) counts one reset. Returns the current count.
    */
   noteIndexBuild(build: string): number {
     return this.db.transaction(() => {
       const seen = this.read('index_build');
       let count = this.current();
       if (seen !== build) {
-        // The first build ever seen resets nothing a cursor could carry: no cursor was handed out before it.
-        if (seen !== undefined) count += 1;
+        count += 1;
         this.write('resets', String(count));
         this.write('index_build', build);
       }

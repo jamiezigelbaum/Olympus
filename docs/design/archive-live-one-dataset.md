@@ -478,8 +478,14 @@ Live WhatsApp capture, with no change to identities or stores
   reset is rare enough for a full replay to be cheap. Nothing is owed or
   settled per reader: a reader is caught up when its cursor carries the
   current count, so one reader catching up never affects another, and a pass
-  that fails before its cursor commits reads the spool again. A counter that
-  cannot be opened fails the listing before anything is forgotten. Every
+  that fails before its cursor commits reads the spool again. A counter or
+  index that cannot be opened fails the listing before anything is forgotten,
+  and no cursor is handed out; the first index build the counter sees counts
+  as a reset too. Clearing the Secrets already known never waits on a
+  replay: a file past the cursor that was never cleared, or no longer holds
+  what clearing recorded of it, is cleared of them from its start on the
+  next pull, whatever the cursor or item limit (bounded by bytes, one whole
+  file at least), with none of its lines certified for a later judgment. Every
   other durable write that comes before the one
   that depends on it is safe to repeat: a Secrets rewrite before its cleared
   record (redone, the same rewrite), the index's rows before the tier set's

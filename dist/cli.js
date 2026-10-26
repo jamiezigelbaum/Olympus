@@ -99937,8 +99937,7 @@ class WhatsAppSpoolResets {
       const seen = this.read("index_build");
       let count = this.current();
       if (seen !== build) {
-        if (seen !== undefined)
-          count += 1;
+        count += 1;
         this.write("resets", String(count));
         this.write("index_build", build);
       }
@@ -100542,12 +100541,10 @@ async function* liveRecords(spoolDir, options) {
   if (!existsSync72(spoolDir))
     return;
   const resets = WhatsAppSpoolResets.open(spoolDir);
-  let index;
-  try {
-    index = WhatsAppSpoolIndex.open(spoolDir);
-  } catch (error) {
+  const index = WhatsAppSpoolIndex.open(spoolDir);
+  if (!index) {
     resets.close();
-    throw error;
+    throw new Error("The WhatsApp spool index cannot be opened.");
   }
   const ledger = WhatsAppMatchLedger.open(spoolDir);
   const pass = {
@@ -100560,18 +100557,16 @@ async function* liveRecords(spoolDir, options) {
     ledger
   };
   try {
-    if (index) {
-      pass.reset = resets.noteIndexBuild(index.generation());
-      index.reconcile(spoolDir, () => {
-        pass.reset = resets.bump();
-      });
-    }
+    pass.reset = resets.noteIndexBuild(index.generation());
+    index.reconcile(spoolDir, () => {
+      pass.reset = resets.bump();
+    });
     if (position !== undefined && position.reset !== pass.reset) {
       pass.findings.cursorsRecovered += 1;
       position = undefined;
     }
     position = resolveStart(spoolDir, position, pass);
-    if (index && !catchUpIndex(spoolDir, index, position, pass)) {
+    if (!catchUpIndex(spoolDir, index, position, pass)) {
       options.findings.passBudgetReached += 1;
       yield { records: [], ...position ? { nextCursor: cursorFromPosition(position, pass.reset) } : {}, done: false };
       return;
@@ -100592,7 +100587,7 @@ async function* liveRecords(spoolDir, options) {
       }
     }
   } finally {
-    index?.close();
+    index.close();
     ledger?.close();
     resets.close();
   }
@@ -101465,13 +101460,14 @@ function clearWhatsAppSpoolSecrets(options) {
     if (!before)
       continue;
     const known = recorded[file];
-    const same = known !== undefined && known.identity === before.identity && before.size >= known.offset && spoolBoundaryHolds(path, known.offset, known.boundary);
+    const same = holds(path, before, known);
+    const certified = known?.judgedLines ?? known?.lines ?? 0;
     const end = same && file === throughFile ? throughLine : ALL_LINES;
-    if (same && (end === ALL_LINES ? before.size === known.size : known.lines >= end)) {
+    if (same && (end === ALL_LINES ? before.size === known.size && certified === known.lines : certified >= end)) {
       next[file] = known;
       continue;
     }
-    const start = same ? known.lines : 0;
+    const start = same ? Math.min(certified, known.lines) : 0;
     const scanned = end === ALL_LINES ? terminatedLinesEnd(path) : { lines: end, offset: options.throughOffset ?? offsetAfterLines(path, end) };
     if (scanned === undefined || scanned.offset === undefined)
       continue;
@@ -101486,7 +101482,7 @@ function clearWhatsAppSpoolSecrets(options) {
     }
     const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size);
     if (entry)
-      next[file] = entry;
+      next[file] = file === throughFile && end === ALL_LINES && scanned.lines > throughLine ? { ...entry, judgedLines: throughLine } : entry;
     else
       delete next[file];
   }
@@ -101494,6 +101490,39 @@ function clearWhatsAppSpoolSecrets(options) {
   for (const [file, known] of Object.entries(recorded)) {
     if (next[file] === undefined && present.has(file) && file >= (failure2 === undefined ? throughFile : ""))
       next[file] = known;
+  }
+  if (failure2 === undefined) {
+    let budget = options.aheadBudgetBytes ?? WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES;
+    for (const file of files) {
+      if (file <= throughFile)
+        continue;
+      const path = join89(options.spoolDir, file);
+      const before = spoolFileIdentity(path);
+      if (!before)
+        continue;
+      if (holds(path, before, next[file]))
+        continue;
+      if (budget <= 0)
+        break;
+      const scanned = terminatedLinesEnd(path);
+      if (scanned === undefined)
+        continue;
+      try {
+        const cleared = redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge2);
+        if (cleared.recordsRedacted + cleared.recordsBlanked > 0)
+          rewritten.add(file);
+        result = addCaptureSpoolRedactions(result, cleared);
+      } catch (error) {
+        failure2 = error;
+        break;
+      }
+      budget -= scanned.offset;
+      const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size);
+      if (entry)
+        next[file] = { ...entry, judgedLines: 0 };
+      else
+        delete next[file];
+    }
   }
   options.ledger.writeMeta(CLEARED_FILES_KEY, JSON.stringify(next));
   refreshIndex(options.spoolDir, rewritten);
@@ -101516,6 +101545,9 @@ function clearWhatsAppSpoolSecrets(options) {
     refreshIndex(options.spoolDir, new Set(files));
   }
   return addCaptureSpoolRedactions(result, sweep);
+}
+function holds(path, now, known) {
+  return known !== undefined && known.identity === now.identity && now.size >= known.offset && spoolBoundaryHolds(path, known.offset, known.boundary);
 }
 function clearedFileNow(path, lines, offset, size) {
   const identity2 = spoolFileIdentity(path);
@@ -101547,7 +101579,7 @@ function readClearedFiles(ledger) {
     const parsed = JSON.parse(raw);
     const valid = {};
     for (const [file, entry] of Object.entries(parsed)) {
-      if (entry && typeof entry.identity === "string" && typeof entry.boundary === "string" && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines) && entry.lines >= 0 && Number.isSafeInteger(entry.size))
+      if (entry && typeof entry.identity === "string" && typeof entry.boundary === "string" && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines) && entry.lines >= 0 && Number.isSafeInteger(entry.size) && (entry.judgedLines === undefined || Number.isSafeInteger(entry.judgedLines) && entry.judgedLines >= 0))
         valid[file] = entry;
     }
     return valid;
@@ -101613,7 +101645,7 @@ function whatsappSyncReceipt(run, findings, state, nowMs, staleThresholdSeconds,
 function whatsappCaptureStaleThresholdSeconds(configured, env) {
   return captureStaleThresholdSeconds(configured, env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_STALE_THRESHOLD_SECONDS, "WhatsApp");
 }
-var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_LIVE_CORPUS_ID = "secure_local.whatsapp.messages", WHATSAPP_PERSONAL_ACCOUNT_SCOPE = "personal", WHATSAPP_INTERNAL_CORPUS_ID = "internal.whatsapp.messages", WHATSAPP_PRODUCT_CONNECTOR_ID = "whatsapp_product_spool", WHATSAPP_STORE_PLACEMENT, WHATSAPP_EXTRACTION_SCOPE_KEY = "whatsapp.personal.messages", WHATSAPP_MALFORMED_SPOOL_WARNING = "whatsapp_malformed_spool_lines", WHATSAPP_UNRESOLVED_REACTIONS_WARNING = "whatsapp_unresolved_reaction_targets", WHATSAPP_CAPTURE_STALE_WARNING = "whatsapp_capture_spool_stale", WHATSAPP_CAPTURE_UNAVAILABLE_WARNING = "whatsapp_capture_freshness_unavailable", WHATSAPP_SPOOL_REDACTION_FAILED_WARNING = "whatsapp_spool_secret_redaction_failed", WHATSAPP_OVERSIZED_SPOOL_WARNING = "whatsapp_oversized_spool_records", WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING = "whatsapp_spool_cursor_recovered", WHATSAPP_CAPTURE_DISCONNECTED_WARNING = "whatsapp_capture_disconnected", WHATSAPP_CAPTURE_DROPPED_WARNING = "whatsapp_capture_dropped_messages", WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", ALL_LINES = -1, CLEARED_FILES_KEY;
+var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_LIVE_CORPUS_ID = "secure_local.whatsapp.messages", WHATSAPP_PERSONAL_ACCOUNT_SCOPE = "personal", WHATSAPP_INTERNAL_CORPUS_ID = "internal.whatsapp.messages", WHATSAPP_PRODUCT_CONNECTOR_ID = "whatsapp_product_spool", WHATSAPP_STORE_PLACEMENT, WHATSAPP_EXTRACTION_SCOPE_KEY = "whatsapp.personal.messages", WHATSAPP_MALFORMED_SPOOL_WARNING = "whatsapp_malformed_spool_lines", WHATSAPP_UNRESOLVED_REACTIONS_WARNING = "whatsapp_unresolved_reaction_targets", WHATSAPP_CAPTURE_STALE_WARNING = "whatsapp_capture_spool_stale", WHATSAPP_CAPTURE_UNAVAILABLE_WARNING = "whatsapp_capture_freshness_unavailable", WHATSAPP_SPOOL_REDACTION_FAILED_WARNING = "whatsapp_spool_secret_redaction_failed", WHATSAPP_OVERSIZED_SPOOL_WARNING = "whatsapp_oversized_spool_records", WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING = "whatsapp_spool_cursor_recovered", WHATSAPP_CAPTURE_DISCONNECTED_WARNING = "whatsapp_capture_disconnected", WHATSAPP_CAPTURE_DROPPED_WARNING = "whatsapp_capture_dropped_messages", WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", ALL_LINES = -1, WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES, CLEARED_FILES_KEY;
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
   init_source_placement();
@@ -101629,6 +101661,7 @@ var init_store_sync2 = __esm(() => {
     trustTier: "S4",
     trustDomain: "secure_local"
   });
+  WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
   CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 });
 
@@ -141742,7 +141775,7 @@ function privacyLogic(config2) {
 `);
     return TOPICS.filter((topic) => named(topic, own3) || answered.indexOf(topic.id) >= 0).map((topic) => topic.id);
   }
-  function holds(segment, label) {
+  function holds2(segment, label) {
     let from = 0;
     for (;; ) {
       const at = segment.indexOf(label, from);
@@ -141775,7 +141808,7 @@ function privacyLogic(config2) {
       const answer = {};
       for (const [option, side] of topic.options) {
         const label = words2.topics[id].options[option] || "";
-        answer[option] = label && holds(" " + privatePart, label) ? "private" : label && holds(" " + sharePart, label) ? "share" : side;
+        answer[option] = label && holds2(" " + privatePart, label) ? "private" : label && holds2(" " + sharePart, label) ? "share" : side;
       }
       out[id] = answer;
     }
@@ -167846,10 +167879,10 @@ async function digestArchiveFiles(root, files, shouldContinue) {
   }
   return digests;
 }
-function repeatedIndexes(items, holds, seen) {
+function repeatedIndexes(items, holds2, seen) {
   const repeated = [];
   items.forEach((item, index) => {
-    if (seen.has(item.identity.localItemId) || holds(item.identity))
+    if (seen.has(item.identity.localItemId) || holds2(item.identity))
       repeated.push(index);
     seen.add(item.identity.localItemId);
   });

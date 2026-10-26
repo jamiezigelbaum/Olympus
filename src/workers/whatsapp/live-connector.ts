@@ -633,12 +633,11 @@ async function* liveRecords(
   if (!existsSync(spoolDir)) return;
   // Fails closed: a counter that cannot be opened ends the listing here, before the index forgets anything.
   const resets = WhatsAppSpoolResets.open(spoolDir);
-  let index: WhatsAppSpoolIndex | undefined;
-  try {
-    index = WhatsAppSpoolIndex.open(spoolDir);
-  } catch (error) {
+  // So does an index that cannot be opened: without it no breach can be found, so no cursor is handed out.
+  const index = WhatsAppSpoolIndex.open(spoolDir);
+  if (!index) {
     resets.close();
-    throw error;
+    throw new Error('The WhatsApp spool index cannot be opened.');
   }
   const ledger = WhatsAppMatchLedger.open(spoolDir);
   const pass: SpoolPassState = {
@@ -654,10 +653,8 @@ async function* liveRecords(
     // The index is trusted only for the files that are there, as they are. A file that broke the spool contract
     // (replaced, cut and written again), or a rebuilt index (it no longer knows what the files held), counts one
     // reset of the whole spool, written durably before the index forgets anything (spool-resets.ts).
-    if (index) {
-      pass.reset = resets.noteIndexBuild(index.generation());
-      index.reconcile(spoolDir, () => { pass.reset = resets.bump(); });
-    }
+    pass.reset = resets.noteIndexBuild(index.generation());
+    index.reconcile(spoolDir, () => { pass.reset = resets.bump(); });
     // A cursor of another reset count, or of none, reads the whole spool again from its start: intake is
     // idempotent by identity and version, so nothing is stored twice.
     if (position !== undefined && position.reset !== pass.reset) {
@@ -666,7 +663,7 @@ async function* liveRecords(
     }
     position = resolveStart(spoolDir, position, pass);
     // The index catches up to where this listing starts before any page is aggregated from it.
-    if (index && !catchUpIndex(spoolDir, index, position, pass)) {
+    if (!catchUpIndex(spoolDir, index, position, pass)) {
       options.findings.passBudgetReached += 1;
       yield { records: [], ...(position ? { nextCursor: cursorFromPosition(position, pass.reset) } : {}), done: false };
       return;
@@ -688,7 +685,7 @@ async function* liveRecords(
       }
     }
   } finally {
-    index?.close();
+    index.close();
     ledger?.close();
     resets.close();
   }
