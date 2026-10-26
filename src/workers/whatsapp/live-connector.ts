@@ -65,7 +65,7 @@
 //   reaction re-emit judges it Secrets again.
 
 import { existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative } from 'node:path';
+import { basename, isAbsolute, join, relative } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
@@ -97,6 +97,7 @@ import {
 } from './reaction-index.ts';
 import { WhatsAppSpoolIndex, comparePlaces, type SpoolPlace } from './spool-index.ts';
 import { WhatsAppMatchLedger } from './match-ledger.ts';
+import { whatsAppMediaFileLocator, type WhatsAppChildReader } from './child-media.ts';
 import { OWNER_SENDER, liveMatchKeys, nameKey } from './match-keys.ts';
 import {
   WHATSAPP_SPOOL_MAX_RECORD_BYTES,
@@ -133,6 +134,8 @@ export interface WhatsAppLiveSourceConnectorOptions {
   passByteBudget?: number;
   /** A record longer than this is skipped and counted (default 1 MiB). */
   maxRecordBytes?: number;
+  /** Reads a child's bytes by its locator (child-media.ts); absent: children cannot be read here. */
+  readChild?: WhatsAppChildReader;
 }
 
 /** What one or more listings skipped or recovered, as counts only. */
@@ -328,7 +331,7 @@ export function createWhatsAppLiveSourceConnector(
     return rawItemFromSpoolMessage(match, account, nowIso(), reactions);
   };
 
-  const builder = createRecordBuilder(account, fetchItem, authenticate);
+  const builder = createRecordBuilder(account, fetchItem, authenticate, options.readChild);
   // The spool is the connector's live input: its records, turned into items
   // by the connector's one builder under the intake rule (core/source-inputs.ts),
   // so a record read again (a recovered cursor, a redelivery) never replaces
@@ -350,7 +353,8 @@ export function createWhatsAppLiveSourceConnector(
     family: 'chat',
     authenticate,
     listItems: (listOptions?: SourceConnectorListOptions) => connector.listItems(listOptions),
-    fetchItem,
+    // A child is read by its locator; a message from the spool.
+    fetchItem: (localItemId, fetchOptions) => builder.fetchItem(localItemId, fetchOptions),
     classificationSignals: whatsAppClassificationSignals,
   };
 }
@@ -404,7 +408,7 @@ function createRecordBuilder(
           authoredAt: record.timestamp,
         },
         // A child whose bytes can be read brings content: a later record that has them fills one that had not.
-        ...(record.children ?? []).map((child) => ({ identity: childIdentity(own, child), bringsContent: child.available && child.locator !== undefined })),
+        ...childrenOf(record).map((child) => ({ identity: childIdentity(own, child), bringsContent: child.available && child.locator !== undefined })),
       ];
     },
     compareVersions: compareWhatsAppVersions,
@@ -413,7 +417,7 @@ function createRecordBuilder(
       const items: RawItem[] = [];
       const own = rawItemFromSpoolMessage(record, account, fetchedAt, record.reactions);
       if (wanted.has(own.identity.localItemId)) items.push(own);
-      for (const child of record.children ?? []) {
+      for (const child of childrenOf(record)) {
         const item = rawItemFromChild(record, child, account, fetchedAt);
         if (wanted.has(item.identity.localItemId)) items.push(item);
       }
@@ -423,12 +427,13 @@ function createRecordBuilder(
       const locator = fetchOptions?.deferredBytes?.locator;
       if (locator === undefined || !localItemId.includes('#child:')) return fetchItem(localItemId);
       // A child an export brought is read by its locator.
-      if (!readChild) throw new Error('This WhatsApp account cannot read imported media yet.');
+      if (!readChild) throw new Error('This WhatsApp account cannot read its media here.');
       const bytes = readChild(locator, {});
+      const mimeType = 'application/octet-stream';
       return {
         identity: childIdentityFromLocalId(localItemId, account),
-        mimeType: 'application/octet-stream',
-        content: { kind: 'bytes', mimeType: 'application/octet-stream', bytes },
+        mimeType,
+        content: { kind: 'bytes', mimeType, bytes },
         metadata: Object.freeze({}),
         fetchedAt: nowIso(),
       };
@@ -456,6 +461,33 @@ export function createWhatsAppRecordBuilder(options: WhatsAppRecordBuilderOption
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp account');
   const live = createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account });
   return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), () => live.authenticate(), options.readChild);
+}
+
+/** The media kinds whose bytes are their message's child: a picture or a video is not what was said. */
+const CHILD_MEDIA_TYPES: ReadonlySet<string> = new Set(['image', 'video', 'video_note']);
+
+/**
+ * A record's children: the export's media an import listed, or the picture or
+ * video the bridge saved for a live message (keyed `media`, as an import keys
+ * its own, so one piece of media both inputs bring is one child). A Secret
+ * line has none. A picture the bridge tried and could not save is a child
+ * that cannot be read, so a later record with the bytes fills it.
+ */
+function childrenOf(record: WhatsAppRecord): readonly WhatsAppChildRecord[] {
+  if (record.children) return record.children;
+  if (record.secretRedacted === true || record.mediaType === undefined || !CHILD_MEDIA_TYPES.has(record.mediaType)) return [];
+  const mimeType = record.mediaMime ?? 'application/octet-stream';
+  if (record.mediaPath !== undefined) {
+    return [{
+      key: 'media',
+      name: basename(record.mediaPath),
+      mimeType,
+      locator: whatsAppMediaFileLocator(record.mediaPath),
+      available: record.downloadStatus === undefined || record.downloadStatus === 'ok',
+      ...(record.mediaSizeBytes !== undefined ? { sizeBytes: record.mediaSizeBytes } : {}),
+    }];
+  }
+  return record.downloadStatus !== undefined ? [{ key: 'media', name: 'media', mimeType, available: false }] : [];
 }
 
 /** A child's identity: `<parent providerItemId>#child:<key>`, in the parent's conversation and version (2.1.0). */
@@ -1144,7 +1176,9 @@ function rawItemFromSpoolMessage(
   const identity = recordIdentity(message, account);
   // A captioned photo, video or document is read by its caption: that is
   // what was said. The media itself stays described by its metadata.
-  const isMedia = message.mediaType !== undefined && message.text === '';
+  // A picture or a video is its message's child: the message is the caption (or its names alone).
+  const mediaIsChild = message.mediaType !== undefined && CHILD_MEDIA_TYPES.has(message.mediaType);
+  const isMedia = message.mediaType !== undefined && message.text === '' && !mediaIsChild;
   const redacted = message.secretRedacted === true;
   const text = spoolMessageText(message);
   const hasPreviewEnrichment = text !== resolveMentionText(message.text, message.mentions);
@@ -1153,7 +1187,7 @@ function rawItemFromSpoolMessage(
   return {
     identity,
     mimeType: isMedia ? (message.mediaMime ?? 'application/octet-stream') : TEXT_MIME_TYPE,
-    content: isMedia || redacted ? { kind: 'metadata_only' } : { kind: 'text', text },
+    content: isMedia || redacted || (mediaIsChild && message.text === '') ? { kind: 'metadata_only' } : { kind: 'text', text },
     metadata: Object.freeze({
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
       sender: senderName || message.senderJid,
@@ -1171,7 +1205,8 @@ function rawItemFromSpoolMessage(
       ...(redacted ? { secretRedacted: true } : {}),
       ...(message.mentions === undefined ? {} : { mentions: message.mentions }),
       ...(message.mediaType === undefined ? {} : { mediaType: message.mediaType }),
-      ...mediaMetadata(message),
+      // The saved file is the child's to read, never the message's.
+      ...(mediaIsChild ? {} : mediaMetadata(message)),
     }),
     fetchedAt,
   };
