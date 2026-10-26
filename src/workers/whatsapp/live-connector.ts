@@ -64,7 +64,8 @@
 //   reads back as a metadata_only item with a Secrets floor, so a replay or a
 //   reaction re-emit judges it Secrets again.
 
-import { existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { basename, isAbsolute, join, relative } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
@@ -469,7 +470,8 @@ const CHILD_MEDIA_TYPES: ReadonlySet<string> = new Set(['image', 'video', 'video
  */
 function childrenOf(record: WhatsAppRecord): readonly WhatsAppChildRecord[] {
   if (record.children) return record.children;
-  if (record.secretRedacted === true || record.mediaType === undefined || !CHILD_MEDIA_TYPES.has(record.mediaType)) return [];
+  // A Secret caption keeps its picture: the picture is judged on its own (and loses its file when it is Secrets).
+  if (record.mediaType === undefined || !CHILD_MEDIA_TYPES.has(record.mediaType)) return [];
   const mimeType = record.mediaMime ?? 'application/octet-stream';
   if (record.mediaPath !== undefined) {
     return [{
@@ -1257,6 +1259,9 @@ function rawItemFromChild(message: SpoolMessage, child: WhatsAppChildRecord, acc
       ...(message.mediaType === undefined ? {} : { mediaType: message.mediaType }),
     }),
     fetchedAt,
+    // A picture, video or file is held Private until its own judgment, live or imported (child-items.md,
+    // "WhatsApp media"): what it shows is never Personal, or sent to a cloud model, before then.
+    holdContentUntilJudged: true,
     deferredBytes: {
       locator: child.locator ?? '',
       available: child.available && child.locator !== undefined,
@@ -1275,12 +1280,18 @@ function spoolMessageText(message: SpoolMessage): string {
 
 /**
  * Rewrite, in place, every message line in `[from, through)` whose item the
- * judge says is Secrets: its text, link preview, mentions, media path and
- * media re-download keys go (and the chat and sender names when the names
- * themselves were judged Secrets, also from a line whose text went earlier),
- * and the media it saved under `mediaDir` or `mediaDirs` (audio, pictures,
- * videos) is deleted. Its id, chat, time and
- * media type stay, and it is flagged so a replay judges it Secrets again.
+ * judge says is Secrets: its text, link preview and mentions go (and the chat
+ * and sender names when the names themselves were judged Secrets, also from a
+ * line whose text went earlier), and it is flagged so a replay judges it
+ * Secrets again. Its id, chat, time and media type stay.
+ *
+ * Saved media follows the judgment of what it is part of. A picture or video
+ * is its message's child (`<id>#child:media`), judged on its own: when the
+ * child is Secrets, the file the bridge saved, any temp of it, its path and
+ * its re-download keys go, whatever the caption's judgment; when only the
+ * caption is, the picture stays. A voice note or document is the message
+ * itself, so its media goes with the message's judgment. A file is deleted
+ * only under `mediaDir` or `mediaDirs`, and only when no other line names it.
  * Reaction lines name another message and are left alone. Cursors are this
  * spool's `<file>:<lines>`.
  */
@@ -1308,6 +1319,8 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
     .map((dir) => existingRealPath(dir))
     .filter((dir): dir is string => dir !== undefined);
   const relocate = options.relocateMediaPath ?? ((path: string): string => path);
+  // A download a killed bridge never finished leaves a temp: those go first (tools/whatsapp-bridge/media_files.go).
+  sweepOrphanMediaTemps(mediaRoots);
   let owners: Map<string, Set<string>> | undefined;
   // Saved audio is deleted only when this message is the only one that names
   // it: the bridge names a file by message id alone, and an id is unique only
@@ -1349,36 +1362,50 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
         ? undefined
         : spoolMessageText(message);
       const redaction = options.judge(identity, text);
-      if (!redaction) return undefined;
-      // Deleted before the line loses its path; a failure here fails the
-      // window, which the next pull clears again.
-      deleteOwnedMedia(message);
-      const namesLeft = message.chatName !== '' || message.senderName !== '' || (message.senderContactName ?? '') !== '';
-      if (alreadyRedacted && (redaction !== 'names' || !namesLeft)) return undefined;
+      // A picture or video is judged as its own item; any other media is the message's.
+      const childMedia = message.mediaType !== undefined && CHILD_MEDIA_TYPES.has(message.mediaType);
+      const mediaSecret = childMedia
+        ? options.judge({ ...identity, providerItemId: childProviderItemId(message.id, 'media') }, undefined) !== undefined
+        : redaction !== undefined;
+      if (!redaction && !mediaSecret) return undefined;
       const record = JSON.parse(line) as Record<string, unknown>;
-      // Mentions are display names copied into the text, so they go with it.
-      // The media hashes and key time only serve a re-download, which a
-      // Secret message must never get. The media path goes too: the audio was
-      // deleted above, or is kept only for the other messages that name it,
-      // and a replay of this line must never read it again. Together they
-      // make room for the flag on a voice note whose audio was its only
-      // content.
-      const removable = [
-        'preview_title', 'preview_description', 'preview_url', 'mentions', 'media_path',
-        'media_key', 'media_direct_path', 'media_file_sha256', 'media_file_enc_sha256', 'media_key_timestamp',
-      ].filter((key) => key in record);
-      // A line with nothing at all to remove is not rewritten: the flag alone
-      // would not fit, and blanking it would lose the record for nothing.
-      if (message.text === '' && removable.length === 0 && (redaction !== 'names' || !namesLeft)) return undefined;
-      record['text'] = '';
-      for (const key of removable) delete record[key];
-      if (redaction === 'names') {
-        record['chat_name'] = '';
-        record['sender_name'] = '';
-        if ('sender_contact_name' in record) record['sender_contact_name'] = '';
+      // The media hashes and key time only serve a re-download, which Secret media must never get. The path goes
+      // too: the file is deleted below, or is kept only for the other messages that name it, and a replay of this
+      // line must never read it again. Together they make room for the flag on a voice note whose audio was its
+      // only content.
+      const mediaKeys = mediaSecret
+        ? ['media_path', 'media_key', 'media_direct_path', 'media_file_sha256', 'media_file_enc_sha256', 'media_key_timestamp'].filter((key) => key in record)
+        : [];
+      if (mediaSecret) {
+        // Deleted before the line loses its path; a failure here fails the window, which the next pull clears again.
+        deleteOwnedMedia(message);
+        deleteMediaTemps(message, mediaRoots);
       }
-      record['secret_redacted'] = true;
-      releaseMedia(message);
+      const namesLeft = message.chatName !== '' || message.senderName !== '' || (message.senderContactName ?? '') !== '';
+      // Mentions are display names copied into the text, so they go with it.
+      const textKeys = redaction ? ['preview_title', 'preview_description', 'preview_url', 'mentions'].filter((key) => key in record) : [];
+      // A picture kept under a Secret caption keeps its path, so the room for the flag comes from what a replay
+      // does not need: a saved file's "ok" status (its path says so), its size and duration (the file has them).
+      const keptMediaRoom = redaction && childMedia && !mediaSecret
+        ? ['media_size_bytes', 'media_duration_seconds', ...(record['download_status'] === 'ok' && 'media_path' in record ? ['download_status'] : [])]
+          .filter((key) => key in record)
+        : [];
+      const textLeft = redaction !== undefined && !alreadyRedacted && message.text !== '';
+      const namesToClear = redaction === 'names' && namesLeft;
+      // A line with nothing at all to remove is not rewritten: the flag alone would not fit, and blanking it would
+      // lose the record for nothing.
+      if (!textLeft && textKeys.length === 0 && mediaKeys.length === 0 && !namesToClear) return undefined;
+      for (const key of [...textKeys, ...mediaKeys, ...keptMediaRoom]) delete record[key];
+      if (redaction) {
+        record['text'] = '';
+        if (redaction === 'names') {
+          record['chat_name'] = '';
+          record['sender_name'] = '';
+          if ('sender_contact_name' in record) record['sender_contact_name'] = '';
+        }
+        record['secret_redacted'] = true;
+      }
+      if (mediaSecret) releaseMedia(message);
       return JSON.stringify(record);
     },
   });
@@ -1402,6 +1429,89 @@ function mediaPathOwners(spoolDir: string, relocate: (path: string) => string): 
     }
   }
   return owners;
+}
+
+/** What a media temp's name is: `.olympus-media-<pid>-<stem>-<random>.tmp` (tools/whatsapp-bridge/media_files.go). */
+const MEDIA_TEMP = /^\.olympus-media-(\d+)-(.+)-[^-]+\.tmp$/u;
+/** An older build's temp, which names no writer. */
+const OLDER_MEDIA_TEMP = /^\.audio-.+\.tmp$/u;
+/** A temp older than this is a leftover whoever wrote it. */
+const MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
+
+/**
+ * The file stem the bridge saves a message's media under: the readable id and
+ * a hash of the normalized chat and the id (main.go, `mediaFileStem`).
+ */
+export function whatsAppMediaFileStem(chatJid: string, id: string): string {
+  const jid = chatJid.trim().toLowerCase();
+  const at = jid.lastIndexOf('@');
+  let normalized = jid;
+  if (at > 0) {
+    const user = jid.slice(0, at);
+    const device = user.indexOf(':');
+    normalized = `${device === -1 ? user : user.slice(0, device)}@${jid.slice(at + 1)}`;
+  }
+  const digest = createHash('sha256').update(`${normalized}\u0000${id}`).digest('hex').slice(0, 16);
+  let readable = [...id].map((char) => (/^[A-Za-z0-9._-]$/u.test(char) ? char : '_')).join('');
+  if (readable === '') readable = 'message';
+  return `${readable.slice(0, 64)}-${digest}`;
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** Removes the media temps a killed bridge left: its writer is gone, it is an older build's, or it is too old. */
+function sweepOrphanMediaTemps(roots: readonly string[], nowMs = Date.now()): void {
+  for (const root of roots) {
+    let names: string[];
+    try {
+      names = readdirSync(root);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const ours = MEDIA_TEMP.exec(name);
+      if (!ours && !OLDER_MEDIA_TEMP.test(name)) continue;
+      const path = join(root, name);
+      try {
+        const stat = lstatSync(path);
+        if (!stat.isFile()) continue;
+        const fresh = nowMs - stat.mtimeMs < MEDIA_TEMP_MAX_AGE_MS;
+        if (ours && fresh && processAlive(Number(ours[1]))) continue;
+        rmSync(path, { force: true });
+      } catch {
+        // Gone already, or not ours to remove.
+      }
+    }
+  }
+}
+
+/** Removes every temp of one message's media, whoever was writing it. */
+function deleteMediaTemps(message: SpoolMessage, roots: readonly string[]): void {
+  const stem = whatsAppMediaFileStem(message.chatJid, message.id);
+  for (const root of roots) {
+    let names: string[];
+    try {
+      names = readdirSync(root);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const temp = MEDIA_TEMP.exec(name);
+      if (temp?.[2] !== stem) continue;
+      try {
+        if (lstatSync(join(root, name)).isFile()) rmSync(join(root, name), { force: true });
+      } catch {
+        // Gone already.
+      }
+    }
+  }
 }
 
 function existingRealPath(path: string): string | undefined {

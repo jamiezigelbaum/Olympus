@@ -401,9 +401,13 @@ type fakeDownloader struct {
 	calls int
 }
 
-func (f *fakeDownloader) Download(_ context.Context, _ whatsmeow.DownloadableMessage) ([]byte, error) {
+func (f *fakeDownloader) DownloadToFile(_ context.Context, _ whatsmeow.DownloadableMessage, file whatsmeow.File) error {
 	f.calls += 1
-	return f.bytes, f.err
+	if f.err != nil {
+		return f.err
+	}
+	_, err := file.Write(f.bytes)
+	return err
 }
 
 func TestChatDisplayNameKeepsPhoneJIDContactPath(t *testing.T) {

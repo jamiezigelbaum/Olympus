@@ -3352,6 +3352,8 @@ export async function main(): Promise<void> {
     // The Dropbox lane reads and lands text across its tier stores.
     ...(dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set] as const] : []),
     ...(localFilesTierLane ? [[LOCAL_FILES_CORPUS_ID, localFilesTierLane.set] as const] : []),
+    // WhatsApp's media children (and voice notes) are read and land across its tier stores.
+    ...(whatsappTierSet ? [[WHATSAPP_LIVE_CORPUS_ID, whatsappTierSet] as const] : []),
     // Each Drive store's corpus lists its own store (and the Private one the
     // routed-only Public store too).
     ...(googleDriveExtractionTierSet && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore

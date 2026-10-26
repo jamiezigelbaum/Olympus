@@ -4,7 +4,7 @@
 // (archive-import/input-media.ts). One reader for both, so the connector's
 // `fetchItem` and the extraction source read children the same way.
 
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { FileExtractionSourceError } from '../../core/file-extraction-source.ts';
 import { parseArchiveInputMedia, readArchiveInputMedia, type ArchiveInputMediaDeps } from '../archive-import/input-media.ts';
@@ -44,26 +44,61 @@ export function createWhatsAppChildReader(options: {
     if (!locator.startsWith(WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX)) throw new FileExtractionSourceError('source_item_not_found');
     const path = locator.slice(WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX.length);
     if (!isAbsolute(path)) throw new FileExtractionSourceError('source_permission_denied');
-    let real: string;
+    // Opened once, never following a link at the end; the open file is then proved to be the real file inside an
+    // approved folder (the same device and inode), and only that descriptor is read, within the bound. A path that
+    // changes after the check changes nothing: what is read is what was checked.
+    let fd: number;
     try {
-      real = realpathSync(relocate(path));
-    } catch {
+      fd = openSync(relocate(path), constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ELOOP') throw new FileExtractionSourceError('source_permission_denied');
       throw new FileExtractionSourceError('source_item_not_found');
     }
-    const inside = options.mediaRoots.some((root) => {
-      let base: string;
+    try {
+      const opened = fstatSync(fd);
+      if (!opened.isFile()) throw new FileExtractionSourceError('source_content_unavailable');
+      let real: string;
       try {
-        base = realpathSync(resolve(root));
+        real = realpathSync(relocate(path));
       } catch {
-        return false;
+        throw new FileExtractionSourceError('source_item_not_found');
       }
-      const from = relative(base, real);
-      return from !== '' && !from.startsWith('..') && !isAbsolute(from);
-    });
-    if (!inside) throw new FileExtractionSourceError('source_permission_denied');
-    const stats = statSync(real);
-    if (!stats.isFile()) throw new FileExtractionSourceError('source_content_unavailable');
-    if (stats.size > maxBytes) throw new FileExtractionSourceError('source_too_large');
-    return readFileSync(real);
+      const named = statSync(real);
+      if (named.dev !== opened.dev || named.ino !== opened.ino || !insideAny(real, options.mediaRoots)) {
+        throw new FileExtractionSourceError('source_permission_denied');
+      }
+      if (opened.size > maxBytes) throw new FileExtractionSourceError('source_too_large');
+      return readBounded(fd, maxBytes);
+    } finally {
+      closeSync(fd);
+    }
   };
+}
+
+function insideAny(real: string, roots: readonly string[]): boolean {
+  return roots.some((root) => {
+    let base: string;
+    try {
+      base = realpathSync(resolve(root));
+    } catch {
+      return false;
+    }
+    const from = relative(base, real);
+    return from !== '' && !from.startsWith('..') && !isAbsolute(from);
+  });
+}
+
+/** Up to `maxBytes` from an open file; a file that grew past the bound since it was checked is too large. */
+function readBounded(fd: number, maxBytes: number): Uint8Array {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const chunk = Buffer.allocUnsafe(Math.min(1024 * 1024, maxBytes + 1));
+  for (;;) {
+    const read = readSync(fd, chunk, 0, chunk.length, total);
+    if (read === 0) break;
+    total += read;
+    if (total > maxBytes) throw new FileExtractionSourceError('source_too_large');
+    chunks.push(Buffer.from(chunk.subarray(0, read)));
+  }
+  return Buffer.concat(chunks, total);
 }

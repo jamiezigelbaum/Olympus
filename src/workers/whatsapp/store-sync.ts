@@ -4,7 +4,7 @@
 
 import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import {
   legacyWhatsAppLiveSyncPaths,
@@ -177,12 +177,15 @@ export function defaultWhatsAppMediaDir(
 export function defaultWhatsAppMediaRoots(
   env: Record<string, string | undefined> = process.env,
 ): string[] {
+  const root = resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media-root', env);
   const state = defaultWhatsAppStateDir(env);
-  return [...new Set([
-    resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media-root', env),
-    join(state, 'media', 'images'),
-    join(state, 'media', 'video'),
-  ])];
+  // A folder account's media folder holds them already; only a folder outside the root is added.
+  const beside = [join(state, 'media', 'images'), join(state, 'media', 'video')]
+    .filter((dir) => {
+      const from = relative(root, dir);
+      return from === '' || from.startsWith('..') || isAbsolute(from);
+    });
+  return [root, ...beside];
 }
 
 /**

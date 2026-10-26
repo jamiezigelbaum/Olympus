@@ -116,7 +116,7 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
   }
 
   async fetch(ref: ExtractionItemRef, options: ExtractionFetchOptions): Promise<FetchedBytes> {
-    if (ref.providerItemId.includes(CHILD_ITEM_ID_SEPARATOR)) return this.fetchChild(ref, options);
+    if (ref.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true) return this.fetchChild(ref, options);
     const located = await this.locators.localContent(ref.localItemId, 1);
     const locator = located?.locatorUri?.trim();
     if (!locator) throw new FileExtractionSourceError('source_item_not_found');

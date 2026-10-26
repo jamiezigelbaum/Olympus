@@ -692,27 +692,47 @@ export's media are (section 5).
   `media/images` (25 MiB a file, 5 GiB in all) and videos and video notes
   in `media/video` (100 MiB a file, 10 GiB in all) of its state folder, beside
   the voice notes, each kind within its own bounds; a file past a bound is
-  left unsaved and its line says so (`download_status`).
+  left unsaved and its line says so (`download_status`). A download streams
+  into a temp through a writer that refuses past the bound (the size the
+  message states is not trusted), and every temp has one name,
+  `.olympus-media-<pid>-<stem>-*.tmp`: removed on every failure, swept at
+  start when its writer is gone or it is older than 30 minutes, and swept
+  again before Secrets clearing (`media_files.go`).
 - **The connector lists them** (`live-connector.ts`, `childrenOf`): a
   picture, video or video note line is its message (its caption, or its
   names alone) with the file as a child keyed `media`, located by
   `whatsapp-media-file:v1:<path>`. The saved file is the child's to read,
   never the message's metadata. A file the bridge could not save is a child
   that cannot be read, so a later line with the bytes fills it. Voice notes
-  keep their one row and transcript.
+  keep their one row and transcript. Every media child, live or imported,
+  is held Private until its own judgment (`holdContentUntilJudged`,
+  child-items.md "WhatsApp media").
 - **One child reader** (`child-media.ts`): a saved file is read only when
   it really lives under one of the account's media folders (a spool line is
-  data and must never name another file); an export's file only while its
-  import serves it. The connector's `fetchItem`, the live pull and the
+  data and must never name another file): opened once without following a
+  link at the end, proved to be that file (device and inode), and read from
+  that descriptor only, within the bound. An export's file is read only
+  while its import serves it. The connector's `fetchItem`, the live pull and the
   extraction source (`extraction-factory.ts`, built by the runtime and, with
   the archive imports, by the engine) read children through it, by the
-  locator the store keeps at the child's version.
+  locator the store keeps at the child's version. Extraction lists them
+  across the lane's tier stores (WhatsApp is in the engine's extraction tier
+  sets), so a child routed out of the Private store is still read and
+  judged.
 - **Media folders** (`defaultWhatsAppMediaRoots`): the account's media
   folder (or, in the older layout, the audio folder) and the bridge's
   picture and video folders beside it.
-- **Secrets.** A Secret message's saved picture or video is deleted as its
-  audio is: Secrets clearing deletes a file under any of the media folders,
-  when no other message names it.
+- **Secrets.** Saved media follows the judgment of what it is part of. A
+  picture or video is judged as its own child (`<id>#child:media`): when it
+  is Secrets, its file, every temp of it (by the message's file stem), its
+  path and its re-download keys go, whatever the caption's judgment; a
+  Secret caption alone leaves the picture. A voice note or document is the
+  message, so its media goes with the message's judgment. A file is deleted
+  only under the media folders and only when no other message names it.
+- **Residual (owner's ruling, post-launch).** A captionless picture both
+  live capture and an export bring stays two children, even with identical
+  bytes: a duplicate, never a wrong merge (the strict-match rule of step
+  5). Matching such media by file digest is a follow-up.
 
 ## To verify before step 4
 

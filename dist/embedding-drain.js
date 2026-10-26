@@ -36862,7 +36862,7 @@ var init_spool_reader = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES;
+var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, MEDIA_TEMP_MAX_AGE_MS;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
@@ -36875,6 +36875,7 @@ var init_live_connector = __esm(() => {
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
   TARGET_READ_CHUNK_BYTES = 4 * 1024;
   CHILD_MEDIA_TYPES = new Set(["image", "video", "video_note"]);
+  MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
 });
 
 // src/workers/whatsapp/store-sync.ts

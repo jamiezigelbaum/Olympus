@@ -281,6 +281,12 @@ floor from its parent.
 - **Archives.** The child's content is held Private until the private model
   judges it, like everything in an archive (`holdContentUntilJudged` already
   covers the lane). The parent's state does not hold or release it.
+- **WhatsApp media.** A WhatsApp picture, video or file child is held the
+  same way whichever input listed it, live capture included: the item
+  carries the hold (`whatsapp/live-connector.ts`, `rawItemFromChild`), so
+  what a picture shows is never Personal, and never reaches a cloud model,
+  before its own judgment. It is an item-level hold outside an archive lane,
+  named in `test/tier-hold-until-judged-guard.test.ts`.
 - **Context for the judge.** The judge sees the child's names and content.
   It may also see the parent's names (subject or chat, sender) as context,
   under three rules:

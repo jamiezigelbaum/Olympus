@@ -7,7 +7,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -16,7 +16,9 @@ import { deferredBytesAnswerFor } from '../src/workers/file-extraction/connector
 import { WHATSAPP_LANE_SYNC, whatsAppConnectorWithInputs } from '../src/workers/whatsapp/archive-target.ts';
 import { WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX, createWhatsAppChildReader } from '../src/workers/whatsapp/child-media.ts';
 import { WhatsAppExtractionSource } from '../src/workers/whatsapp/extraction-source.ts';
-import { createWhatsAppLiveSourceConnector, redactWhatsAppLiveSpoolSecrets } from '../src/workers/whatsapp/live-connector.ts';
+import { createWhatsAppLiveSourceConnector, redactWhatsAppLiveSpoolSecrets, whatsAppMediaFileStem } from '../src/workers/whatsapp/live-connector.ts';
+import { whatsAppExtractionSourceFactory } from '../src/workers/whatsapp/extraction-factory.ts';
+import type { RawItem } from '../src/core/contracts.ts';
 import { WHATSAPP_LIVE_CORPUS_ID, createWhatsAppTierLane, defaultWhatsAppMediaRoots } from '../src/workers/whatsapp/store-sync.ts';
 
 const roots: string[] = [];
@@ -184,6 +186,118 @@ describe('live pictures and videos are children of their message', () => {
     });
     expect(existsSync(photo)).toBe(false);
     expect(readFileSync(day, 'utf8')).not.toContain('S1.jpg');
+  });
+
+  test('a Secret picture under an ordinary caption loses its file and download keys; the caption stays', () => {
+    const target = lane();
+    const photo = join(target.images, 'C1.jpg');
+    writeFileSync(photo, 'secret picture');
+    const day = join(target.spoolDir, '2026-07-01.jsonl');
+    writeFileSync(day, spoolLine({
+      id: 'C1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'lunch at the harbour',
+      media_key: 'a2V5', media_direct_path: '/v/t62/fixture',
+    }));
+    redactWhatsAppLiveSpoolSecrets({
+      spoolDir: target.spoolDir,
+      account: 'personal',
+      judge: (identity) => (identity.providerItemId === 'C1#child:media' ? 'content' : undefined),
+      mediaDirs: [target.images, target.video, target.audio],
+    });
+    expect(existsSync(photo)).toBe(false);
+    const line = JSON.parse(readFileSync(day, 'utf8')) as Record<string, unknown>;
+    expect(line['text']).toBe('lunch at the harbour');
+    expect(line).not.toHaveProperty('media_path');
+    expect(line).not.toHaveProperty('media_key');
+    expect(line).not.toHaveProperty('media_direct_path');
+    expect(line).not.toHaveProperty('secret_redacted');
+  });
+
+  test('a Secret caption over an ordinary picture loses its words; the picture and its child stay', async () => {
+    const target = lane();
+    const photo = join(target.images, 'C2.jpg');
+    writeFileSync(photo, 'an ordinary picture');
+    const day = join(target.spoolDir, '2026-07-01.jsonl');
+    writeFileSync(day, spoolLine({ id: 'C2', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'the door code is 4411' }));
+    redactWhatsAppLiveSpoolSecrets({
+      spoolDir: target.spoolDir,
+      account: 'personal',
+      judge: (identity) => (identity.providerItemId === 'C2' ? 'content' : undefined),
+      mediaDirs: [target.images, target.video, target.audio],
+    });
+    expect(existsSync(photo)).toBe(true);
+    const line = JSON.parse(readFileSync(day, 'utf8')) as Record<string, unknown>;
+    expect(line['text']).toBe('');
+    expect(line['media_path']).toBe(photo);
+    expect(line['secret_redacted']).toBe(true);
+    await target.pull();
+    expect(rows(target.root).find((row) => row.id === 'C2#child:media')?.locator).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}`);
+  });
+
+  test('clearing a Secret picture removes every temp of it; temps a killed bridge left are swept, a running download\'s kept', () => {
+    const target = lane();
+    const photo = join(target.images, 'T1.jpg');
+    writeFileSync(photo, 'secret picture');
+    const stem = whatsAppMediaFileStem(CHAT, 'T1');
+    const own = join(target.images, `.olympus-media-${process.pid}-${stem}-111.tmp`);
+    const dead = join(target.images, `.olympus-media-4194305-${whatsAppMediaFileStem(CHAT, 'other')}-222.tmp`);
+    const stale = join(target.images, `.olympus-media-${process.pid}-${whatsAppMediaFileStem(CHAT, 'old')}-333.tmp`);
+    const running = join(target.images, `.olympus-media-${process.pid}-${whatsAppMediaFileStem(CHAT, 'other')}-444.tmp`);
+    for (const temp of [own, dead, stale, running]) writeFileSync(temp, 'partial');
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(stale, hourAgo, hourAgo);
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'T1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok' }));
+    redactWhatsAppLiveSpoolSecrets({
+      spoolDir: target.spoolDir,
+      account: 'personal',
+      judge: (identity) => (identity.providerItemId === 'T1#child:media' ? 'content' : undefined),
+      mediaDirs: [target.images, target.video, target.audio],
+    });
+    for (const gone of [photo, own, dead, stale]) expect(existsSync(gone)).toBe(false);
+    expect(existsSync(running)).toBe(true);
+  });
+
+  test('a live media child is held until its own judgment', async () => {
+    const target = lane();
+    const photo = join(target.images, 'H1.jpg');
+    writeFileSync(photo, 'jpeg bytes');
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'H1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok' }));
+    const items: RawItem[] = [];
+    for await (const page of createWhatsAppLiveSourceConnector({ spoolDir: target.spoolDir, account: 'personal' }).listItems()) items.push(...page.items);
+    expect(items.find((item) => item.identity.providerItemId === 'H1#child:media')?.holdContentUntilJudged).toBe(true);
+    // The message itself is not held by this.
+    expect(items.find((item) => item.identity.providerItemId === 'H1')?.holdContentUntilJudged).toBeUndefined();
+  });
+
+  test('the child reader reads only the file it checked: no link at the end, never past the bound', () => {
+    const target = lane();
+    const photo = join(target.images, 'R1.jpg');
+    writeFileSync(photo, 'jpeg bytes');
+    const link = join(target.images, 'R1-link.jpg');
+    symlinkSync(photo, link);
+    expect(() => target.readChild(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${link}`, {})).toThrow('source_permission_denied');
+    expect(() => target.readChild(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}`, { maxBytes: 4 })).toThrow('source_too_large');
+    expect(new TextDecoder().decode(target.readChild(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}`, {}))).toBe('jpeg bytes');
+  });
+
+  test('extraction lists children across the lane\'s tier stores, not only the Private one', async () => {
+    // The picture's row is in one store (another tier's); the corpus's own store holds nothing.
+    const holding = lane();
+    const photo = join(holding.images, 'P9.jpg');
+    writeFileSync(photo, 'jpeg bytes');
+    writeFileSync(join(holding.spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'P9', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok' }));
+    await holding.pull();
+    const empty = lane();
+    const factory = whatsAppExtractionSourceFactory({});
+    type View = NonNullable<Parameters<typeof factory>[0]['view']>;
+    const withView = factory({
+      config: { corpusId: WHATSAPP_LIVE_CORPUS_ID, provider: 'whatsapp', scopes: ['whatsapp.personal.messages'] },
+      store: empty.store,
+      view: holding.store as unknown as View,
+    });
+    expect((await withView.listCandidates({ limit: 10 })).candidates.map((candidate) => candidate.providerItemId)).toContain('P9#child:media');
+    // Without the lane's view, only the corpus's own store is listed.
+    const withoutView = factory({ config: { corpusId: WHATSAPP_LIVE_CORPUS_ID, provider: 'whatsapp', scopes: ['whatsapp.personal.messages'] }, store: empty.store });
+    expect((await withoutView.listCandidates({ limit: 10 })).candidates).toEqual([]);
   });
 
   test('the media folders a read may touch are the audio folder and the bridge\'s picture and video folders', () => {

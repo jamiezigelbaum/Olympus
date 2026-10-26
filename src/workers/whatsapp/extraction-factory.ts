@@ -32,6 +32,7 @@ export function whatsAppExtractionSourceFactory(env: LayoutEnv, archive?: () => 
     store: LocalConnectorStore;
     view?: TieredExtractionView;
   }): WhatsAppExtractionSource => {
+    // Across the lane's tier stores when it has them: a child routed out of the Private store is still read and judged.
     const reader = input.view ?? input.store;
     return new WhatsAppExtractionSource({
       id: `${input.config.corpusId}:extraction`,
@@ -39,8 +40,8 @@ export function whatsAppExtractionSourceFactory(env: LayoutEnv, archive?: () => 
       provider: input.config.provider,
       accountScope: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
       approvedScopeKey: input.config.scopes[0]!,
-      candidates: connectorStoreExtractionCandidateReader(input.store),
-      locators: input.store,
+      candidates: connectorStoreExtractionCandidateReader(reader),
+      locators: reader,
       mediaRoots: defaultWhatsAppMediaRoots(env),
       relocateLocator: whatsappMovedPathMapper(env),
       deferredBytes: (ref) => deferredBytesAnswerFor(reader.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
