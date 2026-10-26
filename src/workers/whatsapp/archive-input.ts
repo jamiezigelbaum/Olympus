@@ -557,8 +557,9 @@ function recordOf(
   // A picture or file with no words is never matched: the key says nothing of which picture it is.
   const wordless = textKey(caption) === '' && (files.length > 0 || omitted);
   const matched = wordless || !certain ? undefined : matching.index?.uniqueLiveWithKey(message.precision, key);
-  // Its own id from what it is: the whole text (the file names in it included) and its number among identical ones.
-  const id = matched ? matched.id : exportMessageId(chatJid, ms, message.precision, owner ? OWNER_SENDER : nameKey(message.sender), textKey(message.text), message.occurrence);
+  // Its own id from what it is: the exact text (the file names in it included, nothing folded: the export reader
+  // numbers identical messages by the same exact text) and its number among identical ones.
+  const id = matched ? matched.id : exportMessageId(chatJid, ms, message.precision, owner ? OWNER_SENDER : nameKey(message.sender), message.text, message.occurrence);
   if (!matched && matching.index?.liveBetween(chatJid, ms - 60_000, ms + 60_000)) {
     report({ kind: WHATSAPP_INPUT_FINDINGS.nearMiss, class: 'skipped' });
   }

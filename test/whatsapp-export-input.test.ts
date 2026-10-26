@@ -684,6 +684,18 @@ describe('review round 4 on #551: ids from content, doubt per minute, no matchin
     expect(ids.filter((id) => id.startsWith('wx'))).toHaveLength(1);
   }, 60_000);
 
+  test('two messages that differ only in spacing are two items', async () => {
+    const target = lane();
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), direct({ id: 'L0', timestamp: '2026-07-01T12:00:00Z', text: 'anchor' }));
+    await pullLive(target);
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', chatText([
+      { at: '2026-07-01T08:00:00', sender: 'Rowan Hale', text: 'anchor' },
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'hello  there' },
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'hello there' },
+    ], { style: 'android-24-dmy' }));
+    expect(active(target).map((row) => row.id).filter((id) => id.startsWith('wx'))).toHaveLength(2);
+  });
+
   test('a resume point holds one minute at most, within the cap, however crowded the export', async () => {
     const target = lane();
     writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), direct({ id: 'L0', timestamp: '2026-07-01T12:00:00Z', text: 'anchor' }));
