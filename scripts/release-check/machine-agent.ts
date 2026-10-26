@@ -1620,6 +1620,15 @@ function archiveHost(): ArchiveHost {
     search: archiveSearch,
     readStores: readArchiveStores,
     restartEngine,
+    async awaitEngine(timeoutMs: number) {
+      const started = Date.now();
+      try {
+        await waitForEngine(timeoutMs);
+        return { ok: true, ms: Date.now() - started };
+      } catch (error) {
+        return { ok: false, ms: Date.now() - started, detail: error instanceof Error ? error.message : String(error) };
+      }
+    },
     seedLive: (hook) => liveSeedHook(hook).seed({ env: process.env, home: homedir() }),
     readSourceStores,
     deleteSourceData(sourceId) {
