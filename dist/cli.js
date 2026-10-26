@@ -131346,21 +131346,65 @@ async function settleOneJobHeld(input, staged) {
     ...output.egressDestination ? { egressDestination: output.egressDestination } : {}
   };
 }
+function hasReaderText(output) {
+  if (output.status !== "indexed" || output.text.trim() === "")
+    return false;
+  const derivations = output.derivations ?? [];
+  if (derivations.length === 0)
+    return true;
+  return derivations.some((derivation) => !DESCRIPTOR_ARTIFACTS.has(String(derivation.structuralRef?.["artifact"] ?? "")));
+}
+function providerTextBlock(provided) {
+  const marker = provided.form === "recognized_words" ? `[Recognized by ${provided.label}, approximate words]` : `[Supplied by ${provided.label}]`;
+  const lines = [];
+  for (const line2 of provided.text.split(`
+`)) {
+    const words2 = line2.split("\t").join(" ").split("\r").join(" ").split(" ").filter((word) => word !== "");
+    let current2 = "";
+    for (const word of words2) {
+      if (current2 && current2.length + word.length + 1 > PROVIDER_TEXT_LINE_CHARS) {
+        lines.push(`${marker} ${current2}`);
+        current2 = "";
+      }
+      current2 = current2 ? `${current2} ${word}` : word;
+    }
+    if (current2)
+      lines.push(`${marker} ${current2}`);
+  }
+  const terms = (provided.terms ?? []).slice(0, 500);
+  for (let at = 0;at < terms.length; at += 20)
+    lines.push(`${marker} other readings: ${terms.slice(at, at + 20).join(", ")}`);
+  const text2 = lines.join(`
+`);
+  return text2.length > EXTRACTION_PROVIDER_TEXT_MAX_CHARS ? text2.slice(0, text2.lastIndexOf(`
+`, EXTRACTION_PROVIDER_TEXT_MAX_CHARS)) : text2;
+}
 function providerFallback(output, provided) {
   if (!provided || provided.text.trim() === "")
     return output;
-  const nothing = output.status === "empty_output" || output.status === "metadata_only" || output.status === "skipped_unsupported" || output.status === "skipped_too_large" || output.status === "failed_terminal" || output.status === "indexed" && output.text.trim() === "";
-  if (!nothing)
+  if (output.status === "failed_retryable" || output.status === "failed_terminal")
     return output;
-  const lead = provided.form === "recognized_words" ? `Text recognized by ${provided.label} (approximate words, not an exact quote):` : `Text supplied by ${provided.label}:`;
-  const terms = (provided.terms ?? []).slice(0, 500);
-  const body = [lead, provided.text.trim(), ...terms.length > 0 ? [`Other readings: ${terms.join(", ")}`] : []].join(`
-`);
-  const text2 = body.length > EXTRACTION_PROVIDER_TEXT_MAX_CHARS ? body.slice(0, EXTRACTION_PROVIDER_TEXT_MAX_CHARS) : body;
+  if (hasReaderText(output))
+    return output;
+  const block = providerTextBlock(provided);
+  if (block === "")
+    return output;
+  const carried = output;
+  const derivations = [...carried.derivations ?? [], {
+    artifactKind: "provider_text",
+    chars: block.length,
+    structuralRef: { artifact: "provider_text", label: provided.label, form: provided.form }
+  }];
+  if (output.status === "indexed") {
+    const text2 = output.text.trim() === "" ? block : `${output.text}
+${block}`;
+    return { ...output, text: text2, derivations };
+  }
   return {
     status: "indexed",
-    text: text2,
-    derivations: [{ artifactKind: "provider_text", chars: text2.length, structuralRef: { label: provided.label, form: provided.form } }]
+    text: block,
+    derivations,
+    ...carried.warnings && carried.warnings.length > 0 ? { warnings: carried.warnings } : {}
   };
 }
 async function extractionAuthorizationCurrent(corpus, ref) {
@@ -131676,7 +131720,7 @@ function refusesImageContent(corpus, ref) {
     return false;
   }
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, EXTRACTION_PROVIDER_TEXT_MAX_CHARS = 1e6, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, EXTRACTION_PROVIDER_TEXT_MAX_CHARS = 1e6, DESCRIPTOR_ARTIFACTS, PROVIDER_TEXT_LINE_CHARS = 200, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_media_cache();
   init_operation_error();
@@ -131707,6 +131751,7 @@ var init_runner = __esm(() => {
       this.errorKind = errorKind;
     }
   };
+  DESCRIPTOR_ARTIFACTS = new Set(["image_media", "media_descriptor"]);
   ITEM_REF_FIELDS = new Set([
     "corpusId",
     "provider",
@@ -164995,14 +165040,17 @@ function* elements(text4, name, from, to) {
 }
 function recognizedText(recoIndex) {
   const places = [];
+  let attempted = 0;
   for (const item of elements(recoIndex, "item", 0, recoIndex.length)) {
-    if (places.length >= RECOGNITION_MAX_PLACES)
+    if (places.length >= RECOGNITION_MAX_PLACES || attempted >= RECOGNITION_MAX_ITEMS)
       break;
+    attempted += 1;
     const words2 = [];
-    for (const t of elements(recoIndex, "t", item.body, item.end)) {
+    const body = recoIndex.slice(item.body, item.end);
+    for (const t of elements(body, "t", 0, body.length)) {
       if (words2.length >= MAX_CANDIDATES_PER_PLACE)
         break;
-      const text4 = decodeXmlEntities2(recoIndex.slice(t.body, t.end)).trim();
+      const text4 = decodeXmlEntities2(body.slice(t.body, t.end)).trim();
       if (text4 !== "")
         words2.push({ text: text4, weight: numbers(t.attributes).get("w") ?? 0, order: words2.length });
     }
@@ -165054,9 +165102,10 @@ function recognizedText(recoIndex) {
     alternatives
   };
 }
-var RECOGNITION_MAX_PLACES = 20000, MAX_CANDIDATES_PER_PLACE = 16, RECOGNITION_MAX_ALTERNATIVES = 2000, NUMBER_ATTRIBUTE;
+var RECOGNITION_MAX_PLACES = 20000, RECOGNITION_MAX_ITEMS, MAX_CANDIDATES_PER_PLACE = 16, RECOGNITION_MAX_ALTERNATIVES = 2000, NUMBER_ATTRIBUTE;
 var init_recognition = __esm(() => {
   init_xml_stream();
+  RECOGNITION_MAX_ITEMS = 4 * RECOGNITION_MAX_PLACES;
   NUMBER_ATTRIBUTE = /([A-Za-z_][\w-]*)\s*=\s*["']\s*(-?\d+(?:\.\d+)?)\s*["']/g;
 });
 

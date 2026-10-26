@@ -32,6 +32,8 @@ interface Place {
 
 /** At most this many places (words) are read from one attachment; the rest are left out. */
 export const RECOGNITION_MAX_PLACES = 20_000;
+/** At most this many items are looked at, empty ones included: past it the rest are left out. */
+export const RECOGNITION_MAX_ITEMS = 4 * RECOGNITION_MAX_PLACES;
 /** At most this many candidates are read from one place. */
 const MAX_CANDIDATES_PER_PLACE = 16;
 /** At most this many other candidates are kept as search terms. */
@@ -79,12 +81,16 @@ function* elements(text: string, name: string, from: number, to: number): Genera
 
 export function recognizedText(recoIndex: string): RecognizedText {
   const places: Place[] = [];
+  let attempted = 0;
   for (const item of elements(recoIndex, 'item', 0, recoIndex.length)) {
-    if (places.length >= RECOGNITION_MAX_PLACES) break;
+    if (places.length >= RECOGNITION_MAX_PLACES || attempted >= RECOGNITION_MAX_ITEMS) break;
+    attempted += 1;
     const words: Array<{ text: string; weight: number; order: number }> = [];
-    for (const t of elements(recoIndex, 't', item.body, item.end)) {
+    // The item's own text only: a search for its words never runs on into the rest of the document.
+    const body = recoIndex.slice(item.body, item.end);
+    for (const t of elements(body, 't', 0, body.length)) {
       if (words.length >= MAX_CANDIDATES_PER_PLACE) break;
-      const text = decodeXmlEntities(recoIndex.slice(t.body, t.end)).trim();
+      const text = decodeXmlEntities(body.slice(t.body, t.end)).trim();
       if (text !== '') words.push({ text, weight: numbers(t.attributes).get('w') ?? 0, order: words.length });
     }
     if (words.length === 0) continue;

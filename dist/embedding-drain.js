@@ -45297,6 +45297,7 @@ var SINK_SKIP_SETTLEMENTS = Object.freeze({
   [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only",
   [EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY]: "metadata_only"
 });
+var DESCRIPTOR_ARTIFACTS = new Set(["image_media", "media_descriptor"]);
 var ITEM_REF_FIELDS = new Set([
   "corpusId",
   "provider",
@@ -49045,6 +49046,10 @@ var BLOCKS = new Set([
   "ul"
 ]);
 var SILENT = new Set(["script", "style", "head", "title", "object", "embed", "applet"]);
+
+// src/workers/archive-import/evernote/recognition.ts
+var RECOGNITION_MAX_PLACES = 20000;
+var RECOGNITION_MAX_ITEMS = 4 * RECOGNITION_MAX_PLACES;
 
 // src/workers/archive-import/evernote/connector.ts
 var EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;

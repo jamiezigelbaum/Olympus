@@ -88,6 +88,7 @@ import type {
   ExtractionEgress,
   ExtractionEgressPolicy,
   ExtractionApprovedRemoteDestination,
+  ExtractionDerivation,
   ExtractionItemRef,
   ExtractionPolicyDecision,
   ExtractionSink,
@@ -1322,30 +1323,82 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
 // The most of a source's own reading that becomes an item's text: the bounded text reader's own limit.
 export const EXTRACTION_PROVIDER_TEXT_MAX_CHARS = 1_000_000;
 
+// Derivation techniques that describe a file rather than read it (a prepared photo's "Photo", a scan's media
+// descriptor): their text is no reader's, so the source's own reading may still stand beside it.
+const DESCRIPTOR_ARTIFACTS: ReadonlySet<string> = new Set(['image_media', 'media_descriptor']);
+// A line of provider text is cut here, so its marker is never far from any of its words.
+const PROVIDER_TEXT_LINE_CHARS = 200;
+
+// Whether an output holds text a reader read, as against nothing, or only a generated description of the file.
+function hasReaderText(output: ExtractorOutput): boolean {
+  if (output.status !== 'indexed' || output.text.trim() === '') return false;
+  const derivations = output.derivations ?? [];
+  if (derivations.length === 0) return true;
+  return derivations.some((derivation) => !DESCRIPTOR_ARTIFACTS.has(String(derivation.structuralRef?.['artifact'] ?? '')));
+}
+
+/**
+ * The provider's reading as text, every line saying whose it is and, for recognized words, that they are
+ * approximate: a passage cut from anywhere in it still carries its provenance. Long lines are cut so a marker
+ * is never more than a line away.
+ */
+export function providerTextBlock(provided: RawItemProviderText): string {
+  const marker = provided.form === 'recognized_words'
+    ? `[Recognized by ${provided.label}, approximate words]`
+    : `[Supplied by ${provided.label}]`;
+  const lines: string[] = [];
+  for (const line of provided.text.split('\n')) {
+    const words = line.split('\t').join(' ').split('\r').join(' ').split(' ').filter((word) => word !== '');
+    let current = '';
+    for (const word of words) {
+      if (current && current.length + word.length + 1 > PROVIDER_TEXT_LINE_CHARS) {
+        lines.push(`${marker} ${current}`);
+        current = '';
+      }
+      current = current ? `${current} ${word}` : word;
+    }
+    if (current) lines.push(`${marker} ${current}`);
+  }
+  const terms = (provided.terms ?? []).slice(0, 500);
+  for (let at = 0; at < terms.length; at += 20) lines.push(`${marker} other readings: ${terms.slice(at, at + 20).join(', ')}`);
+  const text = lines.join('\n');
+  return text.length > EXTRACTION_PROVIDER_TEXT_MAX_CHARS ? text.slice(0, text.lastIndexOf('\n', EXTRACTION_PROVIDER_TEXT_MAX_CHARS)) : text;
+}
+
 /**
  * The source's own reading of an item (RawItem.providerText, docs/design/child-items.md, "Text the provider
- * supplies"), as the item's text when no reader produced any: a reader that found nothing, read nothing it
- * could use, or was not given a file over its limit. Our reader stays primary: an output with text is kept as
- * it is, and a failure that may pass on a retry is left to retry. The text says whose reading it is, and that
- * recognized words are approximate, so an answer quoting it can say so; the extraction record says it too
- * (artifact `provider_text`). It then goes to the same sink as any text, so it is judged, held and stored the
- * same way. Nothing here names a source.
+ * supplies"), used when no reader produced text: a reader that found nothing, settled names only, skipped the
+ * type, was not given a file over its limit, or produced only a generated description of the file (a prepared
+ * photo's "Photo"). Our reader stays primary: an output a reader read text into is kept as it is, and a failure
+ * (retryable, or terminal and perhaps reopened for another reader) is left as it is. What the reader's output
+ * carries is kept with the provider's text: its derivations and warnings, so an item waiting for a reader
+ * (`ocr_unavailable_image`) is still read once that reader is ready, and its text then replaces this; a
+ * prepared photo keeps its media. Every line of the provider's text says whose it is (providerTextBlock), and
+ * the extraction record names it (artifact `provider_text`). It then goes to the same sink as any text, so it
+ * is judged, held and stored the same way. Nothing here names a source.
  */
 export function providerFallback(output: ExtractorOutput, provided: RawItemProviderText | undefined): ExtractorOutput {
   if (!provided || provided.text.trim() === '') return output;
-  const nothing = output.status === 'empty_output' || output.status === 'metadata_only' || output.status === 'skipped_unsupported'
-    || output.status === 'skipped_too_large' || output.status === 'failed_terminal' || (output.status === 'indexed' && output.text.trim() === '');
-  if (!nothing) return output;
-  const lead = provided.form === 'recognized_words'
-    ? `Text recognized by ${provided.label} (approximate words, not an exact quote):`
-    : `Text supplied by ${provided.label}:`;
-  const terms = (provided.terms ?? []).slice(0, 500);
-  const body = [lead, provided.text.trim(), ...(terms.length > 0 ? [`Other readings: ${terms.join(', ')}`] : [])].join('\n');
-  const text = body.length > EXTRACTION_PROVIDER_TEXT_MAX_CHARS ? body.slice(0, EXTRACTION_PROVIDER_TEXT_MAX_CHARS) : body;
+  if (output.status === 'failed_retryable' || output.status === 'failed_terminal') return output;
+  if (hasReaderText(output)) return output;
+  const block = providerTextBlock(provided);
+  if (block === '') return output;
+  const carried = output as { derivations?: readonly ExtractionDerivation[]; warnings?: readonly string[] };
+  const derivations = [...(carried.derivations ?? []), {
+    artifactKind: 'provider_text' as const,
+    chars: block.length,
+    structuralRef: { artifact: 'provider_text', label: provided.label, form: provided.form },
+  }];
+  if (output.status === 'indexed') {
+    // A generated description (and a prepared photo's media) stays; the provider's reading is added below it.
+    const text = output.text.trim() === '' ? block : `${output.text}\n${block}`;
+    return { ...output, text, derivations };
+  }
   return {
     status: 'indexed',
-    text,
-    derivations: [{ artifactKind: 'provider_text', chars: text.length, structuralRef: { label: provided.label, form: provided.form } }],
+    text: block,
+    derivations,
+    ...(carried.warnings && carried.warnings.length > 0 ? { warnings: carried.warnings } : {}),
   };
 }
 

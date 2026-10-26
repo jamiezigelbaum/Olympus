@@ -21,7 +21,7 @@ import type { RawItem } from '../src/core/contracts.ts';
 import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { createEvernoteArchiveConnector, enexTime } from '../src/workers/archive-import/evernote/connector.ts';
 import { enmlToText } from '../src/workers/archive-import/evernote/enml.ts';
-import { RECOGNITION_MAX_ALTERNATIVES, RECOGNITION_MAX_PLACES, recognizedText } from '../src/workers/archive-import/evernote/recognition.ts';
+import { RECOGNITION_MAX_ALTERNATIVES, RECOGNITION_MAX_ITEMS, RECOGNITION_MAX_PLACES, recognizedText } from '../src/workers/archive-import/evernote/recognition.ts';
 import { archiveAccountConnector } from '../src/workers/archive-import/extraction-source.ts';
 import { registerArchiveFormatConnectors } from '../src/workers/archive-import/format-connectors.ts';
 import { probeArchivePath } from '../src/workers/archive-import/manifest.ts';
@@ -309,5 +309,22 @@ describe('Evernote\'s reading of a large attachment', () => {
     const started = Date.now();
     expect(recognizedText(reco)).toEqual({ text: '', words: 0, alternatives: [] });
     expect(Date.now() - started).toBeLessThan(3_000);
+  });
+});
+
+describe('Evernote\'s reading: each search stays inside its item', () => {
+  test('160,000 empty items are passed over quickly, and no more items than the cap are looked at', () => {
+    const reco = `<recoIndex>${'<item></item>'.repeat(160_000)}<item x="1" y="1" h="1"><t w="9">late</t></item></recoIndex>`;
+    const started = Date.now();
+    const read = recognizedText(reco);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // The cap counts empty items too: the word after 160,000 of them is past it.
+    expect(160_000).toBeGreaterThan(RECOGNITION_MAX_ITEMS);
+    expect(read.words).toBe(0);
+  });
+
+  test('items within the cap are all read, empty ones between them included', () => {
+    const reco = `<recoIndex>${'<item></item>'.repeat(10)}<item x="1" y="1" h="1"><t w="9">found</t></item></recoIndex>`;
+    expect(recognizedText(reco).text).toBe('found');
   });
 });
