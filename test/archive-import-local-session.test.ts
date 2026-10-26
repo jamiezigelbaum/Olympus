@@ -55,6 +55,8 @@ function archives() {
     stop() { reached.push('stop'); return { ok: true }; },
     sourceImports: () => [],
     archiveSources: () => [],
+    cardViews: () => [],
+    presentCards: () => ({}),
     approveRemoval() { reached.push('remove'); return { ok: true }; },
     // The agent's side only records requests (archive-import-agent.test.ts); nothing here reaches it.
     agent: {} as ArchiveImportDashboard['agent'],

@@ -5,7 +5,7 @@ import type { ModelSetupView } from '../core/model-setup.ts';
 import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
 import type { SourceStorageNoticeKind } from '../core/source-registry.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
-import { ARCHIVE_NEUTRAL_PROVIDER, isArchiveProvider } from '../core/archive-formats.ts';
+import { ARCHIVE_NEUTRAL_PROVIDER, archiveCorpusId, archiveSourceCards, isArchiveProvider } from '../core/archive-formats.ts';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -1314,7 +1314,8 @@ export type DashboardSourceAction =
     // Imported archives: no account and nothing to sign in to; the person
     // chooses an export on this computer (archive-import/dashboard.ts).
     kind: 'archive_import';
-    label: 'Import another archive';
+    // The Archives card (Other archives) imports any export; an import-only source's card, its own.
+    label: 'Import another archive' | 'Import an archive';
   }
   | {
     kind: 'none';
@@ -1489,6 +1490,11 @@ export interface SourceDashboardBuildOptions {
    * (archive-import/dashboard.ts). Absent: none.
    */
   importedArchives?: DashboardImportedArchives;
+  /**
+   * The same for each import-only source's card (`ArchiveFormatDefinition.sourceCard`),
+   * by card id: the imports of its formats. Absent for a card: none.
+   */
+  importedArchivesByCard?: Readonly<Record<string, DashboardImportedArchives>>;
 }
 
 /** The Archives card's whole connection: there is no account, only imports. */
@@ -1582,6 +1588,12 @@ export interface DashboardSupportedSourceDefinition {
   // keys rows by its own short source id, which is NOT always the provider —
   // WhatsApp is `whatsapp` there and `whatsapp_personal` here.
   ingestion_ledger_source_id: string;
+  /**
+   * The public source this card is part of, when its id is not one: an
+   * import-only source's card shows imports the public Archives source holds
+   * (`archive.imports`), and states that source's capabilities.
+   */
+  public_source_id?: string;
   label: string;
   provider: string;
   family: string;
@@ -1836,6 +1848,9 @@ export function dashboardSensitivityTiers(sovereigntyEngine: SovereigntyEngine):
   };
 }
 
+/** The Archives card (Other archives): imports no source card claims. */
+const ARCHIVE_IMPORTS_CARD_ID = 'archive.imports';
+
 export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] = [
   {
     source_id: 'gmail.email',
@@ -1977,6 +1992,25 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     content_arrives_extracted: true,
     connect_action: { kind: 'api_key', source: 'readwise' },
   },
+  // Import-only sources (archive-live-one-dataset.md, step 7): a format no live
+  // connector reads names its card in the format registry. Its imports are
+  // stored under Archives, one account scope each, so the card owns no corpus
+  // of its own; its connection is its imports (importedArchivesByCard).
+  ...archiveSourceCards().map((card): DashboardSupportedSourceDefinition => ({
+    source_id: card.id,
+    // No corpus is this card's: the family's store set holds every import-only source's notes, and Other archives owns it.
+    primary_corpus_id: card.id,
+    corpus_source_ids: [],
+    owns_corpus: () => false,
+    ingestion_ledger_source_id: card.id,
+    public_source_id: ARCHIVE_IMPORTS_CARD_ID,
+    label: card.label,
+    provider: card.formats[0]!.provider,
+    family: card.formats[0]!.family,
+    trust_domain: 'secure_local',
+    connect_kind: 'local',
+    connect_action: { kind: 'archive_import' },
+  })),
 ];
 
 const VENICE_ANSWER_LANE: DashboardSupportedSourceDefinition = {
@@ -2450,7 +2484,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       unpairedSources.get(definition.source_id),
       options.fileSourceScopeStatus?.[definition.source_id],
       options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,
-      options.importedArchives,
+      definition.source_id === ARCHIVE_IMPORTS_CARD_ID ? options.importedArchives : options.importedArchivesByCard?.[definition.source_id],
       captureRuntime?.paired_at,
     );
     // Four-tier facts, stamped like sync_now below: counts from the card's own
@@ -2893,7 +2927,7 @@ function sourceCardFromDefinition(
     provider: definition.provider,
     family: definition.family,
     trust_domain: trustDomain,
-    capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id as V04PublicSourceId),
+    capabilities: renderPublicSourceCapabilityForDashboard((definition.public_source_id ?? definition.source_id) as V04PublicSourceId),
     ...(fileSourceScopeStatus !== undefined
       ? {
           scope_selection: {
@@ -3010,7 +3044,7 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
         : action.kind === 'needs_setup'
           ? `Open Set up for ${card.label}, register the provider app, then start authorization.`
           : action.kind === 'archive_import'
-            ? 'Import an archive from this page: choose a mail export on this computer.'
+            ? `${action.label} from this page: choose an export on this computer.`
             : `Connect one ${card.label} account from this page.`,
       dependencies,
     };
@@ -4111,7 +4145,9 @@ function sourceAction(
     return { kind: 'this_computer', source: definition.connect_action.source, label: 'Connect' };
   }
   // Another archive can always be imported.
-  if (definition.connect_action.kind === 'archive_import') return { kind: 'archive_import', label: 'Import another archive' };
+  if (definition.connect_action.kind === 'archive_import') {
+    return { kind: 'archive_import', label: definition.source_id === ARCHIVE_IMPORTS_CARD_ID ? 'Import another archive' : 'Import an archive' };
+  }
   if (definition.connect_action.kind === 'api_key') {
     if (connected && !reauthRequired && !providerRefusing) return { kind: 'none' };
     return {

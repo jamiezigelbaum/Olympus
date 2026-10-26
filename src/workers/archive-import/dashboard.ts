@@ -18,7 +18,7 @@
  */
 import { homedir } from 'node:os';
 import { posix } from 'node:path';
-import { getArchiveFormat, type ArchiveFormatDefinition } from '../../core/archive-formats.ts';
+import { archiveSourceCardOf, archiveSourceCards, getArchiveFormat, type ArchiveFormatDefinition } from '../../core/archive-formats.ts';
 import { ScopeRoot, ScopeSafeError } from '../../core/scope-safe-fs.ts';
 import type {
   ArchiveBrowseList,
@@ -152,6 +152,16 @@ export interface ArchiveImportDashboard {
    * reads archives as inputs (source-targets.ts), by card.
    */
   archiveSources(): ComputerArchiveSourceMeta[];
+  /**
+   * Each import-only source's card (`ArchiveFormatDefinition.sourceCard`): the
+   * imports of its formats, listed as the Archives row lists its own (with
+   * Remove). Empty while the list of imports cannot be read.
+   */
+  cardViews(): ComputerArchivesMeta[];
+  /**
+   * The connection of the same cards, by card id (`importedArchivesByCard`).
+   */
+  presentCards(): Record<string, DashboardImportedArchives>;
   /**
    * What an agent may do (agent.ts): ask for an import or a removal, and
    * read the same list. It approves and removes nothing; only the methods
@@ -353,23 +363,31 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
 
   // The card an import joined, for the line that says where it shows.
   const joinedSource = (record: ArchiveImportRecord): { source?: { id: string; label: string } } => {
+    const card = cardOf(record);
+    if (card) return { source: { id: card.id, label: named(card.label) } };
     if (!record.target) return {};
     const target = options.runtime.targets.forSource(record.target.source_id);
     return { source: { id: target?.cardId ?? record.target.source_id, label: named(target?.label ?? record.target.source_id) } };
   };
+  // The import-only source an import that joined no source is shown under (its format names the card), if any.
+  const cardOf = (record: ArchiveImportRecord) => (record.target ? undefined : archiveSourceCardOf(record.format));
+  // An import Other archives lists: it joined no source, and no import-only source's card claims its format.
+  const underArchives = (record: ArchiveImportRecord): boolean => !record.target && cardOf(record) === undefined;
   // The formats a source's connector reads, as this build knows them.
   const sourceFormats = (target: ArchiveSourceTarget): ArchiveFormatDefinition[] =>
     target.formats.flatMap((formatId) => {
       const format = getArchiveFormat(formatId);
       return format ? [format] : [];
     });
-  // The source a card's Import an archive names, by its card id.
-  const targetOfCard = (cardId: string): ArchiveSourceTarget | undefined => {
+  // The source a card's Import an archive names, by its card id: a source whose connector reads the
+  // archive as an input, else an import-only source of the format registry. Its name and its formats.
+  const targetOfCard = (cardId: string): { label: string; formats: ArchiveFormatDefinition[] } | undefined => {
     for (const sourceId of options.runtime.targets.sourceIds()) {
       const target = options.runtime.targets.forSource(sourceId);
-      if (target && (target.cardId ?? target.sourceId) === cardId) return target;
+      if (target && (target.cardId ?? target.sourceId) === cardId) return { label: target.label, formats: sourceFormats(target) };
     }
-    return undefined;
+    const card = archiveSourceCards().find((entry) => entry.id === cardId);
+    return card ? { label: card.label, formats: [...card.formats] } : undefined;
   };
 
   const outcome = (requestId: string, result: ArchiveImportStart): void => {
@@ -497,7 +515,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     path: string,
     from?: { requestId: string; status: 'pending' | 'failed' },
     answer: ArchiveAccountAnswer = {},
-    only?: ArchiveSourceTarget,
+    only?: { label: string; formats: ArchiveFormatDefinition[] },
   ): Promise<ArchiveApproveResult> => {
     const name = named(posix.basename(path));
     // An agent's request becomes the import or its check; Try again starts afresh.
@@ -506,7 +524,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       if (from) requests.remove(from.requestId);
     };
     // A source's own Import an archive recognises that source's exports only.
-    const formats = only ? sourceFormats(only) : undefined;
+    const formats = only ? only.formats : undefined;
     const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets, ...(formats ? { formats } : {}) });
     if (prepared.kind === 'unsupported' && only && formats) {
       return refusal('not_this_source', fill(ARCHIVE_APPROVE_COPY.not_this_source, {
@@ -902,7 +920,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
         return approvePath(resolved.path, { requestId: waiting.request_id, status: 'pending' }, answer);
       }
-      let only: ArchiveSourceTarget | undefined;
+      let only: { label: string; formats: ArchiveFormatDefinition[] } | undefined;
       if (request.sourceId !== undefined) {
         only = targetOfCard(request.sourceId);
         if (!only) return refusal('unknown_source', ARCHIVE_APPROVE_COPY.unknown_source);
@@ -966,8 +984,9 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       } catch (error) {
         return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error), file: shown(state.path), list: 'archives' } };
       }
-      // The imports that joined a source are shown in that source's card (sourceImports), not here.
-      const apart = records.filter((record) => !record.target);
+      // The imports that joined a source are shown in that source's card (sourceImports), and those of an
+      // import-only source's format in its card (cardViews), not here.
+      const apart = records.filter(underArchives);
       let asked: ArchiveImportRequest[];
       try {
         asked = requests.list();
@@ -997,12 +1016,65 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       } catch {
         return [];
       }
-      return options.runtime.targets.sourceIds().flatMap((sourceId): ComputerArchiveSourceMeta[] => {
+      const live = options.runtime.targets.sourceIds().flatMap((sourceId): ComputerArchiveSourceMeta[] => {
         const target = options.runtime.targets.forSource(sourceId);
         const formats = target ? sourceFormats(target) : [];
         if (!target || formats.length === 0) return [];
         return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats) }];
       });
+      // Import-only sources: their card imports their formats (a source that reads one live wins it).
+      const imported = archiveSourceCards()
+        .filter((card) => !live.some((entry) => entry.sourceId === card.id))
+        .map((card): ComputerArchiveSourceMeta => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats) }));
+      return [...live, ...imported];
+    },
+
+    cardViews() {
+      let records: ArchiveImportRecord[];
+      try {
+        records = state.list();
+      } catch {
+        // The Archives row says the list cannot be read; a card shows none rather than a wrong list.
+        return [];
+      }
+      const model = options.privateModel();
+      const setting = scheduling();
+      return archiveSourceCards().map((card): ComputerArchivesMeta => {
+        const own = records.filter((record) => cardOf(record)?.id === card.id);
+        return {
+          sourceId: card.id,
+          privateModel: model,
+          archives: own.map(entryOf),
+          // An agent's request names a path, not a format: it waits under Other archives.
+          requests: [],
+          ...(setting !== 'on' && own.length > 0 ? { notRunning: setting } : {}),
+        };
+      });
+    },
+
+    presentCards() {
+      let records: ArchiveImportRecord[];
+      try {
+        records = state.list();
+      } catch (error) {
+        // Never "no archives imported" while the list cannot be read: each card says so too.
+        const unreadable: DashboardImportedArchives = { archives: 0, importing: false, attention: [{ kind: 'unreadable', reason: recordUnreadableReason(error) }] };
+        return Object.fromEntries(archiveSourceCards().map((card) => [card.id, unreadable]));
+      }
+      const setting = scheduling();
+      return Object.fromEntries(archiveSourceCards().map((card): [string, DashboardImportedArchives] => {
+        const own = records.filter((record) => cardOf(record)?.id === card.id);
+        const attention: DashboardImportAttention[] = [];
+        for (const record of own) {
+          if (record.status === 'stopped' && record.stop?.code !== 'stopped_by_owner') attention.push({ kind: 'stopped', id: record.archive_id, name: record.label });
+          else if (record.status !== 'removing' && !counts(record)) attention.push({ kind: 'counts', id: record.archive_id, name: record.label });
+        }
+        return [card.id, {
+          archives: own.length,
+          importing: setting === 'on' && own.some((record) => record.status === 'importing' || record.status === 'removing'),
+          ...(attention.length > 0 ? { attention } : {}),
+        }];
+      }));
     },
 
     sourceImports() {
@@ -1029,7 +1101,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         attention.push({ kind: 'unreadable', reason: recordUnreadableReason(error) });
       }
       for (const record of records) {
-        // The owner's own Stop is not something that needs them.
+        // The owner's own Stop is not something that needs them. An import-only source's import is its card's (presentCards).
+        if (cardOf(record)) continue;
         if (record.status === 'stopped' && record.stop?.code !== 'stopped_by_owner') attention.push({ kind: 'stopped', id: record.archive_id, name: record.label });
       }
       // An import or a removal the scheduler will never run, and the setting why.
@@ -1041,7 +1114,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         if (record.status === 'removing' || record.target) continue;
         const tally = counts(record);
         if (tally) counted.set(record.archive_id, tally);
-        else attention.push({ kind: 'counts', id: record.archive_id, name: record.label });
+        else if (!cardOf(record)) attention.push({ kind: 'counts', id: record.archive_id, name: record.label });
       }
       for (const request of askingNow(asked, records)) {
         if (request.origin !== 'agent' || request.status !== 'pending') continue;
@@ -1063,8 +1136,9 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         const held = [...counted.values()].reduce((sum, tally) => sum + tally.held, 0);
         if (held > 0) attention.push({ kind: 'held', count: held, model });
       }
-      // Imports of a source are that source's card's, not the Archives row's.
-      const apart = records.filter((record) => !record.target);
+      // Imports of a source, or of an import-only source's format, are that source's card's, not the Archives row's.
+      // Held items and imports that cannot run are said once, here, for every import that is not a live source's.
+      const apart = records.filter(underArchives);
       return {
         archives: apart.length,
         // Nothing reads as importing while this computer's settings keep it from running.
