@@ -8,7 +8,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { archiveInputZipMediaLocator } from '../src/workers/archive-import/input-media.ts';
@@ -419,34 +418,6 @@ describe('every piece of media is kept; the one safeguard is free disk space (ow
     expect(rows(target.root).find((row) => row.id === 'W1#child:media')?.locator).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}`);
   });
 
-  test('clearing a Secret picture that waits for disk space removes its waiting line, so it is never fetched', () => {
-    const target = lane();
-    const waitingDir = join(target.root, 'media', 'waiting');
-    mkdirSync(waitingDir, { recursive: true });
-    const waiting = join(waitingDir, `${whatsAppMediaFileStem(CHAT, 'W2')}.json`);
-    writeFileSync(waiting, '{}');
-    const day = join(target.spoolDir, '2026-07-01.jsonl');
-    writeFileSync(day, spoolLine({ id: 'W2', media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', media_key: 'a2V5', media_direct_path: '/v/t62/fixture' }));
-    const clear = () => redactWhatsAppLiveSpoolSecrets({
-      spoolDir: target.spoolDir,
-      account: 'personal',
-      judge: (identity) => (identity.providerItemId === 'W2#child:media' ? 'content' : undefined),
-      mediaDirs: [target.images, target.video, target.audio],
-      mediaWaitingDir: waitingDir,
-    });
-    // A waiting line that cannot be removed fails the clearing: the keys stay for the next pull.
-    chmodSync(waitingDir, 0o500);
-    try {
-      expect(clear).toThrow();
-      expect(JSON.parse(readFileSync(day, 'utf8'))).toHaveProperty('media_key');
-    } finally {
-      chmodSync(waitingDir, 0o700);
-    }
-    clear();
-    expect(existsSync(waiting)).toBe(false);
-    expect(JSON.parse(readFileSync(day, 'utf8'))).not.toHaveProperty('media_key');
-  });
-
   test('a pull says media waits for disk space, as a flag and a warning, never a count', async () => {
     const root = mkdtempSync(join(tmpdir(), 'whatsapp-media-disk-'));
     roots.push(root);
@@ -481,39 +452,6 @@ describe('every piece of media is kept; the one safeguard is free disk space (ow
 });
 
 describe('review round 4 on #558: no Secret left in a waiting line, large media never read whole', () => {
-  test('a Secret caption over a picture that waits for disk space clears the words in its waiting line; the line stays', () => {
-    const target = lane();
-    const waitingDir = join(target.root, 'media', 'waiting');
-    mkdirSync(waitingDir, { recursive: true });
-    const stem = whatsAppMediaFileStem(CHAT, 'W3');
-    const entry = join(waitingDir, `${stem}.json`);
-    const original = JSON.parse(spoolLine({ id: 'W3', media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', text: 'the door code is 4411', media_key: 'a2V5' })) as Record<string, unknown>;
-    writeFileSync(entry, JSON.stringify(original));
-    // The bridge was killed while writing this message's entry, and another's long ago; a third is being written now.
-    const ownTemp = join(waitingDir, `.${stem}.json.tmp111`);
-    const oldTemp = join(waitingDir, `.${whatsAppMediaFileStem(CHAT, 'other')}.json.tmp222`);
-    const freshTemp = join(waitingDir, `.${whatsAppMediaFileStem(CHAT, 'busy')}.json.tmp333`);
-    for (const path of [ownTemp, oldTemp, freshTemp]) writeFileSync(path, '{"text":"partial"}');
-    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    utimesSync(oldTemp, hourAgo, hourAgo);
-    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), `${JSON.stringify(original)}\n`);
-    redactWhatsAppLiveSpoolSecrets({
-      spoolDir: target.spoolDir,
-      account: 'personal',
-      judge: (identity) => (identity.providerItemId === 'W3' ? 'content' : undefined),
-      mediaDirs: [target.images, target.video, target.audio],
-      mediaWaitingDir: waitingDir,
-    });
-    const kept = JSON.parse(readFileSync(entry, 'utf8')) as Record<string, unknown>;
-    expect(kept['text']).toBe('');
-    expect(kept['secret_redacted']).toBe(true);
-    // The picture is not Secret: it is still fetched when there is room.
-    expect(kept['media_key']).toBe('a2V5');
-    expect(readFileSync(entry, 'utf8')).not.toContain('door code');
-    for (const gone of [ownTemp, oldTemp]) expect(existsSync(gone)).toBe(false);
-    expect(existsSync(freshTemp)).toBe(true);
-  });
-
   test('a large video is handed to a file reader as a file, copied a chunk at a time, never read whole', async () => {
     const target = lane();
     const clip = join(target.video, 'V7.mp4');
@@ -559,58 +497,6 @@ describe('review round 4 on #558: no Secret left in a waiting line, large media 
   });
 });
 
-describe('review round 5 on #558: the waiting folder is fenced, and swept on every clearing', () => {
-  const waitingLine = (target: ReturnType<typeof lane>, id: string, text: string) => {
-    const waitingDir = join(target.root, 'media', 'waiting');
-    mkdirSync(waitingDir, { recursive: true });
-    const record = JSON.parse(spoolLine({ id, media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', text })) as Record<string, unknown>;
-    const entry = join(waitingDir, `${whatsAppMediaFileStem(CHAT, id)}.json`);
-    writeFileSync(entry, JSON.stringify(record));
-    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), `${JSON.stringify(record)}\n`);
-    return { waitingDir, entry };
-  };
-  const clear = (target: ReturnType<typeof lane>, waitingDir: string, secretId?: string) => redactWhatsAppLiveSpoolSecrets({
-    spoolDir: target.spoolDir,
-    account: 'personal',
-    judge: (identity) => (identity.providerItemId === secretId ? 'content' : undefined),
-    mediaDirs: [target.images, target.video, target.audio],
-    mediaWaitingDir: waitingDir,
-  });
-
-  test('an old unfinished waiting temp is swept on a clearing with nothing Secret in it', () => {
-    const target = lane();
-    const { waitingDir } = waitingLine(target, 'S1', 'an ordinary caption');
-    const old = join(waitingDir, `.${whatsAppMediaFileStem(CHAT, 'gone')}.json.tmp999`);
-    writeFileSync(old, '{"text":"the door code is 4411"}');
-    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    utimesSync(old, hourAgo, hourAgo);
-    clear(target, waitingDir);
-    expect(existsSync(old)).toBe(false);
-  });
-
-  test('a lock left by a holder that is gone is taken over, and the entry cleared', () => {
-    const target = lane();
-    const { waitingDir, entry } = waitingLine(target, 'S2', 'the door code is 4411');
-    writeFileSync(join(waitingDir, '.olympus-waiting.lock'), `4194305 ${whatsAppBootNonce()}\n`);
-    clear(target, waitingDir, 'S2');
-    expect(readFileSync(entry, 'utf8')).not.toContain('door code');
-    expect(existsSync(join(waitingDir, '.olympus-waiting.lock'))).toBe(false);
-  });
-
-  test('while the bridge holds the lock, the clearing waits for it, then clears', () => {
-    const target = lane();
-    const { waitingDir, entry } = waitingLine(target, 'S3', 'the door code is 4411');
-    const lock = join(waitingDir, '.olympus-waiting.lock');
-    // The bridge (a live process of this boot) holds the lock, and lets it go a moment later.
-    const holder = spawn('sh', ['-c', `sleep 0.4; rm -f '${lock}'`], { detached: true, stdio: 'ignore' });
-    writeFileSync(lock, `${holder.pid} ${whatsAppBootNonce()}\n`);
-    const started = Date.now();
-    clear(target, waitingDir, 'S3');
-    expect(Date.now() - started).toBeGreaterThanOrEqual(300);
-    expect(readFileSync(entry, 'utf8')).not.toContain('door code');
-  }, 15_000);
-});
-
 describe('an export\'s media of any size reaches extraction as a file (owner, 2026-10-26)', () => {
   test('a 65 MiB video in the export zip is copied to a file through the child reader, never refused', () => {
     const root = mkdtempSync(join(tmpdir(), 'whatsapp-export-video-'));
@@ -638,5 +524,92 @@ describe('an export\'s media of any size reaches extraction as a file (owner, 20
     expect(readChild.toFile(locator, {}, dest)).toBe(size);
     expect(readFileSync(dest).byteLength).toBe(size);
   }, 60_000);
+});
+
+describe('review round 6 on #558: Olympus asks the bridge to clear, and clears whatever the bridge spooled', () => {
+  const setup = (id: string, fields: Record<string, unknown>) => {
+    const target = lane();
+    const waitingDir = join(target.root, 'media', 'waiting');
+    mkdirSync(waitingDir, { recursive: true });
+    const stem = whatsAppMediaFileStem(CHAT, id);
+    const entry = join(waitingDir, `${stem}.json`);
+    const waiting = spoolLine({ id, media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', media_key: 'a2V5', ...fields });
+    writeFileSync(entry, waiting.trim());
+    const day = join(target.spoolDir, '2026-07-01.jsonl');
+    writeFileSync(day, waiting);
+    const clear = (secret: (providerItemId: string) => 'content' | 'names' | undefined) => redactWhatsAppLiveSpoolSecrets({
+      spoolDir: target.spoolDir,
+      account: 'personal',
+      judge: (identity) => secret(identity.providerItemId),
+      mediaDirs: [target.images, target.video, target.audio],
+      mediaWaitingDir: waitingDir,
+    });
+    return { target, waitingDir, stem, entry, day, waiting, clear };
+  };
+
+  test('a Secret picture that waits for disk space gets a request to remove it; Olympus never touches the entry', () => {
+    const { waitingDir, stem, entry, waiting, clear } = setup('R1', { text: '' });
+    clear((id) => (id === 'R1#child:media' ? 'content' : undefined));
+    expect(existsSync(join(waitingDir, `${stem}.clear-remove`))).toBe(true);
+    expect(readFileSync(join(waitingDir, `${stem}.clear-remove`), 'utf8')).toBe('remove');
+    expect(readFileSync(entry, 'utf8')).toBe(waiting.trim());
+  });
+
+  test('a Secret caption over a waiting picture asks the bridge to clear the words, not the picture', () => {
+    const { waitingDir, stem, entry, waiting, clear } = setup('R2', { text: 'the door code is 4411' });
+    clear((id) => (id === 'R2' ? 'content' : undefined));
+    expect(existsSync(join(waitingDir, `${stem}.clear-content`))).toBe(true);
+    expect(existsSync(join(waitingDir, `${stem}.clear-remove`))).toBe(false);
+    expect(readFileSync(entry, 'utf8')).toBe(waiting.trim());
+  });
+
+  test('a request that cannot be written fails the clearing: the line keeps its keys for the next pull', () => {
+    const { waitingDir, stem, day, waiting, clear } = setup('R3', { text: '' });
+    chmodSync(waitingDir, 0o500);
+    try {
+      expect(() => clear((id) => (id === 'R3#child:media' ? 'content' : undefined))).toThrow();
+      expect(readFileSync(day, 'utf8')).toBe(waiting);
+    } finally {
+      chmodSync(waitingDir, 0o700);
+    }
+    clear((id) => (id === 'R3#child:media' ? 'content' : undefined));
+    expect(existsSync(join(waitingDir, `${stem}.clear-remove`))).toBe(true);
+  });
+
+  test('a clear landing between the bridge\'s last look and its spool still wins: the line it spooled is cleared and its picture deleted', () => {
+    const { target, waitingDir, stem, day, clear } = setup('R4', { text: 'the door code is 4411' });
+    // Olympus asked for the picture to go...
+    clear((id) => (id === 'R4#child:media' ? 'content' : undefined));
+    expect(existsSync(join(waitingDir, `${stem}.clear-remove`))).toBe(true);
+    // ...but the bridge had already looked, and spools the message with its picture and caption.
+    const photo = join(target.images, 'R4.jpg');
+    writeFileSync(photo, 'secret picture');
+    writeFileSync(day, readFileSync(day, 'utf8') + spoolLine({ id: 'R4', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'the door code is 4411', media_key: 'a2V5' }));
+    // The next pass, which no longer judges anything itself, meets the request.
+    clear(() => undefined);
+    expect(existsSync(photo)).toBe(false);
+    const lines = readFileSync(day, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    for (const line of lines) {
+      expect(line).not.toHaveProperty('media_path');
+      expect(line).not.toHaveProperty('media_key');
+    }
+  });
+
+  test('a request to clear the words clears a line the bridge spooled before it saw it, and keeps the picture', () => {
+    const { target, waitingDir, stem, day } = setup('R5', { text: 'the door code is 4411' });
+    writeFileSync(join(waitingDir, `${stem}.clear-content`), 'content');
+    const photo = join(target.images, 'R5.jpg');
+    writeFileSync(photo, 'an ordinary picture');
+    writeFileSync(day, readFileSync(day, 'utf8') + spoolLine({ id: 'R5', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'the door code is 4411' }));
+    redactWhatsAppLiveSpoolSecrets({
+      spoolDir: target.spoolDir,
+      account: 'personal',
+      judge: () => undefined,
+      mediaDirs: [target.images, target.video, target.audio],
+      mediaWaitingDir: waitingDir,
+    });
+    expect(readFileSync(day, 'utf8')).not.toContain('door code');
+    expect(existsSync(photo)).toBe(true);
+  });
 });
 

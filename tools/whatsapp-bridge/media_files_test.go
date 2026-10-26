@@ -440,34 +440,48 @@ func TestStartSweepsAWaitingEntryAKilledBridgeNeverRenamed(t *testing.T) {
 	}
 }
 
-// asOlympus takes the waiting folder's lock as Olympus does (its own pid and this boot), and lets it go after `hold`, running `meanwhile` first.
-func asOlympus(t *testing.T, store *audioMediaStore, hold time.Duration, meanwhile func()) {
+// requestClear writes a clear request as Olympus does: beside the entry, made exclusively.
+func requestClear(t *testing.T, store *audioMediaStore, id string, how string) {
 	t.Helper()
-	lock := filepath.Join(store.queue.dir, mediaWaitingLockName)
-	if err := os.WriteFile(lock, []byte(fmt.Sprintf("%d %s\n", os.Getpid(), bootNonce)), 0o600); err != nil {
+	path := filepath.Join(store.queue.dir, mediaFileStem("15551234567@s.whatsapp.net", id)+clearRequestPrefix+how)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
-	go func() {
-		time.Sleep(hold)
-		meanwhile()
-		_ = os.Remove(lock)
-	}()
+	_ = file.Close()
 }
 
-func TestTheLineSpooledIsTheWaitingEntryAsItIsWhenPublished(t *testing.T) {
-	downloader := &streamingDownloader{chunk: []byte("picture"), times: 1}
-	store, _ := waitFor(t, downloader, "scrub-1")
-	entry := store.queue.waiting()[0]
-	// Olympus clears the caption (judged Secrets) while the picture downloads.
-	downloader.during = func() {
-		var rec spoolRecord
-		raw, _ := os.ReadFile(entry)
-		_ = json.Unmarshal(raw, &rec)
-		rec.Text = ""
-		rec.SecretRedacted = true
-		cleared, _ := json.Marshal(rec)
-		_ = os.WriteFile(entry, cleared, 0o600)
+func TestAClearToRemoveMadeWhileTheMediaDownloadsIsMet(t *testing.T) {
+	downloader := &streamingDownloader{chunk: []byte("secret picture"), times: 1}
+	store, _ := waitFor(t, downloader, "inflight-1")
+	// Olympus judges the picture Secrets while it downloads.
+	downloader.during = func() { requestClear(t, store, "inflight-1", "remove") }
+	var spooled []spoolRecord
+	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
+	if len(spooled) != 0 {
+		t.Fatalf("spooled a message whose media Olympus asked to remove: %#v", spooled)
 	}
+	if len(store.queue.waiting()) != 0 {
+		t.Fatalf("the entry stayed")
+	}
+	entries, _ := os.ReadDir(store.images.dir)
+	for _, entry := range entries {
+		t.Fatalf("kept %s", entry.Name())
+	}
+}
+
+func TestAClearOfTheWordsMadeWhileTheMediaDownloadsIsInTheLineSpooled(t *testing.T) {
+	downloader := &streamingDownloader{chunk: []byte("picture"), times: 1}
+	store, _ := waitFor(t, downloader, "inflight-2")
+	entry := store.queue.waiting()[0]
+	// The waiting entry holds the caption.
+	rec, _ := readEntry(entry)
+	rec.Text = "the door code is 4411"
+	payload, _ := json.Marshal(rec)
+	if err := os.WriteFile(entry, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	downloader.during = func() { requestClear(t, store, "inflight-2", "content") }
 	var spooled []spoolRecord
 	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
 	if len(spooled) != 1 || spooled[0].Text != "" || !spooled[0].SecretRedacted || spooled[0].DownloadStatus != "ok" {
@@ -475,40 +489,37 @@ func TestTheLineSpooledIsTheWaitingEntryAsItIsWhenPublished(t *testing.T) {
 	}
 }
 
-func TestAnEntryOlympusRemovesWhileHoldingTheLockIsNeverSpooled(t *testing.T) {
+func TestAClearToRemoveFoundBeforeTheDownloadMeansNoDownload(t *testing.T) {
 	downloader := &streamingDownloader{chunk: []byte("secret picture"), times: 1}
-	store, _ := waitFor(t, downloader, "fence-1")
-	entry := store.queue.waiting()[0]
-	// Olympus takes the lock while the picture downloads, and removes the entry before letting it go.
-	downloader.during = func() {
-		asOlympus(t, store, 150*time.Millisecond, func() { _ = os.Remove(entry) })
-	}
-	var spooled []spoolRecord
-	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
-	if len(spooled) != 0 {
-		t.Fatalf("spooled a removed entry: %#v", spooled)
-	}
-	entries, _ := os.ReadDir(store.images.dir)
-	for _, each := range entries {
-		t.Fatalf("kept %s for a removed entry", each.Name())
+	store, _ := waitFor(t, downloader, "before-1")
+	requestClear(t, store, "before-1", "remove")
+	store.queue.retry(context.Background(), store, func(spoolRecord) error { t.Fatal("spooled"); return nil })
+	if downloader.calls != 0 || len(store.queue.waiting()) != 0 {
+		t.Fatalf("downloaded %d times, waiting %d", downloader.calls, len(store.queue.waiting()))
 	}
 }
 
-func TestALockWhoseHolderIsGoneIsTakenOver(t *testing.T) {
-	store := newAudioMediaStore(t.TempDir(), &fakeDownloader{})
-	if err := os.MkdirAll(store.queue.dir, 0o700); err != nil {
-		t.Fatal(err)
+func TestClearRequestsAreRetiredOnlyOnceTheirEntryIsGoneAndTheyAreOld(t *testing.T) {
+	store, _ := waitFor(t, &streamingDownloader{err: errors.New("connection reset by peer")}, "kept-1")
+	requestClear(t, store, "kept-1", "content")
+	requestClear(t, store, "gone-1", "remove")
+	requestClear(t, store, "gone-2", "names")
+	old := time.Now().Add(-2 * clearRequestKeep)
+	gone1 := filepath.Join(store.queue.dir, mediaFileStem("15551234567@s.whatsapp.net", "gone-1")+clearRequestPrefix+"remove")
+	kept1 := filepath.Join(store.queue.dir, mediaFileStem("15551234567@s.whatsapp.net", "kept-1")+clearRequestPrefix+"content")
+	young := filepath.Join(store.queue.dir, mediaFileStem("15551234567@s.whatsapp.net", "gone-2")+clearRequestPrefix+"names")
+	for _, path := range []string{gone1, kept1} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
 	}
-	lock := filepath.Join(store.queue.dir, mediaWaitingLockName)
-	if err := os.WriteFile(lock, []byte("4194305 "+bootNonce+"\n"), 0o600); err != nil {
-		t.Fatal(err)
+	store.queue.retireRequests(time.Now())
+	if _, err := os.Stat(gone1); !os.IsNotExist(err) {
+		t.Fatalf("an old request whose entry is gone stayed")
 	}
-	unlock, err := store.queue.lock()
-	if err != nil {
-		t.Fatalf("a dead holder's lock was not taken over: %v", err)
-	}
-	unlock()
-	if _, err := os.Stat(lock); !os.IsNotExist(err) {
-		t.Fatalf("the lock stayed after it was let go")
+	for _, path := range []string{kept1, young} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s was retired too soon", filepath.Base(path))
+		}
 	}
 }

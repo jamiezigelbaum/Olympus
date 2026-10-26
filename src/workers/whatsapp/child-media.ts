@@ -4,10 +4,10 @@
 // (archive-import/input-media.ts). One reader for both, so the connector's
 // `fetchItem` and the extraction source read children the same way.
 
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, rmSync, statSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { FileExtractionSourceError } from '../../core/file-extraction-source.ts';
-import { copyArchiveInputMediaToFile, parseArchiveInputMedia, readArchiveInputMedia, type ArchiveInputMediaDeps } from '../archive-import/input-media.ts';
+import { copyArchiveInputMediaToFile, parseArchiveInputMedia, readArchiveInputMedia, writeFully, type ArchiveInputMediaDeps } from '../archive-import/input-media.ts';
 
 export const WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX = 'whatsapp-media-file:v1:';
 /** The most one read returns when the caller names no limit. */
@@ -120,7 +120,7 @@ function copyBounded(fd: number, maxBytes: number, dest: string): number {
       if (read === 0) break;
       total += read;
       if (total > maxBytes) throw new FileExtractionSourceError('source_too_large');
-      writeSync(out, chunk, 0, read);
+      writeFully(out, chunk.subarray(0, read));
     }
   } catch (error) {
     closeSync(out);

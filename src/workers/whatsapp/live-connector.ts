@@ -65,8 +65,8 @@
 //   reaction re-emit judges it Secrets again.
 
 import { execFileSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { closeSync, constants, existsSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeSync, type Dirent } from 'node:fs';
 import { basename, isAbsolute, join, relative } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
@@ -1316,8 +1316,9 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   /** The other folders the bridge saves media in (pictures, videos). */
   mediaDirs?: readonly string[];
   /**
-   * Where the bridge keeps media waiting for disk space (`media/waiting/<stem>.json` of its state folder): a Secret
-   * picture's waiting line is removed, so the bridge never fetches it.
+   * Where the bridge keeps media waiting for disk space (`media/waiting/<stem>.json` of its state folder). Olympus
+   * never touches an entry there: it asks the bridge to clear one (a clear request beside it), and clears any line
+   * a request names, whenever the bridge spooled it (tools/whatsapp-bridge/media_waiting.go).
    */
   mediaWaitingDir?: string;
   /**
@@ -1336,7 +1337,9 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   const relocate = options.relocateMediaPath ?? ((path: string): string => path);
   // A download a killed bridge never finished leaves a temp: those go first (tools/whatsapp-bridge/media_files.go).
   sweepOrphanMediaTemps(mediaRoots);
-  if (options.mediaWaitingDir) sweepWaitingTemps(options.mediaWaitingDir);
+  // What the bridge has been asked to clear: every line this pass reads is checked against it, so a line the
+  // bridge spooled before it saw a request is cleared here, and the media it names deleted.
+  const requested = options.mediaWaitingDir ? readClearRequests(options.mediaWaitingDir) : new Map<string, WaitingClear>();
   let owners: Map<string, Set<string>> | undefined;
   // Saved audio is deleted only when this message is the only one that names
   // it: the bridge names a file by message id alone, and an id is unique only
@@ -1378,12 +1381,15 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
       const text = alreadyRedacted || (message.mediaType !== undefined && message.text === '')
         ? undefined
         : spoolMessageText(message);
-      const redaction = options.judge(identity, text);
+      const request = requested.get(whatsAppMediaFileStem(message.chatJid, message.id));
+      const judged = options.judge(identity, text);
+      // A clear request asked for the words (or the names) at least: the line is cleared at least as much.
+      const redaction = request === 'names' || judged === 'names' ? 'names' : request === 'content' || judged !== undefined ? 'content' : undefined;
       // A picture or video is judged as its own item; any other media is the message's.
       const childMedia = message.mediaType !== undefined && CHILD_MEDIA_TYPES.has(message.mediaType);
-      const mediaSecret = childMedia
+      const mediaSecret = request === 'remove' || (childMedia
         ? options.judge({ ...identity, providerItemId: childProviderItemId(message.id, 'media') }, undefined) !== undefined
-        : redaction !== undefined;
+        : redaction !== undefined);
       if (!redaction && !mediaSecret) return undefined;
       const record = JSON.parse(line) as Record<string, unknown>;
       // The media hashes and key time only serve a re-download, which Secret media must never get. The path goes
@@ -1398,10 +1404,12 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
         deleteOwnedMedia(message);
         deleteMediaTemps(message, mediaRoots);
       }
-      // The bridge's waiting entry holds the whole line: gone when the media is Secret (it is never fetched), its
-      // words and names cleared as the line's are when only they are. Before the line is rewritten; a failure fails
+      // The bridge's waiting entry holds the whole line: the bridge is asked to clear it, as the line is cleared
+      // (`remove` when the media is Secrets, so it is never fetched). Before the line is rewritten; a failure fails
       // the window, which the next pull clears again.
-      if (options.mediaWaitingDir) clearWaitingEntry(options.mediaWaitingDir, message, mediaSecret || !redaction ? 'remove' : redaction);
+      if (options.mediaWaitingDir && message.downloadStatus === WHATSAPP_MEDIA_WAITING_STATUS) {
+        requestWaitingClear(options.mediaWaitingDir, whatsAppMediaFileStem(message.chatJid, message.id), mediaSecret || !redaction ? 'remove' : redaction);
+      }
       const namesLeft = message.chatName !== '' || message.senderName !== '' || (message.senderContactName ?? '') !== '';
       // Mentions are display names copied into the text, so they go with it.
       const textKeys = redaction ? ['preview_title', 'preview_description', 'preview_url', 'mentions'].filter((key) => key in record) : [];
@@ -1542,146 +1550,53 @@ function mediaTempFiles(roots: readonly string[], strict: boolean): Array<{ path
   return found;
 }
 
-/** A waiting entry's temp a killed bridge never renamed into place: `.<stem>.json.tmp<random>` (writeFileAtomicPrivate). */
-const WAITING_TEMP = /^\.(.+)\.json\.tmp[^/]*$/u;
-/** Another message's waiting temp older than this is a leftover (the bridge renames its own at once). */
-const WAITING_TEMP_MAX_AGE_MS = 60 * 1000;
-
-/** The lock the bridge and Olympus share on the waiting folder (media_waiting.go, `mediaWaitingLockName`). */
-const WAITING_LOCK_NAME = '.olympus-waiting.lock';
-const WAITING_LOCK_WAIT_MS = 30 * 1000;
+/** What a clear request asks of the bridge (tools/whatsapp-bridge/media_waiting.go): the media gone, or the words or names cleared. */
+type WaitingClear = 'remove' | 'content' | 'names';
+const WAITING_CLEAR_RANK: Record<WaitingClear, number> = { content: 1, names: 2, remove: 3 };
+/** A clear request beside a waiting entry: `<stem>.clear-<how>`. */
+const WAITING_CLEAR = /^(.+)\.clear-(remove|content|names)$/u;
 
 /**
- * Runs `use` holding the waiting folder's lock, shared with the bridge: made
- * exclusively, naming this pid and boot; one whose holder is gone (its pid
- * dead, or of another boot) is taken over. The bridge holds it from reading
- * an entry again until that message is spooled, so an entry cleared or
- * removed here is what the bridge spools, or nothing. Undefined when the
- * folder is not there (nothing waits).
+ * Asks the bridge to clear a waiting entry: a request beside it, made
+ * exclusively and fsynced, which Olympus never removes (the bridge retires
+ * it). One already there is enough. A folder that is not there holds no
+ * entry. Anything else fails the clearing.
  */
-function withWaitingLock<T>(dir: string, use: () => T): T | undefined {
-  const path = join(dir, WAITING_LOCK_NAME);
-  const deadline = Date.now() + WAITING_LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      writeFileSync(path, `${process.pid} ${whatsAppBootNonce()}\n`, { mode: 0o600, flag: 'wx' });
-      break;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') return undefined;
-      if (code !== 'EEXIST') throw error;
-    }
-    if (waitingLockHolderGone(path)) {
-      rmSync(path, { force: true });
-      continue;
-    }
-    if (Date.now() > deadline) throw new Error('The WhatsApp media waiting folder stayed locked.');
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+function requestWaitingClear(dir: string, stem: string, how: WaitingClear): void {
+  let fd: number;
+  try {
+    fd = openSync(join(dir, `${stem}.clear-${how}`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST' || code === 'ENOENT') return;
+    throw error;
   }
   try {
-    return use();
+    writeSync(fd, how);
+    fsyncSync(fd);
   } finally {
-    rmSync(path, { force: true });
+    closeSync(fd);
   }
 }
 
-function waitingLockHolderGone(path: string): boolean {
-  let fields: string[];
-  try {
-    fields = readFileSync(path, 'utf8').trim().split(/\s+/u);
-  } catch {
-    return false;
-  }
-  if (fields.length !== 2) {
-    // Being written this moment, or not a lock this build makes: given a moment.
-    try {
-      return Date.now() - lstatSync(path).mtimeMs > WAITING_LOCK_WAIT_MS;
-    } catch {
-      return false;
-    }
-  }
-  const pid = Number(fields[0]);
-  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
-  return fields[1] !== whatsAppBootNonce() || (pid !== process.pid && !processAlive(pid));
-}
-
-/**
- * Removes the waiting entries' temps a killed bridge never renamed into place,
- * once past the age (the bridge renames its own at once): on every clearing,
- * so one holding a caption never stays.
- */
-function sweepWaitingTemps(dir: string, nowMs = Date.now()): void {
+/** Every clear request in the waiting folder, by stem, the most each asks. */
+function readClearRequests(dir: string): Map<string, WaitingClear> {
+  const requests = new Map<string, WaitingClear>();
   let names: string[];
   try {
     names = readdirSync(dir);
   } catch {
-    return;
+    return requests;
   }
   for (const name of names) {
-    if (!WAITING_TEMP.test(name)) continue;
-    const path = join(dir, name);
-    try {
-      if (nowMs - lstatSync(path).mtimeMs >= WAITING_TEMP_MAX_AGE_MS) rmSync(path, { force: true });
-    } catch {
-      // Gone already, or tried again next time.
-    }
+    const found = WAITING_CLEAR.exec(name);
+    if (!found) continue;
+    const stem = found[1]!;
+    const how = found[2] as WaitingClear;
+    const before = requests.get(stem);
+    if (before === undefined || WAITING_CLEAR_RANK[how] > WAITING_CLEAR_RANK[before]) requests.set(stem, how);
   }
-}
-
-/**
- * Clears one message's waiting entry in the bridge's waiting folder
- * (tools/whatsapp-bridge/media_waiting.go), holding the lock it shares with
- * the bridge: removed (`remove`), or its text, link preview and mentions (and
- * names, for `names`) cleared and the entry flagged as the spool line is,
- * written whole. The message's own unfinished temps go with it. Anything but
- * a file's being gone already fails the clearing.
- */
-function clearWaitingEntry(dir: string, message: SpoolMessage, how: 'remove' | 'content' | 'names'): void {
-  withWaitingLock(dir, () => clearWaitingEntryLocked(dir, message, how));
-}
-
-function clearWaitingEntryLocked(dir: string, message: SpoolMessage, how: 'remove' | 'content' | 'names'): void {
-  const stem = whatsAppMediaFileStem(message.chatJid, message.id);
-  for (const name of readdirSync(dir)) {
-    if (WAITING_TEMP.exec(name)?.[1] === stem) removeTemp(join(dir, name));
-  }
-  const entry = join(dir, `${stem}.json`);
-  if (how === 'remove') {
-    removeTemp(entry);
-    return;
-  }
-  let raw: string;
-  try {
-    raw = readFileSync(entry, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
-  let record: Record<string, unknown>;
-  try {
-    record = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    // Not one the bridge could read back either: it holds the line's words, so it goes.
-    removeTemp(entry);
-    return;
-  }
-  record['text'] = '';
-  for (const key of ['preview_title', 'preview_description', 'preview_url', 'mentions']) delete record[key];
-  if (how === 'names') {
-    record['chat_name'] = '';
-    record['sender_name'] = '';
-    if ('sender_contact_name' in record) record['sender_contact_name'] = '';
-  }
-  record['secret_redacted'] = true;
-  // Written whole: a temp beside it, renamed into place.
-  const temp = join(dir, `.${stem}.json.tmp${randomBytes(6).toString('hex')}`);
-  try {
-    writeFileSync(temp, JSON.stringify(record), { mode: 0o600, flag: 'wx' });
-    renameSync(temp, entry);
-  } catch (error) {
-    rmSync(temp, { force: true });
-    throw error;
-  }
+  return requests;
 }
 
 /** Removes a file, failing on anything but its being gone already. */

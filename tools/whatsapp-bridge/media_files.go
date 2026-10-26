@@ -184,7 +184,7 @@ func (store *audioMediaStore) sweepTemps(now time.Time) {
 	if store == nil {
 		return
 	}
-	store.queue.sweepTemps()
+	store.queue.sweepTemps(0)
 	for _, each := range []*audioMediaStore{store, store.images, store.video} {
 		if each == nil {
 			continue

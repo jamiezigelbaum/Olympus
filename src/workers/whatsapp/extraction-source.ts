@@ -16,7 +16,7 @@
  */
 
 import { readFile, realpath, stat } from 'node:fs/promises';
-import { closeSync, constants, openSync, readSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, constants, openSync, readSync, rmSync } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import type { DeferredBytesAnswer } from '../file-extraction/connector-source.ts';
 import {
@@ -27,6 +27,7 @@ import {
   pruneExtractionSpoolOwner,
 } from '../file-extraction/spool.ts';
 import { withConfinedFile, type WhatsAppChildReader } from './child-media.ts';
+import { writeFully } from '../archive-import/input-media.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import {
   FileExtractionSourceError,
@@ -279,7 +280,7 @@ function copyDescriptor(fd: number, size: number, dest: string): number {
     while (total < size) {
       const read = readSync(fd, chunk, 0, Math.min(chunk.length, size - total), total);
       if (read === 0) break;
-      writeSync(out, chunk, 0, read);
+      writeFully(out, chunk.subarray(0, read));
       total += read;
     }
   } finally {

@@ -10,8 +10,8 @@ package main
 //     writes). Its message is still spooled, with its media "waiting for
 //     disk space" (download_status mediaWaitingStatus).
 //   - The line is kept beside the media as `media/waiting/<stem>.json` (the
-//     message's file stem, so Olympus's Secrets clearing removes it by the
-//     same name and the media is never fetched for a Secret message).
+//     message's file stem). The bridge alone writes, changes and removes
+//     these entries.
 //   - Every minute, while any is waiting and the volume is above the floor
 //     again, the waiting downloads are made in the order they waited, and
 //     each message is spooled again with its media: Olympus fills the
@@ -20,17 +20,22 @@ package main
 //     (the network) stays waiting; only one that can never be fetched (gone
 //     from WhatsApp's servers, failing its hash) is spooled as failed. An
 //     entry is removed only once its line is written and fsynced.
+//   - Olympus clears a Secret message by asking, never by touching the entry:
+//     it writes a clear request beside it, `<stem>.clear-<how>` (remove: the
+//     media is Secrets; names or content: the words are), made exclusively
+//     and fsynced, never removed by Olympus. The bridge applies every request
+//     it finds before a download and again right before spooling: `remove`
+//     drops the entry and what was downloaded for it; the others clear the
+//     words in the entry and the line. A request that lands after that last
+//     look is still met: Olympus checks every line it reads against the
+//     requests, clears the line and deletes the media it names. So a request
+//     always wins, whatever the interleaving, and nothing depends on two
+//     processes excluding each other.
+//   - A request is retired by the bridge alone, once its entry is gone and
+//     it is older than clearRequestKeep (no line for that stem can follow).
 //   - A waiting entry is written whole or not at all (a temp renamed into
-//     place); the temp of a write a killed bridge left is swept at start,
-//     and Olympus sweeps the same on every clearing.
-//   - The bridge and Olympus share one lock on the waiting folder
-//     (mediaWaitingLockName: made exclusively, naming its holder's pid and
-//     boot; one whose holder is gone is taken over). Olympus holds it while
-//     it clears or removes an entry; the bridge holds it from reading an
-//     entry again, right before the message is spooled with its media,
-//     until the line is written and the entry removed. So what is spooled is
-//     the entry as it is then (cleared, if Olympus cleared it), and an entry
-//     Olympus removed is never spooled: what was downloaded for it goes.
+//     place); the bridge sweeps a temp a killed bridge left at start and on
+//     every pass.
 //   - The capture status receipt says media is waiting, with no count, for
 //     as long as any entry remains.
 
@@ -39,12 +44,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,13 +56,15 @@ import (
 )
 
 const (
-	mediaWaitingLockName = ".olympus-waiting.lock"
-	mediaWaitingLockWait = 30 * time.Second
-	mediaWaitingStatus   = "waiting_for_disk"
-	mediaWaitingDirName  = "waiting"
-	diskFloorMinBytes    = 5 * 1024 * 1024 * 1024
-	diskFloorShare       = 20 // one twentieth: 5% of the volume
-	mediaRetryInterval   = time.Minute
+	clearRequestPrefix = ".clear-"
+	// A request outlives its entry this long, so no line Olympus has yet to read misses it.
+	clearRequestKeep    = 24 * time.Hour
+	mediaWaitingTempAge = time.Minute
+	mediaWaitingStatus  = "waiting_for_disk"
+	mediaWaitingDirName = "waiting"
+	diskFloorMinBytes   = 5 * 1024 * 1024 * 1024
+	diskFloorShare      = 20 // one twentieth: 5% of the volume
+	mediaRetryInterval  = time.Minute
 )
 
 // The volume a new queue reads (tests give it one with room).
@@ -172,9 +177,10 @@ func (q *mediaWaitQueue) report() {
 }
 
 // sweepTemps removes the temps of waiting entries a killed bridge never
-// renamed into place (`.<stem>.json.tmp<random>`). Run before capture starts,
-// when no entry is being written.
-func (q *mediaWaitQueue) sweepTemps() {
+// renamed into place (`.<stem>.json.tmp<random>`): all of them at start, when
+// none is being written (minAge 0), and on every pass those past
+// mediaWaitingTempAge (an entry is renamed into place at once).
+func (q *mediaWaitQueue) sweepTemps(minAge time.Duration) {
 	if q == nil {
 		return
 	}
@@ -183,7 +189,10 @@ func (q *mediaWaitQueue) sweepTemps() {
 		return
 	}
 	for _, entry := range entries {
-		if entry.Type().IsRegular() && isWaitingTemp(entry.Name()) {
+		if !entry.Type().IsRegular() || !isWaitingTemp(entry.Name()) {
+			continue
+		}
+		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) >= minAge {
 			_ = os.Remove(filepath.Join(q.dir, entry.Name()))
 		}
 	}
@@ -194,96 +203,87 @@ func isWaitingTemp(name string) bool {
 	return strings.HasPrefix(name, ".") && strings.Contains(name, ".json.tmp")
 }
 
-// lock takes the waiting folder's lock, shared with Olympus (see the header):
-// made exclusively, naming this pid and boot. A lock whose holder is gone
-// (its pid dead, or of another boot) is taken over.
-func (q *mediaWaitQueue) lock() (func(), error) {
-	path := filepath.Join(q.dir, mediaWaitingLockName)
-	if err := os.MkdirAll(q.dir, 0o700); err != nil {
-		return nil, err
+// clearHow ranks what a clear request asks: removing the media and the
+// entry is more than clearing the names, which is more than clearing the words.
+var clearHow = map[string]int{"content": 1, "names": 2, "remove": 3}
+
+// clearRequestOf is the most any clear request for this entry asks, or "".
+func (q *mediaWaitQueue) clearRequestOf(stem string) string {
+	strongest := ""
+	for how := range clearHow {
+		if _, err := os.Stat(filepath.Join(q.dir, stem+clearRequestPrefix+how)); err == nil && clearHow[how] > clearHow[strongest] {
+			strongest = how
+		}
 	}
-	deadline := time.Now().Add(mediaWaitingLockWait)
-	for {
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err == nil {
-			_, werr := fmt.Fprintf(file, "%d %s\n", os.Getpid(), bootNonce)
-			cerr := file.Close()
-			if werr != nil || cerr != nil {
-				_ = os.Remove(path)
-				return nil, errors.Join(werr, cerr)
-			}
-			return func() { _ = os.Remove(path) }, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, err
-		}
-		if lockHolderGone(path) {
-			_ = os.Remove(path)
+	return strongest
+}
+
+// applyClear clears a record as a request asks (not `remove`, which drops it).
+func applyClear(rec *spoolRecord, how string) {
+	if how != "content" && how != "names" {
+		return
+	}
+	rec.Text = ""
+	rec.PreviewTitle = ""
+	rec.PreviewDescription = ""
+	rec.PreviewURL = ""
+	rec.Mentions = nil
+	if how == "names" {
+		rec.ChatName = ""
+		rec.SenderName = ""
+		rec.SenderContactName = ""
+	}
+	rec.SecretRedacted = true
+}
+
+// retireRequests removes the clear requests whose entry is gone and that are
+// past clearRequestKeep: no line for their stem can follow.
+func (q *mediaWaitQueue) retireRequests(now time.Time) {
+	entries, err := os.ReadDir(q.dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		at := strings.Index(name, clearRequestPrefix)
+		if at <= 0 || !entry.Type().IsRegular() {
 			continue
 		}
-		if time.Now().After(deadline) {
-			return nil, errors.New("the media waiting folder stayed locked")
+		stem := name[:at]
+		if _, err := os.Stat(filepath.Join(q.dir, stem+".json")); err == nil {
+			continue
 		}
-		time.Sleep(20 * time.Millisecond)
+		if info, err := entry.Info(); err == nil && now.Sub(info.ModTime()) >= clearRequestKeep {
+			_ = os.Remove(filepath.Join(q.dir, name))
+		}
 	}
 }
 
-// lockHolderGone says whether the lock's holder is no longer running: its pid dead, or of another boot.
-func lockHolderGone(path string) bool {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	fields := strings.Fields(string(raw))
-	if len(fields) != 2 {
-		// Being written this moment, or not a lock this build makes: given a moment.
-		info, err := os.Stat(path)
-		return err == nil && time.Since(info.ModTime()) > mediaWaitingLockWait
-	}
-	pid, err := strconv.Atoi(fields[0])
-	if err != nil {
-		return true
-	}
-	return fields[1] != bootNonce || (pid != os.Getpid() && !processAlive(pid))
-}
-
-// publish spools a waiting message with its media, fenced against Olympus's
-// clearing by the shared lock: the entry is read again under it, and what is
-// spooled is the entry as it is now. An entry that is gone is never spooled,
-// and what was downloaded for it is deleted. The entry goes only once the
-// line is written. Says whether it was spooled.
-func (q *mediaWaitQueue) publish(path string, result func(rec *spoolRecord), saved string, spool func(spoolRecord) error) bool {
-	unlock, err := q.lock()
-	if err != nil {
-		log.Printf("olympus-whatsapp-bridge: could not lock the media waiting folder: %v", err)
-		return false
-	}
-	defer unlock()
-	discard := func() {
-		if saved != "" {
-			_ = os.Remove(saved)
-		}
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		// Removed meanwhile (its media judged Secrets): the media is never kept.
-		discard()
-		return false
-	}
+// readEntry reads a waiting entry; ok is false for one that is gone or cannot be read.
+func readEntry(path string) (spoolRecord, bool) {
 	var rec spoolRecord
-	if json.Unmarshal(raw, &rec) != nil {
-		discard()
+	raw, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(raw, &rec) != nil {
+		return rec, false
+	}
+	return rec, true
+}
+
+// honour applies a waiting entry's clear request, if any, and says whether
+// the entry is still to be downloaded: `remove` drops it (the bridge owns it);
+// the others clear its words in place.
+func (q *mediaWaitQueue) honour(path string, rec *spoolRecord) bool {
+	how := q.clearRequestOf(mediaFileStem(rec.ChatJID, rec.ID))
+	if how == "remove" {
 		_ = os.Remove(path)
 		return false
 	}
-	result(&rec)
-	if err := spool(rec); err != nil {
-		// Not written: the entry stays, and the next pass makes the line again.
-		log.Printf("olympus-whatsapp-bridge: could not spool a message whose media was waiting: %v", err)
-		discard()
-		return false
+	if how != "" && !rec.SecretRedacted || how == "names" && rec.ChatName != "" {
+		applyClear(rec, how)
+		if payload, err := json.Marshal(rec); err == nil {
+			_ = writeFileAtomicPrivate(path, payload)
+		}
 	}
-	_ = os.Remove(path)
 	return true
 }
 
@@ -329,22 +329,23 @@ func permanentDownloadError(err error) bool {
 }
 
 // retry makes the waiting downloads while the volume is above the floor, in
-// the order they waited, and spools each message again with its media. A
-// line Olympus removed meanwhile (its media judged Secrets) is never filled:
-// what was downloaded for it is deleted. An entry goes only once `spool` says
-// its line is durably written.
+// the order they waited, and spools each message again with its media. Every
+// clear request is applied before a download and again right before the
+// line is spooled (see the header). An entry goes only once `spool` says its
+// line is durably written.
 func (q *mediaWaitQueue) retry(ctx context.Context, store *audioMediaStore, spool func(spoolRecord) error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	defer q.report()
+	q.sweepTemps(mediaWaitingTempAge)
+	defer q.retireRequests(time.Now())
 	for _, path := range q.waiting() {
-		raw, err := os.ReadFile(path)
-		if err != nil {
+		rec, ok := readEntry(path)
+		if !ok {
+			_ = os.Remove(path)
 			continue
 		}
-		var rec spoolRecord
-		if json.Unmarshal(raw, &rec) != nil {
-			_ = os.Remove(path)
+		if !q.honour(path, &rec) {
 			continue
 		}
 		kind := store.forMediaType(rec.MediaType)
@@ -364,16 +365,32 @@ func (q *mediaWaitQueue) retry(ctx context.Context, store *audioMediaStore, spoo
 			// A passing failure (the network): it stays waiting for the next pass.
 			continue
 		}
-		failed := err
-		q.publish(path, func(rec *spoolRecord) {
-			if failed != nil {
-				rec.DownloadStatus = "failed:" + classifyDownloadError(failed)
-				return
+		discard := func() {
+			if saved != "" {
+				_ = os.Remove(saved)
 			}
-			rec.MediaPath = saved
-			rec.MediaSizeBytes = size
-			rec.DownloadStatus = "ok"
-		}, saved, spool)
+		}
+		// The last look, right before the line is spooled: what is spooled is the entry as it is now,
+		// with every request made meanwhile applied.
+		current, ok := readEntry(path)
+		if !ok || !q.honour(path, &current) {
+			discard()
+			continue
+		}
+		if err != nil {
+			current.DownloadStatus = "failed:" + classifyDownloadError(err)
+		} else {
+			current.MediaPath = saved
+			current.MediaSizeBytes = size
+			current.DownloadStatus = "ok"
+		}
+		if err := spool(current); err != nil {
+			// Not written: the entry stays, and the next pass makes the line again.
+			log.Printf("olympus-whatsapp-bridge: could not spool a message whose media was waiting: %v", err)
+			discard()
+			continue
+		}
+		_ = os.Remove(path)
 	}
 }
 

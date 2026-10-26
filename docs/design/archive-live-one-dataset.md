@@ -702,8 +702,9 @@ export's media are (section 5).
   larger of 5 GB and 5% of it (`media_waiting.go`). Below it no download
   starts, and one running stops (the temp writer checks as it writes); the
   message is still spooled, its media `waiting_for_disk`, and its line is
-  kept as `media/waiting/<stem>.json` (written whole; a temp a killed
-  bridge left is swept at start and before Secrets clearing). Every minute,
+  kept as `media/waiting/<stem>.json`, which the bridge alone writes,
+  changes and removes (written whole; a temp a killed bridge left is swept
+  at start and on every pass). Every minute,
   once the volume has room again, the waiting downloads are made in order
   (one too large for the room is skipped, the smaller ones after it still
   go; a passing failure stays waiting; only media gone from WhatsApp's
@@ -745,11 +746,19 @@ export's media are (section 5).
 - **Media folders** (`defaultWhatsAppMediaRoots`): the account's media
   folder (or, in the older layout, the audio folder) and the bridge's
   picture and video folders beside it.
-- **Secrets.** Saved media follows the judgment of what it is part of. A
-  Secret picture still waiting for disk space loses its waiting line too, so
-  the bridge never fetches it (and drops what it fetched, should the line go
-  while it downloads); a Secret caption over a waiting picture has its words
-  cleared in the waiting line as in the spool.
+- **Secrets.** Saved media follows the judgment of what it is part of. For
+  media still waiting for disk space, Olympus never touches the bridge's
+  entry: it writes a clear request beside it (`<stem>.clear-remove` when the
+  media is Secrets, `-names` or `-content` when only the words are; made
+  exclusively, fsynced, never removed by Olympus). The bridge applies every
+  request before a download and again right before spooling: a `remove`
+  drops the entry and what was downloaded, the others clear the words in
+  the line it spools. A request that lands after that last look still wins:
+  every pass of Olympus's clearing checks each line against the requests,
+  clears the line and deletes the media it names. No lock is shared: the
+  outcome does not depend on the two processes excluding each other. The
+  bridge alone retires a request, once its entry is gone and a day has
+  passed.
 - **Reading large media.** Keeping every file does not mean reading every
   file into memory: the extraction source hands a file reader the media as
   a file (`fetchFile`), copied a chunk at a time from the descriptor the
