@@ -170608,13 +170608,28 @@ function servedRecord(state, archiveId) {
   return record5;
 }
 function readArchiveInputMedia(locator, deps, options = {}) {
+  let out = new Uint8Array(0);
+  let at = 0;
+  serveArchiveInputMedia(locator, deps, options.maxBytes ?? ARCHIVE_MEDIA_DEFAULT_READ_BYTES, {
+    begin(size) {
+      out = new Uint8Array(size);
+    },
+    write(chunk) {
+      if (at + chunk.length > out.length)
+        throw new FileExtractionSourceError("source_content_unavailable");
+      out.set(chunk, at);
+      at += chunk.length;
+    }
+  });
+  return out;
+}
+function serveArchiveInputMedia(locator, deps, maxBytes, sink) {
   const parsed = parseArchiveInputMedia(locator);
   if (!parsed)
     throw new FileExtractionSourceError("source_item_not_found");
   const record5 = servedRecord(deps.state, parsed.archiveId);
   if (!record5)
     throw new FileExtractionSourceError("source_item_not_found");
-  const maxBytes = options.maxBytes ?? ARCHIVE_MEDIA_DEFAULT_READ_BYTES;
   let root;
   try {
     root = ScopeRoot.open(record5.root_path);
@@ -170622,7 +170637,10 @@ function readArchiveInputMedia(locator, deps, options = {}) {
     throw new FileExtractionSourceError("source_version_gone");
   }
   try {
-    return parsed.kind === "binding" ? readBinding(deps, record5, root, parsed.bindingId, maxBytes) : readZipMember(record5, root, parsed, maxBytes);
+    if (parsed.kind === "binding")
+      serveBinding(deps, record5, root, parsed.bindingId, maxBytes, sink);
+    else
+      serveZipMember(record5, root, parsed, maxBytes, sink);
   } catch (error2) {
     if (error2 instanceof FileExtractionSourceError)
       throw error2;
@@ -170639,13 +170657,25 @@ function readArchiveInputMedia(locator, deps, options = {}) {
     root.close();
   }
 }
-function readBinding(deps, record5, root, bindingId, maxBytes) {
+function serveBinding(deps, record5, root, bindingId, maxBytes, sink) {
   if (!deps.bindings)
     throw new FileExtractionSourceError("source_item_not_found");
   const access = archiveMediaAccess({ bindings: deps.bindings, archiveId: record5.archive_id, root, chosenRelPath: record5.chosen_rel_path });
-  return access.read(bindingId, { maxBytes });
+  const reader = access.open(bindingId);
+  try {
+    const size = reader.size;
+    if (maxBytes !== undefined && size > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
+    sink.begin(size);
+    for (let offset = 0;offset < size; offset += SCOPE_FILE_MAX_RANGE_BYTES) {
+      sink.write(reader.readAt(offset, Math.min(SCOPE_FILE_MAX_RANGE_BYTES, size - offset)));
+    }
+    reader.assertCurrent();
+  } finally {
+    reader.close();
+  }
 }
-function readZipMember(record5, root, ref, maxBytes) {
+function serveZipMember(record5, root, ref, maxBytes, sink) {
   const file = record5.files[ref.fileIndex];
   if (!file)
     throw new FileExtractionSourceError("source_item_not_found");
@@ -170670,24 +170700,23 @@ function readZipMember(record5, root, ref, maxBytes) {
     }
     if (!entry || entry.isDirectory)
       throw new FileExtractionSourceError("source_item_not_found");
-    if (entry.uncompressedSize > maxBytes)
+    if (maxBytes !== undefined && entry.uncompressedSize > maxBytes)
       throw new FileExtractionSourceError("source_too_large");
     const member = ZipMemberReader.open(zip, entry);
     try {
-      const out = new Uint8Array(entry.uncompressedSize);
+      sink.begin(entry.uncompressedSize);
       let at = 0;
       for (let chunk = member.next();chunk !== undefined; chunk = member.next()) {
-        if (at + chunk.length > out.length)
+        if (at + chunk.length > entry.uncompressedSize)
           throw new FileExtractionSourceError("source_content_unavailable");
-        out.set(chunk, at);
+        sink.write(chunk);
         at += chunk.length;
       }
       const end = member.end;
-      if (at !== out.length || !end || !end.sizeOk || end.crcOk === false) {
+      if (at !== entry.uncompressedSize || !end || !end.sizeOk || end.crcOk === false) {
         throw new FileExtractionSourceError("source_content_unavailable");
       }
       reader.assertCurrent?.();
-      return out;
     } finally {
       member.close();
     }
