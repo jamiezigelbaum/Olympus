@@ -8,8 +8,10 @@
 // part of Olympus that talks to WhatsApp.
 //
 // READ-ONLY GUARANTEE: this daemon never sends messages, never marks chats
-// read, and exposes no control surface (no sockets, no HTTP, no IPC). It
-// imports whatsmeow only to receive. The protocol-level acks whatsmeow emits
+// read, and exposes one local control only: an owner-only Unix socket that
+// answers a media download for Olympus (media_serve.go: the bytes of media a
+// spool line names, and nothing else; no HTTP, no other IPC). It imports
+// whatsmeow only to receive. The protocol-level acks whatsmeow emits
 // internally to keep the session alive are the unavoidable minimum; nothing
 // here calls SendMessage, MarkRead, SendPresence, or any other outbound API.
 // Keep it that way: a capture daemon with a send path is an attack surface.
@@ -386,9 +388,11 @@ func startManualPairing(stateDir string, spoolDir string, allowed map[string]str
 	audioStore := newAudioMediaStore(stateDir, client)
 	// What a bridge killed mid-download left behind goes before anything is captured.
 	audioStore.sweepTemps(time.Now())
-	// Media waiting for disk space is downloaded once the volume has room again, and said in the status receipt.
+	// Media waiting for disk space is said in the status receipt; Olympus fetches it through the one local
+	// download call (media_serve.go).
 	audioStore.floor.status = writer.status
-	go audioStore.floor.run(ctx, audioStore)
+	go audioStore.floor.watch(ctx)
+	go audioStore.serveDownloads(ctx, stateDir)
 	go writer.run()
 
 	fatalEvents := make(chan string, 1)
@@ -807,9 +811,11 @@ func startNativeCapture(stateDir string, spoolDir string, native nativeCaptureCo
 	audioStore := newAudioMediaStore(stateDir, client)
 	// What a bridge killed mid-download left behind goes before anything is captured.
 	audioStore.sweepTemps(time.Now())
-	// Media waiting for disk space is downloaded once the volume has room again, and said in the status receipt.
+	// Media waiting for disk space is said in the status receipt; Olympus fetches it through the one local
+	// download call (media_serve.go).
 	audioStore.floor.status = writer.status
-	go audioStore.floor.run(ctx, audioStore)
+	go audioStore.floor.watch(ctx)
+	go audioStore.serveDownloads(ctx, stateDir)
 	go writer.run()
 
 	fatalEvents := make(chan string, 1)

@@ -67,7 +67,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, constants, existsSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeSync, type Dirent } from 'node:fs';
-import { basename, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
@@ -157,6 +157,11 @@ export interface WhatsAppSpoolPassFindings {
   passBudgetReached: number;
   /** Media the bridge spooled as waiting for disk space, with what a later download needs (media-fetch.ts). */
   waitingMedia: WhatsAppWaitingMedia[];
+  /**
+   * Told of each waiting line as it is read, before the pull commits past it, so what waits is recorded even
+   * when a crash follows the commit (media-fetch.ts).
+   */
+  onWaitingMedia?: (media: WhatsAppWaitingMedia) => void;
   /** Messages whose media the bridge has saved itself: nothing is waiting for them any more. */
   savedMedia: Array<{ chatJid: string; id: string; version: string }>;
 }
@@ -167,6 +172,9 @@ export interface WhatsAppWaitingMedia {
   id: string;
   /** The message's version (its time), which the stored item must still be at. */
   version: string;
+  /** Where the line is in the spool: the fill is built from this line, the version's own. */
+  spoolFile: string;
+  spoolOffset: number;
   mediaType: string;
   mediaMime?: string;
   mediaKey?: string;
@@ -508,31 +516,42 @@ export function isWhatsAppChildMediaType(mediaType: string): boolean {
 }
 
 /** What a listed line says of its media: waiting for disk space (with what a download needs), or saved. */
-function noteMedia(findings: WhatsAppSpoolPassFindings, message: SpoolMessage): void {
+function noteMedia(findings: WhatsAppSpoolPassFindings, message: SpoolMessage, place: SpoolPlace): void {
   if (message.mediaType === undefined || !WHATSAPP_FETCHED_MEDIA_TYPES.has(message.mediaType) || message.secretRedacted === true) return;
   if (message.downloadStatus === WHATSAPP_MEDIA_WAITING_STATUS && message.mediaDirectPath) {
-    findings.waitingMedia.push({
+    const media: WhatsAppWaitingMedia = {
       chatJid: message.chatJid,
       id: message.id,
       version: message.timestamp,
+      spoolFile: place.file,
+      spoolOffset: place.offset,
       mediaType: message.mediaType,
       mediaDirectPath: message.mediaDirectPath,
       ...(message.mediaMime !== undefined ? { mediaMime: message.mediaMime } : {}),
       ...(message.mediaKey !== undefined ? { mediaKey: message.mediaKey } : {}),
       ...(message.mediaFileSha256 !== undefined ? { mediaFileSha256: message.mediaFileSha256 } : {}),
       ...(message.mediaFileEncSha256 !== undefined ? { mediaFileEncSha256: message.mediaFileEncSha256 } : {}),
-    });
+    };
+    findings.waitingMedia.push(media);
+    findings.onWaitingMedia?.(media);
   } else if (message.mediaPath !== undefined && message.downloadStatus === 'ok') {
     findings.savedMedia.push({ chatJid: message.chatJid, id: message.id, version: message.timestamp });
   }
 }
 
-/** The file name fetched media is kept under in its media folder: the message's stem, marked fetched (media-fetch.ts). */
-export function whatsAppFetchedMediaName(stem: string, ext: string): string {
-  return `${stem}${WHATSAPP_FETCHED_MARK}${ext}`;
+/**
+ * The file name fetched media is kept under in Olympus's own folder: the
+ * message's stem and its version's digest (media-fetch.ts). `~` is in no name
+ * the bridge gives a file.
+ */
+export function whatsAppFetchedMediaName(stem: string, versionDigest: string, ext: string): string {
+  return `${whatsAppFetchedMediaPrefix(stem)}${versionDigest}${ext}`;
 }
 
-const WHATSAPP_FETCHED_MARK = '-fetched';
+/** What every fetched copy of a message's media is named with first, whatever its version. */
+export function whatsAppFetchedMediaPrefix(stem: string): string {
+  return `${stem}~`;
+}
 
 /**
  * A record's children: the export's media an import listed, or the picture or
@@ -1027,7 +1046,7 @@ function readSpoolPage(
           continue;
         }
         messages.push(message);
-        noteMedia(pass.findings, message);
+        noteMedia(pass.findings, message, place);
         pageMessages.add(chatScopedKey(message.chatJid, message.id));
         reEmitTargets.delete(chatScopedKey(message.chatJid, message.id));
       }
@@ -1265,9 +1284,14 @@ function recordIdentity(message: SpoolMessage, account: string): SourceItemIdent
   };
 }
 
-/** The local id of a message's media child, as the listing builds it (`recordIdentity`, `childIdentity`). */
+/** The local id of a message, as the listing builds it (`recordIdentity`). */
+export function whatsAppMessageLocalItemId(account: string, chatJid: string, id: string): string {
+  return `${account}:${normalizeWhatsAppJid(chatJid)}:${id}`;
+}
+
+/** The local id of a message's media child, as the listing builds it (`childIdentity`). */
 export function whatsAppMediaChildLocalItemId(account: string, chatJid: string, id: string): string {
-  return childProviderItemId(`${account}:${normalizeWhatsAppJid(chatJid)}:${id}`, 'media');
+  return childProviderItemId(whatsAppMessageLocalItemId(account, chatJid, id), 'media');
 }
 
 /** Whether a record carries its item's content, not only its names. */
@@ -1608,12 +1632,12 @@ function mediaTempFiles(roots: readonly string[], strict: boolean): Array<{ path
 }
 
 /**
- * Removes the media fetched for a message (`<stem>-fetched.<ext>`) from the
- * media roots and the kind folders in them. A folder that cannot be read
+ * Removes the media fetched for a message (`<stem>~<version digest><ext>`)
+ * from the media roots and the folders in them. A folder that cannot be read
  * fails the cleanup, as a temp sweep does.
  */
 function deleteFetchedMedia(message: SpoolMessage, roots: readonly string[]): void {
-  const prefix = `${whatsAppMediaFileStem(message.chatJid, message.id)}${WHATSAPP_FETCHED_MARK}.`;
+  const prefix = whatsAppFetchedMediaPrefix(whatsAppMediaFileStem(message.chatJid, message.id));
   const walk = (dir: string, depth: number): void => {
     let entries: Dirent[];
     try {
@@ -1636,6 +1660,18 @@ function removeTemp(path: string): void {
     rmSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return;
+  }
+  fsyncFolderOf(path);
+}
+
+/** Makes a removal durable before it is recorded: the folder that held the file is fsynced. */
+function fsyncFolderOf(path: string): void {
+  const fd = openSync(dirname(path), 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -1708,6 +1744,7 @@ function deleteSavedMedia(mediaPath: string | undefined, mediaRoots: readonly st
   if (!inside) return;
   if (!statSync(real).isFile()) return;
   rmSync(real, { force: true });
+  fsyncFolderOf(real);
 }
 
 function enrichWithLinkPreview(text: string, message: SpoolMessage): string {

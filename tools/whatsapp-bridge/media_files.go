@@ -184,7 +184,6 @@ func (store *audioMediaStore) sweepTemps(now time.Time) {
 	if store == nil {
 		return
 	}
-	store.floor.sweepParts()
 	for _, each := range []*audioMediaStore{store, store.images, store.video} {
 		if each == nil {
 			continue

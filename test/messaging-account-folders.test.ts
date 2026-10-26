@@ -1113,14 +1113,14 @@ describe('the WhatsApp live-sync script', () => {
 });
 
 describe('WhatsApp media', () => {
-  test('a folder account\'s media folder is the allowed media root; a legacy account\'s is the audio folder it always was, with the picture and video folders beside it', () => {
+  test('a folder account\'s media folder is the allowed media root; a legacy account\'s is the audio folder it always was, with the picture, video and fetched-media folders beside it', () => {
     const folder = fresh();
     expect(defaultWhatsAppMediaRoots(folder.env)).toEqual([join(folderOf(WHATSAPP, folder.env), 'raw', 'whatsapp', 'media')]);
 
     const legacy = fresh();
     pinMessagingLegacy(legacy.env);
     const media = join(legacy.home, '.local', 'share', 'olympus', 'whatsapp-live', 'media');
-    expect(defaultWhatsAppMediaRoots(legacy.env)).toEqual([join(media, 'audio'), join(media, 'images'), join(media, 'video')]);
+    expect(defaultWhatsAppMediaRoots(legacy.env)).toEqual([join(media, 'audio'), join(media, 'images'), join(media, 'video'), join(media, 'olympus')]);
     expect(relative(legacy.home, defaultWhatsAppMediaRoots(legacy.env)[0]!)).toContain('whatsapp-live');
   });
 });

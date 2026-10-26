@@ -28,7 +28,15 @@ import {
   whatsAppBootNonce,
   whatsAppMediaFileStem,
 } from '../src/workers/whatsapp/live-connector.ts';
-import { runWhatsAppMediaFetch } from '../src/workers/whatsapp/media-fetch.ts';
+import {
+  bridgeMediaCall,
+  runWhatsAppMediaFetch,
+  WhatsAppMediaFetchState,
+  type WhatsAppMediaAnswer,
+  type WhatsAppMediaRequest,
+} from '../src/workers/whatsapp/media-fetch.ts';
+import { createServer, type Server } from 'node:net';
+import { createHash } from 'node:crypto';
 import { whatsAppExtractionSourceFactory } from '../src/workers/whatsapp/extraction-factory.ts';
 import type { RawItem } from '../src/core/contracts.ts';
 import {
@@ -79,7 +87,8 @@ function lane() {
     tier.newStores.internal?.current()?.close();
     store.close();
   });
-  const readChild = createWhatsAppChildReader({ mediaRoots: [images, video, audio] });
+  const fetched = join(root, 'media', 'olympus');
+  const readChild = createWhatsAppChildReader({ mediaRoots: [images, video, audio, fetched] });
   const connector = whatsAppConnectorWithInputs({ spoolDir, readChild });
   const pull = async () => {
     const cursor = tier.set.committedCursor(connector.id)?.cursor ?? undefined;
@@ -91,13 +100,13 @@ function lane() {
     provider: 'whatsapp',
     accountScope: 'personal',
     approvedScopeKey: 'whatsapp.personal.messages',
-    mediaRoots: [audio],
+    mediaRoots: [audio, fetched],
     candidates: connectorStoreExtractionCandidateReader(store),
     locators: store,
     deferredBytes: (ref) => deferredBytesAnswerFor(store.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
     readChild,
   });
-  return { root, spoolDir, images, video, audio, store, readChild, pull, extraction, ledger: tier.set.ledger, set: tier.set };
+  return { root, spoolDir, images, video, audio, fetched, store, readChild, pull, extraction, ledger: tier.set.ledger, set: tier.set };
 }
 
 interface Row {
@@ -533,7 +542,7 @@ describe('an export\'s media of any size reaches extraction as a file (owner, 20
   }, 60_000);
 });
 
-describe('review round 8 on #558: Olympus alone asks for waiting media, and deletes what it no longer wants', () => {
+describe('review round 9 on #558: Olympus asks the bridge for the exact version, and owns every write', () => {
   const DAY = '2026-07-01.jsonl';
   // Key-shaped text is assembled at run time so no literal key sits in the repository.
   const KEY = ['gh', 'p_', 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'].join('');
@@ -552,35 +561,46 @@ describe('review round 8 on #558: Olympus alone asks for waiting media, and dele
     const day = join(target.spoolDir, DAY);
     writeFileSync(day, (existsSync(day) ? readFileSync(day, 'utf8') : '') + line);
   };
-  // One pull's media pass: what a listing of the spool finds, then the pass over it.
-  const pass = async (target: ReturnType<typeof lane>, room = true) => {
-    const findings = emptyWhatsAppSpoolPassFindings();
-    for await (const _page of createWhatsAppLiveSourceConnector({ spoolDir: target.spoolDir, account: 'personal', findings }).listItems()) { /* listed */ }
-    return runWhatsAppMediaFetch({
-      spoolDir: target.spoolDir,
-      account: 'personal',
-      mediaRoot: join(target.root, 'media'),
-      folders: { image: target.images, video: target.video, audio: target.audio },
-      tierSet: target.set,
-      findings,
-      sync: WHATSAPP_LANE_SYNC,
-      readChild: target.readChild,
-      space: () => (room ? { free: 1_000 * 2 ** 30, total: 1_000 * 2 ** 30 } : { free: 2 ** 30, total: 1_000 * 2 ** 30 }),
-    });
-  };
-  const paths = (target: ReturnType<typeof lane>, id: string, ext = '.jpg') => {
-    const stem = whatsAppMediaFileStem(CHAT, id);
-    return {
-      stem,
-      request: join(target.root, 'media', 'fetch', `${stem}.json`),
-      answer: join(target.root, 'media', 'fetched', `${stem}${ext}`),
-      placed: join(target.images, `${stem}-fetched${ext}`),
+  // The bridge's call, in process: it answers `bytes` (or `answer`), running `during` first, as a download would take time.
+  const bridge = (options: { bytes?: string; answer?: WhatsAppMediaAnswer; during?: () => void } = {}) => {
+    const asked: WhatsAppMediaRequest[] = [];
+    const call = async (request: WhatsAppMediaRequest, part: string, fits: (size: number) => boolean): Promise<WhatsAppMediaAnswer> => {
+      asked.push(request);
+      options.during?.();
+      if (options.answer) return options.answer;
+      const bytes = options.bytes ?? 'jpeg bytes';
+      if (!fits(bytes.length)) return { status: 'failed', permanent: false, reason: 'waiting_for_disk' };
+      writeFileSync(part, bytes);
+      return { status: 'ok', size: bytes.length };
     };
+    return { asked, call };
   };
-  const answer = (path: string, bytes = 'jpeg bytes') => {
-    mkdirSync(join(path, '..'), { recursive: true });
-    writeFileSync(path, bytes);
+  // One pull's media pass: the listing (which records what waits as it reads), then the pass.
+  const pass = async (target: ReturnType<typeof lane>, call = bridge().call, extra: { room?: boolean; set?: typeof target.set } = {}) => {
+    const state = WhatsAppMediaFetchState.open(target.spoolDir);
+    try {
+      const findings = emptyWhatsAppSpoolPassFindings();
+      findings.onWaitingMedia = (media) => state.note(media);
+      for await (const _page of createWhatsAppLiveSourceConnector({ spoolDir: target.spoolDir, account: 'personal', findings }).listItems()) { /* listed */ }
+      return await runWhatsAppMediaFetch({
+        state,
+        spoolDir: target.spoolDir,
+        account: 'personal',
+        folder: target.fetched,
+        tierSet: extra.set ?? target.set,
+        findings,
+        sync: WHATSAPP_LANE_SYNC,
+        call,
+        readChild: target.readChild,
+        space: () => (extra.room === false ? { free: 2 ** 30, total: 1_000 * 2 ** 30 } : { free: 1_000 * 2 ** 30, total: 1_000 * 2 ** 30 }),
+      });
+    } finally {
+      state.close();
+    }
   };
+  const digest = (version: string) => createHash('sha256').update(version, 'utf8').digest('hex').slice(0, 16);
+  const fetchedPath = (target: ReturnType<typeof lane>, id: string, version = '2026-07-01T13:00:00Z', ext = '.jpg') =>
+    join(target.fetched, `${whatsAppMediaFileStem(CHAT, id)}~${digest(version)}${ext}`);
   const judgeSecret = (target: ReturnType<typeof lane>, providerItemId: string) => {
     const identity = { provider: 'whatsapp', accountScope: 'personal', providerItemId, providerConversationId: CHAT };
     target.ledger.recordContentDecision(identity, {
@@ -594,41 +614,60 @@ describe('review round 8 on #558: Olympus alone asks for waiting media, and dele
     });
   };
   const childLocator = (target: ReturnType<typeof lane>, id: string) => rows(target.root).find((row) => row.id === `${id}#child:media`)?.locator ?? '';
+  const folderFiles = (target: ReturnType<typeof lane>) => (existsSync(target.fetched) ? readdirSync(target.fetched) : []);
 
-  test('an uncaptioned picture is asked for once its message is stored and not Secret; the request holds no words or names', async () => {
+  test('an uncaptioned picture is fetched for its stored version into Olympus\'s folder and fills its child, once', async () => {
     const target = lane();
     append(target, waitingLine('U1'));
     await target.pull();
-    expect((await pass(target)).requested).toBe(1);
-    const request = JSON.parse(readFileSync(paths(target, 'U1').request, 'utf8')) as Record<string, unknown>;
-    expect(request).toEqual({
+    const { asked, call } = bridge();
+    const result = await pass(target, call);
+    expect(result.filled).toBe(1);
+    expect(asked).toEqual([{
       chat_jid: CHAT,
       id: 'U1',
+      version: '2026-07-01T13:00:00Z',
       media_type: 'image',
       media_mime: 'image/jpeg',
       media_key: 'a2V5',
       media_direct_path: '/mms/image/U1',
       media_file_sha256: 'ZmlsZQ==',
       media_file_enc_sha256: 'ZW5j',
-    });
-    // Asked once: the next pass leaves it as it is.
-    expect((await pass(target)).requested).toBe(0);
+    }]);
+    const path = fetchedPath(target, 'U1');
+    expect(childLocator(target, 'U1')).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`);
+    expect(new TextDecoder().decode(target.readChild(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`, {}))).toBe('jpeg bytes');
+    expect(folderFiles(target)).toEqual([path.slice(target.fetched.length + 1)]);
+    // Done: nothing is asked again, even when the line is read again.
+    await pass(target, call);
+    expect(asked.length).toBe(1);
   });
 
-  test('a request for a message whose id holds a dot is kept by the sweep', async () => {
+  test('what waits is recorded as the listing reads the line, before any pull commits past it', async () => {
     const target = lane();
-    append(target, waitingLine('3EB0.42'));
-    await target.pull();
-    await pass(target);
-    await pass(target);
-    expect(existsSync(paths(target, '3EB0.42').request)).toBe(true);
+    append(target, waitingLine('L1'));
+    const state = WhatsAppMediaFetchState.open(target.spoolDir);
+    try {
+      const findings = emptyWhatsAppSpoolPassFindings();
+      findings.onWaitingMedia = (media) => state.note(media);
+      for await (const _page of createWhatsAppLiveSourceConnector({ spoolDir: target.spoolDir, account: 'personal', findings }).listItems()) { /* listed, never committed */ }
+    } finally {
+      state.close();
+    }
+    const reopened = WhatsAppMediaFetchState.open(target.spoolDir);
+    try {
+      expect(reopened.all().map((row) => row.id)).toEqual(['L1']);
+    } finally {
+      reopened.close();
+    }
   });
 
   test('a message not stored yet is not asked for', async () => {
     const target = lane();
     append(target, waitingLine('N1'));
-    expect((await pass(target)).requested).toBe(0);
-    expect(existsSync(paths(target, 'N1').request)).toBe(false);
+    const { asked, call } = bridge();
+    await pass(target, call);
+    expect(asked).toEqual([]);
   });
 
   test('a Secret message is never asked for, nor a Secret picture', async () => {
@@ -637,161 +676,220 @@ describe('review round 8 on #558: Olympus alone asks for waiting media, and dele
     append(target, waitingLine('S2', { text: 'the harbour' }));
     await target.pull();
     judgeSecret(target, 'S2#child:media');
-    await pass(target);
-    for (const id of ['S1', 'S2']) expect(existsSync(paths(target, id).request)).toBe(false);
+    const { asked, call } = bridge();
+    await pass(target, call);
+    expect(asked).toEqual([]);
   });
 
-  test('fetched media fills the child alone, kept in the picture folder; the request and answer go', async () => {
+  test('a newer clean version never authorizes the older Secret version\'s media', async () => {
     const target = lane();
-    append(target, waitingLine('F1', { text: 'the harbour at dusk' }));
+    append(target, waitingLine('V1', { text: `deploy key ${KEY}`, media_direct_path: '/mms/image/V1-old' }));
+    append(target, waitingLine('V1', { text: 'all clear now', timestamp: '2026-07-01T14:00:00Z', media_direct_path: '/mms/image/V1-new' }));
     await target.pull();
-    await pass(target);
-    const at = paths(target, 'F1');
-    answer(at.answer);
-    const result = await pass(target);
-    expect(result.filled).toBe(1);
-    expect(childLocator(target, 'F1')).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${at.placed}`);
-    expect(readFileSync(at.placed, 'utf8')).toBe('jpeg bytes');
-    for (const gone of [at.request, at.answer]) expect(existsSync(gone)).toBe(false);
-    // The child reads through the same reader as any saved picture.
-    expect(new TextDecoder().decode(target.readChild(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${at.placed}`, {}))).toBe('jpeg bytes');
-    // Nothing more is asked for it.
-    expect((await pass(target)).requested).toBe(0);
-    expect(existsSync(at.request)).toBe(false);
+    const { asked, call } = bridge();
+    await pass(target, call);
+    expect(asked.map((request) => [request.version, request.media_direct_path])).not.toContainEqual(['2026-07-01T13:00:00Z', '/mms/image/V1-old']);
+    expect(existsSync(fetchedPath(target, 'V1'))).toBe(false);
   });
 
-  test('a voice note waiting for disk space is asked for and filled as itself', async () => {
+  test('a voice note stored at a newer version is never fetched for the older one', async () => {
     const target = lane();
-    append(target, waitingLine('A1', { media_type: 'audio', media_mime: 'audio/ogg' }));
+    append(target, waitingLine('V2', { media_type: 'audio', media_mime: 'audio/ogg', media_direct_path: '/mms/audio/V2-old' }));
+    append(target, waitingLine('V2', { media_type: 'audio', media_mime: 'audio/ogg', timestamp: '2026-07-01T14:00:00Z', media_direct_path: '/mms/audio/V2-new' }));
     await target.pull();
-    await pass(target);
-    const at = paths(target, 'A1', '.ogg');
-    expect(existsSync(at.request)).toBe(true);
-    answer(at.answer, 'ogg bytes');
-    expect((await pass(target)).filled).toBe(1);
-    const placed = join(target.audio, `${at.stem}-fetched.ogg`);
-    const db = new Database(join(target.root, 'whatsapp.db'), { readonly: true });
-    try {
-      const row = db.query("SELECT locator_uri AS locator FROM items WHERE provider_item_id = 'A1'").get() as { locator: string | null };
-      expect(row.locator).toBe(placed);
-    } finally {
-      db.close();
-    }
-    expect(readFileSync(placed, 'utf8')).toBe('ogg bytes');
+    const { asked, call } = bridge({ bytes: 'ogg bytes' });
+    await pass(target, call);
+    expect(asked.map((request) => request.media_direct_path)).toEqual(['/mms/audio/V2-new']);
   });
 
-  test('a message turning Secret mid-download: its request goes, and a download landing after is deleted', async () => {
+  test('a message turning Secret while its bytes come in never keeps them', async () => {
     const target = lane();
     append(target, waitingLine('R1', { text: 'see you at eight' }));
     await target.pull();
-    await pass(target);
-    const at = paths(target, 'R1');
-    expect(existsSync(at.request)).toBe(true);
-    judgeSecret(target, 'R1');
-    await pass(target);
-    expect(existsSync(at.request)).toBe(false);
-    // The bridge was already downloading: its answer lands after the request went.
-    answer(at.answer);
-    answer(join(target.root, 'media', 'fetched', `${at.stem}.part`), 'half');
-    await pass(target);
-    expect(existsSync(at.answer)).toBe(false);
-    expect(existsSync(join(target.root, 'media', 'fetched', `${at.stem}.part`))).toBe(false);
-    expect(existsSync(at.placed)).toBe(false);
+    const { call } = bridge({ during: () => judgeSecret(target, 'R1') });
+    await pass(target, call);
+    expect(folderFiles(target)).toEqual([]);
     expect(childLocator(target, 'R1')).toBe('');
   });
 
-  test('a crash after the fetched copy was kept but before the fill, then Secret: every copy is deleted', async () => {
+  test('a fetched and filled picture whose message turns Secret later loses its file on the next pass', async () => {
     const target = lane();
-    append(target, waitingLine('C1', { text: 'see you at eight' }));
+    append(target, waitingLine('T1', { text: 'see you at eight' }));
     await target.pull();
     await pass(target);
-    const at = paths(target, 'C1');
-    answer(at.answer);
-    // What a pass that died before its fill left: the copy kept, the answer and request still there.
-    answer(at.placed);
-    judgeSecret(target, 'C1#child:media');
-    await pass(target);
-    for (const gone of [at.request, at.answer, at.placed]) expect(existsSync(gone)).toBe(false);
-    expect(childLocator(target, 'C1')).toBe('');
+    expect(existsSync(fetchedPath(target, 'T1'))).toBe(true);
+    judgeSecret(target, 'T1');
+    const { asked, call } = bridge();
+    await pass(target, call);
+    expect(folderFiles(target)).toEqual([]);
+    expect(asked).toEqual([]);
   });
 
-  test('another version: a request for the old one is withdrawn, and its download never fills the new one', async () => {
+  test('a fill the sync did not land is not done: the next pass fills it from the file it has, without asking again', async () => {
     const target = lane();
-    append(target, waitingLine('V1', { text: 'first' }));
+    append(target, waitingLine('F1', { text: 'the harbour at dusk' }));
     await target.pull();
-    await pass(target);
-    const at = paths(target, 'V1');
-    expect(existsSync(at.request)).toBe(true);
-    // The message comes again, newer, and the bridge could not save its media for good.
-    append(target, spoolLine({ id: 'V1', media_type: 'image', media_mime: 'image/jpeg', download_status: 'failed:gone', text: 'second', timestamp: '2026-07-01T14:00:00Z' }));
-    await target.pull();
-    answer(at.answer);
-    await pass(target);
-    for (const gone of [at.request, at.answer, at.placed]) expect(existsSync(gone)).toBe(false);
-    expect(childLocator(target, 'V1')).toBe('');
+    const lost = new Proxy(target.set, {
+      get: (set, key) => (key === 'sync' ? async () => undefined : Reflect.get(set, key, set)),
+    });
+    const { asked, call } = bridge();
+    expect((await pass(target, call, { set: lost })).filled).toBe(0);
+    expect(childLocator(target, 'F1')).toBe('');
+    expect((await pass(target, call)).filled).toBe(1);
+    expect(asked.length).toBe(1);
+    expect(childLocator(target, 'F1')).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${fetchedPath(target, 'F1')}`);
   });
 
-  test('a newer waiting version replaces the request: the stale one is issued again for the version stored', async () => {
+  test('the fill is built from the stored version\'s own line, not a later replay of an older one', async () => {
     const target = lane();
-    append(target, waitingLine('W1', { text: 'first' }));
+    append(target, waitingLine('P1', { text: 'second', timestamp: '2026-07-01T14:00:00Z' }));
     await target.pull();
-    await pass(target);
-    const at = paths(target, 'W1');
-    append(target, waitingLine('W1', { text: 'second', timestamp: '2026-07-01T14:00:00Z', media_direct_path: '/mms/image/W1-again' }));
+    // An older version of the message, replayed after it: the physically last line, never the stored one.
+    append(target, waitingLine('P1', { text: 'first', timestamp: '2026-07-01T12:00:00Z' }));
     await target.pull();
-    await pass(target);
-    expect((JSON.parse(readFileSync(at.request, 'utf8')) as Record<string, unknown>)['media_direct_path']).toBe('/mms/image/W1-again');
+    expect((await pass(target)).filled).toBe(1);
+    expect(childLocator(target, 'P1')).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${fetchedPath(target, 'P1', '2026-07-01T14:00:00Z')}`);
   });
 
-  test('media that can never be fetched leaves its child unreadable and nothing behind', async () => {
+  test('a voice note waiting for disk space is fetched and filled as itself', async () => {
+    const target = lane();
+    append(target, waitingLine('A1', { media_type: 'audio', media_mime: 'audio/ogg' }));
+    await target.pull();
+    expect((await pass(target, bridge({ bytes: 'ogg bytes' }).call)).filled).toBe(1);
+    const path = fetchedPath(target, 'A1', '2026-07-01T13:00:00Z', '.ogg');
+    const db = new Database(join(target.root, 'whatsapp.db'), { readonly: true });
+    try {
+      const row = db.query("SELECT locator_uri AS locator FROM items WHERE provider_item_id = 'A1'").get() as { locator: string | null };
+      expect(row.locator).toBe(path);
+    } finally {
+      db.close();
+    }
+    expect(readFileSync(path, 'utf8')).toBe('ogg bytes');
+  });
+
+  test('a passing failure is asked again next pass; a permanent one never again', async () => {
     const target = lane();
     append(target, waitingLine('X1'));
     await target.pull();
-    await pass(target);
-    const at = paths(target, 'X1');
-    const failed = join(target.root, 'media', 'fetched', `${at.stem}.failed`);
-    answer(failed, 'gone');
-    await pass(target);
-    for (const gone of [at.request, failed]) expect(existsSync(gone)).toBe(false);
+    const passing = bridge({ answer: { status: 'failed', permanent: false, reason: 'network' } });
+    await pass(target, passing.call);
+    await pass(target, passing.call);
+    expect(passing.asked.length).toBe(2);
+    const permanent = bridge({ answer: { status: 'failed', permanent: true, reason: 'gone' } });
+    await pass(target, permanent.call);
+    await pass(target, permanent.call);
+    expect(permanent.asked.length).toBe(1);
+    expect(folderFiles(target)).toEqual([]);
     expect(childLocator(target, 'X1')).toBe('');
-    expect((await pass(target)).requested).toBe(0);
   });
 
-  test('below the floor nothing is asked for, and the pass says media waits', async () => {
+  test('below the floor nothing is asked, and the pass says media waits', async () => {
     const target = lane();
     append(target, waitingLine('D1'));
     await target.pull();
-    const result = await pass(target, false);
-    expect(result.waitingForDisk).toBe(true);
-    expect(existsSync(paths(target, 'D1').request)).toBe(false);
-    expect((await pass(target)).waitingForDisk).toBe(false);
+    const { asked, call } = bridge();
+    expect((await pass(target, call, { room: false })).waitingForDisk).toBe(true);
+    expect(asked).toEqual([]);
+    expect((await pass(target, call)).waitingForDisk).toBe(false);
   });
 
-  test('a request or answer for a message Olympus does not wait for is deleted', async () => {
+  test('a bridge that is not running is asked once a pass, and the media keeps waiting', async () => {
     const target = lane();
-    const fetch = join(target.root, 'media', 'fetch');
-    const fetched = join(target.root, 'media', 'fetched');
-    const strays = [join(fetch, 'stray-0123456789abcdef.json'), join(fetched, 'stray-0123456789abcdef.jpg'), join(fetched, 'stray-0123456789abcdef.part')];
-    for (const stray of strays) answer(stray);
+    append(target, waitingLine('B1'));
+    append(target, waitingLine('B2'));
+    await target.pull();
+    const down = bridge({ answer: { status: 'unavailable' } });
+    await pass(target, down.call);
+    expect(down.asked.length).toBe(1);
+    expect((await pass(target)).filled).toBe(2);
+  });
+
+  test('a file in Olympus\'s folder that no row names is deleted, and a part a dead pass left', async () => {
+    const target = lane();
+    mkdirSync(target.fetched, { recursive: true });
+    const strays = [join(target.fetched, 'stray-0123456789abcdef~0123456789abcdef.jpg'), join(target.fetched, 'x.jpg.part')];
+    for (const stray of strays) writeFileSync(stray, 'left');
     await pass(target);
-    for (const stray of strays) expect(existsSync(stray)).toBe(false);
+    expect(folderFiles(target)).toEqual([]);
   });
 
   test('a fetched picture later judged Secret is deleted by the clearing, though no line names it', async () => {
     const target = lane();
-    append(target, waitingLine('L1', { text: 'the harbour' }));
+    append(target, waitingLine('C1', { text: 'the harbour' }));
     await target.pull();
     await pass(target);
-    const at = paths(target, 'L1');
-    answer(at.answer);
-    await pass(target);
-    expect(existsSync(at.placed)).toBe(true);
+    const path = fetchedPath(target, 'C1');
+    expect(existsSync(path)).toBe(true);
     redactWhatsAppLiveSpoolSecrets({
       spoolDir: target.spoolDir,
       account: 'personal',
-      judge: (identity) => (identity.providerItemId === 'L1#child:media' ? 'content' : undefined),
-      mediaDirs: [target.images, target.video, target.audio],
+      judge: (identity) => (identity.providerItemId === 'C1#child:media' ? 'content' : undefined),
+      mediaDirs: [target.images, target.video, target.audio, target.fetched],
     });
-    expect(existsSync(at.placed)).toBe(false);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  test('a message whose id holds a dot is fetched and kept', async () => {
+    const target = lane();
+    append(target, waitingLine('3EB0.42'));
+    await target.pull();
+    expect((await pass(target)).filled).toBe(1);
+    await pass(target);
+    expect(existsSync(fetchedPath(target, '3EB0.42'))).toBe(true);
+  });
+
+  describe('the bridge\'s call, over its socket', () => {
+    const servers: Server[] = [];
+    afterEach(() => {
+      for (const server of servers.splice(0)) server.close();
+    });
+    // A stand-in for the bridge's socket (media_serve.go): one request line, one answer.
+    const serve = async (respond: (request: WhatsAppMediaRequest) => Buffer) => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'wa-call-'));
+      roots.push(stateDir);
+      const socket = join(stateDir, 'media.sock');
+      const server = createServer((conn) => {
+        let buffered = '';
+        conn.on('data', (data) => {
+          buffered += data.toString('utf8');
+          const newline = buffered.indexOf('\n');
+          if (newline === -1) return;
+          conn.end(respond(JSON.parse(buffered.slice(0, newline)) as WhatsAppMediaRequest));
+        });
+      });
+      servers.push(server);
+      await new Promise<void>((resolve) => server.listen(socket, resolve));
+      writeFileSync(join(stateDir, 'media-download.json'), JSON.stringify({ socket }));
+      return { stateDir, part: join(stateDir, 'out.part') };
+    };
+    const request: WhatsAppMediaRequest = { chat_jid: CHAT, id: 'K1', version: 'v', media_type: 'image', media_direct_path: '/mms/image/K1' };
+
+    test('the bytes after an ok answer are written to the part, whole', async () => {
+      const bytes = Buffer.alloc(200_000, 7);
+      const { stateDir, part } = await serve(() => Buffer.concat([Buffer.from(`${JSON.stringify({ status: 'ok', size: bytes.length })}\n`), bytes]));
+      expect(await bridgeMediaCall(stateDir)(request, part, () => true)).toEqual({ status: 'ok', size: bytes.length });
+      expect(readFileSync(part).equals(bytes)).toBe(true);
+    });
+
+    test('a failure is told as passing or permanent; a cut-off answer is a passing failure', async () => {
+      const permanent = await serve(() => Buffer.from(`${JSON.stringify({ status: 'failed', permanent: true, reason: 'gone' })}\n`));
+      expect(await bridgeMediaCall(permanent.stateDir)(request, permanent.part, () => true)).toEqual({ status: 'failed', permanent: true, reason: 'gone' });
+      const short = await serve(() => Buffer.from(`${JSON.stringify({ status: 'ok', size: 10 })}\nabc`));
+      expect(await bridgeMediaCall(short.stateDir)(request, short.part, () => true)).toEqual({ status: 'failed', permanent: false, reason: 'cut_off' });
+    });
+
+    test('media that does not fit above the floor is never written', async () => {
+      const { stateDir, part } = await serve(() => Buffer.concat([Buffer.from(`${JSON.stringify({ status: 'ok', size: 3 })}\n`), Buffer.from('abc')]));
+      expect(await bridgeMediaCall(stateDir)(request, part, () => false)).toEqual({ status: 'failed', permanent: false, reason: 'waiting_for_disk' });
+      expect(existsSync(part)).toBe(false);
+    });
+
+    test('a bridge that is not running is unavailable', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'wa-call-'));
+      roots.push(stateDir);
+      expect(await bridgeMediaCall(stateDir)(request, join(stateDir, 'out.part'), () => true)).toEqual({ status: 'unavailable' });
+      writeFileSync(join(stateDir, 'media-download.json'), JSON.stringify({ socket: join(stateDir, 'gone.sock') }));
+      expect(await bridgeMediaCall(stateDir)(request, join(stateDir, 'out.part'), () => true)).toEqual({ status: 'unavailable' });
+    });
   });
 });

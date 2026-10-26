@@ -39,7 +39,7 @@ const ALLOWED: Record<string, string> = {
   'src/workers/whatsapp/spool-resets.ts':
     'WhatsApp\'s spool reset counter: how many times the spool was found broken, and the index build last seen (two values, no content), not a tier store; it sits in the spool folder and goes with the account\'s raw state on Delete',
   'src/workers/whatsapp/media-fetch.ts':
-    'WhatsApp\'s media waiting for disk space: per message its ids, version and the download fields its spool line carries (no text, no names), not a tier store; it sits in the spool folder, is opened per pull and closed after, and goes with the account\'s raw state on Delete',
+    'WhatsApp\'s media waiting for disk space: per message version its ids, its line\'s place in the spool and the download fields that line carries (no text, no names), not a tier store; it sits in the spool folder, is opened per pull and closed after, and goes with the account\'s raw state on Delete',
   'src/data-lifecycle.ts': 'the deleter and exporter, which step 5 rebuilds on the registry',
   // Generic code that reopens sidecars of stores already opened through the
   // service, found by path: no source is in scope there.

@@ -1,51 +1,49 @@
 /**
- * Media waiting for disk space, fetched only once Olympus asks (owner,
- * 2026-10-26: waiting media is downloaded only after Olympus judges the
- * message not Secret; review round 8 on #558: Olympus alone owns what is
- * fetched).
+ * Media that waited for disk space, fetched by Olympus alone (owner,
+ * 2026-10-26: Olympus asks the bridge for the exact message version, receives
+ * the bytes into its own folder, re-checks the judgment before indexing, and
+ * keys everything by version).
  *
  * Below its disk floor the bridge spools a picture, video or voice note
  * message at once, its media `waiting_for_disk`, with what a later download
  * needs on the line, and keeps nothing else (tools/whatsapp-bridge/
- * media_waiting.go). The listing notes each such line (`waitingMedia`), and
- * this module keeps them, one row per message, beside the spool index. On
- * every pull, after the Secrets clearing, it makes the bridge's folders match
- * that state and the stores:
+ * media_waiting.go). The listing tells this module of each such line as it
+ * reads it, before the pull commits past it, and the line is kept as a row
+ * keyed by the message and its version digest, with the line's place in the
+ * spool. Every write after that is Olympus's, in the pull, after the Secrets
+ * clearing (the take-back), one message at a time:
  *
- *   - A message stored at the row's version, judged not Secret (nor its
- *     media child), whose names are not still being judged, gets a request
- *     `media/fetch/<stem>.json` while the disk is above the floor. A request
- *     is written to a temp, fsynced, linked into place (never over another)
- *     and its folder fsynced; one that says something else is replaced.
- *   - The bridge answers in `media/fetched/`: `<stem><ext>`, or
- *     `<stem>.failed` for media that can never be fetched. An answer is put
- *     in its media folder as `<stem>-fetched<ext>` and read into the stored
- *     item through the connector's own record builder (`mediaFill`), which
- *     fills the picture's or video's child, or the voice note itself, and
- *     nothing else: no caption goes out this way. Extraction and judgment
- *     follow as for any media. The request, the answer and the row go once
- *     the fill is committed.
- *   - Whatever is no longer wanted is deleted, whenever its download
- *     finished: the request, answer and fetched copy of a message turned
- *     Secret, stored at another version, or gone; any request, answer or part
- *     whose message has no row. A download that lands after its message
- *     turned Secret is deleted on the next pass.
+ *   1. The message is stored at the row's version, neither it nor its media
+ *      child is Secret there (each stored at that version, not hidden, and
+ *      not judged Secret since), its names are settled, and the disk is
+ *      above the floor.
+ *   2. Olympus asks the bridge for that version's media through its one
+ *      local call (media_serve.go), and receives the bytes into
+ *      `<stem>~<version digest><ext>.part` in its own folder, then fsyncs it.
+ *   3. It checks step 1 again; on a Secret or another version the part is
+ *      deleted. Otherwise it is renamed to its name and the folder fsynced.
+ *   4. The file is read into the stored item through the connector's own
+ *      record builder (`mediaFill`), built from the version's own spool line:
+ *      the picture's or video's child, or the voice note itself, and nothing
+ *      else (no caption goes out this way). Extraction and judgment follow as
+ *      for any media. A row is done only once the stores are seen to hold
+ *      the file at that version.
  *
- * The bridge keeps no state for any of this, so a crash of either side leaves
- * at most a request to do again or an answer to read again.
+ * On every pass, a row of a message that is now Secret (the message or its
+ * media), stored at another version, or gone loses its fetched file, the
+ * folder is fsynced, and only then is the row forgotten: done rows included.
+ * A file in the folder that no row names is deleted. The clearing deletes a
+ * fetched copy whose media is judged Secret too, though no line names it.
  *
  * Doc comments here are always multi-line blocks.
  */
 
 import { Database } from 'bun:sqlite';
-import { randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
-  constants,
-  copyFileSync,
   fsyncSync,
-  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -56,14 +54,16 @@ import {
   statSync,
   writeSync,
 } from 'node:fs';
-import { join } from 'node:path';
-import type { SourceConnectorInput, SourceConnectorListOptions } from '../../core/contracts.ts';
+import { createConnection } from 'node:net';
+import { dirname, join } from 'node:path';
+import type { SourceConnectorInput } from '../../core/contracts.ts';
 import { childProviderItemId } from '../../core/child-item-id.ts';
 import { inputConnector } from '../../core/source-inputs.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import type { TierLedgerRecord } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreSyncOptions } from '../connector-store/index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import { WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX } from './child-media.ts';
 import {
   compareWhatsAppVersions,
   createWhatsAppRecordBuilder,
@@ -72,258 +72,320 @@ import {
   whatsAppFetchedMediaName,
   whatsAppMediaChildLocalItemId,
   whatsAppMediaFileStem,
+  whatsAppMessageLocalItemId,
   type WhatsAppRecord,
   type WhatsAppSpoolPassFindings,
   type WhatsAppWaitingMedia,
 } from './live-connector.ts';
-import { WhatsAppSpoolIndex } from './spool-index.ts';
 import { spoolRecords, WHATSAPP_SPOOL_MAX_RECORD_BYTES } from './spool-reader.ts';
 
 export const WHATSAPP_MEDIA_FETCH_STATE_FILE = 'media-fetch.sqlite';
 /** The connector id fills are synced under (an input of the WhatsApp connector, with its own cursor). */
 export const WHATSAPP_MEDIA_FETCH_INPUT_ID = 'whatsapp-media-fetch';
+/** The bridge's note of where its one local call listens (media_serve.go). */
+export const WHATSAPP_MEDIA_SOCKET_POINTER = 'media-download.json';
 
-const FAILED_SUFFIX = '.failed';
 const PART_SUFFIX = '.part';
 /** The floor the bridge keeps: the larger of 5 GiB and 5% of the volume (media_waiting.go, diskFloor). */
 const DISK_FLOOR_MIN_BYTES = 5 * 1024 * 1024 * 1024;
 const DISK_FLOOR_SHARE = 20;
+/** How long the call may go without a byte before Olympus gives up on it for this pass. */
+const CALL_STALL_MS = 120_000;
+/** An answer's head is one short JSON line. */
+const ANSWER_HEAD_MAX_BYTES = 64 * 1024;
 
 export type WhatsAppVolumeSpace = (dir: string) => { free: number; total: number } | undefined;
 
+/** What the bridge's call answered (media_serve.go). */
+export type WhatsAppMediaAnswer =
+  | { status: 'ok'; size: number }
+  | { status: 'failed'; permanent: boolean; reason: string }
+  /** The bridge is not running, or its call cannot be reached: nothing more is asked of it this pass. */
+  | { status: 'unavailable' };
+
+export interface WhatsAppMediaRequest {
+  chat_jid: string;
+  id: string;
+  version: string;
+  media_type: string;
+  media_mime?: string;
+  media_key?: string;
+  media_direct_path: string;
+  media_file_sha256?: string;
+  media_file_enc_sha256?: string;
+}
+
+/**
+ * Asks the bridge for one version's media and writes its bytes to
+ * `partPath`, fsynced. `fits` is asked the size before a byte is written.
+ */
+export type WhatsAppMediaCall = (request: WhatsAppMediaRequest, partPath: string, fits: (size: number) => boolean) => Promise<WhatsAppMediaAnswer>;
+
 export interface WhatsAppMediaFetchResult {
-  /** Requests written this pass. */
-  requested: number;
-  /** Items filled from fetched media this pass. */
+  /** Downloads received this pass. */
+  received: number;
+  /** Items filled from fetched media this pass, seen in the stores. */
   filled: number;
-  /** Rows dropped this pass (Secret, superseded, gone, never fetchable), with everything fetched for them. */
+  /** Rows forgotten this pass (Secret, another version, gone), their files deleted. */
   dropped: number;
   /** Media waits and the volume is below the floor: the card's findable problem. */
   waitingForDisk: boolean;
 }
 
 export interface WhatsAppMediaFetchOptions {
+  state: WhatsAppMediaFetchState;
   spoolDir: string;
   account: string;
-  /** The bridge's media folder in its state folder: `fetch/` and `fetched/` are in it. */
-  mediaRoot: string;
-  /** Where fetched media is kept, by kind: the folders the readers are confined to. */
-  folders: { image: string; video: string; audio: string };
+  /** Olympus's own folder for fetched media; the media roots, which the readers are confined to, include it. */
+  folder: string;
   tierSet: TieredStoreSet;
+  /** What the pull's listing found (the rows it told already, and the media the bridge saved itself). */
   findings: WhatsAppSpoolPassFindings;
   sync: ConnectorStoreSyncOptions;
+  /** The bridge's call (`bridgeMediaCall`). */
+  call: WhatsAppMediaCall;
   readChild?: (locator: string, options: { maxBytes?: number }) => Uint8Array;
   /** The volume's space (test seam); the real volume by default. */
   space?: WhatsAppVolumeSpace;
 }
 
 /**
- * One pass: note what the listing found, then make the requests, answers and
- * fetched copies match the stored state, and fill what was fetched.
+ * One pass, in the pull after the clearing: forget what is no longer wanted,
+ * fetch what is, and fill what was fetched.
  */
 export async function runWhatsAppMediaFetch(options: WhatsAppMediaFetchOptions): Promise<WhatsAppMediaFetchResult> {
-  const result: WhatsAppMediaFetchResult = { requested: 0, filled: 0, dropped: 0, waitingForDisk: false };
-  const state = WaitingMediaState.open(options.spoolDir);
-  try {
-    for (const saved of options.findings.savedMedia) state.saved(saved.chatJid, saved.id, saved.version);
-    for (const waiting of options.findings.waitingMedia) state.note(waiting);
-    const fetchDir = join(options.mediaRoot, 'fetch');
-    const fetchedDir = join(options.mediaRoot, 'fetched');
-    const room = hasRoom(options.mediaRoot, options.space ?? volumeSpace);
-    const ledger = options.tierSet.ledger;
-    const fills: Array<{ row: WaitingMediaRow; placed: string; answer: string; size: number }> = [];
-    const drop = (row: WaitingMediaRow, fetchedCopy: boolean, finished = false): void => {
-      removeIfThere(join(fetchDir, `${row.stem}.json`));
-      for (const name of namesOf(fetchedDir, row.stem)) removeIfThere(join(fetchedDir, name));
-      if (fetchedCopy) for (const dir of Object.values(options.folders)) removeFetchedCopies(dir, row.stem);
-      if (finished) state.finish(row.stem);
-      else state.forget(row.stem);
-      result.dropped += 1;
-    };
-    for (const row of state.all()) {
-      const parent = { provider: 'whatsapp', accountScope: options.account, providerItemId: row.id, providerConversationId: row.chatJid };
-      const child = isWhatsAppChildMediaType(row.media.mediaType) ? { ...parent, providerItemId: childProviderItemId(row.id, 'media') } : undefined;
-      const target = child ?? parent;
-      const parentRecord = ledger.getCurrent(parent);
-      const childRecord = child ? ledger.getCurrent(child) : undefined;
-      if (isSecret(parentRecord) || isSecret(childRecord)) {
-        drop(row, true);
-        continue;
-      }
-      const stored = options.tierSet.storedItem(target, compareWhatsAppVersions);
-      if (!stored) {
-        // Not stored yet (the pull that listed it has not committed it); once its message is, it is gone.
-        if (parentRecord) drop(row, true);
-        continue;
-      }
-      if (stored.tombstoned === true || stored.version === undefined || compareWhatsAppVersions(stored.version, row.version) !== 0) {
-        drop(row, true);
-        continue;
-      }
-      if (child && childFilled(options.tierSet, whatsAppMediaChildLocalItemId(options.account, row.chatJid, row.id))) {
-        drop(row, false, true);
-        continue;
-      }
-      const answers = namesOf(fetchedDir, row.stem);
-      if (answers.includes(`${row.stem}${FAILED_SUFFIX}`)) {
-        // Gone from WhatsApp's servers, or not what its hashes say: the media stays unreadable.
-        drop(row, false, true);
-        continue;
-      }
-      const answer = answers.find((name) => name !== `${row.stem}${PART_SUFFIX}` && !name.startsWith('.'));
-      if (answer !== undefined) {
-        const ext = answer.slice(row.stem.length);
-        const folder = isWhatsAppChildMediaType(row.media.mediaType)
-          ? (row.media.mediaType === 'image' ? options.folders.image : options.folders.video)
-          : options.folders.audio;
-        const placed = join(folder, whatsAppFetchedMediaName(row.stem, ext));
-        const size = place(join(fetchedDir, answer), placed);
-        fills.push({ row, placed, answer: join(fetchedDir, answer), size });
-        continue;
-      }
-      if (!room) {
-        result.waitingForDisk = true;
-        continue;
-      }
-      // Judged not Secret: its names are settled (a Secret only ever comes from them or its words, both judged by now).
-      if (!parentRecord || parentRecord.metadataPending) continue;
-      if (ensureRequest(fetchDir, row)) result.requested += 1;
+  const result: WhatsAppMediaFetchResult = { received: 0, filled: 0, dropped: 0, waitingForDisk: false };
+  const { state, folder } = options;
+  for (const media of options.findings.waitingMedia) state.note(media);
+  for (const saved of options.findings.savedMedia) state.saved(saved.chatJid, saved.id, saved.version);
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const space = options.space ?? volumeSpace;
+  // A part is only ever written inside one pass: any left is a pass that died.
+  for (const name of listNames(folder)) if (name.endsWith(PART_SUFFIX)) removeDurably(join(folder, name));
+  const forget = (row: WaitingMediaRow): void => {
+    for (const name of listNames(folder)) if (name.startsWith(row.filePrefix)) removeDurably(join(folder, name));
+    state.forget(row.key);
+    result.dropped += 1;
+  };
+  const toFill: Array<{ row: WaitingMediaRow; path: string }> = [];
+  let bridgeReachable = true;
+  for (const row of state.all()) {
+    const verdict = judge(options, row);
+    if (verdict === 'secret' || verdict === 'gone') {
+      forget(row);
+      continue;
     }
-    sweepOrphans(fetchDir, state);
-    sweepOrphans(fetchedDir, state);
+    if (row.done) continue;
+    const named = listNames(folder).find((name) => name.startsWith(row.filePrefix) && !name.endsWith(PART_SUFFIX));
+    if (named !== undefined) {
+      // Received by an earlier pass that did not see its fill land: filled again, never fetched again.
+      if (verdict === 'clear') toFill.push({ row, path: join(folder, named) });
+      continue;
+    }
+    if (verdict !== 'clear') continue;
+    if (!hasRoom(folder, space, 0)) {
+      result.waitingForDisk = true;
+      continue;
+    }
+    if (!bridgeReachable) continue;
+    const finalPath = join(folder, whatsAppFetchedMediaName(row.stem, row.versionDigest, extensionFor(row.media.mediaMime)));
+    const part = `${finalPath}${PART_SUFFIX}`;
+    const answer = await options.call(requestOf(row), part, (size) => hasRoom(folder, space, size));
+    if (answer.status === 'unavailable') {
+      bridgeReachable = false;
+      removeDurably(part);
+      continue;
+    }
+    if (answer.status === 'failed') {
+      removeDurably(part);
+      if (answer.reason === 'waiting_for_disk') result.waitingForDisk = true;
+      // Gone from WhatsApp's servers, or not what its hashes say: the media stays unreadable for good.
+      if (answer.permanent) state.finish(row.key);
+      continue;
+    }
+    // The judgment is checked again over the bytes received: a message that turned Secret, or moved to another
+    // version, while they came never keeps them.
+    const again = judge(options, row);
+    if (again !== 'clear') {
+      removeDurably(part);
+      if (again === 'secret' || again === 'gone') forget(row);
+      continue;
+    }
+    renameSync(part, finalPath);
+    fsyncFolder(folder);
+    result.received += 1;
+    toFill.push({ row, path: finalPath });
+  }
+  if (toFill.length > 0) {
+    const fills = toFill.flatMap(({ row, path }) => {
+      const record = fillRecord(options.spoolDir, row, path);
+      return record ? [{ row, path, record }] : [];
+    });
     if (fills.length > 0) {
-      const records = fills.flatMap(({ row, placed, size }) => {
-        const record = fillRecord(options.spoolDir, row, placed, size);
-        return record ? [record] : [];
+      const builder = createWhatsAppRecordBuilder({
+        spoolDir: options.spoolDir,
+        account: options.account,
+        ...(options.readChild ? { readChild: options.readChild } : {}),
       });
-      if (records.length > 0) {
-        const builder = createWhatsAppRecordBuilder({
-          spoolDir: options.spoolDir,
-          account: options.account,
-          ...(options.readChild ? { readChild: options.readChild } : {}),
-        });
-        const input: SourceConnectorInput<WhatsAppRecord> = {
-          inputId: WHATSAPP_MEDIA_FETCH_INPUT_ID,
-          kind: 'live',
-          records: (_listOptions?: SourceConnectorListOptions) => (async function* () {
-            yield { records, done: true };
-          })(),
-        };
-        await options.tierSet.sync(inputConnector(builder, input), options.sync);
-      }
-      for (const { row, answer } of fills) {
-        if (!records.some((record) => record.id === row.id && record.chatJid === row.chatJid)) continue;
-        // Filled: the request goes first, so the bridge never fetches it again once the answer is gone.
-        removeIfThere(join(fetchDir, `${row.stem}.json`));
-        removeIfThere(answer);
-        state.finish(row.stem);
+      const records = fills.map((fill) => fill.record);
+      const input: SourceConnectorInput<WhatsAppRecord> = {
+        inputId: WHATSAPP_MEDIA_FETCH_INPUT_ID,
+        kind: 'live',
+        records: () => (async function* () {
+          yield { records, done: true };
+        })(),
+      };
+      await options.tierSet.sync(inputConnector(builder, input), options.sync);
+      // Done only once the stores are seen to hold the file at the version: a fill a truncated or failed sync
+      // did not land is filled again next pass.
+      for (const { row, path } of fills) {
+        if (!filledAt(options, row, path)) continue;
+        state.finish(row.key);
         result.filled += 1;
       }
     }
-    if (!room && state.count() > 0) result.waitingForDisk = true;
-    return result;
-  } finally {
-    state.close();
   }
+  // Files no row names: a forgotten message's copies that a crash left, or anything else in Olympus's folder.
+  const prefixes = state.all().map((row) => row.filePrefix);
+  for (const name of listNames(folder)) {
+    if (!prefixes.some((prefix) => name.startsWith(prefix))) removeDurably(join(folder, name));
+  }
+  if (!hasRoom(folder, space, 0) && state.waitingCount() > 0) result.waitingForDisk = true;
+  return result;
 }
 
 interface WaitingMediaRow {
+  /** The message and its version: `<stem>@<version digest>`. */
+  key: string;
   stem: string;
   chatJid: string;
   id: string;
   version: string;
+  versionDigest: string;
+  /** What every file of this row in Olympus's folder is named with first. */
+  filePrefix: string;
   media: WhatsAppWaitingMedia;
-  /** Filled, or never fetchable: its keys are gone and nothing is asked for it. */
+  /** Filled, or never fetchable: nothing more is asked, but a Secret still takes its file back. */
   done: boolean;
 }
 
 /**
- * Olympus's one record of the media waiting to be fetched: a row per
- * message, at the newest version a listing found waiting.
+ * Olympus's one record of the media it fetches: a row per message version,
+ * written as the listing reads the line.
  */
-class WaitingMediaState {
+export class WhatsAppMediaFetchState {
   private constructor(private readonly db: Database) {}
 
-  static open(spoolDir: string): WaitingMediaState {
+  static open(spoolDir: string): WhatsAppMediaFetchState {
     const path = join(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE);
     const db = new Database(path, { create: true });
     chmodSync(path, 0o600);
     db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
-    db.run(`CREATE TABLE IF NOT EXISTS waiting (
-      stem TEXT PRIMARY KEY,
-      chat_jid TEXT NOT NULL,
-      id TEXT NOT NULL,
+    db.run(`CREATE TABLE IF NOT EXISTS media (
+      key TEXT PRIMARY KEY,
+      stem TEXT NOT NULL,
       version TEXT NOT NULL,
       media_json TEXT NOT NULL,
       done INTEGER NOT NULL DEFAULT 0
     )`);
-    return new WaitingMediaState(db);
+    return new WhatsAppMediaFetchState(db);
   }
 
+  /** A waiting line read: its version is kept, once (a replay of a version done asks nothing again). */
   note(media: WhatsAppWaitingMedia): void {
     const stem = whatsAppMediaFileStem(media.chatJid, media.id);
-    const existing = this.row(stem);
-    if (existing) {
-      const order = compareWhatsAppVersions(existing.version, media.version);
-      // A newer version waits anew; the same one read again (a replay) is not asked for twice once it is done.
-      if (order > 0 || (order === 0 && existing.done)) return;
-    }
-    this.db.query('INSERT OR REPLACE INTO waiting (stem, chat_jid, id, version, media_json, done) VALUES (?, ?, ?, ?, ?, 0)')
-      .run(stem, media.chatJid, media.id, media.version, JSON.stringify(media));
+    this.db.query('INSERT OR IGNORE INTO media (key, stem, version, media_json) VALUES (?, ?, ?, ?)')
+      .run(rowKey(stem, media.version), stem, media.version, JSON.stringify(media));
   }
 
+  /** The bridge saved a version's media itself: nothing is fetched for that version or an older one. */
   saved(chatJid: string, id: string, version: string): void {
     const stem = whatsAppMediaFileStem(chatJid, id);
-    const existing = this.row(stem);
-    if (existing && compareWhatsAppVersions(existing.version, version) <= 0) this.forget(stem);
+    for (const row of this.rowsOf(stem)) {
+      if (!row.done && compareWhatsAppVersions(row.version, version) <= 0) this.finish(row.key);
+    }
   }
 
-  forget(stem: string): void {
-    this.db.query('DELETE FROM waiting WHERE stem = ?').run(stem);
+  finish(key: string): void {
+    this.db.query('UPDATE media SET done = 1 WHERE key = ?').run(key);
   }
 
-  /** Filled, or never fetchable: kept at its version so a replay of the same line does not ask again. */
-  finish(stem: string): void {
-    this.db.query('UPDATE waiting SET done = 1, media_json = ? WHERE stem = ?').run('{}', stem);
-  }
-
-  count(): number {
-    return (this.db.query('SELECT COUNT(*) AS n FROM waiting WHERE done = 0').get() as { n: number }).n;
+  forget(key: string): void {
+    this.db.query('DELETE FROM media WHERE key = ?').run(key);
   }
 
   all(): WaitingMediaRow[] {
-    const rows = this.db.query('SELECT stem, chat_jid, id, version, media_json, done FROM waiting WHERE done = 0 ORDER BY rowid').all() as RawRow[];
-    return rows.map(toRow);
+    return (this.db.query('SELECT key, stem, version, media_json, done FROM media ORDER BY rowid').all() as RawRow[]).map(toRow);
+  }
+
+  waitingCount(): number {
+    return (this.db.query('SELECT COUNT(*) AS n FROM media WHERE done = 0').get() as { n: number }).n;
   }
 
   close(): void {
     closeSqliteStore(this.db);
   }
 
-  private row(stem: string): WaitingMediaRow | undefined {
-    const row = this.db.query('SELECT stem, chat_jid, id, version, media_json, done FROM waiting WHERE stem = ?').get(stem) as RawRow | null;
-    return row ? toRow(row) : undefined;
+  private rowsOf(stem: string): WaitingMediaRow[] {
+    return (this.db.query('SELECT key, stem, version, media_json, done FROM media WHERE stem = ?').all(stem) as RawRow[]).map(toRow);
   }
 }
 
 interface RawRow {
+  key: string;
   stem: string;
-  chat_jid: string;
-  id: string;
   version: string;
   media_json: string;
   done: number;
 }
 
+function versionDigestOf(version: string): string {
+  return createHash('sha256').update(version, 'utf8').digest('hex').slice(0, 16);
+}
+
+function rowKey(stem: string, version: string): string {
+  return `${stem}@${versionDigestOf(version)}`;
+}
+
 function toRow(row: RawRow): WaitingMediaRow {
+  const media = JSON.parse(row.media_json) as WhatsAppWaitingMedia;
+  const versionDigest = versionDigestOf(row.version);
   return {
+    key: row.key,
     stem: row.stem,
-    chatJid: row.chat_jid,
-    id: row.id,
+    chatJid: media.chatJid,
+    id: media.id,
     version: row.version,
-    media: JSON.parse(row.media_json) as WhatsAppWaitingMedia,
+    versionDigest,
+    filePrefix: whatsAppFetchedMediaName(row.stem, versionDigest, ''),
+    media,
     done: row.done === 1,
   };
+}
+
+/**
+ * The row's standing at its version: `clear` to fetch and fill; `secret`
+ * when the message or its media is Secret; `gone` when the message is stored
+ * at another version, or no more; `wait` while it is not stored yet, or its
+ * names are still being judged.
+ */
+function judge(options: WhatsAppMediaFetchOptions, row: WaitingMediaRow): 'clear' | 'secret' | 'gone' | 'wait' {
+  const { tierSet, account } = options;
+  const parent = { provider: 'whatsapp', accountScope: account, providerItemId: row.id, providerConversationId: row.chatJid };
+  const child = isWhatsAppChildMediaType(row.media.mediaType) ? { ...parent, providerItemId: childProviderItemId(row.id, 'media') } : undefined;
+  const parentRecord = tierSet.ledger.getCurrent(parent);
+  const childRecord = child ? tierSet.ledger.getCurrent(child) : undefined;
+  if (isSecret(parentRecord) || isSecret(childRecord)) return 'secret';
+  const storedParent = tierSet.storedItem(parent, compareWhatsAppVersions);
+  const storedChild = child ? tierSet.storedItem(child, compareWhatsAppVersions) : undefined;
+  if (!storedParent) return parentRecord ? 'gone' : 'wait';
+  // A Secret leaves the stored copy a location only: hidden at its version is Secret there.
+  if (storedParent.tombstoned === true || storedChild?.tombstoned === true) return 'secret';
+  if (storedParent.version === undefined || compareWhatsAppVersions(storedParent.version, row.version) !== 0) return 'gone';
+  if (child && (!storedChild || storedChild.version === undefined || compareWhatsAppVersions(storedChild.version, row.version) !== 0)) return 'gone';
+  if (storedParent.incomplete === true || storedChild?.incomplete === true) return 'wait';
+  if (!parentRecord || parentRecord.metadataPending) return 'wait';
+  return 'clear';
 }
 
 /**
@@ -336,143 +398,165 @@ function isSecret(record: TierLedgerRecord | undefined): boolean {
     || record.targetMetadataTier === 'secrets' || record.targetContentTier === 'secrets';
 }
 
-/** A child some store already reads from a saved file: the bridge saved it, or a fill already landed. */
-function childFilled(tierSet: TieredStoreSet, localItemId: string): boolean {
-  return tierSet.openStores().some((store) => store.deferredBytesStateOfLocalItem(localItemId).state === 'ready');
+/** Whether the stores hold the fetched file at the row's version: the child's locator, or the voice note's own path. */
+function filledAt(options: WhatsAppMediaFetchOptions, row: WaitingMediaRow, path: string): boolean {
+  const stores = options.tierSet.openStores();
+  const childLocal = whatsAppMediaChildLocalItemId(options.account, row.chatJid, row.id);
+  if (isWhatsAppChildMediaType(row.media.mediaType)) {
+    return stores.some((store) => {
+      const state = store.deferredBytesStateOfLocalItem(childLocal, row.version);
+      return state.state === 'ready' && state.locator === `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`;
+    });
+  }
+  const parent = { provider: 'whatsapp', accountScope: options.account, providerItemId: row.id, providerConversationId: row.chatJid };
+  const parentLocal = whatsAppMessageLocalItemId(options.account, row.chatJid, row.id);
+  return stores.some((store) => {
+    const stored = store.storedItemState(parent);
+    if (!stored || stored.tombstoned || stored.version === undefined || compareWhatsAppVersions(stored.version, row.version) !== 0) return false;
+    return store.activeLocalItemRow(parentLocal)?.locatorUri === path;
+  });
 }
 
-/** The request the bridge downloads from: the message and the fields its spool line carried. */
-function requestPayload(row: WaitingMediaRow): string {
+/** The request for a row: the message, its version, and the fields its line carried. */
+function requestOf(row: WaitingMediaRow): WhatsAppMediaRequest {
   const media = row.media;
-  return JSON.stringify({
+  return {
     chat_jid: row.chatJid,
     id: row.id,
+    version: row.version,
     media_type: media.mediaType,
     ...(media.mediaMime !== undefined ? { media_mime: media.mediaMime } : {}),
     ...(media.mediaKey !== undefined ? { media_key: media.mediaKey } : {}),
     media_direct_path: media.mediaDirectPath,
     ...(media.mediaFileSha256 !== undefined ? { media_file_sha256: media.mediaFileSha256 } : {}),
     ...(media.mediaFileEncSha256 !== undefined ? { media_file_enc_sha256: media.mediaFileEncSha256 } : {}),
-  });
+  };
 }
 
 /**
- * Makes the row's request be there, saying what it should: written whole
- * before it can be seen, and replaced when it says something else. True when
- * it was written now.
+ * The fill: the version's own spool line (where the listing read it), naming
+ * the fetched file. Undefined when that line is no longer that version, or was
+ * cleared of a Secret.
  */
-function ensureRequest(fetchDir: string, row: WaitingMediaRow): boolean {
-  const path = join(fetchDir, `${row.stem}.json`);
-  const payload = requestPayload(row);
-  try {
-    if (readFileSync(path, 'utf8') === payload) return false;
-    removeIfThere(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+function fillRecord(spoolDir: string, row: WaitingMediaRow, path: string): WhatsAppRecord | undefined {
+  for (const read of spoolRecords(join(spoolDir, row.media.spoolFile), row.media.spoolOffset, WHATSAPP_SPOOL_MAX_RECORD_BYTES, { bytesLeft: WHATSAPP_SPOOL_MAX_RECORD_BYTES })) {
+    if (read.kind !== 'line') return undefined;
+    const message = parseWhatsAppSpoolRecord(read.text);
+    if (!message || message.id !== row.id || message.secretRedacted === true) return undefined;
+    if (whatsAppMediaFileStem(message.chatJid, message.id) !== row.stem) return undefined;
+    if (compareWhatsAppVersions(message.timestamp, row.version) !== 0) return undefined;
+    return { ...message, mediaPath: path, downloadStatus: 'ok', mediaSizeBytes: statSync(path).size, mediaFill: true };
   }
-  mkdirSync(fetchDir, { recursive: true, mode: 0o700 });
-  const temp = join(fetchDir, `.${row.stem}.json.tmp-${randomBytes(8).toString('hex')}`);
-  const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-  try {
-    try {
-      const bytes = Buffer.from(payload, 'utf8');
-      let written = 0;
-      while (written < bytes.length) written += writeSync(fd, bytes, written, bytes.length - written);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    try {
-      linkSync(temp, path);
-    } catch (error) {
-      // Written meanwhile by another pass: the next pass checks what it says.
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
-      throw error;
-    }
-    fsyncDir(fetchDir);
-    return true;
-  } finally {
-    removeIfThere(temp);
-  }
+  return undefined;
+}
+
+const EXTENSIONS: Readonly<Record<string, string>> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'video/mp4': '.mp4',
+  'video/3gpp': '.3gp',
+  'video/quicktime': '.mov',
+  'audio/ogg': '.ogg',
+  'audio/mpeg': '.mp3',
+  'audio/mp4': '.m4a',
+  'audio/aac': '.aac',
+  'audio/amr': '.amr',
+};
+
+/** An extension for a mime type (the file is Olympus's own; readers go by the stored mime type). */
+function extensionFor(mime: string | undefined): string {
+  return EXTENSIONS[(mime ?? '').split(';')[0]!.trim().toLowerCase()] ?? '.bin';
 }
 
 /**
- * Puts an answer in its media folder under its fetched name (a link, or a
- * copy across volumes), durably, replacing an earlier copy. Returns its size.
+ * The bridge's one local call (media_serve.go): the socket its state folder
+ * names, one request, one answer, the bytes written to the part and fsynced.
+ * A bridge that is not running is `unavailable`.
  */
-function place(answer: string, placed: string): number {
-  const folder = join(placed, '..');
-  mkdirSync(folder, { recursive: true, mode: 0o700 });
-  removeIfThere(placed);
-  try {
-    linkSync(answer, placed);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
-    const temp = `${placed}.tmp-${randomBytes(8).toString('hex')}`;
+export function bridgeMediaCall(stateDir: string): WhatsAppMediaCall {
+  return (request, partPath, fits) => new Promise((resolve) => {
+    let socketPath: string;
     try {
-      copyFileSync(answer, temp, constants.COPYFILE_EXCL);
-      const fd = openSync(temp, 'r');
-      try {
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
+      const named = JSON.parse(readFileSync(join(stateDir, WHATSAPP_MEDIA_SOCKET_POINTER), 'utf8')) as { socket?: unknown };
+      if (typeof named.socket !== 'string' || named.socket === '') throw new Error('no socket');
+      socketPath = named.socket;
+    } catch {
+      resolve({ status: 'unavailable' });
+      return;
+    }
+    let settled = false;
+    let head = Buffer.alloc(0);
+    let answer: { status: 'ok'; size: number } | undefined;
+    let fd: number | undefined;
+    let written = 0;
+    const socket = createConnection({ path: socketPath });
+    const finish = (outcome: WhatsAppMediaAnswer): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      if (fd !== undefined) {
+        try {
+          if (outcome.status === 'ok') fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
       }
-      renameSync(temp, placed);
-    } finally {
-      removeIfThere(temp);
-    }
-  }
-  fsyncDir(folder);
-  return statSync(placed).size;
-}
-
-/** The fill: the message's line at the stored version, naming the fetched copy. Undefined when the line is not that version now. */
-function fillRecord(spoolDir: string, row: WaitingMediaRow, placed: string, size: number): WhatsAppRecord | undefined {
-  const index = WhatsAppSpoolIndex.open(spoolDir);
-  if (!index) return undefined;
-  try {
-    const located = index.newestMessage(row.id, row.chatJid);
-    if (!located) return undefined;
-    for (const read of spoolRecords(join(spoolDir, located.file), located.offset, WHATSAPP_SPOOL_MAX_RECORD_BYTES, { bytesLeft: WHATSAPP_SPOOL_MAX_RECORD_BYTES })) {
-      if (read.kind !== 'line') return undefined;
-      const message = parseWhatsAppSpoolRecord(read.text);
-      if (!message || message.id !== row.id || message.secretRedacted === true) return undefined;
-      if (compareWhatsAppVersions(message.timestamp, row.version) !== 0) return undefined;
-      return { ...message, mediaPath: placed, downloadStatus: 'ok', mediaSizeBytes: size, mediaFill: true };
-    }
-    return undefined;
-  } finally {
-    index.close();
-  }
-}
-
-/** The names in a folder that are a message's: its request, answer, part, or a temp of one. */
-function namesOf(dir: string, stem: string): string[] {
-  return listNames(dir).filter((name) => belongsTo(name, stem));
-}
-
-function belongsTo(name: string, stem: string): boolean {
-  return name.startsWith(`${stem}.`) || name.startsWith(`.${stem}.`);
-}
-
-/**
- * Removes every request, answer, part or temp whose message is not wanted:
- * withdrawn, or downloaded too late. Matched against the stems wanted, never
- * parsed out of a name (a message id may hold a dot).
- */
-function sweepOrphans(dir: string, state: WaitingMediaState): void {
-  const wanted = state.all().map((row) => row.stem);
-  for (const name of listNames(dir)) {
-    if (!wanted.some((stem) => belongsTo(name, stem))) removeIfThere(join(dir, name));
-  }
-}
-
-/** Removes a message's fetched copies from a media folder. */
-function removeFetchedCopies(dir: string, stem: string): void {
-  const prefix = whatsAppFetchedMediaName(stem, '.');
-  for (const name of listNames(dir)) {
-    if (name.startsWith(prefix)) removeIfThere(join(dir, name));
-  }
+      resolve(outcome);
+    };
+    const take = (bytes: Buffer): void => {
+      if (!answer || fd === undefined) return;
+      const chunk = bytes.subarray(0, Math.max(0, answer.size - written));
+      let offset = 0;
+      while (offset < chunk.length) offset += writeSync(fd, chunk, offset, chunk.length - offset);
+      written += chunk.length;
+      if (written === answer.size) finish(answer);
+    };
+    socket.setTimeout(CALL_STALL_MS, () => finish({ status: 'failed', permanent: false, reason: 'stalled' }));
+    socket.on('connect', () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.on('error', () => finish(answer ? { status: 'failed', permanent: false, reason: 'cut_off' } : { status: 'unavailable' }));
+    socket.on('close', () => finish({ status: 'failed', permanent: false, reason: 'cut_off' }));
+    socket.on('data', (data: Buffer) => {
+      if (answer) {
+        take(data);
+        return;
+      }
+      head = Buffer.concat([head, data]);
+      const newline = head.indexOf(0x0a);
+      if (newline === -1) {
+        if (head.length > ANSWER_HEAD_MAX_BYTES) finish({ status: 'failed', permanent: false, reason: 'bad_answer' });
+        return;
+      }
+      let parsed: { status?: unknown; size?: unknown; permanent?: unknown; reason?: unknown };
+      try {
+        parsed = JSON.parse(head.subarray(0, newline).toString('utf8')) as typeof parsed;
+      } catch {
+        finish({ status: 'failed', permanent: false, reason: 'bad_answer' });
+        return;
+      }
+      if (parsed.status !== 'ok') {
+        finish({ status: 'failed', permanent: parsed.permanent === true, reason: typeof parsed.reason === 'string' ? parsed.reason : 'failed' });
+        return;
+      }
+      const size = typeof parsed.size === 'number' && Number.isSafeInteger(parsed.size) && parsed.size >= 0 ? parsed.size : undefined;
+      if (size === undefined) {
+        finish({ status: 'failed', permanent: false, reason: 'bad_answer' });
+        return;
+      }
+      if (!fits(size)) {
+        finish({ status: 'failed', permanent: false, reason: 'waiting_for_disk' });
+        return;
+      }
+      answer = { status: 'ok', size };
+      fd = openSync(partPath, 'w', 0o600);
+      if (size === 0) {
+        finish(answer);
+        return;
+      }
+      take(head.subarray(newline + 1));
+    });
+  });
 }
 
 function listNames(dir: string): string[] {
@@ -486,32 +570,21 @@ function listNames(dir: string): string[] {
 
 function volumeSpace(dir: string): { free: number; total: number } | undefined {
   try {
-    const stats = statfsSync(existingAncestor(dir));
+    const stats = statfsSync(dir);
     return { free: stats.bavail * stats.bsize, total: stats.blocks * stats.bsize };
   } catch {
     return undefined;
   }
 }
 
-function existingAncestor(dir: string): string {
-  for (let current = dir; ; current = join(current, '..')) {
-    try {
-      statSync(current);
-      return current;
-    } catch {
-      if (join(current, '..') === current) return current;
-    }
-  }
-}
-
-/** Whether the volume is above the bridge's floor. A volume whose space cannot be read is never paused for it. */
-function hasRoom(dir: string, space: WhatsAppVolumeSpace): boolean {
+/** Whether `adding` more bytes keep the volume above the bridge's floor. A volume whose space cannot be read is never paused for. */
+function hasRoom(dir: string, space: WhatsAppVolumeSpace, adding: number): boolean {
   const volume = space(dir);
   if (!volume || volume.total <= 0) return true;
-  return volume.free >= Math.max(DISK_FLOOR_MIN_BYTES, Math.floor(volume.total / DISK_FLOOR_SHARE));
+  return volume.free - adding >= Math.max(DISK_FLOOR_MIN_BYTES, Math.floor(volume.total / DISK_FLOOR_SHARE));
 }
 
-function fsyncDir(dir: string): void {
+function fsyncFolder(dir: string): void {
   const fd = openSync(dir, 'r');
   try {
     fsyncSync(fd);
@@ -520,11 +593,13 @@ function fsyncDir(dir: string): void {
   }
 }
 
-/** Removes a file; anything but its being gone fails the pass. */
-function removeIfThere(path: string): void {
+/** Removes a file and fsyncs its folder, so the removal is durable before it is recorded; gone already is fine. */
+function removeDurably(path: string): void {
   try {
     rmSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return;
   }
+  fsyncFolder(dirname(path));
 }

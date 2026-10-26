@@ -36880,13 +36880,14 @@ var init_live_connector = __esm(() => {
 });
 
 // src/workers/whatsapp/media-fetch.ts
-var DISK_FLOOR_MIN_BYTES;
+var DISK_FLOOR_MIN_BYTES, ANSWER_HEAD_MAX_BYTES;
 var init_media_fetch = __esm(() => {
   init_source_inputs();
+  init_child_media();
   init_live_connector();
-  init_spool_index();
   init_spool_reader();
   DISK_FLOOR_MIN_BYTES = 5 * 1024 * 1024 * 1024;
+  ANSWER_HEAD_MAX_BYTES = 64 * 1024;
 });
 
 // src/workers/whatsapp/store-sync.ts

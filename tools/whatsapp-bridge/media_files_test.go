@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,7 +115,7 @@ func TestBelowTheFloorTheMessageIsKeptAndItsMediaWaits(t *testing.T) {
 		t.Fatalf("a download was started below the floor")
 	}
 	// The line is the only record: nothing is kept beside it, and nothing is asked for yet.
-	for _, kept := range []string{"waiting", mediaFetchDirName, mediaFetchedDirName} {
+	for _, kept := range []string{"waiting", "fetch", "fetched"} {
 		if _, err := os.Stat(filepath.Join(dir, "media", kept)); !os.IsNotExist(err) {
 			t.Fatalf("media/%s was made: %v", kept, err)
 		}
@@ -245,222 +247,206 @@ func TestMediaFileStemMatchesOlympus(t *testing.T) {
 	}
 }
 
-// sizedDownloader writes `sizes[n]` bytes on its n-th call.
-type sizedDownloader struct {
-	sizes []int
-	calls int
-}
-
-func (d *sizedDownloader) DownloadMediaWithPathToFile(_ context.Context, _ string, _, _, _ []byte, _ whatsmeow.MediaType, _ string, _ bool, file whatsmeow.File) error {
-	size := d.sizes[d.calls%len(d.sizes)]
-	d.calls++
-	for written := 0; written < size; written += 1024 {
-		if _, err := file.Write(make([]byte, 1024)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// waitFor makes a store whose pictures `ids` wait for disk space, the volume then having room again.
-func waitFor(t *testing.T, downloader mediaDownloader, ids ...string) (*audioMediaStore, *uint64, []spoolRecord) {
+// serving starts the download call on a fresh state folder; `ask` sends one request and reads its answer.
+func serving(t *testing.T, stateDir string, downloader mediaDownloader) (*audioMediaStore, func(downloadRequest) (downloadAnswer, []byte)) {
 	t.Helper()
-	free := uint64(1024)
-	store := newAudioMediaStore(t.TempDir(), downloader)
-	store.floor.space = spaceOf(&free, testVolume)
-	var recs []spoolRecord
-	for _, id := range ids {
-		rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent(id, &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
-			Mimetype:      proto.String("image/jpeg"),
-			Caption:       proto.String("the harbour at dusk"),
-			MediaKey:      []byte{1, 2, 3},
-			FileEncSHA256: []byte{4, 5, 6},
-			FileSHA256:    []byte{7, 8, 9},
-			DirectPath:    proto.String("/mms/image/" + id),
-		}}))
-		if rec.DownloadStatus != mediaWaitingStatus {
-			t.Fatalf("record = %#v", rec)
-		}
-		recs = append(recs, rec)
-		// Each is asked for in turn, oldest first.
-		time.Sleep(10 * time.Millisecond)
-	}
-	free = testVolume
-	return store, &free, recs
-}
-
-// ask writes Olympus's request for a waiting record, from the fields its spool line carries.
-func ask(t *testing.T, store *audioMediaStore, rec spoolRecord) string {
-	t.Helper()
-	stem := mediaFileStem(rec.ChatJID, rec.ID)
-	payload, _ := json.Marshal(fetchRequest{
-		ChatJID:            rec.ChatJID,
-		ID:                 rec.ID,
-		MediaType:          rec.MediaType,
-		MediaMime:          rec.MediaMime,
-		MediaKey:           rec.MediaKey,
-		MediaDirectPath:    rec.MediaDirectPath,
-		MediaFileSHA256:    rec.MediaFileSHA256,
-		MediaFileEncSHA256: rec.MediaFileEncSHA256,
+	store := newAudioMediaStore(stateDir, downloader)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		store.serveDownloads(ctx, stateDir)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
 	})
-	if err := os.MkdirAll(store.floor.fetchDir, 0o700); err != nil {
-		t.Fatal(err)
+	pointer := filepath.Join(stateDir, mediaSocketPointer)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(pointer); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the download call never started")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if err := os.WriteFile(filepath.Join(store.floor.fetchDir, stem+".json"), payload, 0o600); err != nil {
-		t.Fatal(err)
+	ask := func(request downloadRequest) (downloadAnswer, []byte) {
+		t.Helper()
+		raw, err := os.ReadFile(pointer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var named struct {
+			Socket string `json:"socket"`
+		}
+		if err := json.Unmarshal(raw, &named); err != nil {
+			t.Fatal(err)
+		}
+		conn, err := net.Dial("unix", named.Socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		line, _ := json.Marshal(request)
+		if _, err := conn.Write(append(line, '\n')); err != nil {
+			t.Fatal(err)
+		}
+		reader := bufio.NewReader(conn)
+		head, err := reader.ReadBytes('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		var answer downloadAnswer
+		if err := json.Unmarshal(head, &answer); err != nil {
+			t.Fatal(err)
+		}
+		if answer.Status != "ok" {
+			return answer, nil
+		}
+		body := make([]byte, answer.Size)
+		if _, err := io.ReadFull(reader, body); err != nil {
+			t.Fatal(err)
+		}
+		return answer, body
 	}
-	return stem
+	return store, ask
 }
 
-func fetchedNames(t *testing.T, store *audioMediaStore) []string {
+func pictureRequest(id string) downloadRequest {
+	return downloadRequest{
+		ChatJID:            "15551234567@s.whatsapp.net",
+		ID:                 id,
+		Version:            "2026-10-25T09:00:00Z",
+		MediaType:          "image",
+		MediaMime:          "image/jpeg",
+		MediaKey:           "AQID",
+		MediaDirectPath:    "/mms/image/" + id,
+		MediaFileSHA256:    "BwgJ",
+		MediaFileEncSHA256: "BAUG",
+	}
+}
+
+// everyFile lists every file under the state folder but the socket and its pointer.
+func everyFile(t *testing.T, stateDir string) []string {
 	t.Helper()
-	entries, err := os.ReadDir(store.floor.fetchedDir)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	return names
+	var found []string
+	_ = filepath.WalkDir(stateDir, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() && entry.Name() != mediaSocketName && entry.Name() != mediaSocketPointer {
+			found = append(found, path)
+		}
+		return nil
+	})
+	return found
 }
 
 func TestTheWaitingLineCarriesWhatALaterDownloadNeeds(t *testing.T) {
-	_, _, recs := waitFor(t, &streamingDownloader{}, "line-1")
-	rec := recs[0]
-	if rec.MediaDirectPath != "/mms/image/line-1" || rec.MediaKey == "" || rec.MediaFileSHA256 == "" || rec.MediaFileEncSHA256 == "" || rec.MediaMime != "image/jpeg" {
+	free := uint64(1024)
+	store := newAudioMediaStore(t.TempDir(), &streamingDownloader{})
+	store.floor.space = spaceOf(&free, testVolume)
+	rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent("line-1", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+		Mimetype:      proto.String("image/jpeg"),
+		MediaKey:      []byte{1, 2, 3},
+		FileEncSHA256: []byte{4, 5, 6},
+		FileSHA256:    []byte{7, 8, 9},
+		DirectPath:    proto.String("/mms/image/line-1"),
+	}}))
+	if rec.DownloadStatus != mediaWaitingStatus || rec.MediaDirectPath != "/mms/image/line-1" || rec.MediaKey == "" || rec.MediaFileSHA256 == "" || rec.MediaFileEncSHA256 == "" || rec.MediaMime != "image/jpeg" {
 		t.Fatalf("record = %#v", rec)
 	}
 }
 
-func TestWaitingMediaIsNeverDownloadedUnlessOlympusAsks(t *testing.T) {
-	downloader := &streamingDownloader{chunk: []byte("picture"), times: 1}
-	store, _, _ := waitFor(t, downloader, "unasked-1")
-	store.floor.fetch(context.Background(), store)
-	if downloader.calls != 0 || len(fetchedNames(t, store)) != 0 {
-		t.Fatalf("downloaded %d times without a request: %v", downloader.calls, fetchedNames(t, store))
+func TestTheDownloadCallAnswersTheBytesAndKeepsNothing(t *testing.T) {
+	stateDir := t.TempDir()
+	downloader := &streamingDownloader{chunk: []byte("picture bytes"), times: 1}
+	_, ask := serving(t, stateDir, downloader)
+	answer, body := ask(pictureRequest("asked-1"))
+	if answer.Status != "ok" || answer.Size != int64(len("picture bytes")) || string(body) != "picture bytes" {
+		t.Fatalf("answer = %#v, body = %q", answer, body)
+	}
+	// The bridge wrote no file for it: the download was decrypted in a temp that never had a name to keep.
+	if files := everyFile(t, stateDir); len(files) != 0 {
+		t.Fatalf("files left: %v", files)
+	}
+	info, err := os.Stat(filepath.Join(stateDir, mediaSocketName))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("socket: %v %v", info, err)
 	}
 }
 
-func TestRequestedMediaIsDownloadedOnceThereIsRoomAndNothingIsSpooled(t *testing.T) {
-	downloader := &streamingDownloader{chunk: []byte("picture bytes"), times: 1}
-	store, free, recs := waitFor(t, downloader, "asked-1")
+func TestBelowTheFloorTheCallAnswersAPassingFailureAndTheStatusSaysMediaWaits(t *testing.T) {
+	stateDir := t.TempDir()
+	downloader := &streamingDownloader{chunk: []byte("picture"), times: 1}
+	store, ask := serving(t, stateDir, downloader)
+	free := uint64(1024)
+	store.floor.space = spaceOf(&free, testVolume)
 	status := newCaptureStatus(t.TempDir())
 	store.floor.status = status
-	stem := ask(t, store, recs[0])
-	// Still no room: nothing happens, and the status says media waits.
-	*free = 1024
-	store.floor.noteWaiting()
-	store.floor.fetch(context.Background(), store)
-	if downloader.calls != 0 || !status.receipt().MediaWaitingForDisk {
-		t.Fatalf("fetched below the floor (%d), waiting said %v", downloader.calls, status.receipt().MediaWaitingForDisk)
+	answer, _ := ask(pictureRequest("low-1"))
+	if answer.Status != "failed" || answer.Permanent || answer.Reason != "waiting_for_disk" || downloader.calls != 0 {
+		t.Fatalf("answer = %#v, calls %d", answer, downloader.calls)
 	}
-	*free = testVolume
-	store.floor.fetch(context.Background(), store)
-	if names := fetchedNames(t, store); len(names) != 1 || names[0] != stem+extensionFromMime("image/jpeg") {
-		t.Fatalf("fetched = %v", names)
+	if !status.receipt().MediaWaitingForDisk {
+		t.Fatalf("the status does not say media waits")
 	}
-	if raw, _ := os.ReadFile(filepath.Join(store.floor.fetchedDir, stem+extensionFromMime("image/jpeg"))); string(raw) != "picture bytes" {
-		t.Fatalf("fetched bytes = %q", raw)
-	}
+	free = testVolume
+	store.floor.look()
 	if status.receipt().MediaWaitingForDisk {
 		t.Fatalf("still waiting once there was room")
 	}
-	// The request is Olympus's to remove; the answer is not downloaded again.
-	if _, err := os.Stat(filepath.Join(store.floor.fetchDir, stem+".json")); err != nil {
-		t.Fatalf("the bridge removed the request: %v", err)
-	}
-	store.floor.fetch(context.Background(), store)
-	if downloader.calls != 1 {
-		t.Fatalf("downloaded %d times", downloader.calls)
-	}
-	// The bridge spools nothing for it: the media went only to media/fetched.
-	if entries, _ := os.ReadDir(store.images.dir); len(entries) != 0 {
-		t.Fatalf("saved beside the live pictures: %v", entries)
-	}
 }
 
-func TestAPassingFailureLeavesTheRequestAndAPermanentOneAnswersFailed(t *testing.T) {
+func TestAPassingFailureAndAPermanentOneAreToldApart(t *testing.T) {
 	downloader := &streamingDownloader{chunk: []byte("partial"), times: 1, err: errors.New("connection reset by peer")}
-	store, _, recs := waitFor(t, downloader, "blip-1")
-	stem := ask(t, store, recs[0])
-	store.floor.fetch(context.Background(), store)
-	if names := fetchedNames(t, store); len(names) != 0 {
-		t.Fatalf("a network blip left %v", names)
+	stateDir := t.TempDir()
+	_, ask := serving(t, stateDir, downloader)
+	if answer, _ := ask(pictureRequest("blip-1")); answer.Status != "failed" || answer.Permanent {
+		t.Fatalf("a network blip: %#v", answer)
 	}
 	downloader.err = fmt.Errorf("download: %w", whatsmeow.ErrInvalidMediaSHA256)
-	store.floor.fetch(context.Background(), store)
-	if names := fetchedNames(t, store); len(names) != 1 || names[0] != stem+mediaFailedSuffix {
-		t.Fatalf("fetched = %v", names)
+	if answer, _ := ask(pictureRequest("blip-1")); answer.Status != "failed" || !answer.Permanent {
+		t.Fatalf("a bad hash: %#v", answer)
 	}
-	store.floor.fetch(context.Background(), store)
-	if downloader.calls != 2 {
-		t.Fatalf("an answered request was downloaded again: %d", downloader.calls)
-	}
-}
-
-func TestADownloadAKilledBridgeLeftIsDoneAgainFromTheStart(t *testing.T) {
-	downloader := &streamingDownloader{chunk: []byte("whole picture"), times: 1}
-	store, _, recs := waitFor(t, downloader, "crash-1")
-	stem := ask(t, store, recs[0])
-	if err := os.MkdirAll(store.floor.fetchedDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	part := filepath.Join(store.floor.fetchedDir, stem+mediaPartSuffix)
-	if err := os.WriteFile(part, []byte("half of another try, longer than the picture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// The bridge starts again: the unfinished part goes, the request stays and is downloaded whole.
-	store.sweepTemps(time.Now())
-	if _, err := os.Stat(part); !os.IsNotExist(err) {
-		t.Fatalf("the unfinished part survived the start")
-	}
-	store.floor.fetch(context.Background(), store)
-	if raw, _ := os.ReadFile(filepath.Join(store.floor.fetchedDir, stem+extensionFromMime("image/jpeg"))); string(raw) != "whole picture" {
-		t.Fatalf("fetched bytes = %q", raw)
-	}
-	if names := fetchedNames(t, store); len(names) != 1 {
-		t.Fatalf("fetched = %v", names)
+	// A failed download leaves nothing behind either.
+	if files := everyFile(t, stateDir); len(files) != 0 {
+		t.Fatalf("files left: %v", files)
 	}
 }
 
-func TestARequestNamedForOneMessageButAskingForAnotherIsNotDownloaded(t *testing.T) {
+func TestARequestWithoutWhereTheMediaIsIsRefused(t *testing.T) {
 	downloader := &streamingDownloader{chunk: []byte("picture"), times: 1}
-	store, _, recs := waitFor(t, downloader, "named-1", "named-2")
-	stem := ask(t, store, recs[1])
-	// The file named for named-1 asks for named-2's media.
-	if err := os.Rename(filepath.Join(store.floor.fetchDir, stem+".json"), filepath.Join(store.floor.fetchDir, mediaFileStem(recs[0].ChatJID, "named-1")+".json")); err != nil {
-		t.Fatal(err)
+	_, ask := serving(t, t.TempDir(), downloader)
+	request := pictureRequest("bad-1")
+	request.MediaDirectPath = ""
+	if answer, _ := ask(request); answer.Status != "failed" || !answer.Permanent || answer.Reason != "bad_request" || downloader.calls != 0 {
+		t.Fatalf("answer = %#v, calls %d", answer, downloader.calls)
 	}
-	store.floor.fetch(context.Background(), store)
-	if downloader.calls != 0 {
-		t.Fatalf("downloaded a request whose name is not its message")
+	request = pictureRequest("bad-2")
+	request.MediaType = "sticker"
+	if answer, _ := ask(request); answer.Status != "failed" || !answer.Permanent || downloader.calls != 0 {
+		t.Fatalf("answer = %#v, calls %d", answer, downloader.calls)
 	}
 }
 
-func TestAMediaTooLargeForTheRoomIsSkippedAndSmallerOnesAfterItStillGo(t *testing.T) {
-	saved := diskCheckEveryBytes
-	diskCheckEveryBytes = 1024
-	defer func() { diskCheckEveryBytes = saved }()
-	// The first requested picture is 64 KiB, the second 2 KiB; the volume has 32 KiB above its floor.
-	downloader := &sizedDownloader{sizes: []int{64 * 1024, 2 * 1024}}
-	store, _, recs := waitFor(t, downloader, "big-2", "small-2")
-	big := ask(t, store, recs[0])
-	time.Sleep(10 * time.Millisecond)
-	small := ask(t, store, recs[1])
-	floor := diskFloor(testVolume)
-	store.floor.space = func(string) (uint64, uint64, error) {
-		var parts uint64
-		entries, _ := os.ReadDir(store.floor.fetchedDir)
-		for _, entry := range entries {
-			if info, err := entry.Info(); err == nil && strings.HasSuffix(entry.Name(), mediaPartSuffix) {
-				parts += uint64(info.Size())
-			}
-		}
-		return floor + 32*1024 - parts, testVolume, nil
+func TestALongStateFolderPutsTheSocketInAPrivateTempFolder(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), strings.Repeat("a-long-account-folder-name/", 4))
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	store.floor.fetch(context.Background(), store)
-	if names := fetchedNames(t, store); len(names) != 1 || names[0] != small+extensionFromMime("image/jpeg") {
-		t.Fatalf("fetched = %v (big %s)", names, big)
+	_, ask := serving(t, stateDir, &streamingDownloader{chunk: []byte("picture"), times: 1})
+	raw, _ := os.ReadFile(filepath.Join(stateDir, mediaSocketPointer))
+	var named struct {
+		Socket string `json:"socket"`
+	}
+	_ = json.Unmarshal(raw, &named)
+	if strings.HasPrefix(named.Socket, stateDir) || len(named.Socket) > mediaSocketMaxPath {
+		t.Fatalf("socket = %q", named.Socket)
+	}
+	if info, err := os.Stat(filepath.Dir(named.Socket)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("socket folder: %v %v", info, err)
+	}
+	if answer, body := ask(pictureRequest("long-1")); answer.Status != "ok" || string(body) != "picture" {
+		t.Fatalf("answer = %#v", answer)
 	}
 }

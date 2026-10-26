@@ -704,18 +704,17 @@ export's media are (section 5).
   message is still spooled, its media `waiting_for_disk`, with what a later
   download needs on the line (where the media is, its keys and hashes, its
   type and size). That line is the only record: the bridge keeps no list of
-  waiting media. Waiting media is downloaded only after Olympus has judged
-  its message not Secret, and only when Olympus asks (owner, 2026-10-26;
-  review round 8 on #558: Olympus alone owns what is fetched; see Secrets
-  below). The bridge downloads each request in `media/fetch/` into
-  `media/fetched/<stem>.part`, fsyncs it, renames it to `<stem><ext>` and
-  fsyncs the folder, every minute while the volume is above the floor (one
-  too large for the room is skipped, the smaller ones after it still go; a
-  passing failure is left for the next pass; media gone from WhatsApp's
-  servers is answered `<stem>.failed`). It spools nothing for it, so a
-  crash leaves at most a request to do again. While media waits below the
-  floor the capture status says so (no count), as does Olympus's own pass,
-  and the card shows "media waiting for disk space" with what to do. Every temp has one name,
+  waiting media. The owner decided that Olympus fetches it (2026-10-26):
+  "Olympus asks the bridge for the exact message version, receives the
+  bytes into its own folder, re-checks the judgment before indexing, and
+  keys everything by version". See Secrets below. The bridge answers that
+  one local call (`media_serve.go`): an owner-only Unix socket named in
+  `media-download.json` in its state folder, which does nothing but
+  download. It decrypts into an unnamed temp, so it writes no file and
+  keeps no state; below the floor it answers a passing failure. While media
+  waits below the floor, the capture status says so (no count), as does
+  Olympus's own pass, and the card shows "media waiting for disk space"
+  with what to do. Every temp has one name,
   `.olympus-media-<pid>-<boot>-<stem>-*.tmp` (boot: this boot's nonce, since
   a pid is unique only within a boot): removed on every failure, and swept
   at start and before Secrets clearing when its writer is gone (pid dead, or
@@ -750,34 +749,37 @@ export's media are (section 5).
   folder (or, in the older layout, the audio folder) and the bridge's
   picture and video folders beside it.
 - **Secrets.** Saved media follows the judgment of what it is part of.
-  Media waiting for disk space is fetched only as Olympus asks
-  (`media-fetch.ts`). The listing notes each waiting line, and Olympus keeps
-  one row per message (`media-fetch.sqlite` beside the spool index). After
-  each pull's clearing it makes the bridge's folders match that state and
-  the stores:
-  - **Requests.** A message stored at the row's version and judged not
-    Secret (nor its media child), whose names are settled, gets
-    `media/fetch/<stem>.json` while the disk is above the floor. An
-    uncaptioned picture qualifies: the test is "not Secret", not "content
-    judged". The request is written to a temp, fsynced, linked into place
-    and its folder fsynced; a request that says something else is
-    replaced.
-  - **Answers.** An answer is kept in its media folder as
-    `<stem>-fetched<ext>` and read into the stored item through the
-    connector's own record builder (`mediaFill`). That fills the picture's
-    or video's child, or the voice note itself, and nothing else: no
-    caption goes out this way. Extraction and judgment follow as for any
-    media. Once the fill is committed, the request and answer go, and the
-    row is kept as done, so a replayed line is not asked for again.
-  - **Withdrawals.** Whatever Olympus no longer wants is deleted, whenever
-    its download finished. For a message that turned Secret, is stored at
-    another version, or is gone, that means its request, answer and
-    fetched copy. It also means any request, answer or part whose message
-    has no row. So a download that lands after its message turned Secret
-    is deleted on the next pass.
+  Media that waited for disk space is fetched by Olympus alone
+  (`media-fetch.ts`).
+  - **Recording.** The listing tells Olympus of each waiting line as it
+    reads it, before the pull commits past it. Olympus keeps it as a row
+    keyed by the message and its version digest, with the line's place in
+    the spool (`media-fetch.sqlite`, beside the spool index).
+  - **Each message, in the pull after the clearing:**
+    1. The message is stored at the row's version. Neither it nor its
+       media child is Secret there: each is stored at that version, not
+       hidden, and not judged Secret since. Its names are settled, and the
+       disk has room. An uncaptioned picture qualifies.
+    2. Olympus asks the bridge for that version's media and receives the
+       bytes into `<stem>~<version digest><ext>.part` in its own folder
+       (`media/olympus`), fsynced.
+    3. It checks step 1 again. On a Secret or another version the part is
+       deleted; otherwise it is renamed and the folder fsynced.
+    4. The file is read into the stored item through the connector's own
+       record builder (`mediaFill`), from the version's own spool line. That
+       fills the picture's or video's child, or the voice note itself, and
+       nothing else: no caption goes out this way. Extraction and judgment
+       follow as for any media.
 
-  The clearing deletes a fetched copy whose media is later judged Secret,
-  though no line names it.
+    A row is done only once the stores are seen to hold the file at that
+    version, so a fill a sync did not land is filled again. A replayed
+    line of a done version asks nothing again.
+  - **Take-back, every pass.** A row whose message is now Secret (the
+    message or its media), stored at another version, or gone loses its
+    file, done rows included. The folder is fsynced before the row is
+    forgotten. A file no row names is deleted. The clearing deletes a
+    fetched copy whose media is judged Secret too, and every Secret
+    deletion fsyncs its folder.
 - **Reading large media.** Keeping every file does not mean reading every
   file into memory: the extraction source hands a file reader the media as
   a file (`fetchFile`), copied a chunk at a time from the descriptor the

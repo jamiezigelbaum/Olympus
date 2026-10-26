@@ -14,7 +14,9 @@ WhatsApp's terms do not allow third-party clients, and accounts have been
 banned for using them. The owner reviewed and **explicitly accepted this risk**
 (2026-06). Mitigations baked into the daemon: it is strictly receive-only —
 no message sends, no read receipts beyond protocol minimums, no presence
-broadcasting, no control surface (no sockets, no HTTP, no IPC). If WhatsApp
+broadcasting, and one local control only: an owner-only Unix socket that
+answers Olympus's media downloads (`media_serve.go`) and nothing else (no
+HTTP, no other IPC). If WhatsApp
 logs the device out, the daemon exits and waits to be re-paired; it never
 retries in a way that looks like automation.
 
@@ -84,12 +86,12 @@ never into memory. The one safeguard is the computer's: below a free-space
 floor on the volume (the larger of 5 GB and 5% of it) no download starts and
 a running one stops; the message is still spooled with `"download_status":
 "waiting_for_disk"` and what a later download needs, and the bridge keeps
-nothing else. The media is downloaded only once Olympus asks: it writes
-`media/fetch/<stem>.json` after judging the message not Secret, and the
-bridge, every minute while there is room, downloads it to
-`media/fetched/<stem><ext>` (or answers `<stem>.failed` for media that can
-never be fetched), spooling nothing. `capture-status.json` says
-`"media_waiting_for_disk": true` while media waits below the floor. A saved file's line carries `media_path`, `media_mime` and
+nothing else. Olympus fetches the media itself once it has judged that
+message version not Secret. It calls the bridge's one local socket (named in
+`media-download.json` in the state dir), which answers the bytes, decrypted
+in an unnamed temp: the bridge writes no file and keeps no state for it.
+`capture-status.json` says `"media_waiting_for_disk": true` while media waits
+below the floor. A saved file's line carries `media_path`, `media_mime` and
 `download_status`. Olympus reads a saved picture or video as its message's
 child, and deletes it when the picture is judged Secrets.
 
