@@ -513,7 +513,9 @@ Run `bun run verify` (typecheck + `bun test` + `dist:check`). If you touched
 ## Leg 7 — Host enablement
 
 The idiom is a **dedicated numbered systemd drop-in**, not the connector-stores
-JSON mount, whenever the lane has its own enable, budget, and cadence.
+JSON mount, whenever the lane has its own enable, budget, and cadence. A drop-in
+never sets a store path: none is read (Leg 3), and a worker started with a
+retired `OLYMPUS_*_DB_PATH` refuses to start, naming it.
 
 1. **Writer script** — `scripts/ops/install-private-host-<source>-connector-store.sh`,
    modelled on `install-private-host-readwise-connector-store.sh`. It writes

@@ -330,8 +330,10 @@ export function declaredConnectorStoreMounts(env: LayoutEnv = process.env): Decl
 }
 
 // The per-store path settings delivery step 6 retired (owner decision 3), by
-// pattern: every `OLYMPUS_*_DB_PATH`, and the archive record's own.
-const RETIRED_PATH_SETTING = /^OLYMPUS_\w+_DB_PATH$|^OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH$/;
+// pattern: every `OLYMPUS_*_DB_PATH` (but the live ingestion dashboard
+// script's remote-host input, which names no store of this install), and the
+// archive record's own.
+const RETIRED_PATH_SETTING = /^(?!OLYMPUS_SOURCE_INGESTION_REMOTE_)OLYMPUS_\w+_DB_PATH$|^OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH$/;
 
 /**
  * The retired path settings this environment still sets, in words: an
@@ -348,6 +350,8 @@ export function retiredPathSettings(env: LayoutEnv = process.env): string[] {
     .filter((name) => RETIRED_PATH_SETTING.test(name) && env[name]?.trim())
     .sort()
     .map((name) => `${name}=${env[name]!.trim()}`);
+  // A list the worker cannot read cannot be shown to name no placed store.
+  if (declaredConnectorStoreMounts(env) === 'unreadable') found.push(`${MOUNTS_ENV} (cannot be read)`);
   const mounts = declaredConnectorStoreMountPaths(env);
   for (const mount of mounts) {
     if (!hasFolderLayout(mount.sourceId) || !accountStoreNames(mount.sourceId).includes(mount.trustDomain)) continue;

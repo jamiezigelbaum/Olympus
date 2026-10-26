@@ -35,7 +35,7 @@ import {
   olympusDataRoot,
   type LayoutEnv,
 } from './core/olympus-layout.ts';
-import { declaredConnectorStoreMounts } from './core/source-placement.ts';
+import { declaredConnectorStoreMounts, retiredPathSettings } from './core/source-placement.ts';
 import { dataOwnerLockPath, isDataOwnerLockName } from './core/data-owner-lock.ts';
 import { Database } from 'bun:sqlite';
 import { DEFAULT_STORAGE_SLOT, storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
@@ -298,6 +298,7 @@ export function exportOlympusData(options: {
   sourceId?: string;
 } & LifecyclePathContext): DataExportResult {
   const destination = requirePath(options.destination, '--output');
+  refuseRetiredPathSettings(options, 'export');
   const selected = selectExportAccounts(options.sourceId, options);
   refuseExportDuringMove(selected, options);
   // Computed BEFORE anything is created: once mkdir -p has run, the directories
@@ -477,6 +478,7 @@ export function deleteOlympusData(options: {
   if (options.all !== true && !options.sourceId) {
     throw new OperationError('invalid_params', 'Data delete requires --all or --source <id>.');
   }
+  if (options.dryRun !== true) refuseRetiredPathSettings(options, 'delete');
   if (options.all === true) return deleteAllOlympusData(options);
 
   const account = requireAccount(options.sourceId, options);
@@ -952,7 +954,24 @@ export function deleteOlympusDataWithCustody(options: {
   )();
 }
 
+/**
+ * A retired per-store path setting (core/source-placement.ts) means an
+ * account's files may sit where nothing resolves them any more: an export or a
+ * delete run now would miss them and report success. Refused, naming each,
+ * as the worker refuses to start.
+ */
+function refuseRetiredPathSettings(context: LifecyclePathContext, action: 'export' | 'delete'): void {
+  const retired = retiredPathSettings(envForContext(context));
+  if (retired.length === 0) return;
+  throw new OperationError(
+    'invalid_params',
+    `Refusing to ${action} local data while these path settings, which are no longer read, are set: ${retired.join('; ')}.`,
+    'Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then try again. Nothing was changed.',
+  );
+}
+
 function deleteUnderCustody(options: Parameters<typeof deleteOlympusDataWithCustody>[0]): DataDeleteWithCustodyResult {
+  if (options.dryRun !== true) refuseRetiredPathSettings(options, 'delete');
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
     throw new OperationError(

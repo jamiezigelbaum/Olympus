@@ -4,11 +4,12 @@
 // refuses to start, naming each; this is the list it names.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { accountStorePath } from '../src/core/olympus-layout.ts';
 import { resolvedStorePath, retiredPathSettings } from '../src/core/source-placement.ts';
+import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -41,6 +42,21 @@ describe('retired path settings', () => {
       'OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH=/old/gmail.sqlite',
       'OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH=/old/wa.db',
     ]);
+  });
+
+  test('the live ingestion dashboard\'s remote input is not one; a mount list that cannot be read is', () => {
+    expect(retiredPathSettings(env({ OLYMPUS_SOURCE_INGESTION_REMOTE_DB_PATH: '/remote/source-dashboard.sqlite' }))).toEqual([]);
+    expect(retiredPathSettings(env({ OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: '{ not json' }))).toEqual([
+      'OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON (cannot be read)',
+    ]);
+  });
+
+  test('export and delete refuse while one is set, and change nothing', () => {
+    const base = env({ OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH: '/old/gmail.sqlite' });
+    const destination = join(base.HOME!, 'export');
+    expect(() => exportOlympusData({ destination, env: base, homeDir: base.HOME! })).toThrow(/no longer read.*GMAIL_CONNECTOR_STORE_DB_PATH/);
+    expect(existsSync(destination)).toBe(false);
+    expect(() => deleteOlympusData({ sourceId: 'gmail.email', env: base, homeDir: base.HOME! })).toThrow(/no longer read/);
   });
 
   test('a mount that names a placed source\'s store elsewhere is named; at its own place, or for Reflect, it is not', () => {
