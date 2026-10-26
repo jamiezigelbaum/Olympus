@@ -199,7 +199,7 @@ function prng(seed: number): () => number {
   };
 }
 
-type Kind = 'ordinary' | 'secret' | 'deleted' | 'names' | 'unversioned' | 'sameVersion';
+type Kind = 'ordinary' | 'secret' | 'deleted' | 'names' | 'unversioned' | 'sameVersion' | 'empty';
 
 describe('a crash between legs and a cut between items lose nothing', () => {
   const crashOnce = (h: OnePipelineHarness): void => {
@@ -409,15 +409,15 @@ describe('random sequences settle on the newest accepted state', () => {
     test(`seed ${seed}`, async () => {
       const random = prng(seed);
       const pick = <T,>(values: readonly T[]): T => values[Math.floor(random() * values.length)]!;
-      const kinds: Kind[] = ['ordinary', 'ordinary', 'secret', 'deleted', 'names', 'unversioned', 'sameVersion'];
+      const kinds: Kind[] = ['ordinary', 'ordinary', 'secret', 'deleted', 'names', 'unversioned', 'sameVersion', 'empty'];
       const length = 2 + Math.floor(random() * 5);
       const records: FxRecord[] = [];
       const plan: Kind[] = [];
       let version = 0;
       for (let at = 0; at < length; at += 1) {
-        // A deletion of an item never stored leaves nothing to remember it by (a known residual), so it never opens a sequence.
+        // (An empty body, a record with no version and a tie need something stored before them to be one.)
         const drawn = pick(kinds);
-        const kind = at === 0 && ['deleted', 'unversioned', 'sameVersion'].includes(drawn) ? 'ordinary' : drawn;
+        const kind = at === 0 && ['unversioned', 'sameVersion', 'empty'].includes(drawn) ? 'ordinary' : drawn;
         plan.push(kind);
         if (kind === 'unversioned') {
           records.push(rec('a', version, `unversioned body ${at}`, { unversioned: true }));
@@ -433,6 +433,7 @@ describe('random sequences settle on the newest accepted state', () => {
         records.push(kind === 'secret' ? rec('a', version, `key ${at}\n${KEY_MARKER}`)
           : kind === 'deleted' ? rec('a', version, undefined, { deleted: true })
           : kind === 'names' ? rec('a', version, undefined)
+          : kind === 'empty' ? rec('a', version, '')
           : rec('a', version, `body ${at}`, children ? { children } : {}));
       }
       // The newest accepted state, record by record. A record older than the state changes nothing; names alone
@@ -441,12 +442,17 @@ describe('random sequences settle on the newest accepted state', () => {
       // A deletion of an item no pass ever stored (it can share a page with the only record that stored it) leaves
       // nothing to remember it by, so a later tie or unversioned body may legitimately be stored: a known residual.
       const forgotten: string[] = [];
+      let emptiedOver = false;
       records.forEach((_record, at) => {
         const kind = plan[at]!;
         // An unversioned body and a same-version body of one version: in one page the later wins, across pages the stored one.
         if (state.kind === 'body' && kind === 'sameVersion') forgotten.push(`same version body ${at}`);
         if (state.kind === 'body' && kind === 'unversioned') forgotten.push(`unversioned body ${at}`, state.body!);
         if (state.kind === 'deleted' && (kind === 'unversioned' || kind === 'sameVersion')) forgotten.push(kind === 'unversioned' ? `unversioned body ${at}` : `same version body ${at}`);
+        // An empty body over a Secret or a deletion in one page is the page's newest word (the Secret is never applied),
+        // across pages it is a record with no content to judge: either way no text comes back, but later ties may.
+        if (kind === 'empty' && (state.kind === 'secret' || state.kind === 'deleted')) emptiedOver = true;
+        if (emptiedOver && (kind === 'unversioned' || kind === 'sameVersion')) forgotten.push(kind === 'unversioned' ? `unversioned body ${at}` : `same version body ${at}`);
         if (kind === 'unversioned') {
           if (state.kind === 'names' || state.kind === 'none' || (state.kind === 'body' && state.unversioned === true)) state = { kind: 'body', body: `unversioned body ${at}`, unversioned: true };
           return;
@@ -458,6 +464,7 @@ describe('random sequences settle on the newest accepted state', () => {
         if (kind === 'ordinary') state = { kind: 'body', body: `body ${at}` };
         else if (kind === 'secret') state = { kind: 'secret' };
         else if (kind === 'deleted') state = { kind: 'deleted' };
+        else if (kind === 'empty') { if (state.kind === 'body' || state.kind === 'names' || state.kind === 'none') state = { kind: 'names' }; }
         else if (state.kind === 'none') state = { kind: 'names' };
       });
 
@@ -479,7 +486,8 @@ describe('random sequences settle on the newest accepted state', () => {
         for (const row of rows) if (row.version !== null) newest.set(row.providerItemId, Math.max(newest.get(row.providerItemId) ?? -1, Number(row.version)));
         return JSON.stringify([
           // (A tombstone row a Secret's location needed in one leg is not part of what is served.)
-          rows.filter((row) => row.tombstoned === 0).map((row) => [row.domain, row.providerItemId, row.chunks > 0 ? 1 : 0]).sort(),
+          rows.filter((row) => row.tombstoned === 0 && !row.providerItemId.includes('#child:')).map((row) => [row.chunks > 0 ? row.domain : '-', row.providerItemId, row.chunks > 0 ? 1 : 0].join('|')).filter((entry, at, all) => all.indexOf(entry) === at).sort(),
+          // (A leg that holds names alone is not part of what is served: only the leg that holds the text is.)
           [...newest].sort(),
           harness.textOf('a'),
         ]);
@@ -545,10 +553,12 @@ describe('random sequences settle on the newest accepted state', () => {
           if (replayInput && armed < crashes && ids.length === 1) ids.push(await h.startImport('replay.mbox', records));
         }
         for (const each of ids) expect(h.runtime.state.get(each)?.status).toBe('imported');
+        // (A child removal that failed is left for the next sweep, which the next sync of the set runs.)
+        await h.set.sweepOrphanedChildren();
         expect(textIn(h)).not.toContain('PRIVATE KEY');
         expect(h.set.ledger.writeIntents(), 'no intent stays pending').toEqual([]);
         const text = h.textOf('a');
-        const forgot = state.kind === 'deleted' && forgotten.some((body) => text.includes(body));
+        const forgot = (state.kind === 'deleted' || state.kind === 'secret' || state.kind === 'names') && forgotten.some((body) => text.includes(body));
         // (A record with no version, or the version just before, has no place in the order: a replay may read it as
         // the stored one's, so any such body may stand for the item.)
         const ties = records.flatMap((record) => record.unversioned || (record.body ?? '').startsWith('same version') ? [record.body!] : []);

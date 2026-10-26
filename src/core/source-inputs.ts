@@ -296,11 +296,15 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
               const before = stateOf(item.identity);
               thisPass.set(item.identity.localItemId, {
                 ...(item.identity.sourceVersion !== undefined ? { version: item.identity.sourceVersion } : {}),
-                hasContent: hasContent(item) || (!deleted && before?.hasContent === true && before.tombstoned !== true),
+                // (A record whose body is empty replaces the body with nothing: it is content that holds none.)
+                hasContent: hasContent(item) ? !(item.content.kind === 'text' && item.content.text.trim() === '') : !deleted && before?.hasContent === true && before.tombstoned !== true,
                 // Names alone do not bring a deleted item or a Secret back: it stays one, at the newer version.
-                ...(deleted || (before?.tombstoned === true && !hasContent(item)) ? { tombstoned: true as const } : {}),
-                // A write still owed at this very version stays owed for the records after it in the pass.
-                ...(before?.incomplete === true && before.version === item.identity.sourceVersion ? { incomplete: true as const } : {}),
+                ...(deleted || (before?.tombstoned === true && (!hasContent(item) || (item.content.kind === 'text' && item.content.text.trim() === ''))) ? { tombstoned: true as const } : {}),
+                // A write still owed stays owed for the records after this one: at this very version, and through a
+                // names-only record of any version (it neither brings the body nor resolves the debt), until a record
+                // brings content or deletes the item.
+                ...(before?.incomplete === true && (before.version === item.identity.sourceVersion || (!hasContent(item) && !deleted)) ? { incomplete: true as const } : {}),
+                ...(before?.incomplete === true && before.owedBodyVersion !== undefined && !hasContent(item) && !deleted ? { owedBodyVersion: before.owedBodyVersion } : {}),
               });
               units.push({ record: offset + position, entry: index, parent: entries[0]!.identity.localItemId, item });
             });
