@@ -166751,10 +166751,10 @@ function inputConnector(builder, input) {
               const before = stateOf(item.identity);
               thisPass.set(item.identity.localItemId, {
                 ...item.identity.sourceVersion !== undefined ? { version: item.identity.sourceVersion } : {},
-                hasContent: hasContent(item) || !deleted && before?.hasContent === true && before.tombstoned !== true,
-                ...deleted || before?.tombstoned === true && !hasContent(item) ? { tombstoned: true } : {},
-                ...before?.incomplete === true && before.version === item.identity.sourceVersion ? { incomplete: true } : {},
-                ...before?.incomplete === true && before.version === item.identity.sourceVersion && before.owedBodyVersion !== undefined && !hasContent(item) ? { owedBodyVersion: before.owedBodyVersion } : {}
+                hasContent: hasContent(item) ? !(item.content.kind === "text" && item.content.text.trim() === "") : !deleted && before?.hasContent === true && before.tombstoned !== true,
+                ...deleted || before?.tombstoned === true && (!hasContent(item) || item.content.kind === "text" && item.content.text.trim() === "") ? { tombstoned: true } : {},
+                ...before?.incomplete === true && (before.version === item.identity.sourceVersion || !hasContent(item) && !deleted) ? { incomplete: true } : {},
+                ...before?.incomplete === true && before.owedBodyVersion !== undefined && !hasContent(item) && !deleted ? { owedBodyVersion: before.owedBodyVersion } : {}
               });
               units.push({ record: offset + position, entry: index, parent: entries[0].identity.localItemId, item });
             });
