@@ -117,7 +117,7 @@ function isoSecondsFromNow(seconds: number): string {
 describe('extraction job store: module identity', () => {
   test('store id, schema version and default path follow the side-DB precedent', () => {
     expect(FILE_EXTRACTION_JOBS_STORE_ID).toBe('file-extraction-jobs');
-    expect(FILE_EXTRACTION_JOBS_SCHEMA_VERSION).toBe(5);
+    expect(FILE_EXTRACTION_JOBS_SCHEMA_VERSION).toBe(6);
     expect(defaultFileExtractionJobsDbPath({ XDG_DATA_HOME: '/data' }))
       .toBe('/data/openclaw/olympus/file-extraction-jobs.sqlite');
     // No env variable relocates the ledger alone (source storage step 6).
@@ -166,6 +166,16 @@ describe('extraction job store: enqueue', () => {
     for (const status of ['metadata_only', 'failed_terminal', 'skipped_unsupported', 'indexed']) {
       backdate(dbPath, jobId, { status });
       expect(store.itemTextOwed(item)).toBe(false);
+    }
+    // Looked up by identity, not by scanning the whole job history.
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const plan = db.query(`EXPLAIN QUERY PLAN SELECT DISTINCT status FROM extraction_jobs
+        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?`)
+        .all(item.provider, item.accountScope, item.providerItemId) as Array<{ detail: string }>;
+      expect(plan.map((row) => row.detail).join(' ')).toContain('idx_extraction_jobs_identity');
+    } finally {
+      db.close();
     }
   });
 

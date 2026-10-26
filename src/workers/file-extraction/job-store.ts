@@ -59,7 +59,7 @@ import type {
 } from './types.ts';
 
 export const FILE_EXTRACTION_JOBS_STORE_ID = 'file-extraction-jobs';
-export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 5;
+export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 6;
 export { defaultFileExtractionJobsDbPath };
 
 /**
@@ -2221,6 +2221,18 @@ function fileExtractionJobMigrations(): SqliteMigration[] {
         CREATE TABLE IF NOT EXISTS ${SECRET_RESTORED_REREADS_TABLE} (
           job_id TEXT PRIMARY KEY
         );
+      `);
+    },
+  }, {
+    version: 6,
+    name: 'add_extraction_jobs_identity_index',
+    up(db) {
+      // itemTextOwed looks an item up by identity alone, once per pending
+      // item on each privacy-check recovery pass: bounded by the page, not
+      // by the size of the extraction history.
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_identity
+          ON extraction_jobs(provider, account_scope, provider_item_id, status);
       `);
     },
   }];
