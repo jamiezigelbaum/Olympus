@@ -392,6 +392,27 @@ export function readTelegramCaptureSpool(options: {
 }
 
 /**
+ * The byte offset a `<file>:<lines>` cursor stands at in its file, or
+ * undefined when the file is gone or holds fewer lines.
+ */
+export function telegramCaptureCursorOffset(spoolDir: string, cursorText: string): number | undefined {
+  const cursor = parseTelegramCaptureSpoolCursor(cursorText)!;
+  const path = join(spoolDir, cursor.file);
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+    const fd = openSync(path, 'r');
+    try {
+      return spoolLineOffset(fd, path, stat, cursor.line);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Whether a `<file>:<lines>` cursor still names a place in this spool. `reset`
  * when its file is gone while older files remain (the spool was replaced or
  * pruned under it) or when the file holds fewer complete lines than the cursor
