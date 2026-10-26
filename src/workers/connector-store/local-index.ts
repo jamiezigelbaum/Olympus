@@ -14022,12 +14022,12 @@ function migrationFingerprint(contentHash: string | null, chunkHashes: readonly 
     .digest('hex');
 }
 
-/** The text the store would chunk for an item, exactly as the store reads it. */
 /** An item fetched in place of a listed one keeps the listed item's hold until the private model has judged it. */
 function carryHold(listed: RawItem, fetched: RawItem): RawItem {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
 }
 
+/** The text the store would chunk for an item, exactly as the store reads it. */
 export function connectorStoreItemText(item: RawItem): string | undefined {
   return textFromRawItem(item);
 }
