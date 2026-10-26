@@ -144,18 +144,27 @@ describe('the claim is applied fail-closed', () => {
     }
   });
 
-  test('a move that fails gives the copy up, and the claimed record still lands in the protected lane, as do later captures', async () => {
+  test('a move that fails after hiding the copy stops the pull with the copy hidden and kept, and the next pull finishes it', async () => {
     const w = world();
     try {
       w.capture('2026-10-22.jsonl', { id: 'A', text: 'markerA the newer ordinary text', at: '2026-10-22T09:00:00Z', trust: 'internal' });
-      const sync = w.handler({ moveClaimed: async () => { throw new Error('move refused'); } });
+      let fail = true;
+      const { moveTieredItem } = await import('../src/workers/connector-store/tier-move.ts');
+      const sync = w.handler({
+        moveClaimed: (options) => moveTieredItem({ ...options, beforeFlip: () => { if (fail) throw new Error('crash before the flip'); } }),
+      });
       await sync.pull();
       unlinkSync(join(w.spoolDir, '2026-10-22.jsonl'));
       w.capture('2026-10-23.jsonl', { id: 'A', text: 'markerA the older protected text', at: '2026-10-21T09:00:00Z', trust: 'secure_local' });
+      await expect(sync.pull()).rejects.toThrow('crash before the flip');
+      // Hidden, never deleted: the ordinary row still holds its text for the move to finish from.
+      expect(w.readableInInternal('A')).toBe(false);
+      expect(w.internal.itemPresence(w.identity('A')).active).toBe(true);
+      fail = false;
       await sync.pull();
       expect(w.readableInInternal('A')).toBe(false);
-      // The claim's own record is what the protected lane has: newer than what IT held (nothing).
-      expect(w.textIn(w.secureLocal, 'A')).toContain('older protected');
+      // The newer copy moved up; the claim's older record did not replace it.
+      expect(w.textIn(w.secureLocal, 'A')).toContain('newer ordinary');
       w.capture('2026-10-24.jsonl', { id: 'A', text: 'markerA a later protected edit', at: '2026-10-24T09:00:00Z', trust: 'secure_local' });
       await sync.pull();
       expect(w.textIn(w.secureLocal, 'A')).toContain('later protected edit');
@@ -165,20 +174,50 @@ describe('the claim is applied fail-closed', () => {
     }
   });
 
-  test('a copy that cannot be given up stops the pull: the claim is read again, never passed', async () => {
+  test('a move that fails before it starts stops the pull and deletes nothing; the next pull moves it', async () => {
     const w = world();
     try {
       w.capture('2026-10-22.jsonl', { id: 'A', text: 'markerA ordinary', at: '2026-10-22T09:00:00Z', trust: 'internal' });
-      const sync = w.handler();
+      let fail = true;
+      const { moveTieredItem } = await import('../src/workers/connector-store/tier-move.ts');
+      const sync = w.handler({ moveClaimed: (options) => (fail ? Promise.reject(new Error('move refused')) : moveTieredItem(options)) });
       await sync.pull();
       w.capture('2026-10-23.jsonl', { id: 'A', text: 'markerA protected', at: '2026-10-23T09:00:00Z', trust: 'secure_local' });
-      const relinquish = w.internal.relinquishItems.bind(w.internal);
-      w.internal.relinquishItems = () => { throw new Error('store busy'); };
-      await expect(sync.pull()).rejects.toThrow('store busy');
-      w.internal.relinquishItems = relinquish;
+      await expect(sync.pull()).rejects.toThrow('move refused');
+      // Nothing was given up: the copy and its text are where they were, for the next pull.
+      expect(w.textIn(w.internal, 'A')).toContain('markerA ordinary');
+      fail = false;
       await sync.pull();
       expect(w.readableInInternal('A')).toBe(false);
       expect(w.textIn(w.secureLocal, 'A')).toContain('markerA protected');
+    } finally {
+      w.close();
+    }
+  });
+});
+
+describe('nothing is deleted before its replacement is stored', () => {
+  test('a claimed copy whose newer version waits in the spool is moved up first, so a failed write of that version loses nothing', async () => {
+    const w = world();
+    try {
+      w.capture('2026-10-22.jsonl', { id: 'A', text: 'markerA the stored ordinary text', at: '2026-10-22T09:00:00Z', trust: 'internal' });
+      const sync = w.handler();
+      await sync.pull();
+      // The protected claim brings a newer version, which the protected lane writes after the move.
+      w.capture('2026-10-23.jsonl', { id: 'A', text: 'markerA the newer protected text', at: '2026-10-23T09:00:00Z', trust: 'secure_local' });
+      const syncLegs = w.set.syncLegs.bind(w.set);
+      let fail = true;
+      w.set.syncLegs = (...args: Parameters<TieredStoreSet['syncLegs']>) => {
+        if (fail) { fail = false; return Promise.reject(new Error('the lanes could not write')); }
+        return syncLegs(...args);
+      };
+      await expect(sync.pull()).rejects.toThrow('the lanes could not write');
+      // The newer version did not land, and the stored text was not deleted for it: it is in the protected store.
+      expect(w.readableInInternal('A')).toBe(false);
+      expect(w.textIn(w.secureLocal, 'A')).toContain('stored ordinary');
+      await sync.pull();
+      expect(w.textIn(w.secureLocal, 'A')).toContain('newer protected');
+      expect(w.readableInInternal('A')).toBe(false);
     } finally {
       w.close();
     }
@@ -192,6 +231,25 @@ describe('captures are ordered by when they were captured', () => {
     expect(compareTelegramVersions(at('2026-10-20T10:00:00.000Z', 1, '2026-10-20.jsonl', 9), at('2026-10-20T11:00:00.000Z', 2, '2026-10-20.jsonl', 1))).toBe(-1);
     expect(compareTelegramVersions(at('2026-10-20T10:00:00.000Z', 3, 'b', 1), at('2026-10-20T10:00:00.000Z', 2, 'a', 9))).toBe(1);
     expect(compareTelegramVersions(base, at('2026-10-20T10:00:00.000Z', 0, 'a', 1))).toBe(-1);
+  });
+
+  test('a day file removed and written again is read from its start, never past the old file\'s line count', async () => {
+    const w = world();
+    try {
+      for (const id of ['P1', 'P2', 'P3', 'P4', 'P5']) w.capture('2026-10-20.jsonl', { id, text: `marker${id} first file`, at: '2026-10-20T09:00:00Z', trust: 'internal' });
+      const sync = w.handler();
+      await sync.pull();
+      expect(w.internal.lastCompletedSyncRun('telegram_capture_spool_internal')?.cursor).toBe('2026-10-20.jsonl:5');
+      // Removed, and written again under the same name with more lines than before.
+      unlinkSync(join(w.spoolDir, '2026-10-20.jsonl'));
+      const fresh = ['N1', 'N2', 'N3', 'N4', 'N5', 'N6', 'N7'];
+      for (const id of fresh) w.capture('2026-10-20.jsonl', { id, text: `marker${id} second file`, at: '2026-10-20T10:00:00Z', trust: 'internal' });
+      const receipt = await sync.pull();
+      expect(receipt.counts.spool_cursor_resets).toBeGreaterThan(0);
+      for (const id of fresh) expect(w.textIn(w.internal, id)).toContain('second file');
+    } finally {
+      w.close();
+    }
   });
 
   test('a day file removed and written again does not reverse two captures of one version', async () => {

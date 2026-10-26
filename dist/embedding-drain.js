@@ -33610,6 +33610,12 @@ var init_capture_spool_connector = __esm(() => {
   ]);
 });
 
+// src/workers/connector-store/spool-file-identity.ts
+var SPOOL_IDENTITY_HEAD_BYTES;
+var init_spool_file_identity = __esm(() => {
+  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+});
+
 // src/workers/telegram-messages/protection-claims.ts
 var init_protection_claims = __esm(() => {
   init_tier_move();
@@ -33620,6 +33626,7 @@ var init_protection_claims = __esm(() => {
 // src/workers/telegram-messages/store-sync.ts
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var init_store_sync = __esm(() => {
+  init_spool_file_identity();
   init_source_storage();
   init_tiered_store_set();
   init_record_builder();

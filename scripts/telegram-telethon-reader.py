@@ -859,28 +859,55 @@ def append_gateway_page(
 
 
 CAPTURE_SEQ_NAME = ".capture-seq"
+CAPTURE_SEQ_LOCK_NAME = ".capture-seq.lock"
+
+
+def capture_seq_test_crash(step: str) -> None:
+    """Test seam: end the process at a named step, as a kill there would."""
+    if os.environ.get("OLYMPUS_TELEGRAM_TEST_SEQ_CRASH") == step:
+        os._exit(9)
 
 
 def allocate_capture_seq(spool_dir: Path, count: int) -> int:
     """The first of `count` new capture sequence numbers, kept beside the spool.
 
     The number only grows, whatever happens to the day files, so the importer
-    can order two captures of one message at the same capture time. Taken
-    under the file's own lock and written durably before any record names it;
-    a crash after taking numbers only leaves a gap.
+    can order two captures of one message at the same capture time. It is
+    taken under a lock file of its own (held across processes) and replaced
+    whole: the new value is written to a temporary file, synced, renamed over
+    the counter, and the folder synced, so a kill at any step leaves either
+    the old value or the new one, never a torn or empty counter. Numbers are
+    taken before any record names them; a crash after taking them only leaves
+    a gap.
     """
     path = spool_dir / CAPTURE_SEQ_NAME
-    with open(path, "a+b") as counter:
-        os.chmod(path, 0o600)
-        fcntl.flock(counter.fileno(), fcntl.LOCK_EX)
-        counter.seek(0)
-        text = counter.read().decode("ascii", "replace").strip()
+    lock_path = spool_dir / CAPTURE_SEQ_LOCK_NAME
+    with open(lock_path, "a+b") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            text = path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            text = ""
         current = int(text) if text.isdigit() else 0
-        counter.seek(0)
-        counter.truncate(0)
-        counter.write(str(current + count).encode("ascii"))
-        counter.flush()
-        os.fsync(counter.fileno())
+        # What a killed writer left behind is never the counter: it goes.
+        for stale in spool_dir.glob(f".{CAPTURE_SEQ_NAME}.tmp.*"):
+            stale.unlink(missing_ok=True)
+        temporary = spool_dir / f".{CAPTURE_SEQ_NAME}.tmp.{os.getpid()}"
+        with open(temporary, "wb") as output:
+            os.chmod(temporary, 0o600)
+            output.write(str(current + count).encode("ascii"))
+            capture_seq_test_crash("after_temp_write")
+            output.flush()
+            os.fsync(output.fileno())
+        capture_seq_test_crash("after_temp_fsync")
+        os.replace(temporary, path)
+        capture_seq_test_crash("after_rename")
+        directory = os.open(spool_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     return current + 1
 
 

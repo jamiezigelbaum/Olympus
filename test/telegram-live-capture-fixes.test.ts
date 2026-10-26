@@ -469,7 +469,8 @@ describe('review fixes, round 2 (Astra, #545)', () => {
       // One lane holds it, the protected one, with its newest version.
       expect(contentOf(s.internal)).toBe('');
       expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
-      expect(receipt.counts.trust_claims_moved).toBe(0);
+      // The ordinary copy is moved (never deleted first), then the spool's version, newer here, replaces it.
+      expect(receipt.counts.trust_claims_moved).toBe(1);
       await sync.pull();
       expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
     } finally {

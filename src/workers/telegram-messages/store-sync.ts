@@ -2,7 +2,10 @@
 // Provider/session work remains in the thin Telethon helper; this module only
 // advances two trust-separated stores through the shared connector spine.
 
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
+import { sameSpoolFile, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import { openConnectorStore } from '../../core/source-storage.ts';
 import type {
   LocalConnectorStore,
@@ -57,6 +60,8 @@ export const TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = 'telegram_spool_secret_re
 // while older ones stayed, or the file is shorter than the cursor says), so
 // the lane reads the spool again from its start instead of stopping for good.
 export const TELEGRAM_SPOOL_CURSOR_RESET_WARNING = 'telegram_spool_cursor_reset';
+// The identity of the day file a lane cursor stands in, kept in the set's ledger.
+const TELEGRAM_SPOOL_FILE_META_PREFIX = 'telegram:spool_file:';
 // Where the full-spool Secrets pass stands, kept in the set's tier ledger.
 export const TELEGRAM_SPOOL_REDACTION_STATE_KEY = 'capture_spool_secret_redaction:telegram';
 export const DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500;
@@ -245,8 +250,14 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       // every later pull failing on it. Reading again is safe: the lanes'
       // intake never applies a record older than the version stored.
       let cursorResets = 0;
+      // A cursor is also bound to the identity its file had when the lane read it (spool-file-identity.ts):
+      // a day file removed and written again under the same name is another file, read from its start.
       const placed = (cursor: string | undefined): string | undefined => {
-        if (!cursor || telegramCaptureSpoolCursorState(spoolDir, cursor) === 'ok') return cursor;
+        if (!cursor) return cursor;
+        const file = cursor.slice(0, cursor.lastIndexOf(':'));
+        const recorded = tierSet.ledger.readMeta(`${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`);
+        const sameFile = recorded === undefined || !existsSync(join(spoolDir, file)) || sameSpoolFile(recorded, join(spoolDir, file));
+        if (sameFile && telegramCaptureSpoolCursorState(spoolDir, cursor) === 'ok') return cursor;
         cursorResets += 1;
         return undefined;
       };
@@ -365,6 +376,18 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       ]);
       const internal = run.byDomain.internal!.sync;
       const secureLocal = run.byDomain.secure_local!.sync;
+      // The files the lanes' cursors stand in now, with the identity each has: what the next pull binds them to.
+      for (const cursor of [lanesReadThrough(options.stores), sanitizeTelegramCaptureCursor(
+        options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor,
+      ), sanitizeTelegramCaptureCursor(
+        options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor,
+      )]) {
+        if (!cursor) continue;
+        const file = cursor.slice(0, cursor.lastIndexOf(':'));
+        const identity = spoolFileIdentity(join(spoolDir, file))?.identity;
+        const key = `${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`;
+        if (identity && tierSet.ledger.readMeta(key) !== identity) tierSet.ledger.writeMeta(key, identity);
+      }
 
       // Every record both lanes have now read has been judged. Any whose
       // item is Secrets loses its text from the spool here, and a whole-spool
