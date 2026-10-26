@@ -1,3 +1,4 @@
+import { resolvedRawPath } from '../src/core/source-placement.ts';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +15,6 @@ import {
   createXBookmarksConnectorStoreSyncHandler,
   createXBookmarksSourceConnector,
   defaultXBookmarksLiveSyncConfig,
-  defaultXBookmarksReconcileStateDbPath,
   type XBookmarkPost,
   type XBookmarksLiveSourceClient,
   type XBookmarksLiveSyncConfig,
@@ -267,7 +267,7 @@ describe('X daily reconciliation restart state', () => {
       });
       completed.close();
       store.close();
-      expect(defaultXBookmarksReconcileStateDbPath({}, usagePath)).toBe(statePath);
+      expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', {}, { usageDbPath: usagePath })).toBe(statePath);
     });
   });
 
@@ -949,7 +949,7 @@ async function withStateFiles(
 ): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-x-reconcile-resume-'));
   const usagePath = join(dir, 'usage.sqlite');
-  const statePath = defaultXBookmarksReconcileStateDbPath({}, usagePath);
+  const statePath = resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', {}, { usageDbPath: usagePath });
   const usage = new LocalXBookmarksApiUsageStore(usagePath);
   try {
     await run({ usage, usagePath, statePath });

@@ -142,7 +142,7 @@ export const TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = 'tiered_store_set_handoff';
  * The set ledger lives beside the set's secure_local store, where that store's
  * own co-located ledger would be (tier-ledger-path.ts). Every lifecycle path
  * that finds the secure store therefore finds the set ledger: export, delete
- * --source and delete --all, including a relocated (*_DB_PATH) store.
+ * --source and delete --all, including a store in an account folder.
  */
 export function tieredStoreSetLedgerPath(secureLocalStoreDbPath: string): string {
   return tierLedgerPathForStore(secureLocalStoreDbPath);

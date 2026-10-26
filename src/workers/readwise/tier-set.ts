@@ -23,12 +23,6 @@ import { READWISE_SOURCE_ID, READWISE_STORE_PLACEMENT } from './connector.ts';
 export const READWISE_SECURE_LIBRARY_CORPUS_ID = 'secure_local.readwise.library';
 export const READWISE_TIER_SET_ID = 'readwise.library';
 
-export function defaultReadwiseSecureConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(READWISE_SOURCE_ID, 'secure_local', env);
-}
-
 export function createReadwiseTierLane(options: {
   store: LocalConnectorStore;
   env?: Record<string, string | undefined>;
@@ -41,7 +35,7 @@ export function createReadwiseTierLane(options: {
   onStoreOpened?: (store: LocalConnectorStore) => void;
 }): ExistingStoreTierLane {
   const env = options.env ?? process.env;
-  const secureDbPath = defaultReadwiseSecureConnectorStoreDbPath(env);
+  const secureDbPath = resolvedStorePath(READWISE_SOURCE_ID, 'secure_local', env);
   return createExistingStoreTierLane({
     setId: READWISE_TIER_SET_ID,
     store: options.store,

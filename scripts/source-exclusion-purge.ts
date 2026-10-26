@@ -48,21 +48,17 @@
 // for", and an operator cannot sanity-check a prefix before deleting by it.
 // No item path, name, title, or text is read or printed.
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   createDropboxConnectorStore,
   createDropboxTierConnectorStore,
-  defaultDropboxConnectorStoreDbPath,
-  defaultDropboxInternalConnectorStoreDbPath,
-  defaultDropboxPublicConnectorStoreDbPath,
 } from '../src/workers/dropbox-files/index.ts';
 import {
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_SOURCE_ID,
-  defaultGoogleDriveConnectorStoreDbPath,
-  defaultGoogleDriveSecureConnectorStoreDbPath,
   googleDriveIngestionExclusionMatcher,
 } from '../src/workers/google-connectors/index.ts';
 import type {
@@ -213,26 +209,26 @@ function purgeTargets(env: Record<string, string | undefined>): Array<{
   return [
     {
       label: 'Dropbox files',
-      dbPath: defaultDropboxConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath('dropbox.files', 'secure_local', env),
       open: () => createDropboxConnectorStore(env),
     },
     // The lane's per-tier stores (created when a new file is first routed to
     // them) carry the same gate: an exclusion covers a file wherever it rests.
     {
       label: 'Dropbox files (internal)',
-      dbPath: defaultDropboxInternalConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath('dropbox.files', 'internal', env),
       open: () => createDropboxTierConnectorStore('internal', env),
     },
     {
       label: 'Dropbox files (public_safe)',
-      dbPath: defaultDropboxPublicConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath('dropbox.files', 'public_safe', env),
       open: () => createDropboxTierConnectorStore('public_safe', env),
     },
     {
       label: 'Drive docs (internal)',
-      dbPath: defaultGoogleDriveConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', env),
       open: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-        dbPath: defaultGoogleDriveConnectorStoreDbPath(env),
+        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', env),
         corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
         family: 'file',
         trustDomain: 'internal',
@@ -241,9 +237,9 @@ function purgeTargets(env: Record<string, string | undefined>): Array<{
     },
     {
       label: 'Drive docs (secure_local)',
-      dbPath: defaultGoogleDriveSecureConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'secure_local', env),
       open: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-        dbPath: defaultGoogleDriveSecureConnectorStoreDbPath(env),
+        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'secure_local', env),
         corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
         family: 'file',
         trustDomain: 'secure_local',

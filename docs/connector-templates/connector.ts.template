@@ -13,8 +13,10 @@
 
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
+import { sharedDataPath } from '../../core/olympus-layout.ts';
+import { resolvedStorePath } from '../../core/source-placement.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
 import type {
   SourceClassificationSignals,
   RawItem,
@@ -28,13 +30,14 @@ import {
   requireBearerTokenCredentialSession,
   type CredentialBroker,
 } from '../credential-broker/index.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
 // TODO: your provider API client (see src/workers/readwise/api.ts for the shape:
 // bounded timeouts, typed <Source>ApiError carrying `status`, no retries that
 // bypass the budget).
 import { <Source>ApiClient, type <Source>ApiClientOptions } from './api.ts';
 import { <SOURCE>_CORPUS_ID } from './corpus-adapter.ts';
 
+export const <SOURCE>_SOURCE_ID = '<source_id>'; // The source id (Leg 0), as FOLDER_ONLY_STORES names it.
 export const <SOURCE>_CONNECTOR_ID = '<source>_live';
 export const <SOURCE>_PROVIDER = '<provider>';
 export const <SOURCE>_DAILY_REQUEST_BUDGET_ENV =
@@ -166,13 +169,14 @@ export function <source>DailyRequestBudgetFromEnv(
   return parsed;
 }
 
+// A shared file: add '<source>-request-budget': '<source>-daily-request-budget.json'
+// to SHARED_DATA_FILES (src/core/olympus-layout.ts).
 export function default<Source>RequestBudgetStatePath(
   env: Record<string, string | undefined> = process.env,
 ): string {
   const configured = env[<SOURCE>_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', '<source>-daily-request-budget.json');
+  return sharedDataPath('<source>-request-budget', env);
 }
 
 function readRequestBudgetState(statePath: string): { utcDay: string; requests: number } | undefined {
@@ -351,24 +355,19 @@ export function create<Source>SourceConnector(
 
 // --- Store construction ------------------------------------------------------
 
+// The engine places the store in the account's folder (docs/CREATE_CONNECTOR.md,
+// Leg 3): declare the tier in FOLDER_ONLY_STORES (src/core/olympus-layout.ts) and
+// never build a path here. `dbPath` is for tests.
 export function create<Source>ConnectorStore(
-  dbPath = default<Source>ConnectorStoreDbPath(),
+  dbPath = resolvedStorePath(<SOURCE>_SOURCE_ID, 'internal'), // TODO: the lane's declared placement domain.
+  env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: <SOURCE>_SOURCE_ID }, {
     dbPath,
     corpusId: <SOURCE>_CORPUS_ID,
     family: '<family>',
     trustDomain: 'internal', // TODO: the lane's declared placement domain.
-  });
-}
-
-export function default<Source>ConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  const configured = env.OLYMPUS_SOURCE_INDEX_<SOURCE>_CONNECTOR_STORE_DB_PATH?.trim();
-  if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'openclaw', 'olympus', '<source>-connector-store.sqlite');
+  }, env);
 }
 
 // --- Normalization -----------------------------------------------------------

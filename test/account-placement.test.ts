@@ -16,6 +16,7 @@ import {
   placedAccount,
   resolvedRawPath,
   resolvedStorePath,
+  retiredPathSettings,
 } from '../src/core/source-placement.ts';
 import { readSourceRegistry, sourceRegistryPath, updateSourceRegistry } from '../src/core/source-registry.ts';
 import {
@@ -37,9 +38,7 @@ import { secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathFor
 import { archiveConnectorStoreDbPath } from '../src/workers/archive-import/store.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
-import { defaultXBookmarksReconcileStateDbPath, LocalXBookmarksReconcileStateStore } from '../src/workers/x-bookmarks/reconcile-state.ts';
-import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/connector.ts';
-import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/connector.ts';
+import { LocalXBookmarksReconcileStateStore } from '../src/workers/x-bookmarks/reconcile-state.ts';
 
 type Env = Record<string, string>;
 
@@ -121,7 +120,7 @@ describe('placement: a new account', () => {
   });
 
   test('the sidecars of a store count, even with the store itself gone', () => {
-    const store = defaultReadwiseConnectorStoreDbPath(env);
+    const store = resolvedStorePath('readwise.library', 'internal', env);
     expect(store).toBe(join(olympusDataRoot(env), 'sources', 'readwise.library', '1', 'stores', 'internal.sqlite'));
     const legacyStore = join(olympusDataRoot(env), 'readwise-connector-store.sqlite');
     for (const sidecar of [
@@ -153,10 +152,15 @@ describe('placement: a new account', () => {
     expect(decideAccountLayout('gmail.email', env).layout).toBe('legacy');
   });
 
-  test.each(FOLDER_LAYOUT_SOURCES.map((id) => [id]))('%s: an env override pins it legacy', (sourceId) => {
+  // Since step 6 only a messaging account's capture paths relocate its files; a retired per-store
+  // override pins nothing (the worker refuses to start while one is set, core/source-placement.ts).
+  test.each(FOLDER_LAYOUT_SOURCES.map((id) => [id]))('%s: a capture path pins it legacy; a retired store override does not', (sourceId) => {
     const names = legacyOverrideEnvNames(sourceId);
-    if (sourceId === 'archive.imports') expect(names).toEqual(['OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH']);
-    else expect(names.length).toBeGreaterThan(0);
+    if (sourceId === 'telegram.messages' || sourceId === 'whatsapp.personal.messages') expect(names.length).toBeGreaterThan(0);
+    else expect(names).toEqual([]);
+    for (const retired of ['OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH', 'OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH', 'OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH']) {
+      expect(decideAccountLayout(sourceId, { ...env, [retired]: join(dir, 'elsewhere', 'file') }).layout, retired).toBe('folder');
+    }
     for (const name of names) {
       const pinned = { ...env, [name]: join(dir, 'elsewhere', 'file') };
       expect(decideAccountLayout(sourceId, pinned)).toEqual({ layout: 'legacy', why: `${name} pins its files` });
@@ -183,20 +187,21 @@ describe('placement: a new account', () => {
     expect(decideAccountLayout('telegram.messages', { ...env, OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER: 'true' }).layout).toBe('folder');
   });
 
-  test('a connector-store mount that names the account\'s corpus pins it legacy; another source\'s does not', () => {
+  // Since step 6 a mount of a source with a folder layout names no path (the worker ignores it), so it pins
+  // nothing. A mount elsewhere, or a list that cannot be read, stops the worker before anything moves instead.
+  test('a connector-store mount pins nothing; one the worker would refuse is a retired setting', () => {
     const mount = (corpusId: string, trustDomain: string) => JSON.stringify([{ corpusId, trustDomain, dbPath: join(dir, 'mount.sqlite') }]);
     const mounted = { ...env, [MOUNTS]: mount('internal.readwise.library', 'internal') };
-    expect(decideAccountLayout('readwise.library', mounted).layout).toBe('legacy');
-    expect(decideAccountLayout('readwise.library', mounted).why).toContain(MOUNTS);
-    expect(decideAccountLayout('x.bookmarks', mounted).layout).toBe('folder');
+    expect(decideAccountLayout('readwise.library', mounted).layout).toBe('folder');
+    expect(retiredPathSettings(mounted)).toEqual([expect.stringContaining(`${MOUNTS} internal.readwise.library dbPath=${join(dir, 'mount.sqlite')}`)]);
     // An archive corpus of any family belongs to archive.imports.
     const archive = { ...env, [MOUNTS]: mount('secure_local.archive.chat.example', 'secure_local') };
     expect(decideAccountLayout('x.bookmarks', archive).layout).toBe('folder');
-    // A list nobody can read moves nothing.
     for (const text of ['{ not json', '{"corpusId":"x"}']) {
       for (const sourceId of FOLDER_LAYOUT_SOURCES) {
-        expect(decideAccountLayout(sourceId, { ...env, [MOUNTS]: text }).layout).toBe('legacy');
+        expect(decideAccountLayout(sourceId, { ...env, [MOUNTS]: text }).layout).toBe('folder');
       }
+      expect(retiredPathSettings({ ...env, [MOUNTS]: text })).toEqual([`${MOUNTS} (cannot be read)`]);
     }
   });
 
@@ -233,7 +238,7 @@ describe('placement: a new account', () => {
       const padded = { HOME: dir, XDG_DATA_HOME: `  ${join(dir, 'data')}  ` };
       expect(placedAccount('x.bookmarks', padded).layout).toBe('legacy');
       expect(decideAccountLayout('x.bookmarks', padded).layout).toBe('legacy');
-      expect(() => defaultXBookmarksConnectorStoreDbPath(padded)).toThrow('XDG_DATA_HOME must be an absolute path');
+      expect(() => resolvedStorePath('x.bookmarks', 'internal', padded)).toThrow('XDG_DATA_HOME must be an absolute path');
       expect(() => resolvedRawPath('local.files', 'watch', padded)).toThrow('XDG_DATA_HOME must be an absolute path');
       expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', padded, { usageDbPath: ':memory:' })).toBe(':memory:');
       expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', padded, { usageDbPath: '/custom/usage.sqlite' })).toBe('/custom/usage.sqlite.reconcile');
@@ -253,10 +258,10 @@ describe('placement: a new account', () => {
     mkdirSync(dirname(sourceRegistryPath(env)), { recursive: true });
     writeFileSync(sourceRegistryPath(env), 'not json');
     expect(placedAccount('readwise.library', env).layout).toBe('legacy');
-    expect(defaultReadwiseConnectorStoreDbPath(env)).toBe(join(olympusDataRoot(env), 'readwise-connector-store.sqlite'));
+    expect(resolvedStorePath('readwise.library', 'internal', env)).toBe(join(olympusDataRoot(env), 'readwise-connector-store.sqlite'));
     mkdirSync(accountFolder({ source_id: 'readwise.library', slot: '1' }, env), { recursive: true });
     expect(placedAccount('readwise.library', env).layout).toBe('folder');
-    expect(defaultReadwiseConnectorStoreDbPath(env)).toBe(join(accountFolder({ source_id: 'readwise.library', slot: '1' }, env), 'stores', 'internal.sqlite'));
+    expect(resolvedStorePath('readwise.library', 'internal', env)).toBe(join(accountFolder({ source_id: 'readwise.library', slot: '1' }, env), 'stores', 'internal.sqlite'));
     // Another source with no folder stays on its legacy paths.
     expect(placedAccount('x.bookmarks', env).layout).toBe('legacy');
   });
@@ -278,14 +283,14 @@ describe('placement: the registry\'s entry wins once there is one', () => {
     const pinned = { ...env, OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH: join(dir, 'elsewhere.sqlite') };
     // A folder account never honors a per-store override.
     expect(resolvedStorePath('readwise.library', 'internal', pinned)).toBe(join(accountFolder({ source_id: 'readwise.library', slot: '1' }, pinned), 'stores', 'internal.sqlite'));
-    expect(defaultReadwiseConnectorStoreDbPath(pinned)).toBe(resolvedStorePath('readwise.library', 'internal', pinned));
+    expect(resolvedStorePath('readwise.library', 'internal', pinned)).toBe(resolvedStorePath('readwise.library', 'internal', pinned));
   });
 
   test('a legacy entry stays legacy with nothing at the legacy paths', () => {
     updateSourceRegistry(env, (registry) => { registry.accounts.push(entry('x.bookmarks', 'legacy')); });
     expect(decideAccountLayout('x.bookmarks', env).layout).toBe('folder');
     expect(placedAccount('x.bookmarks', env).layout).toBe('legacy');
-    expect(defaultXBookmarksConnectorStoreDbPath(env)).toBe(join(olympusDataRoot(env), 'x-bookmarks-connector-store.sqlite'));
+    expect(resolvedStorePath('x.bookmarks', 'internal', env)).toBe(join(olympusDataRoot(env), 'x-bookmarks-connector-store.sqlite'));
   });
 
   test('the X reconcile state follows the layout; the usage ledger stays shared', () => {
@@ -301,7 +306,7 @@ describe('the schema follows the layouts, and an older build fails closed', () =
   test('the first folder account makes the registry schema 2; a build that only knows schema 1 refuses to read it', () => {
     enableSourceRegistryAdoption();
     const readwise = openConnectorStore({ sourceId: 'readwise.library' }, {
-      dbPath: defaultReadwiseConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath('readwise.library', 'internal', env),
       corpusId: 'internal.readwise.library',
       family: 'readwise',
       trustDomain: 'internal',
@@ -338,7 +343,7 @@ describe('adoption records the decision before the first file exists', () => {
 
   test('a new account is recorded as a folder and its store is created inside it', () => {
     enableSourceRegistryAdoption();
-    const dbPath = defaultXBookmarksConnectorStoreDbPath(env);
+    const dbPath = resolvedStorePath('x.bookmarks', 'internal', env);
     expect(existsSync(dbPath)).toBe(false);
     open('x.bookmarks', dbPath, 'internal.x.bookmarks').close();
     const entry = readSourceRegistry(env).accounts.find((account) => account.source_id === 'x.bookmarks');
@@ -354,7 +359,7 @@ describe('adoption records the decision before the first file exists', () => {
     open('x.bookmarks', legacy, 'internal.x.bookmarks').close();
     expect(existsSync(sourceRegistryPath(env))).toBe(false); // adoption is off: nothing recorded
     enableSourceRegistryAdoption();
-    const dbPath = defaultXBookmarksConnectorStoreDbPath(env);
+    const dbPath = resolvedStorePath('x.bookmarks', 'internal', env);
     expect(dbPath).toBe(legacy);
     open('x.bookmarks', dbPath, 'internal.x.bookmarks').close();
     expect(readSourceRegistry(env).accounts.find((account) => account.source_id === 'x.bookmarks')?.layout).toBe('legacy');
@@ -381,9 +386,9 @@ describe('adoption records the decision before the first file exists', () => {
 
   test('a second tier opened later joins the folder the first one made', () => {
     enableSourceRegistryAdoption();
-    open('readwise.library', defaultReadwiseConnectorStoreDbPath(env), 'internal.readwise.library').close();
+    open('readwise.library', resolvedStorePath('readwise.library', 'internal', env), 'internal.readwise.library').close();
     const secure = resolvedStorePath('readwise.library', 'secure_local', env);
-    expect(dirname(secure)).toBe(dirname(defaultReadwiseConnectorStoreDbPath(env)));
+    expect(dirname(secure)).toBe(dirname(resolvedStorePath('readwise.library', 'internal', env)));
     open('readwise.library', secure, 'secure_local.readwise.library', 'secure_local').close();
     const entry = readSourceRegistry(env).accounts[0]!;
     expect(entry.layout).toBe('folder');
@@ -473,7 +478,7 @@ describe('placement is recorded before the first file of an account, whichever f
   test('the X reconcile state is placed before its database file exists', () => {
     schemaOneInstall();
     enableSourceRegistryAdoption();
-    const dbPath = defaultXBookmarksReconcileStateDbPath(env);
+    const dbPath = resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env);
     expect(dbPath).toBe(join(accountFolder({ source_id: 'x.bookmarks', slot: '1' }, env), 'raw', 'x-reconcile.sqlite'));
     expect(existsSync(dbPath)).toBe(false);
 
@@ -486,7 +491,7 @@ describe('placement is recorded before the first file of an account, whichever f
 
   test('inspecting X reconcile recovery with no state creates nothing, and recovering says there is nothing staged', () => {
     schemaOneInstall();
-    const dbPath = defaultXBookmarksReconcileStateDbPath(env);
+    const dbPath = resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env);
     expect(existsSync(dbPath)).toBe(false);
 
     expect(runXReconcileRecovery({ account: 'personal', stateDbPath: dbPath, execute: false })).toMatchObject({
@@ -508,7 +513,7 @@ describe('placement is recorded before the first file of an account, whichever f
   test('a tier ledger opened before any store places the account, and the store then joins that entry', () => {
     schemaOneInstall();
     enableSourceRegistryAdoption();
-    const store = defaultReadwiseConnectorStoreDbPath(env);
+    const store = resolvedStorePath('readwise.library', 'internal', env);
     const ledger = openTierLedger({ sourceId: 'readwise.library' }, { dbPath: tierLedgerPathForStore(store) }, env);
     ledger.close();
     expect(entryFor('readwise.library')).toMatchObject({ layout: 'folder', corpus_ids: [] });
@@ -523,7 +528,7 @@ describe('placement is recorded before the first file of an account, whichever f
   test('a sniffer or secret-locations index opened first places the account; a read-only open places nothing', () => {
     schemaOneInstall();
     const readwise = { sourceId: 'readwise.library' };
-    const store = defaultReadwiseConnectorStoreDbPath(env);
+    const store = resolvedStorePath('readwise.library', 'internal', env);
     const snifferPath = tierSnifferPathForStore(store);
     // The file exists already (adoption is off for this open), so a read-only open can follow.
     openTierSniffer(readwise, { dbPath: snifferPath }, env).close();
@@ -575,7 +580,7 @@ describe('an install that already has data keeps it', () => {
     const before = readFileSync(sourceRegistryPath(env), 'utf8');
     enableSourceRegistryAdoption();
     // The legacy files are where the resolvers say, and X (no files, no entry) is the only new folder.
-    expect(defaultReadwiseConnectorStoreDbPath(env)).toBe(readwise);
+    expect(resolvedStorePath('readwise.library', 'internal', env)).toBe(readwise);
     expect(resolvedStorePath('dropbox.files', 'secure_local', env)).toBe(dropbox);
     openConnectorStore({ sourceId: 'readwise.library' }, { dbPath: readwise, corpusId: 'internal.readwise.library', family: 'readwise', trustDomain: 'internal' }, env).close();
     const afterReadwise = JSON.parse(readFileSync(sourceRegistryPath(env), 'utf8'));
@@ -591,41 +596,34 @@ describe('every process reaches the same answer', () => {
     const here = join(import.meta.dir, '..', 'src');
     return `
       import { archiveImportFamilies } from '${here}/core/archive-formats.ts';
+      import { resolvedRawPath, resolvedStorePath } from '${here}/core/source-placement.ts';
       import { telegramPairingSessionPaths, telegramSessionBasePath, whatsappPairingSessionPaths, whatsappStateDir } from '${here}/core/pairing-session-paths.ts';
-      import { defaultProtectedTelegramConnectorStoreDbPath, defaultInternalTelegramConnectorStoreDbPath } from '${here}/workers/telegram-messages/corpus-adapter.ts';
       import { defaultTelegramCaptureSpoolDir } from '${here}/workers/telegram-messages/capture-spool-connector.ts';
-      import { defaultWhatsAppConnectorStoreDbPath, defaultWhatsAppInternalConnectorStoreDbPath, defaultWhatsAppMediaDir, defaultWhatsAppSpoolDir, defaultWhatsAppStateDir } from '${here}/workers/whatsapp/store-sync.ts';
+      import { defaultWhatsAppMediaDir, defaultWhatsAppSpoolDir, defaultWhatsAppStateDir } from '${here}/workers/whatsapp/store-sync.ts';
       import { archiveConnectorStoreDbPath } from '${here}/workers/archive-import/store.ts';
       import { defaultArchiveImportStatePath } from '${here}/workers/archive-import/state.ts';
       import { archiveImportRequestsPath } from '${here}/workers/archive-import/requests.ts';
       import { defaultArchiveMediaBindingsPath } from '${here}/workers/archive-import/media-bindings.ts';
-      import { defaultGmailConnectorStoreDbPath, defaultGmailSecureConnectorStoreDbPath } from '${here}/workers/google-connectors/gmail.ts';
-      import { defaultGoogleDriveConnectorStoreDbPath } from '${here}/workers/google-connectors/drive.ts';
       import { dropboxTierConnectorStoreDbPaths } from '${here}/workers/dropbox-files/connector-store.ts';
       import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from '${here}/workers/local-files/store.ts';
-      import { defaultReadwiseConnectorStoreDbPath } from '${here}/workers/readwise/connector.ts';
-      import { defaultReadwiseSecureConnectorStoreDbPath } from '${here}/workers/readwise/tier-set.ts';
-      import { defaultXBookmarksConnectorStoreDbPath } from '${here}/workers/x-bookmarks/connector.ts';
-      import { defaultXBookmarksSecureConnectorStoreDbPath } from '${here}/workers/x-bookmarks/tier-set.ts';
       import { defaultXBookmarksApiUsageDbPath } from '${here}/workers/x-bookmarks/live-control.ts';
-      import { defaultXBookmarksReconcileStateDbPath } from '${here}/workers/x-bookmarks/reconcile-state.ts';
       const env = process.env;
       console.log(JSON.stringify([
-        defaultGmailConnectorStoreDbPath(env), defaultGmailSecureConnectorStoreDbPath(env),
-        defaultGoogleDriveConnectorStoreDbPath(env),
+        resolvedStorePath('gmail.email', 'internal', env), resolvedStorePath('gmail.email', 'secure_local', env),
+        resolvedStorePath('google_drive.docs', 'internal', env),
         dropboxTierConnectorStoreDbPaths(env),
         localFilesTierConnectorStoreDbPaths(env), localFilesWatchDir(env),
-        defaultReadwiseConnectorStoreDbPath(env), defaultReadwiseSecureConnectorStoreDbPath(env),
-        defaultXBookmarksConnectorStoreDbPath(env), defaultXBookmarksSecureConnectorStoreDbPath(env),
-        defaultXBookmarksApiUsageDbPath(env), defaultXBookmarksReconcileStateDbPath(env),
+        resolvedStorePath('readwise.library', 'internal', env), resolvedStorePath('readwise.library', 'secure_local', env),
+        resolvedStorePath('x.bookmarks', 'internal', env), resolvedStorePath('x.bookmarks', 'secure_local', env),
+        defaultXBookmarksApiUsageDbPath(env), resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env),
         archiveImportFamilies().map((family) => ['secure_local', 'internal', 'public_safe'].map((tier) => archiveConnectorStoreDbPath(tier, family, env))),
         defaultArchiveImportStatePath(env), archiveImportRequestsPath(defaultArchiveImportStatePath(env)),
         defaultArchiveMediaBindingsPath(env),
         // What the CLI pairs and the scripts read, and what the worker and the capture children are given.
-        defaultInternalTelegramConnectorStoreDbPath(env), defaultProtectedTelegramConnectorStoreDbPath(env),
+        resolvedStorePath('telegram.messages', 'internal', env), resolvedStorePath('telegram.messages', 'secure_local', env),
         defaultTelegramCaptureSpoolDir(env), telegramSessionBasePath({ env }), telegramPairingSessionPaths({ env }),
         defaultWhatsAppStateDir(env), defaultWhatsAppSpoolDir(env), defaultWhatsAppMediaDir(env),
-        defaultWhatsAppConnectorStoreDbPath(env), defaultWhatsAppInternalConnectorStoreDbPath(env),
+        resolvedStorePath('whatsapp.personal.messages', 'secure_local', env), resolvedStorePath('whatsapp.personal.messages', 'internal', env),
         whatsappStateDir({ env }), whatsappPairingSessionPaths({ env }),
       ]));
     `;
@@ -713,7 +711,7 @@ describe('every process reaches the same answer', () => {
     // A source with no legacy file still gets its folder.
     expect(JSON.stringify(before)).toContain('/sources/readwise.library/1/stores/internal.sqlite');
     enableSourceRegistryAdoption();
-    openConnectorStore({ sourceId: 'x.bookmarks' }, { dbPath: defaultXBookmarksConnectorStoreDbPath(env), corpusId: 'internal.x.bookmarks', family: 'x', trustDomain: 'internal' }, env).close();
+    openConnectorStore({ sourceId: 'x.bookmarks' }, { dbPath: resolvedStorePath('x.bookmarks', 'internal', env), corpusId: 'internal.x.bookmarks', family: 'x', trustDomain: 'internal' }, env).close();
     expect(inThisProcess()).toEqual(before);
     expect(await inAnotherProcess()).toEqual(before);
   }, 60_000);
