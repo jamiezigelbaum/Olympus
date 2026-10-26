@@ -32007,7 +32007,7 @@ class GoogleGmailSourceConnector {
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
     let pageToken = staleLeg ? undefined : resume.pageToken;
     let itemRoom = remaining;
-    let pageSkip = staleLeg ? 0 : resume.skip ?? 0;
+    let pageAfter = staleLeg ? undefined : resume.after;
     if (resume.childOf && !staleLeg) {
       const rest = await this.attachmentsFrom(client, resume.childOf, itemRoom);
       this.providerRequests += 1;
@@ -32019,7 +32019,7 @@ class GoogleGmailSourceConnector {
         ...pageToken ? { pageToken } : {},
         ...metadataLeg ? { phase: "metadata" } : {},
         ...startedMs !== undefined ? { startedMs } : {},
-        ...pageSkip > 0 ? { skip: pageSkip } : {}
+        ...pageAfter ? { after: pageAfter } : {}
       };
       if (rest.next !== undefined) {
         const nextCursor2 = encodeGmailCursor({ ...cursorFields, childOf: { id: resume.childOf.id, from: rest.next } });
@@ -32044,8 +32044,10 @@ class GoogleGmailSourceConnector {
         ...query ? { query } : {}
       });
       const listed = page.messages.filter((message2) => message2.id);
-      const baseSkip = pageSkip;
-      pageSkip = 0;
+      const resumedAt = pageAfter ? listed.findIndex((message2) => message2.id === pageAfter) : -1;
+      const baseSkip = resumedAt + 1;
+      const examinedIds = resumedAt >= 0 ? [pageAfter] : [];
+      pageAfter = undefined;
       const items = [];
       let messagesExamined = 0;
       let messagesFetched = 0;
@@ -32054,6 +32056,7 @@ class GoogleGmailSourceConnector {
         if (messagesFetched >= remaining || items.length >= itemRoom)
           break;
         messagesExamined += 1;
+        examinedIds.push(message2.id);
         const stored = this.scope?.storedItem?.(message2.id);
         if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
           continue;
@@ -32116,6 +32119,7 @@ class GoogleGmailSourceConnector {
         }
         if (items.length + 1 + children.length > itemRoom && items.length > 0) {
           messagesExamined -= 1;
+          examinedIds.pop();
           break;
         }
         const unit = [item, ...children].slice(0, Math.max(1, itemRoom - items.length));
@@ -32138,7 +32142,7 @@ class GoogleGmailSourceConnector {
           ...metadataLeg ? { phase: "metadata" } : {},
           ...startedMs !== undefined ? { startedMs } : {},
           childOf,
-          skip: baseSkip + messagesExamined
+          after: childOf.id
         });
         yield { items, ...nextCursor2 ? { nextCursor: nextCursor2 } : {}, done: false, truncated: true };
         return;
@@ -32167,7 +32171,7 @@ class GoogleGmailSourceConnector {
         ...pageToken ? { pageToken } : {},
         ...metadataLeg ? { phase: "metadata" } : {},
         ...startedMs !== undefined ? { startedMs } : {},
-        ...pageTruncated && handled > 0 ? { skip: handled } : {}
+        ...pageTruncated && examinedIds.length > 0 ? { after: examinedIds.at(-1) } : {}
       });
       yield {
         items,
@@ -32345,7 +32349,7 @@ function promotedWatermark(input) {
   return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
 }
 function encodeGmailCursor(cursor) {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf && !cursor.skip) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf && !cursor.after) {
     return;
   }
   return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
@@ -32367,7 +32371,7 @@ function decodeGmailCursor(value) {
     if (parsed.phase !== undefined && parsed.phase !== "metadata")
       throw new Error("invalid");
     const childOf = decodeChildOf(parsed.childOf);
-    if (parsed.skip !== undefined && (typeof parsed.skip !== "number" || !Number.isSafeInteger(parsed.skip) || parsed.skip < 0 || parsed.skip > 1000)) {
+    if (parsed.after !== undefined && (typeof parsed.after !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(parsed.after))) {
       throw new Error("invalid");
     }
     return {
@@ -32377,7 +32381,7 @@ function decodeGmailCursor(value) {
       ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
       ...startedMs !== undefined ? { startedMs } : {},
       ...childOf ? { childOf } : {},
-      ...typeof parsed.skip === "number" && parsed.skip > 0 ? { skip: parsed.skip } : {}
+      ...typeof parsed.after === "string" ? { after: parsed.after } : {}
     };
   } catch {
     throw new TypeError("Gmail connector cursor is invalid.");

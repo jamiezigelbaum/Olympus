@@ -54348,7 +54348,7 @@ class GoogleGmailSourceConnector {
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
     let pageToken = staleLeg ? undefined : resume.pageToken;
     let itemRoom = remaining;
-    let pageSkip = staleLeg ? 0 : resume.skip ?? 0;
+    let pageAfter = staleLeg ? undefined : resume.after;
     if (resume.childOf && !staleLeg) {
       const rest = await this.attachmentsFrom(client, resume.childOf, itemRoom);
       this.providerRequests += 1;
@@ -54360,7 +54360,7 @@ class GoogleGmailSourceConnector {
         ...pageToken ? { pageToken } : {},
         ...metadataLeg ? { phase: "metadata" } : {},
         ...startedMs !== undefined ? { startedMs } : {},
-        ...pageSkip > 0 ? { skip: pageSkip } : {}
+        ...pageAfter ? { after: pageAfter } : {}
       };
       if (rest.next !== undefined) {
         const nextCursor2 = encodeGmailCursor({ ...cursorFields, childOf: { id: resume.childOf.id, from: rest.next } });
@@ -54385,8 +54385,10 @@ class GoogleGmailSourceConnector {
         ...query ? { query } : {}
       });
       const listed = page2.messages.filter((message2) => message2.id);
-      const baseSkip = pageSkip;
-      pageSkip = 0;
+      const resumedAt = pageAfter ? listed.findIndex((message2) => message2.id === pageAfter) : -1;
+      const baseSkip = resumedAt + 1;
+      const examinedIds = resumedAt >= 0 ? [pageAfter] : [];
+      pageAfter = undefined;
       const items = [];
       let messagesExamined = 0;
       let messagesFetched = 0;
@@ -54395,6 +54397,7 @@ class GoogleGmailSourceConnector {
         if (messagesFetched >= remaining || items.length >= itemRoom)
           break;
         messagesExamined += 1;
+        examinedIds.push(message2.id);
         const stored = this.scope?.storedItem?.(message2.id);
         if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
           continue;
@@ -54457,6 +54460,7 @@ class GoogleGmailSourceConnector {
         }
         if (items.length + 1 + children.length > itemRoom && items.length > 0) {
           messagesExamined -= 1;
+          examinedIds.pop();
           break;
         }
         const unit = [item, ...children].slice(0, Math.max(1, itemRoom - items.length));
@@ -54479,7 +54483,7 @@ class GoogleGmailSourceConnector {
           ...metadataLeg ? { phase: "metadata" } : {},
           ...startedMs !== undefined ? { startedMs } : {},
           childOf,
-          skip: baseSkip + messagesExamined
+          after: childOf.id
         });
         yield { items, ...nextCursor2 ? { nextCursor: nextCursor2 } : {}, done: false, truncated: true };
         return;
@@ -54508,7 +54512,7 @@ class GoogleGmailSourceConnector {
         ...pageToken ? { pageToken } : {},
         ...metadataLeg ? { phase: "metadata" } : {},
         ...startedMs !== undefined ? { startedMs } : {},
-        ...pageTruncated && handled > 0 ? { skip: handled } : {}
+        ...pageTruncated && examinedIds.length > 0 ? { after: examinedIds.at(-1) } : {}
       });
       yield {
         items,
@@ -54771,7 +54775,7 @@ function promotedWatermark(input) {
   return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
 }
 function encodeGmailCursor(cursor) {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf && !cursor.skip) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf && !cursor.after) {
     return;
   }
   return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
@@ -54793,7 +54797,7 @@ function decodeGmailCursor(value) {
     if (parsed.phase !== undefined && parsed.phase !== "metadata")
       throw new Error("invalid");
     const childOf = decodeChildOf(parsed.childOf);
-    if (parsed.skip !== undefined && (typeof parsed.skip !== "number" || !Number.isSafeInteger(parsed.skip) || parsed.skip < 0 || parsed.skip > 1000)) {
+    if (parsed.after !== undefined && (typeof parsed.after !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(parsed.after))) {
       throw new Error("invalid");
     }
     return {
@@ -54803,7 +54807,7 @@ function decodeGmailCursor(value) {
       ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
       ...startedMs !== undefined ? { startedMs } : {},
       ...childOf ? { childOf } : {},
-      ...typeof parsed.skip === "number" && parsed.skip > 0 ? { skip: parsed.skip } : {}
+      ...typeof parsed.after === "string" ? { after: parsed.after } : {}
     };
   } catch {
     throw new TypeError("Gmail connector cursor is invalid.");
@@ -168717,7 +168721,7 @@ function mboxGmailInput(archive, options = {}) {
           throw new Error("This export is not one Gmail account's: nothing of it is read into Gmail.");
         const labels = options.labels ? await options.labels() : { kind: "none" };
         if (labels.kind === "unavailable") {
-          archive.waitForProvider?.("gmail_labels_unavailable");
+          archive.waitForProvider?.(labels.reason);
           return;
         }
         const labelsByName = labels.kind === "map" ? labels.byName : undefined;
@@ -168793,10 +168797,10 @@ function mboxGmailInput(archive, options = {}) {
                       from: parsed.from,
                       ...parsed.subject ? { subject: parsed.subject } : {}
                     });
-                    if (matched === "later") {
+                    if (matched !== "none" && "later" in matched) {
                       if (pending)
                         yield out(before, false);
-                      archive.waitForProvider?.("gmail_requests_spent");
+                      archive.waitForProvider?.(matched.later);
                       return;
                     }
                     if (matched !== "none")
@@ -168899,16 +168903,17 @@ function gmailExportEvidence(archive) {
 }
 async function gmailLabelLookup(lane) {
   const rules = lane.set.classification()?.rules ?? [];
-  const needed = rules.some((rule) => rule.match.kind === "label");
-  let byName;
+  if (!rules.some((rule) => rule.match.kind === "label"))
+    return { kind: "none" };
+  let found;
   try {
-    byName = await lane.labelIds?.();
+    found = await lane.labelIds?.();
   } catch {
-    byName = undefined;
+    found = undefined;
   }
-  if (byName)
-    return { kind: "map", byName };
-  return needed ? { kind: "unavailable" } : { kind: "none" };
+  if (found instanceof Map)
+    return { kind: "map", byName: found };
+  return { kind: "unavailable", reason: found && "unavailable" in found ? found.unavailable : "gmail_labels_unavailable" };
 }
 function gmailArchiveTarget(options) {
   let current2;
@@ -170579,6 +170584,39 @@ var init_gmail_scope_browser = __esm(() => {
   SKIPPABLE_SYSTEM_LABELS = new Set(["SENT", "CHAT"]);
 });
 
+// src/workers/google-connectors/gmail-import-allowance.ts
+function gmailImportAllowance(options) {
+  const now = options.now ?? (() => new Date);
+  let day = "";
+  let used = 0;
+  const check = (requests) => {
+    const today = now().toISOString().slice(0, 10);
+    if (today !== day) {
+      day = today;
+      used = 0;
+    }
+    const usage = options.usage();
+    if (!usage)
+      return true;
+    if (usage.dailyRequestBudget < GMAIL_IMPORT_MESSAGE_COST * 2)
+      return "gmail_budget_too_small";
+    if (usage.requests + requests > usage.dailyRequestBudget)
+      return "gmail_requests_spent";
+    const allowance = Math.max(GMAIL_IMPORT_MESSAGE_COST, Math.floor(usage.dailyRequestBudget * GMAIL_IMPORT_SHARE));
+    return used + requests > allowance ? "gmail_import_allowance_spent" : true;
+  };
+  return {
+    check,
+    take(requests) {
+      const verdict = check(requests);
+      if (verdict === true)
+        used += requests;
+      return verdict;
+    }
+  };
+}
+var GMAIL_IMPORT_MESSAGE_COST = 7, GMAIL_IMPORT_SHARE = 0.5;
+
 // src/workers/google-connectors/gmail-header-match.ts
 function sameDate(a, b) {
   if (!a || !b)
@@ -170605,30 +170643,41 @@ function gmailHeaderMatch(client, options = {}) {
     const api2 = await client();
     if (!api2)
       return "none";
-    const usage = options.usage?.();
-    if (usage && usage.requests + 2 > Math.floor(usage.dailyRequestBudget * IMPORT_SHARE))
-      return "later";
+    const room = options.allowance?.check(GMAIL_IMPORT_MESSAGE_COST) ?? true;
+    if (room !== true)
+      return { later: room };
+    const take = () => {
+      const verdict = options.allowance?.take(1) ?? true;
+      if (verdict !== true)
+        throw new AllowanceRefused(verdict);
+    };
     try {
-      return await matchWith(api2, wanted, headers);
+      return await matchWith(api2, wanted, headers, take);
     } catch (error2) {
+      if (error2 instanceof AllowanceRefused)
+        return { later: error2.reason };
       if (error2 instanceof GoogleRequestBudgetError)
-        return "later";
+        return { later: "gmail_requests_spent" };
       throw error2;
     }
   };
-  async function matchWith(api2, wanted, headers) {
+  async function matchWith(api2, wanted, headers, take) {
     if (options.sameAccount && checked === undefined) {
+      if (api2.getProfile)
+        take();
       const address = api2.getProfile ? (await api2.getProfile()).emailAddress : "";
       checked = address !== "" && options.sameAccount(address);
     }
     if (checked === false)
       return "none";
+    take();
     const listed = await api2.listMessages({ maxResults: MAX_CANDIDATES + 1, query: `rfc822msgid:${wanted}` });
     const candidates2 = listed.messages.map((message2) => message2.id).filter(Boolean);
     if (candidates2.length === 0 || candidates2.length > MAX_CANDIDATES)
       return "none";
     const agreeing = [];
     for (const id of candidates2) {
+      take();
       const message2 = await api2.getMessage(id, { format: "metadata", metadataHeaders: ["Message-ID", "Date", "From", "Subject"] });
       const found = new Map;
       for (const header of message2.payload?.headers ?? []) {
@@ -170643,11 +170692,18 @@ function gmailHeaderMatch(client, options = {}) {
     return agreeing.length === 1 ? { id: agreeing[0] } : "none";
   }
 }
-var MAX_CANDIDATES = 5, IMPORT_SHARE = 0.5, SEARCHABLE, same = (a, b) => readable(a) === readable(b);
+var AllowanceRefused, MAX_CANDIDATES = 5, SEARCHABLE, same = (a, b) => readable(a) === readable(b);
 var init_gmail_header_match = __esm(() => {
   init_postal_mime();
   init_gmail();
   init_request_budget();
+  AllowanceRefused = class AllowanceRefused extends Error {
+    reason;
+    constructor(reason) {
+      super(reason);
+      this.reason = reason;
+    }
+  };
   SEARCHABLE = /^[^\s"()<>{}]{1,500}$/;
 });
 
@@ -192653,6 +192709,8 @@ async function main() {
   };
   if (gmailInternalConnectorStore && gmailSecureConnectorStore) {
     let gmailArchiveSet;
+    const gmailImportGate = gmailImportAllowance({ usage: () => gmailRequestBudget?.status() });
+    let gmailLabelCache;
     archiveSourceTargets.register(gmailArchiveTarget({
       concurrencyKey: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
       exclusive: (task) => connectedHandleRegistryPath ? runExclusiveForSource(connectedHandleRegistryPath, GMAIL_SOURCE_ID, task) : task(),
@@ -192694,9 +192752,16 @@ async function main() {
           sync: gmailLaneSyncOptions(ownerRules),
           account: gmailItemScopeFor(handle),
           labelIds: async () => {
+            const cacheKey = `${new Date().toISOString().slice(0, 10)}
+${key2}`;
+            if (gmailLabelCache?.key === cacheKey)
+              return gmailLabelCache.map;
             if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority)
-              return;
+              return { unavailable: "gmail_labels_unavailable" };
             fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+            const room = gmailImportGate.take(1);
+            if (room !== true)
+              return { unavailable: room };
             matchClient ??= new GoogleGmailSourceConnector({
               credentialHandle: handle.handle,
               ...handle.accountRole ? { account: handle.accountRole } : {},
@@ -192704,8 +192769,10 @@ async function main() {
             }).apiClientForTooling();
             const api2 = await matchClient;
             if (!api2.listLabels)
-              return;
-            return new Map((await api2.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id]));
+              return { unavailable: "gmail_labels_unavailable" };
+            const map2 = new Map((await api2.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id]));
+            gmailLabelCache = { key: cacheKey, map: map2 };
+            return map2;
           },
           match: gmailHeaderMatch(async () => {
             if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority)
@@ -192718,7 +192785,7 @@ async function main() {
             }).apiClientForTooling();
             return matchClient;
           }, {
-            usage: () => gmailRequestBudget?.status(),
+            allowance: gmailImportGate,
             sameAccount: (address) => {
               const named = readSourceRegistry(process.env).accounts.find((entry) => entry.source_id === GMAIL_SOURCE_ID)?.provider_account_hash;
               return named === undefined || compareProviderAccounts(named, googleAccountIdFromAddress(address)) !== "different";
