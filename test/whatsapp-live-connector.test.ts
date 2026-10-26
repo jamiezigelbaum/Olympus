@@ -135,8 +135,11 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     expect(ids(resumed)).toEqual(['b2']);
 
     // A cursor mid-way through an earlier file also crosses file boundaries.
-    const fromEarlier = await drainItems(connector, { cursor: '2026-06-10.jsonl:1' });
+    const count = /~r\d+$/u.exec(pages[0]!.nextCursor!)![0];
+    const fromEarlier = await drainItems(connector, { cursor: `2026-06-10.jsonl:1@${Buffer.byteLength(spoolLine({ id: 'a1' }))}${count}` });
     expect(ids(fromEarlier)).toEqual(['a2', 'b1', 'b2']);
+    // A cursor that carries no reset count (an older form) cannot say no reset happened since: the spool is read again.
+    expect(ids(await drainItems(connector, { cursor: '2026-06-10.jsonl:1' }))).toEqual(['a1', 'a2', 'b1', 'b2']);
   });
 
   test('a cursor naming a vanished file resumes at the next file by name', async () => {

@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
-import { openWaitingPrivateQuestionStore, type StoredPrivateAnswer } from '../src/core/waiting-private-questions.ts';
+import { openWaitingPrivateQuestionStore, waitingPrivateQuestionsDbPath, type StoredPrivateAnswer } from '../src/core/waiting-private-questions.ts';
+import { resolveRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
 import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
 import { olympusOpenUrl, parseOlympusOpenUrl, openTargetToken } from '../src/core/open-targets.ts';
 import { withRemotePrivateNote } from '../src/core/remote-result.ts';
@@ -11,8 +12,12 @@ const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-inbox-lifecycle-')); dirs.push(dir);
-  const path = join(dir, 'custom-private-state', 'waiting-private-questions.sqlite');
-  const options = { homeDir: join(dir, 'home'), env: { OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: join(dir, 'custom-private-state', 'remote-connections.sqlite') } };
+  // A data folder relocated outside the home (XDG_DATA_HOME): the answers sit beside the remote connections there.
+  const homeDir = join(dir, 'home');
+  const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'custom-private-state') };
+  const path = waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
+  mkdirSync(dirname(path), { recursive: true });
+  const options = { homeDir, env };
   return { dir, path, options };
 }
 function save(path: string, corpusId: string, question = 'Example?', pathKind: 'private' | 'anonymous' | 'venice' = 'private') {
@@ -24,7 +29,7 @@ function save(path: string, corpusId: string, question = 'Example?', pathKind: '
 function files(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? files(join(dir, entry.name)) : [join(dir, entry.name)]);
 }
-test('data delete --all removes retained answer state, including an overridden private directory', () => {
+test('data delete --all removes retained answer state, including a relocated data folder', () => {
   const f = fixture(); save(f.path, 'secure_local.example.files'); save(f.path, '', 'Exact outside question', 'anonymous'); save(f.path, 'secure_local.example.files', 'Venice question', 'venice');
   const dry = deleteOlympusData({ all: true, dryRun: true, ...f.options });
   expect(dry.removed).toContain(f.path); expect(existsSync(f.path)).toBe(true);

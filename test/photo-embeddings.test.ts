@@ -10,6 +10,7 @@
  * cache's clean-up, the additive schema migration, the Private content
  * default for images, and the coverage statement.
  */
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { execFileSync } from 'node:child_process';
@@ -38,7 +39,7 @@ import {
   writeMediaCacheFile,
 } from '../src/core/media-cache.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
-import { defaultDropboxConnectorStoreDbPath, dropboxTierConnectorStoreDbPaths } from '../src/workers/dropbox-files/connector-store.ts';
+import { dropboxTierConnectorStoreDbPaths } from '../src/workers/dropbox-files/connector-store.ts';
 import { DEFAULT_STILL_IMAGE_EXTENSIONS, defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import { stillImageReadinessOf } from '../src/core/still-image-readiness.ts';
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
@@ -1105,7 +1106,7 @@ describe('data lifecycle and the media cache', () => {
     // XDG_DATA_HOME is set so the store path is under this temporary home,
     // never the real one.
     const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share'), [MEDIA_CACHE_DIR_ENV]: CACHE_BASE };
-    const dbPath = defaultDropboxConnectorStoreDbPath(env);
+    const dbPath = resolvedStorePath('dropbox.files', 'secure_local', env);
     expect(dbPath.startsWith(home)).toBe(true);
     mkdirSync(join(dbPath, '..'), { recursive: true });
     const store = await photoStore(dbPath);
@@ -1121,7 +1122,7 @@ describe('data lifecycle and the media cache', () => {
   test('a store whose picture references cannot be read stops the delete, and nothing is deleted', async () => {
     const home = temporaryDir('olympus-photo-home-');
     const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share'), [MEDIA_CACHE_DIR_ENV]: CACHE_BASE };
-    const dbPath = defaultDropboxConnectorStoreDbPath(env);
+    const dbPath = resolvedStorePath('dropbox.files', 'secure_local', env);
     mkdirSync(join(dbPath, '..'), { recursive: true });
     // A SQLite file whose pages are damaged past the header.
     const header = Buffer.from('SQLite format 3\u0000', 'latin1');

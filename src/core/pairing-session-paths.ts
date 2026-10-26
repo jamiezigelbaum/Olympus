@@ -2,13 +2,17 @@ import { lstatSync, readdirSync, realpathSync, rmSync, type Stats } from 'node:f
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
-  TELEGRAM_SOURCE_ID,
-  WHATSAPP_SOURCE_ID,
   accountRawPath,
   accountSessionPath,
   legacyCaptureDataRoot,
+  legacyTelegramSessionBase,
+  legacyWhatsAppDefaultStateDir,
   olympusDataRoot,
+  olympusHomeRoots,
   olympusStateRoot,
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_SESSION_FILE,
+  WHATSAPP_SOURCE_ID,
   whatsappStateDirFromValue,
   type LayoutAccount,
   type LayoutAccountLayout,
@@ -76,16 +80,7 @@ export function pairingAccount(source: 'telegram' | 'whatsapp', context: Olympus
  * files.
  */
 export function olympusDataRoots(context: OlympusPathContext = {}): string[] {
-  const home = resolveHomeDir(context);
-  return [
-    join(home, '.olympus'),
-    join(home, '.config', 'olympus'),
-    join(home, '.local', 'share', 'olympus'),
-    join(home, '.local', 'share', 'openclaw', 'olympus'),
-    join(home, '.local', 'state', 'olympus'),
-    join(home, '.cache', 'olympus'),
-    join(home, 'Library', 'Logs', 'Olympus'),
-  ];
+  return olympusHomeRoots(resolveHomeDir(context));
 }
 
 /**
@@ -119,7 +114,7 @@ export function whatsappStateDir(context: OlympusPathContext = {}): string {
   const configured = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
   return configured
     ? whatsappStateDirFromValue(configured)
-    : join(legacyCaptureDataRoot(layoutEnv(context)), 'whatsapp-live');
+    : legacyWhatsAppDefaultStateDir(layoutEnv(context));
 }
 
 /**
@@ -132,7 +127,7 @@ export function whatsappStateDir(context: OlympusPathContext = {}): string {
  */
 export function whatsappPairingSessionPaths(context: OlympusPathContext = {}): string[] {
   const stateDir = whatsappStateDir(context);
-  const sessionDb = join(stateDir, 'session.db');
+  const sessionDb = join(stateDir, WHATSAPP_SESSION_FILE);
   return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join(stateDir, 'qr.txt'), join(stateDir, 'qr.png')];
 }
 
@@ -160,7 +155,7 @@ export function telegramSessionBasePath(context: OlympusPathContext = {}): strin
   const configured = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
   return configured
     ? telegramSessionBase(configured)
-    : join(legacyCaptureDataRoot(layoutEnv(context)), 'telegram', 'telegram.personal');
+    : legacyTelegramSessionBase(layoutEnv(context));
 }
 
 /**
@@ -230,7 +225,7 @@ export function pairingSessionPathsFromStoredValue(
     return [`${base}.session`, `${base}.session-journal`];
   }
   const stateDir = whatsappStateDirFromValue(value);
-  const sessionDb = join(stateDir, 'session.db');
+  const sessionDb = join(stateDir, WHATSAPP_SESSION_FILE);
   return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join(stateDir, 'qr.txt'), join(stateDir, 'qr.png')];
 }
 

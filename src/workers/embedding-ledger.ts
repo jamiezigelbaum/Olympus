@@ -35,7 +35,7 @@
  * quietly loses what it cannot parse reads as complete when it is not, and the
  * reader is entitled to know the difference.
  */
-import { olympusDataPath } from '../core/olympus-layout.ts';
+import { sharedDataPath } from '../core/olympus-layout.ts';
 import { chmod, mkdir, open, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { PUBLIC_RUNTIME_BUILD } from '../core/build-flavor.ts';
@@ -153,7 +153,7 @@ export function resolveEmbeddingLedgerPath(
 ): string {
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured) return configured;
-  return olympusDataPath(env, 'embedding-ledger.jsonl');
+  return sharedDataPath('embedding-ledger', env);
 }
 
 /**

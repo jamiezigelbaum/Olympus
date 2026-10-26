@@ -199,7 +199,7 @@ function prng(seed: number): () => number {
   };
 }
 
-type Kind = 'ordinary' | 'secret' | 'deleted' | 'names' | 'unversioned' | 'sameVersion';
+type Kind = 'ordinary' | 'secret' | 'deleted' | 'names' | 'unversioned' | 'sameVersion' | 'empty';
 
 describe('a crash between legs and a cut between items lose nothing', () => {
   const crashOnce = (h: OnePipelineHarness): void => {
@@ -315,21 +315,109 @@ describe('a crash between legs and a cut between items lose nothing', () => {
   });
 });
 
+describe('a write cut off between an item\'s legs is finished from its intent', () => {
+  const crashOnce = (h: OnePipelineHarness): void => {
+    const store = h.stores.secure_local;
+    const orig = store.syncFromConnector.bind(store);
+    let thrown = false;
+    store.syncFromConnector = (async (...args: Parameters<typeof orig>) => {
+      if (!thrown) { thrown = true; throw new Error('injected crash'); }
+      return orig(...args);
+    }) as typeof orig;
+  };
+  const drainAll = async (h: OnePipelineHarness, ids: readonly string[], maxItems: number): Promise<void> => {
+    for (let pass = 0; pass < 20 && ids.some((id) => h.runtime.state.get(id)?.status !== 'imported'); pass += 1) {
+      for (const id of ids) if (h.runtime.state.get(id)?.status !== 'imported') await h.pull(id, { maxItems }).catch(() => undefined);
+    }
+    for (const id of ids) expect(h.runtime.state.get(id)?.status).toBe('imported');
+  };
+  const live = (h: OnePipelineHarness, id = 'a'): string[] => h.rows().filter((row) => row.providerItemId === id && row.tombstoned === 0 && row.chunks > 0).map((row) => row.domain);
+
+  test('names v10 over a body v9 one leg has not written: the body is repaired first, then the version moves', async () => {
+    const h = onePipelineHarness(cleanups, { pageSize: 1 });
+    h.connectLive();
+    const first = await h.startImport('body9.mbox', [rec('a', 9, 'the ninth body')]);
+    crashOnce(h);
+    await h.pull(first, { maxItems: 3 }).catch(() => undefined);
+    const second = await h.startImport('names10.mbox', [rec('a', 10, undefined)]);
+    await h.pull(second, { maxItems: 3 }).catch(() => undefined);
+    // The names are not accepted over a body still owed.
+    expect(h.runtime.state.get(second)?.status).not.toBe('imported');
+    await drainAll(h, [first, second], 3);
+    expect(h.textOf('a')).toContain('the ninth body');
+    expect(h.rows().filter((row) => row.providerItemId === 'a').map((row) => row.version)).toEqual(['10', '10']);
+  });
+
+  test('a Secret v2 cut off before the Private leg is finished by the next pass, and later names do not mask it', async () => {
+    const h = onePipelineHarness(cleanups, { pageSize: 1 });
+    h.connectLive();
+    await h.importAll(await h.startImport('one.mbox', [rec('a', 1, 'ordinary words')]));
+    const second = await h.startImport('secret2.mbox', [rec('a', 2, `key\n${KEY_MARKER}`)]);
+    crashOnce(h);
+    await h.pull(second, { maxItems: 3 }).catch(() => undefined);
+    // Nothing of the item is served while the Secret is half written.
+    expect(h.served('a')).toBe('');
+    await drainAll(h, [second], 3);
+    expect(live(h)).toEqual([]);
+    await h.importAll(await h.startImport('names3.mbox', [rec('a', 3, undefined)]));
+    expect(live(h)).toEqual([]);
+    expect(textIn(h)).not.toContain('PRIVATE KEY');
+  });
+
+  test('names v9 then body v9 at budget 1 repairs a body owed from an earlier import', async () => {
+    const h = onePipelineHarness(cleanups, { pageSize: 1 });
+    h.connectLive();
+    const first = await h.startImport('body9.mbox', [rec('a', 9, 'the ninth body')]);
+    crashOnce(h);
+    await h.pull(first, { maxItems: 3 }).catch(() => undefined);
+    const second = await h.startImport('again.mbox', [rec('a', 9, undefined), rec('a', 9, 'the ninth body')]);
+    await drainAll(h, [second], 1);
+    await drainAll(h, [first], 1);
+    expect(h.textOf('a')).toContain('the ninth body');
+  });
+
+  test('a names-only version move never lowers a version a later body in the same run set', async () => {
+    const h = onePipelineHarness(cleanups, { pageSize: 1 });
+    h.connectLive();
+    await h.importAll(await h.startImport('one.mbox', [rec('a', 1, 'first body')]));
+    const id = await h.startImport('names5-body9.mbox', [rec('a', 5, undefined), rec('a', 9, 'ninth body')]);
+    await drainAll(h, [id], 5);
+    expect(h.textOf('a')).toContain('ninth body');
+    expect(h.rows().filter((row) => row.providerItemId === 'a').map((row) => row.version)).toEqual(['9', '9']);
+  });
+
+  test('live content of the version a deletion cut off at holds does not bring the item back', async () => {
+    const h = onePipelineHarness(cleanups, { pageSize: 1 });
+    h.connectLive();
+    await h.importAll(await h.startImport('one.mbox', [rec('a', 1, 'doomed words')]));
+    const second = await h.startImport('del2.mbox', [rec('a', 2, undefined, { deleted: true })]);
+    crashOnce(h);
+    await h.pull(second, { maxItems: 3 }).catch(() => undefined);
+    expect(h.served('a')).toBe('');
+    h.live.records = [rec('a', 2, 'replacement words')];
+    await h.pullLive({ maxItems: 3 }).catch(() => undefined);
+    expect(live(h)).toEqual([]);
+    expect(h.served('a')).toBe('');
+    await drainAll(h, [second], 3);
+    expect(live(h)).toEqual([]);
+  });
+});
+
 describe('random sequences settle on the newest accepted state', () => {
   // PROPERTY_SEEDS widens the run on demand; the default is a fixed, quick set.
   for (const seed of process.env['PROPERTY_ONLY'] ? [Number(process.env['PROPERTY_ONLY'])] : Array.from({ length: Number(process.env['PROPERTY_SEEDS'] ?? 24) }, (_, at) => at + 1)) {
     test(`seed ${seed}`, async () => {
       const random = prng(seed);
       const pick = <T,>(values: readonly T[]): T => values[Math.floor(random() * values.length)]!;
-      const kinds: Kind[] = ['ordinary', 'ordinary', 'secret', 'deleted', 'names', 'unversioned', 'sameVersion'];
+      const kinds: Kind[] = ['ordinary', 'ordinary', 'secret', 'deleted', 'names', 'unversioned', 'sameVersion', 'empty'];
       const length = 2 + Math.floor(random() * 5);
       const records: FxRecord[] = [];
       const plan: Kind[] = [];
       let version = 0;
       for (let at = 0; at < length; at += 1) {
-        // A deletion of an item never stored leaves nothing to remember it by (a known residual), so it never opens a sequence.
+        // (An empty body, a record with no version and a tie need something stored before them to be one.)
         const drawn = pick(kinds);
-        const kind = at === 0 && ['deleted', 'unversioned', 'sameVersion'].includes(drawn) ? 'ordinary' : drawn;
+        const kind = at === 0 && ['unversioned', 'sameVersion', 'empty'].includes(drawn) ? 'ordinary' : drawn;
         plan.push(kind);
         if (kind === 'unversioned') {
           records.push(rec('a', version, `unversioned body ${at}`, { unversioned: true }));
@@ -345,6 +433,7 @@ describe('random sequences settle on the newest accepted state', () => {
         records.push(kind === 'secret' ? rec('a', version, `key ${at}\n${KEY_MARKER}`)
           : kind === 'deleted' ? rec('a', version, undefined, { deleted: true })
           : kind === 'names' ? rec('a', version, undefined)
+          : kind === 'empty' ? rec('a', version, '')
           : rec('a', version, `body ${at}`, children ? { children } : {}));
       }
       // The newest accepted state, record by record. A record older than the state changes nothing; names alone
@@ -353,12 +442,17 @@ describe('random sequences settle on the newest accepted state', () => {
       // A deletion of an item no pass ever stored (it can share a page with the only record that stored it) leaves
       // nothing to remember it by, so a later tie or unversioned body may legitimately be stored: a known residual.
       const forgotten: string[] = [];
+      let emptiedOver = false;
       records.forEach((_record, at) => {
         const kind = plan[at]!;
         // An unversioned body and a same-version body of one version: in one page the later wins, across pages the stored one.
-        if (state.kind === 'body' && state.unversioned === true && kind === 'sameVersion') forgotten.push(`same version body ${at}`);
-        if (state.kind === 'body' && state.unversioned === true && kind === 'unversioned') forgotten.push(state.body!);
+        if (state.kind === 'body' && kind === 'sameVersion') forgotten.push(`same version body ${at}`);
+        if (state.kind === 'body' && kind === 'unversioned') forgotten.push(`unversioned body ${at}`, state.body!);
         if (state.kind === 'deleted' && (kind === 'unversioned' || kind === 'sameVersion')) forgotten.push(kind === 'unversioned' ? `unversioned body ${at}` : `same version body ${at}`);
+        // An empty body over a Secret or a deletion in one page is the page's newest word (the Secret is never applied),
+        // across pages it is a record with no content to judge: either way no text comes back, but later ties may.
+        if (kind === 'empty' && (state.kind === 'secret' || state.kind === 'deleted')) emptiedOver = true;
+        if (emptiedOver && (kind === 'unversioned' || kind === 'sameVersion')) forgotten.push(kind === 'unversioned' ? `unversioned body ${at}` : `same version body ${at}`);
         if (kind === 'unversioned') {
           if (state.kind === 'names' || state.kind === 'none' || (state.kind === 'body' && state.unversioned === true)) state = { kind: 'body', body: `unversioned body ${at}`, unversioned: true };
           return;
@@ -370,50 +464,122 @@ describe('random sequences settle on the newest accepted state', () => {
         if (kind === 'ordinary') state = { kind: 'body', body: `body ${at}` };
         else if (kind === 'secret') state = { kind: 'secret' };
         else if (kind === 'deleted') state = { kind: 'deleted' };
+        else if (kind === 'empty') { if (state.kind === 'body' || state.kind === 'names' || state.kind === 'none') state = { kind: 'names' }; }
         else if (state.kind === 'none') state = { kind: 'names' };
       });
 
       const pageSize = 1 + Math.floor(random() * 3);
-      const h = onePipelineHarness(cleanups, { sniffer: judgedOrdinary, pageSize });
+      // A write has two legs when the privacy model has not judged the item yet (the names rest in one store, the body in
+      // the Private one); judged ordinary text has one.
+      const twoLegs = random() < 0.4;
+      // A crash at a random boundary of a random pass (twice, sometimes), and a replay through a second input.
+      const crashAt = Math.floor(random() * 4);
+      const hook = Math.floor(random() * 7);
+      const crashes = 1 + (random() < 0.3 ? 1 : 0);
+      const replayInput = random() < 0.5;
+      const per = random() < 0.4 ? 1 : 1 + Math.floor(random() * 3);
+      const options = { ...(twoLegs ? {} : { sniffer: judgedOrdinary }), pageSize };
+      // What is stored: per leg whether a row is live and holds text, per item its newest version, and the text.
+      const snapshot = (harness: OnePipelineHarness): string => {
+        const rows = harness.rows();
+        const newest = new Map<string, number>();
+        for (const row of rows) if (row.version !== null) newest.set(row.providerItemId, Math.max(newest.get(row.providerItemId) ?? -1, Number(row.version)));
+        return JSON.stringify([
+          // (A tombstone row a Secret's location needed in one leg is not part of what is served.)
+          rows.filter((row) => row.tombstoned === 0 && !row.providerItemId.includes('#child:')).map((row) => [row.chunks > 0 ? row.domain : '-', row.providerItemId, row.chunks > 0 ? 1 : 0].join('|')).filter((entry, at, all) => all.indexOf(entry) === at).sort(),
+          // (A leg that holds names alone is not part of what is served: only the leg that holds the text is.)
+          [...newest].sort(),
+          harness.textOf('a'),
+        ]);
+      };
+
+      // The same records, uninterrupted: what a run with crashes must end as.
+      const reference = onePipelineHarness(cleanups, options);
+      reference.connectLive();
+      const referenceId = await reference.startImport('random.mbox', records);
+      for (let pass = 0; pass < 60 && reference.runtime.state.get(referenceId)?.status !== 'imported'; pass += 1) await reference.pull(referenceId, { maxItems: per });
+      const expected = snapshot(reference);
+
+      const h = onePipelineHarness(cleanups, options);
       h.connectLive();
+      const knobs = JSON.stringify({ twoLegs, crashAt, hook, crashes, replayInput, per, pageSize });
       try {
         const id = await h.startImport('random.mbox', records);
-        // A crash at a random step of a random pass.
-        const crashAt = Math.floor(random() * 4);
-        const hook = Math.floor(random() * 3);
         let passes = 0;
-        let armed = true;
-        const fire = (): void => { if (armed && passes >= crashAt) { armed = false; throw new Error('injected crash'); } };
+        let armed = crashes;
+        const fire = (): void => { if (armed > 0 && passes >= crashAt) { armed -= 1; throw new Error('injected crash'); } };
         const internal = h.set.store('internal', { create: true })!;
+        const secure = h.stores.secure_local;
         const origAdvance = internal.advanceItemVersion.bind(internal);
         const origWithdraw = h.set.withdrawCopies.bind(h.set);
         const origRemove = h.set.ledger.removeCopies.bind(h.set.ledger);
+        const origSecure = secure.syncFromConnector.bind(secure);
+        const origIntent = h.set.ledger.withWriteIntent.bind(h.set.ledger);
+        const origClear = h.set.ledger.clearWriteIntent.bind(h.set.ledger);
         if (hook === 0) internal.advanceItemVersion = ((...args: Parameters<typeof origAdvance>) => { origAdvance(...args); fire(); }) as typeof origAdvance;
         if (hook === 1) h.set.withdrawCopies = ((...args: Parameters<typeof origWithdraw>) => { fire(); origWithdraw(...args); }) as typeof origWithdraw;
         if (hook === 2) h.set.ledger.removeCopies = ((...args: Parameters<typeof origRemove>) => { fire(); return origRemove(...args); }) as typeof origRemove;
-        const per = 1 + Math.floor(random() * 3);
-        for (let pass = 0; pass < 60 && h.runtime.state.get(id)?.status !== 'imported'; pass += 1) {
+        // Between the legs: after the first leg, before the Private one.
+        if (hook === 3) secure.syncFromConnector = (async (...args: Parameters<typeof origSecure>) => { fire(); return origSecure(...args); }) as typeof origSecure;
+        // Between the intent and the legs.
+        if (hook === 4) h.set.ledger.withWriteIntent = ((...args: Parameters<typeof origIntent>) => { const out = origIntent(...args); fire(); return out; }) as typeof origIntent;
+        // After every leg, before the intent is cleared.
+        if (hook === 5) h.set.ledger.clearWriteIntent = ((...args: Parameters<typeof origClear>) => { fire(); origClear(...args); }) as typeof origClear;
+        // Inside the legs, after the first one wrote.
+        if (hook === 6) secure.syncFromConnector = (async (...args: Parameters<typeof origSecure>) => { const out = await origSecure(...args); fire(); return out; }) as typeof origSecure;
+
+        const seenVersion = new Map<string, number>();
+        const watch = (): void => {
+          // No version ever goes down, and nothing of a deleted or Secret item is served while its write is pending.
+          for (const row of h.rows().filter((entry) => entry.providerItemId === 'a')) {
+            if (row.version === null) continue;
+            const key = row.domain;
+            expect(Number(row.version) >= (seenVersion.get(key) ?? -1), `${key} version went down to ${row.version}`).toBe(true);
+            seenVersion.set(key, Number(row.version));
+          }
+          expect(h.served('a')).not.toContain('PRIVATE KEY');
+          const pending = h.set.ledger.writeIntent({ provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a' });
+          if (pending?.kind === 'deletion' || pending?.kind === 'secret') expect(h.served('a'), `${pending.kind} pending`).toBe('');
+        };
+        const ids = [id];
+        for (let pass = 0; pass < 80 && ids.some((each) => h.runtime.state.get(each)?.status !== 'imported'); pass += 1) {
           passes += 1;
-          const out = await h.pull(id, { maxItems: per }).catch((error) => String(error));
+          for (const each of ids) {
+            if (h.runtime.state.get(each)?.status === 'imported') continue;
+            await h.pull(each, { maxItems: per }).catch(() => undefined);
+            watch();
+          }
+          // A replay through another input: the same records, as a second import, once the crash has happened.
+          if (replayInput && armed < crashes && ids.length === 1) ids.push(await h.startImport('replay.mbox', records));
         }
-        expect(h.runtime.state.get(id)?.status).toBe('imported');
+        for (const each of ids) expect(h.runtime.state.get(each)?.status).toBe('imported');
+        // (A child removal that failed is left for the next sweep, which the next sync of the set runs.)
+        await h.set.sweepOrphanedChildren();
         expect(textIn(h)).not.toContain('PRIVATE KEY');
+        expect(h.set.ledger.writeIntents(), 'no intent stays pending').toEqual([]);
         const text = h.textOf('a');
-        const forgot = state.kind === 'deleted' && forgotten.some((body) => text.includes(body));
-        if (state.kind === 'body') expect(forgotten.some((body) => text.includes(body)) || text.includes(state.body!)).toBe(true);
+        const forgot = (state.kind === 'deleted' || state.kind === 'secret' || state.kind === 'names') && forgotten.some((body) => text.includes(body));
+        // (A record with no version, or the version just before, has no place in the order: a replay may read it as
+        // the stored one's, so any such body may stand for the item.)
+        const ties = records.flatMap((record) => record.unversioned || (record.body ?? '').startsWith('same version') ? [record.body!] : []);
+        if (state.kind === 'body') expect(forgotten.some((body) => text.includes(body)) || ties.some((body) => text.includes(body)) || text.includes(state.body!)).toBe(true);
         else if (!forgot) expect(text).toBe('');
         if ((state.kind === 'secret' || state.kind === 'deleted') && !forgot) {
           expect(h.rows().filter((row) => row.providerItemId === 'a' && row.tombstoned === 0 && row.chunks > 0)).toEqual([]);
         }
-        // The tier it is stored in is the one the verdict gave: ordinary text is served from the internal store only.
-        expect([...new Set(h.rows().filter((row) => row.providerItemId === 'a' && row.tombstoned === 0 && row.chunks > 0).map((row) => row.domain))].filter((domain) => domain !== 'internal')).toEqual([]);
+        // The end state is the uninterrupted run's.
+        // (Ties between same-version and unversioned bodies are decided by page boundaries, which a crash moves.)
+        if (!plan.some((kind) => kind === 'sameVersion' || kind === 'unversioned')) expect(snapshot(h)).toBe(expected);
+        // The tier it is stored in is the one the verdict gave: judged ordinary text is served from the internal store only,
+        // and text not yet judged from the Private one.
+        expect([...new Set(h.rows().filter((row) => row.providerItemId === 'a' && row.tombstoned === 0 && row.chunks > 0).map((row) => row.domain))].filter((domain) => domain !== (twoLegs ? 'secure_local' : 'internal'))).toEqual([]);
         // Every child that is still served has its parent present.
         const rows = h.rows();
         for (const child of state.kind === 'body' || state.kind === 'names' ? rows.filter((row) => row.parent !== null && row.tombstoned === 0) : []) {
           expect(rows.some((row) => `${FIXTURE_ACCOUNT_SCOPE}:${row.providerItemId}` === child.parent && row.tombstoned === 0)).toBe(true);
         }
       } catch (error) {
-        throw new Error(`property test failed for seed ${seed} (expected ${JSON.stringify(state)}, stored ${JSON.stringify(h.rows().filter((r) => r.providerItemId === 'a').map((r) => [r.domain, r.version, r.tombstoned, r.chunks]))}, text ${JSON.stringify(h.textOf('a'))}) (records ${JSON.stringify(records.map((r) => [r.version, r.unversioned ? 'u' : '', r.deleted ? 'd' : '', r.body === undefined ? 'n' : r.body.includes('PRIVATE') ? 's' : 'b']))}): ${String(error instanceof Error ? error.message : error)}`);
+        throw new Error(`property test failed for seed ${seed} ${knobs ?? ''} intents ${JSON.stringify(h.set.ledger.writeIntents().map((i) => [i.kind, i.version, i.location]))} (expected ${JSON.stringify(state)}, stored ${JSON.stringify(h.rows().filter((r) => r.providerItemId === 'a').map((r) => [r.domain, r.version, r.tombstoned, r.chunks]))}, text ${JSON.stringify(h.textOf('a'))}) (records ${JSON.stringify(records.map((r) => [r.version, r.unversioned ? 'u' : '', r.deleted ? 'd' : '', r.body === undefined ? 'n' : r.body.includes('PRIVATE') ? 's' : 'b']))}): ${String(error instanceof Error ? error.message : error)}`);
       }
     });
   }

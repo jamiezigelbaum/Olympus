@@ -336,55 +336,70 @@ describe('Olympus data lifecycle', () => {
     }
   });
 
-  test('delete --all removes env-overridden source databases outside known roots', () => {
+  test('delete --all refuses while a dropped per-store override is set, and removes nothing', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-all-env-'));
     const homeDir = join(dir, 'home');
     const emailDb = join(dir, 'external-indexes', 'gmail.sqlite');
     try {
       mkdirSync(dirname(emailDb), { recursive: true });
       createMarkedSqliteStore(emailDb, 'connector-store');
-      writeFileSync(`${emailDb}-wal`, 'wal');
-      writeFileSync(`${emailDb}-shm`, 'shm');
 
-      const result = deleteOlympusData({
+      // Gone since source storage step 6 (owner decision 3): nothing reads it, so a
+      // delete would miss the file it names and report success; it refuses instead.
+      expect(() => deleteOlympusData({
         all: true,
         homeDir,
-        env: {
-          OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH: emailDb,
-        },
-      });
-
-      expect(result.mode).toBe('all');
-      expect(result.removed).toContain(emailDb);
-      expect(result.removed).toContain(`${emailDb}-wal`);
-      expect(result.removed).toContain(`${emailDb}-shm`);
-      expect(existsSync(emailDb)).toBe(false);
-      expect(existsSync(`${emailDb}-wal`)).toBe(false);
-      expect(existsSync(`${emailDb}-shm`)).toBe(false);
+        env: { OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH: emailDb },
+      })).toThrow(/no longer read.*OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH/);
+      expect(existsSync(emailDb)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test('delete --all refuses unsafe env-overridden source paths outside known roots', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-all-unsafe-env-'));
+  test('delete --all removes a store a capture path puts outside known roots', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-all-capture-'));
+    const homeDir = join(dir, 'home');
+    const stateDir = join(dir, 'external-capture');
+    const store = join(stateDir, 'connector-store.db');
+    try {
+      mkdirSync(stateDir, { recursive: true });
+      createMarkedSqliteStore(store, 'connector-store');
+      writeFileSync(`${store}-wal`, 'wal');
+      writeFileSync(`${store}-shm`, 'shm');
+
+      const result = deleteOlympusData({ all: true, homeDir, env: { OLYMPUS_WHATSAPP_STATE_DIR: stateDir } });
+
+      expect(result.mode).toBe('all');
+      expect(result.removed).toContain(store);
+      expect(result.removed).toContain(`${store}-wal`);
+      expect(result.removed).toContain(`${store}-shm`);
+      expect(existsSync(store)).toBe(false);
+      expect(existsSync(`${store}-wal`)).toBe(false);
+      expect(existsSync(`${store}-shm`)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('delete --all refuses an unsafe store a capture path puts outside known roots', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-all-unsafe-capture-'));
     const homeDir = join(dir, 'home');
     try {
-      const nonSqlite = join(dir, 'external-indexes', 'not-sqlite.db');
-      const directoryPath = join(dir, 'external-indexes', 'directory.sqlite');
-      const symlinkPath = join(dir, 'external-indexes', 'symlink.sqlite');
+      const nonSqlite = join(dir, 'not-sqlite', 'connector-store.db');
+      const directoryPath = join(dir, 'directory', 'connector-store.db');
+      const symlinkPath = join(dir, 'symlink', 'connector-store.db');
       mkdirSync(dirname(nonSqlite), { recursive: true });
       writeFileSync(nonSqlite, 'not a sqlite database');
       mkdirSync(directoryPath, { recursive: true });
+      mkdirSync(dirname(symlinkPath), { recursive: true });
       symlinkSync(nonSqlite, symlinkPath);
 
-      for (const emailDb of [nonSqlite, directoryPath, symlinkPath]) {
+      for (const store of [nonSqlite, directoryPath, symlinkPath]) {
         expect(() => deleteOlympusData({
           all: true,
           homeDir,
-          env: {
-            OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH: emailDb,
-          },
+          env: { OLYMPUS_WHATSAPP_STATE_DIR: dirname(store) },
         })).toThrow('Refusing to delete');
       }
 

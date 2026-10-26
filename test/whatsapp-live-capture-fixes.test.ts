@@ -82,9 +82,9 @@ describe('captureLiveness', () => {
       .toEqual({ status: 'unavailable', threshold_seconds: 3_600, quiet: false, stopped: false });
   });
 
-  test('a liveness verdict carries capture_quiet; a plain one does not', () => {
+  test('a liveness verdict carries capture_quiet; a plain one says 0 for both, never leaves them out', () => {
     expect(captureFreshnessCounts(captureLiveness(undefined, '2026-10-25T11:58:00Z', now, 3_600)).capture_quiet).toBe(1);
-    expect('capture_quiet' in captureFreshnessCounts({ status: 'fresh', threshold_seconds: 3_600, age_seconds: 1 })).toBe(false);
+    expect(captureFreshnessCounts({ status: 'fresh', threshold_seconds: 3_600, age_seconds: 1 })).toMatchObject({ capture_quiet: 0, capture_stopped: 0 });
   });
 });
 
@@ -169,7 +169,8 @@ describe('cursor recovery', () => {
     const dir = spoolDir({ '2026-10-25.jsonl': line('a') + line('b') });
     const findings = emptyWhatsAppSpoolPassFindings();
     const connector = createWhatsAppLiveSourceConnector({ spoolDir: dir, findings });
-    const pages = await drain(connector.listItems({ cursor: '2026-10-25.jsonl:2' }));
+    // A cursor of the current reset count (1: the first index build this spool's counter sees).
+    const pages = await drain(connector.listItems({ cursor: `2026-10-25.jsonl:2@${Buffer.byteLength(line('a') + line('b'))}~r1` }));
     expect(ids(pages)).toEqual([]);
     expect(findings).toEqual(emptyWhatsAppSpoolPassFindings());
   });
@@ -178,7 +179,7 @@ describe('cursor recovery', () => {
     const dir = spoolDir({ '2026-10-26.jsonl': line('next-day') });
     const findings = emptyWhatsAppSpoolPassFindings();
     const connector = createWhatsAppLiveSourceConnector({ spoolDir: dir, findings });
-    const pages = await drain(connector.listItems({ cursor: '2026-10-25.jsonl:7' }));
+    const pages = await drain(connector.listItems({ cursor: '2026-10-25.jsonl:7@512~r1' }));
     expect(ids(pages)).toEqual(['next-day']);
     expect(findings.cursorFilesMissing).toBe(1);
   });

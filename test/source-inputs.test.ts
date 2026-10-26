@@ -164,14 +164,22 @@ describe('the intake rule', () => {
     }
   });
 
-  test('an item whose every row is a tombstone comes back only with a newer record (live also at the same version)', () => {
+  test('the record whose body a cut-off write owes is replayed even though a newer names-only record moved the version past it', () => {
+    const owed: StoredItemState = { version: '7', hasContent: true, incomplete: true, owedBodyVersion: '6' };
+    expect(decide('archive', '6', true, owed)).toBe('apply');
+    expect(decide('archive', '5', true, owed)).toBe('skip_older');
+    expect(decide('archive', '6', false, owed)).toBe('skip_older');
+  });
+
+  test('an item whose every row is a tombstone comes back only with a newer record (live also when it has no version to compare)', () => {
     const gone: StoredItemState = { version: '5', hasContent: false, tombstoned: true };
     for (const kind of ['live', 'archive'] as const) {
       expect(decide(kind, '6', true, gone)).toBe('apply');
       expect(decide(kind, '4', true, gone)).toBe('skip_older');
     }
     expect(decide('archive', '5', true, gone)).toBe('skip_same');
-    expect(decide('live', '5', true, gone)).toBe('apply');
+    // (A deletion cut off between legs is finished by the set before any record is decided: a tombstone here is whole.)
+    expect(decide('live', '5', true, gone)).toBe('skip_same');
     // A tombstone with no version to compare is not brought back by an archive record.
     expect(decide('archive', '5', true, { hasContent: false, tombstoned: true })).toBe('skip_same');
     expect(decide('live', '5', true, { hasContent: false, tombstoned: true })).toBe('apply');
@@ -246,8 +254,9 @@ describe('inputs through a real store set', () => {
     const held = input('archive', 'archive.held', [{ id: 'a', version: 1, name: 'Orchard picnic list', text: 'We bring bananas.' }]);
     await sync(f.set, holdingItems(inputConnector(builder, held)));
     expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true });
-    // The Personal copy of the item's names is lost, as when a run stops after one leg.
-    expect(f.stores.internal.tombstoneCopy({ ...f.identity('a'), family: 'file', localItemId: `${ACCOUNT}:a` }, { connectorId: 'test' })).toBe(true);
+    // A run stops after one leg: the body it wrote is owed to the other, and the ledger holds the write's intent.
+    const owed = { ...f.identity('a'), localItemId: `${ACCOUNT}:a` };
+    f.set.ledger.putWriteIntent({ identity: owed, version: '1', kind: 'content', connectorId: 'test' });
     expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true, incomplete: true });
     // An older record does not apply to it: the version boundary holds although a leg is missing.
     await sync(f.set, holdingItems(inputConnector(builder, input('archive', 'archive.older', [{ id: 'a', version: 0, name: 'Old list', text: 'Nothing yet.' }]))));

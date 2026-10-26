@@ -5,9 +5,10 @@ import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { configFromPluginConfig, type OlympusConfig } from './config.ts';
 import {
-  WHATSAPP_SOURCE_ID,
   accountRawPath,
   legacyWhatsAppServiceStateDir,
+  WHATSAPP_SESSION_FILE,
+  WHATSAPP_SOURCE_ID,
 } from './olympus-layout.ts';
 import { accountMovePending, placedAccount } from './source-placement.ts';
 import {
@@ -25,7 +26,7 @@ const SERVICE_LABEL = 'WhatsApp capture service';
 // Unpaired/corrupt sessions still exit promptly; stop always cancels this wait.
 const DEFAULT_STARTUP_TIMEOUT_MS = Number.POSITIVE_INFINITY;
 const READINESS_FILE = 'native-service-readiness.json';
-const SESSION_FILE = 'session.db';
+const SESSION_FILE = WHATSAPP_SESSION_FILE;
 
 export interface NativeWhatsAppServiceOptions {
   initialPluginConfig: unknown;

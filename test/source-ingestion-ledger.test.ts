@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { resolvedStorePath } from '../src/core/source-placement.ts';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -26,7 +27,6 @@ import { createSourceIndexStatusHandler } from '../src/workers/source-index/stat
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import {
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-  defaultProtectedTelegramConnectorStoreDbPath,
 } from '../src/workers/telegram-messages/index.ts';
 
 describe('source ingestion ledger', () => {
@@ -167,9 +167,12 @@ describe('source ingestion ledger', () => {
     }
   });
 
-  test('collects WhatsApp ingestion from mounted connector-store path', async () => {
+  test('collects WhatsApp ingestion from its placed store, ignoring a path a mount names', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-ingestion-ledger-whatsapp-'));
-    const dbPath = join(dir, 'whatsapp-live', 'connector-store.db');
+    const placedEnv = { HOME: join(dir, 'home'), XDG_DATA_HOME: join(dir, 'data-home') };
+    // The store sits where its layout puts it; nothing relocates it (source storage step 6).
+    const dbPath = resolvedStorePath('whatsapp.personal.messages', 'secure_local', placedEnv);
+    mkdirSync(dirname(dbPath), { recursive: true });
     const store = new LocalConnectorStore({
       dbPath,
       corpusId: 'secure_local.whatsapp.messages',
@@ -190,9 +193,10 @@ describe('source ingestion ledger', () => {
     try {
       const snapshot = await collectLocalSourceIngestionLedger({
         env: {
-          XDG_DATA_HOME: join(dir, 'empty-data-home'),
+          ...placedEnv,
+          // A mount of a source with a folder layout names no path: this one is ignored.
           OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{
-            dbPath,
+            dbPath: join(dir, 'whatsapp-live', 'connector-store.db'),
             corpusId: 'secure_local.whatsapp.messages',
             family: 'chat',
             trustDomain: 'secure_local',
@@ -246,7 +250,7 @@ describe('source ingestion ledger', () => {
   test('normal collection includes the canonical protected Telegram connector store', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-ingestion-ledger-telegram-store-'));
     const env = { HOME: join(dir, 'home'), XDG_DATA_HOME: join(dir, 'data') };
-    const dbPath = defaultProtectedTelegramConnectorStoreDbPath(env);
+    const dbPath = resolvedStorePath('telegram.messages', 'secure_local', env);
     const store = new LocalConnectorStore({
       dbPath,
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -283,7 +287,7 @@ describe('source ingestion ledger', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-ingestion-ledger-deleting-'));
     const env = { HOME: join(dir, 'home'), XDG_DATA_HOME: join(dir, 'data') };
     const telegram = new LocalConnectorStore({
-      dbPath: defaultProtectedTelegramConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath('telegram.messages', 'secure_local', env),
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       family: 'chat',
       trustDomain: 'secure_local',
@@ -851,7 +855,9 @@ describe('ledger folders excluded by configuration', () => {
     // corpus against them would report every message as "path unevaluable"
     // purge debt the owner can do nothing about, burying the real number.
     const dir = mkdtempSync(join(tmpdir(), 'olympus-ingestion-ledger-chat-exclusions-'));
-    const dbPath = join(dir, 'whatsapp-live', 'connector-store.db');
+    const placedEnv = { HOME: join(dir, 'home'), XDG_DATA_HOME: join(dir, 'data-home') };
+    const dbPath = resolvedStorePath('whatsapp.personal.messages', 'secure_local', placedEnv);
+    mkdirSync(dirname(dbPath), { recursive: true });
     const exclusionsPath = join(dir, 'ingestion-exclusions.json');
     writeFileSync(exclusionsPath, JSON.stringify({
       schemaVersion: 1,
@@ -883,14 +889,8 @@ describe('ledger folders excluded by configuration', () => {
     try {
       const snapshot = await collectLocalSourceIngestionLedger({
         env: {
-          XDG_DATA_HOME: join(dir, 'empty-data-home'),
+          ...placedEnv,
           OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: exclusionsPath,
-          OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{
-            dbPath,
-            corpusId: 'secure_local.whatsapp.messages',
-            family: 'chat',
-            trustDomain: 'secure_local',
-          }]),
         },
         dashboardDbPath: join(dir, 'source-dashboard.sqlite'),
         now: NOW,

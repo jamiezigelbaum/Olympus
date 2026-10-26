@@ -6,7 +6,10 @@ import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
-import { WHATSAPP_SOURCE_ID, legacyWhatsAppLiveSyncStateDir } from '../../core/olympus-layout.ts';
+import {
+  legacyWhatsAppLiveSyncPaths,
+  WHATSAPP_SOURCE_ID,
+} from '../../core/olympus-layout.ts';
 import { placedAccount, resolvedRawPath, resolvedStorePath, whatsappMovedPathMapper } from '../../core/source-placement.ts';
 import type {
   LocalConnectorStore,
@@ -118,9 +121,9 @@ export interface WhatsAppConnectorStoreSyncReceipt {
     capture_stale_threshold_seconds: number;
     capture_age_seconds?: number;
     /** 1 when the bridge reports capture running and no message arrived within the threshold. */
-    capture_quiet?: number;
+    capture_quiet: 0 | 1;
     /** 1 when the bridge says it is disconnected (past a short grace): capture has stopped. */
-    capture_stopped?: number;
+    capture_stopped: 0 | 1;
     /**
      * Spool lines whose message was judged Secrets and that this pull
      * rewrote without their text (blanked ones included).
@@ -171,12 +174,6 @@ export function defaultWhatsAppMediaRoots(
   return [resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media-root', env)];
 }
 
-export function defaultWhatsAppConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env);
-}
-
 /**
  * Where scripts/whatsapp-live-sync.ts reads and writes: the account's own
  * folder when it lives in one, else the places that script always used, which
@@ -189,10 +186,9 @@ export function whatsAppLiveSyncScriptPaths(
   homeDir: string | undefined = homedir(),
 ): { spoolDir: string; dbPath: string } {
   if (placedAccount(WHATSAPP_SOURCE_ID, env).layout === 'folder') {
-    return { spoolDir: defaultWhatsAppSpoolDir(env), dbPath: defaultWhatsAppConnectorStoreDbPath(env) };
+    return { spoolDir: defaultWhatsAppSpoolDir(env), dbPath: resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env) };
   }
-  const stateDir = legacyWhatsAppLiveSyncStateDir(env, homeDir ?? homedir());
-  return { spoolDir: join(stateDir, 'spool'), dbPath: join(stateDir, 'connector-store.db') };
+  return legacyWhatsAppLiveSyncPaths(env, homeDir ?? homedir());
 }
 
 // The store may also contain archive-import runs. Only a cursor shaped like the
@@ -213,7 +209,7 @@ function spoolPositionOf(cursor: string): string | undefined {
 /** The byte offset a committed cursor stands at, when it carries one (not inside an over-long record). */
 function byteOffsetOf(cursor: string | undefined): number | undefined {
   if (cursor === undefined) return undefined;
-  const found = /@(\d+)$/u.exec(spoolPositionOf(cursor) ?? '');
+  const found = /@(\d+)(?:~r[0-9a-f.]+)?$/u.exec(spoolPositionOf(cursor) ?? '');
   return found ? Number(found[1]) : undefined;
 }
 
@@ -222,12 +218,6 @@ function lineCursorOf(cursor: string | undefined): string | undefined {
   if (cursor === undefined) return undefined;
   const position = spoolPositionOf(cursor);
   return position === undefined ? undefined : whatsAppSpoolLineCursor(position);
-}
-
-export function defaultWhatsAppInternalConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(WHATSAPP_SOURCE_ID, 'internal', env);
 }
 
 /**
@@ -259,7 +249,7 @@ export function createWhatsAppTierLane(options: {
     throw new Error('The WhatsApp lane\'s own store is secure_local.');
   }
   const env = options.env ?? process.env;
-  const internalDbPath = defaultWhatsAppInternalConnectorStoreDbPath(env);
+  const internalDbPath = resolvedStorePath(WHATSAPP_SOURCE_ID, 'internal', env);
   return createExistingStoreTierLane({
     setId: WHATSAPP_PERSONAL_SOURCE_ID,
     store: options.store,
@@ -289,7 +279,7 @@ export function createWhatsAppConnectorStore(
   env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
   return openConnectorStore({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, {
-    dbPath: defaultWhatsAppConnectorStoreDbPath(env),
+    dbPath: resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env),
     corpusId: WHATSAPP_LIVE_CORPUS_ID,
     family: 'chat',
     trustDomain: 'secure_local',
@@ -420,6 +410,15 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
  * read, and records a file only once its clearing succeeded, so a failure is
  * owed until a pull clears it. A pull that owes nothing reads no spool file.
  * A whole-spool pass still runs when the set of Secrets changed.
+ *
+ * Clearing the Secrets already known never waits on the listing: a file past
+ * the cursor that was never cleared, or that no longer holds what clearing
+ * recorded of it (rewritten, replaced, or a reset sent the cursor back past
+ * it), is cleared of them from its start on every pull until it is recorded,
+ * whatever the cursor or the pull's item limit. That clearing is bounded by
+ * bytes per pull (at least one whole file), and certifies none of its lines
+ * for a later judgment: those lines are cleared again as the cursor reaches
+ * them.
  */
 export function clearWhatsAppSpoolSecrets(options: {
   spoolDir: string;
@@ -432,6 +431,8 @@ export function clearWhatsAppSpoolSecrets(options: {
   throughOffset?: number;
   /** Maps a media path a spool line names at the account's old place to the account folder (`whatsappMovedPathMapper`). */
   relocateMediaPath?: (path: string) => string;
+  /** The bytes a pull may read clearing known Secrets ahead of the cursor (default 32 MiB; at least one whole file). */
+  aheadBudgetBytes?: number;
 }): CaptureSpoolRedactionResult {
   const redact = (window: { from?: string; through: string }, judge: SpoolSecretJudge) => redactWhatsAppLiveSpoolSecrets({
     spoolDir: options.spoolDir,
@@ -459,31 +460,37 @@ export function clearWhatsAppSpoolSecrets(options: {
     const before = spoolFileIdentity(path);
     if (!before) continue;
     const known = recorded[file];
-    // The same file holding the same bytes up to where clearing reached: anything after it was appended.
-    const same = known !== undefined && known.identity === before.identity && before.size >= known.offset
-      && spoolBoundaryHolds(path, known.offset, known.boundary);
+    const same = holds(path, before, known);
+    // How far the record is certified for a later judgment (a file cleared ahead of the cursor: none of it).
+    const certified = known?.judgedLines ?? 0;
     // A file before the cursor's is cleared whole; the cursor's own, up to the cursor. A file that broke the
     // spool contract (or was never cleared) keeps none of its old boundaries: it is cleared whole, from its start.
     const end = same && file === throughFile ? throughLine : ALL_LINES;
-    if (same && (end === ALL_LINES ? before.size === known.size : known.lines >= end)) {
-      next[file] = known;
+    if (same && (end === ALL_LINES ? before.size === known.size && certified >= known.lines : certified >= end)) {
+      next[file] = known!;
       continue;
     }
-    const start = same ? known.lines : 0;
+    const start = same ? Math.min(certified, known.lines) : 0;
+    // Where this scan stops is fixed before it starts: the lines the file holds now (a whole file) or the cursor's.
+    // A line appended while it runs is past that boundary, so it is owed to the next pull, never certified unread.
+    const scanned = end === ALL_LINES
+      ? terminatedLinesEnd(path)
+      : { lines: end, offset: options.throughOffset ?? offsetAfterLines(path, end) };
+    if (scanned === undefined || scanned.offset === undefined) continue;
     try {
-      const cleared = redact({
-        from: `${file}:${start}`,
-        through: `${file}:${end === ALL_LINES ? Number.MAX_SAFE_INTEGER : end}`,
-      }, judge);
+      const cleared = redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge);
       if (cleared.recordsRedacted + cleared.recordsBlanked > 0) rewritten.add(file);
       result = addCaptureSpoolRedactions(result, cleared);
     } catch (error) {
       failure = error;
       break;
     }
-    // Recorded as the file is now, after its own rewrite: the identity (its first line may have changed) and the
-    // digest of the bytes that end where clearing reached.
-    const entry = clearedFileNow(path, end, end === ALL_LINES ? undefined : options.throughOffset);
+    // Recorded at the boundary scanned, as the file is after its own rewrite (its first line may have changed): the
+    // size is the one before the scan, so anything written since is owed.
+    // Certified up to what was judged: all of it, but for the cursor's own file cleared whole, only up to the cursor
+    // (what lies past it is not judged yet).
+    const judged = file === throughFile ? Math.min(scanned.lines, throughLine) : scanned.lines;
+    const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size, judged);
     if (entry) next[file] = entry;
     else delete next[file];
   }
@@ -491,6 +498,33 @@ export function clearWhatsAppSpoolSecrets(options: {
   const present = new Set(files);
   for (const [file, known] of Object.entries(recorded)) {
     if (next[file] === undefined && present.has(file) && file >= (failure === undefined ? throughFile : '')) next[file] = known;
+  }
+  // Ahead of the cursor: every file never cleared, or no longer as clearing recorded it, is cleared of the Secrets
+  // already known, from its start, within the byte budget (one whole file at least). Its lines stay uncertified.
+  if (failure === undefined) {
+    let budget = options.aheadBudgetBytes ?? WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES;
+    for (const file of files) {
+      if (file <= throughFile) continue;
+      const path = join(options.spoolDir, file);
+      const before = spoolFileIdentity(path);
+      if (!before) continue;
+      if (holds(path, before, next[file])) continue;
+      if (budget <= 0) break;
+      const scanned = terminatedLinesEnd(path);
+      if (scanned === undefined) continue;
+      try {
+        const cleared = redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge);
+        if (cleared.recordsRedacted + cleared.recordsBlanked > 0) rewritten.add(file);
+        result = addCaptureSpoolRedactions(result, cleared);
+      } catch (error) {
+        failure = error;
+        break;
+      }
+      budget -= scanned.offset;
+      const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size, 0);
+      if (entry) next[file] = entry;
+      else delete next[file];
+    }
   }
   options.ledger.writeMeta(CLEARED_FILES_KEY, JSON.stringify(next));
   refreshIndex(options.spoolDir, rewritten);
@@ -504,7 +538,8 @@ export function clearWhatsAppSpoolSecrets(options: {
     // A whole-spool pass may have rewritten any file: every record of a file is taken again, at the boundary it had.
     for (const [file, known] of Object.entries(next)) {
       // Taken again at the boundary it had, never past it: the sweep cleared only what the window had.
-      const entry = clearedFileNow(join(options.spoolDir, file), known.lines, known.offset, known.size);
+      // What it certified is kept as it was: the sweep certifies nothing new.
+      const entry = clearedFileNow(join(options.spoolDir, file), known.lines, known.offset, known.size, known.judgedLines);
       if (entry) next[file] = entry;
       else delete next[file];
     }
@@ -526,24 +561,39 @@ interface ClearedFile {
   offset: number;
   boundary: string;
   size: number;
+  /**
+   * The lines of it certified for a later judgment: all `lines` once the
+   * cursor has passed them, none for a file cleared ahead of the cursor. A
+   * record without it (older, or unreadable) certifies none, so it is cleared
+   * again in full once.
+   */
+  judgedLines: number;
 }
 
 const ALL_LINES = -1;
+/** What a pull may read clearing known Secrets ahead of the cursor (at least one whole file). */
+export const WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
+
+/** The same file holding the same bytes up to where clearing reached: anything after it was appended. */
+function holds(path: string, now: { identity: string; size: number }, known: ClearedFile | undefined): known is ClearedFile {
+  return known !== undefined && known.identity === now.identity && now.size >= known.offset
+    && spoolBoundaryHolds(path, known.offset, known.boundary);
+}
 const CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 
 /**
- * A file's cleared record as the file is now: through `lines` lines at
- * `offset` (`ALL_LINES`: every terminated line, counted now), never past what
- * was cleared.
+ * A file's cleared record at the boundary that was scanned (`lines` lines,
+ * ending at `offset`), with its identity and the digest there as the file is
+ * now, and the lines of it certified for a later judgment. Never recounted: a
+ * boundary is what a scan reached, not what the file holds by the time it is
+ * recorded. Every record is made here, so none loses what it certified.
  */
-function clearedFileNow(path: string, lines: number, offset: number | undefined, size?: number): ClearedFile | undefined {
+function clearedFileNow(path: string, lines: number, offset: number, size: number, judgedLines: number): ClearedFile | undefined {
   const identity = spoolFileIdentity(path);
   if (!identity) return undefined;
-  const reached = lines === ALL_LINES ? terminatedLinesEnd(path) : { lines, offset: offset ?? offsetAfterLines(path, lines) };
-  if (reached === undefined || reached.offset === undefined) return undefined;
-  const boundary = spoolBoundaryDigest(path, reached.offset);
+  const boundary = spoolBoundaryDigest(path, offset);
   if (boundary === undefined) return undefined;
-  return { identity: identity.identity, lines: reached.lines, offset: reached.offset, boundary, size: size ?? identity.size };
+  return { identity: identity.identity, lines, offset, boundary, size, judgedLines: Math.min(judgedLines, lines) };
 }
 
 function refreshIndex(spoolDir: string, files: ReadonlySet<string>): void {
@@ -566,7 +616,11 @@ function readClearedFiles(ledger: TierLedger): Record<string, ClearedFile> {
     for (const [file, entry] of Object.entries(parsed)) {
       if (entry && typeof entry.identity === 'string' && typeof entry.boundary === 'string'
         && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines) && entry.lines >= 0
-        && Number.isSafeInteger(entry.size)) valid[file] = entry;
+        && Number.isSafeInteger(entry.size)) {
+        // Fails closed: a missing or unreadable certification certifies nothing.
+        const judgedLines = Number.isSafeInteger(entry.judgedLines) && entry.judgedLines >= 0 ? Math.min(entry.judgedLines, entry.lines) : 0;
+        valid[file] = { ...entry, judgedLines };
+      }
     }
     return valid;
   } catch {

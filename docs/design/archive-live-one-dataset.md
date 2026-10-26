@@ -90,7 +90,7 @@ decides again.
   item written to one leg only, or left as a Secret's location or a
   deletion's tombstone, still has its version, so an old export never
   restores what was deleted or made a Secret, nor overwrites a partly
-  written item. A record of an incomplete item's own version completes it.
+  written item. A record of an incomplete item's own version completes it (an item is incomplete while a write intent for it is pending).
 - At the same version, a record applies only when it brings content the
   stored item lacks: mail outside the Gmail window is names-only, and a live
   WhatsApp photo is metadata only (the bridge downloads voice notes alone).
@@ -134,9 +134,15 @@ unchanged.
   its minute, its sender and its text (caption included). The sender is
   "me" for the owner's own messages, and otherwise the contact's saved name
   from the bridge's contact store, which is what the export shows, falling
-  back to the push name. Messages with equal keys are counted on each side,
-  and the dataset keeps as many as the side with more: each side's count is
-  at most the truth, so identical messages are neither lost nor doubled.
+  back to the push name. Matching is strict, and done on the import side
+  only, against the live messages already stored: an export message is one
+  of them only when exactly one export message holds its key (its whole
+  minute counted) and exactly one live message ever held it, in any version,
+  as its current one. Media without words is never matched. Anything else is
+  its own item: when in doubt, a visible duplicate, never a wrong merge. A
+  live message always keeps its own id, so one the bridge delivers after an
+  export already brought it is a second item. That is an accepted residual:
+  exports are mostly past history, and a stored id never changes.
   Live capture periods cannot replace this: the bridge receives missed
   messages after a reconnect with their original times, and a full queue
   drops a message while capture is running.
@@ -385,18 +391,63 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   item resumes from the record that brought its content, so a pass cut between
   the two does not lose it. The routing plan is keyed by the item's identity,
   its version and a digest of the text and names judged, so two bodies of one
-  version are each judged. Known residual: a deletion of an item no pass ever
-  stored leaves no row, so a later tie or unversioned body can still be stored.
+  version are each judged.
 - **Order and resume (2026-10-26).** A page emits an item before its
   children, and a page cut resumes at the earliest record any unyielded item
   still depends on (a merged names-only item depends on the record that
   brought its body), so a cut never loses a body or stores a child ahead of
-  its parent. A names-only version move (`content_unread`) waits for the end of
-  the run and happens only when every active row of the item holds one version,
-  so a body one leg has not written is never hidden behind a newer version. A
-  deletion of the version a half-finished deletion holds finishes it (content
-  never does), and an item the listing skipped whose stored state is incomplete
-  counts as unstored.
+  its parent.
+- **Write intents (2026-10-26).** An item's legs are written one after the
+  other, so a crash between them used to leave a half state that the next pass
+  had to interpret from the rows (an "incomplete" rule in the intake, a live
+  tie exception, a deferred names-only version move, a hold on skipped
+  incomplete items). That is gone. The ledger holds one **write intent** per
+  item (`tier_write_intents`, schema 10), written in the same transaction as
+  the placement and cleared last, after every leg has its write. Kinds:
+  `deletion` and `secret` (redone from the intent alone), `advance` (a version
+  move over rows that hold the item; the intent is the redo), `content` and
+  `names` (a body or names the legs are owed). At the start of every pass,
+  before any record is read, the set finishes every deletion, secret and
+  advance intent, and the children of a finished deletion go with it. While an
+  intent is pending the lookup reports the intended state (the intent's version
+  and `incomplete`), and reads hide an item with a deletion or Secret intent at
+  once. No path lowers a stored version: a names-only record moves a version by
+  an `advance` intent put in place of the content intent it follows, once every
+  leg has its write. Deviation from "keep the body in the Private held copy":
+  the body and the names are not kept in the ledger, so a `content` or
+  `names` intent is repaired by replaying its own record; when a newer
+  names-only record took an older record's body, the intent also holds that
+  record's version (`bodyVersion`, read back as `owedBodyVersion`) so the replay
+  applies that record at the item's version; the owed body stays owed through
+  names-only records of any version until a body or a deletion resolves it.
+  Residuals: an owed `content` or `names` write waits for its own record; a newer
+  names-only record holds behind an earlier run's owed write until that write is
+  finished.
+- **Pending states hold the boundary (2026-10-26).** The lookup reads the
+  persisted intent before any row, and no row is never read as absent: a pending
+  Secret or deletion is the item's state (tombstoned, at its version) even when
+  no store holds a row yet, and a pending body or names write is the item at
+  its version, incomplete, with the version of the record whose body is owed,
+  so an older record never replaces it and the owed write is replayed. A deletion of an item no store ever held is
+  recorded as a tombstone row in the Private store (with a `deletion` intent
+  that carries the item's family, so a cut-off write is finished from the intent
+  alone), which also refuses older versions afterwards; rows that are all
+  tombstones the ledger marks as such an unseen deletion are not a lane's item,
+  so a newer record routes it afresh; a tombstone a lane left keeps the lane's
+  placement. A
+  parent's deletion tombstones each leg's child at that leg's own version
+  (a cascade is not an event of the child), under a versionless `deletion`
+  intent written per child before its removal and cleared when it is whole,
+  so a failed removal is finished at the next pass start and hides the child
+  meanwhile, whatever becomes of the parent. A record whose body is empty
+  (text that is blank: authoritative for a connector that sent it, unlike a
+  record with no body at all) replaces the stored text in every leg before the
+  version moves, under a `content` intent so a cut is repeated by its replay.
+- **The hold survives a fetch (2026-10-26).** A held archive item's hold is
+  carried by whatever replaces it: the archive input decorates `fetchItem` as
+  well as `listItems`, and the local-index lane keeps the hold on both of its
+  `fetchItem` replacements. `test/archive-import-hold-guard.test.ts` fails when
+  a connector method is added without a decision (`holds` or `neutral`).
 - **A refused item is told (2026-10-26).** When placement refuses an item (for
   example a trust domain that does not match), the import still completes but
   shows it as a gap, "Not imported" (`item_refused`), with the count, as the
@@ -440,7 +491,33 @@ Live WhatsApp capture, with no change to identities or stores
   offset its receipt was not taken for: a crash before clearing records its
   new boundary leaves the old record, whose window is checked on the next
   pull. The listing's cursor carries no receipt and is never what decides
-  whether a Secret is cleared; clearing's own record does.
+  whether a Secret is cleared; clearing's own record does. A boundary is
+  what a scan reached, fixed before the scan starts (the lines the file held
+  then, or the cursor's), never recounted after: a line appended while
+  clearing runs is owed to the next pull. A listing reset (a file replaced,
+  cut or rewritten under a cursor, or the disposable index rebuilt, since it
+  then no longer knows what the files held) adds one to a single durable
+  counter beside the spool (`spool-resets.ts`), written before the index
+  forgets anything. Every cursor carries the count as `~r<count>`; a cursor
+  with another count, or none, reads the whole spool again from its start.
+  That is safe because intake is idempotent by identity and version, and a
+  reset is rare enough for a full replay to be cheap. Nothing is owed or
+  settled per reader: a reader is caught up when its cursor carries the
+  current count, so one reader catching up never affects another, and a pass
+  that fails before its cursor commits reads the spool again. A counter or
+  index that cannot be opened fails the listing before anything is forgotten,
+  and no cursor is handed out; the first index build the counter sees counts
+  as a reset too. Clearing the Secrets already known never waits on a
+  replay: a file past the cursor that was never cleared, or no longer holds
+  what clearing recorded of it, is cleared of them from its start on the
+  next pull, whatever the cursor or item limit (bounded by bytes, one whole
+  file at least), with none of its lines certified for a later judgment. Every
+  other durable write that comes before the one
+  that depends on it is safe to repeat: a Secrets rewrite before its cleared
+  record (redone, the same rewrite), the index's rows before the tier set's
+  cursor (read again from the old cursor, the rows already there), and the
+  index's refresh after clearing (a missed refresh reads as a replacement,
+  counted and read again).
 - **One builder, the intake rule.** The spool is the WhatsApp connector's
   live input: its records become items through the connector's one record
   builder under the shared intake rule (`core/source-inputs.ts`), versions
@@ -541,30 +618,29 @@ The WhatsApp chat export is an input of the WhatsApp connector
   (its second when the export shows seconds), its sender and its text
   without media markers; keys are digests. The sender is "me" for the
   owner; otherwise the contact's saved name, which the bridge now spools
-  (`sender_contact_name`), else the push name. Occurrences are counted on
-  the key itself in the export's order (two photos in one minute are two),
-  the count carried in the resume point across a page that ends inside a
-  minute. The live side is the spool index's digests of each live
-  message's current version (`live_keys`, built as the spool is indexed,
-  within a read budget; no rescan of the spool, no text). The export's k-th
-  message with a key is the k-th live message with it, so intake keeps one
-  item. An unmatched message with a live message of the chat within a
-  minute is counted as a near-miss (`match_near_miss`, How it was read).
-- **Both directions** (`match-ledger.ts`, `export-matches.sqlite` in the
-  spool folder, durable, digests and ids only). An export message live does
-  not hold gets an id of its own, recorded by its key and occurrence: a
-  re-import reuses it. When the bridge delivers that message later (it was
-  offline), indexing it finds the recorded id under the same key and
-  occurrence and aliases the live message to it: live capture stores it as
-  the imported item, never a second copy, and reads, reactions and Secrets
-  clearing follow the alias. (Rows are never re-keyed, as section 7 says;
-  the live message takes the item's id instead.)
+  (`sender_contact_name`), else the push name. On the export side a key's
+  messages are counted over its whole minute: the count carries in the
+  resume point across a page that ends inside a minute, and the rest of
+  that minute is read ahead (bounded; a fuller minute is in doubt). The
+  live side is the spool index's digests (`live_keys` for each message's
+  current version, `live_version_keys` for every key any version had;
+  built as the spool is indexed, within a read budget; no rescan, no
+  text). A message is the stored live one only when one export message and
+  one live message hold the key, and it is that message's current key;
+  media without words never. Otherwise it is its own item, with an id from
+  its key and occurrence, so a re-import reuses it. An unmatched message
+  with a live message of the chat within a minute is counted as a
+  near-miss (`match_near_miss`, How it was read).
+- **One direction.** Matching is the import's alone: live capture never
+  claims an imported item, and a live message keeps its own id always. A
+  message the bridge delivers after an import brought it is a second item,
+  a visible duplicate (section 4).
 - **The owner.** The export shows the owner's own name. The name under which
   the sample's messages match live capture's own messages most is taken as
   the owner's.
 - **Time zone.** Chosen on the first pass from the export's messages in the
   window live capture covers (its first and last message, a day either
-  side; up to 2,000 messages within 256 MiB of the export): this computer's
+  side; up to 50,000 messages within 1 GiB of the export): this computer's
   zone first, then every zone whose offsets on the sample's days differ,
   keeping the one under which most keys match; converted with each line's
   own date. No overlap or no match: this computer's zone, reported as

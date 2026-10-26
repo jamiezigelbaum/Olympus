@@ -78,28 +78,64 @@ describe('connector-store mount declaration guards', () => {
   // whatever family/trustDomain the declaration stated.
   test('refuses a declaration pointing a new corpus id at a lane store dbPath', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-mount-dbpath-'));
-    const dbPath = join(dir, 'dropbox.sqlite');
+    // The lane's store sits where its layout puts it, under a home of its own.
     const laneStore = createDropboxConnectorStore({
-      OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: dbPath,
+      HOME: join(dir, 'home'),
       OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(dir, 'no-exclusions.json'),
     });
+    const dbPath = laneStore.dbPath;
     const failures: string[] = [];
     try {
-      const mounts = parseConnectorStoreMountsFromEnv(JSON.stringify([{
-        dbPath,
-        corpusId: 'internal.dropbox.files',
-        family: 'file',
-        trustDomain: 'internal',
-      }]), {
+      const mounts = parseConnectorStoreMountsFromEnv(JSON.stringify([
+        // A source without a folder layout is placed by its dbPath: over the lane's file it is refused.
+        { dbPath, corpusId: 'x-lab.fixture.items', family: 'x-lab', trustDomain: 'x-lab' },
+        // A source with a folder layout names no path: its dbPath is ignored, and with
+        // no lane of its own open it has nothing to add a principal to.
+        { dbPath, corpusId: 'internal.dropbox.files', family: 'file', trustDomain: 'internal' },
+      ]), {
         collidingStores: [laneStore],
         reportFailure: (message) => failures.push(message),
       });
 
       expect(mounts).toEqual([]);
-      expect(failures).toHaveLength(1);
-      expect(failures[0]).toContain('internal.dropbox.files skipped:');
+      expect(failures).toHaveLength(2);
+      expect(failures[0]).toContain('x-lab.fixture.items skipped:');
       expect(failures[0]).toContain('already mounted as corpus');
       expect(failures[0]).toContain(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID);
+      expect(failures[1]).toContain('internal.dropbox.files skipped:');
+      expect(failures[1]).toContain('lane is not open');
+    } finally {
+      laneStore.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a declaration of a placed source adds its principal to the lane store and ignores its dbPath', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-mount-placed-'));
+    const laneStore = createDropboxConnectorStore({
+      HOME: join(dir, 'home'),
+      OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(dir, 'no-exclusions.json'),
+    });
+    const elsewhere = join(dir, 'elsewhere.sqlite');
+    const failures: string[] = [];
+    try {
+      const mounts = parseConnectorStoreMountsFromEnv(JSON.stringify([{
+        dbPath: elsewhere,
+        corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
+        family: 'file',
+        trustDomain: 'secure_local',
+        principalProvider: 'dropbox',
+        principalAccountScope: 'personal',
+      }]), {
+        collidingStores: [laneStore],
+        reportFailure: (message) => failures.push(message),
+      });
+
+      expect(failures).toEqual([]);
+      expect(mounts).toHaveLength(1);
+      expect(mounts[0]!.store).toBe(laneStore);
+      expect(mounts[0]!.principal).toBeDefined();
+      expect(existsSync(elsewhere)).toBe(false);
     } finally {
       laneStore.close();
       rmSync(dir, { recursive: true, force: true });

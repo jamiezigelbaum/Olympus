@@ -8,12 +8,11 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { WHATSAPP_SOURCE_ID } from '../../src/core/olympus-layout.ts';
 import { placeOwnedAccount } from '../../src/core/source-storage.ts';
+import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import {
   createWhatsAppConnectorStore,
   createWhatsAppConnectorStoreSyncHandler,
   createWhatsAppTierLane,
-  defaultWhatsAppConnectorStoreDbPath,
-  defaultWhatsAppInternalConnectorStoreDbPath,
   defaultWhatsAppSpoolDir,
 } from '../../src/workers/whatsapp/store-sync.ts';
 import { registerLiveSeedHook } from './archive-live-seeds.ts';
@@ -47,8 +46,8 @@ function spoolLine(index: number, [at, sender, text]: readonly [string, string |
 registerLiveSeedHook(WHATSAPP_SEED_HOOK, {
   provider: 'whatsapp',
   stores: ({ env }) => [
-    { tier: 'private', path: defaultWhatsAppConnectorStoreDbPath(env) },
-    { tier: 'personal', path: defaultWhatsAppInternalConnectorStoreDbPath(env) },
+    { tier: 'private', path: resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env) },
+    { tier: 'personal', path: resolvedStorePath(WHATSAPP_SOURCE_ID, 'internal', env) },
   ],
   async seed({ env }) {
     // What pairing leaves: the account, and the bridge's spool in its folder.

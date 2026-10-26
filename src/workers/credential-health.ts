@@ -1,4 +1,4 @@
-import { olympusDataPath } from '../core/olympus-layout.ts';
+import { sharedDataPath } from '../core/olympus-layout.ts';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir, uptime } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -198,7 +198,7 @@ export function defaultCredentialHealthReportPath(): string {
 }
 
 export function defaultCredentialBrokerStatePath(): string {
-  return olympusDataPath(process.env, 'credential-broker-state.json');
+  return sharedDataPath('credential-broker-state', process.env);
 }
 
 export function readCredentialHealthReport(path: string = defaultCredentialHealthReportPath()): CredentialHealthReport | undefined {

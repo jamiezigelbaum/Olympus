@@ -35,6 +35,7 @@
 // - The index is a cache of the spool: deleting it costs one catch-up pass.
 
 import { Database } from 'bun:sqlite';
+import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
@@ -43,7 +44,7 @@ import type { WhatsAppReactionEntry } from './reaction-index.ts';
 import { normalizeWhatsAppJid } from './reaction-index.ts';
 
 export const WHATSAPP_SPOOL_INDEX_FILE = 'spool-index.sqlite';
-const SCHEMA = 5;
+const SCHEMA = 7;
 
 export interface SpoolPlace {
   file: string;
@@ -97,6 +98,7 @@ export class WhatsAppSpoolIndex {
           DROP TABLE IF EXISTS meta;
           DROP TABLE IF EXISTS files;
           DROP TABLE IF EXISTS live_keys;
+          DROP TABLE IF EXISTS live_version_keys;
           DROP TABLE IF EXISTS chat_names;
           CREATE TABLE live_keys (
             chat TEXT NOT NULL, id TEXT NOT NULL, chat_jid TEXT NOT NULL, from_me INTEGER NOT NULL, time_ms INTEGER NOT NULL,
@@ -106,14 +108,20 @@ export class WhatsAppSpoolIndex {
             file TEXT NOT NULL, offset INTEGER NOT NULL,
             PRIMARY KEY (chat, id)
           ) WITHOUT ROWID;
-          CREATE INDEX live_keys_exact_m ON live_keys (exact_m, file, offset);
-          CREATE INDEX live_keys_exact_s ON live_keys (exact_s, file, offset);
+          CREATE INDEX live_keys_exact_m ON live_keys (exact_m);
+          CREATE INDEX live_keys_exact_s ON live_keys (exact_s);
           CREATE INDEX live_keys_loose_m ON live_keys (loose_m);
           CREATE INDEX live_keys_loose_s ON live_keys (loose_s);
           CREATE INDEX live_keys_unsent_m ON live_keys (unsent_m);
           CREATE INDEX live_keys_unsent_s ON live_keys (unsent_s);
           CREATE INDEX live_keys_chat_time ON live_keys (chat, time_ms);
           CREATE INDEX live_keys_file ON live_keys (file);
+          -- Every exact key any version of a live message had: a historical version is a candidate too.
+          CREATE TABLE live_version_keys (
+            key TEXT NOT NULL, chat TEXT NOT NULL, id TEXT NOT NULL, file TEXT NOT NULL,
+            PRIMARY KEY (key, chat, id)
+          ) WITHOUT ROWID;
+          CREATE INDEX live_version_keys_file ON live_version_keys (file);
           CREATE TABLE chat_names (name TEXT NOT NULL, chat TEXT NOT NULL, chat_jid TEXT NOT NULL, PRIMARY KEY (name, chat)) WITHOUT ROWID;
           CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL, indexed_to INTEGER NOT NULL, boundary TEXT NOT NULL) WITHOUT ROWID;
           CREATE TABLE messages (
@@ -169,22 +177,49 @@ export class WhatsAppSpoolIndex {
   /**
    * Brings the index in line with the files that are there (name to
    * identity): a file that is gone loses its rows; one whose identity changed
-   * loses them and is indexed again from its start.
+   * loses them and is indexed again from its start. `reset` is called first
+   * when any file was replaced, and must count it durably: only then does
+   * the index forget.
    */
-  reconcile(spoolDir: string): string[] {
+  reconcile(spoolDir: string, reset?: (replaced: readonly string[]) => void): string[] {
     const known = this.db.query('SELECT name, identity, indexed_to, boundary FROM files').all() as
       Array<{ name: string; identity: string; indexed_to: number; boundary: string }>;
     const replaced: string[] = [];
+    const gone: string[] = [];
     for (const { name, identity, indexed_to: indexedTo, boundary } of known) {
       const path = join(spoolDir, name);
       const now = spoolFileIdentity(path);
       // The same file, holding the same bytes up to where indexing reached: it was only appended to.
       if (now !== undefined && now.identity === identity && now.size >= indexedTo && spoolBoundaryHolds(path, indexedTo, boundary)) continue;
-      this.forgetFile(name);
       if (now !== undefined) replaced.push(name);
+      else gone.push(name);
     }
-    // The files that are there but no longer the ones indexed: a listing reads them again from their start.
-    return replaced.sort();
+    replaced.sort();
+    // The reset is counted first, and durably (spool-resets.ts); only then does the index forget what it held.
+    // A failure in between has counted it still, and finds the file again next time (one more reset, harmless).
+    if (replaced.length > 0) reset?.(replaced);
+    this.db.transaction(() => {
+      for (const name of [...gone, ...replaced]) this.forgetFile(name);
+    })();
+    return replaced;
+  }
+
+  /**
+   * This build of the index: a random id made when the index was built. The
+   * reset counter (spool-resets.ts) counts a build it has not seen as a reset:
+   * a rebuilt index no longer knows what the files held, so a breach of the
+   * spool contract in between could not be found.
+   */
+  generation(): string {
+    const row = this.db.query("SELECT value FROM meta WHERE key = 'generation'").get() as { value: string } | null;
+    if (row) return row.value;
+    const generation = randomBytes(8).toString('hex');
+    this.writeMeta('generation', generation);
+    return generation;
+  }
+
+  private writeMeta(key: string, value: string): void {
+    this.db.query('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(key, value);
   }
 
   /** Where indexing reached in a file, with the file's identity and the digest that ends there. */
@@ -225,10 +260,12 @@ export class WhatsAppSpoolIndex {
 
   /** A file was replaced or is gone: what was indexed of it is dropped, and it is indexed again from its start. */
   forgetFile(file: string): void {
+    // Joins an enclosing transaction (reconcile's) when there is one.
     this.db.transaction(() => {
       this.db.query('DELETE FROM messages WHERE file = ?').run(file);
       this.db.query('DELETE FROM reactions WHERE file = ?').run(file);
       this.db.query('DELETE FROM live_keys WHERE file = ?').run(file);
+      this.db.query('DELETE FROM live_version_keys WHERE file = ?').run(file);
       this.db.query('DELETE FROM files WHERE name = ?').run(file);
       const mark = this.highWater();
       if (mark !== undefined && mark.file >= file) {
@@ -257,8 +294,9 @@ export class WhatsAppSpoolIndex {
   }
 
   /**
-   * A message's match keys (match-keys.ts: digests, no text), the newest
-   * line of a message being the one kept, and the name of its chat.
+   * A message's match keys (match-keys.ts: digests, no text): the newest
+   * line's are the message's current keys, and every version's exact keys
+   * are kept too. Also the name of its chat.
    */
   noteMatchKeys(input: {
     chatJid: string;
@@ -282,18 +320,28 @@ export class WhatsAppSpoolIndex {
     `).run(chat, input.id, input.chatJid, input.fromMe ? 1 : 0, input.keys.timeMs, input.mediaType ?? null, input.mediaSaved ? 1 : 0,
       input.keys.exactMinute, input.keys.exactSecond, input.keys.looseMinute, input.keys.looseSecond,
       input.keys.unsentMinute, input.keys.unsentSecond, place.file, place.offset);
+    for (const key of [input.keys.exactMinute, input.keys.exactSecond]) {
+      this.db.query('INSERT OR IGNORE INTO live_version_keys (key, chat, id, file) VALUES (?, ?, ?, ?)').run(key, chat, input.id, place.file);
+    }
     if (input.chatNameKey) {
       this.db.query('INSERT OR IGNORE INTO chat_names (name, chat, chat_jid) VALUES (?, ?, ?)').run(input.chatNameKey, chat, input.chatJid);
     }
   }
 
-  /** The `ordinal`-th live message (from 0, in spool order) with this exact key, at this precision. */
-  liveWithKey(precision: TimePrecision, key: string, ordinal: number): IndexedLiveMessage | undefined {
+  /**
+   * The one live message an exact key names, strictly: exactly one message
+   * ever had the key in any of its versions (a historical version is a
+   * candidate too), and the key is that message's current one. Otherwise
+   * none: in doubt, no match.
+   */
+  uniqueLiveWithKey(precision: TimePrecision, key: string): IndexedLiveMessage | undefined {
+    const candidates = this.db.query('SELECT chat, id FROM live_version_keys WHERE key = ? LIMIT 2').all(key) as Array<{ chat: string; id: string }>;
+    if (candidates.length !== 1) return undefined;
     const column = precision === 'second' ? 'exact_s' : 'exact_m';
     const row = this.db.query(`
-      SELECT id, chat_jid, from_me, time_ms, media_type, media_saved FROM live_keys WHERE ${column} = ?
-      ORDER BY file, offset LIMIT 1 OFFSET ?
-    `).get(key, ordinal) as { id: string; chat_jid: string; from_me: number; time_ms: number; media_type: string | null; media_saved: number } | null;
+      SELECT id, chat_jid, from_me, time_ms, media_type, media_saved FROM live_keys WHERE chat = ? AND id = ? AND ${column} = ?
+    `).get(candidates[0]!.chat, candidates[0]!.id, key) as
+      { id: string; chat_jid: string; from_me: number; time_ms: number; media_type: string | null; media_saved: number } | null;
     return row ? {
       id: row.id,
       chatJid: row.chat_jid,
@@ -302,14 +350,6 @@ export class WhatsAppSpoolIndex {
       ...(row.media_type !== null ? { mediaType: row.media_type } : {}),
       mediaSaved: row.media_saved === 1,
     } : undefined;
-  }
-
-  /** How many live messages with this exact key come before a place in the spool: a live message's rank among its key's. */
-  rankOf(precision: TimePrecision, key: string, place: SpoolPlace): number {
-    const column = precision === 'second' ? 'exact_s' : 'exact_m';
-    return (this.db.query(`
-      SELECT COUNT(*) AS n FROM live_keys WHERE ${column} = ? AND (file < ? OR (file = ? AND offset < ?))
-    `).get(key, place.file, place.file, place.offset) as { n: number }).n;
   }
 
   hasLooseKey(precision: TimePrecision, key: string): boolean {

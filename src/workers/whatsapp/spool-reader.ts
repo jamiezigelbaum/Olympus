@@ -18,6 +18,8 @@ import { spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 export const WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
 const CHUNK_BYTES = 256 * 1024;
 const NEWLINE = 0x0a;
+/** How much a read takes at a time to finish a record once its budget is spent. */
+const FINISH_STEP_BYTES = 4 * 1024;
 /** How far back from the end of the spool the newest record is looked for. */
 const NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
 
@@ -84,20 +86,28 @@ export function* spoolRecords(
     let oversized = skipping;
     let continued = skipping;
     let position = startOffset;
+    // Bytes are spent as records take them: a record read whole, or the part of one a read ends inside. What a
+    // read looked at past the last record it handed out is not spent: the next read takes it again.
+    let chargedTo = startOffset;
+    const charge = (to: number): void => {
+      if (budget) budget.bytesLeft -= to - chargedTo;
+      chargedTo = to;
+    };
     for (;;) {
       // A pause between records, or inside one being skipped; never inside one being held.
       if (budget && budget.bytesLeft <= 0 && pendingBytes === 0) {
         yield pauseAt(position, oversized, continued);
         return;
       }
-      const want = budget && oversized ? Math.max(1, Math.min(size, budget.bytesLeft)) : size;
+      // With a budget, a read takes no more than is left of it (a record already begun is finished in small steps),
+      // so what is spent is what was read.
+      const want = budget ? Math.max(1, Math.min(size, budget.bytesLeft > 0 ? budget.bytesLeft : FINISH_STEP_BYTES)) : size;
       const read = readSync(fd, chunk, 0, want, position);
       if (read === 0) {
         // An over-long fragment at the end is never read again: the next read goes on past it.
         if (oversized) yield pauseAt(position, true, continued);
         return;
       }
-      if (budget) budget.bytesLeft -= read;
       let cursor = 0;
       while (cursor < read) {
         const found = chunk.indexOf(NEWLINE, cursor);
@@ -114,8 +124,12 @@ export function* spoolRecords(
             pendingBytes += segment.length;
           }
         }
-        if (end === -1) break;
+        if (end === -1) {
+          charge(position + read);
+          break;
+        }
         const endOffset = position + end + 1;
+        charge(endOffset);
         if (oversized) {
           yield continued ? { kind: 'oversized', endOffset, continued: true } : { kind: 'oversized', endOffset };
         } else {

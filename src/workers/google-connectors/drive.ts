@@ -1,5 +1,4 @@
-import { olympusDataPath } from '../../core/olympus-layout.ts';
-import { resolvedStorePath } from '../../core/source-placement.ts';
+import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { createHash } from 'node:crypto';
 import type {
   RawItem,
@@ -682,7 +681,7 @@ export function defaultGoogleDriveRequestBudgetStatePath(
 ): string {
   const configured = env[GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured) return configured;
-  return olympusDataPath(env, 'google-drive-daily-request-budget.json');
+  return sharedDataPath('google-drive-request-budget', env);
 }
 
 /**
@@ -1007,18 +1006,6 @@ export function googleDriveIngestionExclusionMatcher(
     GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE,
     { enforceable: GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA },
   );
-}
-
-export function defaultGoogleDriveConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  return resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', env);
-}
-
-export function defaultGoogleDriveSecureConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  return resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'secure_local', env);
-}
-
-export function defaultGoogleDrivePublicConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  return resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'public_safe', env);
 }
 
 class RestGoogleDriveApiClient implements GoogleDriveApiClient {
