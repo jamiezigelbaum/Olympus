@@ -185,6 +185,7 @@ async def read_messages_with_client(
         reverse=reverse,
     ):
         normalized = normalize_message(message, account, str(chat_id), chat_title, chat_type)
+        await capture_message_media(message, normalized)
         sender_id = normalized.get("senderId")
         if isinstance(sender_id, str):
             display_name = sender_display_names.get(sender_id)
@@ -432,6 +433,7 @@ async def capture_gateway_event(
             chat_title_from_entity(entity),
             chat_type_from_entity(entity) if entity is not None else None,
         )
+        await capture_message_media(message, normalized)
         sender_id = normalized.get("senderId")
         if isinstance(sender_id, str):
             display_name = await cached_sender_display_name(
@@ -1453,6 +1455,86 @@ def display_name_from_entity(entity: Any) -> str | None:
     if not isinstance(title, str) or not title.strip():
         return None
     return title.strip()[:120]
+
+
+MEDIA_DIR_NAME = "media"
+MEDIA_MAX_BYTES_DEFAULT = 25 * 1024 * 1024
+MEDIA_MAX_BYTES_HARD_CAP = 512 * 1024 * 1024
+MEDIA_EXTENSIONS = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
+    "application/pdf": ".pdf", "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "video/mp4": ".mp4",
+    "text/plain": ".txt",
+}
+
+
+def media_dir() -> Path | None:
+    """Where the gateway keeps the media it captures: beside its spool, in the account's folder."""
+    spool = first_env("OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR", "OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR")
+    return Path(spool) / MEDIA_DIR_NAME if spool else None
+
+
+def media_max_bytes() -> int:
+    """The largest file the gateway keeps; 0 keeps none. A setting that does not read keeps none, never stops capture."""
+    value = os.environ.get("OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES", "").strip()
+    if value == "0":
+        return 0
+    try:
+        return positive_int_env("OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES", MEDIA_MAX_BYTES_DEFAULT, MEDIA_MAX_BYTES_HARD_CAP)
+    except SafeConfigError:
+        return 0
+
+
+async def capture_message_media(message: Any, normalized: dict[str, Any]) -> None:
+    """Keep a captured message's photo or file beside the spool, so its child item can be read.
+
+    Only the gateway keeps media (it has a spool folder), only a photo or a
+    document, and only up to the configured size (25 MB by default; 0 turns
+    it off). The file is named by the chat and the message, written to a
+    temporary name and renamed, and named on the message's attachment as
+    `mediaFile` (relative to the spool). Anything that goes wrong leaves the
+    attachment named and unreadable, never the capture failed.
+    """
+    attachments = normalized.get("attachments")
+    folder = media_dir()
+    if not folder or not isinstance(attachments, list) or not attachments:
+        return
+    limit = media_max_bytes()
+    attachment = attachments[0]
+    if limit <= 0 or not isinstance(attachment, dict):
+        return
+    kind = str(attachment.get("attachmentId", "")).split(":", 1)[0]
+    if kind not in ("photo", "document"):
+        return
+    size = attachment.get("sizeBytes")
+    if isinstance(size, int) and size > limit:
+        return
+    chat = str(normalized.get("conversationId", ""))
+    message_id = str(normalized.get("id", ""))
+    if not chat.lstrip("-").isdigit() and not chat.isidentifier():
+        return
+    if not message_id.lstrip("-").isdigit():
+        return
+    extension = ".jpg" if kind == "photo" else MEDIA_EXTENSIONS.get(str(attachment.get("mimeType", "")), ".bin")
+    relative = f"{MEDIA_DIR_NAME}/{chat}/{message_id}{extension}"
+    target = folder / chat / f"{message_id}{extension}"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(folder, 0o700)
+        os.chmod(target.parent, 0o700)
+        if not target.exists():
+            temporary = target.with_name(f".{target.name}.tmp.{os.getpid()}")
+            written = await message.download_media(file=str(temporary))
+            if not written:
+                return
+            if os.path.getsize(temporary) > limit:
+                os.unlink(temporary)
+                return
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, target)
+        attachment["mediaFile"] = relative
+        attachment["sizeBytes"] = os.path.getsize(target)
+    except Exception:
+        return
 
 
 def forward_origin_name(forward: Any) -> str | None:

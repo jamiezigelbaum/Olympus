@@ -2,7 +2,8 @@
 // Provider/session work remains in the thin Telethon helper; this module only
 // advances two trust-separated stores through the shared connector spine.
 
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile } from './media-child.ts';
 import { join } from 'node:path';
 import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
@@ -181,8 +182,21 @@ export function createTelegramConnectorStores(
   };
 }
 
+// A lane cursor the spine cut inside a page (core/source-inputs.ts: a record whose message and media child did not
+// both fit the pass) wraps the spool position the page started at: `~in1~<records>~<entries>~<position>`.
+const TRUNCATED_CURSOR = /^~in1~\d+~\d+~((?:\d{4}-\d{2}-\d{2}\.jsonl:[0-9]+)?)$/;
+const SPOOL_CURSOR = /^\d{4}-\d{2}-\d{2}\.jsonl:[0-9]+$/;
+
 export function sanitizeTelegramCaptureCursor(cursor: string | undefined): string | undefined {
-  return cursor && /^\d{4}-\d{2}-\d{2}\.jsonl:[0-9]+$/.test(cursor) ? cursor : undefined;
+  return cursor && (SPOOL_CURSOR.test(cursor) || TRUNCATED_CURSOR.test(cursor)) ? cursor : undefined;
+}
+
+/** The spool position a lane cursor stands at (the page's start for a cut one), or undefined for the spool's start. */
+export function telegramSpoolPosition(cursor: string | undefined): string | undefined {
+  if (!cursor) return undefined;
+  const cut = TRUNCATED_CURSOR.exec(cursor);
+  if (cut) return cut[1] ? cut[1] : undefined;
+  return SPOOL_CURSOR.test(cursor) ? cursor : undefined;
 }
 
 /**
@@ -279,15 +293,19 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       // under the cursor, is read from its start, and every boundary recorded in it goes with the cursor.
       const replacedFiles = new Set<string>();
       const boundaryHolds = (name: string, cursor: string): boolean => {
+        const position = telegramSpoolPosition(cursor);
+        if (!position) return true;
         const recorded = readBoundary(tierSet, name);
         // Trusted only on a receipt for exactly this cursor: a missing one, or one for another position (a crash
         // between the cursor's commit and its receipt), proves nothing about the bytes under it.
         if (!recorded || recorded.cursor !== cursor) return false;
-        const offset = telegramCaptureCursorOffset(spoolDir, cursor);
-        return offset !== undefined && spoolBoundaryHolds(join(spoolDir, cursorFile(cursor)), offset, recorded.digest);
+        const offset = telegramCaptureCursorOffset(spoolDir, position);
+        return offset !== undefined && spoolBoundaryHolds(join(spoolDir, cursorFile(position)), offset, recorded.digest);
       };
       const fileHolds = (cursor: string): boolean => {
-        const file = cursorFile(cursor);
+        const position = telegramSpoolPosition(cursor);
+        if (!position) return true;
+        const file = cursorFile(position);
         const recorded = tierSet.ledger.readMeta(`${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`);
         return recorded === undefined || !existsSync(join(spoolDir, file)) || sameSpoolFile(recorded, join(spoolDir, file));
       };
@@ -296,7 +314,8 @@ export function createTelegramConnectorStoreSyncHandler(options: {
         secureLocal: sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor),
       };
       for (const [name, cursor] of [['internal', laneCursors.internal], ['secure_local', laneCursors.secureLocal]] as const) {
-        if (cursor && (!fileHolds(cursor) || !boundaryHolds(name, cursor))) replacedFiles.add(cursorFile(cursor));
+        const position = telegramSpoolPosition(cursor);
+        if (cursor && position && (!fileHolds(cursor) || !boundaryHolds(name, cursor))) replacedFiles.add(cursorFile(position));
       }
       const cleared = tierSet.ledger.readMeta(TELEGRAM_SPOOL_CLEARED_KEY);
       if (cleared && sanitizeTelegramCaptureCursor(cleared) && (!fileHolds(cleared) || !boundaryHolds('cleared', cleared))) {
@@ -308,7 +327,9 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       }
       const placed = (cursor: string | undefined): string | undefined => {
         if (!cursor) return cursor;
-        if (!replacedFiles.has(cursorFile(cursor)) && telegramCaptureSpoolCursorState(spoolDir, cursor) === 'ok') return cursor;
+        const position = telegramSpoolPosition(cursor);
+        if (!position) return cursor;
+        if (!replacedFiles.has(cursorFile(position)) && telegramCaptureSpoolCursorState(spoolDir, position) === 'ok') return cursor;
         cursorResets += 1;
         return undefined;
       };
@@ -322,7 +343,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       // upserts are idempotent, while importing an unrelated replay cursor
       // could permanently skip preserved capture history.
       const preflightCursor = cursors.internal && cursors.secureLocal
-        ? earlierCursor(cursors.internal, cursors.secureLocal)
+        ? earlierPosition(cursors.internal, cursors.secureLocal)
         : undefined;
       const preflight = (options.preflightRead ?? readTelegramCaptureSpool)({
         spoolDir,
@@ -425,8 +446,9 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       ), sanitizeTelegramCaptureCursor(
         options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor,
       )]) {
-        if (!cursor) continue;
-        const file = cursor.slice(0, cursor.lastIndexOf(':'));
+        const position = telegramSpoolPosition(cursor);
+        if (!position) continue;
+        const file = cursorFile(position);
         const identity = spoolFileIdentity(join(spoolDir, file))?.identity;
         const key = `${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`;
         if (identity && tierSet.ledger.readMeta(key) !== identity) tierSet.ledger.writeMeta(key, identity);
@@ -447,6 +469,8 @@ export function createTelegramConnectorStoreSyncHandler(options: {
           ...(preflightCursor ? { from: preflightCursor } : {}),
           through: lanesReadThrough(options.stores),
         });
+        // A media child judged Secrets loses its kept file too: the spool's copy of its bytes.
+        removeSecretTelegramMedia(spoolDir, tierSet.ledger);
       } catch (error) {
         redactionFailed = true;
         console.error(
@@ -508,6 +532,15 @@ export function createTelegramConnectorStoreSyncHandler(options: {
   };
 }
 
+/** Remove the kept file of every live media child the ledger holds as Secrets. */
+function removeSecretTelegramMedia(spoolDir: string, ledger: TierLedger): void {
+  for (const { identity } of ledger.secretsIdentities()) {
+    if (identity.provider !== 'telegram' || !identity.providerItemId.endsWith(TELEGRAM_MEDIA_CHILD_SUFFIX) || !identity.providerConversationId) continue;
+    const messageId = identity.providerItemId.slice(0, -TELEGRAM_MEDIA_CHILD_SUFFIX.length);
+    for (const path of telegramLiveMediaFile(spoolDir, identity.providerConversationId, messageId)) rmSync(path, { force: true });
+  }
+}
+
 /** The day live capture began: the date of the spool's oldest file. */
 function telegramCaptureSince(spoolDir: string): string | undefined {
   try {
@@ -549,7 +582,7 @@ function lanesReadThrough(stores: TelegramConnectorStores): string | undefined {
   const secureLocal = sanitizeTelegramCaptureCursor(
     stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor,
   );
-  return internal && secureLocal ? earlierCursor(internal, secureLocal) : undefined;
+  return internal && secureLocal ? earlierPosition(internal, secureLocal) : undefined;
 }
 
 /**
@@ -678,12 +711,20 @@ function readBoundary(set: TieredStoreSet, name: string): { cursor: string; dige
 }
 
 function recordBoundary(set: TieredStoreSet, spoolDir: string, name: string, cursor: string | undefined): void {
-  if (!cursor) return;
-  const offset = telegramCaptureCursorOffset(spoolDir, cursor);
-  const digest = offset === undefined ? undefined : spoolBoundaryDigest(join(spoolDir, cursorFile(cursor)), offset);
+  const position = telegramSpoolPosition(cursor);
+  if (!cursor || !position) return;
+  const offset = telegramCaptureCursorOffset(spoolDir, position);
+  const digest = offset === undefined ? undefined : spoolBoundaryDigest(join(spoolDir, cursorFile(position)), offset);
   if (!digest) return;
   const value = JSON.stringify({ cursor, digest });
   if (set.ledger.readMeta(`${TELEGRAM_SPOOL_BOUNDARY_META_PREFIX}${name}`) !== value) set.ledger.writeMeta(`${TELEGRAM_SPOOL_BOUNDARY_META_PREFIX}${name}`, value);
+}
+
+/** The earlier of two lane cursors' spool positions; undefined (the start) when either is at the start. */
+function earlierPosition(left: string, right: string): string | undefined {
+  const a = telegramSpoolPosition(left);
+  const b = telegramSpoolPosition(right);
+  return a && b ? earlierCursor(a, b) : undefined;
 }
 
 function earlierCursor(left: string, right: string): string {

@@ -11,7 +11,7 @@
 import { dirname } from 'node:path';
 import { ARCHIVE_COMMON_FINDINGS, type ArchiveConnectorInput } from '../../core/archive-formats.ts';
 import type { RawItem, SourceConnectorInput, SourceRecordPage } from '../../core/contracts.ts';
-import type { SourceItemIdentity } from '../../core/source-index/types.ts';
+import { telegramMediaChild } from './media-child.ts';
 import { TELEGRAM_FINDINGS, telegramExportChat, telegramExportPages } from '../archive-import/telegram/connector.ts';
 import {
   telegramAccountEntryRecord,
@@ -26,49 +26,12 @@ export function telegramExportMediaLocator(archiveId: string, bindingId: string)
   return `archive-input-media:v1:${archiveId}:b:${bindingId}`;
 }
 
-// The child's key within its message (docs/design/child-items.md): Telegram's `media`, one per message, which
-// live capture computes too, whatever the export's path or whether the file is in the export. The child id is
-// `<parent>#child:<key>`, the rule of src/core/child-item-id.ts (#550), written out here until that lands.
-const TELEGRAM_CHILD_KEY = 'media';
-const CHILD_ITEM_ID_SEPARATOR = '#child:';
-
 function child(
   parent: RawItem,
   media: TelegramExportMedia,
   deferredBytes: RawItem['deferredBytes'],
 ): RawItem {
-  const providerItemId = `${parent.identity.providerItemId}${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
-  const identity: SourceItemIdentity = {
-    family: parent.identity.family,
-    provider: parent.identity.provider,
-    accountScope: parent.identity.accountScope,
-    providerItemId,
-    ...(parent.identity.providerConversationId ? { providerConversationId: parent.identity.providerConversationId } : {}),
-    ...(parent.identity.providerThreadId ? { providerThreadId: parent.identity.providerThreadId } : {}),
-    localItemId: `${parent.identity.accountScope}:${parent.identity.providerConversationId}:${providerItemId}`,
-    ...(parent.identity.sourceVersion ? { sourceVersion: parent.identity.sourceVersion } : {}),
-    parent: { providerItemId: parent.identity.providerItemId, localItemId: parent.identity.localItemId },
-  };
-  const meta = parent.metadata;
-  return {
-    identity,
-    mimeType: media.mimeType ?? 'application/octet-stream',
-    content: { kind: 'metadata_only' },
-    metadata: Object.freeze({
-      title: media.name,
-      name: media.name,
-      chat: meta['title'],
-      ...(typeof meta['sentAt'] === 'string' ? { sentAt: meta['sentAt'], authoredAt: meta['sentAt'] } : {}),
-      ...(typeof meta['senderId'] === 'string' ? { senderId: meta['senderId'] } : {}),
-      ...(typeof meta['senderDisplayName'] === 'string' ? { senderDisplayName: meta['senderDisplayName'], senderLabel: meta['senderDisplayName'] } : {}),
-      ...(typeof meta['chatType'] === 'string' ? { chatType: meta['chatType'] } : {}),
-      trustDomain: meta['trustDomain'],
-      corpusId: meta['corpusId'],
-      mediaKind: media.field,
-    }),
-    fetchedAt: parent.fetchedAt,
-    ...(deferredBytes ? { deferredBytes } : {}),
-  };
+  return telegramMediaChild(parent, { name: media.name, kind: media.field, ...(media.mimeType ? { mimeType: media.mimeType } : {}) }, deferredBytes);
 }
 
 export interface TelegramExportInputOptions {

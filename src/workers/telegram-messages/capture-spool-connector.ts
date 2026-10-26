@@ -10,6 +10,7 @@ import { resolvedRawPath } from '../../core/source-placement.ts';
 import type {
   RawItem,
   SourceConnector,
+  SourceConnectorFetchOptions,
   SourceConnectorInput,
   SourceConnectorListOptions,
   SourceConversationKind,
@@ -36,6 +37,7 @@ import {
 import { rememberSpoolOffset, spoolFileLines, spoolLineOffset } from './spool-lines.ts';
 import { telegramServiceContent } from '../archive-import/telegram/message.ts';
 import { telegramCaptureVersion, telegramRecordBuilder, type TelegramRecordItems } from './record-builder.ts';
+import { TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaBytes, telegramLiveMediaChild } from './media-child.ts';
 
 // Product capture and migration replay are independent writers with
 // independent cursors. Reusing the historical `telegram_spool_replay_*`
@@ -81,6 +83,8 @@ export interface TelegramCaptureSpoolRecord {
   capturedAt: string;
   /** The helper's capture sequence, which only grows; absent on records written before it existed. */
   captureSeq?: number;
+  /** The `<file>:<lines>` cursor just after this record, when the read knows it. */
+  position?: string;
   capturedItem: {
     item: RawItem;
     trustDomain: TelegramMessagesCorpusTrustDomain;
@@ -143,33 +147,44 @@ export function createTelegramCaptureSpoolConnector(options: {
   const bound = options.admitThroughCursor === undefined
     ? {}
     : { admitThroughCursor: options.admitThroughCursor };
+  const fetchSpoolItem = (localItemId: string): RawItem => {
+    // The newest record of the item wins, so the whole spool is read, a
+    // bounded read at a time.
+    let found: RawItem | undefined;
+    let cursor: string | undefined;
+    for (;;) {
+      const result = readTelegramCaptureSpool({
+        spoolDir,
+        trustDomain,
+        malformedPolicy: 'skip',
+        ...(cursor ? { cursor } : {}),
+        ...resolved,
+        ...bound,
+      });
+      for (const record of result.records) {
+        if (record.capturedItem.item.identity.localItemId === localItemId) {
+          found = record.capturedItem.item;
+        }
+      }
+      if (result.exhausted || !result.resumeCursor || result.resumeCursor === cursor) break;
+      cursor = result.resumeCursor;
+    }
+    if (!found) throw new Error('Telegram capture spool cannot fetch an unknown item.');
+    return found;
+  };
   const builder = telegramRecordBuilder({
     trustDomain,
     authenticate: async () => { assertTelegramCaptureSpoolDirectory(spoolDir); },
-    async fetchItem(localItemId: string): Promise<RawItem> {
-      // The newest record of the item wins, so the whole spool is read, a
-      // bounded read at a time.
-      let found: RawItem | undefined;
-      let cursor: string | undefined;
-      for (;;) {
-        const result = readTelegramCaptureSpool({
-          spoolDir,
-          trustDomain,
-          malformedPolicy: 'skip',
-          ...(cursor ? { cursor } : {}),
-          ...resolved,
-          ...bound,
-        });
-        for (const record of result.records) {
-          if (record.capturedItem.item.identity.localItemId === localItemId) {
-            found = record.capturedItem.item;
-          }
-        }
-        if (result.exhausted || !result.resumeCursor || result.resumeCursor === cursor) break;
-        cursor = result.resumeCursor;
+    async fetchItem(localItemId: string, fetchOptions?: SourceConnectorFetchOptions): Promise<RawItem> {
+      // A media child is its message's child, read from the file the helper kept.
+      if (localItemId.endsWith(TELEGRAM_MEDIA_CHILD_SUFFIX)) {
+        const parent = fetchSpoolItem(localItemId.slice(0, -TELEGRAM_MEDIA_CHILD_SUFFIX.length));
+        const media = telegramLiveMediaChild(parent, spoolDir);
+        const locator = fetchOptions?.deferredBytes?.locator ?? media?.deferredBytes?.locator;
+        if (!media || !locator) throw new Error('Telegram capture spool cannot fetch an unknown item.');
+        return telegramLiveMediaBytes(media, spoolDir, locator);
       }
-      if (!found) throw new Error('Telegram capture spool cannot fetch an unknown item.');
-      return found;
+      return fetchSpoolItem(localItemId);
     },
   });
   // The spool is the connector's live input: its records in their own shape,
@@ -208,8 +223,15 @@ export function createTelegramCaptureSpoolConnector(options: {
             ...resolved,
             ...bound,
           });
+          // A message's photo or file is its child: readable when the helper kept the file beside the spool.
+          const all = result.records.map((record) => {
+            const media = telegramLiveMediaChild(record.capturedItem.item, spoolDir);
+            return media ? { record, children: [media] } : { record };
+          });
           if (remaining !== undefined) remaining -= result.records.length;
-          const records = result.records.map((record) => ({ record }));
+          // A message and its child that do not both fit the pass are cut by the spine, which resumes inside the
+          // record next time (core/source-inputs.ts); the lane keeps that cursor (store-sync.ts).
+          const records = all;
           const next = result.resumeCursor ? { nextCursor: result.resumeCursor } : {};
           yield result.exhausted ? { records, ...next, done: true } : { records, ...next, done: false };
           if (result.exhausted) return;
@@ -328,7 +350,7 @@ export function readTelegramCaptureSpool(options: {
         }
         let record: TelegramCaptureSpoolRecord;
         try {
-          record = markCapture(parseTelegramCaptureSpoolRecord(line.text), name, lineIndex);
+          record = { ...markCapture(parseTelegramCaptureSpoolRecord(line.text), name, lineIndex), position: `${name}:${lineIndex}` };
         } catch {
           if (options.malformedPolicy !== 'skip') {
             throw new Error('Telegram capture spool found a malformed record.');

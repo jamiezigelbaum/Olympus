@@ -1,0 +1,125 @@
+// Live Telegram media as children (docs/design/archive-live-one-dataset.md, step 8): the capture helper keeps a message's photo or file
+// beside its spool, and the connector lists it as the message's `media` child, the same child an export brings, so both inputs bring the
+// same media. Synthetic records and bytes only.
+
+import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createTelegramCaptureSpoolConnector } from '../src/workers/telegram-messages/capture-spool-connector.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import {
+  INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
+  PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+  createTelegramConnectorStoreSyncHandler,
+  sanitizeTelegramCaptureCursor,
+} from '../src/workers/telegram-messages/index.ts';
+import { telegramSpoolPosition } from '../src/workers/telegram-messages/store-sync.ts';
+import { telegramLiveMediaChild } from '../src/workers/telegram-messages/media-child.ts';
+import { forgetSpoolOffsets } from '../src/workers/telegram-messages/spool-lines.ts';
+import { liveSpoolLine } from './support/telegram-spool-fixtures.ts';
+import { telegramChat, telegramFullExport, telegramPhoto } from './support/archive-fixtures-telegram.ts';
+import { telegramOneDatasetHarness } from './support/telegram-one-dataset-harness.ts';
+import { telegramFixtureIso } from './support/archive-fixtures-telegram.ts';
+
+const cleanups: Array<() => void> = [];
+const roots: string[] = [];
+afterEach(() => {
+  forgetSpoolOffsets();
+  while (cleanups.length) cleanups.pop()!();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+const ACCOUNT = 'telegram.personal';
+const photo = (mediaFile?: string) => ({ attachments: [{ attachmentId: 'photo:77', type: 'image', ...(mediaFile ? { mediaFile, sizeBytes: 21 } : {}) }] });
+
+describe('a live message\'s media is its child', () => {
+  test('a kept file is a readable child, keyed media, and its bytes are fetched from the file', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-telegram-media-'));
+    roots.push(root);
+    const spoolDir = join(root, 'spool');
+    mkdirSync(join(spoolDir, 'media', '-1000001'), { recursive: true });
+    writeFileSync(join(spoolDir, 'media', '-1000001', '1000.jpg'), 'synthetic jpeg bytes!');
+    writeFileSync(join(spoolDir, '2026-10-20.jsonl'), liveSpoolLine({ chat: '-1000001', id: '1000', text: 'the quay', sentAt: '2026-10-20T09:00:00Z', extra: photo('media/-1000001/1000.jpg') }));
+    const connector = createTelegramCaptureSpoolConnector({ spoolDir, trustDomain: 'internal' });
+    const items = [];
+    for await (const page of connector.listItems()) items.push(...page.items);
+    expect(items.map((item) => item.identity.providerItemId)).toEqual(['1000', '1000#child:media']);
+    const child = items[1]!;
+    expect(child.identity.parent).toEqual({ providerItemId: '1000', localItemId: `${ACCOUNT}:-1000001:1000` });
+    expect(child.deferredBytes).toEqual({ locator: 'telegram-live-media:v1:media/-1000001/1000.jpg', available: true, sizeBytes: 21 });
+    expect(child.metadata).toMatchObject({ name: 'Photo', mediaKind: 'photo' });
+    const fetched = await connector.fetchItem(child.identity.localItemId, { deferredBytes: { locator: child.deferredBytes!.locator } });
+    expect(fetched.content.kind).toBe('bytes');
+    expect(new TextDecoder().decode((fetched.content as { bytes: Uint8Array }).bytes)).toBe('synthetic jpeg bytes!');
+  });
+
+  test('a file the helper did not keep is a named child at the version without the capture mark, and a locator out of the media folder reads nothing', () => {
+    const parent = {
+      identity: { family: 'chat' as const, provider: 'telegram', accountScope: ACCOUNT, providerItemId: '1000', providerConversationId: '-1000001', localItemId: `${ACCOUNT}:-1000001:1000`, sourceVersion: `${ACCOUNT}:-1000001:1000:2026-10-20T09:00:00Z~at:2026-10-20T09:00:01.000Z:0000000000000001:2026-10-20.jsonl:0000000001` },
+      mimeType: 'text/plain', content: { kind: 'text' as const, text: 'x' }, metadata: { title: 'Chat', ...photo() }, fetchedAt: '2026-10-20T09:00:00Z',
+    };
+    const named = telegramLiveMediaChild(parent, '/nowhere')!;
+    expect(named.deferredBytes).toEqual({ locator: '', available: false });
+    expect(named.identity.sourceVersion).toBe(`${ACCOUNT}:-1000001:1000:2026-10-20T09:00:00Z`);
+    const escaping = telegramLiveMediaChild({ ...parent, metadata: { title: 'Chat', ...photo('media/../../etc/passwd') } }, '/nowhere')!;
+    expect(escaping.deferredBytes?.available).toBe(false);
+  });
+});
+
+describe('a pass that cannot hold a message and its child', () => {
+  test('with a one-item budget the spine cuts inside the record, the lane keeps that cursor, and the child lands next pass', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-telegram-media-cut-'));
+    roots.push(root);
+    const spoolDir = join(root, 'spool');
+    mkdirSync(join(spoolDir, 'media', '-1000001'), { recursive: true });
+    writeFileSync(join(spoolDir, 'media', '-1000001', '1000.jpg'), 'synthetic jpeg bytes!');
+    writeFileSync(join(spoolDir, '2026-10-20.jsonl'), liveSpoolLine({ chat: '-1000001', id: '1000', text: 'the quay', sentAt: '2026-10-20T09:00:00Z', extra: photo('media/-1000001/1000.jpg') }));
+    const internal = new LocalConnectorStore({ dbPath: join(root, 'i.sqlite'), corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, family: 'chat', trustDomain: 'internal' });
+    const secureLocal = new LocalConnectorStore({ dbPath: join(root, 's.sqlite'), corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
+    cleanups.push(() => { internal.close(); secureLocal.close(); });
+    const sync = createTelegramConnectorStoreSyncHandler({ stores: { internal, secureLocal }, spoolDir, maxItems: 1 });
+    await sync.pull();
+    // Cut inside the record: the message is stored, and the lane resumes at its child.
+    expect(internal.lastCompletedSyncRun('telegram_capture_spool_internal')?.cursor).toBe('~in1~0~1~');
+    expect(sanitizeTelegramCaptureCursor('~in1~0~1~')).toBe('~in1~0~1~');
+    expect(telegramSpoolPosition('~in1~3~1~2026-10-20.jsonl:7')).toBe('2026-10-20.jsonl:7');
+    const second = await sync.pull();
+    expect(second.counts.spool_cursor_resets).toBe(0);
+    expect(internal.lastCompletedSyncRun('telegram_capture_spool_internal')?.cursor).toBe('2026-10-20.jsonl:1');
+    expect(internal.itemPresence({ provider: 'telegram', accountScope: ACCOUNT, providerItemId: '1000#child:media', providerConversationId: '-1000001' }).active).toBe(true);
+  });
+});
+
+describe('both inputs bring the same media', () => {
+  test('an export\'s readable photo and a live record of the message that kept none are one child, and it stays readable', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    const message = telegramPhoto(0, 'the quay at dawn');
+    const dir = h.writeExport('Telegram Desktop', telegramFullExport({ chats: [telegramChat({ id: 1_000_001, messages: [message] })], withoutPersonalSections: true }), { [String(message.photo)]: 'synthetic jpeg bytes' });
+    const started = await h.startImport(dir, { confirmAccount: true });
+    if (!started.ok || started.status !== 'started') throw new Error(JSON.stringify(started));
+    await h.importAll(started.archive_id);
+    h.capture([{ chat: '-1000001', id: '1000', text: 'the quay at dawn', sentAt: telegramFixtureIso(0), extra: photo() }]);
+    await h.live.pull();
+    const children = h.rows().filter((row) => row.parent !== null);
+    expect(children.map((row) => row.id)).toEqual(['1000#child:media']);
+    expect(children[0]!.available).toBe(1);
+    expect(children[0]!.locator).toMatch(/^archive-input-media:v1:/);
+  });
+
+  test('a child judged Secrets loses the file the helper kept', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    mkdirSync(join(h.spoolDir, 'media', '-1000001'), { recursive: true });
+    const kept = join(h.spoolDir, 'media', '-1000001', '1000.jpg');
+    writeFileSync(kept, 'synthetic jpeg bytes!');
+    h.capture([{ chat: '-1000001', id: '1000', text: 'see the photo', sentAt: '2026-10-20T09:00:00Z', extra: photo('media/-1000001/1000.jpg') }]);
+    await h.live.pull();
+    expect(existsSync(kept)).toBe(true);
+    const ledger = h.live.archiveTarget().lane({ sourceId: 'telegram.messages', slot: 'default' } as never, h.env).set.ledger;
+    ledger.setOverride({ provider: 'telegram', accountScope: ACCOUNT, providerItemId: '1000#child:media', providerConversationId: '-1000001' }, { kind: 'tier', tier: 'secrets' });
+    await h.live.pull();
+    expect(existsSync(kept)).toBe(false);
+  });
+});
