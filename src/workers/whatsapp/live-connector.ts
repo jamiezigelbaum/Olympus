@@ -1278,7 +1278,8 @@ function spoolMessageText(message: SpoolMessage): string {
  * judge says is Secrets: its text, link preview, mentions, media path and
  * media re-download keys go (and the chat and sender names when the names
  * themselves were judged Secrets, also from a line whose text went earlier),
- * and the audio it saved under `mediaDir` is deleted. Its id, chat, time and
+ * and the media it saved under `mediaDir` or `mediaDirs` (audio, pictures,
+ * videos) is deleted. Its id, chat, time and
  * media type stay, and it is flagged so a replay judges it Secrets again.
  * Reaction lines name another message and are left alone. Cursors are this
  * spool's `<file>:<lines>`.
@@ -1289,8 +1290,10 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   from?: string;
   through?: string;
   judge: SpoolSecretJudge;
-  /** Where the bridge saves audio; a media path outside it is never deleted. */
+  /** Where the bridge saves audio; a media path outside it (and `mediaDirs`) is never deleted. */
   mediaDir?: string;
+  /** The other folders the bridge saves media in (pictures, videos). */
+  mediaDirs?: readonly string[];
   /**
    * Maps a media path a line names at the account's old state folder to the
    * same file in its account folder, for an account the boot migration moved
@@ -1301,21 +1304,23 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp account');
   const from = positionFromCursor(options.from);
   const through = positionFromCursor(options.through);
-  const mediaRoot = options.mediaDir ? existingRealPath(options.mediaDir) : undefined;
+  const mediaRoots = [...(options.mediaDir ? [options.mediaDir] : []), ...(options.mediaDirs ?? [])]
+    .map((dir) => existingRealPath(dir))
+    .filter((dir): dir is string => dir !== undefined);
   const relocate = options.relocateMediaPath ?? ((path: string): string => path);
   let owners: Map<string, Set<string>> | undefined;
   // Saved audio is deleted only when this message is the only one that names
   // it: the bridge names a file by message id alone, and an id is unique only
   // within its chat.
   const deleteOwnedMedia = (message: SpoolMessage): void => {
-    if (!message.mediaPath || !mediaRoot) return;
+    if (!message.mediaPath || mediaRoots.length === 0) return;
     owners ??= mediaPathOwners(options.spoolDir, relocate);
     // Keyed by the file itself, so a symlink and its target are one file.
     const real = existingRealPath(relocate(message.mediaPath));
     if (!real) return;
     const self = chatScopedKey(message.chatJid, message.id);
     if ([...(owners.get(real) ?? [])].some((owner) => owner !== self)) return;
-    deleteSavedMedia(real, mediaRoot);
+    deleteSavedMedia(real, mediaRoots);
   };
   // A line that gives up its path no longer holds the file, so the last
   // Secret line to name a shared file is the one that deletes it.
@@ -1412,12 +1417,15 @@ function existingRealPath(path: string): string | undefined {
  * media directory: a spool line is data, and must never be able to name some
  * other file for deletion.
  */
-function deleteSavedMedia(mediaPath: string | undefined, mediaRoot: string | undefined): void {
-  if (!mediaPath || !mediaRoot) return;
+function deleteSavedMedia(mediaPath: string | undefined, mediaRoots: readonly string[]): void {
+  if (!mediaPath || mediaRoots.length === 0) return;
   const real = existingRealPath(mediaPath);
   if (!real) return;
-  const inside = relative(mediaRoot, real);
-  if (!inside || inside.startsWith('..') || isAbsolute(inside)) return;
+  const inside = mediaRoots.some((root) => {
+    const from = relative(root, real);
+    return from !== '' && !from.startsWith('..') && !isAbsolute(from);
+  });
+  if (!inside) return;
   if (!statSync(real).isFile()) return;
   rmSync(real, { force: true });
 }

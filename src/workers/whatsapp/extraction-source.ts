@@ -14,6 +14,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { basename, relative, resolve, sep } from 'node:path';
 import type { DeferredBytesAnswer } from '../file-extraction/connector-source.ts';
 import type { WhatsAppChildReader } from './child-media.ts';
+import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import {
   FileExtractionSourceError,
   type ExtractionCandidateReader,
@@ -29,7 +30,6 @@ import type {
 } from '../file-extraction/types.ts';
 
 const MEDIA_MIME_FILTERS: readonly string[] = ['audio/*', 'video/*', 'image/*', 'application/pdf'];
-const CHILD_MARK = '#child:';
 
 export interface WhatsAppExtractionLocatorReader {
   localContent(
@@ -116,7 +116,7 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
   }
 
   async fetch(ref: ExtractionItemRef, options: ExtractionFetchOptions): Promise<FetchedBytes> {
-    if (ref.providerItemId.includes(CHILD_MARK)) return this.fetchChild(ref, options);
+    if (ref.providerItemId.includes(CHILD_ITEM_ID_SEPARATOR)) return this.fetchChild(ref, options);
     const located = await this.locators.localContent(ref.localItemId, 1);
     const locator = located?.locatorUri?.trim();
     if (!locator) throw new FileExtractionSourceError('source_item_not_found');
@@ -161,7 +161,7 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
   }
 
   private refFromRow(row: ExtractionCandidateRow): ExtractionItemRef | undefined {
-    const child = row.providerItemId?.includes(CHILD_MARK) === true;
+    const child = row.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true;
     if (
       row.provider !== this.provider
       || row.accountScope !== this.accountScope
