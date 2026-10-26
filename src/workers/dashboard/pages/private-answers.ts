@@ -249,7 +249,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       delete: W.delete,
       deleteAllConfirm: W.deleteAllConfirm,
       deleted: W.deleted,
-      deleteAllNothing: W.deleteAllNothing,
+      nothingDeleted: W.nothingDeleted,
       retrying: W.retrying,
       queued: W.queued,
       checkUnavailable: W.checkUnavailable,
@@ -466,8 +466,16 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       button.disabled = false;
       // What the server says it removed, for the release check to read (never shown).
       root.setAttribute('data-pa-removed', String(outcome.ok && typeof outcome.result.removed === 'number' ? outcome.result.removed : 0));
-      // A delete that removed nothing keeps its row and says why.
-      if (!outcome.ok || outcome.result.removed !== 1) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
+      // 410: the answer is not there (a retry after a lost reply, or deleted elsewhere), so its row goes quietly.
+      // Any other failure keeps the row and says why.
+      if (!outcome.ok && outcome.status !== 410) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
+      if (outcome.ok && outcome.result.removed !== 1) {
+        // Ok with nothing removed (an older worker): the worker's own list decides whether the row stays.
+        await poll();
+        var still = findRow(id);
+        if (still) message(still.querySelector('[data-pa-out]'), config.copy.nothingDeleted, true, still.querySelector('.paq').textContent);
+        return;
+      }
       if (selected === id) { selected = null; ++readVersion; }
       row.remove();
       empty();
@@ -479,6 +487,9 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     var all = root.querySelector('[data-pa-delete-all]');
     if (none) none.hidden = count !== 0;
     if (all) all.hidden = count === 0;
+    // "Nothing was deleted" is about rows still listed: an empty inbox has nothing left to say it of.
+    var note = root.querySelector('[data-pa-missing]');
+    if (note && count === 0 && note.textContent === config.copy.nothingDeleted) { note.hidden = true; note.textContent = ''; }
   }
   rows().forEach(bind);
   var all = root.querySelector('[data-pa-delete-all]');
@@ -489,12 +500,14 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     all.disabled = false;
     var removed = outcome.ok && typeof outcome.result.removed === 'number' ? outcome.result.removed : 0;
     root.setAttribute('data-pa-removed', String(removed));
-    // Rows go only when the server removed something: none removed while rows are shown is not a deletion.
-    if (outcome.ok && (removed > 0 || rows().length === 0)) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); }
-    else {
-      var note = root.querySelector('[data-pa-missing]');
-      if (note) { note.hidden = false; note.textContent = outcome.ok ? config.copy.deleteAllNothing : errorText(outcome); }
-    }
+    var note = root.querySelector('[data-pa-missing]');
+    if (outcome.ok && removed > 0) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); return; }
+    if (!outcome.ok) { if (note) { note.hidden = false; note.textContent = errorText(outcome); } return; }
+    // None removed: the worker's own list says what is left (the rows may have gone already). Only rows still
+    // listed are "nothing was deleted".
+    await poll();
+    if (note && rows().length > 0) { note.hidden = false; note.textContent = config.copy.nothingDeleted; }
+    empty();
   });
   function openFragment() {
     var id;

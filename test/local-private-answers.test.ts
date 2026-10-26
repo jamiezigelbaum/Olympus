@@ -1335,31 +1335,63 @@ describe('the Private answers page', () => {
   });
 
   // Release check, 2026-10-26: a delete the server answered "ok, removed 0" dropped its row, and a reload brought it back.
-  test('a delete that removed nothing keeps its row and says why', async () => {
-    for (const reply of [
-      { status: 410, body: { ok: false, error: { code: 'not_found', message: 'Olympus could not find this answer, so nothing was deleted. Reload to see your inbox as it is now.' } } },
-      { status: 503, body: { ok: false, error: { code: 'unavailable', message: 'Private answers cannot be changed right now, so nothing was deleted. Try again in a moment.' } } },
-      // An older worker's false success: removed 0 is not a deletion.
-      { status: 200, body: { ok: true, status: 'deleted', removed: 0 } },
-    ]) {
-      const page = renderAndRun(() => reply);
-      (page.document.querySelector('[data-pa-delete]') as unknown as { click(): void }).click();
-      await page.settle();
-      const row = page.document.querySelector('[data-pa-question="wq_1"]');
-      expect(row).not.toBeNull();
-      const line = row!.querySelector('[data-state="error"]');
-      expect(line).not.toBeNull();
-      if (reply.status !== 200) expect(line!.textContent).toBe((reply.body as { error: { message: string } }).error.message);
-      expect(page.document.querySelector('[data-pa-removed]')!.getAttribute('data-pa-removed')).toBe('0');
-    }
+  test('a delete the worker could not carry out keeps its row and says why', async () => {
+    const page = renderAndRun(() => ({ status: 503, body: { ok: false, error: { code: 'unavailable', message: 'Private answers cannot be changed right now, so nothing was deleted. Try again in a moment.' } } }));
+    (page.document.querySelector('[data-pa-delete]') as unknown as { click(): void }).click();
+    await page.settle();
+    const row = page.document.querySelector('[data-pa-question="wq_1"]');
+    expect(row).not.toBeNull();
+    expect(row!.querySelector('[data-state="error"]')!.textContent).toBe('Private answers cannot be changed right now, so nothing was deleted. Try again in a moment.');
+    expect(page.document.querySelector('[data-pa-removed]')!.getAttribute('data-pa-removed')).toBe('0');
   });
 
-  test('Delete all that removed nothing, or could not run, keeps the rows and says so', async () => {
-    const nothing = renderAndRun(() => ({ status: 200, body: { ok: true, status: 'deleted', removed: 0 } }));
-    (nothing.document.querySelector('[data-pa-delete-all]') as unknown as { click(): void }).click();
-    await nothing.settle();
-    expect(nothing.document.querySelector('[data-pa-question="wq_1"]')).not.toBeNull();
-    expect(nothing.document.querySelector('[data-pa-missing]')!.textContent).toBe('Nothing was deleted. Reload to see your inbox as it is now.');
+  test('a delete answered 410 (a retry after a lost reply) drops its row quietly', async () => {
+    const page = renderAndRun(() => ({ status: 410, body: { ok: false, error: { code: 'not_found', message: 'Olympus could not find this answer, so nothing was deleted. Reload to see your inbox as it is now.' } } }));
+    (page.document.querySelector('[data-pa-delete]') as unknown as { click(): void }).click();
+    await page.settle();
+    expect(page.document.querySelector('[data-pa-question="wq_1"]')).toBeNull();
+    expect(page.document.querySelector('[data-state="error"]')).toBeNull();
+    expect((page.document.querySelector('[data-pa-none]') as unknown as { hidden: boolean }).hidden).toBe(false);
+  });
+
+  test('an older worker\'s ok with nothing removed: the worker\'s list decides, and a row it still lists says nothing was deleted', async () => {
+    const listed = { id: 'wq_1', question: 'Where is the lease?', from: 'ChatGPT', askedAt: '2026-10-01T01:00:00Z', state: 'answered', unread: false };
+    const stays = renderAndRun((body) => (body.action === 'list'
+      ? { status: 200, body: { ok: true, olderRemoved: false, questions: [listed] } }
+      : { status: 200, body: { ok: true, status: 'deleted', removed: 0 } }));
+    (stays.document.querySelector('[data-pa-delete]') as unknown as { click(): void }).click();
+    await stays.settle();
+    const row = stays.document.querySelector('[data-pa-question="wq_1"]');
+    expect(row).not.toBeNull();
+    expect(row!.querySelector('[data-state="error"]')!.textContent).toBe('Nothing was deleted. Reload to see your inbox as it is now.');
+    const gone = renderAndRun((body) => (body.action === 'list'
+      ? { status: 200, body: { ok: true, olderRemoved: false, questions: [] } }
+      : { status: 200, body: { ok: true, status: 'deleted', removed: 0 } }));
+    (gone.document.querySelector('[data-pa-delete]') as unknown as { click(): void }).click();
+    await gone.settle();
+    expect(gone.document.querySelector('[data-pa-question="wq_1"]')).toBeNull();
+    expect(gone.document.querySelector('[data-state="error"]')).toBeNull();
+  });
+
+  test('Delete all that removed nothing re-reads the list: rows still listed say nothing was deleted, an empty inbox says nothing', async () => {
+    const listed = { id: 'wq_1', question: 'Where is the lease?', from: 'ChatGPT', askedAt: '2026-10-01T01:00:00Z', state: 'answered', unread: false };
+    const stays = renderAndRun((body) => (body.action === 'list'
+      ? { status: 200, body: { ok: true, olderRemoved: false, questions: [listed] } }
+      : { status: 200, body: { ok: true, status: 'deleted', removed: 0 } }));
+    (stays.document.querySelector('[data-pa-delete-all]') as unknown as { click(): void }).click();
+    await stays.settle();
+    expect(stays.document.querySelector('[data-pa-question="wq_1"]')).not.toBeNull();
+    expect(stays.document.querySelector('[data-pa-missing]')!.textContent).toBe('Nothing was deleted. Reload to see your inbox as it is now.');
+    // The rows had gone already (a lost reply, then Delete all again): the list is empty and no message stays.
+    const gone = renderAndRun((body) => (body.action === 'list'
+      ? { status: 200, body: { ok: true, olderRemoved: false, questions: [] } }
+      : { status: 200, body: { ok: true, status: 'deleted', removed: 0 } }));
+    (gone.document.querySelector('[data-pa-delete-all]') as unknown as { click(): void }).click();
+    await gone.settle();
+    expect(gone.document.querySelector('[data-pa-question]')).toBeNull();
+    const note = gone.document.querySelector('[data-pa-missing]') as unknown as { hidden: boolean; textContent: string } | null;
+    expect(note === null || note.hidden || note.textContent === '').toBe(true);
+    expect((gone.document.querySelector('[data-pa-none]') as unknown as { hidden: boolean }).hidden).toBe(false);
     const unavailable = renderAndRun(() => ({ status: 503, body: { ok: false, error: { code: 'unavailable', message: 'Private answers cannot be changed right now, so nothing was deleted. Try again in a moment.' } } }));
     (unavailable.document.querySelector('[data-pa-delete-all]') as unknown as { click(): void }).click();
     await unavailable.settle();
