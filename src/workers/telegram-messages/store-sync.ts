@@ -5,7 +5,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
-import { sameSpoolFile, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
+import { sameSpoolFile, spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import { openConnectorStore } from '../../core/source-storage.ts';
 import type {
   LocalConnectorStore,
@@ -48,6 +48,7 @@ import {
   readTelegramCaptureHeartbeat,
   redactTelegramCaptureSpoolSecrets,
   telegramCaptureSpoolCursorState,
+  telegramCaptureCursorOffset,
   type TelegramCaptureSpoolRecord,
 } from './capture-spool-connector.ts';
 
@@ -62,8 +63,14 @@ export const TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = 'telegram_spool_secret_re
 export const TELEGRAM_SPOOL_CURSOR_RESET_WARNING = 'telegram_spool_cursor_reset';
 // The identity of the day file a lane cursor stands in, kept in the set's ledger.
 const TELEGRAM_SPOOL_FILE_META_PREFIX = 'telegram:spool_file:';
+// Every boundary this source records in its spool (each lane's cursor, where the Secrets clearing has
+// reached) with a digest of the 4 KiB that end at it (spool-file-identity.ts, the spool contract): a
+// boundary whose bytes are not the ones recorded is not trusted, and every boundary in its file goes.
+const TELEGRAM_SPOOL_BOUNDARY_META_PREFIX = 'telegram:spool_boundary:';
 // Where the full-spool Secrets pass stands, kept in the set's tier ledger.
 export const TELEGRAM_SPOOL_REDACTION_STATE_KEY = 'capture_spool_secret_redaction:telegram';
+// Where the Secrets clearing has reached (capture-spool-secrets.ts keeps it under this key).
+const TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
 export const DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500;
 const MAX_TELEGRAM_PULL_MAX_ITEMS = 10_000;
 
@@ -250,24 +257,45 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       // every later pull failing on it. Reading again is safe: the lanes'
       // intake never applies a record older than the version stored.
       let cursorResets = 0;
-      // A cursor is also bound to the identity its file had when the lane read it (spool-file-identity.ts):
-      // a day file removed and written again under the same name is another file, read from its start.
+      // A cursor is also bound to the identity its file had when the lane read it, and to the bytes that end
+      // at it (spool-file-identity.ts): a day file removed and written again under the same name, or changed
+      // under the cursor, is read from its start, and every boundary recorded in it goes with the cursor.
+      const replacedFiles = new Set<string>();
+      const boundaryHolds = (name: string, cursor: string): boolean => {
+        const recorded = readBoundary(tierSet, name);
+        if (!recorded || recorded.cursor !== cursor) return true;
+        const offset = telegramCaptureCursorOffset(spoolDir, cursor);
+        return offset !== undefined && spoolBoundaryHolds(join(spoolDir, cursorFile(cursor)), offset, recorded.digest);
+      };
+      const fileHolds = (cursor: string): boolean => {
+        const file = cursorFile(cursor);
+        const recorded = tierSet.ledger.readMeta(`${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`);
+        return recorded === undefined || !existsSync(join(spoolDir, file)) || sameSpoolFile(recorded, join(spoolDir, file));
+      };
+      const laneCursors = {
+        internal: sanitizeTelegramCaptureCursor(options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor),
+        secureLocal: sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor),
+      };
+      for (const [name, cursor] of [['internal', laneCursors.internal], ['secure_local', laneCursors.secureLocal]] as const) {
+        if (cursor && (!fileHolds(cursor) || !boundaryHolds(name, cursor))) replacedFiles.add(cursorFile(cursor));
+      }
+      const cleared = tierSet.ledger.readMeta(TELEGRAM_SPOOL_CLEARED_KEY);
+      if (cleared && sanitizeTelegramCaptureCursor(cleared) && (!fileHolds(cleared) || !boundaryHolds('cleared', cleared))) {
+        replacedFiles.add(cursorFile(cleared));
+      }
+      if (replacedFiles.size > 0 && cleared) {
+        // Whatever was cleaned there is not known any more: the clearing is owed again from the start.
+        tierSet.ledger.writeMeta(TELEGRAM_SPOOL_CLEARED_KEY, '');
+      }
       const placed = (cursor: string | undefined): string | undefined => {
         if (!cursor) return cursor;
-        const file = cursor.slice(0, cursor.lastIndexOf(':'));
-        const recorded = tierSet.ledger.readMeta(`${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`);
-        const sameFile = recorded === undefined || !existsSync(join(spoolDir, file)) || sameSpoolFile(recorded, join(spoolDir, file));
-        if (sameFile && telegramCaptureSpoolCursorState(spoolDir, cursor) === 'ok') return cursor;
+        if (!replacedFiles.has(cursorFile(cursor)) && telegramCaptureSpoolCursorState(spoolDir, cursor) === 'ok') return cursor;
         cursorResets += 1;
         return undefined;
       };
       const cursors = {
-        internal: placed(sanitizeTelegramCaptureCursor(
-          options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor,
-        )),
-        secureLocal: placed(sanitizeTelegramCaptureCursor(
-          options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor,
-        )),
+        internal: placed(laneCursors.internal),
+        secureLocal: placed(laneCursors.secureLocal),
       };
 
       // Validate the next bounded unread window before either trust lane writes.
@@ -410,6 +438,12 @@ export function createTelegramConnectorStoreSyncHandler(options: {
           `[olympus:telegram] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
         );
       }
+      // The boundaries the next pull checks, recorded after the Secrets clearing (it rewrites records in place,
+      // and refreshes its own boundaries here): each lane's cursor, and where the clearing has reached only
+      // when this pull's clearing ran to it.
+      recordBoundary(tierSet, spoolDir, 'internal', sanitizeTelegramCaptureCursor(options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor));
+      recordBoundary(tierSet, spoolDir, 'secure_local', sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor));
+      if (!redactionFailed) recordBoundary(tierSet, spoolDir, 'cleared', sanitizeTelegramCaptureCursor(tierSet.ledger.readMeta(TELEGRAM_SPOOL_CLEARED_KEY)));
       return telegramSyncReceipt(
         internal,
         secureLocal,
@@ -569,6 +603,30 @@ function resolveTelegramTrustClaims(
     if (newer(identity.sourceVersion, stores.secureLocal.storedItemState(identity)?.version)) moveWhole.set(identity.localItemId, identity.sourceVersion);
   }
   return { resolvedTrustByItemId, secureClaims: [...secureClaims.values()], moveWhole };
+}
+
+function cursorFile(cursor: string): string {
+  return cursor.slice(0, cursor.lastIndexOf(':'));
+}
+
+function readBoundary(set: TieredStoreSet, name: string): { cursor: string; digest: string } | undefined {
+  const raw = set.ledger.readMeta(`${TELEGRAM_SPOOL_BOUNDARY_META_PREFIX}${name}`);
+  if (!raw) return undefined;
+  try {
+    const value = JSON.parse(raw) as { cursor?: unknown; digest?: unknown };
+    return typeof value.cursor === 'string' && typeof value.digest === 'string' ? { cursor: value.cursor, digest: value.digest } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function recordBoundary(set: TieredStoreSet, spoolDir: string, name: string, cursor: string | undefined): void {
+  if (!cursor) return;
+  const offset = telegramCaptureCursorOffset(spoolDir, cursor);
+  const digest = offset === undefined ? undefined : spoolBoundaryDigest(join(spoolDir, cursorFile(cursor)), offset);
+  if (!digest) return;
+  const value = JSON.stringify({ cursor, digest });
+  if (set.ledger.readMeta(`${TELEGRAM_SPOOL_BOUNDARY_META_PREFIX}${name}`) !== value) set.ledger.writeMeta(`${TELEGRAM_SPOOL_BOUNDARY_META_PREFIX}${name}`, value);
 }
 
 function earlierCursor(left: string, right: string): string {

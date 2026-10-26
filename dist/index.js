@@ -19458,9 +19458,10 @@ var init_capture_spool_connector = __esm(() => {
 });
 
 // src/workers/connector-store/spool-file-identity.ts
-var SPOOL_IDENTITY_HEAD_BYTES;
+var SPOOL_IDENTITY_HEAD_BYTES, SPOOL_BOUNDARY_WINDOW_BYTES;
 var init_spool_file_identity = __esm(() => {
   SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
 });
 
 // src/workers/telegram-messages/protection-claims.ts
@@ -19471,6 +19472,7 @@ var init_protection_claims = __esm(() => {
 });
 
 // src/workers/telegram-messages/store-sync.ts
+var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY;
 var init_store_sync = __esm(() => {
   init_spool_file_identity();
   init_source_storage();
@@ -19481,6 +19483,7 @@ var init_store_sync = __esm(() => {
   init_capture_freshness();
   init_corpus_adapter4();
   init_capture_spool_connector();
+  TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
 });
 
 // src/workers/telegram-messages/index.ts

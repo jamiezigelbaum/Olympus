@@ -449,6 +449,21 @@ message beyond its search context (`src/workers/telegram-messages/`,
   is read from its start. The helper's capture-sequence counter is replaced
   whole (a temporary file, synced, renamed, the folder synced) under a lock
   file of its own, so a kill at any step leaves the old value or the new one.
+- **The spool contract** (shared with WhatsApp, `spool-file-identity.ts`).
+  Only the capture helper writes the spool, and only by appending; only
+  Olympus's own Secrets clearing rewrites records, in place and at their
+  length, and it records its boundaries again after it runs. The spool folder
+  is owner-only (0700, files 0600). Every boundary Telegram records (each
+  lane's cursor, where the clearing has reached) keeps the file's identity
+  and a digest of the 4 KiB that end at it, checked before the boundary is
+  used. Detected: a file removed and written again, and any change within
+  the 4 KiB before a boundary (a record rewritten under a cursor, longer or
+  as another lane's). On a mismatch every boundary in that file is dropped:
+  its lanes read it again from its start under the intake rule, and the
+  clearing is owed again from the start of the spool, recorded only as far as
+  it then runs. Not detected: an in-place rewrite by anything else further
+  back than 4 KiB before every boundary; that breaks the contract and cannot
+  be seen within the read bounds (scoped out by the coordinator, 2026-10-26).
 - **Quiet is not stale.** After every finished cycle (it read every approved
   chat) the helper writes `.capture-heartbeat.json` beside the spool. The
   receipt's age is from the newer of the newest record and the heartbeat,

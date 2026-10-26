@@ -1,4 +1,16 @@
 /**
+ * The spool contract: a capture spool file is append-only for every writer
+ * but one. The capture helper only appends whole lines; Olympus's own
+ * clearing of Secrets rewrites a line in place, at its own length, and
+ * whatever keeps a boundary in the file (a cursor, what was cleared, what
+ * was indexed) is brought up to date in the same step, so that rewrite never
+ * reads as a break of the contract. Anything else (a file replaced, cut and
+ * written again, edited by hand) breaks it, and is caught cheaply: at every
+ * boundary a reader records, it keeps the digest of the 4 KiB that end there
+ * (`spoolBoundaryDigest`), and before it trusts the boundary it reads that
+ * window again and compares. A mismatch is a file to read again from its
+ * start.
+ *
  * Which file a capture spool's file is: the identity a cursor or an index
  * binds to, so a file removed and put back (a spool folder deleted and
  * capture started again, a file restored from elsewhere) is never taken for
@@ -68,4 +80,36 @@ function firstLineDigest(path: string): string {
   } finally {
     closeSync(fd);
   }
+}
+
+/** How much of a file before a boundary its digest covers. */
+export const SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
+
+/**
+ * The digest of the bytes that end at `offset` (the 4 KiB before it, or all
+ * of them when fewer), hashed, never kept as text. Undefined when the file is
+ * not there or is shorter than `offset`.
+ */
+export function spoolBoundaryDigest(path: string, offset: number): string | undefined {
+  if (!Number.isSafeInteger(offset) || offset < 0) return undefined;
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return undefined;
+  }
+  try {
+    const start = Math.max(0, offset - SPOOL_BOUNDARY_WINDOW_BYTES);
+    const window = Buffer.alloc(offset - start);
+    const read = window.length === 0 ? 0 : readSync(fd, window, 0, window.length, start);
+    if (read < window.length) return undefined;
+    return createHash('sha256').update(`${offset}\0`).update(window).digest('hex').slice(0, 24);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Whether the bytes that end at `offset` are still the ones whose digest was recorded. */
+export function spoolBoundaryHolds(path: string, offset: number, recorded: string): boolean {
+  return spoolBoundaryDigest(path, offset) === recorded;
 }

@@ -73488,6 +73488,23 @@ function readTelegramCaptureSpool(options) {
     ...cursorReset ? { cursorReset: true } : {}
   };
 }
+function telegramCaptureCursorOffset(spoolDir, cursorText) {
+  const cursor = parseTelegramCaptureSpoolCursor(cursorText);
+  const path = join60(spoolDir, cursor.file);
+  try {
+    const stat2 = lstatSync26(path);
+    if (!stat2.isFile() || stat2.isSymbolicLink())
+      return;
+    const fd2 = openSync16(path, "r");
+    try {
+      return spoolLineOffset(fd2, path, stat2, cursor.line);
+    } finally {
+      closeSync16(fd2);
+    }
+  } catch {
+    return;
+  }
+}
 function telegramCaptureSpoolCursorState(spoolDir, cursorText, names = telegramCaptureSpoolFiles(spoolDir)) {
   const cursor = parseTelegramCaptureSpoolCursor(cursorText);
   if (!names.includes(cursor.file)) {
@@ -74056,9 +74073,33 @@ function firstLineDigest(path) {
     closeSync17(fd2);
   }
 }
-var SPOOL_IDENTITY_HEAD_BYTES, NEWLINE = 10;
+function spoolBoundaryDigest(path, offset) {
+  if (!Number.isSafeInteger(offset) || offset < 0)
+    return;
+  let fd2;
+  try {
+    fd2 = openSync17(path, "r");
+  } catch {
+    return;
+  }
+  try {
+    const start = Math.max(0, offset - SPOOL_BOUNDARY_WINDOW_BYTES);
+    const window2 = Buffer.alloc(offset - start);
+    const read = window2.length === 0 ? 0 : readSync6(fd2, window2, 0, window2.length, start);
+    if (read < window2.length)
+      return;
+    return createHash48("sha256").update(`${offset}\x00`).update(window2).digest("hex").slice(0, 24);
+  } finally {
+    closeSync17(fd2);
+  }
+}
+function spoolBoundaryHolds(path, offset, recorded) {
+  return spoolBoundaryDigest(path, offset) === recorded;
+}
+var SPOOL_IDENTITY_HEAD_BYTES, NEWLINE = 10, SPOOL_BOUNDARY_WINDOW_BYTES;
 var init_spool_file_identity = __esm(() => {
   SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
 });
 
 // src/workers/telegram-messages/protection-claims.ts
@@ -74187,20 +74228,45 @@ function createTelegramConnectorStoreSyncHandler(options) {
       const maxItems = telegramPullMaxItems(request.max_items ?? options.maxItems);
       const reconciliation = reconcileTelegramTrustStores(options.stores, options.reconciliation ?? {});
       let cursorResets = 0;
+      const replacedFiles = new Set;
+      const boundaryHolds = (name, cursor) => {
+        const recorded = readBoundary(tierSet, name);
+        if (!recorded || recorded.cursor !== cursor)
+          return true;
+        const offset = telegramCaptureCursorOffset(spoolDir, cursor);
+        return offset !== undefined && spoolBoundaryHolds(join61(spoolDir, cursorFile(cursor)), offset, recorded.digest);
+      };
+      const fileHolds = (cursor) => {
+        const file = cursorFile(cursor);
+        const recorded = tierSet.ledger.readMeta(`${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`);
+        return recorded === undefined || !existsSync50(join61(spoolDir, file)) || sameSpoolFile(recorded, join61(spoolDir, file));
+      };
+      const laneCursors = {
+        internal: sanitizeTelegramCaptureCursor(options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor),
+        secureLocal: sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor)
+      };
+      for (const [name, cursor] of [["internal", laneCursors.internal], ["secure_local", laneCursors.secureLocal]]) {
+        if (cursor && (!fileHolds(cursor) || !boundaryHolds(name, cursor)))
+          replacedFiles.add(cursorFile(cursor));
+      }
+      const cleared = tierSet.ledger.readMeta(TELEGRAM_SPOOL_CLEARED_KEY);
+      if (cleared && sanitizeTelegramCaptureCursor(cleared) && (!fileHolds(cleared) || !boundaryHolds("cleared", cleared))) {
+        replacedFiles.add(cursorFile(cleared));
+      }
+      if (replacedFiles.size > 0 && cleared) {
+        tierSet.ledger.writeMeta(TELEGRAM_SPOOL_CLEARED_KEY, "");
+      }
       const placed = (cursor) => {
         if (!cursor)
           return cursor;
-        const file = cursor.slice(0, cursor.lastIndexOf(":"));
-        const recorded = tierSet.ledger.readMeta(`${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`);
-        const sameFile = recorded === undefined || !existsSync50(join61(spoolDir, file)) || sameSpoolFile(recorded, join61(spoolDir, file));
-        if (sameFile && telegramCaptureSpoolCursorState(spoolDir, cursor) === "ok")
+        if (!replacedFiles.has(cursorFile(cursor)) && telegramCaptureSpoolCursorState(spoolDir, cursor) === "ok")
           return cursor;
         cursorResets += 1;
         return;
       };
       const cursors = {
-        internal: placed(sanitizeTelegramCaptureCursor(options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor)),
-        secureLocal: placed(sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor))
+        internal: placed(laneCursors.internal),
+        secureLocal: placed(laneCursors.secureLocal)
       };
       const preflightCursor = cursors.internal && cursors.secureLocal ? earlierCursor(cursors.internal, cursors.secureLocal) : undefined;
       const preflight = (options.preflightRead ?? readTelegramCaptureSpool)({
@@ -74287,6 +74353,10 @@ function createTelegramConnectorStoreSyncHandler(options) {
         redactionFailed = true;
         console.error(`[olympus:telegram] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : "unknown"}`);
       }
+      recordBoundary(tierSet, spoolDir, "internal", sanitizeTelegramCaptureCursor(options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor));
+      recordBoundary(tierSet, spoolDir, "secure_local", sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor));
+      if (!redactionFailed)
+        recordBoundary(tierSet, spoolDir, "cleared", sanitizeTelegramCaptureCursor(tierSet.ledger.readMeta(TELEGRAM_SPOOL_CLEARED_KEY)));
       return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed, cursorResets, protection.moved, telegramCaptureLiveness(readTelegramCaptureSpoolNewestCapturedAt(spoolDir), readTelegramCaptureHeartbeat(spoolDir), now().getTime(), staleThresholdSeconds));
     },
     lastStoreRunCompletedAt() {
@@ -74352,6 +74422,31 @@ function resolveTelegramTrustClaims(records, spoolConflicts, stores, set) {
   }
   return { resolvedTrustByItemId, secureClaims: [...secureClaims.values()], moveWhole };
 }
+function cursorFile(cursor) {
+  return cursor.slice(0, cursor.lastIndexOf(":"));
+}
+function readBoundary(set, name) {
+  const raw = set.ledger.readMeta(`${TELEGRAM_SPOOL_BOUNDARY_META_PREFIX}${name}`);
+  if (!raw)
+    return;
+  try {
+    const value = JSON.parse(raw);
+    return typeof value.cursor === "string" && typeof value.digest === "string" ? { cursor: value.cursor, digest: value.digest } : undefined;
+  } catch {
+    return;
+  }
+}
+function recordBoundary(set, spoolDir, name, cursor) {
+  if (!cursor)
+    return;
+  const offset = telegramCaptureCursorOffset(spoolDir, cursor);
+  const digest3 = offset === undefined ? undefined : spoolBoundaryDigest(join61(spoolDir, cursorFile(cursor)), offset);
+  if (!digest3)
+    return;
+  const value = JSON.stringify({ cursor, digest: digest3 });
+  if (set.ledger.readMeta(`${TELEGRAM_SPOOL_BOUNDARY_META_PREFIX}${name}`) !== value)
+    set.ledger.writeMeta(`${TELEGRAM_SPOOL_BOUNDARY_META_PREFIX}${name}`, value);
+}
 function earlierCursor(left, right) {
   const [leftFile, leftLine] = cursorParts(left);
   const [rightFile, rightLine] = cursorParts(right);
@@ -74406,7 +74501,7 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
 function sum(runs, key2) {
   return runs.reduce((total, run) => total + Number(run[key2]), 0);
 }
-var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_PERSONAL_ACCOUNT_SCOPE = "telegram.personal", TELEGRAM_MALFORMED_SPOOL_WARNING = "telegram_malformed_spool_records", TELEGRAM_TRUST_CONFLICT_WARNING = "telegram_trust_conflict_items", TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = "telegram_spool_secret_redaction_failed", TELEGRAM_SPOOL_CURSOR_RESET_WARNING = "telegram_spool_cursor_reset", TELEGRAM_SPOOL_FILE_META_PREFIX = "telegram:spool_file:", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500, MAX_TELEGRAM_PULL_MAX_ITEMS = 1e4;
+var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_PERSONAL_ACCOUNT_SCOPE = "telegram.personal", TELEGRAM_MALFORMED_SPOOL_WARNING = "telegram_malformed_spool_records", TELEGRAM_TRUST_CONFLICT_WARNING = "telegram_trust_conflict_items", TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = "telegram_spool_secret_redaction_failed", TELEGRAM_SPOOL_CURSOR_RESET_WARNING = "telegram_spool_cursor_reset", TELEGRAM_SPOOL_FILE_META_PREFIX = "telegram:spool_file:", TELEGRAM_SPOOL_BOUNDARY_META_PREFIX = "telegram:spool_boundary:", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY, DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500, MAX_TELEGRAM_PULL_MAX_ITEMS = 1e4;
 var init_store_sync = __esm(() => {
   init_spool_file_identity();
   init_source_storage();
@@ -74417,6 +74512,7 @@ var init_store_sync = __esm(() => {
   init_capture_freshness();
   init_corpus_adapter4();
   init_capture_spool_connector();
+  TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
 });
 
 // src/workers/telegram-messages/index.ts

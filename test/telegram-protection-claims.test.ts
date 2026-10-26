@@ -252,6 +252,52 @@ describe('captures are ordered by when they were captured', () => {
     }
   });
 
+  test('a record rewritten in place under the cursor is caught: the file is read again, and a protected rewrite leaves the ordinary lane', async () => {
+    const w = world();
+    try {
+      const a = w.capture('2026-10-20.jsonl', { id: 'A', text: 'markerA first', at: '2026-10-20T09:00:00Z', trust: 'internal' });
+      const b = w.capture('2026-10-20.jsonl', { id: 'B', text: 'markerB second', at: '2026-10-20T09:00:00Z', trust: 'internal' });
+      const cRecord = w.capture('2026-10-20.jsonl', { id: 'C', text: 'markerC third, ordinary', at: '2026-10-20T09:00:00Z', trust: 'internal' });
+      const sync = w.handler();
+      await sync.pull();
+      expect(w.textIn(w.internal, 'C')).toContain('ordinary');
+      // The last record is rewritten in place, longer, as protected: the first line (the file's identity) is unchanged.
+      writeFileSync(join(w.spoolDir, '2026-10-20.jsonl'), line(a) + line(b) + line({ ...cRecord, trust: 'secure_local', text: 'markerC third, now protected and longer' }));
+      const receipt = await sync.pull();
+      expect(receipt.counts.spool_cursor_resets).toBeGreaterThan(0);
+      expect(w.readableInInternal('C')).toBe(false);
+      expect(w.textIn(w.secureLocal, 'C')).toContain('now protected');
+      // The others were read again under the intake rule and stand as they were.
+      expect(w.textIn(w.internal, 'A')).toContain('markerA first');
+    } finally {
+      w.close();
+    }
+  });
+
+  test('a mismatch under the cursor owes the Secrets clearing again from the start of the spool', async () => {
+    const w = world();
+    try {
+      const a = w.capture('2026-10-20.jsonl', { id: 'A', text: 'markerA first', at: '2026-10-20T09:00:00Z', trust: 'internal' });
+      w.capture('2026-10-20.jsonl', { id: 'B', text: 'markerB second', at: '2026-10-20T09:00:00Z', trust: 'internal' });
+      const sync = w.handler();
+      await sync.pull();
+      expect(w.set.ledger.readMeta('capture_spool_secret_redaction:telegram:cleared_through')).toBe('2026-10-20.jsonl:2');
+      writeFileSync(join(w.spoolDir, '2026-10-20.jsonl'), line(a) + line({ ...a, id: 'B', text: 'markerB replaced, same file' }));
+      let clearedSeen: string | undefined = 'unread';
+      const writeMeta = w.set.ledger.writeMeta.bind(w.set.ledger);
+      w.set.ledger.writeMeta = (key: string, value: string) => {
+        if (key === 'capture_spool_secret_redaction:telegram:cleared_through' && clearedSeen === 'unread') clearedSeen = value;
+        writeMeta(key, value);
+      };
+      await sync.pull();
+      // Dropped first (owed from the start), then recorded again only as far as this pull's clearing ran.
+      expect(clearedSeen).toBe('');
+      expect(w.set.ledger.readMeta('capture_spool_secret_redaction:telegram:cleared_through')).toBe('2026-10-20.jsonl:2');
+    } finally {
+      w.close();
+    }
+  });
+
   test('a day file removed and written again does not reverse two captures of one version', async () => {
     const w = world();
     try {
