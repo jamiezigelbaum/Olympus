@@ -126,29 +126,55 @@ describe('the version boundary does not depend on how completely an item was wri
   const stateOf = (h: OnePipelineHarness, id: string) =>
     h.set.storedItem({ provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: id }, (a, b) => Number(a) - Number(b));
 
-  test('a Private body whose metadata leg is missing is not overwritten by an older archive record, and a record of its own version completes it', async () => {
-    // Held until judged: the item's names rest in the Personal store and its body in the Private one.
+  test('a body one leg has not written is not overwritten by an older archive record, and a record of its own version completes it', async () => {
+    // Held until judged: the item's names rest in the Personal store and its body in the Private one. The run
+    // stops after the names leg, so the Private leg still owes the body.
     const h = onePipelineHarness(cleanups);
     h.connectLive();
-    await h.importAll(await h.startImport('newest.mbox', [rec('a', 9, 'the newest words')]));
-    expect(h.textOf('a')).toBe('the newest words');
-    expect(h.contentDomain('a')).toBe('secure_local');
-    // The names leg is lost, as when a run stops after one leg.
-    const identity = { provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a', family: 'email' as const, localItemId: `${FIXTURE_ACCOUNT_SCOPE}:a` };
-    expect(h.stores.internal.tombstoneCopy(identity, { connectorId: 'test' })).toBe(true);
-    expect(stateOf(h, 'a')).toMatchObject({ version: '9', hasContent: true, incomplete: true });
+    const newest = await h.startImport('newest.mbox', [rec('a', 9, 'the newest words')]);
+    const orig = h.stores.secure_local.syncFromConnector.bind(h.stores.secure_local);
+    let thrown = false;
+    h.stores.secure_local.syncFromConnector = (async (...args: Parameters<typeof orig>) => {
+      if (!thrown) { thrown = true; throw new Error('injected crash'); }
+      return orig(...args);
+    }) as typeof orig;
+    await h.pull(newest).catch(() => undefined);
+    expect(h.textOf('a')).toBe('');
+    expect(stateOf(h, 'a')).toMatchObject({ version: '9', incomplete: true });
 
     const id = await h.startImport('older.mbox', [rec('a', 2, 'an old draft')]);
     await h.importAll(id);
     expect(everyStoredText(h)).not.toContain('an old draft');
-    expect(h.textOf('a')).toBe('the newest words');
+    expect(h.textOf('a')).toBe('');
 
     // The same version arriving again repairs the item: both legs hold it again.
-    const again = await h.startImport('same.mbox', [rec('a', 9, 'the newest words')]);
-    await h.importAll(again);
+    await h.importAll(newest);
     expect(h.textOf('a')).toBe('the newest words');
+    expect(h.contentDomain('a')).toBe('secure_local');
     expect(stateOf(h, 'a')?.incomplete).toBeUndefined();
     expect(h.rows().filter((row) => row.providerItemId === 'a' && row.tombstoned === 0).map((row) => row.version)).toEqual(['9', '9']);
+  });
+
+  test('the body a cut-off write owes is replayed when a names-only record of the item\'s version comes first in the same listing', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive();
+    // A names-only v9 after a v1 body is one item at v9 with that body; the run stops after the names leg.
+    const first = await h.startImport('first.mbox', [rec('a', 1, 'the first body'), rec('a', 9, undefined)]);
+    const orig = h.stores.secure_local.syncFromConnector.bind(h.stores.secure_local);
+    let thrown = false;
+    h.stores.secure_local.syncFromConnector = (async (...args: Parameters<typeof orig>) => {
+      if (!thrown) { thrown = true; throw new Error('injected crash'); }
+      return orig(...args);
+    }) as typeof orig;
+    await h.pull(first).catch(() => undefined);
+    expect(h.textOf('a')).toBe('');
+    expect(stateOf(h, 'a')).toMatchObject({ version: '9', incomplete: true, owedBodyVersion: '1' });
+    // The replay lists the names-only v9 before the v1 record that carries the body.
+    const again = await h.startImport('again.mbox', [rec('a', 9, undefined), rec('a', 1, 'the first body')]);
+    await h.importAll(again);
+    expect(h.textOf('a')).toBe('the first body');
+    expect(stateOf(h, 'a')?.incomplete).toBeUndefined();
+    expect(h.set.ledger.writeIntents()).toEqual([]);
   });
 
   test('an older ordinary archive record never restores an item that became a Secret in a later version', async () => {

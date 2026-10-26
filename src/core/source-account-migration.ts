@@ -68,13 +68,11 @@ import { archiveImportFamilies } from './archive-formats.ts';
 import { syncDirectorySync } from './atomic-file.ts';
 import { tryHoldFileFlock, type HeldFileFlock } from './data-owner-lock.ts';
 import {
-  TELEGRAM_GATEWAY_LOCK_NAME,
-  TELEGRAM_SOURCE_ID,
-  WHATSAPP_BRIDGE_LOCK_NAME,
-  WHATSAPP_SOURCE_ID,
   accountFolder,
+  accountFolderEntry,
   accountFoldersRoot,
   accountRawPath,
+  accountSessionPath,
   accountStorePath,
   folderNameOfStagedTelegramLogin,
   legacyAccountFiles,
@@ -85,6 +83,10 @@ import {
   migratableSources,
   migrationPathRoots,
   olympusDataRoot,
+  TELEGRAM_GATEWAY_LOCK_NAME,
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_BRIDGE_LOCK_NAME,
+  WHATSAPP_SOURCE_ID,
   type AccountRawName,
   type LayoutAccount,
   type LayoutEnv,
@@ -289,7 +291,7 @@ function candidates(sourceId: string, slot: string, env: LayoutEnv): Candidate[]
       add('sniffer', tierSnifferPathForStore(file.legacy), tierSnifferPathForStore(to), 'file', true);
     } else {
       const to = file.folderPath
-        ? join(accountFolder(account, env), ...file.folderPath.split('/'))
+        ? accountFolderEntry(account, file.folderPath, env)
         : accountRawPath(account, file.name as AccountRawName, env);
       add('raw', file.legacy, to, file.rawKind === 'dir' ? 'dir' : 'file', file.rawKind === 'db');
     }
@@ -299,7 +301,7 @@ function candidates(sourceId: string, slot: string, env: LayoutEnv): Candidate[]
     // (Unpair and the next pairing find them by its name). Looked for in both
     // places, so a plan part way is checked against the same list.
     const legacyDir = dirname(legacyTelegramSessionBase(env));
-    const folderDir = join(accountFolder(account, env), 'session');
+    const folderDir = dirname(accountSessionPath(account, env));
     const own = basename(legacyTelegramSessionBase(env));
     const staged = new Set<string>();
     for (const name of listNames(legacyDir)) if (folderNameOfStagedTelegramLogin(name, env)) staged.add(name);

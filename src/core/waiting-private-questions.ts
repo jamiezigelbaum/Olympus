@@ -29,10 +29,10 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { assertSqliteSchemaCanOpen, runSqliteMigrations, type SqliteMigration } from './sqlite-migrations.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
+import { SHARED_DATA_FILES } from './olympus-layout.ts';
 
 export const WAITING_PRIVATE_QUESTIONS_STORE_ID = 'waiting-private-questions';
 export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 5;
-export const WAITING_PRIVATE_QUESTIONS_FILE_NAME = 'waiting-private-questions.sqlite';
 
 export const WAITING_QUESTION_LIMITS = Object.freeze({
   /** UTF-8 bytes of the question. */
@@ -239,7 +239,7 @@ interface QuestionRow {
 
 /** Where the store lives: beside the remote-connections database, in its private directory. */
 export function waitingPrivateQuestionsDbPath(remoteConnectionsDbPath: string): string {
-  return join(dirname(remoteConnectionsDbPath), WAITING_PRIVATE_QUESTIONS_FILE_NAME);
+  return join(dirname(remoteConnectionsDbPath), SHARED_DATA_FILES['waiting-private-questions']);
 }
 
 /** The question as the dedupe key reads it: case, width forms and spacing aside. */

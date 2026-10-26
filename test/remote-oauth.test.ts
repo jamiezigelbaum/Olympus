@@ -11,7 +11,7 @@ import { Database } from 'bun:sqlite';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { UnauthorizedError, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
@@ -29,7 +29,7 @@ import {
   normalizePairingCode,
 } from '../src/core/remote-oauth-store.ts';
 import { assertSqliteSchemaCanOpen, readSqliteSchemaVersion } from '../src/core/sqlite-migrations.ts';
-import { remoteConnectionsPreV2BackupPath } from '../src/core/remote-connections.ts';
+import { remoteConnectionsPreV2BackupPath, resolveRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
 import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
 import { createRemoteOpenApiHandler, withRemoteOpenApiRoutes } from '../src/workers/remote-openapi.ts';
 import { readBoundedRequestText } from '../src/workers/remote-request-body.ts';
@@ -166,7 +166,8 @@ function assemble(options: AssembleOptions = {}): void {
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'olympus-remote-oauth-'));
-  dbPath = join(dir, 'state', 'remote-connections.sqlite');
+  // Where the CLI finds it for this test's home: no env variable relocates it.
+  dbPath = resolveRemoteConnectionsDbPath({ HOME: join(dir, 'home') });
   clock = Date.parse('2026-09-24T12:00:00.000Z');
   store = openRemoteConnectionStore(dbPath, { now: () => new Date(clock) });
   ledger = [];
@@ -1190,7 +1191,6 @@ describe('pairing codes', () => {
   test('olympus connections pair mints a code and says whether OAuth is on', () => {
     const env = {
       HOME: join(dir, 'home'),
-      OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: dbPath,
       OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
     };
     const off = runConnectionsCommand(['pair'], env) as { code: string; oauth_enabled: boolean; url: string | null };
@@ -1293,7 +1293,7 @@ describe('tokens', () => {
 
     test('by olympus connections revoke, from another process', async () => {
       await rotateThenRevoke(({ connectionId }) => {
-        const env = { HOME: join(dir, 'home'), OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: dbPath, OLYMPUS_CONFIG: join(dir, 'missing.json') };
+        const env = { HOME: join(dir, 'home'), OLYMPUS_CONFIG: join(dir, 'missing.json') };
         runConnectionsCommand(['revoke', connectionId], env);
       });
     });
@@ -1348,7 +1348,7 @@ describe('tokens', () => {
   test('olympus connections revoke kills access and refresh tokens', async () => {
     const tokens = await chatgptGrant();
     const [connection] = store.list();
-    const env = { HOME: join(dir, 'home'), OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: dbPath, OLYMPUS_CONFIG: join(dir, 'missing.json') };
+    const env = { HOME: join(dir, 'home'), OLYMPUS_CONFIG: join(dir, 'missing.json') };
     const listed = runConnectionsCommand(['list'], env) as { connections: Array<Record<string, unknown>> };
     expect(listed.connections).toEqual([expect.objectContaining({
       id: connection!.id, name: 'ChatGPT', kind: 'oauth', client_id: CHATGPT_CLIENT_ID, status: 'active',
@@ -1550,11 +1550,11 @@ describe('connection database migration', () => {
   test('the pre-migration backup is left out of exports and removed by data delete --all', () => {
     const home = join(dir, 'lifecycle-home');
     mkdirSync(home, { recursive: true });
-    const path = join(dir, 'outside-roots', 'remote-connections.sqlite');
-    mkdirSync(join(dir, 'outside-roots'), { mode: 0o700 });
+    const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share') };
+    const path = resolveRemoteConnectionsDbPath(env);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     writeFileSync(remoteConnectionsPreV2BackupPath(path), 'backup', { mode: 0o600 });
     openRemoteConnectionStore(path).close();
-    const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share'), OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: path };
     const exported = exportOlympusData({ destination: join(dir, 'export'), homeDir: home, env });
     expect(exported.skipped).toContain(remoteConnectionsPreV2BackupPath(path));
     deleteOlympusData({ all: true, homeDir: home, env });

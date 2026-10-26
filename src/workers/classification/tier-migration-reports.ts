@@ -20,13 +20,13 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
-import { olympusDataPath, type LayoutEnv } from '../../core/olympus-layout.ts';
+import { sharedDataPath, type LayoutEnv } from '../../core/olympus-layout.ts';
 
 export const TIER_MIGRATION_DIR_ENV = 'OLYMPUS_TIER_MIGRATION_DIR';
 
 /** The migration's folder: its state file and its reports sit in it. */
 export function tierMigrationDir(env: LayoutEnv): string {
-  return env[TIER_MIGRATION_DIR_ENV]?.trim() || olympusDataPath(env, 'tier-migration');
+  return env[TIER_MIGRATION_DIR_ENV]?.trim() || sharedDataPath('tier-migration', env);
 }
 
 export function tierMigrationReportDir(env: LayoutEnv): string {

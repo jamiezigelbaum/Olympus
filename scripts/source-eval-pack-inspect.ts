@@ -20,6 +20,7 @@ import {
 import { runUnderDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
 import type { EvalDataset, EvalQuestion } from '../eval/types.ts';
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 
 const DEFAULT_DATASET_PATH = 'eval/private/held-out.real.json';
 const DEFAULT_MAX_RESULTS = 8;
@@ -58,9 +59,9 @@ async function main(): Promise<void> {
   if (!existsSync(datasetPath)) {
     throw new Error(`Dataset not found: ${datasetPath}`);
   }
-  const dbPath = process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH?.trim();
-  if (!dbPath) {
-    throw new Error('Set OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH to the local Dropbox connector store.');
+  const dbPath = process.env.OLYMPUS_EVAL_DROPBOX_STORE?.trim() || resolvedStorePath('dropbox.files', 'secure_local');
+  if (!existsSync(dbPath)) {
+    throw new Error(`No Dropbox connector store at ${dbPath}. Set OLYMPUS_EVAL_DROPBOX_STORE to the store to inspect.`);
   }
 
   const dataset = JSON.parse(readFileSync(datasetPath, 'utf8')) as EvalDataset;

@@ -1,5 +1,5 @@
 import { downloadPinnedFile, writeDownloadChunk } from '../pinned-download.ts';
-import { olympusDataPath } from '../../../core/olympus-layout.ts';
+import { sharedDataPath } from '../../../core/olympus-layout.ts';
 // Fetches, verifies and installs the built-in private reasoning model and the
 // llama.cpp server that runs it into the Olympus data directory, once. Every
 // file is checked against the pinned manifest before it is used; a file that
@@ -203,14 +203,9 @@ export function builtInReasoningPaths(
 }
 
 function builtInReasoningRoot(env: Record<string, string | undefined>): string {
-  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || join(olympusModelsDir(env), 'built-in-reasoning');
+  const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || sharedDataPath('built-in-reasoning', env);
   if (!isAbsolute(root)) throw new TypeError('The built-in reasoning directory must be an absolute path.');
   return root;
-}
-
-/** `<data root>/models` (core/olympus-layout.ts). */
-export function olympusModelsDir(env: Record<string, string | undefined> = process.env): string {
-  return olympusDataPath(env, 'models');
 }
 
 /**

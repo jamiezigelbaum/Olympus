@@ -32,7 +32,6 @@ import {
   fileSourceScopeLocalFilesPolicy,
 } from '../src/workers/local-files/scope.ts';
 import {
-  LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV,
   LOCAL_FILES_CORPUS_ID,
   createLocalFilesConnectorStore,
 } from '../src/workers/local-files/store.ts';
@@ -53,7 +52,8 @@ describe('local files from Connect to an answer', () => {
     const registryPath = join(base, 'handles.json');
     const authority = new FileSourceScopeAuthority({ registryPath, readRegistry: () => ({ version: 1, handles: [] }) });
     const env = {
-      [LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV]: join(base, 'store.sqlite'),
+      // The store goes where its layout puts it, under a home of its own.
+      HOME: join(base, 'olympus-home'),
       [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: join(base, 'no-exclusions.json'),
     };
     const policy = defaultLocalFilesIngestionPolicy({ stillImagesRead: false });

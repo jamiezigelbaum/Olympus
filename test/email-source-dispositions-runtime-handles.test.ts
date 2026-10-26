@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { openIngestionDispositionsRuntime } from '../src/workers/email-source/server.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 
 function seedStore(dbPath: string, corpusId: string, trustDomain: 'internal' | 'secure_local'): void {
+  mkdirSync(dirname(dbPath), { recursive: true });
   const store = new LocalConnectorStore({ dbPath, corpusId, family: 'file', trustDomain });
   store.close();
 }
@@ -19,23 +21,21 @@ describe('ingestion dispositions runtime', () => {
   test('carries a store that refuses to open as data instead of orphaning earlier handles', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-dispositions-runtime-'));
     try {
-      const dropboxDb = join(dir, 'dropbox.sqlite');
-      const driveInternalDb = join(dir, 'drive-internal.sqlite');
+      // The stores sit where their layout puts them, under a home of their own.
+      const env = {
+        HOME: join(dir, 'home'),
+        OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(dir, 'no-exclusions.json'),
+      };
+      const dropboxDb = resolvedStorePath('dropbox.files', 'secure_local', env);
+      const driveInternalDb = resolvedStorePath('google_drive.docs', 'internal', env);
       const driveSecureTarget = join(dir, 'drive-secure-target.sqlite');
-      const driveSecureDb = join(dir, 'drive-secure.sqlite');
+      const driveSecureDb = resolvedStorePath('google_drive.docs', 'secure_local', env);
       seedStore(dropboxDb, 'secure_local.dropbox.files', 'secure_local');
       seedStore(driveInternalDb, 'internal.google_drive.docs', 'internal');
       seedStore(driveSecureTarget, 'secure_local.google_drive.docs', 'secure_local');
       // existsSync follows the link, so the refusal lands inside the read-only
       // constructor — after the Drive internal handle is already open.
       symlinkSync(driveSecureTarget, driveSecureDb);
-
-      const env = {
-        OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: dropboxDb,
-        OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH: driveInternalDb,
-        OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH: driveSecureDb,
-        OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(dir, 'no-exclusions.json'),
-      };
 
       const runtime = openIngestionDispositionsRuntime(env);
       try {

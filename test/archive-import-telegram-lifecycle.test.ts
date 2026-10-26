@@ -4,6 +4,7 @@
 // capture (a different source in different stores) never opened or touched.
 // Synthetic exports only.
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
@@ -25,8 +26,6 @@ import { pullArchiveImport, type ArchiveImportPullOptions } from '../src/workers
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-  defaultInternalTelegramConnectorStoreDbPath,
-  defaultProtectedTelegramConnectorStoreDbPath,
   isTelegramMessagesCorpusId,
 } from '../src/workers/telegram-messages/corpus-adapter.ts';
 import {
@@ -202,8 +201,8 @@ function dyingAfterFirstPage(): (formatId: string) => ArchiveConnectorFactory {
  * fails; the protected one is a real database with a row in it.
  */
 function seedLiveTelegram(env: Record<string, string>) {
-  const internal = defaultInternalTelegramConnectorStoreDbPath(env);
-  const protectedPath = defaultProtectedTelegramConnectorStoreDbPath(env);
+  const internal = resolvedStorePath('telegram.messages', 'internal', env);
+  const protectedPath = resolvedStorePath('telegram.messages', 'secure_local', env);
   mkdirSync(dirname(internal), { recursive: true });
   writeFileSync(internal, 'Not a database: opening this file as one fails.');
   const db = new Database(protectedPath);
@@ -480,7 +479,7 @@ describe('the archive and the live capture are different sources', () => {
     }
     expect([INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID]).not.toContain(archiveCorpusId('secure_local', 'chat'));
     const env = { HOME: '/home/example', XDG_DATA_HOME: '/home/example/xdg' };
-    const live = [defaultInternalTelegramConnectorStoreDbPath(env), defaultProtectedTelegramConnectorStoreDbPath(env)];
+    const live = [resolvedStorePath('telegram.messages', 'internal', env), resolvedStorePath('telegram.messages', 'secure_local', env)];
     for (const path of archiveConnectorStoreDbPaths(['chat'], env)) expect(live).not.toContain(path);
 
     const found: string[] = [];

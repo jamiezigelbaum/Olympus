@@ -44,7 +44,7 @@ import {
 import { configWithEnvironmentOverrides, defaultConfig } from '../src/core/config.ts';
 import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
 import { ScopeFileReader } from '../src/core/scope-safe-fs.ts';
-import { ARCHIVE_IMPORTS_STATE_PATH_ENV } from '../src/workers/archive-import/state.ts';
+import { defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
 import { runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath, type ArchiveImportApproval } from '../src/workers/archive-import/requests.ts';
 import { archiveManifestSha256 } from '../src/workers/archive-import/manifest.ts';
@@ -139,7 +139,8 @@ function fixture(options: { model?: ArchivePrivateModelState } = {}) {
   const env = { HOME: home, XDG_DATA_HOME: join(base, 'xdg'), OPENCLAW_STATE_DIR: join(base, 'openclaw') };
   const runtime = createArchiveImportRuntime({
     env,
-    statePath: join(base, 'xdg', 'archive-imports.json'),
+    // Where the layout keeps the record, so a delete in another process finds it.
+    statePath: defaultArchiveImportStatePath(env),
     waitingQuestionsDbPath: join(base, 'waiting-private-questions.sqlite'),
     openSecretLocations: (secureDbPath) => new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(secureDbPath) }),
   });
@@ -601,7 +602,7 @@ describe('a check of a possible copy', () => {
     const custody = () => dataDeleteCustody({
       sourceId: 'archive.imports',
       homeDir: f.home,
-      env: { ...f.env, [ARCHIVE_IMPORTS_STATE_PATH_ENV]: f.runtime.state.path },
+      env: f.env,
       connectedRegistry: { version: 1, handles: [] },
     });
     expect(custody()).toMatchObject({ ready: true });
@@ -757,7 +758,7 @@ describe('one exclusion for approvals and the CLI delete of imported archives', 
   test('the CLI delete waits for an approval moving into the checks, then refuses', async () => {
     const f = fixture();
     const marker = join(f.base, 'held');
-    const env = { ...f.env, [ARCHIVE_IMPORTS_STATE_PATH_ENV]: f.runtime.state.path };
+    const env = f.env;
     const worker = holdApprovals(f.runtime.state.path, marker, 1500,
       'new requests.ArchiveImportRequestStore({ path: requests.archiveImportRequestsPath(statePath) }).addChecking(process.env.HOLD_PATH, JSON.parse(process.env.HOLD_APPROVAL));',
       { HOLD_PATH: f.write('Mine.mbox', mbox([mail(0)])), HOLD_APPROVAL: JSON.stringify(fakeApproval('Mine.mbox')) });
