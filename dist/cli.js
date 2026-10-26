@@ -170347,8 +170347,37 @@ function createArchiveImportDashboard(options) {
     wakeScheduler();
     return { ok: true };
   };
+  const listing = (shownHere) => {
+    const model = options.privateModel();
+    const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID2, privateModel: model };
+    let records;
+    try {
+      records = state.list();
+    } catch (error2) {
+      return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error2), file: shown(state.path), list: "archives" } };
+    }
+    const apart = records.filter(shownHere);
+    let asked;
+    try {
+      asked = requests.list();
+    } catch (error2) {
+      return {
+        ...base,
+        archives: apart.map(entryOf),
+        requests: [],
+        unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path), list: "requests" }
+      };
+    }
+    const setting = scheduling();
+    return {
+      ...base,
+      archives: apart.map(entryOf),
+      requests: askingNow(asked, records).map((request) => requestOf2(request, records)),
+      ...setting !== "on" && records.length > 0 ? { notRunning: setting } : {}
+    };
+  };
   const api2 = {
-    agent: createArchiveImportAgent({ state, requests, view: () => api2.view() }),
+    agent: createArchiveImportAgent({ state, requests, view: () => listing(() => true) }),
     async browse(request) {
       const page2 = await options.browser.browse(request);
       return {
@@ -170452,33 +170481,7 @@ function createArchiveImportDashboard(options) {
       return result;
     },
     view() {
-      const model = options.privateModel();
-      const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID2, privateModel: model };
-      let records;
-      try {
-        records = state.list();
-      } catch (error2) {
-        return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error2), file: shown(state.path), list: "archives" } };
-      }
-      const apart = records.filter(underArchives);
-      let asked;
-      try {
-        asked = requests.list();
-      } catch (error2) {
-        return {
-          ...base,
-          archives: apart.map(entryOf),
-          requests: [],
-          unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path), list: "requests" }
-        };
-      }
-      const setting = scheduling();
-      return {
-        ...base,
-        archives: apart.map(entryOf),
-        requests: askingNow(asked, records).map((request) => requestOf2(request, records)),
-        ...setting !== "on" && records.length > 0 ? { notRunning: setting } : {}
-      };
+      return listing(underArchives);
     },
     archiveSources() {
       try {

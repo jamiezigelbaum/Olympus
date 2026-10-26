@@ -877,8 +877,42 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     return { ok: true };
   };
 
+  // The Archives list and its requests. The dashboard shows the imports that are its own (`shownHere`): one that joined a source
+  // is in that source's card (sourceImports), one of an import-only source's format in its card (cardViews). The agent sees
+  // every import, wherever it is shown: it must be able to follow any import it asked for.
+  const listing = (shownHere: (record: ArchiveImportRecord) => boolean): ComputerArchivesMeta => {
+    const model = options.privateModel();
+    const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID, privateModel: model };
+    let records: ArchiveImportRecord[];
+    try {
+      records = state.list();
+    } catch (error) {
+      return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error), file: shown(state.path), list: 'archives' } };
+    }
+    const apart = records.filter(shownHere);
+    let asked: ArchiveImportRequest[];
+    try {
+      asked = requests.list();
+    } catch (error) {
+      return {
+        ...base,
+        archives: apart.map(entryOf),
+        requests: [],
+        unreadable: { reason: recordUnreadableReason(error), file: shown(requests.path), list: 'requests' },
+      };
+    }
+    const setting = scheduling();
+    return {
+      ...base,
+      archives: apart.map(entryOf),
+      requests: askingNow(asked, records).map((request) => requestOf(request, records)),
+      // Any archive here: its import or removal would not run, and neither would Remove.
+      ...(setting !== 'on' && records.length > 0 ? { notRunning: setting } : {}),
+    };
+  };
+
   const api: ArchiveImportDashboard = {
-    agent: createArchiveImportAgent({ state, requests, view: () => api.view() }),
+    agent: createArchiveImportAgent({ state, requests, view: () => listing(() => true) }),
 
     async browse(request) {
       const page = await options.browser.browse(request);
@@ -979,36 +1013,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     },
 
     view() {
-      const model = options.privateModel();
-      const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID, privateModel: model };
-      let records: ArchiveImportRecord[];
-      try {
-        records = state.list();
-      } catch (error) {
-        return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error), file: shown(state.path), list: 'archives' } };
-      }
-      // The imports that joined a source are shown in that source's card (sourceImports), and those of an
-      // import-only source's format in its card (cardViews), not here.
-      const apart = records.filter(underArchives);
-      let asked: ArchiveImportRequest[];
-      try {
-        asked = requests.list();
-      } catch (error) {
-        return {
-          ...base,
-          archives: apart.map(entryOf),
-          requests: [],
-          unreadable: { reason: recordUnreadableReason(error), file: shown(requests.path), list: 'requests' },
-        };
-      }
-      const setting = scheduling();
-      return {
-        ...base,
-        archives: apart.map(entryOf),
-        requests: askingNow(asked, records).map((request) => requestOf(request, records)),
-        // Any archive here: its import or removal would not run, and neither would Remove.
-        ...(setting !== 'on' && records.length > 0 ? { notRunning: setting } : {}),
-      };
+      return listing(underArchives);
     },
 
     archiveSources() {
