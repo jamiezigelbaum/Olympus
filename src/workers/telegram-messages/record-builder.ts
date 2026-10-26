@@ -125,7 +125,8 @@ export function telegramRecordBuilder(options: {
       const authoredAt = index === 0 ? item.metadata['sentAt'] : undefined;
       return {
         identity: item.identity,
-        bringsContent: item.content.kind !== 'metadata_only',
+        // A child whose bytes can be read brings its content (it is read later), over a version of it that could not.
+        bringsContent: item.content.kind !== 'metadata_only' || item.deferredBytes?.available === true,
         ...(typeof authoredAt === 'string' ? { authoredAt } : {}),
       };
     }),

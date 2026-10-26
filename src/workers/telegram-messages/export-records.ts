@@ -24,6 +24,7 @@ import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
 } from './corpus-adapter.ts';
 import { telegramMessageItem, type TelegramCaptureSpoolRecord } from './capture-spool-connector.ts';
+import { telegramPeerId } from './peer-id.ts';
 
 /** The chat types Telegram Desktop writes, as live capture names them (`chat_type_from_entity`). */
 const LIVE_CHAT_TYPES: Readonly<Record<string, string>> = {
@@ -64,12 +65,12 @@ export function telegramMarkedChatId(type: string | undefined, id: string | unde
     case 'verification_codes':
       return id;
     case 'private_group':
-      return `-${id}`;
+      return telegramPeerId('chat', id);
     case 'private_supergroup':
     case 'public_supergroup':
     case 'private_channel':
     case 'public_channel':
-      return `-100${id}`;
+      return telegramPeerId('channel', id);
     default:
       return `export:${type && /^[a-z_]{1,40}$/.test(type) ? type : 'unknown'}:${id}`;
   }
@@ -84,8 +85,7 @@ export function telegramExportSenderId(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const found = /^(user|channel|chat)(\d{1,20})$/.exec(value.trim());
   if (!found) return undefined;
-  if (found[1] === 'user') return found[2];
-  return found[1] === 'channel' ? `-100${found[2]}` : `-${found[2]}`;
+  return telegramPeerId(found[1] as 'user' | 'chat' | 'channel', found[2]!);
 }
 
 /** An ISO time the way the Telethon helper writes it (no milliseconds), so both inputs spell a version alike. */
@@ -167,9 +167,14 @@ export interface TelegramExportRecordContext {
 }
 
 export type TelegramExportOutcome =
-  | { kind: 'record'; record: TelegramCaptureSpoolRecord; media: TelegramExportMedia[]; assumedZone: boolean; unsupported: boolean; mediaNotRead: number }
+  | { kind: 'record'; record: TelegramCaptureSpoolRecord; media: TelegramExportMedia[]; assumedZone: boolean; unsupported: boolean; mediaNotRead: number; withoutText: boolean }
   | { kind: 'skipped'; reason: 'message_without_text' }
   | { kind: 'gap'; reason: 'message_unreadable' | 'message_content_unsupported' | 'chat_unknown' };
+
+/** The time an export was made, when the input knows it (its file's modification time): what an account entry's version says. */
+export interface TelegramExportClock {
+  exportedAt?: string;
+}
 
 const SERVICE_FIELDS = ['title', 'new_title', 'members', 'duration_seconds', 'duration', 'discard_reason', 'period', 'amount', 'currency', 'boosts', 'inviter'];
 
@@ -224,9 +229,9 @@ export function telegramExportMessageRecord(
   if (!conversationId) return { kind: 'gap', reason: 'chat_unknown' };
   const service = value.type === 'service';
   const content = service ? undefined : telegramMessageContent(value);
-  if (content && !content.hasContent) {
-    return content.unsupported ? { kind: 'gap', reason: 'message_content_unsupported' } : { kind: 'skipped', reason: 'message_without_text' };
-  }
+  // A message with nothing to read (empty, or a kind of content this reader cannot read) is still a message: it
+  // becomes an item by its names (id, sender, time, chat), so nothing of it is lost, and is counted.
+  const withoutText = content !== undefined && !content.hasContent;
   const sent = telegramTime(value, 'date');
   const edited = telegramTime(value, 'edited');
   const named = (field: unknown): string | undefined => (typeof field === 'string' && field.trim() !== '' ? field.trim() : undefined);
@@ -265,7 +270,7 @@ export function telegramExportMessageRecord(
     ...(senderId ? { senderId } : {}),
     ...(senderName ? { senderDisplayName: senderName } : {}),
     ...(senderId && context.ownUserId ? { senderIsOwner: senderId === context.ownUserId } : {}),
-    ...(content ? { boundedText: content.text } : {}),
+    ...(content && content.hasContent ? { boundedText: content.text } : {}),
     ...(service ? { service: serviceEvent } : {}),
     ...(replyTo ? { replyToMessageId: replyTo } : {}),
     ...(forwardedFrom ? { forwardSource: 'telegram_forward', forwardFromName: forwardedFrom } : {}),
@@ -295,6 +300,7 @@ export function telegramExportMessageRecord(
     assumedZone: sent.assumedZone,
     unsupported: content?.unsupported ?? false,
     mediaNotRead: media.length,
+    withoutText,
   };
 }
 
@@ -318,7 +324,8 @@ export function telegramAccountEntryKey(section: AccountSection, value: unknown,
     const parts = section.name === 'sessions' || section.name === 'web_sessions'
       ? [value.device_model, value.platform, value.application_name, value.domain, value.bot_username, value.created_unixtime ?? value.created]
       : section.name === 'contacts' || section.name === 'frequent_contacts'
-        ? [value.phone_number, value.first_name, value.last_name, value.name, value.category]
+        // A contact is who its number is (a renamed contact is the same one); without a number, its names.
+        ? (telegramScalar(value.phone_number) ? [value.phone_number] : [value.first_name, value.last_name, value.name, value.category])
         : [];
     const known = parts.map((part) => telegramScalar(part) ?? '');
     if (known.some((part) => part !== '')) return sha256(known.join('\x1f')).slice(0, 24);
@@ -337,11 +344,15 @@ export function telegramAccountEntryRecord(
   section: AccountSection,
   ordinal: number,
   value: unknown,
+  clock: TelegramExportClock = {},
 ): { record: TelegramCaptureSpoolRecord; mediaFiles: number } {
   const content = accountEntryContent(section, value);
   const conversationId = telegramAccountConversation(section);
   const id = telegramAccountEntryKey(section, value, ordinal);
-  const sourceVersion = `${context.account}:${conversationId}:${id}:text:${sha256(content.text).slice(0, 16)}`;
+  // An entry has no time of its own: its version is when the export was made, so a later export's snapshot of
+  // the same entry is newer (its text may have changed) and an older export's never replaces it.
+  const exportedAt = liveIso(clock.exportedAt) ?? '';
+  const sourceVersion = `${context.account}:${conversationId}:${id}:text:${sha256(content.text).slice(0, 16)}:${exportedAt}`;
   const capturedItem = telegramMessageItem({
     account: context.account,
     conversationId,

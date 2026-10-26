@@ -8,7 +8,6 @@
 // (export-records.ts). A message's photo or file in the export's folder is a
 // child of the message, listed by name and read later.
 
-import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import { ARCHIVE_COMMON_FINDINGS, type ArchiveConnectorInput } from '../../core/archive-formats.ts';
 import type { RawItem, SourceConnectorInput, SourceRecordPage } from '../../core/contracts.ts';
@@ -27,17 +26,18 @@ export function telegramExportMediaLocator(archiveId: string, bindingId: string)
   return `archive-input-media:v1:${archiveId}:b:${bindingId}`;
 }
 
-/** A child's key within its message: the field that names the file and the file's path in the export. */
-function childKey(media: TelegramExportMedia): string {
-  return `${media.field}:${createHash('sha256').update(media.path ?? media.name).digest('hex').slice(0, 24)}`;
-}
+// The child's key within its message (docs/design/child-items.md): Telegram's `media`, one per message, which
+// live capture computes too, whatever the export's path or whether the file is in the export. The child id is
+// `<parent>#child:<key>`, the rule of src/core/child-item-id.ts (#550), written out here until that lands.
+const TELEGRAM_CHILD_KEY = 'media';
+const CHILD_ITEM_ID_SEPARATOR = '#child:';
 
 function child(
   parent: RawItem,
   media: TelegramExportMedia,
   deferredBytes: RawItem['deferredBytes'],
 ): RawItem {
-  const providerItemId = `${parent.identity.providerItemId}#child:${childKey(media)}`;
+  const providerItemId = `${parent.identity.providerItemId}${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
   const identity: SourceItemIdentity = {
     family: parent.identity.family,
     provider: parent.identity.provider,
@@ -129,8 +129,9 @@ export function telegramExportInput(
           if (outcome.kind === 'gap') {
             return { kind: 'gap', reason: outcome.reason === 'chat_unknown' ? TELEGRAM_FINDINGS.unreadable : outcome.reason };
           }
-          const findings: Array<{ kind: string; count?: number }> = [];
+          const findings: Array<{ kind: string; count?: number; class?: 'gap' | 'skipped' }> = [];
           if (outcome.unsupported) findings.push({ kind: TELEGRAM_FINDINGS.unsupported });
+          if (outcome.withoutText && !outcome.unsupported) findings.push({ kind: TELEGRAM_FINDINGS.withoutText, class: 'skipped' });
           const left = outcome.media.filter((entry) => entry.leftOut).length;
           if (left > 0) findings.push({ kind: ARCHIVE_COMMON_FINDINGS.mediaNotImported, count: left });
           return {
@@ -141,7 +142,7 @@ export function telegramExportInput(
           };
         },
         account(section, ordinal, value) {
-          const built = telegramAccountEntryRecord(context, section, ordinal, value);
+          const built = telegramAccountEntryRecord(context, section, ordinal, value, { exportedAt: new Date(file.version.mtimeMs).toISOString() });
           return { unit: { record: built.record }, mediaFiles: built.mediaFiles };
         },
       });

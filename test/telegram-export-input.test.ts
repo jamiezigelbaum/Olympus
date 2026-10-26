@@ -26,7 +26,11 @@ import {
   telegramService,
   telegramSingleChatExport,
   telegramText,
+  telegramUnreadableKind,
 } from './support/archive-fixtures-telegram.ts';
+import { utimesSync } from 'node:fs';
+import { join } from 'node:path';
+import { telegramPeerId } from '../src/workers/telegram-messages/peer-id.ts';
 import { telegramOneDatasetHarness, type TelegramOneDatasetHarness } from './support/telegram-one-dataset-harness.ts';
 
 const cleanups: Array<() => void> = [];
@@ -217,7 +221,8 @@ describe('what a real export holds', () => {
     const children = h.rows().filter((row) => row.parent !== null);
     expect(children).toHaveLength(2);
     const bound = children.find((row) => row.parent === `${ACCOUNT}:${GROUP}:1000`)!;
-    expect(bound.id).toMatch(/^1000#child:photo:[0-9a-f]{24}$/);
+    // One child per message, keyed `media`, as live capture keys it.
+    expect(bound.id).toBe('1000#child:media');
     expect(bound.locator).toMatch(/^archive-input-media:v1:.+:b:.+$/);
     expect(bound.available).toBe(1);
     const left = children.find((row) => row.parent === `${ACCOUNT}:${GROUP}:1001`)!;
@@ -252,5 +257,72 @@ describe('which account an export joins', () => {
     expect(telegramProviderAccountId('1001')).toMatch(/^telegram:[0-9a-f]{16}$/);
     const registry = readSourceRegistry({});
     expect(findRegistryAccount(registry, 'nothing', 'default')).toBeUndefined();
+  });
+});
+
+describe('review fixes (Astra, #553)', () => {
+  test('a channel or supergroup id is Telethon\'s marked id by number, never by joining text', () => {
+    expect(telegramMarkedChatId('private_channel', '1234567')).toBe('-1000001234567');
+    expect(telegramMarkedChatId('public_supergroup', '1234567')).toBe('-1000001234567');
+    expect(telegramExportSenderId('channel1234567')).toBe('-1000001234567');
+    // A basic group whose bare id reads like the joined text is another chat.
+    expect(telegramMarkedChatId('private_group', '1001234567')).toBe('-1001234567');
+    expect(telegramMarkedChatId('private_channel', '1234567')).not.toBe(telegramMarkedChatId('private_group', '1001234567'));
+    expect(telegramPeerId('channel', '1500000001')).toBe('-1001500000001');
+    expect(telegramPeerId('user', '0')).toBeUndefined();
+  });
+
+  test('an empty message and one of a kind the reader cannot read are items by their names, and are counted', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    const messages = [
+      telegramText(0, ''),
+      telegramUnreadableKind(1, { giveaway_information: { quantity: 3 } }),
+      telegramText(2, 'and a plain one'),
+    ];
+    const { record } = await importExport(h, 'Telegram Desktop', telegramFullExport({ chats: [telegramChat({ id: GROUP_ID, messages })], withoutPersonalSections: true }), undefined, { confirmAccount: true });
+    expect(ids(h)).toEqual([`${GROUP}/1000`, `${GROUP}/1001`, `${GROUP}/1002`]);
+    expect(h.textOf(GROUP, '1000')).toBe('');
+    expect(record.findings.skipped['message_without_text']).toBe(1);
+    expect(record.findings.gaps['message_content_unsupported']).toBe(1);
+  });
+
+  test('a photo left out of one export and present in the next is one child, and becomes readable', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    const left = { ...telegramPhoto(0, 'the quay'), photo: '(File not included. Change data exporting settings to download.)' };
+    await importExport(h, 'Export one', telegramFullExport({ chats: [telegramChat({ id: GROUP_ID, messages: [left] })], withoutPersonalSections: true }), undefined, { confirmAccount: true });
+    const present = telegramPhoto(0, 'the quay');
+    await importExport(h, 'Export two', telegramFullExport({ chats: [telegramChat({ id: GROUP_ID, messages: [present] })], withoutPersonalSections: true }), { [String(present.photo)]: 'synthetic jpeg bytes' }, { confirmAccount: true });
+    const children = h.rows().filter((row) => row.parent !== null);
+    expect(children.map((row) => row.id)).toEqual(['1000#child:media']);
+    expect(children[0]!.available).toBe(1);
+    expect(children[0]!.locator).toMatch(/^archive-input-media:v1:/);
+  });
+
+  test('a later export\'s snapshot of an account entry replaces the earlier one, and an older export never does', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    const withContact = (name: string) => {
+      const value = telegramFullExport({ chats: [], contacts: 1 });
+      ((value.contacts as { list: Array<Record<string, unknown>> }).list[0]!).first_name = name;
+      return value;
+    };
+    const first = h.writeExport('Old export', withContact('Robin'));
+    utimesSync(join(first, 'result.json'), new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+    const second = h.writeExport('New export', withContact('Robyn'));
+    utimesSync(join(second, 'result.json'), new Date('2026-06-01T00:00:00Z'), new Date('2026-06-01T00:00:00Z'));
+    const contactText = () => h.rows().filter((row) => row.conversation === 'account:contacts').map((row) => h.textOf(row.conversation, row.id)).join('\n');
+    const run = async (path: string) => {
+      const started = await h.startImport(path);
+      if (!started.ok || started.status !== 'started') throw new Error(JSON.stringify(started));
+      await h.importAll(started.archive_id);
+    };
+    await run(second);
+    expect(contactText()).toContain('Robyn');
+    // The older export, imported after: its snapshot is older, and the stored one stays.
+    await run(first);
+    expect(contactText()).toContain('Robyn');
+    expect(contactText()).not.toContain('Robin');
   });
 });

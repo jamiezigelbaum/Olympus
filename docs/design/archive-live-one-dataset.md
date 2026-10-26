@@ -547,7 +547,9 @@ Telegram connector (`src/workers/telegram-messages/`: `export-records.ts`,
 - **Exact keys.** A message is keyed by Telethon's marked chat id (a user
   or bot as is, a basic group `-id`, a supergroup or channel `-100id`, from
   the export's chat type; checked against the helper, which keys a chat by
-  Telethon's `dialog.id`) and the message id. A chat type this does not know
+  Telethon's `dialog.id`) and the message id. The marked ids are computed
+  by number (`peer-id.ts`, `-(1000000000000 + id)` for a channel, as
+  Telethon's `get_peer_id`), never by joining text (review, #553). A chat type this does not know
   is kept apart (`export:<type>:<id>`) rather than risk joining the wrong
   live chat. Senders take the same form (`user<id>`, `channel<id>`).
   History from before a supergroup migration (negative ids) is its own
@@ -559,7 +561,11 @@ Telegram connector (`src/workers/telegram-messages/`: `export-records.ts`,
   records of their own kinds, one per entry, in a conversation per part
   (`account:contacts`, ...), keyed by what says who the entry is (a
   contact's user id, else its phone and name; a session's device, app and
-  start).
+  start). An entry's version is when the export was made (its file's
+  modification time), so a later export's snapshot replaces an earlier one
+  and an older export never does. A message with nothing to read (empty, or
+  a kind this reader cannot read) is still an item, by its names, and is
+  counted (review, #553).
 - **Account.** The export's `personal_information.user_id`, hashed as
   pairing hashes it (`telegram:` + `sha256(id)[:16]`), is the account's
   hash. An export without a profile (a single chat, or an account export
@@ -568,11 +574,13 @@ Telegram connector (`src/workers/telegram-messages/`: `export-records.ts`,
   run without the exclusive runner, under the Telegram pull's own scheduler
   key.
 - **Media.** A photo or file a message names in the export's folder is a
-  child of the message (`<message>#child:<field>:<path digest>`), listed by
+  child of the message (`<message>#child:media`, one per message, the key
+  live capture computes too), listed by
   name with a media binding and a locator in the shared
   `archive-input-media:v1:<archive>:b:<binding>` shape; a file the export
   left out (or one beside a single chosen `result.json`) is a child that
-  is named and not readable. The bytes are read once the shared reader for
+  is named and not readable. A readable child brings its content, so a
+  later export with the file present makes a named-only child readable. The bytes are read once the shared reader for
   archive-input media lands (WhatsApp lane) and Telegram has an extraction
   roster for its stores.
 - **The trust lanes.** The secure lane's claim on an item is now a row it

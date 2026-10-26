@@ -367,7 +367,7 @@ function isDamage(error: unknown): boolean {
 
 /** What one message of the export becomes, for whoever reads the export: a unit of its own, or a finding. */
 export type TelegramExportMessageOutcome<U> =
-  | { kind: 'unit'; unit: U; findings: Array<{ kind: string; count?: number }>; assumedZone: boolean }
+  | { kind: 'unit'; unit: U; findings: Array<{ kind: string; count?: number; class?: 'gap' | 'skipped' }>; assumedZone: boolean }
   | { kind: 'skipped'; reason: string }
   | { kind: 'gap'; reason: string };
 
@@ -529,7 +529,7 @@ export async function* telegramExportPages<U>(
           } else {
             page.push(outcome.unit);
             positions.push(event.start);
-            for (const finding of outcome.findings) report(finding.kind, 'gap', event.start, finding.count);
+            for (const finding of outcome.findings) report(finding.kind, finding.class ?? 'gap', event.start, finding.count);
             if (outcome.assumedZone && !assumedZone) {
               assumedZone = true;
               report(ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, 'gap', event.start);

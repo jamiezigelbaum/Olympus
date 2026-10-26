@@ -19669,7 +19669,6 @@ var init_connector4 = __esm(() => {
   SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
   LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
 });
-
 // src/workers/telegram-messages/export-records.ts
 var init_export_records = __esm(() => {
   init_message();
