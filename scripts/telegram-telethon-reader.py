@@ -367,6 +367,10 @@ async def run_gateway(run_once: bool = False) -> None:
                 )
                 report = gateway_report(config, state, captured)
                 write_json_atomic(config.report_path, report)
+                # A finished cycle read every approved chat, so the session is
+                # alive whether or not anyone wrote: the importer tells a quiet
+                # account from a stopped capture by this, beside the spool.
+                write_capture_heartbeat(config.spool_dir)
                 sys.stdout.write(json.dumps(report, separators=(",", ":")) + "\n")
                 sys.stdout.flush()
                 if run_once:
@@ -854,9 +858,64 @@ def append_gateway_page(
     return len(records)
 
 
+CAPTURE_SEQ_NAME = ".capture-seq"
+CAPTURE_SEQ_LOCK_NAME = ".capture-seq.lock"
+
+
+def capture_seq_test_crash(step: str) -> None:
+    """Test seam: end the process at a named step, as a kill there would."""
+    if os.environ.get("OLYMPUS_TELEGRAM_TEST_SEQ_CRASH") == step:
+        os._exit(9)
+
+
+def allocate_capture_seq(spool_dir: Path, count: int) -> int:
+    """The first of `count` new capture sequence numbers, kept beside the spool.
+
+    The number only grows, whatever happens to the day files, so the importer
+    can order two captures of one message at the same capture time. It is
+    taken under a lock file of its own (held across processes) and replaced
+    whole: the new value is written to a temporary file, synced, renamed over
+    the counter, and the folder synced, so a kill at any step leaves either
+    the old value or the new one, never a torn or empty counter. Numbers are
+    taken before any record names them; a crash after taking them only leaves
+    a gap.
+    """
+    path = spool_dir / CAPTURE_SEQ_NAME
+    lock_path = spool_dir / CAPTURE_SEQ_LOCK_NAME
+    with open(lock_path, "a+b") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            text = path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            text = ""
+        current = int(text) if text.isdigit() else 0
+        # What a killed writer left behind is never the counter: it goes.
+        for stale in spool_dir.glob(f".{CAPTURE_SEQ_NAME}.tmp.*"):
+            stale.unlink(missing_ok=True)
+        temporary = spool_dir / f".{CAPTURE_SEQ_NAME}.tmp.{os.getpid()}"
+        with open(temporary, "wb") as output:
+            os.chmod(temporary, 0o600)
+            output.write(str(current + count).encode("ascii"))
+            capture_seq_test_crash("after_temp_write")
+            output.flush()
+            os.fsync(output.fileno())
+        capture_seq_test_crash("after_temp_fsync")
+        os.replace(temporary, path)
+        capture_seq_test_crash("after_rename")
+        directory = os.open(spool_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    return current + 1
+
+
 def append_spool_records(spool_dir: Path, records: list[dict[str, Any]], date_name: str) -> None:
     spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(spool_dir, 0o700)
+    first_seq = allocate_capture_seq(spool_dir, len(records))
+    records = [{**record, "capture_seq": first_seq + index} for index, record in enumerate(records)]
     path = spool_dir / f"{date_name}.jsonl"
     with open(path, "a+b") as spool:
         os.chmod(path, 0o600)
@@ -907,11 +966,86 @@ def replay_jsonl(path: Path) -> list[Any]:
     return result
 
 
+CAPTURE_HEARTBEAT_NAME = ".capture-heartbeat.json"
+SPOOL_SCAN_CHUNK_BYTES = 1 << 20
+# How far back from a spool file's end the report looks for its newest record.
+SPOOL_TAIL_SCAN_BYTES = 16 << 20
+
+
+def write_capture_heartbeat(spool_dir: Path) -> None:
+    write_json_atomic(spool_dir / CAPTURE_HEARTBEAT_NAME, {
+        "kind": "telegram_capture_heartbeat",
+        "schema_version": 1,
+        "cycle_completed_at": gateway_now_iso(),
+    })
+
+
+def count_spool_records(path: Path) -> int:
+    """Complete non-blank lines, counted in chunks: the spool is never held whole."""
+    count = 0
+    pending_content = False
+    try:
+        with open(path, "rb") as spool:
+            while True:
+                chunk = spool.read(SPOOL_SCAN_CHUNK_BYTES)
+                if not chunk:
+                    break
+                start = 0
+                while True:
+                    newline = chunk.find(b"\n", start)
+                    if newline < 0:
+                        if chunk[start:].strip():
+                            pending_content = True
+                        break
+                    if pending_content or chunk[start:newline].strip():
+                        count += 1
+                    pending_content = False
+                    start = newline + 1
+    except FileNotFoundError:
+        return 0
+    return count
+
+
+def newest_spool_captured_at(path: Path) -> str:
+    """The newest `captured_at` among the complete records at a file's end.
+
+    Records are appended in time order, so the last record that reads is the
+    newest; a damaged one is passed over rather than failing the report.
+    """
+    try:
+        with open(path, "rb") as spool:
+            spool.seek(0, os.SEEK_END)
+            size = spool.tell()
+            start = max(0, size - SPOOL_TAIL_SCAN_BYTES)
+            spool.seek(start)
+            payload = spool.read(size - start)
+    except FileNotFoundError:
+        return ""
+    complete = payload[:payload.rfind(b"\n") + 1] if b"\n" in payload else b""
+    lines = complete.split(b"\n")
+    if start > 0 and lines:
+        lines = lines[1:]  # the first piece may be the end of a longer line
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        value = record.get("captured_at") if isinstance(record, dict) else None
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def gateway_report(config: GatewayConfig, state: dict[str, Any], captured: int) -> dict[str, Any]:
-    records = []
-    for path in sorted(config.spool_dir.glob("*.jsonl")):
-        records.extend(replay_jsonl(path))
-    newest = max((record.get("captured_at", "") for record in records if isinstance(record, dict)), default="")
+    paths = sorted(config.spool_dir.glob("*.jsonl"))
+    spool_records = sum(count_spool_records(path) for path in paths)
+    newest = ""
+    for path in reversed(paths):
+        newest = newest_spool_captured_at(path)
+        if newest:
+            break
     age = seconds_since(newest) if newest else None
     if age is None:
         freshness_status, freshness_reason = "unavailable", "no_valid_message_timestamp"
@@ -928,7 +1062,7 @@ def gateway_report(config: GatewayConfig, state: dict[str, Any], captured: int) 
         "approved_chats": len(config.approved_scopes),
         "protected_chats": sum(1 for value in config.classifications.values() if value["trust_domain"] == "secure_local"),
         "records_captured": captured,
-        "spool_records": len(records),
+        "spool_records": spool_records,
         **({"spool_newest_age_seconds": age} if age is not None else {}),
         "spool_stale_threshold_seconds": config.stale_threshold_seconds,
         "spool_freshness_status": freshness_status,
@@ -1134,6 +1268,12 @@ def normalize_message(
     forward = getattr(message, "forward", None)
     if forward is not None:
         item["forwardSource"] = "telegram_forward"
+        forward_name = forward_origin_name(forward)
+        if forward_name:
+            item["forwardFromName"] = forward_name
+    service = service_action_fields(getattr(message, "action", None))
+    if service:
+        item["service"] = service
     attachments = attachment_metadata(message)
     if attachments:
         item["attachments"] = attachments
@@ -1313,6 +1453,113 @@ def display_name_from_entity(entity: Any) -> str | None:
     if not isinstance(title, str) or not title.strip():
         return None
     return title.strip()[:120]
+
+
+def forward_origin_name(forward: Any) -> str | None:
+    """Who a forwarded message came from, from what Telethon already holds.
+
+    A hidden sender is only a name (`from_name`); otherwise the original sender
+    or channel is an entity Telethon resolved with the message. Nothing is
+    fetched: a forward whose origin is not at hand keeps the bare flag.
+    """
+    name = getattr(forward, "from_name", None)
+    if isinstance(name, str) and name.strip():
+        return name.strip()[:120]
+    for attribute in ("sender", "chat"):
+        try:
+            entity = getattr(forward, attribute, None)
+        except Exception:
+            entity = None
+        resolved = display_name_from_entity(entity)
+        if resolved:
+            return resolved
+    return None
+
+
+# Telethon's service actions under the names Telegram Desktop's export uses,
+# so both inputs of the Telegram connector describe one event the same way
+# (src/workers/archive-import/telegram/message.ts reads these names).
+SERVICE_ACTION_NAMES = {
+    "MessageActionChatCreate": "create_group",
+    "MessageActionChannelCreate": "create_channel",
+    "MessageActionChatEditTitle": "edit_group_title",
+    "MessageActionChatEditPhoto": "edit_group_photo",
+    "MessageActionChatDeletePhoto": "delete_group_photo",
+    "MessageActionChatAddUser": "invite_members",
+    "MessageActionChatDeleteUser": "remove_members",
+    "MessageActionChatJoinedByLink": "join_group_by_link",
+    "MessageActionChatJoinedByRequest": "join_group_by_request",
+    "MessageActionChatMigrateTo": "migrate_to_supergroup",
+    "MessageActionChannelMigrateFrom": "migrate_from_group",
+    "MessageActionPinMessage": "pin_message",
+    "MessageActionHistoryClear": "clear_history",
+    "MessageActionPhoneCall": "phone_call",
+    "MessageActionGroupCall": "group_call",
+    "MessageActionInviteToGroupCall": "invite_to_group_call",
+    "MessageActionContactSignUp": "joined_telegram",
+    "MessageActionSetMessagesTTL": "set_messages_ttl",
+    "MessageActionTopicCreate": "topic_created",
+    "MessageActionTopicEdit": "topic_edit",
+    "MessageActionScreenshotTaken": "take_screenshot",
+    "MessageActionPaymentSent": "send_payment",
+    "MessageActionBoostApply": "boost_apply",
+}
+
+PHONE_CALL_DISCARD_REASONS = {
+    "PhoneCallDiscardReasonMissed": "missed",
+    "PhoneCallDiscardReasonBusy": "busy",
+    "PhoneCallDiscardReasonHangup": "hangup",
+    "PhoneCallDiscardReasonDisconnect": "disconnect",
+}
+
+
+def service_action_fields(action: Any) -> dict[str, Any] | None:
+    """A service message's event as the export's `action` and plain fields.
+
+    Only names, counts and durations are kept; member ids are not names, and
+    who did it is the message's sender. An action this does not know keeps its
+    own name, so it is still an event rather than an empty message.
+    """
+    if action is None:
+        return None
+    class_name = type(action).__name__
+    if not class_name.startswith("MessageAction") or class_name == "MessageActionEmpty":
+        return None
+    name = SERVICE_ACTION_NAMES.get(class_name)
+    if name is None:
+        rest = class_name[len("MessageAction"):]
+        name = "".join(("_" + char.lower()) if char.isupper() else char for char in rest).lstrip("_") or "service"
+    fields: dict[str, Any] = {"action": name[:80]}
+
+    def text_field(source: str, target: str) -> None:
+        value = getattr(action, source, None)
+        if isinstance(value, str) and value.strip():
+            fields[target] = value.strip()[:200]
+
+    def int_field(source: str, target: str) -> None:
+        value = getattr(action, source, None)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            fields[target] = value
+
+    if name in ("create_group", "create_channel", "edit_group_title", "topic_created", "migrate_from_group"):
+        text_field("title", "title")
+    if name == "topic_edit":
+        text_field("title", "new_title")
+    if name == "phone_call":
+        int_field("duration", "duration_seconds")
+        reason = PHONE_CALL_DISCARD_REASONS.get(type(getattr(action, "reason", None)).__name__)
+        if reason:
+            fields["discard_reason"] = reason
+    if name == "group_call":
+        int_field("duration", "duration")
+    if name == "set_messages_ttl":
+        int_field("period", "period")
+    if name == "send_payment":
+        int_field("total_amount", "amount")
+        text_field("currency", "currency")
+    if name == "boost_apply":
+        int_field("boosts", "boosts")
+    return fields
 
 
 def chat_type_from_entity(entity: Any) -> str:
