@@ -15,7 +15,8 @@ import {
   sanitizeTelegramCaptureCursor,
 } from '../src/workers/telegram-messages/index.ts';
 import { telegramSpoolPosition } from '../src/workers/telegram-messages/store-sync.ts';
-import { telegramLiveMediaChild } from '../src/workers/telegram-messages/media-child.ts';
+import { readTelegramMediaState, telegramLiveMediaChild } from '../src/workers/telegram-messages/media-child.ts';
+import { readdirSync } from 'node:fs';
 import { forgetSpoolOffsets } from '../src/workers/telegram-messages/spool-lines.ts';
 import { liveSpoolLine } from './support/telegram-spool-fixtures.ts';
 import { telegramChat, telegramFullExport, telegramPhoto } from './support/archive-fixtures-telegram.ts';
@@ -39,15 +40,15 @@ describe('a live message\'s media is its child', () => {
     roots.push(root);
     const spoolDir = join(root, 'spool');
     mkdirSync(join(spoolDir, 'media', '-1000001'), { recursive: true });
-    writeFileSync(join(spoolDir, 'media', '-1000001', '1000.jpg'), 'synthetic jpeg bytes!');
-    writeFileSync(join(spoolDir, '2026-10-20.jsonl'), liveSpoolLine({ chat: '-1000001', id: '1000', text: 'the quay', sentAt: '2026-10-20T09:00:00Z', extra: photo('media/-1000001/1000.jpg') }));
+    writeFileSync(join(spoolDir, 'media', '-1000001', '1000.a1b2c3d4e5f6.jpg'), 'synthetic jpeg bytes!');
+    writeFileSync(join(spoolDir, '2026-10-20.jsonl'), liveSpoolLine({ chat: '-1000001', id: '1000', text: 'the quay', sentAt: '2026-10-20T09:00:00Z', extra: photo('media/-1000001/1000.a1b2c3d4e5f6.jpg') }));
     const connector = createTelegramCaptureSpoolConnector({ spoolDir, trustDomain: 'internal' });
     const items = [];
     for await (const page of connector.listItems()) items.push(...page.items);
     expect(items.map((item) => item.identity.providerItemId)).toEqual(['1000', '1000#child:media']);
     const child = items[1]!;
     expect(child.identity.parent).toEqual({ providerItemId: '1000', localItemId: `${ACCOUNT}:-1000001:1000` });
-    expect(child.deferredBytes).toEqual({ locator: 'telegram-live-media:v1:media/-1000001/1000.jpg', available: true, sizeBytes: 21 });
+    expect(child.deferredBytes).toEqual({ locator: 'telegram-live-media:v1:media/-1000001/1000.a1b2c3d4e5f6.jpg', available: true, sizeBytes: 21 });
     expect(child.metadata).toMatchObject({ name: 'Photo', mediaKind: 'photo' });
     const fetched = await connector.fetchItem(child.identity.localItemId, { deferredBytes: { locator: child.deferredBytes!.locator } });
     expect(fetched.content.kind).toBe('bytes');
@@ -73,8 +74,8 @@ describe('a pass that cannot hold a message and its child', () => {
     roots.push(root);
     const spoolDir = join(root, 'spool');
     mkdirSync(join(spoolDir, 'media', '-1000001'), { recursive: true });
-    writeFileSync(join(spoolDir, 'media', '-1000001', '1000.jpg'), 'synthetic jpeg bytes!');
-    writeFileSync(join(spoolDir, '2026-10-20.jsonl'), liveSpoolLine({ chat: '-1000001', id: '1000', text: 'the quay', sentAt: '2026-10-20T09:00:00Z', extra: photo('media/-1000001/1000.jpg') }));
+    writeFileSync(join(spoolDir, 'media', '-1000001', '1000.a1b2c3d4e5f6.jpg'), 'synthetic jpeg bytes!');
+    writeFileSync(join(spoolDir, '2026-10-20.jsonl'), liveSpoolLine({ chat: '-1000001', id: '1000', text: 'the quay', sentAt: '2026-10-20T09:00:00Z', extra: photo('media/-1000001/1000.a1b2c3d4e5f6.jpg') }));
     const internal = new LocalConnectorStore({ dbPath: join(root, 'i.sqlite'), corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, family: 'chat', trustDomain: 'internal' });
     const secureLocal = new LocalConnectorStore({ dbPath: join(root, 's.sqlite'), corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
     cleanups.push(() => { internal.close(); secureLocal.close(); });
@@ -112,14 +113,61 @@ describe('both inputs bring the same media', () => {
     const h = telegramOneDatasetHarness(cleanups);
     h.pairLive('1001');
     mkdirSync(join(h.spoolDir, 'media', '-1000001'), { recursive: true });
-    const kept = join(h.spoolDir, 'media', '-1000001', '1000.jpg');
+    const kept = join(h.spoolDir, 'media', '-1000001', '1000.a1b2c3d4e5f6.jpg');
     writeFileSync(kept, 'synthetic jpeg bytes!');
-    h.capture([{ chat: '-1000001', id: '1000', text: 'see the photo', sentAt: '2026-10-20T09:00:00Z', extra: photo('media/-1000001/1000.jpg') }]);
+    h.capture([{ chat: '-1000001', id: '1000', text: 'see the photo', sentAt: '2026-10-20T09:00:00Z', extra: photo('media/-1000001/1000.a1b2c3d4e5f6.jpg') }]);
     await h.live.pull();
     expect(existsSync(kept)).toBe(true);
     const ledger = h.live.archiveTarget().lane({ sourceId: 'telegram.messages', slot: 'default' } as never, h.env).set.ledger;
     ledger.setOverride({ provider: 'telegram', accountScope: ACCOUNT, providerItemId: '1000#child:media', providerConversationId: '-1000001' }, { kind: 'tier', tier: 'secrets' });
     await h.live.pull();
     expect(existsSync(kept)).toBe(false);
+  });
+});
+
+describe('review fixes (#556)', () => {
+  test('a Secret takes every file of its message: the current one, an earlier attachment\'s, and its downloads in progress', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    const folder = join(h.spoolDir, 'media', '-1000001');
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, '1000.a1b2c3d4e5f6.jpg'), 'synthetic jpeg bytes!');
+    writeFileSync(join(folder, '1000.0000000000aa.jpg'), 'an earlier photo');
+    writeFileSync(join(folder, '.1000.ffffffffffff.jpg.tmp.999999999'), 'half written');
+    writeFileSync(join(folder, `.1000.eeeeeeeeeeee.jpg.tmp.${process.pid}`), 'in flight');
+    // Another message's file, and a stopped process's download of yet another, which the sweep removes.
+    writeFileSync(join(folder, '10000.a1b2c3d4e5f6.jpg'), 'not this message');
+    writeFileSync(join(folder, '.2000.a1b2c3d4e5f6.jpg.tmp.999999999'), 'orphan');
+    h.capture([{ chat: '-1000001', id: '1000', text: 'see the photo', sentAt: '2026-10-20T09:00:00Z', extra: photo('media/-1000001/1000.a1b2c3d4e5f6.jpg') }]);
+    await h.live.pull();
+    const ledger = h.live.archiveTarget().lane({ sourceId: 'telegram.messages', slot: 'default' } as never, h.env).set.ledger;
+    ledger.setOverride({ provider: 'telegram', accountScope: ACCOUNT, providerItemId: '1000#child:media', providerConversationId: '-1000001' }, { kind: 'tier', tier: 'secrets' });
+    await h.live.pull();
+    expect(readdirSync(folder)).toEqual(['10000.a1b2c3d4e5f6.jpg']);
+  });
+
+  test('media the helper left out names why on its child', () => {
+    const parent = {
+      identity: { family: 'chat' as const, provider: 'telegram', accountScope: ACCOUNT, providerItemId: '1000', providerConversationId: '-1000001', localItemId: `${ACCOUNT}:-1000001:1000`, sourceVersion: `${ACCOUNT}:-1000001:1000:2026-10-20T09:00:00Z` },
+      mimeType: 'text/plain', content: { kind: 'text' as const, text: 'x' }, fetchedAt: '2026-10-20T09:00:00Z',
+    };
+    for (const reason of ['too_large', 'storage_full'] as const) {
+      const child = telegramLiveMediaChild({ ...parent, metadata: { title: 'Chat', attachments: [{ attachmentId: 'photo:77', type: 'image', mediaLeftOut: reason }] } }, '/nowhere')!;
+      expect(child.deferredBytes?.available).toBe(false);
+      expect(child.metadata['mediaLeftOut']).toBe(reason);
+    }
+  });
+
+  test('a full media store is on the sync receipt, as a count and a warning', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    h.capture([{ chat: '-1000001', id: '1000', text: 'hello', sentAt: '2026-10-20T09:00:00Z' }]);
+    const before = await h.live.pull();
+    expect(before.counts.media_storage_full).toBe(0);
+    writeFileSync(join(h.spoolDir, '.capture-media.json'), JSON.stringify({ kind: 'telegram_capture_media', schema_version: 1, stored_bytes: 2000, quota_bytes: 2000, storage_full: true, updated_at: '2026-10-20T09:00:00Z' }));
+    expect(readTelegramMediaState(h.spoolDir)).toEqual({ storedBytes: 2000, quotaBytes: 2000, storageFull: true });
+    const full = await h.live.pull();
+    expect(full.counts.media_storage_full).toBe(1);
+    expect(full.warnings).toContain('telegram_media_storage_full');
   });
 });

@@ -623,16 +623,32 @@ Telegram connector (`src/workers/telegram-messages/`: `export-records.ts`,
 
 Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
 `src/workers/telegram-messages/media-child.ts`; tests
-`test/telegram-live-media.test.ts` and the helper's in
-`test/telegram-telethon-richer-records.test.ts`).
+`test/telegram-live-media.test.ts`, and the helper's in
+`test/telegram-telethon-richer-records.test.ts` and
+`test/telegram-telethon-media.test.ts`).
 
 - **Kept beside the spool.** The capture helper keeps a captured message's
-  photo or document under `media/<chat>/<message>.<ext>` in the spool's own
-  folder (the account's, owner-only), up to `OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES`
-  (25 MB by default; 0 keeps none; a setting that does not read keeps none and
-  never stops capture). It is written to a temporary name and renamed, and
-  named on the attachment as `mediaFile`. A failed download leaves the
-  attachment named only.
+  photo or document under `media/<chat>/<message>.<tag><ext>` in the spool's
+  own folder (the account's, owner-only). The tag comes from Telegram's id,
+  access hash, size and date for the file, so a changed attachment is
+  downloaded again under a new name, replaces the old file, and arrives with
+  the message's edit. Media can only change through an edit, so the child's
+  version moves with it.
+- **Bounded.** `OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES` caps one file (25 MB by
+  default) and is enforced while the bytes arrive, so a photo with no stated
+  size never lands whole. `OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES` caps everything
+  kept (2 GB by default). Either set to 0 keeps no media; a setting that does
+  not read keeps none and never stops capture. The native service passes both
+  settings through. Media over a limit is named only, and its child says why
+  (`mediaLeftOut`: `too_large` or `storage_full`). Nothing kept is ever
+  evicted. A full store is a visible problem instead: the helper writes
+  `.capture-media.json` beside the spool, and the sync receipt carries
+  `media_storage_full` and the `telegram_media_storage_full` warning until
+  room is made or the quota is raised.
+- **No copy left behind.** A download is written to `.<name>.tmp.<pid>` and
+  renamed into place, and the temporary is removed on any failure, the rename
+  included. A stopped process's temporaries are swept when the gateway starts
+  and before every Secrets cleanup.
 - **One child, both inputs.** The connector lists a live message's media as
   its `media` child, the same child an export brings: readable through a
   `telegram-live-media:v1:<path>` locator when the file was kept (read back by
@@ -640,8 +656,9 @@ Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
   was not. A named-only live child takes the version without the capture's
   mark, so it never replaces a readable child an export brought at the same
   edit time.
-- **Secrets.** A media child judged Secrets loses its kept file at the next
-  pull's clearing.
+- **Secrets.** A media child judged Secrets loses every file kept for its
+  message at the next pull's clearing: the current file, an earlier
+  attachment's, and any download of it in progress.
 - **Not yet.** Nothing reads the kept bytes until Telegram has an extraction
   roster for its stores (the factory's per-account connector resolution).
 
