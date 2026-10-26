@@ -3,9 +3,11 @@
 
 import { describe, expect, test } from 'bun:test';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
-import { legFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { ARCHIVE_FORMATS, legFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
-  agentImportJourney, besideLiveChecks, besideLiveJourney, besideLiveLine, panelArchivesOf, seedLiveChecks,
+  agentImportJourney, besideLiveChecks, besideLiveJourney, besideLiveLine, panelArchivesOf, seedLiveChecks, unpairJourney,
   type BesideLiveObservation, type RowView,
 } from '../scripts/release-check/archive-leg.ts';
 import { liveSeedHook, registerLiveSeedHook } from '../scripts/release-check/archive-live-seeds.ts';
@@ -40,7 +42,7 @@ const good = (over: Partial<BesideLiveObservation> = {}): BesideLiveObservation 
   row: row(),
   stores: [{ tier: 'private', exists: true, live: 6, tokenRows: 3 }, { tier: 'personal', exists: true, live: 2, tokenRows: 0 }],
   search: { ok: true, isError: false, evidence: [{ source: 'Fixture', hasToken: true }] },
-  deleted: { ok: true, stores: [{ tier: 'private', exists: true, live: 0, tokenRows: 0 }], rowGone: true },
+  deleted: { ok: true, unpaired: true, stores: [{ tier: 'private', exists: true, live: 0, tokenRows: 0 }], rowGone: true },
   ...over,
 });
 
@@ -63,8 +65,13 @@ describe('an import beside a live input is judged', () => {
     expect(failing(good({ row: row({ text: `${fx.fileName} 6 messages from this archive` }) }))).toEqual(['archive.beside.fixture_chat.in-source']);
     expect(failing(good({ stores: [{ tier: 'private', exists: true, live: 0, tokenRows: 0 }] }))).toEqual(['archive.beside.fixture_chat.stores']);
     expect(failing(good({ search: { ok: true, isError: false, evidence: [{ source: 'Imported mail', hasToken: true }] } }))).toEqual(['archive.beside.fixture_chat.search']);
-    expect(failing(good({ deleted: { ok: true, stores: [{ tier: 'private', exists: true, live: 1, tokenRows: 1 }], rowGone: true } }))).toEqual(['archive.beside.fixture_chat.deleted']);
-    expect(failing(good({ deleted: { ok: true, stores: [], rowGone: false } }))).toEqual(['archive.beside.fixture_chat.deleted']);
+    expect(failing(good({ deleted: { ok: true, unpaired: true, stores: [{ tier: 'private', exists: true, live: 1, tokenRows: 1 }], rowGone: true } }))).toEqual(['archive.beside.fixture_chat.deleted']);
+    expect(failing(good({ deleted: { ok: true, unpaired: true, stores: [], rowGone: false } }))).toEqual(['archive.beside.fixture_chat.deleted']);
+    // Mac, 2026-10-26: the Delete ran while the source was still paired, and the engine refused it (delete_source_paired).
+    const paired = besideLiveChecks(good({ deleted: { ok: false, unpaired: false, detail: 'Error [delete_source_paired]: Unpair this source before deleting its indexed data.', stores: [], rowGone: false } }), fx);
+    expect(paired.filter((check) => check.status === 'fail').map((check) => check.id)).toEqual(['archive.beside.fixture_chat.deleted']);
+    expect(paired.find((check) => check.id === 'archive.beside.fixture_chat.deleted')!.detail).toContain('the source was not unpaired before its Delete');
+    expect(failing(good({ deleted: { ok: true, unpaired: false, stores: [], rowGone: true } }))).toEqual(['archive.beside.fixture_chat.deleted']);
     expect(failing(good({ start: { ok: true, code: 'started', hasOpenTarget: false, carriesContent: false } }))).toEqual(['archive.beside.fixture_chat.requested']);
   });
 
@@ -72,6 +79,33 @@ describe('an import beside a live input is judged', () => {
     expect(seedLiveChecks({ ok: true, format: 'x', liveItems: 0 }, 'x')[0]!.status).toBe('fail');
     expect(seedLiveChecks({ ok: true, format: 'x', liveItems: 3 }, 'x')[0]!.status).toBe('pass');
     expect(seedLiveChecks(undefined, 'x')[0]!.status).toBe('fail');
+  });
+
+  test('the source is unpaired the way the owner does it: its menu, Unpair, the confirmation, then it reads disconnected', () => {
+    const journey = unpairJourney('telegram.messages', 'Telegram');
+    expect(journey.steps.map((step) => step.do)).toEqual([
+      { go: '/dashboard' },
+      { click: { css: '[data-key="summary:menu:telegram.messages"]' }, frame: 'panel' },
+      { click: { role: 'button', name: 'Unpair Telegram' }, frame: 'panel' },
+      { click: { role: 'button', name: 'Yes, unpair telegram' }, frame: 'panel' },
+    ]);
+    expect(journey.steps.at(-1)!.expect).toEqual([
+      { present: { css: 'li.row.source', text: 'Disconnected · indexed data kept', contains: true }, frame: 'panel' },
+      { absent: { role: 'button', name: 'Unpair Telegram' }, frame: 'panel' },
+    ]);
+  });
+
+  test('every format with an import beside a live input names its source for the Unpair', () => {
+    for (const spec of Object.values(ARCHIVE_FORMATS)) if (spec.besideLive) expect(spec.besideLive.sourceLabel.length).toBeGreaterThan(0);
+  });
+
+  test('the stage unpairs before it deletes', () => {
+    const stage = readFileSync(join(import.meta.dir, '..', 'scripts', 'release-check', 'archive-stages.ts'), 'utf8');
+    const body = stage.slice(stage.indexOf('export async function besideLiveStage'));
+    const unpairAt = body.indexOf('unpairJourney(beside.sourceId');
+    const deleteAt = body.indexOf('host.deleteSourceData!(beside.sourceId)');
+    expect(unpairAt).toBeGreaterThan(0);
+    expect(deleteAt).toBeGreaterThan(unpairAt);
   });
 
   test('the journey waits for the row inside the source\'s card', () => {

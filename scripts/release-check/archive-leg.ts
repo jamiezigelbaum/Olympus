@@ -23,7 +23,7 @@
  * machine-agent.ts does the pressing, the waiting, the store reading and the egress watch, and hands back the observations below.
  * Nothing here holds message text: a row is the dashboard's own sentences, counts and names, which are the fixture's.
  */
-import { DASHBOARD_ARCHIVE_COPY as A, DASHBOARD_CHATGPT_PAGE_COPY as PANEL, dashboardArchiveNouns } from '../../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_ARCHIVE_COPY as A, DASHBOARD_CHATGPT_PAGE_COPY as PANEL, DASHBOARD_DISCONNECTED_DATA_KEPT, dashboardArchiveNouns } from '../../src/workers/dashboard/vocabulary.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, type ArchiveExpectation, type BesideLiveExpectation, type LegFixture } from './archive-fixtures.ts';
 import { egressVerdict, type EgressView } from './inbox.ts';
 import { journeyChecks, type Journey, type JourneyTrace } from './journey.ts';
@@ -414,8 +414,11 @@ export interface BesideLiveObservation {
   /** The source's own stores once the import settled. */
   stores: StoreView[];
   search?: SearchView;
-  /** The source's Delete, and what is left after it. */
-  deleted?: { ok: boolean; detail?: string; stores: StoreView[]; rowGone: boolean };
+  /**
+   * The source's Delete, and what is left after it. `unpaired`: the source was unpaired on the dashboard first, as the owner must
+   * (the engine refuses to delete a paired source's data).
+   */
+  deleted?: { ok: boolean; unpaired: boolean; detail?: string; stores: StoreView[]; rowGone: boolean };
 }
 
 export interface ModelObservation {
@@ -583,6 +586,43 @@ export function removeJourney(role: string, fileName: string, removeS: number = 
         do: { click: { role: 'button', name: confirm }, frame: 'panel' },
         expect: [{ absent: rowTarget(fileName), frame: 'panel' }],
         timeoutMs: removeS * 1_000,
+      },
+    ],
+  };
+}
+
+/**
+ * Unpair, the way the owner ends a pairing before deleting a chat source's data: the source's ⋯ menu, Unpair <source>, the engine's
+ * own confirmation, then the row says it is disconnected with its data kept, and offers Unpair no more.
+ */
+export function unpairJourney(sourceId: string, label: string, bounds: { unpairS?: number; openS?: number } = {}): Journey {
+  const unpair = `Unpair ${label}`;
+  const confirm = fill(PANEL.confirm, { label: unpair.toLowerCase() });
+  return {
+    id: `archive-beside-unpair-${sourceId}`,
+    title: `The owner unpairs ${label} before deleting its data`,
+    source: 'a paired chat source\'s Delete: the engine refuses it until the source is unpaired, so the owner unpairs it first',
+    mutates: true,
+    steps: [
+      { name: 'Open the dashboard: the source has its menu', do: { go: '/dashboard' }, expect: [{ present: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' }], timeoutMs: (bounds.openS ?? OPEN_S) * 1_000 },
+      {
+        name: `Open the source's menu: it offers ${unpair}`,
+        do: { click: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' },
+        expect: [{ present: { role: 'button', name: unpair }, frame: 'panel' }],
+      },
+      {
+        name: `Press ${unpair}: it asks first`,
+        do: { click: { role: 'button', name: unpair }, frame: 'panel' },
+        expect: [{ present: { role: 'button', name: confirm }, frame: 'panel' }],
+      },
+      {
+        name: 'Confirm: the source reads disconnected, its data kept',
+        do: { click: { role: 'button', name: confirm }, frame: 'panel' },
+        expect: [
+          { present: { css: 'li.row.source', text: DASHBOARD_DISCONNECTED_DATA_KEPT, contains: true }, frame: 'panel' },
+          { absent: { role: 'button', name: unpair }, frame: 'panel' },
+        ],
+        timeoutMs: (bounds.unpairS ?? 60) * 1_000,
       },
     ],
   };
@@ -964,6 +1004,7 @@ export function besideLiveChecks(obs: BesideLiveObservation | undefined, fx: Leg
   const gone: string[] = [];
   if (!deleted) gone.push('the source\'s Delete was not run');
   else {
+    if (!deleted.unpaired) gone.push('the source was not unpaired before its Delete (the engine refuses to delete a paired source\'s data)');
     if (!deleted.ok) gone.push(`the source's Delete failed${deleted.detail ? `: ${deleted.detail}` : ''}`);
     for (const store of deleted.stores) {
       if (store.error) gone.push(`the ${store.tier} store could not be read: ${store.error}`);
