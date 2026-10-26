@@ -74267,7 +74267,7 @@ function telegramClaimKept(set, localItemId) {
 async function applyTelegramProtectionClaims(args) {
   const result = { carried: [], moved: 0, relinquished: [] };
   const readable = (identity2) => readableInOrdinaryLane(args.set, args.internal, identity2);
-  const unfinished = (identity2) => args.set.ledger.getCurrent(identity2)?.state === "moving";
+  const unfinished = (identity2) => args.set.ledger.getCurrent(identity2)?.state === "moving" || isClaimIntent(args.set.ledger.writeIntent(identity2));
   const held = args.claims.filter((identity2) => readable(identity2) || unfinished(identity2));
   const ids = new Set([...args.newestKnown.keys(), ...held.map((identity2) => identity2.localItemId)]);
   const newest = ids.size > 0 ? readTelegramCaptureSpoolNewest({ spoolDir: args.spoolDir, localItemIds: ids, compareVersions: compareTelegramVersions, asTrust: "secure_local" }) : new Map;
@@ -74281,7 +74281,19 @@ async function applyTelegramProtectionClaims(args) {
     if (!held.includes(identity2))
       continue;
     adoptIfLegacy(args.set, args.internal, identity2);
+    const version = args.internal.storedItemState(identity2)?.version ?? args.set.store("secure_local")?.storedItemState(identity2)?.version;
+    const intent = {
+      identity: { provider: identity2.provider, accountScope: identity2.accountScope, providerItemId: identity2.providerItemId, ...identity2.providerConversationId ? { providerConversationId: identity2.providerConversationId } : {}, family: identity2.family, localItemId: identity2.localItemId },
+      kind: "content",
+      ...version !== undefined ? { version } : {},
+      connectorId: TELEGRAM_CLAIM_MOVE_CONNECTOR_ID
+    };
+    const pending = args.set.ledger.writeIntent(identity2);
+    if (!pending || isClaimIntent(pending))
+      args.set.ledger.putWriteIntent(intent);
     await (args.move ?? moveTieredItem)({ set: args.set, identity: identity2, target: { metadataTier: "secure", contentTier: "secure" } });
+    if (isClaimIntent(args.set.ledger.writeIntent(identity2)))
+      args.set.ledger.clearWriteIntent(identity2);
     result.moved += 1;
     result.relinquished.push(identity2.localItemId);
     if (readable(identity2) || unfinished(identity2))
@@ -74292,6 +74304,9 @@ async function applyTelegramProtectionClaims(args) {
       args.set.ledger.writeMeta(`${CLAIM_META_PREFIX}${identity2.localItemId}`, "1");
   }
   return result;
+}
+function isClaimIntent(intent) {
+  return intent?.connectorId === TELEGRAM_CLAIM_MOVE_CONNECTOR_ID;
 }
 function adoptIfLegacy(set, internal, identity2) {
   const record = set.ledger.getCurrent(identity2);
@@ -74324,7 +74339,7 @@ function telegramProtectedLaneLookup(set, claimed) {
     return stored;
   };
 }
-var CLAIM_META_PREFIX = "telegram:secure_claim:";
+var CLAIM_META_PREFIX = "telegram:secure_claim:", TELEGRAM_CLAIM_MOVE_CONNECTOR_ID = "telegram_protection_claim_move";
 var init_protection_claims = __esm(() => {
   init_tier_move();
   init_capture_spool_connector();

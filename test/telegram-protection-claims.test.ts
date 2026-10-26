@@ -160,8 +160,14 @@ describe('the claim is applied fail-closed', () => {
       // Hidden, never deleted: the ordinary row still holds its text for the move to finish from.
       expect(w.readableInInternal('A')).toBe(false);
       expect(w.internal.itemPresence(w.identity('A')).active).toBe(true);
+      // The move's write intent (#540) is still pending: the set reports the item owed at the version being moved.
+      expect(w.set.ledger.writeIntent(w.identity('A'))?.connectorId).toBe('telegram_protection_claim_move');
+      const owed = w.set.storedItem(w.identity('A'), compareTelegramVersions);
+      expect(owed?.incomplete).toBe(true);
+      expect(owed?.version).toContain('2026-10-22T09:00:00Z');
       fail = false;
       await sync.pull();
+      expect(w.set.ledger.writeIntent(w.identity('A'))).toBeUndefined();
       expect(w.readableInInternal('A')).toBe(false);
       // The newer copy moved up; the claim's older record did not replace it.
       expect(w.textIn(w.secureLocal, 'A')).toContain('newer ordinary');
