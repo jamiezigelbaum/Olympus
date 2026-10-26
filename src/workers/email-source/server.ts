@@ -446,6 +446,7 @@ import {
   gmailHoldsImportedHistory,
   gmailImportedHistoryEmbeddingTargets,
   gmailItemAccountScope,
+  gmailLaneEmbeddingTargets,
 } from '../google-connectors/gmail-archive-target.ts';
 import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
 import {
@@ -4943,6 +4944,17 @@ export async function main(): Promise<void> {
           ? [{ store, provider, wholeStore: wholeStoreEmbeddingSweepAllowed(source.sourceId, store.corpusId) && hybridServed(store.corpusId) }]
           : [];
       });
+      // Live Gmail: its own queue, and the imports' recovery beside it whatever the approval state.
+      if (source.sourceId === SCHEDULER_SOURCE_IDS.gmail) {
+        const importScope = gmailItemScopeFor(currentGmailHandle);
+        const laneTargets = () => gmailLaneEmbeddingTargets({
+          live: targets(),
+          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
+          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
+          accountScope: importScope,
+        });
+        return laneTargets().length > 0 ? laneTargets : undefined;
+      }
       // A source with no store that embeds (a keyword-only lane) gets no sweep.
       return targets().length > 0 ? targets : undefined;
     });

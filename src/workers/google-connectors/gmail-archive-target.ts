@@ -90,6 +90,23 @@ export function gmailImportedHistoryEmbeddingTargets(input: {
   });
 }
 
+/**
+ * The live Gmail lane's sweep targets, with the imports' recovery beside them:
+ * the live lane drains its own queue (under its scope binding), and what the
+ * imports brought is recovered store-wide whatever the live approval state,
+ * so a backlog a restart left (the queue is in memory) never waits on the
+ * fallback source. The imports' targets touch only archive-observed rows with
+ * a vector missing, so live rows are never embedded twice.
+ */
+export function gmailLaneEmbeddingTargets(input: {
+  live: readonly ConnectorStoreEmbeddingTarget[];
+  stores: readonly LocalConnectorStore[];
+  providerFor: (store: LocalConnectorStore) => SourceEmbeddingProvider | undefined;
+  accountScope: string;
+}): ConnectorStoreEmbeddingTarget[] {
+  return [...input.live, ...gmailImportedHistoryEmbeddingTargets(input)];
+}
+
 /** The Gmail connector's one way from a record to items, for any input of the account `account`. */
 export function gmailRecordBuilder(account: string, build: GmailMailBuild = {}): SourceRecordBuilder<GmailMailRecord> {
   return {

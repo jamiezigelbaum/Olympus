@@ -14,7 +14,7 @@ import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { defaultSovereigntyConfigPath } from '../src/core/sovereignty.ts';
 import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { gmailHoldsImportedHistory, gmailImportedHistoryEmbeddingTargets } from '../src/workers/google-connectors/gmail-archive-target.ts';
+import { gmailHoldsImportedHistory, gmailImportedHistoryEmbeddingTargets, gmailLaneEmbeddingTargets } from '../src/workers/google-connectors/gmail-archive-target.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { gmailPrivateStoreStatusScope } from '../src/workers/email-source/gmail-status-scope.ts';
 import {
@@ -115,6 +115,47 @@ describe('imported Gmail history with no live connection', () => {
     expect(inputs.join('\n')).toContain('imported lease renewal');
     expect(inputs.join('\n')).not.toContain('approval that no longer stands');
     writeFileSync(join(home, 'done'), '');
+  });
+});
+
+describe('imported mail is recovered beside a connected live lane', () => {
+  test('Venice policy, provider down, restart, then live connected: the imports\' backlog embeds, live rows are not embedded twice', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gmail-live-recovery-'));
+    homes.push(dir);
+    const path = join(dir, 'secure.sqlite');
+    // 1. Imported mail live Gmail does not hold, and a live row, written while the embedder was down: no vectors.
+    const first = new LocalConnectorStore({ dbPath: path, corpusId: CORPUS, family: 'email', trustDomain: 'secure_local', tierLedger: null });
+    await first.syncFromConnector(connector('archive.6f9c2a10-0000-4000-8000-000000000003', mailItem('imported-only', 'The imported insurance policy renewal')), { fetchContent: true });
+    await first.syncFromConnector(connector('gmail.scope.0123456789abcdef01234567', mailItem('live-one', 'A live message under the current approval')), { fetchContent: true });
+    first.close();
+    // 2. A restart: the in-memory queue is gone.
+    const store = new LocalConnectorStore({ dbPath: path, corpusId: CORPUS, family: 'email', trustDomain: 'secure_local', tierLedger: null });
+    stores.push(store);
+    const calls: string[] = [];
+    const venice = {
+      provider: 'venice', modelId: 'fixture-venice', dimension: 4, configHash: 'fixture-venice', epochId: 'epoch:fixture-venice', backend: 'cloud',
+      async embed(inputs: SourceEmbeddingInput[]) {
+        calls.push(...inputs.map((input) => input.text));
+        return inputs.map(() => [1, 0, 0, 0]);
+      },
+    } as SourceEmbeddingProvider;
+    // 3. Live Gmail connected and approved: its Private store is queue-only (never store-wide).
+    const live = [{ store, provider: venice, wholeStore: false }];
+    const source = createGmailImportedHistorySchedulerSource({
+      config: { worker: { scheduler: { syncIntervalSeconds: 60, freshnessThresholdHours: 24 } } } as never,
+    });
+    const liveOnly = withEmbeddingSweep([source], () => () => live)[0]!.tasks[0]!;
+    expect(await liveOnly.run()).toMatchObject({ counts: { chunks_embedded: 0 } });
+    const lane = withEmbeddingSweep([source], () => () => gmailLaneEmbeddingTargets({
+      live, stores: [store], providerFor: () => venice, accountScope: 'personal',
+    }))[0]!.tasks[0]!;
+    expect(await lane.run()).toMatchObject({ counts: { chunks_embedded: 1 } });
+    expect(calls.join('\n')).toContain('insurance policy renewal');
+    expect(calls.join('\n')).not.toContain('current approval');
+    // Nothing is embedded twice: a second pass finds nothing missing among the imports.
+    calls.length = 0;
+    expect(await lane.run()).toMatchObject({ counts: { chunks_embedded: 0 } });
+    expect(calls).toEqual([]);
   });
 });
 

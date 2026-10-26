@@ -168949,6 +168949,9 @@ function gmailImportedHistoryEmbeddingTargets(input) {
     return provider ? [{ store, provider, wholeStore: true, missingOnly: true, accountScope: input.accountScope, filters: GMAIL_IMPORTED_FILTERS }] : [];
   });
 }
+function gmailLaneEmbeddingTargets(input) {
+  return [...input.live, ...gmailImportedHistoryEmbeddingTargets(input)];
+}
 function gmailRecordBuilder(account, build = {}) {
   return {
     family: "email",
@@ -194149,6 +194152,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
         return provider ? [{ store, provider, wholeStore: wholeStoreEmbeddingSweepAllowed(source.sourceId, store.corpusId) && hybridServed(store.corpusId) }] : [];
       });
+      if (source.sourceId === SCHEDULER_SOURCE_IDS.gmail) {
+        const importScope = gmailItemScopeFor(currentGmailHandle);
+        const laneTargets = () => gmailLaneEmbeddingTargets({
+          live: targets(),
+          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
+          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
+          accountScope: importScope
+        });
+        return laneTargets().length > 0 ? laneTargets : undefined;
+      }
       return targets().length > 0 ? targets : undefined;
     });
     const scopeRefs = new Map;
