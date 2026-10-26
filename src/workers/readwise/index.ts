@@ -37,7 +37,6 @@ export {
   createReadwiseConnectorStore,
   createReadwiseDailyRequestBudget,
   createReadwiseSourceConnector,
-  defaultReadwiseConnectorStoreDbPath,
   defaultReadwiseRequestBudgetStatePath,
   isReadwiseConnectorCursor,
   readwiseCursorIsSweepBoundary,

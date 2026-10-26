@@ -14,6 +14,7 @@
 // Nits: the daily budget survives a restart; stop() closes ledgers after the
 // running pass; data deletion takes the sniffer's queue.
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -54,7 +55,6 @@ import { loadOwnerTierRules } from '../src/workers/classification/tier-rules.ts'
 import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
 import { tierSnifferPathForLedger, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { SecureAnalystPoolState } from '../src/workers/source-index/analyst-pool.ts';
-import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/index.ts';
 import {
   CORPORA,
   FIXTURE_PLACEMENT,
@@ -422,7 +422,7 @@ describe('nits', () => {
     const dir = workspace();
     const homeDir = join(dir, 'home');
     const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'xdg-data') };
-    const storePath = defaultReadwiseConnectorStoreDbPath(env);
+    const storePath = resolvedStorePath('readwise.library', 'internal', env);
     const snifferPath = tierSnifferPathForStore(storePath);
     const store = new TierSnifferStore({ dbPath: snifferPath });
     store.enqueue({ subject: subject(1), pass: 'metadata', material: 'bank', mapRevision: 'r', flags: [] });

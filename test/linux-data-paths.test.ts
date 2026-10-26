@@ -3,28 +3,27 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { publishLinuxEngineReceipt, resolveLinuxEngineLayout } from '../src/core/linux-engine-layout.ts';
-import { defaultDropboxConnectorStoreDbPath } from '../src/workers/dropbox-files/connector-store.ts';
-import { defaultGmailConnectorStoreDbPath } from '../src/workers/google-connectors/gmail.ts';
-import { defaultGoogleDriveConnectorStoreDbPath } from '../src/workers/google-connectors/drive.ts';
-import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/connector.ts';
-import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/connector.ts';
 import { defaultSourceSchedulerStateDbPath } from '../src/workers/source-scheduler-state.ts';
 import { defaultFileExtractionJobsDbPath } from '../src/workers/file-extraction/job-store.ts';
 import { resolveEmbeddingLedgerPath } from '../src/workers/embedding-ledger.ts';
 import { resolveClassificationLedgerPath } from '../src/workers/classification-ledger.ts';
 import { builtInEmbeddingPaths } from '../src/workers/source-index/built-in-embedding/assets.ts';
 import { defaultRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
+import { resolvedStorePath } from '../src/core/source-placement.ts';
+
+type Env = Record<string, string | undefined>;
+const store = (sourceId: string, tier: string) => (env: Env) => resolvedStorePath(sourceId, tier, env);
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 // [resolver, the file it has always been, and where a new account of a source with account
 // folders puts it (docs/design/source-storage.md, step 4a)].
 const paths = [
-  [defaultDropboxConnectorStoreDbPath, 'dropbox-files-connector-store.sqlite', 'sources/dropbox.files/1/stores/secure_local.sqlite'],
-  [defaultGmailConnectorStoreDbPath, 'gmail-connector-store.sqlite', 'sources/gmail.email/1/stores/internal.sqlite'],
-  [defaultGoogleDriveConnectorStoreDbPath, 'google-drive-connector-store.sqlite', 'sources/google_drive.docs/1/stores/internal.sqlite'],
-  [defaultReadwiseConnectorStoreDbPath, 'readwise-connector-store.sqlite', 'sources/readwise.library/1/stores/internal.sqlite'],
-  [defaultXBookmarksConnectorStoreDbPath, 'x-bookmarks-connector-store.sqlite', 'sources/x.bookmarks/1/stores/internal.sqlite'],
+  [store('dropbox.files', 'secure_local'), 'dropbox-files-connector-store.sqlite', 'sources/dropbox.files/1/stores/secure_local.sqlite'],
+  [store('gmail.email', 'internal'), 'gmail-connector-store.sqlite', 'sources/gmail.email/1/stores/internal.sqlite'],
+  [store('google_drive.docs', 'internal'), 'google-drive-connector-store.sqlite', 'sources/google_drive.docs/1/stores/internal.sqlite'],
+  [store('readwise.library', 'internal'), 'readwise-connector-store.sqlite', 'sources/readwise.library/1/stores/internal.sqlite'],
+  [store('x.bookmarks', 'internal'), 'x-bookmarks-connector-store.sqlite', 'sources/x.bookmarks/1/stores/internal.sqlite'],
   [defaultSourceSchedulerStateDbPath, 'source-scheduler.sqlite'],
   [defaultFileExtractionJobsDbPath, 'file-extraction-jobs.sqlite'],
   [resolveEmbeddingLedgerPath, 'embedding-ledger.jsonl'],

@@ -231,6 +231,8 @@ export interface OnePipelineHarness {
   ledgerRecord(providerItemId: string): ReturnType<TierLedger['getCurrent']>;
   /** The text stored for an item, from whichever leg holds it. */
   textOf(providerItemId: string): string;
+  /** The text a read serves: a leg's chunks count only while the ledger has a current copy for that leg. */
+  served(providerItemId: string): string;
   close(): void;
 }
 
@@ -457,6 +459,13 @@ export function onePipelineHarness(cleanups: Array<() => void>, options: Fixture
     },
     textOf(providerItemId) {
       return [stores.internal, stores.secure_local]
+        .flatMap((store) => store.localContent(localId(providerItemId))?.chunks ?? []).join(' ');
+    },
+    served(providerItemId) {
+      // The read path's own snapshot: an item with a deletion or Secret under way is already hidden in it.
+      const copies = [...set.ledger.copiesForMany([{ provider: FIXTURE_PROVIDER, accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId }]).values()][0] ?? [];
+      return [stores.internal, stores.secure_local]
+        .filter((store) => copies.some((copy) => copy.corpusId === store.corpusId && copy.state === 'current'))
         .flatMap((store) => store.localContent(localId(providerItemId))?.chunks ?? []).join(' ');
     },
     close,

@@ -20,7 +20,6 @@ import {
   DEFAULT_EXTRACTION_LEASE_LIMIT,
   DEFAULT_EXTRACTION_LEASE_SECONDS,
   DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS,
-  FILE_EXTRACTION_JOBS_DB_PATH_ENV,
   FILE_EXTRACTION_JOBS_SCHEMA_VERSION,
   FILE_EXTRACTION_JOBS_STORE_ID,
   LocalFileExtractionJobStore,
@@ -121,10 +120,11 @@ describe('extraction job store: module identity', () => {
     expect(FILE_EXTRACTION_JOBS_SCHEMA_VERSION).toBe(5);
     expect(defaultFileExtractionJobsDbPath({ XDG_DATA_HOME: '/data' }))
       .toBe('/data/openclaw/olympus/file-extraction-jobs.sqlite');
+    // No env variable relocates the ledger alone (source storage step 6).
     expect(defaultFileExtractionJobsDbPath({
       XDG_DATA_HOME: '/data',
-      [FILE_EXTRACTION_JOBS_DB_PATH_ENV]: '/override/jobs.sqlite',
-    })).toBe('/override/jobs.sqlite');
+      OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH: '/override/jobs.sqlite',
+    })).toBe('/data/openclaw/olympus/file-extraction-jobs.sqlite');
   });
 
   test('ported constants keep their production values', () => {

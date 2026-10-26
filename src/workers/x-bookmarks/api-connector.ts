@@ -2,6 +2,7 @@
 // restart cursor interpretation, rate/cost control, normalization, fetch, and
 // sensitivity. Downstream code sees only SourceConnector.
 
+import { resolvedRawPath } from '../../core/source-placement.ts';
 import { createHash } from 'node:crypto';
 import type {
   RawItem,
@@ -49,7 +50,6 @@ import {
   ReconcileStagedRecoveryRequiredError,
   ReconcileWindowBoundaryMismatchError,
   X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION,
-  defaultXBookmarksReconcileStateDbPath,
   type XBookmarksCompletedReconcileSnapshot,
   type XBookmarksReconcileLimits,
   type XBookmarksStagedFailureClass,
@@ -1490,7 +1490,7 @@ async function withReconcileStateStore<T>(
 ): Promise<T> {
   const provided = options.reconcileStateStore;
   const store = provided ?? new LocalXBookmarksReconcileStateStore(
-    defaultXBookmarksReconcileStateDbPath(env, options.usageStore.dbPath),
+    resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env, { usageDbPath: options.usageStore.dbPath }),
     env,
   );
   try {

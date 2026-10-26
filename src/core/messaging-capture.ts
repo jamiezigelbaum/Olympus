@@ -5,14 +5,15 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import {
-  TELEGRAM_SOURCE_ID,
-  WHATSAPP_BRIDGE_LOCK_NAME,
-  WHATSAPP_SOURCE_ID,
   accountRawPath,
   accountSessionPath,
   folderCaptureDirs,
   folderCaptureEnv,
   folderCaptureEnvRemoved,
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_BRIDGE_LOCK_NAME,
+  WHATSAPP_SESSION_FILE,
+  WHATSAPP_SOURCE_ID,
   whatsappStateDirFromValue,
   type LayoutAccount,
 } from './olympus-layout.ts';
@@ -468,12 +469,12 @@ function sessionExists(grant: MessagingCaptureGrant, account: LayoutAccount, env
   if (account.layout === 'folder') {
     return grant.source === 'telegram'
       ? existsSync(`${accountSessionPath(account, env)}.session`)
-      : existsSync(join(accountRawPath(account, 'whatsapp', env), 'session.db'));
+      : existsSync(join(accountRawPath(account, 'whatsapp', env), WHATSAPP_SESSION_FILE));
   }
   const sessionPath = grant.sessionPath ?? '';
   return grant.source === 'telegram'
     ? existsSync(`${sessionPath.replace(/\.session$/, '')}.session`)
-    : existsSync(join(sessionPath, 'session.db'));
+    : existsSync(join(sessionPath, WHATSAPP_SESSION_FILE));
 }
 
 function spawnCapture(input: { executable: string; args: readonly string[]; env: Record<string, string>; inheritFds?: readonly number[] }): CaptureChild {

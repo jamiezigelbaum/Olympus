@@ -33,6 +33,7 @@ import {
   isArchiveId,
   type NewArchiveImportRecord,
 } from './state.ts';
+import { archiveStateSiblingPath } from '../../core/olympus-layout.ts';
 
 /**
  * Requests an agent may leave waiting at once; one more is refused until the person answers.
@@ -103,7 +104,7 @@ interface PersistedRequests {
 }
 
 export function archiveImportRequestsPath(statePath: string): string {
-  return join(dirname(statePath), 'archive-import-requests.json');
+  return archiveStateSiblingPath(statePath, 'archive-import-requests.json');
 }
 
 /**

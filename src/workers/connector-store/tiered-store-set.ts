@@ -84,6 +84,8 @@ import {
   type TierLedger,
   type TierLedgerIdentity,
   type TierPlacementPlan,
+  type TierWriteIntent,
+  type TierWriteIntentKind,
 } from '../classification/tier-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
@@ -150,7 +152,7 @@ export const TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = 'tiered_store_set_handoff';
  * The set ledger lives beside the set's secure_local store, where that store's
  * own co-located ledger would be (tier-ledger-path.ts). Every lifecycle path
  * that finds the secure store therefore finds the set ledger: export, delete
- * --source and delete --all, including a relocated (*_DB_PATH) store.
+ * --source and delete --all, including a store in an account folder.
  */
 export function tieredStoreSetLedgerPath(secureLocalStoreDbPath: string): string {
   return tierLedgerPathForStore(secureLocalStoreDbPath);
@@ -508,12 +510,23 @@ export class TieredStoreSet {
    */
   private removeChild(child: SourceItemIdentity): boolean {
     try {
+      // The removal is owed from here until it is whole, whatever becomes of the parent meanwhile (it may come back
+      // as a Secret, whose location counts as present): the intent hides the child at once, and every pass start
+      // finishes it. It carries no version: a cascade is not an event of the child, each leg keeps its own.
+      const { sourceVersion: _own, ...bare } = child;
+      this.ledger.putWriteIntent({
+        identity: bare as TierWriteIntent['identity'],
+        kind: 'deletion',
+        connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+        itemFamily: child.family,
+      });
       this.ledger.removeCopies(child);
       this.secrets()?.remove(child);
       for (const store of this.openStores()) {
-        store.tombstoneCopy(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
-        store.retireSecretLocation(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+        store.tombstoneCopy(bare, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+        store.retireSecretLocation(bare, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
       }
+      this.ledger.clearWriteIntent(child);
       return true;
     } catch {
       return false;
@@ -757,6 +770,7 @@ export class TieredStoreSet {
   async sync(
     ...args: Parameters<TieredStoreSet['runSync']>
   ): Promise<TieredStoreSetRun> {
+    await this.finishWritesCutOff();
     try {
       return await this.whileSyncing(() => this.runSync(...args));
     } finally {
@@ -807,7 +821,7 @@ export class TieredStoreSet {
     run.finalize();
     // The only gate for moving on: what the input accepted is read back through the stores, and the set's resume
     // point passes only the pages whose every item is there as accepted.
-    run.counts.itemsUnstored += this.unstoredAccepted(traversal.accepted(), (item) => run.plannedKind(item));
+    run.counts.itemsUnstored += this.unstoredAccepted(traversal.accepted(), (item) => run.plannedKind(item), (item) => run.alreadyOwed(item));
     const cursor = legRuns[0]?.sync.cursor;
     // A pass that is not a resume point (a reconcile from the start of the
     // listing) must not overwrite the incremental lane's committed position.
@@ -826,6 +840,7 @@ export class TieredStoreSet {
   async syncLegs(
     ...args: Parameters<TieredStoreSet['runSyncLegs']>
   ): Promise<TieredStoreSetRun> {
+    await this.finishWritesCutOff();
     try {
       return await this.whileSyncing(() => this.runSyncLegs(...args));
     } finally {
@@ -993,6 +1008,81 @@ export class TieredStoreSet {
   }
 
   /**
+   * Finishes every write a crash left half done, from its intent alone, before anything else in a pass reads or
+   * decides an item: a deletion or Secret tombstones every leg that still holds the item, then forgets the copy
+   * rows; a names write moves the version in every leg. A body (`content`) cannot be redone from the intent: it
+   * stays owed until its own record is read again. Each intent is cleared last, so this is safe to run again.
+   */
+  async finishWritesCutOff(): Promise<void> {
+    // The children of an item whose deletion was just finished go with it before any record of the pass can bring the parent back.
+    if (this.finishPendingIntents()) await this.sweepOrphanedChildren();
+  }
+
+  /**
+   * Whether the stored state supersedes a body or names write that is still owed: only a deletion of the very
+   * version it owes (a deletion beats content at one version) does. Rows existing, tombstones of an older version
+   * included, never clear it: a restoration of a deleted item is owed past the old tombstone. A newer write replaces
+   * the intent itself (one per item), so no newer row needs to be read here.
+   */
+  private intentSuperseded(intent: TierWriteIntent): boolean {
+    const identity = { ...intent.identity, ...(intent.version !== undefined ? { sourceVersion: intent.version } : {}) } as SourceItemIdentity;
+    if (intent.version === undefined) {
+      // No version to compare: owed nothing once the item has rows and none is live (it was deleted since).
+      return this.anyLegHasRow(identity) && TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
+    }
+    return TIER_DOMAIN_ORDER.some((domain) => {
+      const row = this.store(domain)?.storedItemState(identity);
+      return row?.tombstoned === true && row.version === intent.version;
+    });
+  }
+
+  finishPendingIntents(): boolean {
+    let removed = false;
+    for (const intent of this.ledger.writeIntents()) {
+      const identity = { ...intent.identity, ...(intent.version !== undefined ? { sourceVersion: intent.version } : {}) } as SourceItemIdentity;
+      if (intent.kind === 'content' || intent.kind === 'names') {
+        // Owed until its own record is read again, or until the stored state supersedes it.
+        if (this.intentSuperseded(intent)) this.ledger.clearWriteIntent(intent.identity);
+        continue;
+      }
+      if (intent.kind === 'advance') {
+        for (const domain of TIER_DOMAIN_ORDER) this.store(domain)?.advanceItemVersion(identity);
+        this.ledger.clearWriteIntent(intent.identity);
+        continue;
+      }
+      // A Secret the owner keeps hidden for an approved purge is not tombstoned here: its copies are hidden already.
+      const keep = intent.kind === 'secret' && secretsDisposition() === 'hide_until_purge';
+      if (!keep) {
+        for (const domain of TIER_DOMAIN_ORDER) {
+          const store = this.store(domain);
+          if (!store) continue;
+          store.tombstoneCopy(identity, { connectorId: intent.connectorId || TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, ...(intent.kind === 'secret' ? { trustTier: 'S5' as const } : {}) });
+          store.advanceItemVersion(identity, { onlyTombstoned: true });
+          // A cascade (no version) also retires a Secret location the child kept.
+          if (intent.version === undefined) store.retireSecretLocation(identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+        }
+        this.ledger.removeCopies(intent.identity);
+        removed = true;
+      }
+      // An item nowhere stored keeps a row for its version (a Secret's location, a deletion's tombstone) in the
+      // Private store; the intent alone is enough to write it.
+      if (intent.location === true && !this.anyLegHasRow(identity)) {
+        if (intent.itemFamily === undefined) continue;
+        this.store(SECRET_LOCATION_DOMAIN, { create: true })?.tombstoneCopy({ ...identity, family: intent.itemFamily as SourceItemIdentity['family'] }, {
+          connectorId: intent.connectorId || TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+          ...(intent.kind === 'secret' ? { trustTier: 'S5' as const } : {}),
+          insert: true,
+        });
+        if (intent.kind === 'deletion') this.ledger.markUnseenDeletion(intent.identity);
+        // The item is present as a tombstone now: the children it had go with it.
+        removed = true;
+      }
+      this.ledger.clearWriteIntent(intent.identity);
+    }
+    return removed;
+  }
+
+  /**
    * Reads back what an input's listing accepted, through the same lookup intake uses, and counts the items the
    * stores do not hold as accepted: the version is not the one reported (or a newer one), content that was
    * brought is missing or incomplete, a deletion or Secret is still active. Per identity only the newest
@@ -1001,6 +1091,7 @@ export class TieredStoreSet {
   private unstoredAccepted(
     accepted: { items: readonly RawItem[]; compareVersions?: (a: string, b: string) => number },
     plannedKind: (item: RawItem) => Plan['kind'] | undefined,
+    alreadyOwed: (item: RawItem) => boolean,
   ): number {
     const compare = accepted.compareVersions;
     if (!compare) return 0;
@@ -1022,6 +1113,8 @@ export class TieredStoreSet {
       const storedOlder = version !== undefined && (stored?.version === undefined || compare(stored.version, version) < 0);
       const storedNewer = version !== undefined && stored?.version !== undefined && compare(stored.version, version) > 0;
       const secret = this.ledger.itemIsSecret(item.identity);
+      // Every write this run made is cleared by now; one still pending is a body an earlier run still owes.
+      if (this.ledger.writeIntent(item.identity) !== undefined) { if (!alreadyOwed(item)) unstored += 1; continue; }
       let ok: boolean;
       if (item.metadata['deleted'] === true || secret) {
         const gone = stored === undefined || stored.tombstoned === true || (secret && secretsDisposition() === 'hide_until_purge');
@@ -1054,7 +1147,8 @@ export class TieredStoreSet {
    * a newer active row (a Secret's location from an earlier version) and the
    * old leg's tombstone after a move are not the item's state. When the rows
    * at the newest version are all tombstones (deleted, or a Secret kept as a
-   * location) it is `tombstoned`. It is undefined only when no leg holds a row.
+   * location) it is `tombstoned`. It is undefined only when no leg holds a row and no write is pending: a pending write (the ledger's intent) is the item's
+   * state at its version before any row exists.
    */
   storedItem(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
@@ -1065,7 +1159,24 @@ export class TieredStoreSet {
       const state = this.store(domain)?.storedItemState(identity);
       if (state) found.push({ domain, ...state });
     }
-    if (found.length === 0) return undefined;
+    // A deletion or Secret whose write is pending is the item's state before any row of it exists, and ahead of
+    // any row that is older: the intent is read first.
+    const pending = this.ledger.writeIntent(identity);
+    const hidden = (pending?.kind === 'deletion' || pending?.kind === 'secret') && pending.version !== undefined ? pending.version : undefined;
+    if (found.length === 0) {
+      // No row is not "absent": every pending write is the item's boundary at its version. A deletion or Secret is
+      // tombstoned there; a body or names owed is incomplete (its own record, or a newer one, replays it); a version
+      // move is the version alone.
+      if (pending?.version === undefined) return undefined;
+      if (hidden !== undefined) return { version: hidden, hasContent: false, tombstoned: true as const };
+      const owesBody = pending.kind === 'content' || pending.kind === 'names';
+      return {
+        version: pending.version,
+        hasContent: false,
+        incomplete: true as const,
+        ...(owesBody && pending.bodyVersion !== undefined ? { owedBodyVersion: pending.bodyVersion } : {}),
+      };
+    }
     const newest = found.reduce<string | undefined>(
       (best, leg) => (leg.version !== undefined && (best === undefined || compareVersions(leg.version, best) > 0) ? leg.version : best),
       undefined,
@@ -1074,24 +1185,26 @@ export class TieredStoreSet {
     const top = newest === undefined ? found : found.filter((leg) => leg.version !== undefined && compareVersions(leg.version, newest) === 0);
     const below = found.filter((leg) => !top.includes(leg));
     const topActive = top.filter((leg) => !leg.tombstoned);
-    const tombstoned = topActive.length === 0;
-    // A copy the ledger names as current must have an active row in its store, unless the item is gone.
-    const cutOff = !tombstoned && this.ledger.copies(identity).some((copy) => {
-      if (copy.state === 'superseded') return false;
-      const domain = this.domainForCorpus(copy.corpusId);
-      return domain !== undefined && !topActive.some((leg) => leg.domain === domain);
-    });
-    const staleActive = below.some((leg) => !leg.tombstoned);
-    // A routed item's rows are only where its ledger copies are: an active row in a store the ledger names no
-    // copy of (an item placed by a plan that did not judge what was stored) is not complete either.
-    const placed = this.ledger.isRouted(identity) ? this.ledger.copies(identity) : [];
-    const stray = !tombstoned && placed.length > 0 && topActive.some((leg) => !placed.some((copy) => this.domainForCorpus(copy.corpusId) === leg.domain));
-    const incomplete = cutOff || staleActive || stray;
+    const intentLeads = hidden !== undefined && (newest === undefined || compareVersions(hidden, newest) > 0);
+    const tombstoned = topActive.length === 0 || intentLeads;
+    // A body still owed to a leg (a write cut off before it landed everywhere) is the item's state: its version is
+    // the item's, and only its own record, or a newer one, completes it.
+    const owed = this.ledger.writeIntent(identity);
+    const owesBody = owed?.kind === 'content' || owed?.kind === 'names';
+    // A body owed at a version above every row (a restoration over an old tombstone included) is the item's state.
+    const owedLeads = owesBody && owed.version !== undefined && (newest === undefined || compareVersions(owed.version, newest) > 0);
+    const owedBody = owesBody && owed.version !== undefined && (owedLeads || !tombstoned);
+    const incomplete = owedBody;
+    const owedBodyVersion = owedBody ? owed?.bodyVersion : undefined;
+    // A pending version move is the item's version too, ahead of rows that are older.
+    const moving = pending?.kind === 'advance' && pending.version !== undefined && (newest === undefined || compareVersions(pending.version, newest) > 0) ? pending.version : undefined;
+    const version = intentLeads ? hidden : moving !== undefined ? moving : owedBody && (newest === undefined || compareVersions(owed.version!, newest) > 0) ? owed.version : newest;
     return {
-      ...(newest !== undefined ? { version: newest } : {}),
-      hasContent: topActive.some((leg) => leg.chunkCount > 0),
-      ...(tombstoned ? { tombstoned: true as const } : {}),
+      ...(version !== undefined ? { version } : {}),
+      hasContent: !intentLeads && !owedLeads && topActive.some((leg) => leg.chunkCount > 0),
+      ...(tombstoned && !owedLeads ? { tombstoned: true as const } : {}),
       ...(incomplete ? { incomplete: true as const } : {}),
+      ...(owedBodyVersion !== undefined ? { owedBodyVersion } : {}),
     };
   }
 
@@ -1538,7 +1651,14 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   readonly counts: TieredStoreRoutingCounts;
   private readonly plans: Map<string, PlanEntry>;
   private readonly copyRemovals: Map<string, SourceItemIdentity>;
-  /** Lower copies a replacement made stale: withdrawn once the replacement is written in every leg. */
+  /** The items whose write intent (ledger.withWriteIntent) this run wrote: cleared, last, once every leg has been written. */
+  private readonly intents: Map<string, SourceItemIdentity>;
+  /** A names-only version move behind a body this run writes: done when the intent is cleared. */
+  private readonly namesAdvance: Map<string, SourceItemIdentity>;
+  /** Items whose accepted record says the body is empty: their stored text goes, in every leg, before the version moves. */
+  private readonly emptied: Map<string, SourceItemIdentity>;
+  /** Items whose same-version record only repeated what an earlier run still owes: nothing to hold the cursor for. */
+  private readonly owedAlready: Set<string>;
   private readonly pendingWithdrawals: Map<string, { item: RawItem; domains: readonly SourceTrustDomain[]; text: readonly SourceTrustDomain[] }>;
   private readonly set: TieredStoreSet;
   private readonly mode: 'shared' | 'per_leg';
@@ -1554,6 +1674,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.plans = new Map();
     this.copyRemovals = new Map();
     this.pendingWithdrawals = new Map();
+    this.intents = new Map();
+    this.namesAdvance = new Map();
+    this.emptied = new Map();
+    this.owedAlready = new Set();
     this.counts = {
       itemsRouted: 0,
       itemsLegacy: 0,
@@ -1564,6 +1688,11 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       contentUnreadHeld: 0,
       itemsUnstored: 0,
     };
+  }
+
+  /** The item's record only repeated the version an earlier run still owes: it holds nothing back. */
+  alreadyOwed(item: RawItem): boolean {
+    return this.owedAlready.has(identityKey(item.identity));
   }
 
   /** What the run planned for an item's version, if it routed it at all. */
@@ -1597,6 +1726,30 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     for (const identity of identities) secrets.remove(identity);
   }
 
+  /**
+   * Writes the item's intent (ledger.withWriteIntent) before anything is written to a leg, in the transaction of
+   * the ledger change it belongs to, and remembers it so `finalize` clears it last.
+   */
+  private writeIntent<T>(
+    connectorId: string,
+    identity: SourceItemIdentity,
+    kind: TierWriteIntentKind,
+    run: () => T,
+    settle?: (result: T) => Partial<Pick<TierWriteIntent, 'kind' | 'location'>> | undefined,
+    bodyVersion?: string,
+  ): T {
+    this.intents.set(identityKey(identity), identity);
+    if (kind !== 'advance') { this.namesAdvance.delete(identityKey(identity)); this.emptied.delete(identityKey(identity)); }
+    return this.set.ledger.withWriteIntent({
+      identity: identity as TierWriteIntent['identity'],
+      ...(identity.sourceVersion !== undefined ? { version: identity.sourceVersion } : {}),
+      kind,
+      ...(bodyVersion !== undefined ? { bodyVersion } : {}),
+      itemFamily: identity.family,
+      connectorId,
+    }, run, settle);
+  }
+
   /** Forget the copy rows of routed items this run deleted or found to be Secrets, now that every leg tombstoned them. */
   finalize(): void {
     for (const { item, domains, text } of this.pendingWithdrawals.values()) {
@@ -1606,6 +1759,23 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.pendingWithdrawals.clear();
     for (const identity of this.copyRemovals.values()) this.set.ledger.removeCopies(identity);
     this.copyRemovals.clear();
+    // The intents go last, once every leg has its write. A `names` write is the version move, done now: later
+    // plans of the same item in this run replaced it (one intent per item), so it can never lower a version.
+    for (const [key, identity] of this.intents) {
+      const intent = this.set.ledger.writeIntent(identity);
+      // An edit that empties the body replaces it: the old text goes from every leg while the intent still owes
+      // the write, so a cut here is repeated by the record's replay.
+      if (this.emptied.has(key)) for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.stripCopyContent(identity);
+      const moveTo = intent?.kind === 'advance' ? identity : this.namesAdvance.get(key);
+      // Every leg has its write: what is left is the version move, which an `advance` intent redoes if cut off here
+      // (the intent never owes a version below the rows).
+      if (moveTo && intent && intent.kind !== 'advance') this.set.ledger.putWriteIntent({ identity: intent.identity, version: moveTo.sourceVersion, kind: 'advance', connectorId: intent.connectorId } as TierWriteIntent);
+      if (moveTo) for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(moveTo);
+      this.set.ledger.clearWriteIntent(identity);
+    }
+    this.intents.clear();
+    this.namesAdvance.clear();
+    this.emptied.clear();
   }
 
   private routeFor(plan: Plan, corpusId: string, domain: SourceTrustDomain): ConnectorStoreTierRoute {
@@ -1650,15 +1820,23 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       if (item.metadata['deletedIdentityResolved'] !== false) {
         this.set.retireSecretPresence(identity, { record: ledger.itemIsSecret(identity) });
       }
-      if (!routed) {
+      // A deletion of an item no store ever held still leaves its version: the Private store records a tombstone
+      // for it (as it does for a Secret's location), so an older record is refused afterwards.
+      // (Only an item no leg ever held a row for, or one whose tombstone this path made: a lane's own tombstone is not ours.)
+      const location = !routed && (!hasRow || ledger.isUnseenDeletion(identity)) && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined && item.identity.sourceVersion !== undefined;
+      if (!routed && !location) {
         this.counts.itemsLegacy += 1;
         return { kind: 'legacy' };
       }
       this.counts.routedDeletions += 1;
+      // The deletion is written down first, and the item's copies are hidden with it: from here a crash leaves an
+      // intent the next pass finishes, and nothing of the item is served.
+      this.writeIntent(connector.id, identity, 'deletion', () => undefined, () => (location ? { location: true as const } : undefined));
       // A row that is already a tombstone takes the deletion's version too (a live row takes it with its own tombstone).
       for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(identity, { onlyTombstoned: true });
       this.copyRemovals.set(identityKey(identity), identity);
-      return { kind: 'delete', corpora: new Set(ledger.copies(identity).map((copy) => copy.corpusId)), reason: 'provider_deleted' };
+      if (location) { this.routedDomains.add(SECRET_LOCATION_DOMAIN); ledger.markUnseenDeletion(identity); }
+      return { kind: 'delete', corpora: new Set(ledger.copies(identity).map((copy) => copy.corpusId)), reason: 'provider_deleted', ...(location ? { location: true as const } : {}) };
     }
 
     // A lane whose text arrives later reads none at listing; an owner
@@ -1688,7 +1866,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       // text actually read; metadata-only dispositions and unread content keep
       // the lane's placement. A lane whose text arrives later routes a new
       // item by its names now and its content when the text lands.
-      if (hasRow || (!deferred && (!contentRead || input.metadataOnly))) {
+      // Rows that are all tombstones (a deletion recorded for an item no store held) are not a lane's item: a newer
+      // record routes it afresh.
+      const laneRow = hasRow && (TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity).active === true) || !ledger.isUnseenDeletion(identity));
+      if (laneRow || (!deferred && (!contentRead || input.metadataOnly))) {
         this.counts.itemsLegacy += 1;
         return { kind: 'legacy' };
       }
@@ -1698,8 +1879,31 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         // tier, so its copies are left exactly as they are.
         this.counts.contentUnreadHeld += 1;
         // The record's version is accepted though its names are not written: the stored rows keep their text,
-        // and the version the lookup reports moves to it, so an older record can never overwrite them.
-        for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(identity);
+        // and the version the lookup reports moves to it, so an older record can never overwrite them. The move
+        // is a write of its own (intent `names`, made at `finalize`). An earlier run's body still owed to a leg
+        // is not hidden behind a newer version: the item stays as it is, the record is not accepted, and the
+        // body's own record finishes it.
+        const key = identityKey(identity);
+        const owed = ledger.writeIntent(identity);
+        // A record whose body is authoritatively empty (the source said so; blank text is "unread" only to the
+        // classifier) replaces the stored text, unlike a record that has no body to give.
+        const emptied = text !== undefined && text.trim() === '' && item.content.kind !== 'metadata_only' && !input.contentFetchFailed;
+        if (emptied && !((owed?.kind === 'content' || owed?.kind === 'names') && !this.intents.has(key) && owed.version !== identity.sourceVersion)) {
+          this.writeIntent(connector.id, identity, 'content', () => undefined, undefined,
+            typeof item.metadata['contentVersion'] === 'string' && item.metadata['contentVersion'] !== identity.sourceVersion ? item.metadata['contentVersion'] : undefined);
+          this.emptied.set(key, identity);
+          this.namesAdvance.set(key, identity);
+          return { kind: 'hold', reason: 'content_unread' };
+        }
+        if (owed?.kind === 'content' || owed?.kind === 'names') {
+          // A write still owed to a leg: this run's own lands in the legs first, and the version moves with the
+          // clearing of its intent. An earlier run's stays put and the item is not moved on past it (the record
+          // is not accepted); a record of the very version it owes adds nothing and is simply passed.
+          if (this.intents.has(key)) this.namesAdvance.set(key, identity);
+          else if (owed.version === identity.sourceVersion) this.owedAlready.add(key);
+          return { kind: 'hold', reason: 'content_unread' };
+        }
+        this.writeIntent(connector.id, identity, 'advance', () => undefined);
         return { kind: 'hold', reason: 'content_unread' };
       }
       // Re-listed without text in a lane whose text arrives later: the names
@@ -1739,10 +1943,17 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       ? placement.copies.filter(copy => copy.layers === 'metadata'
         && (this.set.store(copy.trustDomain)?.storedItemState(identity)?.chunkCount ?? 0) > 0).map(copy => copy.trustDomain)
       : [];
-    const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
-      staleCopiesGone: replacesInPlace || (routed && this.set.routedCopiesGone(identity)),
+    const recorded = this.writeIntent(connector.id, identity, decision.contentTier === 'secrets' ? 'secret' : item.content.kind === 'metadata_only' ? 'names' : 'content', () => ledger.recordRoutedPlacement(identity, decision, placement, {
+      // A deletion or Secret this run already planned for the item removes its copies in every leg before the run ends:
+      // a newer version planned after it replaces them in place, as it would one run later.
+      staleCopiesGone: replacesInPlace || (routed && (this.copyRemovals.has(identityKey(identity)) || this.set.routedCopiesGone(identity))),
       ...(deferred ? { stagedLandingAllowed: true } : {}),
-    });
+    }), (result) => (result.outcome === 'secrets'
+      ? { kind: 'secret' as const, ...(!hasRow && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined ? { location: true as const } : {}) }
+      : { kind: item.content.kind === 'metadata_only' ? 'names' as const : 'content' as const }),
+    // The version of the record that brought the body, when a newer names-only record carries it: replaying that
+    // record is what finishes this write.
+    typeof item.metadata['contentVersion'] === 'string' && item.metadata['contentVersion'] !== identity.sourceVersion ? item.metadata['contentVersion'] : undefined);
     // Left Secrets in this write (the owner's restore): its extraction jobs
     // keep their names again from this listing's enqueue on.
     if (recorded.outcome !== 'secrets') {
