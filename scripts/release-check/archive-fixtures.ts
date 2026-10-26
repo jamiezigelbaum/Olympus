@@ -89,8 +89,11 @@ export interface BesideLiveSpec {
    * account's, and the journey answers "Add to <sourceLabel>".
    */
   confirmAccount?: true;
-  /** The source as the dashboard's account question names it ("WhatsApp"). */
-  sourceLabel?: string;
+  /**
+   * The source as the dashboard names it ("WhatsApp"): its account question, and its Unpair ("Unpair WhatsApp"), which the stage
+   * presses before the source's Delete, as the owner must (the engine refuses to delete a paired source's data).
+   */
+  sourceLabel: string;
 }
 
 export interface ArchiveFixtureSpec {
@@ -388,7 +391,7 @@ export const TELEGRAM_FIXTURES: ArchiveFixtureSpec = {
   family: 'chat',
   provider: 'telegram_export',
   small: telegramSmall,
-  besideLive: { sourceId: 'telegram.messages', seedHook: 'telegram', small: telegramBesideLive },
+  besideLive: { sourceId: 'telegram.messages', seedHook: 'telegram', sourceLabel: 'Telegram', small: telegramBesideLive },
 };
 
 // ---------------------------------------------------------------------------
