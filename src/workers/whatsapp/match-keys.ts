@@ -71,7 +71,14 @@ export function liveMatchKeys(input: { chatJid: string; timestamp: string; sende
   };
 }
 
-/** A stable id of an export message live does not hold: the same in a second export of the same chat. */
-export function exportMessageId(key: string, occurrence: number): string {
-  return `wx${keyDigest(key, String(occurrence)).slice(0, 30)}`;
+/**
+ * A stable id of an export message live does not hold, from what it is, never
+ * from where it is: its chat, its time slot (zone applied), its sender, its
+ * whole text with the names of the files it carries (WhatsApp names each file
+ * apart, so a picture with no words has an id of its own), and its number
+ * among exactly identical messages (the export reader's own count). The same
+ * in a second export of the chat, however much more or less that one holds.
+ */
+export function exportMessageId(chatJid: string, ms: number, precision: TimePrecision, sender: string, text: string, occurrence: string): string {
+  return `wx${keyDigest('id', normalizeWhatsAppJid(chatJid), timeSlot(ms, precision), sender, text, occurrence).slice(0, 30)}`;
 }

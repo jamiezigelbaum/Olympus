@@ -136,10 +136,13 @@ unchanged.
   from the bridge's contact store, which is what the export shows, falling
   back to the push name. Matching is strict, and done on the import side
   only, against the live messages already stored: an export message is one
-  of them only when exactly one export message holds its key (its whole
-  minute counted) and exactly one live message ever held it, in any version,
-  as its current one. Media without words is never matched. Anything else is
-  its own item: when in doubt, a visible duplicate, never a wrong merge. A
+  of them only when its minute is certain (read whole, at most 200
+  messages), exactly one export message in it holds its key, and exactly
+  one live message ever held it, in any version, as its current one, by a
+  live index caught up to the spool's end. Media without words is never
+  matched. Anything else is its own item, with an id from what it is (its
+  content and the names of the files it carries, never its place in the
+  export): when in doubt, a visible duplicate, never a wrong merge. A
   live message always keeps its own id, so one the bridge delivers after an
   export already brought it is a second item. That is an accepted residual:
   exports are mostly past history, and a stored id never changes.
@@ -618,17 +621,25 @@ The WhatsApp chat export is an input of the WhatsApp connector
   (its second when the export shows seconds), its sender and its text
   without media markers; keys are digests. The sender is "me" for the
   owner; otherwise the contact's saved name, which the bridge now spools
-  (`sender_contact_name`), else the push name. On the export side a key's
-  messages are counted over its whole minute: the count carries in the
-  resume point across a page that ends inside a minute, and the rest of
-  that minute is read ahead (bounded; a fuller minute is in doubt). The
+  (`sender_contact_name`), else the push name. Doubt is per minute: a
+  minute is certain only when it was read whole (the count carries in the
+  resume point across a page that ends inside it, and its rest is read
+  ahead within a byte bound) and holds at most 200 messages; otherwise
+  nothing in it is matched. The resume point holds the current minute
+  only, within that cap. The
   live side is the spool index's digests (`live_keys` for each message's
   current version, `live_version_keys` for every key any version had;
   built as the spool is indexed, within a read budget; no rescan, no
   text). A message is the stored live one only when one export message and
   one live message hold the key, and it is that message's current key;
   media without words never. Otherwise it is its own item, with an id from
-  its key and occurrence, so a re-import reuses it. An unmatched message
+  its chat, minute, sender, whole text with its file names (WhatsApp names
+  each file apart) and its number among exactly identical messages, so a
+  re-import, or a fuller or shorter export, gives it the same id. A media
+  file one export left out is never guessed to be one a later export has.
+  The import matches only against a live index caught up to the spool's
+  end: a pass that finds it still catching up decides nothing and waits
+  for the next. An unmatched message
   with a live message of the chat within a minute is counted as a
   near-miss (`match_near_miss`, How it was read).
 - **One direction.** Matching is the import's alone: live capture never

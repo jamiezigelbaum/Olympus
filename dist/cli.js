@@ -100082,8 +100082,8 @@ function liveMatchKeys(input) {
     unsentSecond: unsentKey(input.chatJid, ms, "second", text2)
   };
 }
-function exportMessageId(key2, occurrence) {
-  return `wx${keyDigest(key2, String(occurrence)).slice(0, 30)}`;
+function exportMessageId(chatJid, ms, precision, sender, text2, occurrence) {
+  return `wx${keyDigest("id", normalizeWhatsAppJid(chatJid), timeSlot(ms, precision), sender, text2, occurrence).slice(0, 30)}`;
 }
 var OWNER_SENDER = "\x00me";
 var init_match_keys = __esm(() => {
@@ -170801,6 +170801,7 @@ var init_export_zone = __esm(() => {
 
 // src/workers/whatsapp/archive-input.ts
 import { createHash as createHash88 } from "node:crypto";
+import { existsSync as existsSync89 } from "node:fs";
 import { posix as posix7 } from "node:path";
 function hash2(value2) {
   return createHash88("sha256").update(value2).digest("hex").slice(0, 24);
@@ -170890,7 +170891,10 @@ function createWhatsAppExportInput(options) {
     records(listing = {}) {
       return async function* () {
         const decoded2 = decodeCursor3(listing.cursor);
-        catchUpWhatsAppSpoolIndex(options.spoolDir, LIVE_INDEX_BYTES);
+        if (existsSync89(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
+          yield { records: [], ...listing.cursor !== undefined ? { nextCursor: listing.cursor } : {}, done: false };
+          return;
+        }
         const index = WhatsAppSpoolIndex.open(options.spoolDir);
         const matching = { index };
         try {
@@ -170928,19 +170932,51 @@ function createWhatsAppExportInput(options) {
               const message2 = exportMessageOf(item);
               return message2 ? [{ message: message2, at, keyed: keyOf(message2, decided, matching) }] : [];
             });
-            const totals = new Map;
             const carried = decided.g;
-            for (const { keyed: { key: key2, slot } } of keyed)
-              totals.set(key2, (totals.get(key2) ?? (carried?.s === slot ? carried.c[key2] ?? 0 : 0)) + 1);
+            const slotCount = new Map;
+            const keyCount = new Map;
+            const doubt = new Set;
+            if (carried) {
+              slotCount.set(carried.s, carried.n);
+              if (carried.d)
+                doubt.add(carried.s);
+              for (const [key2, count] of Object.entries(carried.c ?? {}))
+                keyCount.set(key2, count);
+            }
+            for (const { keyed: { key: key2, slot } } of keyed) {
+              slotCount.set(slot, (slotCount.get(slot) ?? 0) + 1);
+              keyCount.set(key2, (keyCount.get(key2) ?? 0) + 1);
+            }
             const last = keyed.at(-1);
             if (last && !page2.done && page2.nextCursor !== undefined) {
               const ahead = await countSlotAhead(archive, page2.nextCursor, last.keyed.slot, decided, matching);
-              for (const [key2, count] of ahead)
-                totals.set(key2, (totals.get(key2) ?? 0) + count);
+              if (!ahead.whole)
+                doubt.add(last.keyed.slot);
+              slotCount.set(last.keyed.slot, (slotCount.get(last.keyed.slot) ?? 0) + ahead.count);
+              for (const [key2, count] of ahead.keys)
+                keyCount.set(key2, (keyCount.get(key2) ?? 0) + count);
+            }
+            for (const [slot, count] of slotCount)
+              if (count > SLOT_CAP)
+                doubt.add(slot);
+            if (last) {
+              const slot = last.keyed.slot;
+              const seen = (carried?.s === slot ? carried.n : 0) + keyed.filter((entry) => entry.keyed.slot === slot).length;
+              const inDoubt = seen > SLOT_CAP || carried?.s === slot && carried.d === 1;
+              const counts = {};
+              if (!inDoubt) {
+                if (carried?.s === slot)
+                  Object.assign(counts, carried.c ?? {});
+                for (const entry of keyed)
+                  if (entry.keyed.slot === slot)
+                    counts[entry.keyed.key] = (counts[entry.keyed.key] ?? 0) + 1;
+              }
+              decided.g = inDoubt ? { s: slot, n: seen, d: 1 } : { s: slot, n: seen, c: counts };
             }
             for (const { message: message2, at, keyed: k } of keyed) {
               const place = positions[at] ?? { fileIndex: message2.sourceFileIndex, offset: 0 };
-              records.push(recordOf(message2, k, totals.get(k.key) ?? 1, decided, matching, media, (finding) => archive.report({ ...finding, fileIndex: place.fileIndex, offset: place.offset })));
+              const certain = !doubt.has(k.slot) && keyCount.get(k.key) === 1;
+              records.push(recordOf(message2, k, certain, decided, matching, media, (finding) => archive.report({ ...finding, fileIndex: place.fileIndex, offset: place.offset })));
             }
             positions = [];
             const nextCursor = page2.nextCursor !== undefined ? encodeCursor4(decided, page2.nextCursor) : undefined;
@@ -171120,8 +171156,8 @@ async function countSlotAhead(archive, cursor, slot, state, matching) {
     maxBytesPerListing: SLOT_LOOKAHEAD_BYTES,
     pageSize: 100
   });
-  const counts = new Map;
-  let read = 0;
+  const keys = new Map;
+  let count = 0;
   for await (const page2 of quiet.listItems({ cursor })) {
     for (const item of page2.items) {
       const message2 = exportMessageOf(item);
@@ -171129,32 +171165,24 @@ async function countSlotAhead(archive, cursor, slot, state, matching) {
         continue;
       const keyed = keyOf(message2, { ...state, j: { ...state.j } }, matching);
       if (keyed.slot !== slot)
-        return counts;
-      counts.set(keyed.key, (counts.get(keyed.key) ?? 0) + 1);
-      read += 1;
-      if (read >= SLOT_LOOKAHEAD_MESSAGES) {
-        for (const key2 of counts.keys())
-          counts.set(key2, 2);
-        return counts;
-      }
+        return { whole: true, count, keys };
+      count += 1;
+      keys.set(keyed.key, (keys.get(keyed.key) ?? 0) + 1);
+      if (count > SLOT_CAP)
+        return { whole: false, count, keys };
     }
-    if (page2.truncated === true) {
-      for (const key2 of counts.keys())
-        counts.set(key2, 2);
-      return counts;
-    }
+    if (page2.done)
+      return { whole: true, count, keys };
+    if (page2.truncated === true)
+      return { whole: false, count, keys };
   }
-  return counts;
+  return { whole: false, count, keys };
 }
-function recordOf(message2, keyed, total, state, matching, media, report) {
-  const { ms, chatJid, owner, caption, files, omitted, key: key2, slot } = keyed;
-  if (state.g?.s !== slot)
-    state.g = { s: slot, c: {} };
-  const ordinal = state.g.c[key2] ?? 0;
-  state.g.c[key2] = ordinal + 1;
+function recordOf(message2, keyed, certain, state, matching, media, report) {
+  const { ms, chatJid, owner, caption, files, omitted, key: key2 } = keyed;
   const wordless = textKey(caption) === "" && (files.length > 0 || omitted);
-  const matched = wordless || total !== 1 ? undefined : matching.index?.uniqueLiveWithKey(message2.precision, key2);
-  const id = matched ? matched.id : exportMessageId(key2, ordinal);
+  const matched = wordless || !certain ? undefined : matching.index?.uniqueLiveWithKey(message2.precision, key2);
+  const id = matched ? matched.id : exportMessageId(chatJid, ms, message2.precision, owner ? OWNER_SENDER : nameKey(message2.sender), textKey(message2.text), message2.occurrence);
   if (!matched && matching.index?.liveBetween(chatJid, ms - 60000, ms + 60000)) {
     report({ kind: WHATSAPP_INPUT_FINDINGS.nearMiss, class: "skipped" });
   }
@@ -171187,7 +171215,7 @@ function recordOf(message2, keyed, total, state, matching, media, report) {
     ...children.length > 0 ? { children } : {}
   };
 }
-var WHATSAPP_STATUS_JID = "status@broadcast", WHATSAPP_EXPORT_CHAT_SERVER = "export.whatsapp", CURSOR_PREFIX = "wa1~", SAMPLE_MESSAGES = 50000, SAMPLE_BYTES, LIVE_INDEX_BYTES, SLOT_LOOKAHEAD_MESSAGES = 1000, SLOT_LOOKAHEAD_BYTES, DAY_MS4, WHATSAPP_INPUT_FINDINGS, EXTENSION_MIME;
+var WHATSAPP_STATUS_JID = "status@broadcast", WHATSAPP_EXPORT_CHAT_SERVER = "export.whatsapp", CURSOR_PREFIX = "wa1~", SAMPLE_MESSAGES = 50000, SAMPLE_BYTES, LIVE_INDEX_BYTES, SLOT_CAP = 200, SLOT_LOOKAHEAD_BYTES, DAY_MS4, WHATSAPP_INPUT_FINDINGS, EXTENSION_MIME;
 var init_archive_input = __esm(() => {
   init_archive_formats();
   init_state();
@@ -172375,7 +172403,7 @@ var init_sniffer_resolver = __esm(() => {
 
 // src/workers/classification/sniffer-service.ts
 import { Database as Database23 } from "bun:sqlite";
-import { existsSync as existsSync89 } from "node:fs";
+import { existsSync as existsSync90 } from "node:fs";
 
 class TierSnifferService {
   options;
@@ -172460,7 +172488,7 @@ class TierSnifferService {
             continue;
         }
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync89(path);
+        const hasQueue = existsSync90(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -172662,14 +172690,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync89(bound)) {
+        if (bound && bound !== ":memory:" && existsSync90(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync89(own3))
+      if (existsSync90(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -187145,7 +187173,7 @@ __export(exports_remote_mcp, {
   REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
   DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
 });
-import { existsSync as existsSync90 } from "node:fs";
+import { existsSync as existsSync91 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
 }
@@ -187310,7 +187338,7 @@ function lazyRemoteConnectionStore(resolvePath4, open6) {
     if (store)
       return store;
     const dbPath = resolvePath4();
-    if (!options.create && !existsSync90(dbPath))
+    if (!options.create && !existsSync91(dbPath))
       return;
     store = open6(dbPath);
     return store;
@@ -192220,7 +192248,7 @@ __export(exports_server2, {
   accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
 });
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync91 } from "node:fs";
+import { existsSync as existsSync92 } from "node:fs";
 import { dirname as dirname91, isAbsolute as isAbsolute36, join as join120 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
@@ -192653,7 +192681,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync91(store.dbPath))
+        if (!existsSync92(store.dbPath))
           continue;
         const handle = openConnectorStore(definition.account, {
           dbPath: store.dbPath,
@@ -197386,7 +197414,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes32 } from "node:crypto";
-import { existsSync as existsSync92, readFileSync as readFileSync77, openSync as openSync23, closeSync as closeSync24, writeSync as writeSync6 } from "node:fs";
+import { existsSync as existsSync93, readFileSync as readFileSync77, openSync as openSync23, closeSync as closeSync24, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve24 } from "node:path";
@@ -201060,7 +201088,7 @@ function parseXReconcileRecoveryArgs(args) {
 }
 function runXReconcileRecovery(options) {
   const stateDbPath = options.stateDbPath ?? resolvedRawPath("x.bookmarks", "x-reconcile.sqlite");
-  if (stateDbPath !== ":memory:" && !existsSync92(stateDbPath)) {
+  if (stateDbPath !== ":memory:" && !existsSync93(stateDbPath)) {
     if (!options.execute)
       return xBookmarksRecoveryStatusWithoutState();
     throw new Error("X reconciliation has no staged run to recover.");
