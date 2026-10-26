@@ -354,8 +354,9 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
-- 2026-10-26 (v2.3.0, additive): **text the provider supplies**
-  (`docs/design/child-items.md`, "Text the provider supplies", decided in #532).
+- 2026-10-26 (v2.3.0, additive, builds on 2.2.0 and lands after it): **text the
+  provider supplies** (`docs/design/child-items.md`, "Text the provider
+  supplies", decided in #532).
   Optional `RawItem.providerText` (`text`, `form`: `prose` or
   `recognized_words`, `label`, optional `terms`). The shared extractor uses it
   as an item's text only when no reader produced any; the text says whose
