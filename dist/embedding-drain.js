@@ -35987,15 +35987,17 @@ var init_reaction_index = __esm(() => {
   init_reactions();
 });
 
-// src/workers/whatsapp/spool-index.ts
-var init_spool_index = __esm(() => {
-  init_reaction_index();
-});
-
 // src/workers/connector-store/spool-file-identity.ts
-var SPOOL_IDENTITY_HEAD_BYTES;
+var SPOOL_IDENTITY_HEAD_BYTES, SPOOL_BOUNDARY_WINDOW_BYTES;
 var init_spool_file_identity = __esm(() => {
   SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
+});
+
+// src/workers/whatsapp/spool-index.ts
+var init_spool_index = __esm(() => {
+  init_spool_file_identity();
+  init_reaction_index();
 });
 
 // src/workers/whatsapp/spool-reader.ts
@@ -36031,6 +36033,8 @@ var init_store_sync2 = __esm(() => {
   init_capture_freshness();
   init_live_connector();
   init_spool_reader();
+  init_spool_file_identity();
+  init_spool_index();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local"

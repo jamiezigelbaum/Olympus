@@ -17,6 +17,13 @@
 //   at or before the mark are not indexed again, so a replay never moves a
 //   reaction backwards, and an index started on an existing spool catches up
 //   from the spool's start, a budget at a time, before a page is aggregated.
+// - The spool contract (connector-store/spool-file-identity.ts): a spool file
+//   is append-only for every writer but Olympus's own clearing of Secrets,
+//   which refreshes this index's record of the file in the same step
+//   (`refreshFile`). Each file's record keeps where indexing reached in it
+//   and the digest of the 4 KiB that end there; a listing reads that window
+//   again before it trusts the file, so a file cut and written again, even to
+//   the same length or longer, is indexed again from its start.
 // - Every indexed file is known by its identity (device, inode and birth time
 //   where the platform has one). Each listing reconciles the index with the
 //   files that are there before it trusts a position or an aggregate: rows of
@@ -30,11 +37,12 @@
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import type { WhatsAppReactionEntry } from './reaction-index.ts';
 import { normalizeWhatsAppJid } from './reaction-index.ts';
 
 export const WHATSAPP_SPOOL_INDEX_FILE = 'spool-index.sqlite';
-const SCHEMA = 3;
+const SCHEMA = 4;
 
 export interface SpoolPlace {
   file: string;
@@ -76,7 +84,7 @@ export class WhatsAppSpoolIndex {
           DROP TABLE IF EXISTS reactions;
           DROP TABLE IF EXISTS meta;
           DROP TABLE IF EXISTS files;
-          CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
+          CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL, indexed_to INTEGER NOT NULL, boundary TEXT NOT NULL) WITHOUT ROWID;
           CREATE TABLE messages (
             chat TEXT NOT NULL, id TEXT NOT NULL, chat_jid TEXT NOT NULL, file TEXT NOT NULL, offset INTEGER NOT NULL,
             PRIMARY KEY (chat, id)
@@ -132,22 +140,52 @@ export class WhatsAppSpoolIndex {
    * identity): a file that is gone loses its rows; one whose identity changed
    * loses them and is indexed again from its start.
    */
-  reconcile(present: ReadonlyMap<string, { identity: string; size: number }>): void {
-    const known = this.db.query('SELECT name, identity, size FROM files').all() as Array<{ name: string; identity: string; size: number }>;
-    for (const { name, identity, size } of known) {
-      const now = present.get(name);
-      // The same file, as long or longer: it was only appended to.
-      if (now !== undefined && now.identity === identity && now.size >= size) continue;
+  reconcile(spoolDir: string): void {
+    const known = this.db.query('SELECT name, identity, indexed_to, boundary FROM files').all() as
+      Array<{ name: string; identity: string; indexed_to: number; boundary: string }>;
+    for (const { name, identity, indexed_to: indexedTo, boundary } of known) {
+      const path = join(spoolDir, name);
+      const now = spoolFileIdentity(path);
+      // The same file, holding the same bytes up to where indexing reached: it was only appended to.
+      if (now !== undefined && now.identity === identity && now.size >= indexedTo && spoolBoundaryHolds(path, indexedTo, boundary)) continue;
       this.forgetFile(name);
     }
   }
 
-  /** The file a line is indexed from, with its identity and size, so a later replacement is found. */
-  noteFile(name: string, identity: string, size: number): void {
+  /** Where indexing reached in a file, with the file's identity and the digest that ends there. */
+  noteFile(spoolDir: string, name: string, indexedTo: number): void {
+    const path = join(spoolDir, name);
+    const identity = spoolFileIdentity(path);
+    const boundary = spoolBoundaryDigest(path, indexedTo);
+    if (!identity || boundary === undefined) return;
     this.db.query(`
-      INSERT INTO files (name, identity, size) VALUES (?, ?, ?)
-      ON CONFLICT (name) DO UPDATE SET identity = excluded.identity, size = MAX(files.size, excluded.size)
-    `).run(name, identity, size);
+      INSERT INTO files (name, identity, indexed_to, boundary) VALUES (?, ?, ?, ?)
+      ON CONFLICT (name) DO UPDATE SET identity = excluded.identity, indexed_to = excluded.indexed_to, boundary = excluded.boundary
+      WHERE excluded.indexed_to >= files.indexed_to
+    `).run(name, identity.identity, indexedTo, boundary);
+  }
+
+  /**
+   * Clearing a Secret rewrote lines of a file in place, at their own length:
+   * the file's record (its identity, the digest at where indexing reached)
+   * is taken again, so the rewrite never reads as a break of the contract.
+   */
+  refreshFile(spoolDir: string, name: string): void {
+    const row = this.db.query('SELECT indexed_to FROM files WHERE name = ?').get(name) as { indexed_to: number } | null;
+    if (!row) return;
+    const path = join(spoolDir, name);
+    const identity = spoolFileIdentity(path);
+    const boundary = spoolBoundaryDigest(path, row.indexed_to);
+    if (!identity || boundary === undefined) {
+      this.forgetFile(name);
+      return;
+    }
+    this.db.query('UPDATE files SET identity = ?, boundary = ? WHERE name = ?').run(identity.identity, boundary, name);
+  }
+
+  /** The files the index holds a record of. */
+  fileNames(): string[] {
+    return (this.db.query('SELECT name FROM files ORDER BY name').all() as Array<{ name: string }>).map((row) => row.name);
   }
 
   /** A file was replaced or is gone: what was indexed of it is dropped, and it is indexed again from its start. */

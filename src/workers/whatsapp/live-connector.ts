@@ -609,14 +609,7 @@ async function* liveRecords(
   const pass: SpoolPassState = { budget: { bytesLeft: options.passByteBudget }, maxRecordBytes: options.maxRecordBytes, findings: options.findings, index };
   try {
     // The index is trusted only for the files that are there, as they are.
-    if (index) {
-      const present = new Map<string, { identity: string; size: number }>();
-      for (const file of listSpoolFiles(spoolDir)) {
-        const identity = spoolFileIdentity(join(spoolDir, file));
-        if (identity) present.set(file, { identity: identity.identity, size: identity.size });
-      }
-      index.reconcile(present);
-    }
+    if (index) index.reconcile(spoolDir);
     position = resolveStart(spoolDir, position, pass);
     // The index catches up to where this listing starts before any page is aggregated from it.
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
@@ -689,10 +682,8 @@ function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolP
     let offset = file === mark.file ? mark.offset : 0;
     const end = file === target.file ? target.offset : Number.POSITIVE_INFINITY;
     let paused = false;
-    const identity = spoolFileIdentity(join(spoolDir, file));
-    if (!identity) continue;
+    if (!spoolFileIdentity(join(spoolDir, file))) continue;
     index.transaction(() => {
-      index.noteFile(file, identity.identity, identity.size);
       for (const record of spoolRecords(join(spoolDir, file), offset, pass.maxRecordBytes, pass.budget)) {
         if (record.kind === 'paused') {
           // Inside an over-long record the rest of it reads as one unparsable line next time: nothing is indexed from it.
@@ -706,6 +697,7 @@ function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolP
         if (offset >= end) break;
       }
       index.advance({ file, offset: Math.min(offset, end) });
+      index.noteFile(spoolDir, file, Math.min(offset, end));
     });
     if (paused || pass.budget.bytesLeft <= 0) return comparePlaces(index.highWater() ?? mark, target) >= 0;
   }
@@ -750,8 +742,14 @@ function readSpoolPage(
   const projectedItems = (): number => messages.length + reEmitTargets.size;
   let position = start;
   const index = pass.index;
+  // Where this page's reading reached in each file it read: recorded with the digest that ends there.
+  const reached = new Map<string, number>();
   const finish = (result: SpoolPageReadResult): SpoolPageReadResult => {
-    if (index && result.position?.offset !== undefined) index.advance({ file: result.position.file, offset: result.position.offset });
+    if (index && result.position?.offset !== undefined) {
+      index.advance({ file: result.position.file, offset: result.position.offset });
+      if (result.position.skipping !== true) reached.set(result.position.file, result.position.offset);
+      for (const [file, offset] of reached) index.noteFile(spoolDir, file, offset);
+    }
     return result;
   };
   const run = (): SpoolPageReadResult => {
@@ -762,8 +760,6 @@ function readSpoolPage(
       let offset = fromStart ? start.offset ?? 0 : 0;
       const skipping = fromStart && start.skipping === true;
       position = { file, line: lineIndex, offset, ...(skipping ? { skipping: true as const } : {}) };
-      const identity = spoolFileIdentity(join(spoolDir, file));
-      if (index && identity) index.noteFile(file, identity.identity, identity.size);
       for (const record of spoolRecords(join(spoolDir, file), offset, pass.maxRecordBytes, pass.budget, skipping)) {
         if (record.kind === 'paused') {
           if (record.firstSeen) pass.findings.oversizedRecords += 1;
@@ -777,6 +773,7 @@ function readSpoolPage(
         offset = record.endOffset;
         lineIndex += 1;
         position = { file, line: lineIndex, offset };
+        reached.set(file, offset);
         if (record.kind === 'oversized') {
           if (!record.continued) pass.findings.oversizedRecords += 1;
           continue;
