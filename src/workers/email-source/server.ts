@@ -440,7 +440,13 @@ import {
 } from '../../core/file-scope-sources.ts';
 import { fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
-import { GMAIL_IMPORT_CONNECTOR_PREFIX, gmailArchiveTarget, gmailItemAccountScope } from '../google-connectors/gmail-archive-target.ts';
+import {
+  GMAIL_IMPORT_CONNECTOR_PREFIX,
+  gmailArchiveTarget,
+  gmailHoldsImportedHistory,
+  gmailImportedHistoryEmbeddingTargets,
+  gmailItemAccountScope,
+} from '../google-connectors/gmail-archive-target.ts';
 import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
 import {
   GMAIL_IMPORT_LABELS_COST,
@@ -4890,9 +4896,12 @@ export async function main(): Promise<void> {
     // Gmail with no live lane (not connected, or no mail approval) whose stores hold mail an import brought in: a
     // source with no sync of its own, so the embedding sweep and the private meaning backfill below still drain
     // the imported history. Live approval governs live reads, not the account's own stores.
+    // Only mail an import brought in counts: kept live mail waits for its own lane's approval.
+    let gmailImportedHistory: SourceSchedulerSource | undefined;
     if (!sources.some((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail) && gmailInternalConnectorStore && gmailSecureConnectorStore
-      && [gmailInternalConnectorStore, gmailSecureConnectorStore].some((store) => store.itemAccountScopes('gmail', 1).length > 0)) {
-      sources.push(createGmailImportedHistorySchedulerSource({ config: olympusConfig }));
+      && gmailHoldsImportedHistory([gmailInternalConnectorStore, gmailSecureConnectorStore, gmailTierLane?.publicStore?.current()])) {
+      gmailImportedHistory = createGmailImportedHistorySchedulerSource({ config: olympusConfig });
+      sources.push(gmailImportedHistory);
     }
     // One embedding sweep per source that embeds, built once here from the
     // worker's own store registry: every mounted store of the source's corpora
@@ -4916,6 +4925,17 @@ export async function main(): Promise<void> {
           && definition.activationMode !== 'lexical_only'
           && definition.embeddingPolicy !== 'disabled';
       };
+      // Gmail with no live lane: only what the imports brought, each store store-wide on its current provider
+      // (never a queue a live sync left under an approval that may no longer stand).
+      if (source === gmailImportedHistory) {
+        const importScope = gmailItemScopeFor(currentGmailHandle);
+        const importTargets = () => gmailImportedHistoryEmbeddingTargets({
+          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
+          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
+          accountScope: importScope,
+        });
+        return importTargets().length > 0 ? importTargets : undefined;
+      }
       const targets = () => connectorStores.flatMap((store) => {
         if (!corpusIds.has(store.corpusId)) return [];
         const provider = connectorStoreEmbeddingProviders.get(store.corpusId);

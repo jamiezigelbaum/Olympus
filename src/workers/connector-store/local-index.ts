@@ -11702,6 +11702,12 @@ export class LocalConnectorStore {
     return this.db.query('SELECT 1 AS present FROM items LIMIT 1').get() !== null;
   }
 
+  /** Whether any live (not tombstoned) row matches these filters. */
+  holdsItemsMatching(filters: ConnectorStoreSearchFilters): boolean {
+    const scoped = connectorStoreFilterSql(filters);
+    return this.db.query(`SELECT 1 AS present FROM items i WHERE i.tombstoned = 0 ${scoped.sql} LIMIT 1`).get(...scoped.params) !== null;
+  }
+
   /** The account scopes a provider's rows are kept under, at most `limit` of them (tombstones included). */
   itemAccountScopes(provider: string, limit = 2): string[] {
     const rows = this.db.query('SELECT DISTINCT account_scope AS scope FROM items WHERE provider = ? LIMIT ?').all(provider, limit) as Array<{ scope: string }>;

@@ -28846,6 +28846,10 @@ var init_local_index = __esm(() => {
     holdsAnyItem() {
       return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
     }
+    holdsItemsMatching(filters) {
+      const scoped = connectorStoreFilterSql(filters);
+      return this.db.query(`SELECT 1 AS present FROM items i WHERE i.tombstoned = 0 ${scoped.sql} LIMIT 1`).get(...scoped.params) !== null;
+    }
     itemAccountScopes(provider, limit = 2) {
       const rows = this.db.query("SELECT DISTINCT account_scope AS scope FROM items WHERE provider = ? LIMIT ?").all(provider, limit);
       return rows.map((row) => row.scope);
@@ -49596,6 +49600,9 @@ var exportAddresses = new Map;
 
 // src/workers/google-connectors/gmail-archive-target.ts
 init_gmail_mail_record();
+var GMAIL_PROVIDER_ID = "gmail";
+var GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.";
+var GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
 
 // src/workers/email-source/server.ts
 init_tiered_store_set();

@@ -37258,6 +37258,10 @@ var init_local_index = __esm(() => {
     holdsAnyItem() {
       return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
     }
+    holdsItemsMatching(filters) {
+      const scoped = connectorStoreFilterSql(filters);
+      return this.db.query(`SELECT 1 AS present FROM items i WHERE i.tombstoned = 0 ${scoped.sql} LIMIT 1`).get(...scoped.params) !== null;
+    }
     itemAccountScopes(provider, limit = 2) {
       const rows = this.db.query("SELECT DISTINCT account_scope AS scope FROM items WHERE provider = ? LIMIT ?").all(provider, limit);
       return rows.map((row) => row.scope);
@@ -168935,6 +168939,15 @@ function gmailItemAccountScope(stores, roleScope) {
     return roleScope;
   return [...held][0];
 }
+function gmailHoldsImportedHistory(stores) {
+  return stores.some((store) => store?.holdsItemsMatching(GMAIL_IMPORTED_FILTERS) === true);
+}
+function gmailImportedHistoryEmbeddingTargets(input) {
+  return input.stores.flatMap((store) => {
+    const provider = input.providerFor(store);
+    return provider ? [{ store, provider, wholeStore: true, missingOnly: true, accountScope: input.accountScope, filters: GMAIL_IMPORTED_FILTERS }] : [];
+  });
+}
 function gmailRecordBuilder(account, build = {}) {
   return {
     family: "email",
@@ -169005,7 +169018,7 @@ function gmailArchiveTarget(options) {
     exclusive: (task) => options.exclusive(task)
   };
 }
-var GMAIL_ARCHIVE_SOURCE_ID = "gmail.email", GMAIL_ARCHIVE_LABEL = "Gmail", GMAIL_PROVIDER_ID = "gmail", GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.";
+var GMAIL_ARCHIVE_SOURCE_ID = "gmail.email", GMAIL_ARCHIVE_LABEL = "Gmail", GMAIL_PROVIDER_ID = "gmail", GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.", GMAIL_IMPORTED_FILTERS;
 var init_gmail_archive_target = __esm(() => {
   init_provider_account_identity();
   init_source_inputs();
@@ -169013,6 +169026,7 @@ var init_gmail_archive_target = __esm(() => {
   init_gmail_account();
   init_gmail_input();
   init_gmail_mail_record();
+  GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
 });
 
 // src/workers/email-source/gmail-status-scope.ts
@@ -194107,8 +194121,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         });
       })
     ].filter((source) => source !== undefined);
-    if (!sources.some((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail) && gmailInternalConnectorStore && gmailSecureConnectorStore && [gmailInternalConnectorStore, gmailSecureConnectorStore].some((store) => store.itemAccountScopes("gmail", 1).length > 0)) {
-      sources.push(createGmailImportedHistorySchedulerSource({ config: olympusConfig }));
+    let gmailImportedHistory;
+    if (!sources.some((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail) && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailHoldsImportedHistory([gmailInternalConnectorStore, gmailSecureConnectorStore, gmailTierLane?.publicStore?.current()])) {
+      gmailImportedHistory = createGmailImportedHistorySchedulerSource({ config: olympusConfig });
+      sources.push(gmailImportedHistory);
     }
     const sweptSources = withEmbeddingSweep(sources, (source) => {
       const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
@@ -194117,6 +194133,15 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === corpusId);
         return definition !== undefined && definition.activationMode !== "lexical_only" && definition.embeddingPolicy !== "disabled";
       };
+      if (source === gmailImportedHistory) {
+        const importScope = gmailItemScopeFor(currentGmailHandle);
+        const importTargets = () => gmailImportedHistoryEmbeddingTargets({
+          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
+          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
+          accountScope: importScope
+        });
+        return importTargets().length > 0 ? importTargets : undefined;
+      }
       const targets = () => connectorStores.flatMap((store) => {
         if (!corpusIds.has(store.corpusId))
           return [];

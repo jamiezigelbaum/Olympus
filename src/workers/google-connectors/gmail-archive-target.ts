@@ -24,7 +24,8 @@ import type { SourceConnector, SourceConnectorInput } from '../../core/contracts
 import type { ArchiveConnectorInput } from '../../core/archive-formats.ts';
 import { googleAccountIdFromAddress } from '../../core/provider-account-identity.ts';
 import { inputConnector, type IntakeObservingInput, type SourceRecordBuilder } from '../../core/source-inputs.ts';
-import type { ConnectorStoreSyncOptions, LocalConnectorStore } from '../connector-store/index.ts';
+import type { ConnectorStoreEmbeddingTarget, ConnectorStoreSyncOptions, LocalConnectorStore } from '../connector-store/index.ts';
+import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { archiveFileEntries } from '../archive-import/manifest.ts';
 import { identifyGmailExport } from '../archive-import/mbox/gmail-account.ts';
@@ -61,6 +62,32 @@ export function gmailItemAccountScope(stores: readonly Pick<LocalConnectorStore,
   const held = new Set(stores.flatMap((store) => store.itemAccountScopes(GMAIL_PROVIDER_ID, 3)));
   if (held.size !== 1 || held.has(roleScope)) return roleScope;
   return [...held][0]!;
+}
+
+/** What an import brought into the Gmail stores: rows an import's input observed. */
+export const GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
+
+/** Whether any of these Gmail stores holds mail an import brought in (kept live mail does not count). */
+export function gmailHoldsImportedHistory(stores: ReadonlyArray<Pick<LocalConnectorStore, 'holdsItemsMatching'> | undefined>): boolean {
+  return stores.some((store) => store?.holdsItemsMatching(GMAIL_IMPORTED_FILTERS) === true);
+}
+
+/**
+ * The embedding sweep of Gmail's stores with no live lane: only what the
+ * imports brought, store-wide on each store's current provider, and never a
+ * queue a live sync left under an approval that may no longer stand.
+ */
+export function gmailImportedHistoryEmbeddingTargets(input: {
+  stores: readonly LocalConnectorStore[];
+  providerFor: (store: LocalConnectorStore) => SourceEmbeddingProvider | undefined;
+  accountScope: string;
+}): ConnectorStoreEmbeddingTarget[] {
+  return input.stores.flatMap((store) => {
+    const provider = input.providerFor(store);
+    return provider
+      ? [{ store, provider, wholeStore: true, missingOnly: true, accountScope: input.accountScope, filters: GMAIL_IMPORTED_FILTERS }]
+      : [];
+  });
 }
 
 /** The Gmail connector's one way from a record to items, for any input of the account `account`. */
