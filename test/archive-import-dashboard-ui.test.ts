@@ -352,7 +352,7 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     await settle();
     (Array.from(row.querySelectorAll('.menu-panel button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
     await settle();
-    expect(page.text()).toContain('Import a Telegram archive');
+    expect(page.text()).toContain('Import an archive into Telegram');
     expect(page.text()).toContain(TELEGRAM.intro);
     expect(page.text()).not.toContain(A.pick.intro);
     (page.doc.querySelector('[data-key="picker:open:/Users/you/Telegram exports"]') as HTMLButtonElement).click();

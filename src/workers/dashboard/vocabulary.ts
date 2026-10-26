@@ -2069,7 +2069,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
    * A source's own ⋯ menu entry: the picker for that source's exports only
    * (`ComputerArchiveSourceMeta`). {source} is the source's name.
    */
-  sourceImport: { action: 'Import an archive', title: 'Import a {source} archive' },
+  sourceImport: { action: 'Import an archive', title: 'Import an archive into {source}' },
   /** The picker in archive mode: one file or folder, no save step. */
   pick: {
     back: 'Back to Olympus',

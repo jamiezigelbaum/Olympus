@@ -52092,7 +52092,7 @@ var init_vocabulary = __esm(() => {
   };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import another archive",
-    sourceImport: { action: "Import an archive", title: "Import a {source} archive" },
+    sourceImport: { action: "Import an archive", title: "Import an archive into {source}" },
     pick: {
       back: "Back to Olympus",
       title: "Import another archive",

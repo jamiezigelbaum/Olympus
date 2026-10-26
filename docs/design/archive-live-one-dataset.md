@@ -400,8 +400,8 @@ says so.
 
 - **A source's own card.** Every source whose connector reads its exports as
   inputs (a registered `ArchiveSourceTarget`) gets **Import an archive** in its
-  ⋯ menu, before Disconnect and Delete. It opens the picker titled "Import a
-  Telegram archive", whose opening sentence names only that source's exports.
+  ⋯ menu, before Disconnect and Delete. It opens the picker titled "Import an
+  archive into Telegram", whose opening sentence names only that source's exports.
   The approval names the card (`source_id`), and the engine recognises only that
   source's formats (`prepareArchiveImport` with the target's formats). Any other
   export is refused in the picker: "This isn't a Telegram export. From the
