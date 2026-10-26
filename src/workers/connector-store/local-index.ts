@@ -3653,11 +3653,12 @@ export class LocalConnectorStore {
   /**
    * Tombstone this store's copy of an item outside a sync: Secrets found on a
    * routed item, or a provider deletion of one. Chunks, FTS rows and vectors
-   * go, as for any tombstone; the identity row stays.
+   * go, as for any tombstone; the identity row stays. With `insert` an item this store never saw gets a
+   * tombstone row of its own (a Secret's location, or a deletion's version).
    */
   tombstoneCopy(
     identity: SourceItemIdentity,
-    options: { connectorId: string; trustTier?: SourceTrustTier },
+    options: { connectorId: string; trustTier?: SourceTrustTier; insert?: true },
   ): boolean {
     const syncRunId = `connector-tier-copy-${randomUUID()}`;
     const startedAt = nowIso();
@@ -3681,7 +3682,7 @@ export class LocalConnectorStore {
           'observed',
           syncRunId,
           options.trustTier,
-          true,
+          options.insert !== true,
         );
       })();
     } finally {
