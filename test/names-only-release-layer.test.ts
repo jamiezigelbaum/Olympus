@@ -36,7 +36,7 @@ function privateFileCheck(): { check: ReleaseCheck; seen: ReleaseInput[][] } {
   };
 }
 
-function handlerFor(check: ReleaseCheck, marker: 'namesOnly' | 'contentPrivate' = 'contentPrivate') {
+function handlerFor(check: ReleaseCheck, marker: 'namesOnly' | 'contentPrivate' | 'unread' | 'text' = 'contentPrivate') {
   const item = (id: string) => ({ family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: id, localItemId: `personal:${id}` });
   const hit = (id: string, title: string) => ({ sourceItem: item(id), provenance: { sourceItem: item(id), citation: { title } }, score: 1, rawExposed: false as const });
   return createAnalystSourceIndexAnswerHandler({
@@ -60,7 +60,9 @@ function handlerFor(check: ReleaseCheck, marker: 'namesOnly' | 'contentPrivate' 
           async fetchLocalContent(request: { provenance: { sourceItem: { providerItemId: string } } }) {
             const sensitivity = buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' });
             return request.provenance.sourceItem.providerItemId === 'private-file'
-              ? { sensitivity, chunks: [], ...(marker === 'contentPrivate' ? { contentPrivate: true } : { namesOnly: true }) }
+              ? marker === 'text'
+                ? { sensitivity, chunks: ['Policy number and premium.'] }
+                : { sensitivity, chunks: [], ...(marker === 'contentPrivate' ? { contentPrivate: true } : marker === 'namesOnly' ? { namesOnly: true } : {}) }
               : { sensitivity, chunks: ['Inspected both hives on Saturday.'] };
           },
         },
@@ -71,8 +73,10 @@ function handlerFor(check: ReleaseCheck, marker: 'namesOnly' | 'contentPrivate' 
 
 describe('a names-only candidate in the release check', () => {
   // contentPrivate: a Private file whose names stay Personal (the store's own
-  // marker, connector-store/local-index.ts); namesOnly: the owner's Names-only choice.
-  for (const marker of ['contentPrivate', 'namesOnly'] as const) test(`(${marker}) is a names-layer input, so a Private file matched by name does not withhold the answer`, async () => {
+  // marker, connector-store/local-index.ts); namesOnly: the owner's Names-only
+  // choice; unread: a file never read (deleted at the source before extraction)
+  // whose unread content the ledger holds Private, with no Private copy behind it.
+  for (const marker of ['contentPrivate', 'namesOnly', 'unread'] as const) test(`(${marker}) is a names-layer input, so a Private file matched by name does not withhold the answer`, async () => {
     const { check, seen } = privateFileCheck();
     const sink = createReleaseManifestSink();
     const result = await runWithReleaseManifestSink(sink, () => handlerFor(check, marker).answer({ question: 'How many items do I have about beekeeping?' }));
@@ -83,5 +87,13 @@ describe('a names-only candidate in the release check', () => {
     expect(inputs.find((input) => input.providerItemId === 'private-file')).toMatchObject({ layer: 'names', privateAtAnswer: false });
     expect(inputs.find((input) => input.providerItemId === 'personal-file')?.layer).toBeUndefined();
     expect(seen.length).toBeGreaterThan(0);
+  });
+
+  test('a Private file whose text reached the model is still judged by its content', async () => {
+    const { check } = privateFileCheck();
+    const sink = createReleaseManifestSink();
+    const answer = runWithReleaseManifestSink(sink, () => handlerFor(check, 'text').answer({ question: 'How many items do I have about beekeeping?' }));
+
+    await expect(answer).rejects.toThrow(ANSWER_BECAME_PRIVATE);
   });
 });

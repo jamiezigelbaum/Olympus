@@ -788,15 +788,17 @@ export function createAnalystSourceIndexAnswerHandler(
  * The analysed pack's items, each with its account and whether it was Private.
  */
 function releaseInputs(detail: EvidencePackBuildDetail): ReleaseInput[] {
-  // A candidate that came with its names and no text (the owner's Names-only
-  // choice, or a Private file whose names stay Personal) put only those names
-  // in front of the model, so its release is judged by the names tier. Judging
-  // it by the Private text the answer never read would withhold every answer
-  // that merely matched such a file by name. One that came with any text
-  // (a Names-only item's reactions) keeps the content layer.
-  const namesOnly = new Set([...(detail.namesOnlyCandidateIndexes ?? []), ...(detail.contentPrivateCandidateIndexes ?? [])]
-    .filter((index) => (detail.pack.candidates[index]?.chunks.length ?? 1) === 0
-      && !(detail.pack.candidates[index]?.tables?.length)));
+  // A candidate that came with its names and no text put only those names in
+  // front of the model, so its release is judged by the names tier, whatever
+  // the reason it has no text: the owner's Names-only choice, a Private file
+  // whose names stay Personal, or a file never read (deleted at the source,
+  // extraction failed) whose unread content is held Private to be safe.
+  // Judging it by text the answer never read would withhold every answer that
+  // merely matched such a file by name. One that came with any text (a
+  // Names-only item's reactions), a table or a fact keeps the content layer.
+  const namesOnly = new Set(detail.pack.candidates.flatMap((candidate, index) => (
+    candidate.chunks.length === 0 && !candidate.tables?.length && !candidate.facts?.length ? [index] : []
+  )));
   const items = detail.pack.candidates.map((candidate, index): ReleaseInput => {
     const item = candidate.provenance.sourceItem;
     return {
