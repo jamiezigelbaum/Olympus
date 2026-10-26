@@ -741,9 +741,9 @@ export function catchUpWhatsAppSpoolIndex(spoolDir: string, budgetBytes: number)
       index,
       ledger,
     };
-    // Up to the last whole line: a fragment being written is indexed when it is whole.
-    const offset = terminatedLinesEnd(join(spoolDir, last))?.offset ?? 0;
-    return catchUpIndex(spoolDir, index, { file: last, line: 0, offset }, pass);
+    // Up to the file's end as it is now (a stat, no read): a fragment being written is not a record, so indexing
+    // stops at the last whole line and the high-water mark says where; the next catch-up goes on from there.
+    return catchUpIndex(spoolDir, index, { file: last, line: 0, offset: end.size }, pass);
   } finally {
     index.close();
     ledger?.close();
@@ -803,7 +803,7 @@ function noteLine(index: WhatsAppSpoolIndex, line: string, place: SpoolPlace, le
     text: message.text,
   });
   if (!keys) return;
-  index.noteMatchKeys({
+  const firstSeen = index.noteMatchKeys({
     chatJid: message.chatJid,
     id: message.id,
     fromMe: message.fromMe,
@@ -814,16 +814,25 @@ function noteLine(index: WhatsAppSpoolIndex, line: string, place: SpoolPlace, le
       ? { chatNameKey: 'status@broadcast' }
       : message.chatName ? { chatNameKey: nameKey(message.chatName) } : {}),
   }, place);
-  // The other direction: an import that ran first gave this message an id of its own. The live message is that
-  // item, found by the same key and occurrence the import counted (match-ledger.ts).
-  if (!ledger || ledger.aliasOf(message.chatJid, message.id) !== undefined) return;
+  // The other direction: an import that ran first gave this message an id of its own, and this is the message's
+  // first line (it was never stored under its own id: a stored item's id never changes, and a later line is
+  // another version, which never claims anything). The live message takes that item's id only when the match
+  // is certain: one live message and one imported one hold the key, and the message is not a picture or file
+  // with no words (whose key says nothing of which picture it is). When in doubt, no merge.
+  if (!ledger || !firstSeen || ledger.aliasOf(message.chatJid, message.id) !== undefined) return;
+  if (message.mediaType !== undefined && textKeyIsEmpty(message.text)) return;
   for (const [precision, key] of [['minute', keys.exactMinute], ['second', keys.exactSecond]] as const) {
-    const imported = ledger.exportAt(precision, key, index.rankOf(precision, key, place));
+    if (index.countWithKey(precision, key) !== 1 || ledger.exportCount(precision, key) !== 1) continue;
+    const imported = ledger.exportAt(precision, key, 0);
     if (imported !== undefined && !ledger.claimed(imported)) {
       ledger.alias(message.chatJid, message.id, imported);
       return;
     }
   }
+}
+
+function textKeyIsEmpty(text: string): boolean {
+  return text.trim() === '';
 }
 
 /** A record of a live message an import holds already, under that item's id. */

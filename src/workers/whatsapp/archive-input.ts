@@ -73,9 +73,9 @@ export const WHATSAPP_STATUS_JID = 'status@broadcast';
 export const WHATSAPP_EXPORT_CHAT_SERVER = 'export.whatsapp';
 const CURSOR_PREFIX = 'wa1~';
 /** Messages the first pass reads to choose the time zone and learn the owner's name. */
-const SAMPLE_MESSAGES = 2_000;
+const SAMPLE_MESSAGES = 50_000;
 /** How much of the export the first pass may read looking for the overlap with live capture. */
-const SAMPLE_BYTES = 256 * 1024 * 1024;
+const SAMPLE_BYTES = 1024 * 1024 * 1024;
 /** How much of the live spool one pass may index before matching (the rest is matched the other way, later). */
 const LIVE_INDEX_BYTES = 64 * 1024 * 1024;
 const DAY_MS = 24 * 3_600_000;
@@ -433,7 +433,9 @@ function recordOf(
   if (state.g?.s !== slot) state.g = { s: slot, c: {} };
   const ordinal = state.g.c[key] ?? 0;
   state.g.c[key] = ordinal + 1;
-  const matched = matching.index?.liveWithKey(message.precision, key, ordinal);
+  // A picture or file with no words is never merged by key: the key says nothing of which picture it is.
+  const wordless = text === '' && (files.length > 0 || omitted);
+  const matched = wordless ? undefined : matching.index?.liveWithKey(message.precision, key, ordinal);
   const taken = matched ? matching.ledger?.aliasOf(matched.chatJid, matched.id) : undefined;
   let id: string;
   if (matched) {

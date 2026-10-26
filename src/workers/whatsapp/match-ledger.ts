@@ -56,6 +56,11 @@ export class WhatsAppMatchLedger {
       .run(precision, key, ordinal, wxId, chatJid);
   }
 
+  /** How many export messages were given their own id under this key. */
+  exportCount(precision: TimePrecision, key: string): number {
+    return (this.db.query('SELECT COUNT(*) AS n FROM export_ids WHERE precision = ? AND key = ?').get(precision, key) as { n: number }).n;
+  }
+
   exportAt(precision: TimePrecision, key: string, ordinal: number): string | undefined {
     const row = this.db.query('SELECT wx_id FROM export_ids WHERE precision = ? AND key = ? AND ordinal = ?').get(precision, key, ordinal) as { wx_id: string } | null;
     return row?.wx_id;

@@ -43,7 +43,7 @@ import type { WhatsAppReactionEntry } from './reaction-index.ts';
 import { normalizeWhatsAppJid } from './reaction-index.ts';
 
 export const WHATSAPP_SPOOL_INDEX_FILE = 'spool-index.sqlite';
-const SCHEMA = 5;
+const SCHEMA = 6;
 
 export interface SpoolPlace {
   file: string;
@@ -103,11 +103,11 @@ export class WhatsAppSpoolIndex {
             media_type TEXT, media_saved INTEGER NOT NULL,
             exact_m TEXT NOT NULL, exact_s TEXT NOT NULL, loose_m TEXT NOT NULL, loose_s TEXT NOT NULL,
             unsent_m TEXT NOT NULL, unsent_s TEXT NOT NULL,
-            file TEXT NOT NULL, offset INTEGER NOT NULL,
+            file TEXT NOT NULL, offset INTEGER NOT NULL, first_file TEXT NOT NULL, first_offset INTEGER NOT NULL,
             PRIMARY KEY (chat, id)
           ) WITHOUT ROWID;
-          CREATE INDEX live_keys_exact_m ON live_keys (exact_m, file, offset);
-          CREATE INDEX live_keys_exact_s ON live_keys (exact_s, file, offset);
+          CREATE INDEX live_keys_exact_m ON live_keys (exact_m, first_file, first_offset);
+          CREATE INDEX live_keys_exact_s ON live_keys (exact_s, first_file, first_offset);
           CREATE INDEX live_keys_loose_m ON live_keys (loose_m);
           CREATE INDEX live_keys_loose_s ON live_keys (loose_s);
           CREATE INDEX live_keys_unsent_m ON live_keys (unsent_m);
@@ -319,12 +319,13 @@ export class WhatsAppSpoolIndex {
     mediaSaved: boolean;
     keys: LiveMatchKeys;
     chatNameKey?: string;
-  }, place: SpoolPlace): void {
+  }, place: SpoolPlace): boolean {
     const chat = normalizeWhatsAppJid(input.chatJid);
+    const seen = this.db.query('SELECT 1 FROM live_keys WHERE chat = ? AND id = ?').get(chat, input.id) !== null;
     this.db.query(`
       INSERT INTO live_keys (chat, id, chat_jid, from_me, time_ms, media_type, media_saved,
-        exact_m, exact_s, loose_m, loose_s, unsent_m, unsent_s, file, offset)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        exact_m, exact_s, loose_m, loose_s, unsent_m, unsent_s, file, offset, first_file, first_offset)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (chat, id) DO UPDATE SET chat_jid = excluded.chat_jid, from_me = excluded.from_me, time_ms = excluded.time_ms,
         media_type = excluded.media_type, media_saved = excluded.media_saved,
         exact_m = excluded.exact_m, exact_s = excluded.exact_s, loose_m = excluded.loose_m, loose_s = excluded.loose_s,
@@ -332,10 +333,18 @@ export class WhatsAppSpoolIndex {
       WHERE excluded.file > live_keys.file OR (excluded.file = live_keys.file AND excluded.offset > live_keys.offset)
     `).run(chat, input.id, input.chatJid, input.fromMe ? 1 : 0, input.keys.timeMs, input.mediaType ?? null, input.mediaSaved ? 1 : 0,
       input.keys.exactMinute, input.keys.exactSecond, input.keys.looseMinute, input.keys.looseSecond,
-      input.keys.unsentMinute, input.keys.unsentSecond, place.file, place.offset);
+      input.keys.unsentMinute, input.keys.unsentSecond, place.file, place.offset, place.file, place.offset);
     if (input.chatNameKey) {
       this.db.query('INSERT OR IGNORE INTO chat_names (name, chat, chat_jid) VALUES (?, ?, ?)').run(input.chatNameKey, chat, input.chatJid);
     }
+    // Whether this is the message's first line: a later one is another version of a message already seen.
+    return !seen;
+  }
+
+  /** How many live messages hold this exact key now. */
+  countWithKey(precision: TimePrecision, key: string): number {
+    const column = precision === 'second' ? 'exact_s' : 'exact_m';
+    return (this.db.query(`SELECT COUNT(*) AS n FROM live_keys WHERE ${column} = ?`).get(key) as { n: number }).n;
   }
 
   /** The `ordinal`-th live message (from 0, in spool order) with this exact key, at this precision. */
@@ -343,7 +352,7 @@ export class WhatsAppSpoolIndex {
     const column = precision === 'second' ? 'exact_s' : 'exact_m';
     const row = this.db.query(`
       SELECT id, chat_jid, from_me, time_ms, media_type, media_saved FROM live_keys WHERE ${column} = ?
-      ORDER BY file, offset LIMIT 1 OFFSET ?
+      ORDER BY first_file, first_offset LIMIT 1 OFFSET ?
     `).get(key, ordinal) as { id: string; chat_jid: string; from_me: number; time_ms: number; media_type: string | null; media_saved: number } | null;
     return row ? {
       id: row.id,
