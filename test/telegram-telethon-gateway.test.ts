@@ -118,6 +118,9 @@ describe('long-lived read-only Telethon capture gateway', () => {
         },
       });
       expect(new Set(records.map((record) => record.capture_id)).size).toBe(4);
+      // Every record carries the helper's capture sequence, which only grows (kept beside the spool).
+      expect(records.map((record) => record.capture_seq)).toEqual([1, 2, 3, 4]);
+      expect(readFileSync(join(fixture.spoolDir, '.capture-seq'), 'utf8')).toBe('4');
       expect(statSync(fixture.spoolDir).mode & 0o777).toBe(0o700);
       expect(statSync(spoolPath).mode & 0o777).toBe(0o600);
       expect(statSync(fixture.statePath).mode & 0o777).toBe(0o600);

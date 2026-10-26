@@ -858,9 +858,37 @@ def append_gateway_page(
     return len(records)
 
 
+CAPTURE_SEQ_NAME = ".capture-seq"
+
+
+def allocate_capture_seq(spool_dir: Path, count: int) -> int:
+    """The first of `count` new capture sequence numbers, kept beside the spool.
+
+    The number only grows, whatever happens to the day files, so the importer
+    can order two captures of one message at the same capture time. Taken
+    under the file's own lock and written durably before any record names it;
+    a crash after taking numbers only leaves a gap.
+    """
+    path = spool_dir / CAPTURE_SEQ_NAME
+    with open(path, "a+b") as counter:
+        os.chmod(path, 0o600)
+        fcntl.flock(counter.fileno(), fcntl.LOCK_EX)
+        counter.seek(0)
+        text = counter.read().decode("ascii", "replace").strip()
+        current = int(text) if text.isdigit() else 0
+        counter.seek(0)
+        counter.truncate(0)
+        counter.write(str(current + count).encode("ascii"))
+        counter.flush()
+        os.fsync(counter.fileno())
+    return current + 1
+
+
 def append_spool_records(spool_dir: Path, records: list[dict[str, Any]], date_name: str) -> None:
     spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(spool_dir, 0o700)
+    first_seq = allocate_capture_seq(spool_dir, len(records))
+    records = [{**record, "capture_seq": first_seq + index} for index, record in enumerate(records)]
     path = spool_dir / f"{date_name}.jsonl"
     with open(path, "a+b") as spool:
         os.chmod(path, 0o600)
