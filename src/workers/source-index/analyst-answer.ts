@@ -788,6 +788,11 @@ export function createAnalystSourceIndexAnswerHandler(
  * The analysed pack's items, each with its account and whether it was Private.
  */
 function releaseInputs(detail: EvidencePackBuildDetail): ReleaseInput[] {
+  // A names-only candidate put only the item's names in front of the model,
+  // so its release is judged by the names tier. A Private file's names stay
+  // Personal; judging them by the Private text the answer never read would
+  // withhold every answer that merely matched such a file by name.
+  const namesOnly = new Set(detail.namesOnlyCandidateIndexes ?? []);
   const items = detail.pack.candidates.map((candidate, index): ReleaseInput => {
     const item = candidate.provenance.sourceItem;
     return {
@@ -797,6 +802,7 @@ function releaseInputs(detail: EvidencePackBuildDetail): ReleaseInput[] {
       providerItemId: item.providerItemId,
       ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
       privateAtAnswer: isSecureSensitivity(candidate),
+      ...(namesOnly.has(index) ? { layer: 'names' as const } : {}),
     };
   });
   // A parent label put the parent's names in front of the model: they are as
