@@ -17,8 +17,14 @@
 //   at or before the mark are not indexed again, so a replay never moves a
 //   reaction backwards, and an index started on an existing spool catches up
 //   from the spool's start, a budget at a time, before a page is aggregated.
-// - A file found replaced (recovery) has its rows dropped and is indexed again
-//   from its start.
+// - Every indexed file is known by its identity (device, inode and birth time
+//   where the platform has one). Each listing reconciles the index with the
+//   files that are there before it trusts a position or an aggregate: rows of
+//   a file that is gone are dropped, and a file whose identity changed (a
+//   replacement, even one of the same length) has its rows dropped and is
+//   indexed again from its start. Content is not fingerprinted: clearing
+//   Secrets rewrites a line in place, which would read as a replacement.
+// - A file found replaced by cursor recovery is treated the same way.
 // - The index is a cache of the spool: deleting it costs one catch-up pass.
 
 import { Database } from 'bun:sqlite';
@@ -28,7 +34,7 @@ import type { WhatsAppReactionEntry } from './reaction-index.ts';
 import { normalizeWhatsAppJid } from './reaction-index.ts';
 
 export const WHATSAPP_SPOOL_INDEX_FILE = 'spool-index.sqlite';
-const SCHEMA = 1;
+const SCHEMA = 2;
 
 export interface SpoolPlace {
   file: string;
@@ -69,6 +75,8 @@ export class WhatsAppSpoolIndex {
           DROP TABLE IF EXISTS messages;
           DROP TABLE IF EXISTS reactions;
           DROP TABLE IF EXISTS meta;
+          DROP TABLE IF EXISTS files;
+          CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL) WITHOUT ROWID;
           CREATE TABLE messages (
             chat TEXT NOT NULL, id TEXT NOT NULL, chat_jid TEXT NOT NULL, file TEXT NOT NULL, offset INTEGER NOT NULL,
             PRIMARY KEY (chat, id)
@@ -119,11 +127,33 @@ export class WhatsAppSpoolIndex {
       .run(JSON.stringify(to));
   }
 
-  /** A file was replaced: what was indexed of it is gone, and it is indexed again from its start. */
+  /**
+   * Brings the index in line with the files that are there (name to
+   * identity): a file that is gone loses its rows; one whose identity changed
+   * loses them and is indexed again from its start.
+   */
+  reconcile(present: ReadonlyMap<string, string>): void {
+    const known = this.db.query('SELECT name, identity FROM files').all() as Array<{ name: string; identity: string }>;
+    for (const { name, identity } of known) {
+      const now = present.get(name);
+      if (now === identity) continue;
+      this.forgetFile(name);
+      if (now === undefined) this.db.query('DELETE FROM files WHERE name = ?').run(name);
+    }
+  }
+
+  /** The file a line is indexed from, with its identity, so a later replacement is found. */
+  noteFile(name: string, identity: string): void {
+    this.db.query('INSERT INTO files (name, identity) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET identity = excluded.identity')
+      .run(name, identity);
+  }
+
+  /** A file was replaced or is gone: what was indexed of it is dropped, and it is indexed again from its start. */
   forgetFile(file: string): void {
     this.db.transaction(() => {
       this.db.query('DELETE FROM messages WHERE file = ?').run(file);
       this.db.query('DELETE FROM reactions WHERE file = ?').run(file);
+      this.db.query('DELETE FROM files WHERE name = ?').run(file);
       const mark = this.highWater();
       if (mark !== undefined && mark.file >= file) {
         this.db.query("INSERT INTO meta (key, value) VALUES ('high_water', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")

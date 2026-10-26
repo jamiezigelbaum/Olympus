@@ -399,7 +399,14 @@ Live WhatsApp capture, with no change to identities or stores
   one line; memory does not grow with the spool's history. The index holds
   ids, positions and reactions, never a message's text, and is a cache:
   deleting it costs one catch-up. `fetchItem` reads from it too, and scans
-  the spool only for a message the index does not hold.
+  the spool only for a message the index does not hold. Each indexed file
+  is known by its identity (device, inode, birth time), and every listing
+  reconciles the index with the files that are there before trusting it: a
+  file that is gone loses its rows (its reactions stop counting), and one
+  put in another's place, even of the same length, is indexed again. A
+  reacted-to message is read from its one line in 4 KiB steps, out of the
+  same budget as the rest of the pass, so a page of many reactions pauses
+  like any other.
 - **Cursor recovery.** A cursor's file only grows, so one shorter than its
   cursor, or where the cursor's offset is not the start of a line, was
   replaced (the spool folder removed and capture started again the same
@@ -412,7 +419,9 @@ Live WhatsApp capture, with no change to identities or stores
 - **Secrets clearing.** The shared rewrite streams its files
   (`connector-store/capture-spool-secrets.ts`, from the Telegram lane). A
   pull that read nothing new skips the window and runs only the whole-spool
-  pass when the set of Secrets changed.
+  pass when the set of Secrets changed, unless a window an earlier pull
+  failed to clear is still owed (where clearing reached is behind where
+  reading reached): that window is cleared first.
 - **Counted bridge drops.** The bridge writes `spool/capture-status.json`
   every minute and on connect and disconnect: connected, the last time it
   knew it was connected, and the messages a full queue dropped, carried

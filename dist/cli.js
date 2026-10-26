@@ -74401,6 +74401,8 @@ class WhatsAppSpoolIndex {
           DROP TABLE IF EXISTS messages;
           DROP TABLE IF EXISTS reactions;
           DROP TABLE IF EXISTS meta;
+          DROP TABLE IF EXISTS files;
+          CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL) WITHOUT ROWID;
           CREATE TABLE messages (
             chat TEXT NOT NULL, id TEXT NOT NULL, chat_jid TEXT NOT NULL, file TEXT NOT NULL, offset INTEGER NOT NULL,
             PRIMARY KEY (chat, id)
@@ -74447,10 +74449,25 @@ class WhatsAppSpoolIndex {
       return;
     this.db.query("INSERT INTO meta (key, value) VALUES ('high_water', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(JSON.stringify(to));
   }
+  reconcile(present) {
+    const known = this.db.query("SELECT name, identity FROM files").all();
+    for (const { name, identity: identity2 } of known) {
+      const now = present.get(name);
+      if (now === identity2)
+        continue;
+      this.forgetFile(name);
+      if (now === undefined)
+        this.db.query("DELETE FROM files WHERE name = ?").run(name);
+    }
+  }
+  noteFile(name, identity2) {
+    this.db.query("INSERT INTO files (name, identity) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET identity = excluded.identity").run(name, identity2);
+  }
   forgetFile(file) {
     this.db.transaction(() => {
       this.db.query("DELETE FROM messages WHERE file = ?").run(file);
       this.db.query("DELETE FROM reactions WHERE file = ?").run(file);
+      this.db.query("DELETE FROM files WHERE name = ?").run(file);
       const mark = this.highWater();
       if (mark !== undefined && mark.file >= file) {
         this.db.query("INSERT INTO meta (key, value) VALUES ('high_water', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(JSON.stringify({ file, offset: 0 }));
@@ -74483,7 +74500,7 @@ class WhatsAppSpoolIndex {
     return this.db.transaction(work)();
   }
 }
-var WHATSAPP_SPOOL_INDEX_FILE = "spool-index.sqlite", SCHEMA = 1;
+var WHATSAPP_SPOOL_INDEX_FILE = "spool-index.sqlite", SCHEMA = 2;
 var init_spool_index = __esm(() => {
   init_reaction_index();
 });
@@ -74496,7 +74513,7 @@ function pauseAt(offset, skipping, continued) {
     return { kind: "paused", offset };
   return continued ? { kind: "paused", offset, skipping: true } : { kind: "paused", offset, skipping: true, firstSeen: true };
 }
-function* spoolRecords(path, startOffset = 0, maxRecordBytes = WHATSAPP_SPOOL_MAX_RECORD_BYTES, budget, skipping = false) {
+function* spoolRecords(path, startOffset = 0, maxRecordBytes = WHATSAPP_SPOOL_MAX_RECORD_BYTES, budget, skipping = false, chunkBytes = CHUNK_BYTES) {
   let fd2;
   try {
     fd2 = openSync16(path, "r");
@@ -74504,7 +74521,8 @@ function* spoolRecords(path, startOffset = 0, maxRecordBytes = WHATSAPP_SPOOL_MA
     return;
   }
   try {
-    const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
+    const size = Math.max(1, Math.min(CHUNK_BYTES, chunkBytes));
+    const chunk = Buffer.allocUnsafe(size);
     let pending = [];
     let pendingBytes = 0;
     let oversized = skipping;
@@ -74515,7 +74533,7 @@ function* spoolRecords(path, startOffset = 0, maxRecordBytes = WHATSAPP_SPOOL_MA
         yield pauseAt(position, oversized, continued);
         return;
       }
-      const want = budget && oversized ? Math.max(1, Math.min(CHUNK_BYTES, budget.bytesLeft)) : CHUNK_BYTES;
+      const want = budget && oversized ? Math.max(1, Math.min(size, budget.bytesLeft)) : size;
       const read = readSync4(fd2, chunk, 0, want, position);
       if (read === 0) {
         if (oversized)
@@ -74623,7 +74641,8 @@ function isRecordBoundary(path, offset) {
 function spoolFileIdentity(path) {
   try {
     const stats = statSync22(path);
-    return { size: stats.size, ...stats.ino > 0 ? { ino: stats.ino } : {} };
+    const birth = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? Math.floor(stats.birthtimeMs) : 0;
+    return { size: stats.size, ...stats.ino > 0 ? { ino: stats.ino } : {}, identity: `${stats.dev}:${stats.ino}:${birth}` };
   } catch {
     return;
   }
@@ -74834,11 +74853,18 @@ function createRecordBuilder(account, fetchItem, authenticate) {
     authenticate
   };
 }
-function readMessageAt(spoolDir, file, offset) {
-  for (const record of spoolRecords(join63(spoolDir, file), offset)) {
-    return record.kind === "line" ? parseSpoolLine(record.text) : undefined;
+function readMessageAt(spoolDir, file, offset, budget) {
+  const own3 = { bytesLeft: WHATSAPP_SPOOL_MAX_RECORD_BYTES + TARGET_READ_CHUNK_BYTES };
+  const before = own3.bytesLeft;
+  try {
+    for (const record of spoolRecords(join63(spoolDir, file), offset, WHATSAPP_SPOOL_MAX_RECORD_BYTES, own3, false, TARGET_READ_CHUNK_BYTES)) {
+      return record.kind === "line" ? parseSpoolLine(record.text) : undefined;
+    }
+    return;
+  } finally {
+    if (budget)
+      budget.bytesLeft -= before - own3.bytesLeft;
   }
-  return;
 }
 function readWhatsAppLiveCaptureState(spoolDir) {
   const newestMessageTimestamp = newestSpoolRecord(spoolDir, listSpoolFiles(spoolDir), (line) => parseSpoolLine(line)?.timestamp);
@@ -74853,6 +74879,15 @@ async function* liveRecords(spoolDir, options) {
   const index = WhatsAppSpoolIndex.open(spoolDir);
   const pass = { budget: { bytesLeft: options.passByteBudget }, maxRecordBytes: options.maxRecordBytes, findings: options.findings, index };
   try {
+    if (index) {
+      const present = new Map;
+      for (const file of listSpoolFiles(spoolDir)) {
+        const identity2 = spoolFileIdentity(join63(spoolDir, file));
+        if (identity2)
+          present.set(file, identity2.identity);
+      }
+      index.reconcile(present);
+    }
     position = resolveStart(spoolDir, position, pass);
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
       options.findings.passBudgetReached += 1;
@@ -74915,7 +74950,11 @@ function catchUpIndex(spoolDir, index, until, pass) {
     let offset = file === mark.file ? mark.offset : 0;
     const end = file === target.file ? target.offset : Number.POSITIVE_INFINITY;
     let paused = false;
+    const identity2 = spoolFileIdentity(join63(spoolDir, file));
+    if (!identity2)
+      continue;
     index.transaction(() => {
+      index.noteFile(file, identity2.identity);
       for (const record of spoolRecords(join63(spoolDir, file), offset, pass.maxRecordBytes, pass.budget)) {
         if (record.kind === "paused") {
           offset = record.offset;
@@ -74959,6 +74998,7 @@ function readSpoolPage(spoolDir, start, limit, pass) {
   }
   const messages = [];
   const reactions = [];
+  const targets = new Map;
   const reEmitTargets = new Set;
   const pageMessages = new Set;
   const projectedItems = () => messages.length + reEmitTargets.size;
@@ -74978,15 +75018,18 @@ function readSpoolPage(spoolDir, start, limit, pass) {
       let offset = fromStart ? start.offset ?? 0 : 0;
       const skipping = fromStart && start.skipping === true;
       position = { file, line: lineIndex, offset, ...skipping ? { skipping: true } : {} };
+      const identity2 = spoolFileIdentity(join63(spoolDir, file));
+      if (index && identity2)
+        index.noteFile(file, identity2.identity);
       for (const record of spoolRecords(join63(spoolDir, file), offset, pass.maxRecordBytes, pass.budget, skipping)) {
         if (record.kind === "paused") {
           if (record.firstSeen)
             pass.findings.oversizedRecords += 1;
           position = { file, line: lineIndex, offset: record.offset, ...record.skipping ? { skipping: true } : {} };
-          return { messages, reactions, position, exhausted: false, budgetReached: true };
+          return { messages, reactions, position, exhausted: false, budgetReached: true, targets };
         }
         if (projectedItems() >= limit) {
-          return { messages, reactions, position, exhausted: false };
+          return { messages, reactions, position, exhausted: false, targets };
         }
         const place = { file, offset };
         offset = record.endOffset;
@@ -75016,6 +75059,13 @@ function readSpoolPage(spoolDir, start, limit, pass) {
             const target = chatScopedKey(message2.chatJid, targetId);
             if (!pageMessages.has(target))
               reEmitTargets.add(target);
+            if (index && !pageMessages.has(target) && !targets.has(targetId)) {
+              const located = index.newestMessage(targetId);
+              const read = located ? readMessageAt(spoolDir, located.file, located.offset, pass.budget) : undefined;
+              targets.set(targetId, read && read.id === targetId ? read : null);
+              if (pass.budget.bytesLeft <= 0)
+                return { messages, reactions, position, exhausted: false, budgetReached: true, targets };
+            }
           }
           continue;
         }
@@ -75024,7 +75074,7 @@ function readSpoolPage(spoolDir, start, limit, pass) {
         reEmitTargets.delete(chatScopedKey(message2.chatJid, message2.id));
       }
     }
-    return { messages, reactions, position, exhausted: true };
+    return { messages, reactions, position, exhausted: true, targets };
   };
   return finish(index ? index.transaction(run) : run());
 }
@@ -75036,8 +75086,7 @@ function pageRecords(spoolDir, page2, pass) {
   const aggregates = new Map;
   for (const targetId of targetIds) {
     const inPage = [...page2.messages].reverse().find((message2) => message2.id === targetId);
-    const located = inPage ? undefined : index.newestMessage(targetId);
-    const target = inPage ?? (located ? readMessageAt(spoolDir, located.file, located.offset) : undefined);
+    const target = inPage ?? page2.targets?.get(targetId) ?? undefined;
     const reactions = target && target.id === targetId ? boundedReactionsForTarget(index.reactionsFor(targetId), target.chatJid) : undefined;
     if (!target || reactions === undefined) {
       pass.findings.unresolvedReactionTargets += 1;
@@ -75429,7 +75478,7 @@ function optionalStringRecord(value) {
 function nowIso3() {
   return new Date().toISOString();
 }
-var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, CURSOR2, LEGACY_CURSOR;
+var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CURSOR2, LEGACY_CURSOR;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
@@ -75438,6 +75487,7 @@ var init_live_connector = __esm(() => {
   init_spool_reader();
   CONNECTOR_ID2 = WHATSAPP_LIVE_CONNECTOR_ID;
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
+  TARGET_READ_CHUNK_BYTES = 4 * 1024;
   CURSOR2 = /^(.+):(\d+)@(\d+)(s?)$/u;
   LEGACY_CURSOR = /^(.+):(\d+)$/u;
 });
@@ -75584,7 +75634,8 @@ function clearWhatsAppSpoolSecrets(options) {
     ...window2,
     judge: judge2
   });
-  if (options.windowRead === false && options.through !== undefined) {
+  const owed = options.through !== undefined && options.ledger.readMeta(`${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_through`) !== options.through;
+  if (options.windowRead === false && options.through !== undefined && !owed) {
     const through = options.through;
     return addCaptureSpoolRedactions(sweepCaptureSpoolWhenSecretsChange({
       ledger: options.ledger,

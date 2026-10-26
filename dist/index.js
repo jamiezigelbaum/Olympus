@@ -20991,7 +20991,7 @@ var init_spool_reader = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-var DEFAULT_PASS_BYTE_BUDGET;
+var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
@@ -20999,6 +20999,7 @@ var init_live_connector = __esm(() => {
   init_spool_index();
   init_spool_reader();
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
+  TARGET_READ_CHUNK_BYTES = 4 * 1024;
 });
 
 // src/workers/whatsapp/store-sync.ts

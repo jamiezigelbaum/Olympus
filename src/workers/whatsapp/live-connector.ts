@@ -155,6 +155,8 @@ export function emptyWhatsAppSpoolPassFindings(): WhatsAppSpoolPassFindings {
 }
 
 const DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
+/** A reacted-to message is read from its one line in steps this size: most lines are far smaller. */
+const TARGET_READ_CHUNK_BYTES = 4 * 1024;
 
 export interface WhatsAppLiveSpoolStatus {
   files: number;
@@ -373,11 +375,19 @@ function createRecordBuilder(
 }
 
 /** The message line at a place in the spool, or undefined when there is none there now. */
-function readMessageAt(spoolDir: string, file: string, offset: number): SpoolMessage | undefined {
-  for (const record of spoolRecords(join(spoolDir, file), offset)) {
-    return record.kind === 'line' ? parseSpoolLine(record.text) : undefined;
+function readMessageAt(spoolDir: string, file: string, offset: number, budget?: SpoolReadBudget): SpoolMessage | undefined {
+  // One line is wanted: read in small steps, and never past one record's bound (an over-long line pauses
+  // the read, unread). What was read is spent from the pass's budget when there is one.
+  const own: SpoolReadBudget = { bytesLeft: WHATSAPP_SPOOL_MAX_RECORD_BYTES + TARGET_READ_CHUNK_BYTES };
+  const before = own.bytesLeft;
+  try {
+    for (const record of spoolRecords(join(spoolDir, file), offset, WHATSAPP_SPOOL_MAX_RECORD_BYTES, own, false, TARGET_READ_CHUNK_BYTES)) {
+      return record.kind === 'line' ? parseSpoolLine(record.text) : undefined;
+    }
+    return undefined;
+  } finally {
+    if (budget) budget.bytesLeft -= before - own.bytesLeft;
   }
-  return undefined;
 }
 
 /**
@@ -468,6 +478,8 @@ interface SpoolPageReadResult {
   exhausted: boolean;
   /** True when the page stopped because the listing's byte budget ran out. */
   budgetReached?: boolean;
+  /** The reacted-to messages read for this page's reactions, by id (null: not found). */
+  targets?: Map<string, SpoolMessage | null>;
 }
 
 interface SpoolPassState {
@@ -490,6 +502,15 @@ async function* liveRecords(
   const index = WhatsAppSpoolIndex.open(spoolDir);
   const pass: SpoolPassState = { budget: { bytesLeft: options.passByteBudget }, maxRecordBytes: options.maxRecordBytes, findings: options.findings, index };
   try {
+    // The index is trusted only for the files that are there, as they are.
+    if (index) {
+      const present = new Map<string, string>();
+      for (const file of listSpoolFiles(spoolDir)) {
+        const identity = spoolFileIdentity(join(spoolDir, file));
+        if (identity) present.set(file, identity.identity);
+      }
+      index.reconcile(present);
+    }
     position = resolveStart(spoolDir, position, pass);
     // The index catches up to where this listing starts before any page is aggregated from it.
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
@@ -562,7 +583,10 @@ function catchUpIndex(spoolDir: string, index: WhatsAppSpoolIndex, until: SpoolP
     let offset = file === mark.file ? mark.offset : 0;
     const end = file === target.file ? target.offset : Number.POSITIVE_INFINITY;
     let paused = false;
+    const identity = spoolFileIdentity(join(spoolDir, file));
+    if (!identity) continue;
     index.transaction(() => {
+      index.noteFile(file, identity.identity);
       for (const record of spoolRecords(join(spoolDir, file), offset, pass.maxRecordBytes, pass.budget)) {
         if (record.kind === 'paused') {
           // Inside an over-long record the rest of it reads as one unparsable line next time: nothing is indexed from it.
@@ -608,6 +632,7 @@ function readSpoolPage(
   }
   const messages: SpoolMessage[] = [];
   const reactions: SpoolMessage[] = [];
+  const targets = new Map<string, SpoolMessage | null>();
   // A reaction re-emits its target, so the page's item count is its messages
   // plus the targets not already among them. Budgeting against that total is
   // what keeps a page from overshooting the caller's limit. Both sets are
@@ -631,14 +656,16 @@ function readSpoolPage(
       let offset = fromStart ? start.offset ?? 0 : 0;
       const skipping = fromStart && start.skipping === true;
       position = { file, line: lineIndex, offset, ...(skipping ? { skipping: true as const } : {}) };
+      const identity = spoolFileIdentity(join(spoolDir, file));
+      if (index && identity) index.noteFile(file, identity.identity);
       for (const record of spoolRecords(join(spoolDir, file), offset, pass.maxRecordBytes, pass.budget, skipping)) {
         if (record.kind === 'paused') {
           if (record.firstSeen) pass.findings.oversizedRecords += 1;
           position = { file, line: lineIndex, offset: record.offset, ...(record.skipping ? { skipping: true as const } : {}) };
-          return { messages, reactions, position, exhausted: false, budgetReached: true };
+          return { messages, reactions, position, exhausted: false, budgetReached: true, targets };
         }
         if (projectedItems() >= limit) {
-          return { messages, reactions, position, exhausted: false };
+          return { messages, reactions, position, exhausted: false, targets };
         }
         const place = { file, offset };
         offset = record.endOffset;
@@ -665,6 +692,14 @@ function readSpoolPage(
           if (targetId !== undefined) {
             const target = chatScopedKey(message.chatJid, targetId);
             if (!pageMessages.has(target)) reEmitTargets.add(target);
+            // The reacted-to message is read now, from its one line, out of the same budget; a pass that spends
+            // the budget here ends after this reaction, with nothing left to resolve.
+            if (index && !pageMessages.has(target) && !targets.has(targetId)) {
+              const located = index.newestMessage(targetId);
+              const read = located ? readMessageAt(spoolDir, located.file, located.offset, pass.budget) : undefined;
+              targets.set(targetId, read && read.id === targetId ? read : null);
+              if (pass.budget.bytesLeft <= 0) return { messages, reactions, position, exhausted: false, budgetReached: true, targets };
+            }
           }
           continue;
         }
@@ -673,7 +708,7 @@ function readSpoolPage(
         reEmitTargets.delete(chatScopedKey(message.chatJid, message.id));
       }
     }
-    return { messages, reactions, position, exhausted: true };
+    return { messages, reactions, position, exhausted: true, targets };
   };
   return finish(index ? index.transaction(run) : run());
 }
@@ -693,8 +728,8 @@ function pageRecords(spoolDir: string, page: SpoolPageReadResult, pass: SpoolPas
   for (const targetId of targetIds) {
     // The newest line of the reacted-to message: this page's own, else the index's.
     const inPage = [...page.messages].reverse().find((message) => message.id === targetId);
-    const located = inPage ? undefined : index.newestMessage(targetId);
-    const target = inPage ?? (located ? readMessageAt(spoolDir, located.file, located.offset) : undefined);
+    // Read while the page was read, out of its budget.
+    const target = inPage ?? page.targets?.get(targetId) ?? undefined;
     const reactions = target && target.id === targetId
       ? boundedReactionsForTarget(index.reactionsFor(targetId), target.chatJid)
       : undefined;
