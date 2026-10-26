@@ -26918,6 +26918,16 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key2) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key2 || key2.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key2}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
 // src/workers/connector-store/child-visibility.ts
 function parentIdentityOf(child) {
   const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
@@ -27150,7 +27160,7 @@ function hiddenChildKeys(lane, probes) {
   }
   return childrenWithHiddenParents(lane, links);
 }
-var CHILD_ITEM_ID_SEPARATOR = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   HIDDEN = { visible: false, gone: false };
@@ -53878,16 +53888,6 @@ function metadataStringArray2(metadata, key2) {
     return [];
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
-
-// src/core/child-item-id.ts
-function childProviderItemId(parentProviderItemId, key2) {
-  if (!parentProviderItemId)
-    throw new TypeError("A child needs its parent's id.");
-  if (!key2 || key2.includes(CHILD_ITEM_ID_SEPARATOR2))
-    throw new TypeError("A child's key must be plain text.");
-  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR2}${key2}`;
-}
-var CHILD_ITEM_ID_SEPARATOR2 = "#child:";
 
 // src/workers/google-connectors/gmail-mail-record.ts
 import { createHash as createHash31 } from "node:crypto";
@@ -171014,7 +171014,7 @@ function gmailAttachmentCandidates(reader) {
   return {
     async extractionCandidates(options) {
       const page2 = await reader.extractionCandidates(options);
-      return { ...page2, candidates: page2.candidates.filter((row) => (row.providerItemId ?? row.localItemId).includes(CHILD_ITEM_ID_SEPARATOR2)) };
+      return { ...page2, candidates: page2.candidates.filter((row) => (row.providerItemId ?? row.localItemId).includes(CHILD_ITEM_ID_SEPARATOR)) };
     }
   };
 }

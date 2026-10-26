@@ -19520,7 +19520,7 @@ var init_secrets_disposition = __esm(() => {
 
 // src/workers/connector-store/child-visibility.ts
 function parentIdentityOf(child) {
-  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR2);
+  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
   if (cut <= 0)
     return;
   return {
@@ -19656,7 +19656,7 @@ function hiddenChildKeys(lane, probes) {
   }
   return childrenWithHiddenParents(lane, links);
 }
-var CHILD_ITEM_ID_SEPARATOR2 = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   HIDDEN = { visible: false, gone: false };
