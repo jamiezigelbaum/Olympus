@@ -64,8 +64,10 @@
 //   reads back as a metadata_only item with a Secrets floor, so a replay or a
 //   reaction re-emit judges it Secrets again.
 
-import { existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, type Dirent } from 'node:fs';
+import { basename, isAbsolute, join, relative } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
@@ -98,6 +100,7 @@ import {
 import { WhatsAppSpoolIndex, comparePlaces, type SpoolPlace } from './spool-index.ts';
 import { WhatsAppSpoolResets } from './spool-resets.ts';
 import { CHILD_ITEM_ID_SEPARATOR, childProviderItemId } from '../../core/child-item-id.ts';
+import { whatsAppMediaFileLocator, type WhatsAppChildReader } from './child-media.ts';
 import { OWNER_SENDER, liveMatchKeys, nameKey } from './match-keys.ts';
 import {
   WHATSAPP_SPOOL_MAX_RECORD_BYTES,
@@ -134,6 +137,8 @@ export interface WhatsAppLiveSourceConnectorOptions {
   passByteBudget?: number;
   /** A record longer than this is skipped and counted (default 1 MiB). */
   maxRecordBytes?: number;
+  /** Reads a child's bytes by its locator (child-media.ts); absent: children cannot be read here. */
+  readChild?: WhatsAppChildReader;
 }
 
 /** What one or more listings skipped or recovered, as counts only. */
@@ -322,7 +327,7 @@ export function createWhatsAppLiveSourceConnector(
     return rawItemFromSpoolMessage(match, account, nowIso(), reactions);
   };
 
-  const builder = createRecordBuilder(account, fetchItem, authenticate);
+  const builder = createRecordBuilder(account, fetchItem, authenticate, options.readChild);
   // The spool is the connector's live input: its records, turned into items
   // by the connector's one builder under the intake rule (core/source-inputs.ts),
   // so a record read again (a recovered cursor, a redelivery) never replaces
@@ -344,7 +349,8 @@ export function createWhatsAppLiveSourceConnector(
     family: 'chat',
     authenticate,
     listItems: (listOptions?: SourceConnectorListOptions) => connector.listItems(listOptions),
-    fetchItem,
+    // A child is read by its locator; a message from the spool.
+    fetchItem: (localItemId, fetchOptions) => builder.fetchItem(localItemId, fetchOptions),
     classificationSignals: whatsAppClassificationSignals,
   };
 }
@@ -398,7 +404,7 @@ function createRecordBuilder(
           authoredAt: record.timestamp,
         },
         // A child whose bytes can be read brings content: a later record that has them fills one that had not.
-        ...(record.children ?? []).map((child) => ({ identity: childIdentity(own, child), bringsContent: child.available && child.locator !== undefined })),
+        ...childrenOf(record).map((child) => ({ identity: childIdentity(own, child), bringsContent: child.available && child.locator !== undefined })),
       ];
     },
     compareVersions: compareWhatsAppVersions,
@@ -407,7 +413,7 @@ function createRecordBuilder(
       const items: RawItem[] = [];
       const own = rawItemFromSpoolMessage(record, account, fetchedAt, record.reactions);
       if (wanted.has(own.identity.localItemId)) items.push(own);
-      for (const child of record.children ?? []) {
+      for (const child of childrenOf(record)) {
         const item = rawItemFromChild(record, child, account, fetchedAt);
         if (wanted.has(item.identity.localItemId)) items.push(item);
       }
@@ -417,12 +423,13 @@ function createRecordBuilder(
       const locator = fetchOptions?.deferredBytes?.locator;
       if (locator === undefined || !localItemId.includes(CHILD_ITEM_ID_SEPARATOR)) return fetchItem(localItemId);
       // A child an export brought is read by its locator.
-      if (!readChild) throw new Error('This WhatsApp account cannot read imported media yet.');
+      if (!readChild) throw new Error('This WhatsApp account cannot read its media here.');
       const bytes = readChild(locator, {});
+      const mimeType = 'application/octet-stream';
       return {
         identity: childIdentityFromLocalId(localItemId, account),
-        mimeType: 'application/octet-stream',
-        content: { kind: 'bytes', mimeType: 'application/octet-stream', bytes },
+        mimeType,
+        content: { kind: 'bytes', mimeType, bytes },
         metadata: Object.freeze({}),
         fetchedAt: nowIso(),
       };
@@ -450,6 +457,34 @@ export function createWhatsAppRecordBuilder(options: WhatsAppRecordBuilderOption
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp account');
   const live = createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account });
   return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), () => live.authenticate(), options.readChild);
+}
+
+/** The media kinds whose bytes are their message's child: a picture or a video is not what was said. */
+const CHILD_MEDIA_TYPES: ReadonlySet<string> = new Set(['image', 'video', 'video_note']);
+
+/**
+ * A record's children: the export's media an import listed, or the picture or
+ * video the bridge saved for a live message (keyed `media`, as an import keys
+ * its own, so one piece of media both inputs bring is one child). A Secret
+ * line has none. A picture the bridge tried and could not save is a child
+ * that cannot be read, so a later record with the bytes fills it.
+ */
+function childrenOf(record: WhatsAppRecord): readonly WhatsAppChildRecord[] {
+  if (record.children) return record.children;
+  // A Secret caption keeps its picture: the picture is judged on its own (and loses its file when it is Secrets).
+  if (record.mediaType === undefined || !CHILD_MEDIA_TYPES.has(record.mediaType)) return [];
+  const mimeType = record.mediaMime ?? 'application/octet-stream';
+  if (record.mediaPath !== undefined) {
+    return [{
+      key: 'media',
+      name: basename(record.mediaPath),
+      mimeType,
+      locator: whatsAppMediaFileLocator(record.mediaPath),
+      available: record.downloadStatus === undefined || record.downloadStatus === 'ok',
+      ...(record.mediaSizeBytes !== undefined ? { sizeBytes: record.mediaSizeBytes } : {}),
+    }];
+  }
+  return record.downloadStatus !== undefined ? [{ key: 'media', name: 'media', mimeType, available: false }] : [];
 }
 
 /** A child's identity: `<parent providerItemId>#child:<key>`, in the parent's conversation and version (2.1.0). */
@@ -1169,7 +1204,9 @@ function rawItemFromSpoolMessage(
   const identity = recordIdentity(message, account);
   // A captioned photo, video or document is read by its caption: that is
   // what was said. The media itself stays described by its metadata.
-  const isMedia = message.mediaType !== undefined && message.text === '';
+  // A picture or a video is its message's child: the message is the caption (or its names alone).
+  const mediaIsChild = message.mediaType !== undefined && CHILD_MEDIA_TYPES.has(message.mediaType);
+  const isMedia = message.mediaType !== undefined && message.text === '' && !mediaIsChild;
   const redacted = message.secretRedacted === true;
   const text = spoolMessageText(message);
   const hasPreviewEnrichment = text !== resolveMentionText(message.text, message.mentions);
@@ -1178,7 +1215,7 @@ function rawItemFromSpoolMessage(
   return {
     identity,
     mimeType: isMedia ? (message.mediaMime ?? 'application/octet-stream') : TEXT_MIME_TYPE,
-    content: isMedia || redacted ? { kind: 'metadata_only' } : { kind: 'text', text },
+    content: isMedia || redacted || (mediaIsChild && message.text === '') ? { kind: 'metadata_only' } : { kind: 'text', text },
     metadata: Object.freeze({
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
       sender: senderName || message.senderJid,
@@ -1196,7 +1233,8 @@ function rawItemFromSpoolMessage(
       ...(redacted ? { secretRedacted: true } : {}),
       ...(message.mentions === undefined ? {} : { mentions: message.mentions }),
       ...(message.mediaType === undefined ? {} : { mediaType: message.mediaType }),
-      ...mediaMetadata(message),
+      // The saved file is the child's to read, never the message's.
+      ...(mediaIsChild ? {} : mediaMetadata(message)),
     }),
     fetchedAt,
   };
@@ -1222,6 +1260,9 @@ function rawItemFromChild(message: SpoolMessage, child: WhatsAppChildRecord, acc
       ...(message.mediaType === undefined ? {} : { mediaType: message.mediaType }),
     }),
     fetchedAt,
+    // A picture, video or file is held Private until its own judgment, live or imported (child-items.md,
+    // "WhatsApp media"): what it shows is never Personal, or sent to a cloud model, before then.
+    holdContentUntilJudged: true,
     deferredBytes: {
       locator: child.locator ?? '',
       available: child.available && child.locator !== undefined,
@@ -1240,11 +1281,18 @@ function spoolMessageText(message: SpoolMessage): string {
 
 /**
  * Rewrite, in place, every message line in `[from, through)` whose item the
- * judge says is Secrets: its text, link preview, mentions, media path and
- * media re-download keys go (and the chat and sender names when the names
- * themselves were judged Secrets, also from a line whose text went earlier),
- * and the audio it saved under `mediaDir` is deleted. Its id, chat, time and
- * media type stay, and it is flagged so a replay judges it Secrets again.
+ * judge says is Secrets: its text, link preview and mentions go (and the chat
+ * and sender names when the names themselves were judged Secrets, also from a
+ * line whose text went earlier), and it is flagged so a replay judges it
+ * Secrets again. Its id, chat, time and media type stay.
+ *
+ * Saved media follows the judgment of what it is part of. A picture or video
+ * is its message's child (`<id>#child:media`), judged on its own: when the
+ * child is Secrets, the file the bridge saved, any temp of it, its path and
+ * its re-download keys go, whatever the caption's judgment; when only the
+ * caption is, the picture stays. A voice note or document is the message
+ * itself, so its media goes with the message's judgment. A file is deleted
+ * only under `mediaDir` or `mediaDirs`, and only when no other line names it.
  * Reaction lines name another message and are left alone. Cursors are this
  * spool's `<file>:<lines>`.
  */
@@ -1254,8 +1302,10 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   from?: string;
   through?: string;
   judge: SpoolSecretJudge;
-  /** Where the bridge saves audio; a media path outside it is never deleted. */
+  /** Where the bridge saves audio; a media path outside it (and `mediaDirs`) is never deleted. */
   mediaDir?: string;
+  /** The other folders the bridge saves media in (pictures, videos). */
+  mediaDirs?: readonly string[];
   /**
    * Maps a media path a line names at the account's old state folder to the
    * same file in its account folder, for an account the boot migration moved
@@ -1266,21 +1316,26 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp account');
   const from = positionFromCursor(options.from);
   const through = positionFromCursor(options.through);
-  const mediaRoot = options.mediaDir ? existingRealPath(options.mediaDir) : undefined;
+  const mediaRoots = [...(options.mediaDir ? [options.mediaDir] : []), ...(options.mediaDirs ?? [])]
+    .map((dir) => existingRealPath(dir))
+    .filter((dir): dir is string => dir !== undefined);
   const relocate = options.relocateMediaPath ?? ((path: string): string => path);
+  // A download a killed bridge never finished leaves a temp: those go first (tools/whatsapp-bridge/media_files.go).
+  sweepOrphanMediaTemps(mediaRoots);
   let owners: Map<string, Set<string>> | undefined;
   // Saved audio is deleted only when this message is the only one that names
   // it: the bridge names a file by message id alone, and an id is unique only
   // within its chat.
   const deleteOwnedMedia = (message: SpoolMessage): void => {
-    if (!message.mediaPath || !mediaRoot) return;
+    if (!message.mediaPath || mediaRoots.length === 0) return;
     owners ??= mediaPathOwners(options.spoolDir, relocate);
-    // Keyed by the file itself, so a symlink and its target are one file.
-    const real = existingRealPath(relocate(message.mediaPath));
+    // Keyed by the file itself, so a symlink and its target are one file. A path that cannot be resolved for any
+    // reason but its being gone fails the cleanup: the keys are kept and the next pull tries again.
+    const real = realPathUnlessGone(relocate(message.mediaPath));
     if (!real) return;
     const self = chatScopedKey(message.chatJid, message.id);
     if ([...(owners.get(real) ?? [])].some((owner) => owner !== self)) return;
-    deleteSavedMedia(real, mediaRoot);
+    deleteSavedMedia(real, mediaRoots);
   };
   // A line that gives up its path no longer holds the file, so the last
   // Secret line to name a shared file is the one that deletes it.
@@ -1309,36 +1364,50 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
         ? undefined
         : spoolMessageText(message);
       const redaction = options.judge(identity, text);
-      if (!redaction) return undefined;
-      // Deleted before the line loses its path; a failure here fails the
-      // window, which the next pull clears again.
-      deleteOwnedMedia(message);
-      const namesLeft = message.chatName !== '' || message.senderName !== '' || (message.senderContactName ?? '') !== '';
-      if (alreadyRedacted && (redaction !== 'names' || !namesLeft)) return undefined;
+      // A picture or video is judged as its own item; any other media is the message's.
+      const childMedia = message.mediaType !== undefined && CHILD_MEDIA_TYPES.has(message.mediaType);
+      const mediaSecret = childMedia
+        ? options.judge({ ...identity, providerItemId: childProviderItemId(message.id, 'media') }, undefined) !== undefined
+        : redaction !== undefined;
+      if (!redaction && !mediaSecret) return undefined;
       const record = JSON.parse(line) as Record<string, unknown>;
-      // Mentions are display names copied into the text, so they go with it.
-      // The media hashes and key time only serve a re-download, which a
-      // Secret message must never get. The media path goes too: the audio was
-      // deleted above, or is kept only for the other messages that name it,
-      // and a replay of this line must never read it again. Together they
-      // make room for the flag on a voice note whose audio was its only
-      // content.
-      const removable = [
-        'preview_title', 'preview_description', 'preview_url', 'mentions', 'media_path',
-        'media_key', 'media_direct_path', 'media_file_sha256', 'media_file_enc_sha256', 'media_key_timestamp',
-      ].filter((key) => key in record);
-      // A line with nothing at all to remove is not rewritten: the flag alone
-      // would not fit, and blanking it would lose the record for nothing.
-      if (message.text === '' && removable.length === 0 && (redaction !== 'names' || !namesLeft)) return undefined;
-      record['text'] = '';
-      for (const key of removable) delete record[key];
-      if (redaction === 'names') {
-        record['chat_name'] = '';
-        record['sender_name'] = '';
-        if ('sender_contact_name' in record) record['sender_contact_name'] = '';
+      // The media hashes and key time only serve a re-download, which Secret media must never get. The path goes
+      // too: the file is deleted below, or is kept only for the other messages that name it, and a replay of this
+      // line must never read it again. Together they make room for the flag on a voice note whose audio was its
+      // only content.
+      const mediaKeys = mediaSecret
+        ? ['media_path', 'media_key', 'media_direct_path', 'media_file_sha256', 'media_file_enc_sha256', 'media_key_timestamp'].filter((key) => key in record)
+        : [];
+      if (mediaSecret) {
+        // Deleted before the line loses its path; a failure here fails the window, which the next pull clears again.
+        deleteOwnedMedia(message);
+        deleteMediaTemps(message, mediaRoots);
       }
-      record['secret_redacted'] = true;
-      releaseMedia(message);
+      const namesLeft = message.chatName !== '' || message.senderName !== '' || (message.senderContactName ?? '') !== '';
+      // Mentions are display names copied into the text, so they go with it.
+      const textKeys = redaction ? ['preview_title', 'preview_description', 'preview_url', 'mentions'].filter((key) => key in record) : [];
+      // A picture kept under a Secret caption keeps its path, so the room for the flag comes from what a replay
+      // does not need: a saved file's "ok" status (its path says so), its size and duration (the file has them).
+      const keptMediaRoom = redaction && childMedia && !mediaSecret
+        ? ['media_size_bytes', 'media_duration_seconds', ...(record['download_status'] === 'ok' && 'media_path' in record ? ['download_status'] : [])]
+          .filter((key) => key in record)
+        : [];
+      const textLeft = redaction !== undefined && !alreadyRedacted && message.text !== '';
+      const namesToClear = redaction === 'names' && namesLeft;
+      // A line with nothing at all to remove is not rewritten: the flag alone would not fit, and blanking it would
+      // lose the record for nothing.
+      if (!textLeft && textKeys.length === 0 && mediaKeys.length === 0 && !namesToClear) return undefined;
+      for (const key of [...textKeys, ...mediaKeys, ...keptMediaRoom]) delete record[key];
+      if (redaction) {
+        record['text'] = '';
+        if (redaction === 'names') {
+          record['chat_name'] = '';
+          record['sender_name'] = '';
+          if ('sender_contact_name' in record) record['sender_contact_name'] = '';
+        }
+        record['secret_redacted'] = true;
+      }
+      if (mediaSecret) releaseMedia(message);
       return JSON.stringify(record);
     },
   });
@@ -1364,6 +1433,150 @@ function mediaPathOwners(spoolDir: string, relocate: (path: string) => string): 
   return owners;
 }
 
+/**
+ * What a media temp's name is: `.olympus-media-<pid>-<boot>-<stem>-<random>.tmp`
+ * (tools/whatsapp-bridge/media_files.go), boot being the nonce of the boot the
+ * writer ran in.
+ */
+const MEDIA_TEMP = /^\.olympus-media-(\d+)-([0-9a-f]{8})-(.+)-[^-]+\.tmp$/u;
+/** A temp named another way: an older build's, which names no writer we can trust. */
+const OLDER_MEDIA_TEMP = /^\.(?:audio-|olympus-media-).*\.tmp$/u;
+/** An older build's temp older than this is a leftover. */
+const MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
+/** How deep a media root is walked for temps: the root, and the kind folders in it (images, video, audio). */
+const MEDIA_TEMP_DEPTH = 2;
+
+/**
+ * The file stem the bridge saves a message's media under: the readable id and
+ * a hash of the normalized chat and the id (main.go, `mediaFileStem`).
+ */
+export function whatsAppMediaFileStem(chatJid: string, id: string): string {
+  const jid = chatJid.trim().toLowerCase();
+  const at = jid.lastIndexOf('@');
+  let normalized = jid;
+  if (at > 0) {
+    const user = jid.slice(0, at);
+    const device = user.indexOf(':');
+    normalized = `${device === -1 ? user : user.slice(0, device)}@${jid.slice(at + 1)}`;
+  }
+  const digest = createHash('sha256').update(`${normalized}\u0000${id}`).digest('hex').slice(0, 16);
+  let readable = [...id].map((char) => (/^[A-Za-z0-9._-]$/u.test(char) ? char : '_')).join('');
+  if (readable === '') readable = 'message';
+  return `${readable.slice(0, 64)}-${digest}`;
+}
+
+let currentBootNonce: string | undefined;
+
+/** This boot's nonce, as the bridge writes it (boot_linux.go, boot_darwin.go): a pid is unique only within a boot. */
+export function whatsAppBootNonce(): string {
+  if (currentBootNonce !== undefined) return currentBootNonce;
+  let id = '';
+  try {
+    if (process.platform === 'linux') id = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    else if (process.platform === 'darwin') id = execFileSync('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8' }).trim();
+  } catch {
+    id = '';
+  }
+  currentBootNonce = id === '' ? '00000000' : createHash('sha256').update(id).digest('hex').slice(0, 8);
+  return currentBootNonce;
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Every media temp under the roots, walked to MEDIA_TEMP_DEPTH (a folder
+ * account's media root holds the images and video folders), each folder once.
+ * The one list both the sweep and a message's cleanup read, so they never
+ * look in different places. `strict` (a Secret message's cleanup): a folder
+ * that cannot be read for any reason but its being gone fails the walk, so
+ * the cleanup is never certified past a folder it could not look in; the
+ * routine sweep passes over it.
+ */
+function mediaTempFiles(roots: readonly string[], strict: boolean): Array<{ path: string; name: string }> {
+  const seen = new Set<string>();
+  const found: Array<{ path: string; name: string }> = [];
+  const walk = (dir: string, depth: number): void => {
+    let real: string | undefined;
+    let entries: Dirent[];
+    try {
+      real = realPathUnlessGone(dir);
+      if (real === undefined || seen.has(real)) return;
+      seen.add(real);
+      entries = readdirSync(real, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' || !strict) return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && depth < MEDIA_TEMP_DEPTH) walk(join(real, entry.name), depth + 1);
+      else if (entry.isFile() && OLDER_MEDIA_TEMP.test(entry.name)) found.push({ path: join(real, entry.name), name: entry.name });
+    }
+  };
+  for (const root of roots) walk(root, 0);
+  return found;
+}
+
+/** Removes a file, failing on anything but its being gone already. */
+function removeTemp(path: string): void {
+  try {
+    rmSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+/**
+ * Removes the media temps a killed bridge left: one whose writer is gone (its
+ * pid dead, or of another boot), or an older build's past the age. A temp
+ * whose writer is alive in this boot stays, however long its download stalls.
+ */
+function sweepOrphanMediaTemps(roots: readonly string[], nowMs = Date.now()): void {
+  const boot = whatsAppBootNonce();
+  for (const { path, name } of mediaTempFiles(roots, false)) {
+    const named = MEDIA_TEMP.exec(name);
+    if (named) {
+      if (named[2] === boot && processAlive(Number(named[1]))) continue;
+    } else {
+      try {
+        if (nowMs - lstatSync(path).mtimeMs < MEDIA_TEMP_MAX_AGE_MS) continue;
+      } catch {
+        continue;
+      }
+    }
+    try {
+      removeTemp(path);
+    } catch {
+      // Another message's leftover: tried again before the next clearing. A Secret message's own temps are
+      // removed by its own cleanup, which fails rather than certify a temp it could not remove.
+    }
+  }
+}
+
+/** Removes every temp of one message's media, whoever was writing it; a temp that cannot be removed fails the cleanup. */
+function deleteMediaTemps(message: SpoolMessage, roots: readonly string[]): void {
+  const stem = whatsAppMediaFileStem(message.chatJid, message.id);
+  for (const { path, name } of mediaTempFiles(roots, true)) {
+    if (MEDIA_TEMP.exec(name)?.[3] === stem) removeTemp(path);
+  }
+}
+
+/** The real path, or undefined when the file is gone; any other failure is thrown. */
+function realPathUnlessGone(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 function existingRealPath(path: string): string | undefined {
   try {
     return realpathSync(path);
@@ -1377,12 +1590,15 @@ function existingRealPath(path: string): string | undefined {
  * media directory: a spool line is data, and must never be able to name some
  * other file for deletion.
  */
-function deleteSavedMedia(mediaPath: string | undefined, mediaRoot: string | undefined): void {
-  if (!mediaPath || !mediaRoot) return;
-  const real = existingRealPath(mediaPath);
+function deleteSavedMedia(mediaPath: string | undefined, mediaRoots: readonly string[]): void {
+  if (!mediaPath || mediaRoots.length === 0) return;
+  const real = realPathUnlessGone(mediaPath);
   if (!real) return;
-  const inside = relative(mediaRoot, real);
-  if (!inside || inside.startsWith('..') || isAbsolute(inside)) return;
+  const inside = mediaRoots.some((root) => {
+    const from = relative(root, real);
+    return from !== '' && !from.startsWith('..') && !isAbsolute(from);
+  });
+  if (!inside) return;
   if (!statSync(real).isFile()) return;
   rmSync(real, { force: true });
 }

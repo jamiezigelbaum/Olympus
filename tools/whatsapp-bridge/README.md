@@ -75,7 +75,17 @@ Non-text payloads add `"media_type":"image"` (or
 `video`, `audio`, `document`, `sticker`, `contact`, `location`, `poll`,
 `reaction`, `event`, `video_note`). A photo, video, video note or document
 carries its caption as `"text"` (empty when it has none, and on every other
-media type). Only the newest spool file ever grows;
+media type).
+
+Voice notes, pictures, videos and video notes are saved in the state dir's
+`media/audio`, `media/images` and `media/video` (voice notes and pictures up
+to 25 MiB a file and 5 GiB in all, videos up to 100 MiB and 10 GiB). A saved
+file's line carries `media_path`, `media_mime` and `download_status`; a file
+past a bound is left unsaved and its line says so. Olympus reads a saved
+picture or video as its message's child, and deletes it when the message is
+judged Secrets.
+
+Only the newest spool file ever grows;
 the daemon fsyncs after every batch. `session.db` holds the device keys —
 treat the whole state dir as secret (`0700`).
 

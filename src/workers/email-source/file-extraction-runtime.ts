@@ -60,7 +60,7 @@ import {
   GoogleDriveExtractionSource,
 } from '../google-connectors/drive-extraction-source.ts';
 import type { GoogleDailyRequestBudget } from '../google-connectors/request-budget.ts';
-import { WhatsAppExtractionSource } from '../whatsapp/extraction-source.ts';
+import { whatsAppExtractionSourceFactory } from '../whatsapp/extraction-factory.ts';
 import {
   WHATSAPP_EXTRACTION_SCOPE_KEY,
   WHATSAPP_LIVE_CORPUS_ID,
@@ -762,19 +762,9 @@ function defaultSourceFactories(
         }),
       });
     }],
-    ['whatsapp', (input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore }) => {
-      return new WhatsAppExtractionSource({
-        id: `${input.config.corpusId}:extraction`,
-        corpusId: input.config.corpusId,
-        provider: input.config.provider,
-        accountScope: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
-        approvedScopeKey: input.config.scopes[0]!,
-        candidates: connectorStoreExtractionCandidateReader(input.store),
-        locators: input.store,
-        mediaRoots: defaultWhatsAppMediaRoots(env),
-        relocateLocator: whatsappMovedPathMapper(env),
-      });
-    }],
+    // Voice notes by their saved path; children (pictures, videos) by their locator. The engine replaces this with
+    // one that also reads an imported export's files (whatsapp/extraction-factory.ts).
+    ['whatsapp', whatsAppExtractionSourceFactory(env)],
   ]);
   return factories;
 }

@@ -325,6 +325,7 @@ Each source's Import an archive appears as its step registers it.
 8. Live Telegram media and live WhatsApp images and video, so both
    inputs bring the same media. Telegram's part built (see "Built, step 8:
    Telegram"); reading the kept bytes waits for a Telegram extraction roster.
+   WhatsApp's part built (see "Built, step 8: WhatsApp").
 
 Each step is proved on fresh Mac and Linux installs by the release check's
 archive leg, which gains an import-beside-live case per source with a
@@ -1147,12 +1148,13 @@ The WhatsApp chat export is an input of the WhatsApp connector
 - **Notices** from WhatsApp itself stay left out (owner).
 - **Media** become children (section 5), keyed `media` as live capture keys
   its own, so a picture both inputs bring is one child; a child that can be
-  read brings content, so a later export (or live capture) with the bytes
-  fills one an earlier export left out. Reading them is the shared reader
-  of an input's media (`archive-import/input-media.ts`: a folder binding or a
-  zip member by its place, served only while the import is an input of a
-  source and not being removed); wiring it into WhatsApp's extraction is
-  step 8's.
+  read brings content, so a later record of the same message with the bytes
+  fills one that could not be read. A file one export left out is never
+  guessed to be one a later export has (they are different messages by
+  content). Reading them is the shared reader of an input's media
+  (`archive-import/input-media.ts`: a folder binding or a zip member by its
+  place, served only while the import is an input of a source and not being
+  removed), wired into WhatsApp's extraction in step 8.
 - **Account.** An export names no account: it joins the source's account at
   the owner's confirmation in the import sheet, or creates it, or stays
   under Archives by the owner's choice. WhatsApp has no exclusive runner:
@@ -1160,6 +1162,65 @@ The WhatsApp chat export is an input of the WhatsApp connector
 - **Release check.** `ARCHIVE_FORMATS.whatsapp_chat` has an import beside a
   seeded live input (`archive-live-seed-whatsapp.ts`): the account question
   is answered Add, and the Archives case answers Keep apart.
+
+## Built, step 8: WhatsApp
+
+Live WhatsApp pictures and videos are children of their message, as an
+export's media are (section 5).
+
+- **The bridge saves them** (`tools/whatsapp-bridge`): pictures in
+  `media/images` (25 MiB a file, 5 GiB in all) and videos and video notes
+  in `media/video` (100 MiB a file, 10 GiB in all) of its state folder, beside
+  the voice notes, each kind within its own bounds; a file past a bound is
+  left unsaved and its line says so (`download_status`). A download streams
+  into a temp through a writer that refuses past the bound (the size the
+  message states is not trusted), and every temp has one name,
+  `.olympus-media-<pid>-<boot>-<stem>-*.tmp` (boot: this boot's nonce, since
+  a pid is unique only within a boot): removed on every failure, and swept
+  at start and before Secrets clearing when its writer is gone (pid dead, or
+  of another boot). A live writer's temp is never swept, however long its
+  download stalls; only an older build's temp is judged by age (30
+  minutes). Olympus finds temps in every media folder, the kind folders
+  inside a folder account's media root included, through one walk shared by
+  the sweep and a message's cleanup (`media_files.go`, `live-connector.ts`).
+- **The connector lists them** (`live-connector.ts`, `childrenOf`): a
+  picture, video or video note line is its message (its caption, or its
+  names alone) with the file as a child keyed `media`, located by
+  `whatsapp-media-file:v1:<path>`. The saved file is the child's to read,
+  never the message's metadata. A file the bridge could not save is a child
+  that cannot be read, so a later line with the bytes fills it. Voice notes
+  keep their one row and transcript. Every media child, live or imported,
+  is held Private until its own judgment (`holdContentUntilJudged`,
+  child-items.md "WhatsApp media").
+- **One child reader** (`child-media.ts`): a saved file is read only when
+  it really lives under one of the account's media folders (a spool line is
+  data and must never name another file): opened once without following a
+  link at the end, proved to be that file (device and inode), and read from
+  that descriptor only, within the bound. An export's file is read only
+  while its import serves it. The connector's `fetchItem`, the live pull and the
+  extraction source (`extraction-factory.ts`, built by the runtime and, with
+  the archive imports, by the engine) read children through it, by the
+  locator the store keeps at the child's version. Extraction lists them
+  across the lane's tier stores (WhatsApp is in the engine's extraction tier
+  sets), so a child routed out of the Private store is still read and
+  judged.
+- **Media folders** (`defaultWhatsAppMediaRoots`): the account's media
+  folder (or, in the older layout, the audio folder) and the bridge's
+  picture and video folders beside it.
+- **Secrets.** Saved media follows the judgment of what it is part of. A
+  picture or video is judged as its own child (`<id>#child:media`): when it
+  is Secrets, its file, every temp of it (by the message's file stem), its
+  path and its re-download keys go, whatever the caption's judgment; a
+  Secret caption alone leaves the picture. A file or temp that cannot be
+  removed (anything but its being gone already) fails that line's clearing:
+  the keys stay, the pull reports the failure, and the next pull tries
+  again. A voice note or document is the
+  message, so its media goes with the message's judgment. A file is deleted
+  only under the media folders and only when no other message names it.
+- **Residual (owner's ruling, post-launch).** A captionless picture both
+  live capture and an export bring stays two children, even with identical
+  bytes: a duplicate, never a wrong merge (the strict-match rule of step
+  5). Matching such media by file digest is a follow-up.
 
 ## To verify before step 4
 

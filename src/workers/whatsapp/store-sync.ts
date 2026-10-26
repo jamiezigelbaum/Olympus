@@ -4,7 +4,7 @@
 
 import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import {
   legacyWhatsAppLiveSyncPaths,
@@ -54,6 +54,7 @@ import {
 import { offsetAfterLines, terminatedLinesEnd } from './spool-reader.ts';
 import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import { WhatsAppSpoolIndex } from './spool-index.ts';
+import { createWhatsAppChildReader, type WhatsAppChildReader } from './child-media.ts';
 
 export const WHATSAPP_PERSONAL_SOURCE_ID = 'whatsapp.personal.messages';
 export const WHATSAPP_LIVE_CORPUS_ID = 'secure_local.whatsapp.messages';
@@ -167,11 +168,24 @@ export function defaultWhatsAppMediaDir(
   return resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media', env);
 }
 
-/** The folders a media extraction may read from: a folder account's whole media folder, else the audio folder. */
+/**
+ * The folders the bridge saves media in, which a media read (extraction, a
+ * child's bytes) and Secrets clearing may touch: a folder account's whole
+ * media folder, else the audio folder; and the bridge's picture and video
+ * folders beside its audio (`media/images`, `media/video` in its state folder).
+ */
 export function defaultWhatsAppMediaRoots(
   env: Record<string, string | undefined> = process.env,
 ): string[] {
-  return [resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media-root', env)];
+  const root = resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media-root', env);
+  const state = defaultWhatsAppStateDir(env);
+  // A folder account's media folder holds them already; only a folder outside the root is added.
+  const beside = [join(state, 'media', 'images'), join(state, 'media', 'video')]
+    .filter((dir) => {
+      const from = relative(root, dir);
+      return from === '' || from.startsWith('..') || isAbsolute(from);
+    });
+  return [root, ...beside];
 }
 
 /**
@@ -296,6 +310,8 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   env?: Record<string, string | undefined>;
   /** Where the bridge saves audio, deleted for a Secret message. */
   mediaDir?: string;
+  /** Reads a child's bytes by its locator (default: the bridge's media folders only; child-media.ts). */
+  readChild?: WhatsAppChildReader;
   /**
    * The lane's per-tier stores (createWhatsAppTierLane), whose secure leg is
    * `store`. Absent: the single-store lane exactly as before.
@@ -306,9 +322,12 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   const spoolDir = options.spoolDir?.trim() || defaultWhatsAppSpoolDir(env);
   const account = options.account?.trim() || WHATSAPP_PERSONAL_ACCOUNT_SCOPE;
   const mediaDir = options.mediaDir?.trim() || defaultWhatsAppMediaDir(env);
+  // Every folder the bridge saves media in: a Secret message's picture or video goes as its audio does.
+  const mediaDirs = [mediaDir, ...defaultWhatsAppMediaRoots(env)];
+  const readChild = options.readChild ?? createWhatsAppChildReader({ mediaRoots: defaultWhatsAppMediaRoots(env), relocate: whatsappMovedPathMapper(env) });
   // One connector per pull, so each receipt counts what that pull read.
   const connectorFor = (findings: WhatsAppSpoolPassFindings) => ({
-    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings }),
+    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings, readChild }),
     // The private drain retains WHATSAPP_LIVE_CONNECTOR_ID until it is retired
     // after observed qualification. A distinct product cursor prevents either
     // writer from advancing or regressing the other's traversal meanwhile.
@@ -366,6 +385,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
             spoolDir,
             account,
             mediaDir,
+            mediaDirs,
             relocateMediaPath: whatsappMovedPathMapper(env),
             ledger: tierSet.ledger,
             through: lineCursorOf(committed),
@@ -424,6 +444,8 @@ export function clearWhatsAppSpoolSecrets(options: {
   spoolDir: string;
   account: string;
   mediaDir?: string;
+  /** Every other folder the bridge saves media in (pictures, videos). */
+  mediaDirs?: readonly string[];
   ledger: TierLedger;
   /** Where the set has committed to, `<file>:<lines>`: nothing past it is cleared yet. */
   through: string | undefined;
@@ -438,6 +460,7 @@ export function clearWhatsAppSpoolSecrets(options: {
     spoolDir: options.spoolDir,
     account: options.account,
     ...(options.mediaDir ? { mediaDir: options.mediaDir } : {}),
+    ...(options.mediaDirs ? { mediaDirs: options.mediaDirs } : {}),
     ...(options.relocateMediaPath ? { relocateMediaPath: options.relocateMediaPath } : {}),
     ...window,
     judge,

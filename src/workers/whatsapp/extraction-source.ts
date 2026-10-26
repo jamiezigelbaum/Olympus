@@ -4,10 +4,17 @@
  * Capture has already downloaded media onto this host. This adapter enumerates
  * unrepresented audio from the connector store and reads the local bytes; the
  * shared registry, queue, runner and sink own every step after that boundary.
+ *
+ * A child (a picture or video live capture saved, or a file an imported export
+ * carries) is listed with the others and read by the locator the store keeps
+ * for it, through the account's child reader (child-media.ts).
  */
 
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { basename, relative, resolve, sep } from 'node:path';
+import type { DeferredBytesAnswer } from '../file-extraction/connector-source.ts';
+import type { WhatsAppChildReader } from './child-media.ts';
+import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import {
   FileExtractionSourceError,
   type ExtractionCandidateReader,
@@ -22,7 +29,7 @@ import type {
   FileExtractionSource,
 } from '../file-extraction/types.ts';
 
-const MEDIA_MIME_FILTERS: readonly string[] = ['audio/*', 'video/*'];
+const MEDIA_MIME_FILTERS: readonly string[] = ['audio/*', 'video/*', 'image/*', 'application/pdf'];
 
 export interface WhatsAppExtractionLocatorReader {
   localContent(
@@ -46,6 +53,10 @@ export interface WhatsAppExtractionSourceOptions {
    * (core/source-placement.ts, `whatsappMovedPathMapper`). The stored locator stays.
    */
   relocateLocator?: (path: string) => string;
+  /** What the store keeps of a child's bytes (`deferredBytesAnswerFor` of the store's state). */
+  deferredBytes?: (ref: ExtractionItemRef) => DeferredBytesAnswer;
+  /** Reads a child's bytes by its locator. Without it, children are not offered. */
+  readChild?: WhatsAppChildReader;
 }
 
 export class WhatsAppExtractionSource implements FileExtractionSource {
@@ -59,8 +70,12 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
   private readonly locators: WhatsAppExtractionLocatorReader;
   private readonly mediaRoots: readonly string[];
   private readonly relocateLocator: (path: string) => string;
+  private readonly deferredBytes: ((ref: ExtractionItemRef) => DeferredBytesAnswer) | undefined;
+  private readonly readChild: WhatsAppChildReader | undefined;
 
   constructor(options: WhatsAppExtractionSourceOptions) {
+    this.deferredBytes = options.deferredBytes;
+    this.readChild = options.readChild;
     this.relocateLocator = options.relocateLocator ?? ((path) => path);
     this.id = requireNonEmpty(options.id, 'WhatsApp extraction source id');
     this.corpusId = requireNonEmpty(options.corpusId, 'WhatsApp extraction corpus id');
@@ -101,6 +116,7 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
   }
 
   async fetch(ref: ExtractionItemRef, options: ExtractionFetchOptions): Promise<FetchedBytes> {
+    if (ref.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true) return this.fetchChild(ref, options);
     const located = await this.locators.localContent(ref.localItemId, 1);
     const locator = located?.locatorUri?.trim();
     if (!locator) throw new FileExtractionSourceError('source_item_not_found');
@@ -131,12 +147,26 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
     }
   }
 
+  /** A child's bytes, by the locator the store keeps for it at this version. */
+  private fetchChild(ref: ExtractionItemRef, options: ExtractionFetchOptions): FetchedBytes {
+    if (!this.deferredBytes || !this.readChild) throw new FileExtractionSourceError('source_item_not_found');
+    const answer = this.deferredBytes(ref);
+    if (answer === undefined) throw new FileExtractionSourceError('source_item_not_found');
+    if ('refusal' in answer) throw new FileExtractionSourceError(answer.refusal);
+    if (options.maxBytes !== undefined && answer.sizeBytes !== undefined && answer.sizeBytes > options.maxBytes) {
+      throw new FileExtractionSourceError('source_too_large');
+    }
+    const bytes = this.readChild(answer.locator, { ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}) });
+    return { bytes, ...(ref.mimeType ? { mimeType: ref.mimeType } : {}), sizeBytes: bytes.byteLength };
+  }
+
   private refFromRow(row: ExtractionCandidateRow): ExtractionItemRef | undefined {
+    const child = row.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true;
     if (
       row.provider !== this.provider
       || row.accountScope !== this.accountScope
       || !row.providerItemId
-      || !row.locatorUri
+      || (child ? !this.readChild || !this.deferredBytes : !row.locatorUri)
     ) return undefined;
     return {
       corpusId: this.corpusId,
@@ -147,7 +177,7 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
       localItemId: row.localItemId,
       ...(row.sourceVersion ? { sourceVersion: row.sourceVersion } : {}),
       ...(row.mimeType ? { mimeType: row.mimeType } : {}),
-      name: basename(row.locatorUri),
+      name: row.locatorUri ? basename(row.locatorUri) : row.name ?? 'media',
     };
   }
 

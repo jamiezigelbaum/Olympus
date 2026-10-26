@@ -99,6 +99,10 @@ const (
 
 	audioMediaMaxFileBytes = 25 * 1024 * 1024
 	audioMediaQuotaBytes   = 5 * 1024 * 1024 * 1024
+	imageMediaMaxFileBytes = 25 * 1024 * 1024
+	imageMediaQuotaBytes   = 5 * 1024 * 1024 * 1024
+	videoMediaMaxFileBytes = 100 * 1024 * 1024
+	videoMediaQuotaBytes   = 10 * 1024 * 1024 * 1024
 	// The readable part of a saved file's name; the chat-scoped hash after it
 	// is what keeps names unique.
 	audioMediaReadableStemMax = 64
@@ -384,6 +388,8 @@ func startManualPairing(stateDir string, spoolDir string, allowed map[string]str
 	client := newWhatsmeowClient(device, waLog.Stdout("Client", "INFO", true))
 	writer := newSpoolWriter(spoolDir)
 	audioStore := newAudioMediaStore(stateDir, client)
+	// What a bridge killed mid-download left behind goes before anything is captured.
+	audioStore.sweepTemps(time.Now())
 	go writer.run()
 
 	fatalEvents := make(chan string, 1)
@@ -800,6 +806,8 @@ func startNativeCapture(stateDir string, spoolDir string, native nativeCaptureCo
 	client := newSession(device, waLog.Stdout("Client", "INFO", true))
 	writer := newSpoolWriter(spoolDir)
 	audioStore := newAudioMediaStore(stateDir, client)
+	// What a bridge killed mid-download left behind goes before anything is captured.
+	audioStore.sweepTemps(time.Now())
 	go writer.run()
 
 	fatalEvents := make(chan string, 1)
@@ -1000,6 +1008,17 @@ func recordFromMessage(ctx context.Context, client *whatsmeow.Client, audioStore
 	rec.applyReaction(evt.Message.GetReactionMessage())
 	if audio := evt.Message.GetAudioMessage(); audio != nil {
 		rec.applyAudioCapture(audioStore.capture(ctx, rec.ChatJID, rec.ID, audio))
+	}
+	// Pictures and videos are saved too, each within its own bounds, so the
+	// extraction factory can read them as their message's media.
+	if audioStore != nil {
+		if image := evt.Message.GetImageMessage(); image != nil && audioStore.images != nil {
+			rec.applyAudioCapture(audioStore.images.captureMedia(ctx, rec.ChatJID, rec.ID, image, 0))
+		} else if video := evt.Message.GetVideoMessage(); video != nil && audioStore.video != nil {
+			rec.applyAudioCapture(audioStore.video.captureMedia(ctx, rec.ChatJID, rec.ID, video, video.GetSeconds()))
+		} else if note := evt.Message.GetPtvMessage(); note != nil && audioStore.video != nil {
+			rec.applyAudioCapture(audioStore.video.captureMedia(ctx, rec.ChatJID, rec.ID, note, note.GetSeconds()))
+		}
 	}
 	return rec, true
 }
@@ -1246,15 +1265,24 @@ func contactInfoDisplayName(contact types.ContactInfo) string {
 
 // --- Audio media capture -----------------------------------------------------
 
-type mediaDownloader interface {
-	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
-}
-
 type audioMediaStore struct {
 	dir          string
 	maxFileBytes int64
 	quotaBytes   int64
 	downloader   mediaDownloader
+	// Pictures and videos are saved beside the voice notes, each kind in its
+	// own folder with its own bounds (nil: that kind keeps metadata only).
+	images *audioMediaStore
+	video  *audioMediaStore
+}
+
+// capturableMedia is what a voice note, a picture and a video share: the
+// means to download it, and what the message says of its bytes.
+type capturableMedia interface {
+	whatsmeow.DownloadableMessage
+	GetMimetype() string
+	GetFileLength() uint64
+	GetMediaKeyTimestamp() int64
 }
 
 type audioCaptureResult struct {
@@ -1276,14 +1304,33 @@ func newAudioMediaStore(stateDir string, downloader mediaDownloader) *audioMedia
 		maxFileBytes: audioMediaMaxFileBytes,
 		quotaBytes:   audioMediaQuotaBytes,
 		downloader:   downloader,
+		images: &audioMediaStore{
+			dir:          filepath.Join(stateDir, "media", "images"),
+			maxFileBytes: imageMediaMaxFileBytes,
+			quotaBytes:   imageMediaQuotaBytes,
+			downloader:   downloader,
+		},
+		video: &audioMediaStore{
+			dir:          filepath.Join(stateDir, "media", "video"),
+			maxFileBytes: videoMediaMaxFileBytes,
+			quotaBytes:   videoMediaQuotaBytes,
+			downloader:   downloader,
+		},
 	}
 }
 
 func (store *audioMediaStore) capture(ctx context.Context, chatJID string, messageID string, audio *waE2E.AudioMessage) audioCaptureResult {
-	result := audioRetryFields(audio)
-	result.MediaMime = audio.GetMimetype()
-	result.MediaDurationSeconds = audio.GetSeconds()
-	result.MediaSizeBytes = int64(audio.GetFileLength())
+	return store.captureMedia(ctx, chatJID, messageID, audio, audio.GetSeconds())
+}
+
+// captureMedia saves one piece of media within this store's bounds, and says
+// what happened in the record's download status; the re-download fields are
+// kept either way. A store that is not there keeps metadata only.
+func (store *audioMediaStore) captureMedia(ctx context.Context, chatJID string, messageID string, media capturableMedia, seconds uint32) audioCaptureResult {
+	result := mediaRetryFields(media)
+	result.MediaMime = media.GetMimetype()
+	result.MediaDurationSeconds = seconds
+	result.MediaSizeBytes = int64(media.GetFileLength())
 	if store == nil || store.downloader == nil {
 		result.DownloadStatus = "failed:not_configured"
 		return result
@@ -1293,93 +1340,37 @@ func (store *audioMediaStore) capture(ctx context.Context, chatJID string, messa
 		return result
 	}
 
-	bytes, err := store.downloader.Download(ctx, audio)
-	if err != nil {
-		result.DownloadStatus = "failed:" + classifyDownloadError(err)
-		return result
-	}
-	result.MediaSizeBytes = int64(len(bytes))
-	if result.MediaSizeBytes > store.maxFileBytes {
+	// Streamed into a temp within the bound (media_files.go): the size the message states is not trusted.
+	path, size, err := store.download(ctx, chatJID, messageID, result.MediaMime, media)
+	if errors.Is(err, errMediaTooLarge) {
 		result.DownloadStatus = "too_large"
 		return result
 	}
-	path, err := store.write(chatJID, messageID, result.MediaMime, bytes)
 	if err != nil {
 		result.DownloadStatus = "failed:" + classifyDownloadError(err)
 		return result
 	}
+	result.MediaSizeBytes = size
 	result.MediaPath = path
 	result.DownloadStatus = "ok"
 	if err := store.enforceQuota(path); err != nil {
-		log.Printf("olympus-whatsapp-bridge: audio media quota enforcement failed: %v", err)
+		log.Printf("olympus-whatsapp-bridge: media quota enforcement failed: %v", err)
 	}
 	return result
 }
 
 func audioRetryFields(audio *waE2E.AudioMessage) audioCaptureResult {
+	return mediaRetryFields(audio)
+}
+
+func mediaRetryFields(media capturableMedia) audioCaptureResult {
 	return audioCaptureResult{
-		MediaKey:           base64.StdEncoding.EncodeToString(audio.GetMediaKey()),
-		MediaDirectPath:    audio.GetDirectPath(),
-		MediaFileSHA256:    base64.StdEncoding.EncodeToString(audio.GetFileSHA256()),
-		MediaFileEncSHA256: base64.StdEncoding.EncodeToString(audio.GetFileEncSHA256()),
-		MediaKeyTimestamp:  audio.GetMediaKeyTimestamp(),
+		MediaKey:           base64.StdEncoding.EncodeToString(media.GetMediaKey()),
+		MediaDirectPath:    media.GetDirectPath(),
+		MediaFileSHA256:    base64.StdEncoding.EncodeToString(media.GetFileSHA256()),
+		MediaFileEncSHA256: base64.StdEncoding.EncodeToString(media.GetFileEncSHA256()),
+		MediaKeyTimestamp:  media.GetMediaKeyTimestamp(),
 	}
-}
-
-// write saves one voice note and returns its path. A WhatsApp message id is
-// unique only within its chat, so the file name carries a hash of the
-// normalized chat JID and id as well as the readable id. The final step links
-// rather than renames, so an existing file is never overwritten: identical
-// bytes (a re-delivered message) reuse it, different bytes take the next free
-// "-N" name. Files saved under older names stay where their spool lines point.
-func (store *audioMediaStore) write(chatJID string, messageID string, mediaMime string, bytes []byte) (string, error) {
-	if err := os.MkdirAll(store.dir, 0o700); err != nil {
-		return "", err
-	}
-	tmp, err := os.CreateTemp(store.dir, ".audio-*.tmp")
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(bytes); err != nil {
-		tmp.Close()
-		return "", err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return "", err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
-		return "", err
-	}
-	stem := mediaFileStem(chatJID, messageID)
-	ext := extensionFromMime(mediaMime)
-	for attempt := 0; attempt < audioMediaNameAttempts; attempt++ {
-		name := stem + ext
-		if attempt > 0 {
-			name = fmt.Sprintf("%s-%d%s", stem, attempt, ext)
-		}
-		path := filepath.Join(store.dir, name)
-		err := os.Link(tmp.Name(), path)
-		if err == nil {
-			return path, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return "", err
-		}
-		if sameFileBytes(path, bytes) {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("no free media file name for %s", stem)
-}
-
-func sameFileBytes(path string, want []byte) bool {
-	got, err := os.ReadFile(path)
-	return err == nil && string(got) == string(want)
 }
 
 // mediaFileStem is the readable message id plus a hash of the normalized chat
@@ -1423,7 +1414,8 @@ func (store *audioMediaStore) enforceQuota(protectedPath string) error {
 	var total int64
 	files := make([]mediaFileInfo, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.Type().IsRegular() {
+		// A temp is a download still running, or a leftover the sweep removes.
+		if !entry.Type().IsRegular() || isMediaTemp(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(store.dir, entry.Name())
