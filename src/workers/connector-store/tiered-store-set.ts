@@ -1041,8 +1041,8 @@ export class TieredStoreSet {
       // An item nowhere stored keeps a row for its version (a Secret's location, a deletion's tombstone) in the
       // Private store; the intent alone is enough to write it.
       if (intent.location === true && !this.anyLegHasRow(identity)) {
-        if (intent.family === undefined) continue;
-        this.store(SECRET_LOCATION_DOMAIN, { create: true })?.tombstoneCopy({ ...identity, family: intent.family as SourceItemIdentity['family'] }, {
+        if (intent.itemFamily === undefined) continue;
+        this.store(SECRET_LOCATION_DOMAIN, { create: true })?.tombstoneCopy({ ...identity, family: intent.itemFamily as SourceItemIdentity['family'] }, {
           connectorId: intent.connectorId || TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
           ...(intent.kind === 'secret' ? { trustTier: 'S5' as const } : {}),
           insert: true,
@@ -1699,7 +1699,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       ...(identity.sourceVersion !== undefined ? { version: identity.sourceVersion } : {}),
       kind,
       ...(bodyVersion !== undefined ? { bodyVersion } : {}),
-      family: identity.family,
+      itemFamily: identity.family,
       connectorId,
     }, run, settle);
   }

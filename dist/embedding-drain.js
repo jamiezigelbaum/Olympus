@@ -14087,7 +14087,7 @@ function writeIntentFromRow(row) {
     kind: row.kind,
     ...row.location === 1 ? { location: true } : {},
     ...row.body_version !== null ? { bodyVersion: row.body_version } : {},
-    ...row.family !== null ? { family: row.family } : {},
+    ...row.item_family !== null ? { itemFamily: row.item_family } : {},
     connectorId: row.connector_id
   };
 }
@@ -15863,9 +15863,9 @@ class TierLedger {
   putWriteIntent(intent) {
     this.db.query(`
       INSERT OR REPLACE INTO tier_write_intents (
-        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version, family
+        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version, item_family
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.family ?? null);
+    `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null);
   }
   writeIntent(identity) {
     const row = this.db.query(`
@@ -16744,7 +16744,7 @@ function tierLedgerMigrations() {
             connector_id TEXT NOT NULL DEFAULT '',
             written_at TEXT NOT NULL,
             body_version TEXT,
-            family TEXT,
+            item_family TEXT,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);
