@@ -12,15 +12,20 @@
  * (a list resend) are taken as one: the residual the design accepts.
  *
  * Every request is the Gmail lane's, under its day budget: one search, and one
- * read per candidate, only for a message without the id. A spent budget fails
- * the pass (the scheduler backs off and the message is read again later);
+ * read per candidate, only for a message without the id. An import may spend
+ * at most half of the day's budget (`IMPORT_SHARE`), so live Gmail always has
+ * the rest; past it, or with the budget spent, the answer is `later`, and the
+ * import waits for its next scheduled pass with what it read so far stored.
  * Olympus not connected to Gmail means nothing can be matched (`none`).
  */
 import { decodeWords } from 'postal-mime';
 import type { MboxGmailMatch, MboxMessageHeaders } from '../archive-import/mbox/gmail-input.ts';
 import { bareMessageId, type GmailApiClient } from './gmail.ts';
+import { GoogleRequestBudgetError } from './request-budget.ts';
 
 const MAX_CANDIDATES = 5;
+/** The most of the day's Gmail requests an import's matching may leave used: live Gmail keeps the rest. */
+export const IMPORT_SHARE = 0.5;
 // A Message-ID Gmail's search can take as one term.
 const SEARCHABLE = /^[^\s"()<>{}]{1,500}$/;
 
@@ -51,6 +56,8 @@ export interface GmailHeaderMatchOptions {
    * message delivered to both cannot take the other account's id.
    */
   sameAccount?: (address: string) => boolean;
+  /** The day's Gmail requests so far and the day's budget (the lane's one counter). */
+  usage?: () => { requests: number; dailyRequestBudget: number } | undefined;
 }
 
 export function gmailHeaderMatch(client: () => Promise<GmailApiClient | undefined>, options: GmailHeaderMatchOptions = {}): MboxGmailMatch {
@@ -60,6 +67,18 @@ export function gmailHeaderMatch(client: () => Promise<GmailApiClient | undefine
     if (!wanted || !SEARCHABLE.test(wanted)) return 'none';
     const api = await client();
     if (!api) return 'none';
+    const usage = options.usage?.();
+    // Two requests at least are asked for one message: past the share, none is.
+    if (usage && usage.requests + 2 > Math.floor(usage.dailyRequestBudget * IMPORT_SHARE)) return 'later';
+    try {
+      return await matchWith(api, wanted, headers);
+    } catch (error) {
+      if (error instanceof GoogleRequestBudgetError) return 'later';
+      throw error;
+    }
+  };
+
+  async function matchWith(api: GmailApiClient, wanted: string, headers: MboxMessageHeaders): Promise<{ id: string } | 'none'> {
     if (options.sameAccount && checked === undefined) {
       const address = api.getProfile ? (await api.getProfile()).emailAddress : '';
       checked = address !== '' && options.sameAccount(address);
@@ -85,5 +104,5 @@ export function gmailHeaderMatch(client: () => Promise<GmailApiClient | undefine
       }
     }
     return agreeing.length === 1 ? { id: agreeing[0]! } : 'none';
-  };
+  }
 }

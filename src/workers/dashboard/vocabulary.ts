@@ -2203,6 +2203,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
     // Old records only (a message used to be cut at a million characters; nothing is cut now).
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
+    mail_for_another_account: { one: '1 message delivered to another address left out', many: '{n} messages delivered to another address left out' },
     system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
     message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
     // Old records only (the status updates chat used to be left out; it is read like any chat now).
@@ -2275,6 +2276,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
     attachments_not_read: 'not_imported',
     text_cut: 'not_imported',
     spam_or_trash: 'not_imported',
+    mail_for_another_account: 'not_imported',
     // Chats (WhatsApp, Telegram).
     message_content_unsupported: 'not_imported',
     system_message: 'how_read',

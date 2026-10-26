@@ -9,6 +9,7 @@
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import type { ConnectedCredentialHandle } from '../credential-broker/connected-handles.ts';
 import { gmailCursorConnectorId } from '../google-connectors/index.ts';
+import { GMAIL_IMPORT_CONNECTOR_PREFIX } from '../google-connectors/gmail-archive-target.ts';
 import type { FileSourceScopeAuthority } from '../source-scope-runtime.ts';
 
 /** `{ contentNotBefore }` when the approval names a window, else nothing ("everything" has none). */
@@ -47,6 +48,8 @@ export function gmailPrivateStoreStatusScope(input: {
   const itemFilters = {
     provider: 'gmail',
     observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
+    // Mail an import brought into the account counts too: the owner approved each import on its own.
+    observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX,
   };
   return {
     accountScope, scopeRevision: ref.revision, itemFilters, contentAllowed: true,

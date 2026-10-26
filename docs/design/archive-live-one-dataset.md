@@ -398,16 +398,21 @@ connector; any other mbox stays under Archives, as before.
   `X-GM-THRID` the thread's; both become the API's hex form, so an imported
   message names the live item. Labels Takeout names are given as live
   Gmail's ids (`Inbox` is `INBOX`; `Opened` and `Archived` are absences);
-  user labels keep their names, which live gives as `Label_…` ids (a
-  residual: an owner rule on a user label sees imported mail by name).
+  user labels are resolved to the account's label ids through Gmail's label
+  list and kept by id and by name, so an owner rule on either applies. When a
+  rule names a label and the list cannot be read, the import waits rather
+  than store mail the rule could miss.
 - **Header matching** (`google-connectors/gmail-header-match.ts`) for a
   message without Takeout's id. The first draft had a background pass read
   every stored message's `Message-ID` into a local index. Gmail already
   indexes `Message-ID` for every message, so the input asks it directly:
   one search, and one metadata read per candidate (at most five), only for
   such messages, under the day budget and only while the mail approval is
-  current. A Takeout import costs no request; no new store is kept. A spent
-  budget fails the pass, and the scheduler's backoff brings it back.
+  current. A Takeout import costs no request; no new store is kept. An import
+  may spend at most half of the day's requests, so live Gmail keeps the rest;
+  past that, or with the budget spent, what was read goes out with its resume
+  point and the import waits for its next scheduled pass
+  (`archive_import_waiting_for_provider` on the pass's receipt).
 - **Account** (`archive-import/mbox/gmail-account.ts`). Headers of the first
   500 messages (or 64 MB) are read: every one must carry a Gmail marker, and
   the topmost `Delivered-To` of the received ones must name exactly one
@@ -416,12 +421,22 @@ connector; any other mbox stays under Archives, as before.
   proof: it joins only an entry that carries that address (or no address),
   at the owner's yes; an entry with another address is another account.
   With no Gmail account yet, the import makes it, named by the address
-  label, and a later connect of that address joins it.
+  label, and a later connect of that address joins it. The first messages
+  decide the account, so every message is checked again as it is read: one
+  whose topmost `Delivered-To` names another address is counted ("delivered
+  to another address left out") and never written. The look stops at its
+  byte bound inside the splitter, an oversized message included.
 - **Lane.** The worker registers the target when the Gmail lane's stores
   exist. Imports write the Gmail stores and ledger with the live lane's own
   sync options and the owner's current rules, under Gmail's scheduler key
   and inside `runExclusiveForSource('gmail.email')`. The account scope is
-  the connected handle's account role, else `personal`, as live's.
+  the connected handle's account role, else `personal`, unless the Gmail
+  stores already hold Gmail rows under one other scope: then every reader and
+  writer, live included, keeps that one (`gmailItemAccountScope`), so an
+  import made before the connect and a connect under another role still name
+  one item. The Private store's approved-scope filter (status counts, private
+  embedding) accepts an observation by an import's input (`archive.<id>`)
+  beside the live lane's scoped one: the owner approved each import.
 - **What an import does not apply.** The owner's mail scope (skipped
   senders and categories, the one-time-code filter, the content window)
   governs what live reads; an import is its own approval, as it was under
@@ -429,8 +444,9 @@ connector; any other mbox stays under Archives, as before.
 - **Children: built, off.** The child key is the MIME part path, computed by
   both inputs as Gmail numbers `partId` (`archive-import/mbox/mime-parts.ts`;
   a `message/rfc822` part is one attachment). Live listing keeps a message
-  and its attachments within the item budget and can resume inside one
-  message's attachments; `fetchItem` with a locator reads a part's bytes
+  and its attachments within the item budget, can resume inside one
+  message's attachments, and resumes a cut-short page after the messages it
+  handled (`skip`), whether or not the store would skip them; `fetchItem` with a locator reads a part's bytes
   (inline, or `attachments.get`). They stay off (`GmailMailBuild.children`)
   because nothing reads a Gmail child's bytes yet: the Gmail lane has no
   extraction roster entry, and an imported child's locator points into the

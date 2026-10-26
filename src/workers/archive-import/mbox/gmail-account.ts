@@ -19,11 +19,11 @@
  */
 import type { ArchiveFileEntry } from '../../../core/archive-formats.ts';
 import type { ScopeRoot } from '../../../core/scope-safe-fs.ts';
-import { MboxSplitter } from './split.ts';
+import { MboxReadBoundError, MboxSplitter } from './split.ts';
 
 /** Messages read at most, and bytes, before deciding. */
-const MAX_MESSAGES = 500;
-const MAX_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_MESSAGES = 500;
+const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 const MAX_HEADER_BYTES = 256 * 1024;
 const MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
 
@@ -53,17 +53,31 @@ export function bareAddress(value: string | undefined): string | undefined {
   return /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(inner) ? inner.toLowerCase() : undefined;
 }
 
-export function identifyGmailExport(root: ScopeRoot, files: readonly ArchiveFileEntry[]): GmailExportEvidence {
+export function identifyGmailExport(
+  root: ScopeRoot,
+  files: readonly ArchiveFileEntry[],
+  limits: { maxMessages?: number; maxBytes?: number } = {},
+): GmailExportEvidence {
+  const MAX_MESSAGES = limits.maxMessages ?? DEFAULT_MAX_MESSAGES;
+  const MAX_BYTES = limits.maxBytes ?? DEFAULT_MAX_BYTES;
   const addresses = new Set<string>();
   let messages = 0;
   let bytes = 0;
   for (const file of files) {
     const reader = root.openFile(file.relPath, { expected: file.version });
     try {
-      const splitter = new MboxSplitter(reader, { maxMessageBytes: MAX_MESSAGE_BYTES });
+      // The bound holds inside the splitter: a message over the size bound is not scanned past what is left.
+      const splitter = new MboxSplitter(reader, { maxMessageBytes: MAX_MESSAGE_BYTES, maxReadBytes: MAX_BYTES - bytes });
       for (;;) {
         if (messages >= MAX_MESSAGES || bytes >= MAX_BYTES) break;
-        const span = splitter.next();
+        let span;
+        try {
+          span = splitter.next();
+        } catch (error) {
+          if (!(error instanceof MboxReadBoundError)) throw error;
+          bytes = MAX_BYTES;
+          break;
+        }
         if (!span) break;
         bytes += span.length;
         // A message over the bound is not read; it says nothing either way.

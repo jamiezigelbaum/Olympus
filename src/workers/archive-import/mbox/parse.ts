@@ -31,6 +31,8 @@ export interface ParsedMboxMessage {
   threadRoot?: string;
   /** A declared charset nothing here decodes. */
   charsetNotDecoded: boolean;
+  /** The topmost `Delivered-To`, as written: the account the mail was delivered to, last. */
+  deliveredTo?: string;
 }
 
 export function sha256(value: Uint8Array | string): string {
@@ -139,6 +141,7 @@ export async function parseMboxMessage(raw: Uint8Array): Promise<ParsedMboxMessa
   const to = decoded(headerValue(email, 'to'));
   const messageId = bareMessageId(email.messageId ?? headerValue(email, 'message-id'));
   const thread = headerValue(email, 'x-gm-thrid');
+  const deliveredTo = headerValue(email, 'delivered-to');
   const threadRoot = firstMessageId(email.references) ?? firstMessageId(email.inReplyTo) ?? messageId;
   return {
     email,
@@ -155,5 +158,6 @@ export async function parseMboxMessage(raw: Uint8Array): Promise<ParsedMboxMessa
     ...(thread && /^\d{1,20}$/.test(thread) ? { gmailThread: thread } : {}),
     ...(threadRoot ? { threadRoot } : {}),
     charsetNotDecoded: declaredCharsets(raw).some((charset) => !charsetDecodable(charset)),
+    ...(deliveredTo ? { deliveredTo } : {}),
   };
 }

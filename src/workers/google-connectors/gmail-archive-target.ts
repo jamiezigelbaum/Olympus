@@ -24,11 +24,11 @@ import type { SourceConnector, SourceConnectorInput } from '../../core/contracts
 import type { ArchiveConnectorInput } from '../../core/archive-formats.ts';
 import { googleAccountIdFromAddress } from '../../core/provider-account-identity.ts';
 import { inputConnector, type IntakeObservingInput, type SourceRecordBuilder } from '../../core/source-inputs.ts';
-import type { ConnectorStoreSyncOptions } from '../connector-store/index.ts';
+import type { ConnectorStoreSyncOptions, LocalConnectorStore } from '../connector-store/index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { archiveFileEntries } from '../archive-import/manifest.ts';
 import { identifyGmailExport } from '../archive-import/mbox/gmail-account.ts';
-import { mboxGmailInput, type MboxGmailMatch } from '../archive-import/mbox/gmail-input.ts';
+import { mboxGmailInput, type GmailLabelLookup, type MboxGmailMatch } from '../archive-import/mbox/gmail-input.ts';
 import type { ArchiveAccountEvidence, ArchiveSourceLane, ArchiveSourceTarget, ArchiveToIdentify } from '../archive-import/source-targets.ts';
 import {
   compareGmailMailVersions,
@@ -42,6 +42,26 @@ import {
 export const GMAIL_ARCHIVE_SOURCE_ID = 'gmail.email';
 export const GMAIL_ARCHIVE_LABEL = 'Gmail';
 const GMAIL_PROVIDER_ID = 'gmail';
+/**
+ * Every import's input writes under its own connector id, `archive.<archive id>`
+ * (archive-import/state.ts): what the Gmail scope's observation filters accept
+ * beside the live lane's own scoped id.
+ */
+export const GMAIL_IMPORT_CONNECTOR_PREFIX = 'archive.';
+
+/**
+ * The account scope Gmail's items are kept under: the connected handle's role
+ * (`roleScope`), unless the stores already hold Gmail rows under exactly one
+ * other scope. An import made before the account was connected keeps the
+ * scope it was given (`personal`), and a later connect under another role
+ * reuses it, so both inputs keep naming one item, never `work:<id>` beside
+ * `personal:<id>`.
+ */
+export function gmailItemAccountScope(stores: readonly Pick<LocalConnectorStore, 'itemAccountScopes'>[], roleScope: string): string {
+  const held = new Set(stores.flatMap((store) => store.itemAccountScopes(GMAIL_PROVIDER_ID, 3)));
+  if (held.size !== 1 || held.has(roleScope)) return roleScope;
+  return [...held][0]!;
+}
 
 /** The Gmail connector's one way from a record to items, for any input of the account `account`. */
 export function gmailRecordBuilder(account: string, build: GmailMailBuild = {}): SourceRecordBuilder<GmailMailRecord> {
@@ -73,6 +93,26 @@ export interface GmailArchiveLane {
   build?: GmailMailBuild;
   /** Finds stored mail by its headers, for messages without Takeout's id (section 4). */
   match?: MboxGmailMatch;
+  /** The account's labels, lower-cased name to id; undefined when they cannot be read now. */
+  labelIds?: () => Promise<ReadonlyMap<string, string> | undefined>;
+}
+
+/**
+ * How an import resolves Takeout's label names: by the account's label list.
+ * When an owner rule names a label and the list cannot be read, the import
+ * waits (`unavailable`) rather than store mail the rule could miss.
+ */
+export async function gmailLabelLookup(lane: Pick<GmailArchiveLane, 'set' | 'labelIds'>): Promise<GmailLabelLookup> {
+  const rules = lane.set.classification()?.rules ?? [];
+  const needed = rules.some((rule) => rule.match.kind === 'label');
+  let byName: ReadonlyMap<string, string> | undefined;
+  try {
+    byName = await lane.labelIds?.();
+  } catch {
+    byName = undefined;
+  }
+  if (byName) return { kind: 'map', byName };
+  return needed ? { kind: 'unavailable' } : { kind: 'none' };
 }
 
 export interface GmailArchiveTargetOptions {
@@ -102,6 +142,7 @@ export function gmailArchiveTarget(options: GmailArchiveTargetOptions): ArchiveS
       return mboxGmailInput(archive, {
         ...(lane.build ? { build: lane.build } : {}),
         ...(lane.match ? { match: lane.match } : {}),
+        labels: () => gmailLabelLookup(lane),
       });
     },
     lane(): ArchiveSourceLane {

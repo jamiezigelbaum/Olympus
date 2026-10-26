@@ -451,7 +451,7 @@ import {
 } from '../../core/file-scope-sources.ts';
 import { fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
-import { gmailArchiveTarget } from '../google-connectors/gmail-archive-target.ts';
+import { GMAIL_IMPORT_CONNECTOR_PREFIX, gmailArchiveTarget, gmailItemAccountScope } from '../google-connectors/gmail-archive-target.ts';
 import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
 import type { GmailApiClient } from '../google-connectors/gmail.ts';
 import { readSourceRegistry } from '../../core/source-registry.ts';
@@ -885,6 +885,7 @@ export function localPrivateEmbeddingTargets(input: {
     const filters = mail ? {
       provider: 'gmail',
       observedConnectorId: gmailCursorConnectorId(accountScope!, { generation: ref!.accountGeneration, revision: ref!.revision }),
+      observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX,
     } : scope.contentFilters;
     const provider = ref && fileSourceScopeAuthority
       ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref)
@@ -2807,6 +2808,16 @@ export async function main(): Promise<void> {
         }),
       })
     : undefined;
+  // The account scope Gmail's items are kept under (gmail-archive-target.ts
+  // `gmailItemAccountScope`): the handle's role, unless the stores already
+  // hold the account's mail under one other scope (an import made before the
+  // connect), which every reader and writer then keeps using.
+  const gmailItemScopeFor = (handle: { accountRole?: string; handle?: string } | undefined): string => {
+    const role = handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle);
+    return gmailInternalConnectorStore && gmailSecureConnectorStore
+      ? gmailItemAccountScope([gmailInternalConnectorStore, gmailSecureConnectorStore], role)
+      : role;
+  };
   // An mbox export of a Gmail account is an input of the Gmail connector
   // (docs/design/archive-live-one-dataset.md, step 6): its mail joins the
   // Gmail stores, matched by Gmail's own ids, under the account it proves and
@@ -2856,7 +2867,20 @@ export async function main(): Promise<void> {
           set: gmailArchiveSet.set,
           sync: gmailLaneSyncOptions(ownerRules),
           // The account scope live Gmail writes under, so both inputs name one item.
-          account: handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle),
+          account: gmailItemScopeFor(handle),
+          // Takeout names user labels; the account's list gives their ids, so an owner rule on a label id applies.
+          labelIds: async () => {
+            if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority) return undefined;
+            fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+            matchClient ??= new GoogleGmailSourceConnector({
+              credentialHandle: handle.handle,
+              ...(handle.accountRole ? { account: handle.accountRole } : {}),
+              requestBudget: gmailRequestBudget,
+            }).apiClientForTooling();
+            const api = await matchClient;
+            if (!api.listLabels) return undefined;
+            return new Map((await api.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id] as const));
+          },
           // A message without Takeout's id is matched by asking Gmail, under the live lane's day budget, and only
           // while the owner's mail approval is current: nothing of the mailbox is read without one.
           match: gmailHeaderMatch(async () => {
@@ -2870,6 +2894,7 @@ export async function main(): Promise<void> {
             }).apiClientForTooling();
             return matchClient;
           }, {
+            usage: () => gmailRequestBudget?.status(),
             // The token's mailbox must not be another account than the one the registry names for Gmail.
             sameAccount: (address) => {
               const named = readSourceRegistry(process.env).accounts.find((entry) => entry.source_id === GMAIL_SOURCE_ID)?.provider_account_hash;
@@ -3637,7 +3662,7 @@ export async function main(): Promise<void> {
         env: process.env, pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
         provider: 'gmail', capability: 'gmail.email.sync', handles: readActiveConnectedHandles(process.env),
       });
-      return gmailPrivateStoreStatusScope({ authority: fileSourceScopeAuthority, handle });
+      return gmailPrivateStoreStatusScope({ authority: fileSourceScopeAuthority, handle: handle ? { accountRole: gmailItemScopeFor(handle) } : undefined });
     }
     if (store === gmailInternalConnectorStore) return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
     const readScope = connectorStoreReadScope(store);
@@ -3846,7 +3871,7 @@ export async function main(): Promise<void> {
         ? { secureEmbeddingProvider: scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, scopeRef) }
         : {}),
       ...(handle?.handle ? { credentialHandle: handle.handle } : {}),
-      ...(handle?.accountRole ? { account: handle.accountRole } : {}),
+      account: gmailItemScopeFor(handle),
     })
     : undefined;
   };
@@ -4844,7 +4869,7 @@ export async function main(): Promise<void> {
       source, sovereigntyEngine, secureLocalPolicyEmbeddingProvider, sourceCorpusRegistry,
       scopeRefs, connectorStores, fullCorpusDefinitions, fileSourceScopeAuthority,
       readScope: connectorStoreReadScope, connectorStoreAccountScopes,
-      gmailAccountScope: currentGmailHandle?.accountRole,
+      gmailAccountScope: currentGmailHandle ? gmailItemScopeFor(currentGmailHandle) : undefined,
     }));
     const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
     return {

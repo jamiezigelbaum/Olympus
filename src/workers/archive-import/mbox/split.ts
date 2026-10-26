@@ -54,6 +54,14 @@ export class MboxFormatError extends Error {
   }
 }
 
+/** A splitter given `maxReadBytes` read that many: it stops there, wherever it is in a message. */
+export class MboxReadBoundError extends Error {
+  constructor() {
+    super('The mail file was read as far as this look may read.');
+    this.name = 'MboxReadBoundError';
+  }
+}
+
 export class MboxSplitter {
   private readonly source: MboxByteSource;
   private readonly maxMessageBytes: number;
@@ -61,9 +69,17 @@ export class MboxSplitter {
   /** File offset of `buffer[0]`. */
   private bufferStart: number;
   private next_: number;
+  private readonly maxReadBytes: number;
+  private bytesRead = 0;
 
-  constructor(source: MboxByteSource, options: { start?: number; maxMessageBytes?: number } = {}) {
+  /**
+   * `maxReadBytes`: the most this splitter reads from the source in all, a
+   * message over the size bound included; past it `next` throws
+   * MboxReadBoundError instead of reading on.
+   */
+  constructor(source: MboxByteSource, options: { start?: number; maxMessageBytes?: number; maxReadBytes?: number } = {}) {
     this.source = source;
+    this.maxReadBytes = options.maxReadBytes ?? Number.POSITIVE_INFINITY;
     this.maxMessageBytes = Math.max(1, options.maxMessageBytes ?? MBOX_DEFAULT_MAX_MESSAGE_BYTES);
     this.next_ = options.start ?? 0;
     this.bufferStart = this.next_;
@@ -166,7 +182,10 @@ export class MboxSplitter {
 
   private readMore(length: number): void {
     const from = this.bufferStart + this.buffer.length;
-    const chunk = this.source.readAt(from, Math.min(length, Math.max(0, this.source.size - from)));
+    const allowed = this.maxReadBytes - this.bytesRead;
+    if (allowed <= 0) throw new MboxReadBoundError();
+    const chunk = this.source.readAt(from, Math.min(length, allowed, Math.max(0, this.source.size - from)));
+    this.bytesRead += chunk.length;
     if (chunk.length === 0) throw new MboxFormatError(from);
     this.buffer = this.buffer.length === 0
       ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length)

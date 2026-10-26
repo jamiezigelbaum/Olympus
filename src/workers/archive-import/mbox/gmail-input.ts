@@ -37,6 +37,7 @@ import {
   parseCursor,
   stoppedFrom,
 } from './connector.ts';
+import { bareAddress, identifyGmailExport } from './gmail-account.ts';
 import { mimeAttachments } from './mime-parts.ts';
 import { parseMboxMessage, sha256, type ParsedMboxMessage } from './parse.ts';
 import { MBOX_DEFAULT_MAX_MESSAGE_BYTES, MboxSplitter, type MboxMessageSpan } from './split.ts';
@@ -50,16 +51,35 @@ export interface MboxMessageHeaders {
 }
 
 /**
- * The Gmail message a message is, by its headers (section 4): its id, or
- * `none` (no Gmail message agrees, or several do). One that cannot be asked
- * now throws, and the pass fails before anything of its page is stored, so a
- * later pass reads the message again.
+ * The Gmail message a message is, by its headers (section 4): its id, `none`
+ * (no Gmail message agrees, or several do), or `later` (Gmail cannot be asked
+ * now: the import's share of the day's requests is spent). On `later` the
+ * listing stops before the message, what came before it goes out with its
+ * resume point, and the import waits for its next scheduled pass.
  */
-export type MboxGmailMatch = (headers: MboxMessageHeaders) => Promise<{ id: string } | 'none'>;
+export type MboxGmailMatch = (headers: MboxMessageHeaders) => Promise<{ id: string } | 'none' | 'later'>;
+
+/**
+ * Takeout names user labels; live Gmail gives their ids (`Label_7`), which
+ * owner rules may name. `map`: the account's labels by name (lower-cased);
+ * `none`: no rule names a label, so names alone are enough; `unavailable`: a
+ * rule names a label and the account's labels cannot be read now, so the
+ * import waits rather than store mail a rule could miss.
+ */
+export type GmailLabelLookup =
+  | { kind: 'map'; byName: ReadonlyMap<string, string> }
+  | { kind: 'none' }
+  | { kind: 'unavailable' };
 
 export interface MboxGmailInputOptions {
   build?: GmailMailBuild;
   match?: MboxGmailMatch;
+  labels?: () => Promise<GmailLabelLookup>;
+  /**
+   * The address the export's account was proved by. Absent: the export's own,
+   * read again from its first messages as the account check read it.
+   */
+  accountAddress?: string;
 }
 
 const TAKEOUT_ID = /^From (\d{1,20})@xxx(?:\s|$)/;
@@ -100,12 +120,25 @@ const SYSTEM_LABELS = new Map<string, string | null>([
   ['archived', null],
 ]);
 
-export function gmailLabelIds(names: readonly string[]): string[] {
+/**
+ * The label ids live Gmail would give a message Takeout labels by name. A user
+ * label the account's map knows is given by its id and by its name, so a rule
+ * on either matches; one it does not know keeps its name.
+ */
+export function gmailLabelIds(names: readonly string[], byName?: ReadonlyMap<string, string>): string[] {
   const ids: string[] = [];
+  const add = (value: string | null | undefined): void => {
+    if (value && !ids.includes(value)) ids.push(value);
+  };
   for (const name of names) {
-    const system = SYSTEM_LABELS.get(name.trim().toLowerCase());
-    const id = system === undefined ? name.trim() : system;
-    if (id && !ids.includes(id)) ids.push(id);
+    const trimmed = name.trim();
+    const system = SYSTEM_LABELS.get(trimmed.toLowerCase());
+    if (system !== undefined) {
+      add(system);
+      continue;
+    }
+    add(byName?.get(trimmed.toLowerCase()));
+    add(trimmed);
   }
   return ids;
 }
@@ -120,6 +153,7 @@ function recordOf(
   span: MboxMessageSpan,
   fileIndex: number,
   id: string,
+  labelsByName: ReadonlyMap<string, string> | undefined,
 ): GmailMailRecord {
   const threadId = parsed.gmailThread
     ? gmailIdFromDecimal(parsed.gmailThread)
@@ -127,7 +161,7 @@ function recordOf(
   return {
     id,
     ...(threadId ? { threadId } : {}),
-    labelIds: gmailLabelIds(parsed.labels),
+    labelIds: gmailLabelIds(parsed.labels, labelsByName),
     headers: {
       ...(parsed.subject ? { subject: parsed.subject } : {}),
       ...(parsed.from ? { from: parsed.from } : {}),
@@ -154,6 +188,18 @@ function ownId(parsed: ParsedMboxMessage): string {
   return `${GMAIL_OWN_ID_PREFIX}${sha256(`${parsed.messageId ?? ''}\u0000${parsed.messageHash}`).slice(0, 32)}`;
 }
 
+/** The address an export's account was proved by, per manifest: read once, by the account check's own rule. */
+const exportAddresses = new Map<string, string | undefined>();
+
+function exportAddress(archive: ArchiveConnectorInput): string | undefined {
+  if (!exportAddresses.has(archive.manifestSha256)) {
+    const found = identifyGmailExport(archive.root, archive.files);
+    if (exportAddresses.size > 64) exportAddresses.clear();
+    exportAddresses.set(archive.manifestSha256, found.kind === 'gmail' ? found.address : undefined);
+  }
+  return exportAddresses.get(archive.manifestSha256);
+}
+
 export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmailInputOptions = {}): SourceConnectorInput<GmailMailRecord> {
   const pageSizeDefault = Math.max(1, archive.pageSize ?? MBOX_DEFAULT_PAGE_SIZE);
   const byteBudget = Math.max(1, archive.maxBytesPerListing ?? MBOX_DEFAULT_MAX_BYTES_PER_LISTING);
@@ -168,6 +214,16 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
           yield { records: [], nextCursor: doneCursor(archive), done: true };
           return;
         }
+        // Every message must be the proved account's: one delivered to another address is never written.
+        const address = options.accountAddress ?? exportAddress(archive);
+        if (!address) throw new Error('This export is not one Gmail account\'s: nothing of it is read into Gmail.');
+        // The account's label ids, read once per pass; a rule on a label that cannot be resolved makes the import wait.
+        const labels = options.labels ? await options.labels() : { kind: 'none' as const };
+        if (labels.kind === 'unavailable') {
+          archive.waitForProvider?.('gmail_labels_unavailable');
+          return;
+        }
+        const labelsByName = labels.kind === 'map' ? labels.byName : undefined;
         const limit = listOptions?.limit !== undefined && listOptions.limit > 0 ? listOptions.limit : Number.POSITIVE_INFINITY;
         const pageSize = Math.max(1, Math.min(pageSizeDefault, limit));
         let bytesRead = 0;
@@ -206,6 +262,7 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
                 if (pending) yield out(splitter.position, false);
                 return;
               }
+              const before = splitter.position;
               let span: MboxMessageSpan | undefined;
               try {
                 span = splitter.next();
@@ -223,7 +280,10 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
                 const parsed = await parseMboxMessage(span.raw!);
                 if (!parsed) report(MBOX_FINDINGS.unreadable, 'gap');
                 else if (parsed.spamOrTrash) report(MBOX_FINDINGS.spamOrTrash, 'skipped');
-                else {
+                else if (parsed.deliveredTo !== undefined && bareAddress(parsed.deliveredTo) !== address) {
+                  // Delivered to another address than the account's: counted, never written into the account.
+                  report(MBOX_FINDINGS.otherAccount, 'gap');
+                } else {
                   let id = takeoutMessageId(span.separator);
                   if (id === undefined && options.match) {
                     const matched = await options.match({
@@ -232,9 +292,16 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
                       from: parsed.from,
                       ...(parsed.subject ? { subject: parsed.subject } : {}),
                     });
+                    if (matched === 'later') {
+                      // Gmail cannot be asked now: what came before goes out, and this message is read again on
+                      // the next scheduled pass (its findings are reported then).
+                      if (pending) yield out(before, false);
+                      archive.waitForProvider?.('gmail_requests_spent');
+                      return;
+                    }
                     if (matched !== 'none') id = matched.id;
                   }
-                  const record = recordOf(parsed, span, fileIndex, id ?? ownId(parsed));
+                  const record = recordOf(parsed, span, fileIndex, id ?? ownId(parsed), labelsByName);
                   page.push(record);
                   positions.push({ fileIndex, offset: span.offset });
                   pending = true;

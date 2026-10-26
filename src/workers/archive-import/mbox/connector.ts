@@ -49,6 +49,8 @@ export const MBOX_FINDINGS = {
   /** Old records only: a body used to be cut at a million characters. Nothing reports it now; a body is kept whole. */
   textCut: 'text_cut',
   spamOrTrash: 'spam_or_trash',
+  /** An export of one Gmail account holding mail delivered to another address: never written into the account. */
+  otherAccount: 'mail_for_another_account',
 } as const;
 
 interface ParsedCursor {

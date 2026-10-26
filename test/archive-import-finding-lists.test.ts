@@ -63,7 +63,7 @@ describe('the two lists under an archive', () => {
     const notImported = [
       'media_not_imported', 'section_not_imported', 'file_damaged', 'files_not_looked_at', 'files_unconfirmed',
       'message_too_large', 'message_unreadable', 'message_content_unsupported', 'charset_not_decoded', 'attachments_not_read',
-      'spam_or_trash', 'note_unreadable', 'note_too_large', 'note_content_unsupported',
+      'spam_or_trash', 'mail_for_another_account', 'note_unreadable', 'note_too_large', 'note_content_unsupported',
       // Kinds only an older record carries are still Not imported: nothing disappears.
       'item_truncated', 'text_cut', 'service_message', 'status_updates',
     ];

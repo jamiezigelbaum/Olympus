@@ -13,7 +13,7 @@ import { lifecycleAccountFiles } from '../../src/data-lifecycle.ts';
 import { SecretLocationsIndex } from '../../src/workers/classification/secret-locations.ts';
 import { TierLedger } from '../../src/workers/classification/tier-ledger.ts';
 import { secretLocationsPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
-import type { TierSniffer } from '../../src/workers/classification/tier-classifier.ts';
+import type { OwnerTierRule, TierSniffer } from '../../src/workers/classification/tier-classifier.ts';
 import { LocalConnectorStore } from '../../src/workers/connector-store/index.ts';
 import { createLaneTieredStoreSet, tieredStoreSetLedgerPath, type TieredStoreSet } from '../../src/workers/connector-store/tiered-store-set.ts';
 import { createArchiveImportDashboard, type ArchiveImportDashboard } from '../../src/workers/archive-import/dashboard.ts';
@@ -48,6 +48,8 @@ export interface GmailArchiveHarness {
   window: { contentAfterMs?: number };
   build: GmailMailBuild;
   match: { current?: MboxGmailMatch };
+  /** The account's labels as the lane reads them (lower-cased name to id); undefined: they cannot be read. */
+  labels: { current?: () => Promise<ReadonlyMap<string, string> | undefined> };
   /** Gmail connected as the account named by `providerAccountId` (null: an entry that names none). */
   connectLive(providerAccountId: string | null): void;
   pullLive(): Promise<void>;
@@ -85,7 +87,10 @@ function fakeGmail(mailbox: { messages: GmailMessage[] }): GmailApiClient {
   };
 }
 
-export function gmailArchiveHarness(cleanups: Array<() => void>, options: { build?: GmailMailBuild; sniffer?: TierSniffer } = {}): GmailArchiveHarness {
+export function gmailArchiveHarness(
+  cleanups: Array<() => void>,
+  options: { build?: GmailMailBuild; sniffer?: TierSniffer; rules?: OwnerTierRule[] } = {},
+): GmailArchiveHarness {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'gmail-archive-')));
   const home = join(base, 'home');
   const exports = join(home, 'Exports');
@@ -106,12 +111,13 @@ export function gmailArchiveHarness(cleanups: Array<() => void>, options: { buil
     secureStore,
     ledger,
     secretLocations: secrets,
-    tierClassification: { sniffer: options.sniffer ?? WAITING },
+    tierClassification: { sniffer: options.sniffer ?? WAITING, ...(options.rules ? { rules: options.rules } : {}) },
   });
   const mailbox = { messages: [] as GmailMessage[] };
   const window: { contentAfterMs?: number } = {};
   const build = options.build ?? {};
   const match: { current?: MboxGmailMatch } = {};
+  const labels: GmailArchiveHarness['labels'] = {};
   const exclusive = createExclusiveRunner();
   const targets = new ArchiveSourceTargets();
   targets.register(gmailArchiveTarget({
@@ -121,6 +127,7 @@ export function gmailArchiveHarness(cleanups: Array<() => void>, options: { buil
       account: ACCOUNT,
       build,
       ...(match.current ? { match: match.current } : {}),
+      ...(labels.current ? { labelIds: labels.current } : {}),
     }),
     exclusive,
     concurrencyKey: 'internal.email',
@@ -157,7 +164,7 @@ export function gmailArchiveHarness(cleanups: Array<() => void>, options: { buil
   cleanups.push(close);
 
   const harness: GmailArchiveHarness = {
-    home, env, runtime, targets, dashboard, set, mailbox, window, build, match,
+    home, env, runtime, targets, dashboard, set, mailbox, window, build, match, labels,
     connectLive(providerAccountId) {
       const account = { sourceId: GMAIL_ARCHIVE_SOURCE_ID };
       placeOwnedAccount(account, env);
