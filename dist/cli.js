@@ -26824,6 +26824,16 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key2) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key2 || key2.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key2}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
 // src/workers/connector-store/child-visibility.ts
 function parentIdentityOf(child) {
   const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
@@ -27056,7 +27066,7 @@ function hiddenChildKeys(lane, probes) {
   }
   return childrenWithHiddenParents(lane, links);
 }
-var CHILD_ITEM_ID_SEPARATOR = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   HIDDEN = { visible: false, gone: false };
@@ -131149,6 +131159,7 @@ async function settleOneJobHeld(input, staged) {
   }
   let fetched;
   let fetchedFile;
+  let tooLarge = false;
   if (extractor.input.kind !== "none") {
     let source;
     try {
@@ -131168,7 +131179,9 @@ async function settleOneJobHeld(input, staged) {
       } else {
         fetched = await source.fetch(job.ref, { ...maxBytes !== undefined ? { maxBytes } : {} });
         if (maxBytes !== undefined && fetched.bytes.byteLength > maxBytes) {
-          return { status: "skipped_too_large", errorKind: "source_too_large" };
+          if (!fetched.providerText)
+            return { status: "skipped_too_large", errorKind: "source_too_large" };
+          tooLarge = true;
         }
       }
     } catch (error2) {
@@ -131225,8 +131238,10 @@ async function settleOneJobHeld(input, staged) {
   if (!await extractionAuthorizationCurrent(corpus, job.ref)) {
     return { status: "blocked_policy", errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
   }
+  const providerText = fetched?.providerText ?? fetchedFile?.providerText;
   try {
-    output = await extractor.extract(extractorInput);
+    output = tooLarge ? { status: "empty_output" } : await extractor.extract(extractorInput);
+    output = providerFallback(output, providerText);
     if (output.status === "indexed" && output.media)
       staged.media = output.media;
   } catch (error2) {
@@ -131319,6 +131334,23 @@ async function settleOneJobHeld(input, staged) {
     chunksAwaitingEmbedding: accepted.chunksAwaitingEmbedding,
     ...output.derivations ? { derivations: output.derivations } : {},
     ...output.egressDestination ? { egressDestination: output.egressDestination } : {}
+  };
+}
+function providerFallback(output, provided) {
+  if (!provided || provided.text.trim() === "")
+    return output;
+  const nothing = output.status === "empty_output" || output.status === "metadata_only" || output.status === "skipped_unsupported" || output.status === "skipped_too_large" || output.status === "failed_terminal" || output.status === "indexed" && output.text.trim() === "";
+  if (!nothing)
+    return output;
+  const lead = provided.form === "recognized_words" ? `Text recognized by ${provided.label} (approximate words, not an exact quote):` : `Text supplied by ${provided.label}:`;
+  const terms = (provided.terms ?? []).slice(0, 500);
+  const body = [lead, provided.text.trim(), ...terms.length > 0 ? [`Other readings: ${terms.join(", ")}`] : []].join(`
+`);
+  const text2 = body.length > EXTRACTION_PROVIDER_TEXT_MAX_CHARS ? body.slice(0, EXTRACTION_PROVIDER_TEXT_MAX_CHARS) : body;
+  return {
+    status: "indexed",
+    text: text2,
+    derivations: [{ artifactKind: "provider_text", chars: text2.length, structuralRef: { label: provided.label, form: provided.form } }]
   };
 }
 async function extractionAuthorizationCurrent(corpus, ref) {
@@ -131634,7 +131666,7 @@ function refusesImageContent(corpus, ref) {
     return false;
   }
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, EXTRACTION_PROVIDER_TEXT_MAX_CHARS = 1e6, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_media_cache();
   init_operation_error();
@@ -164479,12 +164511,7 @@ class XmlStreamReader {
               const open6 = this.top();
               if (piece.includes(AMP))
                 open6.element.rangeEntities = true;
-              const start = this.offset;
-              const last = open6.element.ranges[open6.element.ranges.length - 1];
-              if (last && last.end === start)
-                last.end = start + piece.length;
-              else
-                open6.element.ranges.push({ start, end: start + piece.length });
+              this.addRange(open6, this.offset, piece.length);
             } else if (this.keeping()) {
               this.keepText(piece, false);
             } else if (!this.inRecord() && this.stack.length === 0 && this.rootSeenName !== undefined) {
@@ -164552,6 +164579,7 @@ class XmlStreamReader {
           if (byte === GT2 && this.markup.length >= 2 && this.markup[this.markup.length - 1] === 45 && this.markup[this.markup.length - 2] === 45) {
             this.mode = "text";
             this.markup = [];
+            this.chargeSkipped();
             break;
           }
           this.markup.push(byte);
@@ -164566,6 +164594,7 @@ class XmlStreamReader {
           if (byte === GT2 && this.markup[this.markup.length - 1] === 63) {
             this.mode = "text";
             this.markup = [];
+            this.chargeSkipped();
             break;
           }
           this.markup.push(byte);
@@ -164638,15 +164667,23 @@ class XmlStreamReader {
     if (bytes.length === 0)
       return;
     if (this.inRange() && this.keeping()) {
-      const open6 = this.top();
-      const last = open6.element.ranges[open6.element.ranges.length - 1];
-      if (last && last.end === start)
-        last.end = start + bytes.length;
-      else
-        open6.element.ranges.push({ start, end: start + bytes.length });
+      this.addRange(this.top(), start, bytes.length);
       return;
     }
     this.keepText(bytes, true);
+  }
+  addRange(open6, start, length) {
+    const ranges = open6.element.ranges;
+    const last = ranges[ranges.length - 1];
+    if (last && last.end === start) {
+      last.end = start + length;
+      return;
+    }
+    ranges.push({ start, end: start + length });
+    this.count(XML_STREAM_RANGE_COST);
+  }
+  chargeSkipped() {
+    this.count(this.offset - this.markupStart);
   }
   countMarkupLength() {
     if (this.offset - this.markupStart > XML_STREAM_MAX_MARKUP_BYTES)
@@ -164742,7 +164779,7 @@ function xmlChild(element, name) {
 function xmlChildren(element, name) {
   return element.children.filter((child) => typeof child !== "string" && child.name === name);
 }
-var XML_STREAM_MAX_DEPTH = 256, XML_STREAM_MAX_MARKUP_BYTES, XmlStreamError, LT = 60, GT2 = 62, AMP = 38, PREDEFINED, NAME, ATTRIBUTE;
+var XML_STREAM_MAX_DEPTH = 256, XML_STREAM_MAX_MARKUP_BYTES, XML_STREAM_RANGE_COST = 32, XmlStreamError, LT = 60, GT2 = 62, AMP = 38, PREDEFINED, NAME, ATTRIBUTE;
 var init_xml_stream = __esm(() => {
   XML_STREAM_MAX_MARKUP_BYTES = 1024 * 1024;
   XmlStreamError = class XmlStreamError extends Error {
@@ -164913,31 +164950,60 @@ var init_enml = __esm(() => {
 });
 
 // src/workers/archive-import/evernote/recognition.ts
-function number5(attributes, name) {
-  const match = new RegExp(`(?:^|\\s)${name}\\s*=\\s*["']\\s*(-?\\d+(?:\\.\\d+)?)\\s*["']`).exec(attributes);
-  return match ? Number(match[1]) : 0;
+function numbers(attributes) {
+  const out = new Map;
+  for (const match of attributes.matchAll(NUMBER_ATTRIBUTE))
+    out.set(match[1], Number(match[2]));
+  return out;
+}
+function* elements(text4, name, from, to) {
+  const open6 = `<${name}`;
+  const close = `</${name}>`;
+  let at = from;
+  for (;; ) {
+    const start = text4.indexOf(open6, at);
+    if (start < 0 || start >= to)
+      return;
+    const after = text4.charCodeAt(start + open6.length);
+    if (!(after === 32 || after === 62 || after === 9 || after === 10 || after === 13 || after === 47)) {
+      at = start + open6.length;
+      continue;
+    }
+    const tagEnd = text4.indexOf(">", start);
+    if (tagEnd < 0 || tagEnd >= to)
+      return;
+    if (text4.charCodeAt(tagEnd - 1) === 47) {
+      at = tagEnd + 1;
+      continue;
+    }
+    const end = text4.indexOf(close, tagEnd + 1);
+    if (end < 0 || end + close.length > to)
+      return;
+    yield { attributes: text4.slice(start + open6.length, tagEnd), body: tagEnd + 1, end };
+    at = end + close.length;
+  }
 }
 function recognizedText(recoIndex) {
   const places = [];
-  const item = /<item\b([^>]*)>([\s\S]*?)<\/item>/g;
-  const candidate = /<t\b([^>]*)>([\s\S]*?)<\/t>/g;
-  for (const match of recoIndex.matchAll(item)) {
-    if (places.length >= MAX_PLACES)
+  for (const item of elements(recoIndex, "item", 0, recoIndex.length)) {
+    if (places.length >= RECOGNITION_MAX_PLACES)
       break;
     const words2 = [];
-    let order = 0;
-    for (const t of match[2].matchAll(candidate)) {
-      const text4 = decodeXmlEntities2(t[2]).trim();
+    for (const t of elements(recoIndex, "t", item.body, item.end)) {
+      if (words2.length >= MAX_CANDIDATES_PER_PLACE)
+        break;
+      const text4 = decodeXmlEntities2(recoIndex.slice(t.body, t.end)).trim();
       if (text4 !== "")
-        words2.push({ text: text4, weight: number5(t[1], "w"), order: order++ });
+        words2.push({ text: text4, weight: numbers(t.attributes).get("w") ?? 0, order: words2.length });
     }
     if (words2.length === 0)
       continue;
     words2.sort((a, b) => b.weight - a.weight || a.order - b.order);
+    const at = numbers(item.attributes);
     places.push({
-      x: number5(match[1], "x"),
-      y: number5(match[1], "y"),
-      h: Math.max(1, number5(match[1], "h")),
+      x: at.get("x") ?? 0,
+      y: at.get("y") ?? 0,
+      h: Math.max(1, at.get("h") ?? 0),
       best: words2[0].text,
       others: words2.slice(1).map((word) => word.text)
     });
@@ -164947,29 +165013,41 @@ function recognizedText(recoIndex) {
   for (const place of places) {
     const line2 = lines[lines.length - 1];
     if (line2) {
-      const top = Math.min(...line2.map((entry) => entry.y));
-      const bottom = Math.max(...line2.map((entry) => entry.y + entry.h));
-      const overlap = Math.min(bottom, place.y + place.h) - Math.max(top, place.y);
-      const shorter = Math.min(bottom - top, place.h);
+      const overlap = Math.min(line2.bottom, place.y + place.h) - Math.max(line2.top, place.y);
+      const shorter = Math.min(line2.bottom - line2.top, place.h);
       if (overlap > shorter / 2) {
-        line2.push(place);
+        line2.places.push(place);
+        line2.top = Math.min(line2.top, place.y);
+        line2.bottom = Math.max(line2.bottom, place.y + place.h);
         continue;
       }
     }
-    lines.push([place]);
+    lines.push({ top: place.y, bottom: place.y + place.h, places: [place] });
   }
   const best = new Set(places.map((place) => place.best));
-  const alternatives = [...new Set(places.flatMap((place) => place.others))].filter((word) => !best.has(word));
+  const alternatives = [];
+  const seen = new Set;
+  for (const place of places) {
+    for (const word of place.others) {
+      if (alternatives.length >= RECOGNITION_MAX_ALTERNATIVES)
+        break;
+      if (best.has(word) || seen.has(word))
+        continue;
+      seen.add(word);
+      alternatives.push(word);
+    }
+  }
   return {
-    text: lines.map((line2) => line2.sort((a, b) => a.x - b.x).map((place) => place.best).join(" ")).join(`
+    text: lines.map((line2) => line2.places.sort((a, b) => a.x - b.x).map((place) => place.best).join(" ")).join(`
 `),
     words: places.length,
     alternatives
   };
 }
-var MAX_PLACES = 1e5;
+var RECOGNITION_MAX_PLACES = 20000, MAX_CANDIDATES_PER_PLACE = 16, RECOGNITION_MAX_ALTERNATIVES = 2000, NUMBER_ATTRIBUTE;
 var init_recognition = __esm(() => {
   init_xml_stream();
+  NUMBER_ATTRIBUTE = /([A-Za-z_][\w-]*)\s*=\s*["']\s*(-?\d+(?:\.\d+)?)\s*["']/g;
 });
 
 // src/workers/archive-import/evernote/connector.ts
@@ -164983,6 +165061,29 @@ function enexTime(value2) {
     return;
   const ms = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]));
   return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function recognitionOf(reader, place, fileSize2) {
+  if (place === "-")
+    return;
+  const parts = place.slice(1).split(".").map((part) => part.split("-").map(Number));
+  let total = 0;
+  for (const [start, end] of parts) {
+    if (!(start < end) || end > fileSize2)
+      throw new FileExtractionSourceError("source_version_gone");
+    total += end - start;
+  }
+  if (total > EVERNOTE_MAX_RECOGNITION_BYTES)
+    return;
+  const raw = parts.map(([start, end]) => Buffer.from(reader.readAt(start, end - start)).toString("utf8")).join("");
+  const recognized = recognizedText(place.startsWith("e") ? decodeXmlEntities2(raw) : raw);
+  if (recognized.words === 0)
+    return;
+  return {
+    text: recognized.text,
+    form: "recognized_words",
+    label: "Evernote",
+    ...recognized.alternatives.length > 0 ? { terms: recognized.alternatives } : {}
+  };
 }
 function decodeBase64Range(reader, start, end, cap) {
   const out = [];
@@ -165110,10 +165211,10 @@ function createEvernoteArchiveConnector(input) {
       const encoding = (data2?.attributes["encoding"] ?? "base64").toLowerCase();
       const readable = data2 !== undefined && encoding === "base64" && data2.rangeEntities !== true && ranges.length === 1;
       const range = readable ? ranges[0] : undefined;
-      const locator = range ? `${prefix}${fileIndex}:${range.start}:${range.end}:${Buffer.from(mime2).toString("base64url")}` : `${prefix}none`;
       const recognition = xmlChild(resource, "recognition");
-      const recognized = recognition ? recognizedText(xmlText(recognition)) : undefined;
-      const providerItemId = sha25611(`${parent.identity.providerItemId}\x00resource\x00${index}`).slice(0, 32);
+      const recognitionPlace = recognition?.ranges && recognition.ranges.length > 0 ? `${recognition.rangeEntities === true ? "e" : "r"}${recognition.ranges.map((part) => `${part.start}-${part.end}`).join(".")}` : "-";
+      const locator = range ? `${prefix}${fileIndex}:${range.start}:${range.end}:${Buffer.from(mime2).toString("base64url")}:${recognitionPlace}` : `${prefix}none`;
+      const providerItemId = childProviderItemId(parent.identity.providerItemId, `resource-${index}`);
       const authoredAt = parent.metadata["authoredAt"];
       items.push({
         identity: {
@@ -165131,8 +165232,7 @@ function createEvernoteArchiveConnector(input) {
           title: name,
           name,
           mimeType: mime2,
-          ...typeof authoredAt === "string" ? { authoredAt } : {},
-          ...recognized && recognized.words > 0 ? { recognizedWords: recognized.words } : {}
+          ...typeof authoredAt === "string" ? { authoredAt } : {}
         }),
         fetchedAt: new Date().toISOString(),
         deferredBytes: { locator, available: readable }
@@ -165181,7 +165281,7 @@ function createEvernoteArchiveConnector(input) {
       };
       const xml2 = new XmlStreamReader(watched, {
         recordPaths: [RECORD_PATH],
-        rangeElements: ["data"],
+        rangeElements: ["data", "recognition"],
         maxRecordBytes: NOTE_MAX_RECORD_BYTES,
         ...cursor.offset > 0 ? { open: [RECORD_PATH[0]] } : {}
       });
@@ -165249,7 +165349,7 @@ function createEvernoteArchiveConnector(input) {
     const locator = options?.deferredBytes?.locator;
     if (!locator)
       throw new FileExtractionSourceError("source_item_not_found");
-    const match = /^enex1:([0-9a-f]{16}):(\d+):(\d+):(\d+):([A-Za-z0-9_-]*)$/.exec(locator);
+    const match = /^enex1:([0-9a-f]{16}):(\d+):(\d+):(\d+):([A-Za-z0-9_-]*):(-|[er]\d+-\d+(?:\.\d+-\d+)*)$/.exec(locator);
     if (!match || match[1] !== tag)
       throw new FileExtractionSourceError("source_version_gone");
     const fileIndex = Number(match[2]);
@@ -165262,6 +165362,7 @@ function createEvernoteArchiveConnector(input) {
     const reader = input.root.openFile(file.relPath, { expected: file.version });
     try {
       const bytes = decodeBase64Range(reader, start, end, cap);
+      const providerText = recognitionOf(reader, match[6], file.version.size);
       reader.assertCurrent();
       const scopePrefix = `${input.accountScope}:`;
       const providerItemId = localItemId.startsWith(scopePrefix) ? localItemId.slice(scopePrefix.length) : localItemId;
@@ -165276,7 +165377,8 @@ function createEvernoteArchiveConnector(input) {
         mimeType: mime2,
         content: { kind: "bytes", mimeType: mime2, bytes },
         metadata: Object.freeze({}),
-        fetchedAt: new Date().toISOString()
+        fetchedAt: new Date().toISOString(),
+        ...providerText ? { providerText } : {}
       };
     } finally {
       reader.close();
@@ -165355,7 +165457,7 @@ function createEvernoteArchiveConnector(input) {
 function registerEvernoteArchiveConnector() {
   registerArchiveFormatConnector("evernote-enex", createEvernoteArchiveConnector);
 }
-var EVERNOTE_CURSOR_PREFIX = "enex1:", EVERNOTE_DEFAULT_PAGE_SIZE = 100, EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING, EVERNOTE_MAX_UNITS_PER_PAGE = 5000, FETCH_SLICE_BYTES, RECORD_PATH, ReadInterrupted2, textOf = (element) => element ? xmlText(element).trim() : "", BASE64;
+var EVERNOTE_CURSOR_PREFIX = "enex1:", EVERNOTE_DEFAULT_PAGE_SIZE = 100, EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING, EVERNOTE_MAX_UNITS_PER_PAGE = 5000, FETCH_SLICE_BYTES, RECORD_PATH, ReadInterrupted2, textOf = (element) => element ? xmlText(element).trim() : "", BASE64, EVERNOTE_MAX_RECOGNITION_BYTES;
 var init_connector10 = __esm(() => {
   init_archive_formats();
   init_file_extraction_source();
@@ -165377,6 +165479,7 @@ var init_connector10 = __esm(() => {
       table[alphabet.charCodeAt(index)] = index;
     return table;
   })();
+  EVERNOTE_MAX_RECOGNITION_BYTES = 8 * 1024 * 1024;
 });
 
 // src/workers/archive-import/format-connectors.ts
@@ -167144,7 +167247,7 @@ function createConnectorFileExtractionSource(options) {
       if (fetchOptions.maxBytes !== undefined && bytes.byteLength > fetchOptions.maxBytes) {
         throw new FileExtractionSourceError("source_too_large");
       }
-      return { bytes, ...mimeType ? { mimeType } : {}, sizeBytes: bytes.byteLength };
+      return { bytes, ...mimeType ? { mimeType } : {}, sizeBytes: bytes.byteLength, ...item.providerText ? { providerText: item.providerText } : {} };
     },
     async fetchFile(ref, fileOptions) {
       const { connector, deferred: deferred2 } = resolve_(ref, fileOptions.maxBytes);
@@ -167168,6 +167271,7 @@ function createConnectorFileExtractionSource(options) {
         path: handed.path,
         ...mimeType ? { mimeType } : {},
         ...deferred2?.sizeBytes !== undefined ? { sizeBytes: deferred2.sizeBytes } : {},
+        ...handed.item.providerText ? { providerText: handed.item.providerText } : {},
         dispose: fileHandOver(handed.path, handed.spooled, spoolDir, () => pruneExtractionSpoolOwner(fileOptions.spoolDir, owner)).dispose
       };
     }

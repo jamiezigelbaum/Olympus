@@ -159,3 +159,29 @@ describe('damage', () => {
 test('entities: the five predefined ones and numeric references; any other is kept as written', () => {
   expect(decodeXmlEntities('&lt;&gt;&amp;&quot;&apos;&#65;&#x42;&nbsp;&#0;&#xD800;')).toBe('<>&"\'AB&nbsp;&#0;&#xD800;');
 });
+
+describe('a record\'s bookkeeping is bounded by its budget', () => {
+  test('text cut into many pieces by comments is charged per piece: a record past its budget is passed over, quickly', () => {
+    // 500,000 pieces of a range element's text, each split from the next by a comment, under a 64-byte budget.
+    const pieces = Array.from({ length: 500_000 }, () => 'A<!---->').join('');
+    const doc = enc.encode(`<en-export><note><title>T</title><data>${pieces}</data></note><note><title>Next</title></note></en-export>`);
+    const started = Date.now();
+    const events = all(new XmlStreamReader(chunked(doc, 1 << 16), { recordPaths: [['en-export', 'note']], rangeElements: ['data'], maxRecordBytes: 64 }));
+    expect(events.map((event) => event.kind)).toEqual(['oversize', 'record']);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  test('ranges that go on from each other are one range, and cost the record once', () => {
+    const doc = enc.encode('<r><n><data>AB<![CDATA[CD]]>EF</data></n></r>');
+    const [event] = all(new XmlStreamReader(chunked(doc, 2), { recordPaths: [['r', 'n']], rangeElements: ['data'], maxRecordBytes: 1000 }));
+    const data = event?.kind === 'record' ? event.element.children[0] as { ranges?: Array<{ start: number; end: number }> } : undefined;
+    // The CDATA markers sit between the pieces, so the text is three ranges; contiguous pieces of one are joined.
+    expect(data?.ranges?.map((range) => new TextDecoder().decode(doc.slice(range.start, range.end)))).toEqual(['AB', 'CD', 'EF']);
+  });
+
+  test('a comment inside a record is charged to it', () => {
+    const doc = enc.encode(`<r><n><t>x</t><!--${'c'.repeat(200)}--></n></r>`);
+    const events = all(new XmlStreamReader(chunked(doc, 50), { recordPaths: [['r', 'n']], maxRecordBytes: 100 }));
+    expect(events.map((event) => event.kind)).toEqual(['oversize']);
+  });
+});

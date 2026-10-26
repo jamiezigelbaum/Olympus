@@ -157,7 +157,7 @@ export interface FetchedFile {
   path: string;
   mimeType?: string;
   sizeBytes?: number;
-  /** As FetchedBytes.providerText. */
+  // As FetchedBytes.providerText.
   providerText?: RawItemProviderText;
   dispose(): Promise<void>;
 }
@@ -262,7 +262,7 @@ export type ExtractionArtifactKind =
   | 'slide'
   | 'transcript'
   | 'image_description'
-  /** The source's own reading of the item (RawItem.providerText), used because no reader produced text. */
+  // The source's own reading of the item (RawItem.providerText), used because no reader produced text.
   | 'provider_text';
 
 /**

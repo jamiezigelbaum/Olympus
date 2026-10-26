@@ -18761,6 +18761,9 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
+// src/core/child-item-id.ts
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
 // src/workers/connector-store/child-visibility.ts
 function parentIdentityOf(child) {
   const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
@@ -18899,7 +18902,7 @@ function hiddenChildKeys(lane, probes) {
   }
   return childrenWithHiddenParents(lane, links);
 }
-var CHILD_ITEM_ID_SEPARATOR = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   HIDDEN = { visible: false, gone: false };
@@ -48545,6 +48548,7 @@ init_stop_errors();
 // src/workers/archive-import/xml-stream.ts
 var XML_STREAM_MAX_DEPTH = 256;
 var XML_STREAM_MAX_MARKUP_BYTES = 1024 * 1024;
+var XML_STREAM_RANGE_COST = 32;
 
 class XmlStreamError extends Error {
   code;
@@ -48742,12 +48746,7 @@ class XmlStreamReader {
               const open4 = this.top();
               if (piece.includes(AMP))
                 open4.element.rangeEntities = true;
-              const start = this.offset;
-              const last = open4.element.ranges[open4.element.ranges.length - 1];
-              if (last && last.end === start)
-                last.end = start + piece.length;
-              else
-                open4.element.ranges.push({ start, end: start + piece.length });
+              this.addRange(open4, this.offset, piece.length);
             } else if (this.keeping()) {
               this.keepText(piece, false);
             } else if (!this.inRecord() && this.stack.length === 0 && this.rootSeenName !== undefined) {
@@ -48815,6 +48814,7 @@ class XmlStreamReader {
           if (byte === GT2 && this.markup.length >= 2 && this.markup[this.markup.length - 1] === 45 && this.markup[this.markup.length - 2] === 45) {
             this.mode = "text";
             this.markup = [];
+            this.chargeSkipped();
             break;
           }
           this.markup.push(byte);
@@ -48829,6 +48829,7 @@ class XmlStreamReader {
           if (byte === GT2 && this.markup[this.markup.length - 1] === 63) {
             this.mode = "text";
             this.markup = [];
+            this.chargeSkipped();
             break;
           }
           this.markup.push(byte);
@@ -48901,15 +48902,23 @@ class XmlStreamReader {
     if (bytes.length === 0)
       return;
     if (this.inRange() && this.keeping()) {
-      const open4 = this.top();
-      const last = open4.element.ranges[open4.element.ranges.length - 1];
-      if (last && last.end === start)
-        last.end = start + bytes.length;
-      else
-        open4.element.ranges.push({ start, end: start + bytes.length });
+      this.addRange(this.top(), start, bytes.length);
       return;
     }
     this.keepText(bytes, true);
+  }
+  addRange(open4, start, length) {
+    const ranges = open4.element.ranges;
+    const last = ranges[ranges.length - 1];
+    if (last && last.end === start) {
+      last.end = start + length;
+      return;
+    }
+    ranges.push({ start, end: start + length });
+    this.count(XML_STREAM_RANGE_COST);
+  }
+  chargeSkipped() {
+    this.count(this.offset - this.markupStart);
   }
   countMarkupLength() {
     if (this.offset - this.markupStart > XML_STREAM_MAX_MARKUP_BYTES)
@@ -49044,6 +49053,7 @@ var BASE64 = (() => {
     table[alphabet.charCodeAt(index)] = index;
   return table;
 })();
+var EVERNOTE_MAX_RECOGNITION_BYTES = 8 * 1024 * 1024;
 
 // src/workers/archive-import/runtime.ts
 init_lane();

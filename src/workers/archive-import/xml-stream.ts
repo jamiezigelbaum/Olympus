@@ -41,6 +41,8 @@ import type { ArchiveByteSource } from './byte-source.ts';
 export const XML_STREAM_MAX_DEPTH = 256;
 /** The longest tag, comment, processing instruction or declaration the reader takes. */
 export const XML_STREAM_MAX_MARKUP_BYTES = 1024 * 1024;
+/** What one kept range of a range element costs a record, against its byte budget: its own bookkeeping. */
+export const XML_STREAM_RANGE_COST = 32;
 
 export type XmlStreamErrorCode = 'invalid_xml' | 'truncated' | 'too_deep';
 
@@ -301,10 +303,7 @@ export class XmlStreamReader {
             if (this.inRange() && this.keeping()) {
               const open = this.top()!;
               if (piece.includes(AMP)) open.element.rangeEntities = true;
-              const start = this.offset;
-              const last = open.element.ranges![open.element.ranges!.length - 1];
-              if (last && last.end === start) last.end = start + piece.length;
-              else open.element.ranges!.push({ start, end: start + piece.length });
+              this.addRange(open, this.offset, piece.length);
             } else if (this.keeping()) {
               this.keepText(piece, false);
             } else if (!this.inRecord() && this.stack.length === 0 && this.rootSeenName !== undefined) {
@@ -371,6 +370,7 @@ export class XmlStreamReader {
           if (byte === GT && this.markup.length >= 2 && this.markup[this.markup.length - 1] === 0x2d && this.markup[this.markup.length - 2] === 0x2d) {
             this.mode = 'text';
             this.markup = [];
+            this.chargeSkipped();
             break;
           }
           this.markup.push(byte);
@@ -384,6 +384,7 @@ export class XmlStreamReader {
           if (byte === GT && this.markup[this.markup.length - 1] === 0x3f) {
             this.mode = 'text';
             this.markup = [];
+            this.chargeSkipped();
             break;
           }
           this.markup.push(byte);
@@ -451,14 +452,32 @@ export class XmlStreamReader {
   private cdataText(bytes: Uint8Array, start: number): void {
     if (bytes.length === 0) return;
     if (this.inRange() && this.keeping()) {
-      const open = this.top()!;
       // CDATA bytes are the text as written: a range over them reads them as they are.
-      const last = open.element.ranges![open.element.ranges!.length - 1];
-      if (last && last.end === start) last.end = start + bytes.length;
-      else open.element.ranges!.push({ start, end: start + bytes.length });
+      this.addRange(this.top()!, start, bytes.length);
       return;
     }
     this.keepText(bytes, true);
+  }
+
+  /**
+   * Where a range element's raw text is: joined to the last range when it goes on from it, else a new range.
+   * The text is not held, so it is not charged; each range kept is (XML_STREAM_RANGE_COST), so text cut into
+   * many pieces (by comments, say) cannot grow a record's bookkeeping past its budget.
+   */
+  private addRange(open: Building, start: number, length: number): void {
+    const ranges = open.element.ranges!;
+    const last = ranges[ranges.length - 1];
+    if (last && last.end === start) {
+      last.end = start + length;
+      return;
+    }
+    ranges.push({ start, end: start + length });
+    this.count(XML_STREAM_RANGE_COST);
+  }
+
+  /** Markup skipped inside a record (a comment, a processing instruction) is charged to it as read. */
+  private chargeSkipped(): void {
+    this.count(this.offset - this.markupStart);
   }
 
   private countMarkupLength(): void {

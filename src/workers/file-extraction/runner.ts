@@ -1309,7 +1309,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   };
 }
 
-/** The most of a source's own reading that becomes an item's text: the bounded text reader's own limit. */
+// The most of a source's own reading that becomes an item's text: the bounded text reader's own limit.
 export const EXTRACTION_PROVIDER_TEXT_MAX_CHARS = 1_000_000;
 
 /**

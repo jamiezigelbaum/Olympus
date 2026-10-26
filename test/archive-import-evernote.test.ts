@@ -21,7 +21,7 @@ import type { RawItem } from '../src/core/contracts.ts';
 import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { createEvernoteArchiveConnector, enexTime } from '../src/workers/archive-import/evernote/connector.ts';
 import { enmlToText } from '../src/workers/archive-import/evernote/enml.ts';
-import { recognizedText } from '../src/workers/archive-import/evernote/recognition.ts';
+import { RECOGNITION_MAX_ALTERNATIVES, RECOGNITION_MAX_PLACES, recognizedText } from '../src/workers/archive-import/evernote/recognition.ts';
 import { archiveAccountConnector } from '../src/workers/archive-import/extraction-source.ts';
 import { registerArchiveFormatConnectors } from '../src/workers/archive-import/format-connectors.ts';
 import { probeArchivePath } from '../src/workers/archive-import/manifest.ts';
@@ -287,5 +287,27 @@ describe('a whole import under Archives', () => {
     const bytes = await (reading as unknown as { fetchItemWithin: (id: string, o: object) => Promise<RawItem> })
       .fetchItemWithin(`${started.archiveId}:${photo.identity.providerItemId}`, { maxBytes: 1_000_000, deferredBytes: { locator: photo.deferredBytes!.locator } });
     expect(bytes.content.kind === 'bytes' ? Array.from(bytes.content.bytes) : []).toEqual(Array.from(pngBytes(1)));
+  });
+});
+
+describe('Evernote\'s reading of a large attachment', () => {
+  test('a 4.8 MB reading on one line is read in one pass, and stops at its cap of words', () => {
+    const items = Array.from({ length: 60_000 }, (_, index) => `<item x="${index * 10}" y="5" w="9" h="10"><t w="90">word${index}</t><t w="10">alt${index}</t></item>`).join('');
+    const reco = `<recoIndex>${items}</recoIndex>`;
+    expect(reco.length).toBeGreaterThan(4_800_000);
+    const started = Date.now();
+    const read = recognizedText(reco);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(read.words).toBe(RECOGNITION_MAX_PLACES);
+    expect(read.text.split('\n')).toHaveLength(1);
+    expect(read.text.startsWith('word0 word1 word2')).toBe(true);
+    expect(read.alternatives.length).toBeLessThanOrEqual(RECOGNITION_MAX_ALTERNATIVES);
+  });
+
+  test('items that never close are not looked at again and again', () => {
+    const reco = `<recoIndex>${'<item x="1" y="1" h="1"><t w="5">open'.repeat(200_000)}</recoIndex>`;
+    const started = Date.now();
+    expect(recognizedText(reco)).toEqual({ text: '', words: 0, alternatives: [] });
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 });
