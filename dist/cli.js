@@ -62731,7 +62731,8 @@ function parentLabelReleaseInputs(dependencies) {
       providerItemId: parent.providerItemId,
       ...parent.providerConversationId ? { providerConversationId: parent.providerConversationId } : {},
       privateAtAnswer: dependency.private,
-      layer: "names"
+      layer: "names",
+      dependency: "parent_label"
     });
   }
   return [...seen.values()];
@@ -118371,7 +118372,7 @@ function recheckRelease(evidence, manifests, check) {
     return { withhold: REMOTE_ANSWER_UNVERIFIED };
   for (const [index, { input, manifest: manifest2 }] of inputs.entries()) {
     const verdict = verdicts[index];
-    if (input.layer === "names" && verdict.gone)
+    if (input.dependency === "parent_label" && verdict.gone)
       return { withhold: REMOTE_ANSWER_UNVERIFIED };
     if (!privateInputReleaseAllowed(input, verdict, manifest2.constraints, postureNow))
       return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
@@ -118389,7 +118390,7 @@ function recheckRelease(evidence, manifests, check) {
   return { dropped };
 }
 function citesInput(entry, input) {
-  return input.layer !== "names" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
+  return input.dependency !== "parent_label" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
 }
 function citationOutput(entry) {
   const title = scannedText(entry.title, MAX_TITLE, "line");
@@ -166964,13 +166965,13 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault) {
         }
         const lane = childLane(scope);
         if (lane) {
-          const orphaned = hiddenChildKeys(lane, governed.filter(({ index }) => inputs[index].layer !== "names").map(({ identity: identity2 }) => identity2));
+          const orphaned = hiddenChildKeys(lane, governed.filter(({ index }) => inputs[index].dependency !== "parent_label").map(({ identity: identity2 }) => identity2));
           for (const { index, identity: identity2 } of governed) {
-            if (inputs[index].layer !== "names" && orphaned.has(tierLedgerIdentityKey(identity2))) {
+            if (inputs[index].dependency !== "parent_label" && orphaned.has(tierLedgerIdentityKey(identity2))) {
               verdicts[index] = { ...verdicts[index], gone: true, hiddenByParent: true };
             }
           }
-          const named = governed.filter(({ index }) => inputs[index].layer === "names");
+          const named = governed.filter(({ index }) => inputs[index].dependency === "parent_label");
           if (named.length > 0) {
             const standing = itemVerdicts(lane, named.map(({ identity: identity2 }) => identity2));
             for (const { index, identity: identity2 } of named) {

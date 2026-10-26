@@ -284,6 +284,7 @@ export function parentLabelReleaseInputs(dependencies: readonly ParentLabelDepen
       ...(parent.providerConversationId ? { providerConversationId: parent.providerConversationId } : {}),
       privateAtAnswer: dependency.private,
       layer: 'names',
+      dependency: 'parent_label',
     });
   }
   return [...seen.values()];
