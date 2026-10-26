@@ -301,6 +301,8 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
                 ...(deleted || (before?.tombstoned === true && !hasContent(item)) ? { tombstoned: true as const } : {}),
                 // A write still owed at this very version stays owed for the records after it in the pass.
                 ...(before?.incomplete === true && before.version === item.identity.sourceVersion ? { incomplete: true as const } : {}),
+                // The body it owes stays owed to the records after this one, until a record brings it.
+                ...(before?.incomplete === true && before.version === item.identity.sourceVersion && before.owedBodyVersion !== undefined && !hasContent(item) ? { owedBodyVersion: before.owedBodyVersion } : {}),
               });
               units.push({ record: offset + position, entry: index, parent: entries[0]!.identity.localItemId, item });
             });
