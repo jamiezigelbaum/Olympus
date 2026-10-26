@@ -59,7 +59,7 @@ import type {
 } from './types.ts';
 
 export const FILE_EXTRACTION_JOBS_STORE_ID = 'file-extraction-jobs';
-export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 5;
+export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 6;
 export { defaultFileExtractionJobsDbPath };
 
 /**
@@ -1419,6 +1419,25 @@ export class LocalFileExtractionJobStore {
     return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
   }
 
+  /**
+   * Whether an item's text is still owed by extraction: it has no job yet
+   * (listed, not yet queued) or a job that is queued, leased or waiting to
+   * retry, and no job already read it. Any other outcome (read, metadata
+   * only, unsupported, too large, blocked, failed for good) means no text is
+   * coming, so the privacy check does not wait for it. Scoped by the item's
+   * identity alone: a set's stores share one provider item id.
+   */
+  itemTextOwed(item: { provider: string; accountScope: string; providerItemId: string }): boolean {
+    const rows = this.db.query(`
+      SELECT DISTINCT status FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+    `).all(item.provider, item.accountScope, item.providerItemId) as Array<{ status: string }>;
+    if (rows.length === 0) return true;
+    const statuses = new Set(rows.map((row) => row.status));
+    if (statuses.has('indexed')) return false;
+    return statuses.has('queued') || statuses.has('leased') || statuses.has('failed_retryable');
+  }
+
   private unreadJobsQuery(request: UnreadExtractionJobsRequest): { sql: string; params: string[] } {
     const lane = requireLaneKey(request);
     const extractorKind = requireToken(request.extractorKind, 'extractorKind');
@@ -2202,6 +2221,18 @@ function fileExtractionJobMigrations(): SqliteMigration[] {
         CREATE TABLE IF NOT EXISTS ${SECRET_RESTORED_REREADS_TABLE} (
           job_id TEXT PRIMARY KEY
         );
+      `);
+    },
+  }, {
+    version: 6,
+    name: 'add_extraction_jobs_identity_index',
+    up(db) {
+      // itemTextOwed looks an item up by identity alone, once per pending
+      // item on each privacy-check recovery pass: bounded by the page, not
+      // by the size of the extraction history.
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_identity
+          ON extraction_jobs(provider, account_scope, provider_item_id, status);
       `);
     },
   }];
