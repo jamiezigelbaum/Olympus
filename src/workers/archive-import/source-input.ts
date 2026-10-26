@@ -90,5 +90,7 @@ export function holdingItems(connector: SourceConnector): SourceConnector {
       }
     })();
   };
+  // The fetched item replaces the listed one in the store, so it is held the same way.
+  held.fetchItem = async (localItemId, options) => ({ ...(await connector.fetchItem(localItemId, options)), holdContentUntilJudged: true });
   return held;
 }
