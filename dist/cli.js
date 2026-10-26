@@ -101940,9 +101940,10 @@ async function runWhatsAppMediaFetch(options) {
     return had;
   };
   const takeBack = (row) => {
-    const hadFile = removeFiles(row);
-    if (row.done || hadFile)
-      settleFetchedChild(options, row);
+    state.markRevoking(row.key);
+    if (!settleFetchedChild(options, row))
+      return;
+    removeFiles(row);
     state.forget(row.key);
     result.dropped += 1;
   };
@@ -101954,6 +101955,10 @@ async function runWhatsAppMediaFetch(options) {
   const toFill = [];
   let bridgeReachable = true;
   for (const row of state.all()) {
+    if (row.revoking) {
+      takeBack(row);
+      continue;
+    }
     const verdict = judge2(options, row);
     if (verdict === "secret") {
       takeBack(row);
@@ -102022,11 +102027,13 @@ async function runWhatsAppMediaFetch(options) {
       const record2 = fillRecord(options.spoolDir, row, path);
       if (!record2)
         continue;
+      await options.tierSet.finishWritesCutOff();
+      await options.tierSet.sweepOrphanedChildren();
       const outcome = await options.tierSet.ledger.holdingWrites(async () => {
         const before = judge2(options, row);
         if (before !== "clear")
           return before;
-        await options.tierSet.sync(inputConnector(builder, fillInput(record2)), options.sync);
+        await options.tierSet.sync(inputConnector(builder, fillInput(record2)), options.sync, { embed: false, settle: false });
         return judge2(options, row);
       });
       if (outcome === "secret") {
@@ -102066,40 +102073,47 @@ function parentOf(options, row) {
 }
 function settleFetchedChild(options, row) {
   if (!isWhatsAppChildMediaType(row.media.mediaType))
-    return;
+    return true;
   const { tierSet } = options;
   const child = { ...parentOf(options, row), providerItemId: childProviderItemId(row.id, "media") };
+  const copies = () => tierSet.openStores().flatMap((store) => {
+    const copy = store.exportItemCopy(child);
+    return copy ? [{ store, copy }] : [];
+  });
   const record2 = tierSet.ledger.getCurrent(child);
-  if (!record2 || isSecret(record2))
-    return;
-  const exported = tierSet.openStores().map((store) => store.exportItemCopy(child)).find((copy) => copy !== undefined);
-  if (!exported)
-    return;
-  const decision = {
-    ...record2,
-    metadataTier: "secrets",
-    contentTier: "secrets",
-    decidedBy: "secret_detector",
-    reasons: ["content:secret:fetched_media_parent_secret"],
-    snifferId: "undecided",
-    state: "current",
-    contentRead: true,
-    metadataPending: false,
-    contentPending: false
-  };
-  const finding = { findingKinds: ["fetched_media_parent_secret"] };
-  const locations = tierSet.secrets();
-  if (record2.routed) {
-    settleRoutedSecrets(tierSet, child, decision, exported, finding);
-  } else if (locations) {
-    settleLegacySecrets({ ledger: tierSet.ledger, stores: tierSet.openStores(), locations, identity: child, decision });
-  } else {
-    for (const store of tierSet.openStores())
-      if (store.exportItemCopy(child))
-        store.tombstoneCopy(exported.identity, { connectorId: WHATSAPP_MEDIA_FETCH_INPUT_ID, trustTier: "S5" });
-    tierSet.ledger.recordDecision(child, decision);
+  const held = copies();
+  if (!record2 && held.length === 0)
+    return true;
+  const exported = held[0]?.copy;
+  if (record2 && !isSecret(record2) && exported) {
+    const decision = {
+      ...record2,
+      metadataTier: "secrets",
+      contentTier: "secrets",
+      decidedBy: "secret_detector",
+      reasons: ["content:secret:fetched_media_parent_secret"],
+      snifferId: "undecided",
+      state: "current",
+      contentRead: true,
+      metadataPending: false,
+      contentPending: false
+    };
+    const finding = { findingKinds: ["fetched_media_parent_secret"] };
+    const locations = tierSet.secrets();
+    if (record2.routed) {
+      settleRoutedSecrets(tierSet, child, decision, exported, finding);
+    } else if (locations) {
+      settleLegacySecrets({ ledger: tierSet.ledger, stores: tierSet.openStores(), locations, identity: child, decision });
+    } else {
+      for (const { store, copy } of held)
+        store.tombstoneCopy(copy.identity, { connectorId: WHATSAPP_MEDIA_FETCH_INPUT_ID, trustTier: "S5" });
+      tierSet.ledger.recordDecision(child, decision);
+    }
+    forgetSecretInSideStores({ ledger: tierSet.ledger, identity: { ...child, localItemId: exported.identity.localItemId } });
   }
-  forgetSecretInSideStores({ ledger: tierSet.ledger, identity: { ...child, localItemId: exported.identity.localItemId } });
+  for (const { store, copy } of copies())
+    store.tombstoneCopy(copy.identity, { connectorId: WHATSAPP_MEDIA_FETCH_INPUT_ID, trustTier: "S5" });
+  return isSecret(tierSet.ledger.getCurrent(child)) && copies().length === 0;
 }
 
 class WhatsAppMediaFetchState {
@@ -102117,7 +102131,8 @@ class WhatsAppMediaFetchState {
       stem TEXT NOT NULL,
       version TEXT NOT NULL,
       media_json TEXT NOT NULL,
-      done INTEGER NOT NULL DEFAULT 0
+      done INTEGER NOT NULL DEFAULT 0,
+      revoking INTEGER NOT NULL DEFAULT 0
     )`);
     return new WhatsAppMediaFetchState(db);
   }
@@ -102136,11 +102151,14 @@ class WhatsAppMediaFetchState {
   finish(key2) {
     this.db.query("UPDATE media SET done = 1 WHERE key = ?").run(key2);
   }
+  markRevoking(key2) {
+    this.db.query("UPDATE media SET revoking = 1 WHERE key = ?").run(key2);
+  }
   forget(key2) {
     this.db.query("DELETE FROM media WHERE key = ?").run(key2);
   }
   all() {
-    return this.db.query("SELECT key, stem, version, media_json, done FROM media ORDER BY rowid").all().map(toRow);
+    return this.db.query("SELECT key, stem, version, media_json, done, revoking FROM media ORDER BY rowid").all().map(toRow);
   }
   waitingCount() {
     return this.db.query("SELECT COUNT(*) AS n FROM media WHERE done = 0").get().n;
@@ -102149,7 +102167,7 @@ class WhatsAppMediaFetchState {
     closeSqliteStore(this.db);
   }
   rowsOf(stem) {
-    return this.db.query("SELECT key, stem, version, media_json, done FROM media WHERE stem = ?").all(stem).map(toRow);
+    return this.db.query("SELECT key, stem, version, media_json, done, revoking FROM media WHERE stem = ?").all(stem).map(toRow);
   }
 }
 function versionDigestOf(version) {
@@ -102170,7 +102188,8 @@ function toRow(row) {
     versionDigest,
     filePrefix: whatsAppFetchedMediaName(row.stem, versionDigest, ""),
     media,
-    done: row.done === 1
+    done: row.done === 1,
+    revoking: row.revoking === 1
   };
 }
 function judge2(options, row) {

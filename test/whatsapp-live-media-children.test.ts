@@ -38,6 +38,7 @@ import {
 import { createServer, type Server } from 'node:net';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
+import { withFileLease } from '../src/core/file-lease.ts';
 import { createHash } from 'node:crypto';
 import { whatsAppExtractionSourceFactory } from '../src/workers/whatsapp/extraction-factory.ts';
 import type { RawItem } from '../src/core/contracts.ts';
@@ -947,6 +948,121 @@ describe('review round 9 on #558: Olympus asks the bridge for the exact version,
       expect(searchable(target, 'Lighthousemarker')).toEqual([]);
       expect(target.ledger.getCurrent(childIdentity('A1'))?.contentTier).toBe('secrets');
       expect(existsSync(fetchedPath(target, 'A1'))).toBe(false);
+    });
+
+    test('review round 11: a take-back cut off before its tombstone is taken up again; nothing stays searchable', async () => {
+      const target = lane();
+      append(target, waitingLine('A1', { text: 'see you at eight' }));
+      await target.pull();
+      // The fill lands and is extracted, and its message turns Secret before the fill is done; the first tombstone
+      // write of the take-back then fails.
+      let failures = 1;
+      const failingStore = (store: ReturnType<typeof target.set.openStores>[number]) => new Proxy(store, {
+        get: (inner, key) => (key === 'tombstoneCopy' && failures > 0
+          ? () => {
+            failures -= 1;
+            throw new Error('disk I/O error');
+          }
+          : Reflect.get(inner, key, inner)),
+      });
+      const racing = new Proxy(target.set, {
+        get: (set, key) => {
+          if (key === 'sync') {
+            return async (...args: Parameters<typeof set.sync>) => {
+              const run = await set.sync(...args);
+              await extract(target, 'A1', 'Lighthousemarker on the quay');
+              judgeSecret(target, 'A1');
+              return run;
+            };
+          }
+          if (key === 'openStores') return () => set.openStores().map(failingStore);
+          if (key === 'store') return (...args: Parameters<typeof set.store>) => {
+            const store = set.store(...args);
+            return store ? failingStore(store) : store;
+          };
+          return Reflect.get(set, key, set);
+        },
+      });
+      await expect(pass(target, bridge().call, { set: racing })).rejects.toThrow('disk I/O error');
+      // Nothing was deleted ahead of the settlement: the file is still there, and the take-back is owed.
+      expect(existsSync(fetchedPath(target, 'A1'))).toBe(true);
+      expect(searchable(target, 'Lighthousemarker').length).toBeGreaterThan(0);
+      const { asked, call } = bridge();
+      await pass(target, call);
+      expect(searchable(target, 'Lighthousemarker')).toEqual([]);
+      expect(target.ledger.getCurrent(childIdentity('A1'))?.contentTier).toBe('secrets');
+      expect(existsSync(fetchedPath(target, 'A1'))).toBe(false);
+      expect(asked).toEqual([]);
+      const state = WhatsAppMediaFetchState.open(target.spoolDir);
+      try {
+        expect(state.all()).toEqual([]);
+      } finally {
+        state.close();
+      }
+    });
+
+    test('review round 11: the hold covers one record\'s publication only, never a wait for the embedding lease', async () => {
+      const target = lane();
+      append(target, waitingLine('E1', { text: 'the harbour' }));
+      await target.pull();
+      // Another embedder holds the store's embedding lease for the whole pass.
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      let leased!: () => void;
+      const holding = new Promise<void>((resolve) => { leased = resolve; });
+      const lease = withFileLease(`${join(target.root, 'whatsapp.db')}.embedding`, async () => {
+        leased();
+        await released;
+      });
+      await holding;
+      try {
+        const started = Date.now();
+        expect((await pass(target)).filled).toBe(1);
+        expect(Date.now() - started).toBeLessThan(5_000);
+      } finally {
+        release();
+        await lease;
+      }
+    }, 30_000);
+
+    test('review round 11: inside the hold, only the fill is synced: no embedding, no other settlement, sweeps before', async () => {
+      const target = lane();
+      append(target, waitingLine('E2', { text: 'the harbour' }));
+      await target.pull();
+      const order: string[] = [];
+      const logged = new Proxy(target.set, {
+        get: (set, key) => {
+          if (key === 'finishWritesCutOff' || key === 'sweepOrphanedChildren') {
+            return async () => {
+              order.push(String(key));
+              return (set[key] as () => Promise<unknown>).call(set);
+            };
+          }
+          if (key === 'sync') {
+            return async (...args: Parameters<typeof set.sync>) => {
+              order.push(`sync ${JSON.stringify(args[2] ?? {})}`);
+              return set.sync(...args);
+            };
+          }
+          if (key === 'ledger') {
+            return new Proxy(set.ledger, {
+              get: (ledger, member) => (member === 'holdingWrites'
+                ? async <T>(work: () => Promise<T>) => {
+                  order.push('hold');
+                  try {
+                    return await ledger.holdingWrites(work);
+                  } finally {
+                    order.push('released');
+                  }
+                }
+                : Reflect.get(ledger, member, ledger)),
+            });
+          }
+          return Reflect.get(set, key, set);
+        },
+      });
+      expect((await pass(target, bridge().call, { set: logged })).filled).toBe(1);
+      expect(order).toEqual(['finishWritesCutOff', 'sweepOrphanedChildren', 'hold', 'sync {"embed":false,"settle":false}', 'released']);
     });
 
     test('a picture whose own names are still being judged waits', async () => {

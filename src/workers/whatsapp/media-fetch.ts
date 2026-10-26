@@ -27,17 +27,20 @@
  *      the picture's or video's child, or the voice note itself, and nothing
  *      else (no caption goes out this way). Each fill is fenced: under the
  *      ledger's write hold (`holdingWrites`), step 1 is checked once more,
- *      the fill is synced, and step 1 is checked again; a decision another
+ *      the fill alone is synced (no embedding, no other settlement; what a
+ *      sync sweeps besides runs before the hold), and step 1 is checked again; a decision another
  *      process makes waits for the hold, and one made in this process
  *      meanwhile is seen by the last check, which takes the fill back at
  *      once. Extraction and judgment follow as for any media. A row is done
  *      only once the stores are seen to hold the file at that version.
  *
  * On every pass, a row of a message that is now Secret (the message or its
- * media) is taken back: a picture's or video's child that was filled is made
- * Secret through the one Secrets path (`settleRoutedSecrets`: its copies,
- * chunks, embeddings and extraction-job names go), its file is deleted and
- * the folder fsynced, and only then is the row forgotten. A row stored at
+ * media) is taken back. The row is marked first, so the take-back is owed
+ * until it is confirmed. The picture's or video's child is made Secret
+ * through the one Secrets path (`settleRoutedSecrets`; its copies, chunks,
+ * embeddings and extraction-job names go), whether or not the file is still
+ * there. Once that is confirmed, the file is deleted and the folder fsynced,
+ * and the row is forgotten last. A row stored at
  * another version loses its file but is kept, so a Secret later still takes
  * its child back; one whose message is gone is forgotten. A file in the
  * folder that no row names is deleted. The clearing deletes a fetched copy
@@ -182,11 +185,14 @@ export async function runWhatsAppMediaFetch(options: WhatsAppMediaFetchOptions):
     }
     return had;
   };
-  // A Secret takes everything back: what the fill made searchable through the one Secrets path, then the file,
-  // and the row only once both are durable.
+  // A Secret takes everything back, in this order: the row is marked first (a take-back owed, whatever is judged
+  // later); what a fill made searchable is settled through the one Secrets path, whether or not the file is still
+  // there; only once that is confirmed is the file deleted, and the row forgotten last. One cut off anywhere is
+  // taken up again by the next pass.
   const takeBack = (row: WaitingMediaRow): void => {
-    const hadFile = removeFiles(row);
-    if (row.done || hadFile) settleFetchedChild(options, row);
+    state.markRevoking(row.key);
+    if (!settleFetchedChild(options, row)) return;
+    removeFiles(row);
     state.forget(row.key);
     result.dropped += 1;
   };
@@ -198,6 +204,10 @@ export async function runWhatsAppMediaFetch(options: WhatsAppMediaFetchOptions):
   const toFill: Array<{ row: WaitingMediaRow; path: string }> = [];
   let bridgeReachable = true;
   for (const row of state.all()) {
+    if (row.revoking) {
+      takeBack(row);
+      continue;
+    }
     const verdict = judge(options, row);
     if (verdict === 'secret') {
       takeBack(row);
@@ -260,11 +270,16 @@ export async function runWhatsAppMediaFetch(options: WhatsAppMediaFetchOptions):
     for (const { row, path } of toFill) {
       const record = fillRecord(options.spoolDir, row, path);
       if (!record) continue;
-      // Fenced, one item at a time: no decision lands between the last check and the store write.
+      // What a sync does besides its own records runs before the hold, so the hold covers one record's
+      // publication only: writes a cut-off pass still owes, and the children of parents that are gone.
+      await options.tierSet.finishWritesCutOff();
+      await options.tierSet.sweepOrphanedChildren();
+      // Fenced, one item at a time: no decision lands between the last check and the store write. The fill embeds
+      // nothing (a filled child has no text until extraction reads it) and settles nothing else.
       const outcome = await options.tierSet.ledger.holdingWrites(async () => {
         const before = judge(options, row);
         if (before !== 'clear') return before;
-        await options.tierSet.sync(inputConnector(builder, fillInput(record)), options.sync);
+        await options.tierSet.sync(inputConnector(builder, fillInput(record)), options.sync, { embed: false, settle: false });
         return judge(options, row);
       });
       if (outcome === 'secret') {
@@ -312,44 +327,56 @@ function parentOf(options: WhatsAppMediaFetchOptions, row: WaitingMediaRow) {
  * path, as a landing or a re-judgment that found a Secret settles one (a
  * routed row through its copy ledger, an older row by every copy a store
  * holds): its copies are tombstoned, with their chunks and embeddings, and
- * its extraction jobs and queued questions forget it. A child already Secret, or never routed, has
- * nothing to take back here. A voice note is its message: its own Secret
- * already took it.
+ * its extraction jobs and queued questions forget it. It does not depend on
+ * the fetched file being there. True once that is confirmed: the child is
+ * Secret and no store holds an active copy of it (or it was never stored). A
+ * voice note is its message: its own Secret already took it.
  */
-function settleFetchedChild(options: WhatsAppMediaFetchOptions, row: WaitingMediaRow): void {
-  if (!isWhatsAppChildMediaType(row.media.mediaType)) return;
+function settleFetchedChild(options: WhatsAppMediaFetchOptions, row: WaitingMediaRow): boolean {
+  if (!isWhatsAppChildMediaType(row.media.mediaType)) return true;
   const { tierSet } = options;
   const child = { ...parentOf(options, row), providerItemId: childProviderItemId(row.id, 'media') };
+  const copies = () => tierSet.openStores().flatMap((store) => {
+    const copy = store.exportItemCopy(child);
+    return copy ? [{ store, copy }] : [];
+  });
   const record = tierSet.ledger.getCurrent(child);
-  if (!record || isSecret(record)) return;
-  const exported = tierSet.openStores().map((store) => store.exportItemCopy(child)).find((copy) => copy !== undefined);
-  if (!exported) return;
-  const decision: TierDecision = {
-    ...record,
-    metadataTier: 'secrets',
-    contentTier: 'secrets',
-    decidedBy: 'secret_detector',
-    reasons: ['content:secret:fetched_media_parent_secret'],
-    // No sniffer answered this: it follows from the message's own Secret.
-    snifferId: 'undecided',
-    state: 'current',
-    contentRead: true,
-    metadataPending: false,
-    contentPending: false,
-  };
-  const finding = { findingKinds: ['fetched_media_parent_secret'] };
-  const locations = tierSet.secrets();
-  if (record.routed) {
-    settleRoutedSecrets(tierSet, child, decision, exported, finding);
-  } else if (locations) {
-    // A row the set never routed has no copy ledger: every copy a store holds is tombstoned before the decision.
-    settleLegacySecrets({ ledger: tierSet.ledger, stores: tierSet.openStores(), locations, identity: child, decision });
-  } else {
-    for (const store of tierSet.openStores()) if (store.exportItemCopy(child)) store.tombstoneCopy(exported.identity, { connectorId: WHATSAPP_MEDIA_FETCH_INPUT_ID, trustTier: 'S5' });
-    tierSet.ledger.recordDecision(child, decision);
+  const held = copies();
+  // Never routed and never stored: nothing of it can be searched.
+  if (!record && held.length === 0) return true;
+  const exported = held[0]?.copy;
+  if (record && !isSecret(record) && exported) {
+    const decision: TierDecision = {
+      ...record,
+      metadataTier: 'secrets',
+      contentTier: 'secrets',
+      decidedBy: 'secret_detector',
+      reasons: ['content:secret:fetched_media_parent_secret'],
+      // No sniffer answered this: it follows from the message's own Secret.
+      snifferId: 'undecided',
+      state: 'current',
+      contentRead: true,
+      metadataPending: false,
+      contentPending: false,
+    };
+    const finding = { findingKinds: ['fetched_media_parent_secret'] };
+    const locations = tierSet.secrets();
+    if (record.routed) {
+      settleRoutedSecrets(tierSet, child, decision, exported, finding);
+    } else if (locations) {
+      // A row the set never routed has no copy ledger: every copy a store holds is tombstoned before the decision.
+      settleLegacySecrets({ ledger: tierSet.ledger, stores: tierSet.openStores(), locations, identity: child, decision });
+    } else {
+      for (const { store, copy } of held) store.tombstoneCopy(copy.identity, { connectorId: WHATSAPP_MEDIA_FETCH_INPUT_ID, trustTier: 'S5' });
+      tierSet.ledger.recordDecision(child, decision);
+    }
+    // The side stores (queued questions, extraction jobs' names) forget it too, as on any Secret landing.
+    forgetSecretInSideStores({ ledger: tierSet.ledger, identity: { ...child, localItemId: exported.identity.localItemId } });
   }
-  // The side stores (queued questions, extraction jobs' names) forget it too, as on any Secret landing.
-  forgetSecretInSideStores({ ledger: tierSet.ledger, identity: { ...child, localItemId: exported.identity.localItemId } });
+  // A settlement cut off after its decision leaves copies behind: they go now, as the policy would have taken them.
+  for (const { store, copy } of copies()) store.tombstoneCopy(copy.identity, { connectorId: WHATSAPP_MEDIA_FETCH_INPUT_ID, trustTier: 'S5' });
+  // Confirmed only when the child is Secret and no store holds an active copy of it.
+  return isSecret(tierSet.ledger.getCurrent(child)) && copies().length === 0;
 }
 
 interface WaitingMediaRow {
@@ -365,6 +392,8 @@ interface WaitingMediaRow {
   media: WhatsAppWaitingMedia;
   /** Filled, or never fetchable: nothing more is asked, but a Secret still takes its file back. */
   done: boolean;
+  /** A take-back is owed and not yet confirmed. */
+  revoking: boolean;
 }
 
 /**
@@ -384,7 +413,8 @@ export class WhatsAppMediaFetchState {
       stem TEXT NOT NULL,
       version TEXT NOT NULL,
       media_json TEXT NOT NULL,
-      done INTEGER NOT NULL DEFAULT 0
+      done INTEGER NOT NULL DEFAULT 0,
+      revoking INTEGER NOT NULL DEFAULT 0
     )`);
     return new WhatsAppMediaFetchState(db);
   }
@@ -413,12 +443,17 @@ export class WhatsAppMediaFetchState {
     this.db.query('UPDATE media SET done = 1 WHERE key = ?').run(key);
   }
 
+  /** A take-back is owed: kept until it is confirmed, whatever is judged meanwhile. */
+  markRevoking(key: string): void {
+    this.db.query('UPDATE media SET revoking = 1 WHERE key = ?').run(key);
+  }
+
   forget(key: string): void {
     this.db.query('DELETE FROM media WHERE key = ?').run(key);
   }
 
   all(): WaitingMediaRow[] {
-    return (this.db.query('SELECT key, stem, version, media_json, done FROM media ORDER BY rowid').all() as RawRow[]).map(toRow);
+    return (this.db.query('SELECT key, stem, version, media_json, done, revoking FROM media ORDER BY rowid').all() as RawRow[]).map(toRow);
   }
 
   waitingCount(): number {
@@ -430,7 +465,7 @@ export class WhatsAppMediaFetchState {
   }
 
   private rowsOf(stem: string): WaitingMediaRow[] {
-    return (this.db.query('SELECT key, stem, version, media_json, done FROM media WHERE stem = ?').all(stem) as RawRow[]).map(toRow);
+    return (this.db.query('SELECT key, stem, version, media_json, done, revoking FROM media WHERE stem = ?').all(stem) as RawRow[]).map(toRow);
   }
 }
 
@@ -440,6 +475,7 @@ interface RawRow {
   version: string;
   media_json: string;
   done: number;
+  revoking: number;
 }
 
 function versionDigestOf(version: string): string {
@@ -463,6 +499,7 @@ function toRow(row: RawRow): WaitingMediaRow {
     filePrefix: whatsAppFetchedMediaName(row.stem, versionDigest, ''),
     media,
     done: row.done === 1,
+    revoking: row.revoking === 1,
   };
 }
 

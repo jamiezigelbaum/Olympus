@@ -772,8 +772,10 @@ export's media are (section 5).
        follow as for any media.
 
     Each fill is fenced, one item at a time, under the ledger's write hold
-    (`TierLedger.holdingWrites`): step 1 is checked, the fill is synced, and
-    step 1 is checked again. A decision another process makes waits for
+    (`TierLedger.holdingWrites`): step 1 is checked, the fill alone is synced
+    (no embedding and no other settlement; writes a cut-off pass owes and
+    the orphaned-children sweep run before the hold), and step 1 is checked
+    again. A decision another process makes waits for
     the hold. One this process makes meanwhile is seen by the last check,
     which takes the fill back at once. A row is done only once the stores
     are seen to hold the file at that version, so a fill a sync did not land
@@ -782,12 +784,16 @@ export's media are (section 5).
     bridge sends a bare newline while a download runs: Olympus gives up
     only on a call that stalls, and never on one for its length.
   - **Take-back, every pass.** A row whose message is now Secret (the
-    message or its media) is taken back, done rows included. A filled
-    picture's or video's child is made Secret through the one Secrets path
-    (`settleRoutedSecrets`, or `settleLegacySecrets` for a row the set
-    never routed). Its copies, chunks and embeddings go, and the side
-    stores forget it. Its file is deleted and the folder fsynced before the
-    row is forgotten. A row stored at another version loses its file but is
+    message or its media) is taken back, done rows included. The row is
+    marked first, so the take-back is owed until it is confirmed, whatever
+    is judged meanwhile. The picture's or video's child is made Secret
+    through the one Secrets path (`settleRoutedSecrets`, or
+    `settleLegacySecrets` for a row the set never routed), whether or not the
+    file is still there. Its copies, chunks and embeddings go, and the side
+    stores forget it. Only once the child is confirmed Secret, with no active
+    copy anywhere, is its file deleted and the folder fsynced; the row is
+    forgotten last. A take-back cut off anywhere is taken up again by the
+    next pass. A row stored at another version loses its file but is
     kept, so a later Secret still takes its child back; one whose message
     is gone is forgotten. A file no row names is deleted. The clearing
     deletes a fetched copy whose media is judged Secret too, and every
