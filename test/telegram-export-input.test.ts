@@ -359,3 +359,53 @@ describe('review fixes (Astra, #553)', () => {
     expect(h.rows().filter((row) => row.conversation === 'account:contacts')).toHaveLength(4);
   });
 });
+
+describe('review fixes, round 3 (Astra, #553)', () => {
+  test('an untimed snapshot never replaces a timed one, even over a write the spine left incomplete', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    const snapshot = (name: string, day: string) => {
+      const value = telegramFullExport({
+        chats: [telegramChat({ id: GROUP_ID, messages: [telegramText(0, `a message on ${day}`, { extra: { date: `${day}T12:00:00`, date_unixtime: String(Date.parse(`${day}T12:00:00Z`) / 1000) } })] })],
+        contacts: 1,
+      });
+      (value.contacts as { list: Array<Record<string, unknown>> }).list[0]!.last_name = name;
+      return value;
+    };
+    const run = async (path: string) => {
+      const started = await h.startImport(path);
+      if (!started.ok || started.status !== 'started') throw new Error(JSON.stringify(started));
+      return h.importAll(started.archive_id);
+    };
+    const contactText = () => h.rows().filter((row) => row.conversation === 'account:contacts').map((row) => h.textOf(row.conversation, row.id)).join('\n');
+    await run(h.writeExport('June export', snapshot('June', '2026-06-01')));
+    expect(contactText()).toContain('June');
+    // One contact, so no place among others in its id (the scan counts contacts, not their fields).
+    expect(h.rows().filter((row) => row.conversation === 'account:contacts').map((row) => row.id.includes('~'))).toEqual([false]);
+    // The October import is cut off before the Private store writes.
+    const sync = h.stores.secureLocal.syncFromConnector.bind(h.stores.secureLocal);
+    let cut = true;
+    h.stores.secureLocal.syncFromConnector = ((...args: Parameters<typeof sync>) => {
+      if (cut) { cut = false; return Promise.reject(new Error('interrupted')); }
+      return sync(...args);
+    }) as typeof sync;
+    await run(h.writeExport('October export', snapshot('October', '2026-10-01'))).catch(() => undefined);
+    // The same export, older and with every time taken out: nothing in it says when it was made.
+    const untimed = (value: unknown): unknown => Array.isArray(value) ? value.map(untimed)
+      : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'date' && !key.endsWith('_unixtime')).map(([key, inner]) => [key, untimed(inner)]))
+      : value;
+    await run(h.writeExport('Stale export', untimed(snapshot('Stale', '2026-01-01'))));
+    expect(contactText()).not.toContain('Stale');
+    const versions = h.rows().filter((row) => row.conversation === 'account:contacts').map((row) => row.version ?? '');
+    expect(versions.every((version) => /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(version))).toBe(true);
+  });
+
+  test('the order: untimed is older than any timed version, and equal only to itself', () => {
+    const timed = `${ACCOUNT}:account:contacts:k:text:abc:2026-06-01T12:00:00Z`;
+    const untimed = `${ACCOUNT}:account:contacts:k:text:def`;
+    expect(compareTelegramVersions(untimed, timed)).toBe(-1);
+    expect(compareTelegramVersions(timed, untimed)).toBe(1);
+    expect(compareTelegramVersions(untimed, `${ACCOUNT}:account:contacts:k:text:ghi`)).toBe(-1);
+    expect(compareTelegramVersions(untimed, untimed)).toBe(0);
+  });
+});

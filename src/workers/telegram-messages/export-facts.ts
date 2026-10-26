@@ -83,9 +83,10 @@ function contactOccurrencesOf(root: ScopeRoot, file: ArchiveFileEntry): Map<stri
   try {
     const json = new JsonStreamReader(telegramJsonSource(fileByteSource(reader)), {
       itemPaths: [
-        ...CONTACT_SECTIONS.map((section) => [section, 'list', '*']),
-        // Past the contact lists: the first of these ends the scan.
-        ['sessions', 'about'], ['web_sessions', 'about'], ['other_data'], ['chats', 'about'], ['left_chats', 'about'], ['messages', '*'],
+        // A path names the container: each contact is a child of its list, claimed whole.
+        ...CONTACT_SECTIONS.map((section) => [section, 'list']),
+        // Past the contact lists: the first child of any of these ends the scan.
+        ['sessions'], ['web_sessions'], ['other_data'], ['chats'], ['left_chats'], ['messages'],
       ],
       maxItemBytes: 1024 * 1024,
     });
