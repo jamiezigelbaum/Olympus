@@ -14639,6 +14639,7 @@ var init_vocabulary = __esm(() => {
       gmail_labels_unavailable: { one: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.", many: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now." },
       system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
       message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
+      match_near_miss: { one: "1 message may also be in the live chat, shown differently there (a renamed contact, an edited caption), so it was kept as its own", many: "{n} messages may also be in the live chat, shown differently there (a renamed contact, an edited caption), so each was kept as its own" },
       status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
       note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
       note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
@@ -14696,6 +14697,7 @@ var init_vocabulary = __esm(() => {
       message_content_unsupported: "not_imported",
       system_message: "how_read",
       message_empty: "how_read",
+      match_near_miss: "how_read",
       message_without_text: "how_read",
       status_updates: "not_imported",
       service_message: "not_imported",
@@ -20219,10 +20221,10 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "whatsapp.personal.messages",
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "optional exports", "exclude Status broadcasts"],
+      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once; WhatsApp notices left out)", "Status posts as their own kind"],
       dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
-      supported_formats: ["message text", "link previews", "reactions", "media metadata", "voice-note transcript sidecars"],
+      supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],
       doctor_lane: {
         provider: "whatsapp_personal",
         capability: "whatsapp.personal.messages.sync"

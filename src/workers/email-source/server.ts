@@ -405,7 +405,6 @@ import {
   type WhatsAppConnectorStoreSyncHandler,
 } from '../whatsapp/index.ts';
 import { createWhatsAppArchiveTarget } from '../whatsapp/archive-target.ts';
-import { archiveSourceTargets } from '../archive-import/source-targets.ts';
 import { readArchiveInputMedia } from '../archive-import/input-media.ts';
 import { SqliteSourceDashboardHistory, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
 import type { DashboardPanelTools } from './dashboard-panel-tools.ts';
@@ -463,7 +462,6 @@ import {
 import type { GmailApiClient } from '../google-connectors/gmail.ts';
 import { readSourceRegistry } from '../../core/source-registry.ts';
 import { gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
-import { archiveSourceTargets } from '../archive-import/source-targets.ts';
 import { createLaneTieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import {
   SourceAccountChangedError,
