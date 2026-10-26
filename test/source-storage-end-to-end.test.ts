@@ -21,11 +21,14 @@ import { dirname, join } from 'node:path';
 import {
   FOLDER_LAYOUT_SOURCES,
   accountFolder,
+  accountFolderEntry,
+  accountRawPath,
   accountStoreNames,
   legacyAccountFiles,
   legacyAccountPaths,
   olympusDataRoot,
   sharedDataPath,
+  type AccountRawName,
 } from '../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { readSourceRegistry } from '../src/core/source-registry.ts';
@@ -273,10 +276,17 @@ describe('source storage, end to end on this host', () => {
     seedAllFiles(layout);
     // The deleted source's Secrets redaction claims name its tier ledger by id, as the seeds give it.
     seedTierLedgerBeside(stores['dropbox.files']!, MINE);
-    // Olympus keeps its settings folder owner-only (the secret store refuses any other); the seeds' writers do not all make it so.
+    // Olympus keeps its settings folder owner-only and its parent not group-writable (the secret store refuses
+    // anything else); the seeds' writers make them with the process's umask.
+    chmodSync(env.XDG_CONFIG_HOME!, 0o755);
     chmodSync(join(env.XDG_CONFIG_HOME!, 'olympus'), 0o700);
     const shared = Object.fromEntries(SEEDED_FOR_MINE.map((file) => [file.stepId, { mine: file.left(layout, MINE), other: file.left(layout, OTHER) }]));
 
+    const telegram = { source_id: 'telegram.messages', slot: '1', layout: 'folder' } as const;
+    const telegramTargets = legacyAccountFiles('telegram.messages', env)
+      .filter((file) => file.area === 'raw')
+      .map((file) => (file.folderPath ? accountFolderEntry(telegram, file.folderPath, env) : accountRawPath(telegram, file.name as AccountRawName, env)));
+    expect(telegramTargets.length).toBeGreaterThan(2);
     const first = await boot(env);
     try {
       const output = first.output();
@@ -292,6 +302,25 @@ describe('source storage, end to end on this host', () => {
     } finally {
       await first.stop();
     }
+
+    // The raw state arrived in each folder, not only left its old place.
+    const arrived = (sourceId: string, rel: string): string => join(accountFolder({ source_id: sourceId, slot: '1' }, env), rel);
+    for (const [sourceId, rel] of [
+      ['local.files', 'raw/watch/snapshot.json'],
+      ['x.bookmarks', 'raw/x-reconcile.sqlite'],
+      ['archive.imports', 'raw/archive-imports.json'],
+      ['archive.imports', 'stores/email.secure_local.sqlite'],
+      ['telegram.messages', 'stores/internal.sqlite'],
+      ['telegram.messages', 'stores/secure_local.sqlite'],
+      ['whatsapp.personal.messages', 'stores/secure_local.sqlite'],
+      ['whatsapp.personal.messages', 'stores/internal.sqlite'],
+      ['whatsapp.personal.messages', 'raw/whatsapp/session.db'],
+      ['whatsapp.personal.messages', 'raw/whatsapp/spool/2026-10-24.jsonl'],
+      ['whatsapp.personal.messages', 'raw/whatsapp/media/audio/voice.ogg'],
+    ] as const) expect(existsSync(arrived(sourceId, rel)), `${sourceId} ${rel}`).toBe(true);
+    // Every Telegram raw file the legacy layout names is in the folder under the name the layout gives it.
+    for (const to of telegramTargets) expect(existsSync(to), to).toBe(true);
+    expect(readFileSync(arrived('whatsapp.personal.messages', 'raw/whatsapp/spool/2026-10-24.jsonl'), 'utf8')).toBe('{"id":"M1"}\n');
 
     // Every account in its folder; nothing left at a legacy place.
     for (const sourceId of FOLDER_LAYOUT_SOURCES) {

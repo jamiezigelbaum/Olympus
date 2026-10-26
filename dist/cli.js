@@ -166938,7 +166938,8 @@ var init_tier_visibility = __esm(() => {
 import { linkSync as linkSync4, lstatSync as lstatSync45, mkdirSync as mkdirSync57, readdirSync as readdirSync22, realpathSync as realpathSync24, renameSync as renameSync20, rmdirSync as rmdirSync8, statSync as statSync36, unlinkSync as unlinkSync4 } from "node:fs";
 import { basename as basename18, dirname as dirname86, isAbsolute as isAbsolute34, join as join114, relative as relative13, resolve as resolve23, sep as sep16 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
-  return !MIGRATION_OFF.includes(env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "");
+  const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
+  return value2 === "" || MIGRATION_ON.includes(value2);
 }
 function candidates(sourceId, slot, env) {
   const account = { source_id: sourceId, slot, layout: "folder" };
@@ -167773,7 +167774,7 @@ function migrateAccountFolders(env = process.env, options = {}) {
   }
   return report;
 }
-var MIGRATE_ACCOUNT_FOLDERS_ENV = "OLYMPUS_MIGRATE_ACCOUNT_FOLDERS", ASSUMED_BYTES_PER_SECOND, MIGRATION_BUDGET_MS = 45000, QUICK_CHECK_BUDGET_MS = 15000, QUICK_CHECK_STORE_MAX_BYTES, QUICK_CHECK_TOTAL_MAX_BYTES, ACCOUNT_LOG_MAX_BYTES, LOCK_WAIT_CAP_MS = 2000, SKIP_REASONS, AccountMigrationKilled, __accountMigrationTestHooks, MIGRATION_OFF, MESSAGING_SOURCES, isMessaging = (sourceId) => MESSAGING_SOURCES.includes(sourceId), COMPANION_SUFFIXES, isCompanion = (path) => COMPANION_SUFFIXES.some((suffix) => path.endsWith(suffix)), checkpoint = (at) => __accountMigrationTestHooks.checkpoint?.(at), waitMs = (ctx) => Math.max(0, Math.min(LOCK_WAIT_CAP_MS, ctx.deadline - ctx.now())), limit = (name, fallback) => __accountMigrationTestHooks.limits?.[name] ?? fallback, NO_HARD_LINKS, syncFolder = (path) => (__accountMigrationTestHooks.syncDirectory ?? syncDirectorySync)(path), moveFile = (from, to, kind) => (__accountMigrationTestHooks.rename ?? moveWithoutReplacing)(from, to, kind), MoveFault, EntryChanged, skip = (reason, detail) => ({ kind: "skip", reason, detail }), isDisposable = (move) => move.from.endsWith("-shm") || (move.from.endsWith("-wal") || move.from.endsWith("-journal")) && move.size === 0, isPlanned = (found, move) => (found.kind === "file" || found.kind === "dir") && found.kind === move.kind && String(found.dev) === move.dev && String(found.ino) === move.ino;
+var MIGRATE_ACCOUNT_FOLDERS_ENV = "OLYMPUS_MIGRATE_ACCOUNT_FOLDERS", ASSUMED_BYTES_PER_SECOND, MIGRATION_BUDGET_MS = 45000, QUICK_CHECK_BUDGET_MS = 15000, QUICK_CHECK_STORE_MAX_BYTES, QUICK_CHECK_TOTAL_MAX_BYTES, ACCOUNT_LOG_MAX_BYTES, LOCK_WAIT_CAP_MS = 2000, SKIP_REASONS, AccountMigrationKilled, __accountMigrationTestHooks, MIGRATION_ON, MESSAGING_SOURCES, isMessaging = (sourceId) => MESSAGING_SOURCES.includes(sourceId), COMPANION_SUFFIXES, isCompanion = (path) => COMPANION_SUFFIXES.some((suffix) => path.endsWith(suffix)), checkpoint = (at) => __accountMigrationTestHooks.checkpoint?.(at), waitMs = (ctx) => Math.max(0, Math.min(LOCK_WAIT_CAP_MS, ctx.deadline - ctx.now())), limit = (name, fallback) => __accountMigrationTestHooks.limits?.[name] ?? fallback, NO_HARD_LINKS, syncFolder = (path) => (__accountMigrationTestHooks.syncDirectory ?? syncDirectorySync)(path), moveFile = (from, to, kind) => (__accountMigrationTestHooks.rename ?? moveWithoutReplacing)(from, to, kind), MoveFault, EntryChanged, skip = (reason, detail) => ({ kind: "skip", reason, detail }), isDisposable = (move) => move.from.endsWith("-shm") || (move.from.endsWith("-wal") || move.from.endsWith("-journal")) && move.size === 0, isPlanned = (found, move) => (found.kind === "file" || found.kind === "dir") && found.kind === move.kind && String(found.dev) === move.dev && String(found.ino) === move.ino;
 var init_source_account_migration = __esm(() => {
   init_archive_formats();
   init_atomic_file();
@@ -167821,7 +167822,7 @@ var init_source_account_migration = __esm(() => {
       delete this.limits;
     }
   };
-  MIGRATION_OFF = ["0", "false", "off", "no"];
+  MIGRATION_ON = ["1", "true", "on", "yes"];
   MESSAGING_SOURCES = [TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID];
   COMPANION_SUFFIXES = ["-wal", "-shm", "-journal"];
   NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
@@ -189757,6 +189758,9 @@ function replaceEmptyAccountsAtBoot(env) {
   }
 }
 function migrateAccountFoldersAtBoot(env, options = {}) {
+  if (!accountFolderMigrationEnabled(env)) {
+    console.log(`[storage] Moving accounts into their folders is off (OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=${env.OLYMPUS_MIGRATE_ACCOUNT_FOLDERS?.trim()}); a move already under way is still finished or undone.`);
+  }
   try {
     const report = migrateAccountFolders(env, options);
     for (const sourceId of report.moved)

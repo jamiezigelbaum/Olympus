@@ -230,17 +230,20 @@ export const __accountMigrationTestHooks: {
   },
 };
 
-/** The values of `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS` that turn the pass off; anything else, unset included, leaves it on. */
-const MIGRATION_OFF = ['0', 'false', 'off', 'no'];
+/** The values of `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS` that leave the pass on; unset and empty do too. */
+const MIGRATION_ON = ['1', 'true', 'on', 'yes'];
 
 /**
- * Whether this boot starts moves: on by default, off only when the worker's
- * environment says `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0` (or `false`, `off`,
- * `no`). The opt-out stays until release testing signs the migration off
+ * Whether this boot starts moves: on by default (unset, empty, `1`, `true`,
+ * `on`, `yes`). Any other value of `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS` turns it
+ * off, `0` the one the docs name: the switch exists to stop file moves, so a
+ * value it does not know (a typo) stops them rather than starting them. It
+ * stays until release testing signs the migration off
  * (docs/design/source-storage.md, step 4c's retirement list).
  */
 export function accountFolderMigrationEnabled(env: LayoutEnv = process.env): boolean {
-  return !MIGRATION_OFF.includes(env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? '');
+  const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? '';
+  return value === '' || MIGRATION_ON.includes(value);
 }
 
 const MESSAGING_SOURCES: readonly string[] = [TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID];

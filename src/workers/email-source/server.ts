@@ -2120,6 +2120,9 @@ export function replaceEmptyAccountsAtBoot(env: Record<string, string | undefine
  * leaves every account where it is and the worker boots as it always did.
  */
 export function migrateAccountFoldersAtBoot(env: Record<string, string | undefined>, options: AccountMigrationOptions = {}): AccountMigrationReport | undefined {
+  if (!accountFolderMigrationEnabled(env)) {
+    console.log(`[storage] Moving accounts into their folders is off (OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=${env.OLYMPUS_MIGRATE_ACCOUNT_FOLDERS?.trim()}); a move already under way is still finished or undone.`);
+  }
   try {
     const report = migrateAccountFolders(env, options);
     for (const sourceId of report.moved) console.log(`[storage] ${sourceId} moved into its account folder.`);

@@ -499,7 +499,9 @@ describe('on by default', () => {
     ['not set', undefined],
     ['empty', ''],
     ['1', '1'],
-    ['true', 'true'],
+    ['true', ' TRUE '],
+    ['on', 'on'],
+    ['yes', 'yes'],
   ])('%s: the boot moves an existing account into its folder', (_label, value) => {
     const { env } = fixture();
     install(env, 'dropbox.files');
@@ -515,7 +517,7 @@ describe('with the switch off', () => {
     ['0', '0'],
     ['false', 'false'],
     ['off', ' OFF '],
-    ['no', 'no'],
+    ['a value it does not know (a typo of an opt-out)', 'fasle'],
   ])('%s: the boot changes nothing, not a path, a byte or the registry', (_label, value) => {
     const { env, root } = fixture();
     for (const sourceId of migratableSources()) install(env, sourceId);
@@ -528,7 +530,7 @@ describe('with the switch off', () => {
     expect(tree(root)).toEqual(before);
     // Every account still resolves to the paths that were always there.
     expect(resolvedStorePath('dropbox.files', 'secure_local', switched)).toBe(join(root, 'dropbox-files-connector-store.sqlite'));
-  });
+  }, 30_000);
 
   test('a boot with no registry and no data folder writes nothing at all', () => {
     const { env, root } = fixture();

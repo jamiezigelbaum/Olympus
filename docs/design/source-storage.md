@@ -956,10 +956,12 @@ embeddings and watch snapshots move as files. Embedding changes stay
 owner-gated and this plan makes none.
 
 The pass runs at every worker boot by default (since 2026-10-26, owner
-direction 2026-10-25). `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0` (or `false`, `off`,
-`no`) in the worker's environment turns it off: no move starts, and the
-registry and every file are byte-identical to 4b's. A move already under way
-is finished or undone either way.
+direction 2026-10-25). `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0` in the worker's
+environment turns it off, and so does any value but unset, empty, `1`, `true`,
+`on` and `yes` (the switch exists to stop moves, so a typo stops them): no move
+starts, the boot says so in one `[storage]` line, and the registry and every
+file are byte-identical to 4b's. A move already under way is finished or
+undone either way.
 
 ## What must not break
 
@@ -1224,11 +1226,14 @@ imported archive family; local files' watch snapshots; X's reconcile state;
 the archive record; Telegram's stores, login, gateway state, spool and drain
 cursor; WhatsApp's stores and bridge state with session, spool and media; and
 rows of both a deleted and a kept source in every shared file): the first boot
-moves all nine accounts into their folders before the worker listens, status
-and search read the moved stores, no file is left at a legacy place, and the
-item counts match. A Delete of Dropbox then removes its folder and its rows in
-every shared file, and leaves every other folder and the other source's rows as
-they were; the next worker's boot reopens nothing of the deleted account (a
+moves all nine accounts into their folders before the worker listens; the
+status route answers and a search reads Gmail's moved store; no file is left
+at a legacy place; the seven content stores' item counts match; and every raw
+file seeded (Telegram's login, gateway state, spool and cursor, WhatsApp's
+session, spool and media, X's reconcile state, the watch snapshot, the archive
+record) is at its place in the folder. A Delete of Dropbox then removes its folder and its rows in
+every shared file, and leaves every other folder's files in place and the
+other source's rows as they were; the next worker's boot reopens nothing of the deleted account (a
 lane it mounts again starts a new, empty store). Run on
 this host (Sparta, Linux, Bun 1.3.14).
 

@@ -97,9 +97,10 @@ decision 6 (imported history joins the live account and goes only with its
 Delete) 2026-10-25, with step 4e (account identity) added ahead of archive
 ingestion's Telegram and mail steps. Every delivery step is built (step 6,
 connectors stop naming paths: #549), and the boot migration of existing
-accounts runs by default (2026-10-26; `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0` turns
-it off until release testing signs it off), proven end to end on standalone
-Linux. Before a hand-configured host takes this build, remove any retired
+accounts runs by default (2026-10-26, owner direction 2026-10-25;
+`OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0` turns it off until release testing signs it
+off), proven end to end on standalone Linux. On a Mac and OpenClaw-hosted it is
+on by default without a run on those hosts (the residual risk above). Before a hand-configured host takes this build, remove any retired
 `OLYMPUS_*_DB_PATH` from its worker environment: the worker refuses to start
 while one is set. Not proven on this project's Linux host: the Mac and
 OpenClaw-hosted runs listed under step 6's residual risk. Design, migration,
