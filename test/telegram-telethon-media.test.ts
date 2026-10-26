@@ -49,13 +49,17 @@ class Msg:
                 out.write(self.payload[at:at + step])
                 out.flush()
                 self.written += len(self.payload[at:at + step])
+                await asyncio.sleep(0)
                 if self.fail == "midway":
                     raise RuntimeError("network")
                 if progress_callback:
                     progress_callback(min(at + step, len(self.payload)), None)
         return file
-def record(mid, chat="-1000001"):
-    return {"id": str(mid), "conversationId": chat, "attachments": [{"attachmentId": "photo:5", "type": "image"}]}
+def record(mid, chat="-1000001", size=None):
+    attachment = {"attachmentId": "photo:5", "type": "image"}
+    if size is not None:
+        attachment["sizeBytes"] = size
+    return {"id": str(mid), "conversationId": chat, "attachments": [attachment]}
 def files(chat="-1000001"):
     folder = reader.media_dir() / chat
     return sorted(os.listdir(folder)) if folder.is_dir() else []
@@ -144,6 +148,45 @@ print(json.dumps({"files": files(), "first": first["attachments"][0]["mediaFile"
     expect(out.changed).not.toBe(out.first);
     expect(out.files).toEqual([out.changed.split('/').pop()]);
     expect(out.kept).toBe('new photo');
+  });
+
+  for (const declared of [true, false]) {
+    pythonTest(`overlapping downloads share the quota (sizes ${declared ? 'stated' : 'not stated'}): one of four 60-byte files fits in 100 bytes`, async () => {
+      const dir = spool();
+      const out = await python(`
+records = [record(20 + n, size=${declared ? 60 : 'None'}) for n in range(4)]
+messages = [Msg(20 + n, photo_id=20 + n, payload=b"m" * 60, chunks=6) for n in range(4)]
+async def overlapping():
+    await asyncio.gather(*(reader.capture_message_media(m, r) for m, r in zip(messages, records)))
+asyncio.run(overlapping())
+folder = reader.media_dir() / "-1000001"
+on_disk = sum(os.path.getsize(folder / name) for name in os.listdir(folder))
+state = json.load(open(reader.media_dir().parent / ".capture-media.json"))
+print(json.dumps({"kept": [r["attachments"][0].get("mediaFile") for r in records], "leftOut": [r["attachments"][0].get("mediaLeftOut") for r in records], "onDisk": on_disk, "files": files(), "state": state}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '100' });
+      expect(out.kept.filter(Boolean)).toHaveLength(1);
+      expect(out.leftOut.filter((reason: string | null) => reason === 'storage_full')).toHaveLength(3);
+      expect(out.onDisk).toBe(60);
+      expect(out.files.filter((name: string) => name.includes('.tmp.'))).toEqual([]);
+      expect(out.state).toMatchObject({ stored_bytes: 60, quota_bytes: 100, storage_full: true, left_out_items: 3 });
+    });
+  }
+
+  pythonTest('the total is measured from disk at start, so files kept before a restart count against the quota', async () => {
+    const dir = spool();
+    mkdirSync(join(dir, 'media', '-1000001'), { recursive: true });
+    writeFileSync(join(dir, 'media', '-1000001', '9.aaaaaaaaaaaa.jpg'), 'k'.repeat(80));
+    writeFileSync(join(dir, 'media', '-1000001', '.8.aaaaaaaaaaaa.jpg.tmp.999999999'), 'x'.repeat(500));
+    const out = await python(`
+reader.media_usage["bytes"] = 0
+measured = reader.media_stored_bytes(reader.media_dir(), fresh=True)
+late = record(5, size=30)
+asyncio.run(reader.capture_message_media(Msg(5, payload=b"p" * 30), late))
+print(json.dumps({"measured": measured, "attachment": late["attachments"][0]}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '100' });
+    // A temporary is not a kept file: only the 80 kept bytes count.
+    expect(out.measured).toBe(80);
+    expect(out.attachment).toMatchObject({ mediaLeftOut: 'storage_full' });
   });
 
   pythonTest('0 keeps no media and downloads nothing', async () => {
