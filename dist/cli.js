@@ -166342,7 +166342,7 @@ function localFilesListing(options, mode) {
       }
       throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
     }
-    const offered = (entry) => !entry.isSymbolicLink() && (entry.isDirectory() || mode === "archive" && entry.isFile() && !entry.name.startsWith("."));
+    const offered = (entry) => !entry.isSymbolicLink() && !(mode === "archive" && entry.name.startsWith(".")) && (entry.isDirectory() || mode === "archive" && entry.isFile());
     return entries.filter(offered).map((entry) => {
       const childReal = join113(realPath, entry.name);
       if (!entry.isDirectory())
