@@ -101871,6 +101871,7 @@ var init_live_connector = __esm(() => {
 import { Database as Database21 } from "bun:sqlite";
 import { randomBytes as randomBytes17 } from "node:crypto";
 import {
+  chmodSync as chmodSync29,
   closeSync as closeSync26,
   constants as constants14,
   copyFileSync as copyFileSync2,
@@ -102005,8 +102006,10 @@ class WaitingMediaState {
     this.db = db;
   }
   static open(spoolDir) {
-    const db = new Database21(join88(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE));
-    db.run("PRAGMA journal_mode = WAL");
+    const path = join88(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE);
+    const db = new Database21(path, { create: true });
+    chmodSync29(path, 384);
+    db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
     db.run(`CREATE TABLE IF NOT EXISTS waiting (
       stem TEXT PRIMARY KEY,
       chat_jid TEXT NOT NULL,
@@ -102047,7 +102050,7 @@ class WaitingMediaState {
     return rows.map(toRow);
   }
   close() {
-    this.db.close();
+    closeSqliteStore(this.db);
   }
   row(stem) {
     const row = this.db.query("SELECT stem, chat_jid, id, version, media_json, done FROM waiting WHERE stem = ?").get(stem);
@@ -123099,7 +123102,7 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync29, existsSync as existsSync77, lstatSync as lstatSync39, mkdirSync as mkdirSync51, readFileSync as readFileSync65, renameSync as renameSync18, writeFileSync as writeFileSync19 } from "node:fs";
+import { chmodSync as chmodSync30, existsSync as existsSync77, lstatSync as lstatSync39, mkdirSync as mkdirSync51, readFileSync as readFileSync65, renameSync as renameSync18, writeFileSync as writeFileSync19 } from "node:fs";
 import { join as join98 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync51(stateDir, { recursive: true, mode: 448 });
@@ -123109,13 +123112,13 @@ function ensureStateDir(stateDir) {
   if (!stat3.isDirectory() || stat3.isSymbolicLink() || typeof process.getuid === "function" && stat3.uid !== process.getuid()) {
     throw new Error("the connect-relay state directory must be a directory owned by this user");
   }
-  chmodSync29(dir, 448);
+  chmodSync30(dir, 448);
   return dir;
 }
 function writePrivateFile(path, contents) {
   const temporary = `${path}.tmp.${process.pid}`;
   writeFileSync19(temporary, contents, { mode: 384 });
-  chmodSync29(temporary, 384);
+  chmodSync30(temporary, 384);
   renameSync18(temporary, path);
 }
 function loadOrCreateIdentity(stateDir) {
@@ -127142,7 +127145,7 @@ var init_model_setup = __esm(() => {
 
 // src/core/dashboard-session-secret.ts
 import { randomBytes as randomBytes25 } from "node:crypto";
-import { chmodSync as chmodSync30, lstatSync as lstatSync41, mkdirSync as mkdirSync53, readFileSync as readFileSync69 } from "node:fs";
+import { chmodSync as chmodSync31, lstatSync as lstatSync41, mkdirSync as mkdirSync53, readFileSync as readFileSync69 } from "node:fs";
 import { dirname as dirname77, join as join102 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
   return join102(dirname77(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
@@ -127180,7 +127183,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
     mkdirSync53(dirname77(path), { recursive: true, mode: 448 });
     writePrivateFileAtomicSync(path, `${secret2}
 `);
-    chmodSync30(path, 384);
+    chmodSync31(path, 384);
     return { secret: secret2, source: existing === "missing" ? "created" : "regenerated", path };
   } catch {
     return { secret: secret2, source: "memory", path };
@@ -128183,7 +128186,7 @@ var init_extraction_factory = __esm(() => {
 });
 
 // src/workers/file-extraction/job-store.ts
-import { chmodSync as chmodSync31, mkdirSync as mkdirSync54 } from "node:fs";
+import { chmodSync as chmodSync32, mkdirSync as mkdirSync54 } from "node:fs";
 import { createHash as createHash71, randomUUID as randomUUID27 } from "node:crypto";
 import { dirname as dirname78 } from "node:path";
 import { Database as Database23 } from "bun:sqlite";
@@ -128233,7 +128236,7 @@ class LocalFileExtractionJobStore {
     }
     this.db = this.readonly ? new Database23(dbPath, { readonly: true }) : new Database23(dbPath, { create: true });
     if (!inMemory && !this.readonly)
-      chmodSync31(dbPath, 384);
+      chmodSync32(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
@@ -149238,7 +149241,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync32, copyFileSync as copyFileSync3, existsSync as existsSync82, lstatSync as lstatSync42, mkdirSync as mkdirSync56, readFileSync as readFileSync73 } from "node:fs";
+import { chmodSync as chmodSync33, copyFileSync as copyFileSync3, existsSync as existsSync82, lstatSync as lstatSync42, mkdirSync as mkdirSync56, readFileSync as readFileSync73 } from "node:fs";
 import { dirname as dirname83 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
@@ -149300,7 +149303,7 @@ function writeSourceIngestionExclusionsFile(options) {
     }
     backupPath = `${path}.${stamp}.bak`;
     copyFileSync3(path, backupPath);
-    chmodSync32(backupPath, 384);
+    chmodSync33(backupPath, 384);
   } else {
     mkdirSync56(dirname83(path), { recursive: true, mode: 448 });
   }
@@ -191915,7 +191918,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync33, lstatSync as lstatSync48, mkdirSync as mkdirSync60, statSync as statSync41 } from "node:fs";
+import { chmodSync as chmodSync34, lstatSync as lstatSync48, mkdirSync as mkdirSync60, statSync as statSync41 } from "node:fs";
 import { dirname as dirname89, isAbsolute as isAbsolute37 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
@@ -191973,7 +191976,7 @@ function writeConsultSettings(input, location = {}) {
             published = true;
           } });
           __consultSettingsWriterTestHooks.afterPublish?.(path);
-          chmodSync33(path, 384);
+          chmodSync34(path, 384);
         });
       } catch {
         if (!published)
@@ -192007,7 +192010,7 @@ function ensureSettingsDirectory(directory) {
     }
     try {
       mkdirSync60(directory, { mode: 448 });
-      chmodSync33(directory, 448);
+      chmodSync34(directory, 448);
     } catch {
       return "directory_unavailable";
     }
