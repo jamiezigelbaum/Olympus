@@ -5,7 +5,7 @@
  * report reads the spool in chunks and passes a damaged record instead of
  * failing. Stand-in Telethon objects only; no network.
  */
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -148,4 +148,45 @@ print(json.dumps(reader.allocate_capture_seq(Path(${JSON.stringify(spoolDir)}), 
       }
     });
   }
+});
+
+describe('Telethon helper: a captured message\'s media is kept beside the spool', () => {
+  const run = async (limit: string | undefined) => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-telegram-media-keep-'));
+    const spoolDir = join(root, 'spool');
+    mkdirSync(spoolDir);
+    try {
+      const out = await python(`
+import asyncio
+class Msg:
+    async def download_media(self, file):
+        with open(file, "wb") as output:
+            output.write(b"synthetic jpeg bytes")
+        return file
+normalized = {"id": "5", "conversationId": "-1000001", "attachments": [{"attachmentId": "photo:1", "type": "image"}]}
+asyncio.run(reader.capture_message_media(Msg(), normalized))
+print(json.dumps(normalized["attachments"][0]))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: spoolDir, ...(limit !== undefined ? { OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES: limit } : {}) });
+      return { out, kept: existsSync(join(spoolDir, 'media', '-1000001', '5.jpg')), leftovers: existsSync(join(spoolDir, 'media', '-1000001')) ? readdirSync(join(spoolDir, 'media', '-1000001')).filter((name) => name.includes('.tmp.')) : [] };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  pythonTest('a photo under the limit is kept and named on its attachment', async () => {
+    const { out, kept, leftovers } = await run(undefined);
+    expect(out).toEqual({ attachmentId: 'photo:1', type: 'image', mediaFile: 'media/-1000001/5.jpg', sizeBytes: 20 });
+    expect(kept).toBe(true);
+    expect(leftovers).toEqual([]);
+  });
+
+  pythonTest('a file over the limit, or with keeping turned off, stays named only', async () => {
+    const over = await run('3');
+    expect(over.out).toEqual({ attachmentId: 'photo:1', type: 'image' });
+    expect(over.kept).toBe(false);
+    expect(over.leftovers).toEqual([]);
+    const off = await run('0');
+    expect(off.out).toEqual({ attachmentId: 'photo:1', type: 'image' });
+    expect(off.kept).toBe(false);
+  });
 });

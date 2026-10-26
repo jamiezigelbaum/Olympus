@@ -54,12 +54,15 @@ describe('Telegram canonical product runtime', () => {
       // (core/source-inputs.ts), so the store sees two items, and message 1 lands with its reactions.
       expect(first).toMatchObject({
         status: 'progress',
-        counts: { items_seen: 2, items_indexed: 2, items_changed: 2 },
+        // ...and message 1's attachment is its media child (named only: the helper kept no file for it).
+        counts: { items_seen: 3, items_indexed: 3, items_changed: 3 },
       });
       expect(JSON.stringify(first)).not.toContain('project note');
-      expect(fixture.stores.internal.status().counts.items).toBe(1);
+      // Message 1 and its attachment's media child.
+      expect(fixture.stores.internal.status().counts.items).toBe(2);
       expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
-      expect(fixture.stores.internal.searchItems('roadmap', 5)).toHaveLength(1);
+      // The message and its media child, found by the file's name.
+      expect(fixture.stores.internal.searchItems('roadmap', 5)).toHaveLength(2);
       expect(fixture.stores.secureLocal.searchItems('private', 5)).toHaveLength(1);
       expect(fixture.stores.internal.itemReactions(`${ACCOUNT}:ordinary:1`)).toEqual(reactions);
       expect(fixture.stores.internal.lastCompletedSyncRun(
@@ -79,7 +82,7 @@ describe('Telegram canonical product runtime', () => {
       );
       const internalOnly = await source!.tasks[0]!.run();
       expect(internalOnly).toMatchObject({ status: 'progress', counts: { items_seen: 1, items_changed: 1 } });
-      expect(fixture.stores.internal.status().counts.items).toBe(2);
+      expect(fixture.stores.internal.status().counts.items).toBe(3);
       expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
       expect(fixture.stores.secureLocal.lastCompletedSyncRun(
         TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local,
@@ -90,7 +93,7 @@ describe('Telegram canonical product runtime', () => {
         `${JSON.stringify(spoolRecord('protected', '4', 'secure_local', 'new protected note'))}\n`,
       );
       await source!.tasks[0]!.run();
-      expect(fixture.stores.internal.status().counts.items).toBe(2);
+      expect(fixture.stores.internal.status().counts.items).toBe(3);
       expect(fixture.stores.secureLocal.status().counts.items).toBe(2);
     } finally {
       fixture.close();

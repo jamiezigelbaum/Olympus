@@ -34145,6 +34145,13 @@ var init_record_builder = __esm(() => {
   init_capture_spool_connector();
 });
 
+// src/workers/telegram-messages/media-child.ts
+var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, LIVE_MEDIA_MAX_READ_BYTES;
+var init_media_child = __esm(() => {
+  TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
+  LIVE_MEDIA_MAX_READ_BYTES = 64 * 1024 * 1024;
+});
+
 // src/workers/telegram-messages/capture-spool-connector.ts
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID, MAX_READ_BYTES, MAX_RECORD_BYTES, MAX_TAIL_SCAN_BYTES, SERVICE_FIELDS;
 var init_capture_spool_connector = __esm(() => {
@@ -34156,6 +34163,7 @@ var init_capture_spool_connector = __esm(() => {
   init_spool_lines();
   init_message();
   init_record_builder();
+  init_media_child();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
     secure_local: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_secure_local`
@@ -34469,6 +34477,7 @@ var init_export_records = __esm(() => {
 // src/workers/telegram-messages/export-input.ts
 var init_export_input = __esm(() => {
   init_archive_formats();
+  init_media_child();
   init_connector4();
   init_export_records();
   init_export_facts();
@@ -34490,6 +34499,7 @@ var init_archive_target = __esm(() => {
 // src/workers/telegram-messages/store-sync.ts
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY;
 var init_store_sync = __esm(() => {
+  init_media_child();
   init_source_placement();
   init_spool_file_identity();
   init_source_storage();

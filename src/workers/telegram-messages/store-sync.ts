@@ -2,7 +2,8 @@
 // Provider/session work remains in the thin Telethon helper; this module only
 // advances two trust-separated stores through the shared connector spine.
 
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile } from './media-child.ts';
 import { join } from 'node:path';
 import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
@@ -468,6 +469,8 @@ export function createTelegramConnectorStoreSyncHandler(options: {
           ...(preflightCursor ? { from: preflightCursor } : {}),
           through: lanesReadThrough(options.stores),
         });
+        // A media child judged Secrets loses its kept file too: the spool's copy of its bytes.
+        removeSecretTelegramMedia(spoolDir, tierSet.ledger);
       } catch (error) {
         redactionFailed = true;
         console.error(
@@ -527,6 +530,15 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       });
     },
   };
+}
+
+/** Remove the kept file of every live media child the ledger holds as Secrets. */
+function removeSecretTelegramMedia(spoolDir: string, ledger: TierLedger): void {
+  for (const { identity } of ledger.secretsIdentities()) {
+    if (identity.provider !== 'telegram' || !identity.providerItemId.endsWith(TELEGRAM_MEDIA_CHILD_SUFFIX) || !identity.providerConversationId) continue;
+    const messageId = identity.providerItemId.slice(0, -TELEGRAM_MEDIA_CHILD_SUFFIX.length);
+    for (const path of telegramLiveMediaFile(spoolDir, identity.providerConversationId, messageId)) rmSync(path, { force: true });
+  }
 }
 
 /** The day live capture began: the date of the spool's oldest file. */

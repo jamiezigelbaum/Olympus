@@ -308,7 +308,8 @@ Each source's Import an archive appears as its step registers it.
 7. Reflect, Roam, Evernote: their own sources, assets as children (built,
    see "Built, step 7").
 8. Live Telegram media and live WhatsApp images and video, so both
-   inputs bring the same media.
+   inputs bring the same media. Telegram's part built (see "Built, step 8:
+   Telegram"); reading the kept bytes waits for a Telegram extraction roster.
 
 Each step is proved on fresh Mac and Linux installs by the release check's
 archive leg, which gains an import-beside-live case per source with a
@@ -868,6 +869,32 @@ Telegram connector (`src/workers/telegram-messages/`: `export-records.ts`,
   own tiers. Before, such an item's later live edits were dropped.
 - **Production.** The worker registers the target when the Telegram store
   lane is up; without it an export stays under Archives, as before.
+
+## Built, step 8: Telegram
+
+Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
+`src/workers/telegram-messages/media-child.ts`; tests
+`test/telegram-live-media.test.ts` and the helper's in
+`test/telegram-telethon-richer-records.test.ts`).
+
+- **Kept beside the spool.** The capture helper keeps a captured message's
+  photo or document under `media/<chat>/<message>.<ext>` in the spool's own
+  folder (the account's, owner-only), up to `OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES`
+  (25 MB by default; 0 keeps none; a setting that does not read keeps none and
+  never stops capture). It is written to a temporary name and renamed, and
+  named on the attachment as `mediaFile`. A failed download leaves the
+  attachment named only.
+- **One child, both inputs.** The connector lists a live message's media as
+  its `media` child, the same child an export brings: readable through a
+  `telegram-live-media:v1:<path>` locator when the file was kept (read back by
+  `fetchItem`, bounded, only from under the media folder), named only when it
+  was not. A named-only live child takes the version without the capture's
+  mark, so it never replaces a readable child an export brought at the same
+  edit time.
+- **Secrets.** A media child judged Secrets loses its kept file at the next
+  pull's clearing.
+- **Not yet.** Nothing reads the kept bytes until Telegram has an extraction
+  roster for its stores (the factory's per-account connector resolution).
 
 ## To verify before step 4
 
