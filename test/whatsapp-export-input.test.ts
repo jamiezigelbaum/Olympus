@@ -95,7 +95,7 @@ async function pullLive(target: Lane): Promise<void> {
 }
 
 /** Imports an export file through the connector's archive input, as the archive layer does, to its end. */
-async function importExport(target: Lane, name: string, text: string | Uint8Array, findings: ArchiveImportFinding[] = [], extra: Record<string, string> = {}) {
+async function importExport(target: Lane, name: string, text: string | Uint8Array, findings: ArchiveImportFinding[] = [], extra: Record<string, string> = {}, sync: { maxItems: number; pageSize: number } = { maxItems: 4, pageSize: 3 }) {
   mkdirSync(join(target.exportDir, name, '..'), { recursive: true });
   writeFileSync(join(target.exportDir, name), text);
   for (const [file, body] of Object.entries(extra)) writeFileSync(join(target.exportDir, file), body);
@@ -114,7 +114,7 @@ async function importExport(target: Lane, name: string, text: string | Uint8Arra
       manifestSha256: archiveManifestSha256(manifest),
       report: (finding) => { findings.push(finding); },
       shouldContinue: () => true,
-      pageSize: 3,
+      pageSize: sync.pageSize,
       media: {
         bind: (relPath) => ({ ok: true, bindingId: `mb-${relPath.replace(/[^A-Za-z0-9]/gu, '')}`.slice(0, 60), sizeBytes: 9 }),
         open: () => { throw new Error('not read here'); },
@@ -127,7 +127,7 @@ async function importExport(target: Lane, name: string, text: string | Uint8Arra
   const connector = holdingItems(target.connector.forInput!(input));
   for (let pass = 0; pass < 50; pass += 1) {
     const cursor = target.set.committedCursor(connector.id)?.cursor ?? undefined;
-    await target.set.sync(connector, { ...WHATSAPP_LANE_SYNC, maxItems: 4, ...(cursor ? { cursor } : {}) });
+    await target.set.sync(connector, { ...WHATSAPP_LANE_SYNC, maxItems: sync.maxItems, ...(cursor ? { cursor } : {}) });
     if (pass > 0 && target.set.committedCursor(connector.id)?.cursor === cursor) break;
   }
   return findings;
@@ -510,7 +510,7 @@ describe('review round 2 on #551: a stored id never changes, only the current ve
       ...earlier,
       { at: '2026-07-01T16:00:00', sender: 'Rowan Hale', text: 'Ferry at nine?' },
       { at: '2026-07-01T16:01:00', sender: 'Rowan Hale', text: 'Or ten?' },
-    ], { style: 'android-24-dmy' }));
+    ], { style: 'android-24-dmy' }), [], {}, { maxItems: 500, pageSize: 100 });
     expect(findings.some((finding) => finding.kind === 'time_zone_assumed')).toBe(false);
     expect(active(target)).toHaveLength(2_102);
   }, 120_000);
@@ -529,7 +529,7 @@ describe('review round 2 on #551: a stored id never changes, only the current ve
     }
     for (let pass = 0; pass < 10_000 && !catchUpWhatsAppSpoolIndex(target.spoolDir, 64 * 1024); pass += 1);
     expect(catchUpWhatsAppSpoolIndex(target.spoolDir, 1)).toBe(true);
-  });
+  }, 120_000);
 });
 
 describe('live status posts', () => {

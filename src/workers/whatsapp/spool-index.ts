@@ -35,6 +35,7 @@
 // - The index is a cache of the spool: deleting it costs one catch-up pass.
 
 import { Database } from 'bun:sqlite';
+import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
@@ -171,7 +172,7 @@ export class WhatsAppSpoolIndex {
    * identity): a file that is gone loses its rows; one whose identity changed
    * loses them and is indexed again from its start.
    */
-  reconcile(spoolDir: string): string[] {
+  reconcile(spoolDir: string, owe?: (replaced: readonly string[]) => void): string[] {
     const known = this.db.query('SELECT name, identity, indexed_to, boundary FROM files').all() as
       Array<{ name: string; identity: string; indexed_to: number; boundary: string }>;
     const replaced: string[] = [];
@@ -185,52 +186,26 @@ export class WhatsAppSpoolIndex {
       else gone.push(name);
     }
     replaced.sort();
-    // Dropping a replaced file's records and owing the listing a read of it from its start are one write: the
-    // obligation outlives a pass that fails before its cursor commits, and is cleared only when a cursor that
-    // carries it comes back (`clearReplay`).
+    // The read again every reader owes is written first, and durably (spool-obligations.ts); only then does the
+    // index forget what it held. A failure in between owes it still, and finds the file again next time.
+    if (replaced.length > 0) owe?.(replaced);
     this.db.transaction(() => {
-      for (const name of gone) this.forgetFile(name);
-      for (const name of replaced) this.oweReplay(name);
+      for (const name of [...gone, ...replaced]) this.forgetFile(name);
     })();
     return replaced;
   }
 
   /**
-   * A file is no longer the one read: its records go, and the listing owes a
-   * read of it from its start, in one write (joining an enclosing transaction).
+   * This build of the index: a random id made when the index was built, so
+   * a cursor handed out by an earlier build (the index deleted since, or of
+   * another shape) is never taken to have read what this one knows.
    */
-  oweReplay(file: string): void {
-    this.db.transaction(() => {
-      this.forgetFile(file);
-      const owed = this.replayObligation();
-      const epoch = this.metaNumber('replay_epoch') + 1;
-      this.writeMeta('replay_epoch', String(epoch));
-      this.writeMeta('replay', JSON.stringify({ file: owed !== undefined && owed.file < file ? owed.file : file, epoch }));
-    })();
-  }
-
-  /** The read again a replaced file is owed: the listing goes back to `file`, and cursors it hands out carry `epoch`. */
-  replayObligation(): { file: string; epoch: number } | undefined {
-    const row = this.db.query("SELECT value FROM meta WHERE key = 'replay'").get() as { value: string } | null;
-    if (!row) return undefined;
-    try {
-      const parsed = JSON.parse(row.value) as { file: string; epoch: number };
-      return typeof parsed.file === 'string' && Number.isSafeInteger(parsed.epoch) ? parsed : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /** A cursor carrying `epoch` came back: the read again it was owed is committed. */
-  clearReplay(epoch: number): void {
-    const owed = this.replayObligation();
-    if (owed !== undefined && epoch >= owed.epoch) this.db.query("DELETE FROM meta WHERE key = 'replay'").run();
-  }
-
-  private metaNumber(key: string): number {
-    const row = this.db.query('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | null;
-    const value = row ? Number(row.value) : 0;
-    return Number.isSafeInteger(value) ? value : 0;
+  generation(): string {
+    const row = this.db.query("SELECT value FROM meta WHERE key = 'generation'").get() as { value: string } | null;
+    if (row) return row.value;
+    const generation = randomBytes(8).toString('hex');
+    this.writeMeta('generation', generation);
+    return generation;
   }
 
   private writeMeta(key: string, value: string): void {
