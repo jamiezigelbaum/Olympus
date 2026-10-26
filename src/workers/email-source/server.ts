@@ -453,7 +453,14 @@ import { fileSourceScopeIdForProvider } from '../../core/source-scope-approval.t
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import { GMAIL_IMPORT_CONNECTOR_PREFIX, gmailArchiveTarget, gmailItemAccountScope } from '../google-connectors/gmail-archive-target.ts';
 import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
-import { gmailImportAllowance } from '../google-connectors/gmail-import-allowance.ts';
+import {
+  GMAIL_IMPORT_LABELS_COST,
+  GMAIL_IMPORT_MAX_RETRIES,
+  GmailImportWaitError,
+  gmailImportAllowance,
+  gmailImportBudget,
+  gmailImportWait,
+} from '../google-connectors/gmail-import-allowance.ts';
 import type { GmailApiClient } from '../google-connectors/gmail.ts';
 import { readSourceRegistry } from '../../core/source-registry.ts';
 import { gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
@@ -2853,7 +2860,20 @@ export async function main(): Promise<void> {
         } catch {
           // No current approval: no owner rules apply, as live reads nothing without one.
         }
-        let matchClient: Promise<GmailApiClient> | undefined;
+        // The imports' one Gmail client for the pass: every attempt, retries included, is charged at its transport
+        // to the imports' allowance, then to the lane's day counter. Undefined without a current mail approval.
+        let importClientPromise: Promise<GmailApiClient> | undefined;
+        const importClient = (): Promise<GmailApiClient> | undefined => {
+          if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority) return undefined;
+          fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+          importClientPromise ??= new GoogleGmailSourceConnector({
+            credentialHandle: handle.handle,
+            ...(handle.accountRole ? { account: handle.accountRole } : {}),
+            requestBudget: gmailImportBudget(gmailRequestBudget, gmailImportGate),
+            maxRetries: GMAIL_IMPORT_MAX_RETRIES,
+          }).apiClientForTooling();
+          return importClientPromise;
+        };
         const key = JSON.stringify(ownerRules);
         if (gmailArchiveSet?.key !== key) {
           gmailArchiveSet = {
@@ -2877,34 +2897,32 @@ export async function main(): Promise<void> {
           labelIds: async () => {
             const cacheKey = `${new Date().toISOString().slice(0, 10)}\n${key}`;
             if (gmailLabelCache?.key === cacheKey) return gmailLabelCache.map;
-            if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority) return { unavailable: 'gmail_labels_unavailable' };
-            fileSourceScopeAuthority.assertCurrentMail(scopeRef);
-            const room = gmailImportGate.take(1);
-            if (room !== true) return { unavailable: room };
-            matchClient ??= new GoogleGmailSourceConnector({
-              credentialHandle: handle.handle,
-              ...(handle.accountRole ? { account: handle.accountRole } : {}),
-              requestBudget: gmailRequestBudget,
-            }).apiClientForTooling();
-            const api = await matchClient;
+            const client = importClient();
+            if (!client) return { unavailable: 'gmail_labels_unavailable' };
+            // Begun only when the allowance holds the list at its worst; a refusal spends nothing.
+            const room = gmailImportGate.check(GMAIL_IMPORT_LABELS_COST);
+            if (room !== true) {
+              const wait = gmailImportWait(room);
+              return { unavailable: wait.later, ...(wait.minimum !== undefined ? { minimum: wait.minimum } : {}) };
+            }
+            const api = await client;
             if (!api.listLabels) return { unavailable: 'gmail_labels_unavailable' };
-            const map = new Map((await api.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id] as const));
-            gmailLabelCache = { key: cacheKey, map };
-            return map;
+            try {
+              const map = new Map((await api.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id] as const));
+              gmailLabelCache = { key: cacheKey, map };
+              return map;
+            } catch (error) {
+              if (error instanceof GmailImportWaitError) {
+                const wait = gmailImportWait(error.reason);
+                return { unavailable: wait.later, ...(wait.minimum !== undefined ? { minimum: wait.minimum } : {}) };
+              }
+              if (error instanceof GoogleRequestBudgetError) return { unavailable: 'gmail_requests_spent' };
+              throw error;
+            }
           },
           // A message without Takeout's id is matched by asking Gmail, under the live lane's day budget, and only
           // while the owner's mail approval is current: nothing of the mailbox is read without one.
-          match: gmailHeaderMatch(async () => {
-            if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority) return undefined;
-            fileSourceScopeAuthority.assertCurrentMail(scopeRef);
-            // One client for the pass: one credential session, every request under the day budget.
-            matchClient ??= new GoogleGmailSourceConnector({
-              credentialHandle: handle.handle,
-              ...(handle.accountRole ? { account: handle.accountRole } : {}),
-              requestBudget: gmailRequestBudget,
-            }).apiClientForTooling();
-            return matchClient;
-          }, {
+          match: gmailHeaderMatch(async () => importClient(), {
             allowance: gmailImportGate,
             // The token's mailbox must not be another account than the one the registry names for Gmail.
             sameAccount: (address) => {

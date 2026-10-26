@@ -431,19 +431,26 @@ connector; any other mbox stays under Archives, as before.
   one search, and one metadata read per candidate (at most five), only for
   such messages, under the day budget and only while the mail approval is
   current. A Takeout import costs no request; no new store is kept.
-- **One allowance** (`google-connectors/gmail-import-allowance.ts`). Every
-  Gmail request an import makes (the label list, the mailbox check, the
-  search, the candidates' headers) passes one gate: half of the day's budget,
-  never less than one message's worst case (seven requests), so any accepted
-  budget moves at least one message a day. A message is begun only when the
-  allowance holds its worst case, and a refusal spends nothing. A day's
-  budget under fourteen cannot leave live Gmail its share, so the import
-  waits and says why. Waiting, what was read goes out with its resume point
-  and the import waits for its next scheduled pass; the pass's receipt names
-  the reason (`archive_import_waiting_for_provider: gmail_import_allowance_spent`,
-  `gmail_requests_spent`, `gmail_budget_too_small` or
-  `gmail_labels_unavailable`). The label list is asked only when an owner
-  rule names a label, and once a day while the rules stay the same.
+- **One budget model** (`google-connectors/gmail-import-allowance.ts`).
+  Imports read Gmail through their own client, whose day counter charges
+  every HTTP attempt, retries included, to the imports' allowance and then to
+  the lane's day counter, so nothing goes around it. The allowance is half of
+  the day's budget. The client retries a failed request once, so one message
+  costs at most 14 attempts (the mailbox check, the search, five candidates)
+  and the label list 2; the smallest accepted budget (32) holds both, so any
+  accepted budget moves at least one message a day. A message, or the label
+  list, is begun only when the allowance holds its worst case, and a refusal
+  spends nothing. The label list is asked only when an owner rule names a
+  label, and once a day while the rules stay the same.
+- **Waiting is findable.** Waiting, what was read goes out with its resume
+  point and the import waits for its next scheduled pass. The import record
+  keeps why (`waiting`), its row says it in a plain line (the day's share is
+  spent; the day's requests are spent; a rule names a label Gmail cannot
+  read now; or the daily limit is too low, with the setting
+  `OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET` and the least it must
+  be), and a limit too low is a Needs you item too. The pass's receipt names
+  the reason (`archive_import_waiting_for_provider: …`). The note goes with
+  the next pass that does not wait.
 - **Account** (`archive-import/mbox/gmail-account.ts`). Headers of the first
   500 messages (or 64 MB) are read: every one must carry a Gmail marker, and
   the topmost `Delivered-To` of the received ones must name exactly one

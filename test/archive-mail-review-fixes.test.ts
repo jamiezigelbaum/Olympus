@@ -21,7 +21,18 @@ import type { CredentialBroker } from '../src/workers/credential-broker/index.ts
 import { GoogleGmailSourceConnector, type GmailApiClient, type GmailMessage } from '../src/workers/google-connectors/gmail.ts';
 import { gmailItemAccountScope, gmailLabelLookup } from '../src/workers/google-connectors/gmail-archive-target.ts';
 import { gmailHeaderMatch } from '../src/workers/google-connectors/gmail-header-match.ts';
-import { GMAIL_IMPORT_MESSAGE_COST, GMAIL_IMPORT_SHARE, gmailImportAllowance } from '../src/workers/google-connectors/gmail-import-allowance.ts';
+import {
+  GMAIL_DAILY_BUDGET_SETTING,
+  GMAIL_IMPORT_LABELS_COST,
+  GMAIL_IMPORT_MAX_RETRIES,
+  GMAIL_IMPORT_MIN_DAILY_BUDGET,
+  gmailImportAllowance,
+  gmailImportBudget,
+  gmailImportWait,
+} from '../src/workers/google-connectors/gmail-import-allowance.ts';
+import { GoogleDailyRequestBudget } from '../src/workers/google-connectors/request-budget.ts';
+import { dashboardImportAttentionSentence } from '../src/workers/dashboard/vocabulary.ts';
+import { gapSentence } from '../scripts/release-check/archive-leg.ts';
 import { gmailPrivateStoreStatusScope } from '../src/workers/email-source/gmail-status-scope.ts';
 import { GoogleRequestBudgetError } from '../src/workers/google-connectors/request-budget.ts';
 import { ACCOUNT, gmailArchiveHarness } from './support/gmail-archive-harness.ts';
@@ -108,57 +119,93 @@ describe('a spent request budget keeps what was read and waits', () => {
 
   const live = mail(7);
   const headers = { messageId: live.messageId!, date: new Date(live.date).toUTCString(), from: live.from, subject: live.subject };
-  /** A day counter the test drives: the lane's, which every request (live's and imports') moves. */
-  const counter = (dailyRequestBudget: number, start = 0) => {
-    const state = { requests: start };
-    return { state, usage: () => ({ utcDay: '2026-10-26', requests: state.requests, dailyRequestBudget }) };
-  };
-  const counted = (client: GmailApiClient, state: { requests: number }): GmailApiClient => ({
-    async listMessages(request) { state.requests += 1; return client.listMessages(request); },
-    async getMessage(id, options) { state.requests += 1; return client.getMessage(id, options); },
-  });
+  const TOKEN_BROKER = { async issueSession() { return { kind: 'bearer_token' as const, token: 'fixture-token' }; } } as unknown as CredentialBroker;
 
-  test('one gate holds every request an import makes: half the day, whole messages, nothing spent while waiting', async () => {
-    const day = counter(100);
-    const allowance = gmailImportAllowance({ usage: day.usage, now: () => new Date('2026-10-26T12:00:00Z') });
-    const match = gmailHeaderMatch(async () => counted(api([apiMessage(live)]), day.state), { allowance });
-    // Each match asks two requests (search, one candidate); the share is 50, a message is begun only with 7 left.
-    let matched = 0;
-    for (let at = 0; at < 40; at += 1) {
-      const answer = await match(headers);
-      if (answer !== 'none' && 'later' in answer) {
-        expect(answer.later).toBe('gmail_import_allowance_spent');
-        break;
-      }
-      matched += 1;
-    }
-    expect(day.state.requests).toBeLessThanOrEqual(Math.floor(100 * GMAIL_IMPORT_SHARE));
-    expect(matched).toBe(Math.floor((50 - GMAIL_IMPORT_MESSAGE_COST) / 2) + 1);
+  /**
+   * The imports' real Gmail client (the REST transport, its retries, the lane's day counter) over a fake Gmail
+   * that fails the first attempt of every request when `flaky` (each request then costs its worst case).
+   */
+  async function importClient(daily: number, options: { flaky?: boolean; candidates?: number } = {}) {
+    const lane = new GoogleDailyRequestBudget({ provider: 'Gmail', dailyRequestBudget: daily, now: () => new Date('2026-10-26T12:00:00Z') });
+    const allowance = gmailImportAllowance({ usage: () => lane.status(), now: () => new Date('2026-10-26T12:00:00Z') });
+    const twins = Array.from({ length: options.candidates ?? 1 }, (_, at) => apiMessage(mail(200 + at, {
+      messageId: live.messageId!, date: live.date, from: live.from, subject: live.subject,
+    })));
+    const seen = new Map<string, number>();
+    const http = { attempts: 0 };
+    const fetchImpl = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      http.attempts += 1;
+      const tries = (seen.get(url) ?? 0) + 1;
+      seen.set(url, tries);
+      if (options.flaky && tries === 1) return new Response('busy', { status: 503 });
+      if (url.includes('/profile')) return Response.json({ emailAddress: OWNER_ADDRESS });
+      if (url.includes('/labels')) return Response.json({ labels: [{ id: 'Label_7', name: 'Payroll' }] });
+      if (url.includes('messages?')) return Response.json({ messages: twins.map((entry) => ({ id: entry.id })) });
+      const id = /messages\/([^?]+)/.exec(url)?.[1];
+      const found = twins.find((entry) => entry.id === id)!;
+      return Response.json({ ...found, payload: { headers: found.payload?.headers ?? [] } });
+    };
+    const connector = new GoogleGmailSourceConnector({
+      account: 'personal',
+      credentialBroker: TOKEN_BROKER,
+      fetch: fetchImpl as never,
+      requestBudget: gmailImportBudget(lane, allowance),
+      maxRetries: GMAIL_IMPORT_MAX_RETRIES,
+      sleep: async () => {},
+    });
+    return { client: await connector.apiClientForTooling(), allowance, lane, http };
+  }
+
+  test('every HTTP attempt is charged, retries included: an import never goes past its share', async () => {
+    const { client, allowance, lane, http } = await importClient(40, { flaky: true });
+    const match = gmailHeaderMatch(async () => client, { allowance, sameAccount: () => true });
+    const answers: unknown[] = [];
+    for (let at = 0; at < 10; at += 1) answers.push(await match(headers));
+    // The share of a day of 40 is 20 attempts, and each attempt, the failed ones too, is the lane's as well.
+    expect(http.attempts).toBeLessThanOrEqual(20);
+    expect(lane.status().requests).toBe(http.attempts);
+    expect(answers[0]).toEqual({ id: mail(200).id });
+    expect(answers.at(-1)).toEqual({ later: 'gmail_import_allowance_spent' });
     // A waiting retry spends nothing.
-    const before = day.state.requests;
+    const before = http.attempts;
     expect(await match(headers)).toEqual({ later: 'gmail_import_allowance_spent' });
-    expect(day.state.requests).toBe(before);
-    // The lane's own budget spent by live Gmail: later, never an error.
-    const spent: GmailApiClient = { ...api([]), async listMessages() { throw new GoogleRequestBudgetError('Gmail', '2026-10-27T00:00:00.000Z'); } };
-    expect(await gmailHeaderMatch(async () => spent)(headers)).toEqual({ later: 'gmail_requests_spent' });
+    expect(http.attempts).toBe(before);
   });
 
-  test('any budget the import accepts moves at least one message a day; one too small says so', async () => {
-    const tiny = counter(4);
-    expect(await gmailHeaderMatch(async () => api([apiMessage(live)]), { allowance: gmailImportAllowance({ usage: tiny.usage }) })(headers))
-      .toEqual({ later: 'gmail_budget_too_small' });
-    // The smallest accepted budget: its allowance holds one whole message.
-    const small = counter(GMAIL_IMPORT_MESSAGE_COST * 2);
-    const allowance = gmailImportAllowance({ usage: small.usage });
-    expect(await gmailHeaderMatch(async () => counted(api([apiMessage(live)]), small.state), { allowance })(headers)).toEqual({ id: live.id });
+  test('any accepted budget makes progress within a day, at its worst: the label list and one message, every request retried', async () => {
+    for (const daily of [GMAIL_IMPORT_MIN_DAILY_BUDGET, GMAIL_IMPORT_MIN_DAILY_BUDGET + 1, GMAIL_IMPORT_MIN_DAILY_BUDGET + 7, 100, 5_000]) {
+      const { client, allowance } = await importClient(daily, { flaky: true, candidates: 5 });
+      expect(allowance.check(GMAIL_IMPORT_LABELS_COST)).toBe(true);
+      expect((await client.listLabels!()).map((label) => label.id)).toEqual(['Label_7']);
+      // Five candidates agree on all four headers: no single message is it, and the message is done with.
+      const answer = await gmailHeaderMatch(async () => client, { allowance, sameAccount: () => true })(headers);
+      expect(answer, String(daily)).toBe('none');
+    }
+    const { allowance } = await importClient(GMAIL_IMPORT_MIN_DAILY_BUDGET - 1);
+    expect(allowance.check(1)).toBe('gmail_budget_too_small');
+    expect(gmailImportWait('gmail_budget_too_small')).toEqual({ later: 'gmail_budget_too_small', minimum: GMAIL_IMPORT_MIN_DAILY_BUDGET });
   });
 
-  test('labels are asked through the same gate, so a waiting import charges nothing for them', () => {
-    const day = counter(100, 0);
-    const allowance = gmailImportAllowance({ usage: day.usage });
-    for (let at = 0; at < 50; at += 1) expect(allowance.take(1)).toBe(true);
-    expect(allowance.take(1)).toBe('gmail_import_allowance_spent');
-    expect(allowance.check(1)).toBe('gmail_import_allowance_spent');
+  test('a budget too small is said on the import\'s row and under Needs you, with the least it must be and the setting', async () => {
+    const h = gmailArchiveHarness(cleanups);
+    h.match.current = async () => gmailImportWait('gmail_budget_too_small');
+    const text = takeoutMbox([mail(19)], { separator: () => 'From someone@example.test Mon Jan  1 00:00:00 2024' });
+    const id = await started(await h.approve('export.mbox', text));
+    const outcome = await h.importAll(id);
+    expect(outcome.record?.waiting).toMatchObject({ reason: 'gmail_budget_too_small', minimum: GMAIL_IMPORT_MIN_DAILY_BUDGET });
+    const row = h.dashboard.sourceImports()[0]!.imports[0]!;
+    expect(row.gaps).toContainEqual({ kind: 'gmail_budget_too_small', count: GMAIL_IMPORT_MIN_DAILY_BUDGET });
+    expect(gapSentence('gmail_budget_too_small', GMAIL_IMPORT_MIN_DAILY_BUDGET)).toContain(`${GMAIL_DAILY_BUDGET_SETTING} to ${GMAIL_IMPORT_MIN_DAILY_BUDGET} or more`);
+    const attention = h.dashboard.present().attention ?? [];
+    const item = attention.find((entry) => entry.kind === 'waiting');
+    expect(item).toMatchObject({ id, reason: 'gmail_budget_too_small', minimum: GMAIL_IMPORT_MIN_DAILY_BUDGET });
+    expect(dashboardImportAttentionSentence(item!)).toContain(`${GMAIL_DAILY_BUDGET_SETTING} to ${GMAIL_IMPORT_MIN_DAILY_BUDGET} or more`);
+    // Once a pass does not wait, the note goes.
+    h.match.current = async () => 'none';
+    const after = await h.importAll(id);
+    expect(after.record?.waiting).toBeUndefined();
+    expect((h.dashboard.present().attention ?? []).some((entry) => entry.kind === 'waiting')).toBe(false);
   });
 
   test('end to end: messages matched before the budget ran out are stored, the rest wait for the next pass', async () => {

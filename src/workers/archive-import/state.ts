@@ -169,6 +169,13 @@ export interface ArchiveImportRecord {
    * What the import read, and how much of it the source already held (inputs of a source only).
    */
   intake?: ArchiveImportIntake;
+  /**
+   * Why the import's last pass stopped early and waits (the source's provider
+   * cannot be asked now): a short reason code, and for a limit that is too
+   * small, the least it must be raised to. Cleared by the next pass that does
+   * not wait.
+   */
+  waiting?: { reason: string; at: string; minimum?: number };
 }
 
 interface PersistedArchiveImportState {

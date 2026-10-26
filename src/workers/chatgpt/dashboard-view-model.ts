@@ -631,6 +631,8 @@ function importAttentionItem(entry: DashboardImportAttention): DashboardItem {
       return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
     case 'scheduler':
       return { id: 'archives:scheduler', sentence, fix: helpLinkFix(words.seeWhy, archives) };
+    case 'waiting':
+      return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
     case 'held':
       return {
         id: 'archives:held',
@@ -1254,6 +1256,9 @@ function importsAttention(input: readonly DashboardImportAttention[] | undefined
       out.push({ kind: 'scheduler', setting: entry.setting });
     } else if (entry.kind === 'unreadable') {
       out.push({ kind: 'unreadable', reason: IMPORT_UNREADABLE_REASONS.has(entry.reason) ? entry.reason : 'other' });
+    } else if (entry.kind === 'waiting' && typeof entry.id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)
+      && typeof entry.reason === 'string' && /^[a-z_]{1,64}$/.test(entry.reason) && finite(entry.minimum) && entry.minimum > 0) {
+      out.push({ kind: 'waiting', id: entry.id, name: name(entry.name), reason: entry.reason, minimum: count(entry.minimum) });
     }
   }
   return out.length > 0 ? { imports_attention: out } : {};

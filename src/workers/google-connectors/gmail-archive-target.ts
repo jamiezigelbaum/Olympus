@@ -97,7 +97,7 @@ export interface GmailArchiveLane {
    * The account's labels, lower-cased name to id, or why they cannot be read
    * now. Asked only when an owner rule names a label.
    */
-  labelIds?: () => Promise<ReadonlyMap<string, string> | { unavailable: string }>;
+  labelIds?: () => Promise<ReadonlyMap<string, string> | { unavailable: string; minimum?: number }>;
 }
 
 /**
@@ -109,14 +109,17 @@ export async function gmailLabelLookup(lane: Pick<GmailArchiveLane, 'set' | 'lab
   const rules = lane.set.classification()?.rules ?? [];
   // No rule names a label: names are enough, and nothing is asked of Gmail.
   if (!rules.some((rule) => rule.match.kind === 'label')) return { kind: 'none' };
-  let found: ReadonlyMap<string, string> | { unavailable: string } | undefined;
+  let found: ReadonlyMap<string, string> | { unavailable: string; minimum?: number } | undefined;
   try {
     found = await lane.labelIds?.();
   } catch {
     found = undefined;
   }
   if (found instanceof Map) return { kind: 'map', byName: found };
-  return { kind: 'unavailable', reason: found && 'unavailable' in found ? found.unavailable : 'gmail_labels_unavailable' };
+  if (found && 'unavailable' in found) {
+    return { kind: 'unavailable', reason: found.unavailable, ...(found.minimum !== undefined ? { minimum: found.minimum } : {}) };
+  }
+  return { kind: 'unavailable', reason: 'gmail_labels_unavailable' };
 }
 
 export interface GmailArchiveTargetOptions {

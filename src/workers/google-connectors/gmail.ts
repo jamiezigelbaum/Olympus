@@ -42,6 +42,7 @@ import {
   type GmailMailBuild,
   type GmailMailRecord,
 } from './gmail-mail-record.ts';
+import type { GmailRequestCounter } from './gmail-import-allowance.ts';
 import {
   GoogleDailyRequestBudget,
   GoogleRequestBudgetError,
@@ -97,7 +98,7 @@ export interface GoogleGmailSourceConnectorOptions {
    * construction seam always supplies it, so one process can never quietly run
    * two independent counters against the same Gmail quota.
    */
-  requestBudget?: GoogleDailyRequestBudget;
+  requestBudget?: GmailRequestCounter;
   /**
    * Who initiated the run this connector serves. Operator runs are exempt from
    * the daily request budget (owner ruling 2026-08-19); anything but the exact
@@ -303,7 +304,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   private readonly query: string | undefined;
   private readonly scope: GmailConnectorScope | undefined;
   private readonly now: () => number;
-  private readonly requestBudget: GoogleDailyRequestBudget | undefined;
+  private readonly requestBudget: GmailRequestCounter | undefined;
   private readonly provenance: SourceInvocationProvenance;
   private readonly maxRetries: number | undefined;
   private readonly sleepImpl: ((ms: number) => Promise<void>) | undefined;
@@ -933,7 +934,7 @@ export function defaultGmailRequestBudgetStatePath(
 
 function budgetedGmailApiClient(
   inner: GmailApiClient,
-  budget: GoogleDailyRequestBudget,
+  budget: GmailRequestCounter,
   // Bound at wrap time, from the connector that owns one run. A budget shared
   // by the whole process cannot hold this: it would leak one run's exemption
   // into whatever ran next.
@@ -1101,14 +1102,14 @@ class RestGmailApiClient implements GmailApiClient {
   private readonly baseUrl: string;
   private readonly maxRetries: number;
   private readonly sleep: (ms: number) => Promise<void>;
-  private readonly requestBudget: GoogleDailyRequestBudget | undefined;
+  private readonly requestBudget: GmailRequestCounter | undefined;
   private readonly provenance: SourceInvocationProvenance;
 
   constructor(options: {
     token: string;
     fetch: CredentialBrokerFetch;
     baseUrl: string;
-    requestBudget?: GoogleDailyRequestBudget;
+    requestBudget?: GmailRequestCounter;
     provenance?: SourceInvocationProvenance;
     maxRetries?: number;
     sleep?: (ms: number) => Promise<void>;

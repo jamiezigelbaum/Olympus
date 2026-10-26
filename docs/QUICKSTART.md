@@ -522,6 +522,16 @@ changed scope starts a fresh traversal under the new query that skips mail
 already held; saving an unchanged scope does nothing. The approval is stored in
 `mail-source-scopes.json` beside the connected-handle registry.
 
+A Google Takeout mail export (`.mbox`) of the connected account joins Gmail
+when you import it: its messages are the same items as the live ones, so
+nothing is stored twice. Takeout names each message by Gmail's id, so this
+costs no Gmail requests. Messages without that id are looked up in Gmail, and
+imports may spend at most half of the day's Gmail requests
+(`OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET`, 5,000 by default), so
+live mail always keeps the rest. Below 32 a day an import cannot move: its row
+and Needs you say so, and setting the budget to 32 or more, then restarting
+Olympus, lets it go on.
+
 Operators can still narrow Gmail with the hidden
 `OLYMPUS_SOURCE_INDEX_GMAIL_QUERY` setting (Gmail search syntax). It is an
 override on top of the approved scope, never a replacement: the lane ANDs it

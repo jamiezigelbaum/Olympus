@@ -1088,7 +1088,7 @@ export interface ArchiveConnectorInput {
    * out with its resume point, and the import waits for its next scheduled
    * pass instead of being run again at once. `reason` is a short code.
    */
-  waitForProvider?(reason: string): void;
+  waitForProvider?(reason: string, detail?: { minimum?: number }): void;
   /** Bytes read per listing before it pauses with a resume point. */
   maxBytesPerListing?: number;
   pageSize?: number;

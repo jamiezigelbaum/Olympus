@@ -58,7 +58,7 @@ export interface MboxMessageHeaders {
  * before it goes out with its resume point, and the import waits for its next
  * scheduled pass.
  */
-export type MboxGmailMatch = (headers: MboxMessageHeaders) => Promise<{ id: string } | 'none' | { later: string }>;
+export type MboxGmailMatch = (headers: MboxMessageHeaders) => Promise<{ id: string } | 'none' | { later: string; minimum?: number }>;
 
 /**
  * Takeout names user labels; live Gmail gives their ids (`Label_7`), which
@@ -70,7 +70,7 @@ export type MboxGmailMatch = (headers: MboxMessageHeaders) => Promise<{ id: stri
 export type GmailLabelLookup =
   | { kind: 'map'; byName: ReadonlyMap<string, string> }
   | { kind: 'none' }
-  | { kind: 'unavailable'; reason: string };
+  | { kind: 'unavailable'; reason: string; minimum?: number };
 
 export interface MboxGmailInputOptions {
   build?: GmailMailBuild;
@@ -221,7 +221,7 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
         // The account's label ids, read once per pass; a rule on a label that cannot be resolved makes the import wait.
         const labels = options.labels ? await options.labels() : { kind: 'none' as const };
         if (labels.kind === 'unavailable') {
-          archive.waitForProvider?.(labels.reason);
+          archive.waitForProvider?.(labels.reason, labels.minimum !== undefined ? { minimum: labels.minimum } : undefined);
           return;
         }
         const labelsByName = labels.kind === 'map' ? labels.byName : undefined;
@@ -297,7 +297,7 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
                       // Gmail cannot be asked now: what came before goes out, and this message is read again on
                       // the next scheduled pass (its findings are reported then).
                       if (pending) yield out(before, false);
-                      archive.waitForProvider?.(matched.later);
+                      archive.waitForProvider?.(matched.later, matched.minimum !== undefined ? { minimum: matched.minimum } : undefined);
                       return;
                     }
                     if (matched !== 'none') id = matched.id;

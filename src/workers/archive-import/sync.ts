@@ -502,6 +502,7 @@ async function runPass(
     // Set when the listing stopped because the source's provider cannot be asked now: the import waits for its
     // next scheduled pass instead of being run again at once.
     let providerWait: string | undefined;
+    let providerWaitMinimum: number | undefined;
     const connector = sink.connector({
       archiveId: record.archive_id,
       connectorId,
@@ -513,7 +514,10 @@ async function runPass(
       report: (finding) => { pending.push(finding); },
       reportPosition: (next) => { position = next; },
       reportItemPositions: (positions) => { itemPositions = positions; },
-      waitForProvider: (reason) => { providerWait = reason; },
+      waitForProvider: (reason, detail) => {
+        providerWait = reason;
+        providerWaitMinimum = detail?.minimum;
+      },
       shouldContinue,
       ...(options.media ? { media: archiveMediaAccess({ bindings: options.media, archiveId: record.archive_id, root, chosenRelPath: record.chosen_rel_path }) } : {}),
       ...(options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {}),
@@ -605,6 +609,12 @@ async function runPass(
       else if (!media.ok) mediaChange = stopFrom(media, now().toISOString());
     }
     const updated = options.state.update(record.archive_id, (entry) => {
+      // Why it waits, on the record, so the import's row and Needs you say it; gone once a pass does not wait.
+      if (providerWait !== undefined) {
+        entry.waiting = { reason: providerWait, at: now().toISOString(), ...(providerWaitMinimum !== undefined ? { minimum: providerWaitMinimum } : {}) };
+      } else {
+        delete entry.waiting;
+      }
       if (dates.earliest && dates.latest) {
         entry.date_range = {
           earliest: entry.date_range && entry.date_range.earliest < dates.earliest ? entry.date_range.earliest : dates.earliest,

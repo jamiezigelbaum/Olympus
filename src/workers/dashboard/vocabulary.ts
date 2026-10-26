@@ -2204,6 +2204,14 @@ export const DASHBOARD_ARCHIVE_COPY = {
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
     mail_for_another_account: { one: '1 message delivered to another address left out', many: '{n} messages delivered to another address left out' },
+    // Why an import waits (the record's `waiting`): for a limit too small, {n} is the least it must be.
+    gmail_budget_too_small: {
+      one: 'Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.',
+      many: 'Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.',
+    },
+    gmail_import_allowance_spent: { one: "Waiting until tomorrow: imports have used their share of today's Gmail requests.", many: "Waiting until tomorrow: imports have used their share of today's Gmail requests." },
+    gmail_requests_spent: { one: "Waiting until tomorrow: today's Gmail requests are used up.", many: "Waiting until tomorrow: today's Gmail requests are used up." },
+    gmail_labels_unavailable: { one: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.", many: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now." },
     system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
     message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
     // Old records only (the status updates chat used to be left out; it is read like any chat now).
@@ -2279,6 +2287,10 @@ export const DASHBOARD_ARCHIVE_COPY = {
     text_cut: 'not_imported',
     spam_or_trash: 'not_imported',
     mail_for_another_account: 'not_imported',
+    gmail_budget_too_small: 'not_imported',
+    gmail_import_allowance_spent: 'not_imported',
+    gmail_requests_spent: 'not_imported',
+    gmail_labels_unavailable: 'not_imported',
     // Chats (WhatsApp, Telegram).
     message_content_unsupported: 'not_imported',
     system_message: 'how_read',
@@ -2351,6 +2363,11 @@ export const DASHBOARD_ARCHIVE_COPY = {
     },
     held: { one: '1 imported item waits for the private model', many: '{n} imported items wait for the private model' },
     unreadable: "Olympus can't read its list of imported archives",
+    /** An import waits for a limit the owner must raise; {n} is the least it must be. */
+    waiting: {
+      gmail_budget_too_small: "An import waits: {name}. The daily limit on Gmail requests is too low; set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more",
+      other: 'An import waits: {name}',
+    },
     seeWhy: 'See why',
     review: 'Review',
     setUp: 'Set up the private model',
@@ -2399,6 +2416,10 @@ export function dashboardImportAttentionSentence(entry: DashboardImportAttention
       return entry.count === 1 ? words.held.one : words.held.many.replace('{n}', dashboardCount(entry.count));
     case 'unreadable':
       return words.unreadable;
+    case 'waiting': {
+      const template = entry.reason === 'gmail_budget_too_small' ? words.waiting.gmail_budget_too_small : words.waiting.other;
+      return template.replace('{name}', () => displayText(entry.name)).replace('{n}', dashboardCount(entry.minimum));
+    }
   }
 }
 

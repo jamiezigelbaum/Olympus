@@ -1,43 +1,73 @@
 /**
- * The share of the Gmail day budget imports may spend, and the one gate every
- * request an import makes passes (labels, the mailbox check, the search, the
- * candidates' headers). Live Gmail keeps the rest of the day.
+ * The one budget model for the Gmail requests imports make
+ * (docs/design/archive-live-one-dataset.md, "Built, step 6").
  *
- * - **Allowance.** Half of the day's budget, but never less than what one
- *   message costs at worst (`MESSAGE_COST`), so any budget the import accepts
- *   makes progress: at least one message a day.
- * - **Too small.** A day's budget under twice that cost cannot leave live
- *   Gmail its share while an import still moves: the import waits, and the
- *   receipt says so (`gmail_budget_too_small`), with the setting to raise.
- * - **Whole messages.** A message is begun only when the allowance holds its
- *   worst case, so a message is never left half asked about and asked again.
- * - **No charge for waiting.** A refusal spends nothing: the gate refuses
- *   before any request.
+ * - **Charged at the transport.** Imports read Gmail through a client whose
+ *   day counter is `gmailImportBudget`: every HTTP attempt, a retry included,
+ *   passes the imports' allowance before the lane's own day counter, so no
+ *   request goes around it.
+ * - **Allowance.** Half of the day's budget: live Gmail keeps the rest.
+ * - **Worst cases, retries included.** An import's client retries a failed
+ *   request once (`GMAIL_IMPORT_ATTEMPTS`). One message asks at most the
+ *   mailbox check, one search and five candidates' headers
+ *   (`GMAIL_IMPORT_MESSAGE_COST` attempts); the label list, asked once a day
+ *   when an owner rule names a label, at most `GMAIL_IMPORT_LABELS_COST`.
+ * - **Any accepted budget moves.** The smallest accepted day budget
+ *   (`GMAIL_IMPORT_MIN_DAILY_BUDGET`) gives an allowance that holds the label
+ *   list and one message at their worst, so an import goes on by at least one
+ *   message a day. A smaller budget is refused with `gmail_budget_too_small`,
+ *   which the import's row and Needs you say in plain words, with the setting
+ *   to raise.
+ * - **Whole steps, nothing charged while waiting.** A message (or the label
+ *   list) is begun only when the allowance holds its worst case; a refusal
+ *   comes before any request.
  *
- * The count is the import's own, per UTC day, in this process (the lane's one
- * day counter still bounds every request, imports' and live's alike); a
- * restart begins the import's count again, still under that counter.
+ * The count is the imports' own, per UTC day, in this process; a restart
+ * begins it again, still under the lane's durable day counter.
  */
+import type { SourceInvocationProvenance } from '../../core/invocation-provenance.ts';
 import type { GoogleRequestBudgetStatus } from './request-budget.ts';
 
-/** One search, five candidates' headers, and the mailbox check: the most one message asks. */
-export const GMAIL_IMPORT_MESSAGE_COST = 7;
+/** Retries an import's client makes after a failed attempt. */
+export const GMAIL_IMPORT_MAX_RETRIES = 1;
+export const GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
+/** The mailbox check, one search and five candidates' headers, each at its worst. */
+export const GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
+/** The account's label list, at its worst. */
+export const GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
 /** The share of the day's budget imports may spend. */
 export const GMAIL_IMPORT_SHARE = 0.5;
+/** The smallest day budget whose share holds the label list and one message at their worst. */
+export const GMAIL_IMPORT_MIN_DAILY_BUDGET = Math.ceil((GMAIL_IMPORT_LABELS_COST + GMAIL_IMPORT_MESSAGE_COST) / GMAIL_IMPORT_SHARE);
+/** The setting that raises the day budget, named where the budget is too small. */
+export const GMAIL_DAILY_BUDGET_SETTING = 'OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET';
 
 export type GmailImportWait =
-  /** The import's share of today's requests is spent: it goes on tomorrow. */
+  /** The imports' share of today's requests is spent: they go on tomorrow. */
   | 'gmail_import_allowance_spent'
-  /** The lane's day budget is spent (live Gmail used it): it goes on tomorrow. */
+  /** The lane's day budget is spent (live Gmail used it): imports go on tomorrow. */
   | 'gmail_requests_spent'
-  /** The day's budget is too small for an import to move while live Gmail keeps its share. */
+  /** The day's budget is under `GMAIL_IMPORT_MIN_DAILY_BUDGET`: imports wait until it is raised. */
   | 'gmail_budget_too_small';
 
+/** How an import says it waits: the reason, and for a budget too small, the least it must be. */
+export function gmailImportWait(reason: GmailImportWait): { later: GmailImportWait; minimum?: number } {
+  return reason === 'gmail_budget_too_small' ? { later: reason, minimum: GMAIL_IMPORT_MIN_DAILY_BUDGET } : { later: reason };
+}
+
+/** Thrown by the imports' day counter instead of making a request. */
+export class GmailImportWaitError extends Error {
+  constructor(readonly reason: GmailImportWait) {
+    super(`Gmail import waits: ${reason}`);
+    this.name = 'GmailImportWaitError';
+  }
+}
+
 export interface GmailImportAllowance {
-  /** Whether `requests` more may be asked now; on yes they are counted. */
-  take(requests: number): true | GmailImportWait;
-  /** What one message's worst case would meet now, without counting anything. */
+  /** Whether `requests` attempts may begin now, without counting them. */
   check(requests: number): true | GmailImportWait;
+  /** Counts one attempt, or refuses it. */
+  take(): true | GmailImportWait;
 }
 
 export function gmailImportAllowance(options: {
@@ -55,17 +85,37 @@ export function gmailImportAllowance(options: {
     }
     const usage = options.usage();
     if (!usage) return true;
-    if (usage.dailyRequestBudget < GMAIL_IMPORT_MESSAGE_COST * 2) return 'gmail_budget_too_small';
+    if (usage.dailyRequestBudget < GMAIL_IMPORT_MIN_DAILY_BUDGET) return 'gmail_budget_too_small';
     if (usage.requests + requests > usage.dailyRequestBudget) return 'gmail_requests_spent';
-    const allowance = Math.max(GMAIL_IMPORT_MESSAGE_COST, Math.floor(usage.dailyRequestBudget * GMAIL_IMPORT_SHARE));
-    return used + requests > allowance ? 'gmail_import_allowance_spent' : true;
+    return used + requests > Math.floor(usage.dailyRequestBudget * GMAIL_IMPORT_SHARE) ? 'gmail_import_allowance_spent' : true;
   };
   return {
     check,
-    take(requests) {
-      const verdict = check(requests);
-      if (verdict === true) used += requests;
+    take() {
+      const verdict = check(1);
+      if (verdict === true) used += 1;
       return verdict;
     },
+  };
+}
+
+/** The lane's day counter, as an import client uses it: the shape `GoogleDailyRequestBudget` has. */
+export interface GmailRequestCounter {
+  reserve(provenance?: SourceInvocationProvenance): void;
+  status(): GoogleRequestBudgetStatus;
+}
+
+/**
+ * The day counter an import's Gmail client is given: every attempt passes the
+ * imports' allowance, then the lane's own counter.
+ */
+export function gmailImportBudget(lane: GmailRequestCounter, allowance: GmailImportAllowance): GmailRequestCounter {
+  return {
+    reserve(provenance) {
+      const verdict = allowance.take();
+      if (verdict !== true) throw new GmailImportWaitError(verdict);
+      lane.reserve(provenance);
+    },
+    status: () => lane.status(),
   };
 }

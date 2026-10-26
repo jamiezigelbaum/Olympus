@@ -51697,6 +51697,10 @@ function dashboardImportAttentionSentence(entry) {
       return entry.count === 1 ? words2.held.one : words2.held.many.replace("{n}", dashboardCount(entry.count));
     case "unreadable":
       return words2.unreadable;
+    case "waiting": {
+      const template = entry.reason === "gmail_budget_too_small" ? words2.waiting.gmail_budget_too_small : words2.waiting.other;
+      return template.replace("{name}", () => displayText(entry.name)).replace("{n}", dashboardCount(entry.minimum));
+    }
   }
 }
 function archiveFindingList(kind) {
@@ -52220,6 +52224,13 @@ var init_vocabulary = __esm(() => {
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
       mail_for_another_account: { one: "1 message delivered to another address left out", many: "{n} messages delivered to another address left out" },
+      gmail_budget_too_small: {
+        one: "Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.",
+        many: "Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus."
+      },
+      gmail_import_allowance_spent: { one: "Waiting until tomorrow: imports have used their share of today's Gmail requests.", many: "Waiting until tomorrow: imports have used their share of today's Gmail requests." },
+      gmail_requests_spent: { one: "Waiting until tomorrow: today's Gmail requests are used up.", many: "Waiting until tomorrow: today's Gmail requests are used up." },
+      gmail_labels_unavailable: { one: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.", many: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now." },
       system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
       message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
       status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
@@ -52272,6 +52283,10 @@ var init_vocabulary = __esm(() => {
       text_cut: "not_imported",
       spam_or_trash: "not_imported",
       mail_for_another_account: "not_imported",
+      gmail_budget_too_small: "not_imported",
+      gmail_import_allowance_spent: "not_imported",
+      gmail_requests_spent: "not_imported",
+      gmail_labels_unavailable: "not_imported",
       message_content_unsupported: "not_imported",
       system_message: "how_read",
       message_empty: "how_read",
@@ -52330,6 +52345,10 @@ var init_vocabulary = __esm(() => {
       },
       held: { one: "1 imported item waits for the private model", many: "{n} imported items wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
+      waiting: {
+        gmail_budget_too_small: "An import waits: {name}. The daily limit on Gmail requests is too low; set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more",
+        other: "An import waits: {name}"
+      },
       seeWhy: "See why",
       review: "Review",
       setUp: "Set up the private model",
@@ -165713,7 +165732,7 @@ function createArchiveImportDashboard(options) {
       startedAt: record5.created_at,
       ...record5.completed_at ? { importedAt: record5.completed_at } : {},
       ...record5.status === "stopped" && record5.stop ? { stop: { code: record5.stop.code, ...stopFile ? { file: stopFile } : {} } } : {},
-      gaps: gapsOf(record5),
+      gaps: record5.status === "importing" && record5.waiting ? [...gapsOf(record5), { kind: record5.waiting.reason, count: Math.max(1, Math.floor(record5.waiting.minimum ?? 1)) }] : gapsOf(record5),
       skipped: tallies(record5.findings.skipped)
     };
   };
@@ -165950,6 +165969,9 @@ function createArchiveImportDashboard(options) {
       for (const record5 of records) {
         if (record5.status === "stopped" && record5.stop?.code !== "stopped_by_owner")
           attention.push({ kind: "stopped", id: record5.archive_id, name: record5.label });
+        if (record5.status === "importing" && record5.waiting?.minimum !== undefined) {
+          attention.push({ kind: "waiting", id: record5.archive_id, name: record5.label, reason: record5.waiting.reason, minimum: record5.waiting.minimum });
+        }
       }
       const setting = scheduling();
       if (setting !== "on" && stuck(records))
@@ -167048,6 +167070,7 @@ async function runPass(options, record5, context2) {
     const connectorId = archiveConnectorId(record5.archive_id);
     const shouldContinue = options.shouldContinue ?? (() => true);
     let providerWait;
+    let providerWaitMinimum;
     const connector = sink.connector({
       archiveId: record5.archive_id,
       connectorId,
@@ -167065,8 +167088,9 @@ async function runPass(options, record5, context2) {
       reportItemPositions: (positions) => {
         itemPositions = positions;
       },
-      waitForProvider: (reason) => {
+      waitForProvider: (reason, detail) => {
         providerWait = reason;
+        providerWaitMinimum = detail?.minimum;
       },
       shouldContinue,
       ...options.media ? { media: archiveMediaAccess({ bindings: options.media, archiveId: record5.archive_id, root, chosenRelPath: record5.chosen_rel_path }) } : {},
@@ -167148,6 +167172,11 @@ async function runPass(options, record5, context2) {
         mediaChange = stopFrom(media, now().toISOString());
     }
     const updated = options.state.update(record5.archive_id, (entry) => {
+      if (providerWait !== undefined) {
+        entry.waiting = { reason: providerWait, at: now().toISOString(), ...providerWaitMinimum !== undefined ? { minimum: providerWaitMinimum } : {} };
+      } else {
+        delete entry.waiting;
+      }
       if (dates.earliest && dates.latest) {
         entry.date_range = {
           earliest: entry.date_range && entry.date_range.earliest < dates.earliest ? entry.date_range.earliest : dates.earliest,
@@ -168721,7 +168750,7 @@ function mboxGmailInput(archive, options = {}) {
           throw new Error("This export is not one Gmail account's: nothing of it is read into Gmail.");
         const labels = options.labels ? await options.labels() : { kind: "none" };
         if (labels.kind === "unavailable") {
-          archive.waitForProvider?.(labels.reason);
+          archive.waitForProvider?.(labels.reason, labels.minimum !== undefined ? { minimum: labels.minimum } : undefined);
           return;
         }
         const labelsByName = labels.kind === "map" ? labels.byName : undefined;
@@ -168800,7 +168829,7 @@ function mboxGmailInput(archive, options = {}) {
                     if (matched !== "none" && "later" in matched) {
                       if (pending)
                         yield out(before, false);
-                      archive.waitForProvider?.(matched.later);
+                      archive.waitForProvider?.(matched.later, matched.minimum !== undefined ? { minimum: matched.minimum } : undefined);
                       return;
                     }
                     if (matched !== "none")
@@ -168913,7 +168942,10 @@ async function gmailLabelLookup(lane) {
   }
   if (found instanceof Map)
     return { kind: "map", byName: found };
-  return { kind: "unavailable", reason: found && "unavailable" in found ? found.unavailable : "gmail_labels_unavailable" };
+  if (found && "unavailable" in found) {
+    return { kind: "unavailable", reason: found.unavailable, ...found.minimum !== undefined ? { minimum: found.minimum } : {} };
+  }
+  return { kind: "unavailable", reason: "gmail_labels_unavailable" };
 }
 function gmailArchiveTarget(options) {
   let current2;
@@ -170585,6 +170617,9 @@ var init_gmail_scope_browser = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-import-allowance.ts
+function gmailImportWait(reason) {
+  return reason === "gmail_budget_too_small" ? { later: reason, minimum: GMAIL_IMPORT_MIN_DAILY_BUDGET } : { later: reason };
+}
 function gmailImportAllowance(options) {
   const now = options.now ?? (() => new Date);
   let day = "";
@@ -170598,24 +170633,48 @@ function gmailImportAllowance(options) {
     const usage = options.usage();
     if (!usage)
       return true;
-    if (usage.dailyRequestBudget < GMAIL_IMPORT_MESSAGE_COST * 2)
+    if (usage.dailyRequestBudget < GMAIL_IMPORT_MIN_DAILY_BUDGET)
       return "gmail_budget_too_small";
     if (usage.requests + requests > usage.dailyRequestBudget)
       return "gmail_requests_spent";
-    const allowance = Math.max(GMAIL_IMPORT_MESSAGE_COST, Math.floor(usage.dailyRequestBudget * GMAIL_IMPORT_SHARE));
-    return used + requests > allowance ? "gmail_import_allowance_spent" : true;
+    return used + requests > Math.floor(usage.dailyRequestBudget * GMAIL_IMPORT_SHARE) ? "gmail_import_allowance_spent" : true;
   };
   return {
     check,
-    take(requests) {
-      const verdict = check(requests);
+    take() {
+      const verdict = check(1);
       if (verdict === true)
-        used += requests;
+        used += 1;
       return verdict;
     }
   };
 }
-var GMAIL_IMPORT_MESSAGE_COST = 7, GMAIL_IMPORT_SHARE = 0.5;
+function gmailImportBudget(lane, allowance) {
+  return {
+    reserve(provenance) {
+      const verdict = allowance.take();
+      if (verdict !== true)
+        throw new GmailImportWaitError(verdict);
+      lane.reserve(provenance);
+    },
+    status: () => lane.status()
+  };
+}
+var GMAIL_IMPORT_MAX_RETRIES = 1, GMAIL_IMPORT_ATTEMPTS, GMAIL_IMPORT_MESSAGE_COST, GMAIL_IMPORT_LABELS_COST, GMAIL_IMPORT_SHARE = 0.5, GMAIL_IMPORT_MIN_DAILY_BUDGET, GmailImportWaitError;
+var init_gmail_import_allowance = __esm(() => {
+  GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
+  GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
+  GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
+  GMAIL_IMPORT_MIN_DAILY_BUDGET = Math.ceil((GMAIL_IMPORT_LABELS_COST + GMAIL_IMPORT_MESSAGE_COST) / GMAIL_IMPORT_SHARE);
+  GmailImportWaitError = class GmailImportWaitError extends Error {
+    reason;
+    constructor(reason) {
+      super(`Gmail import waits: ${reason}`);
+      this.reason = reason;
+      this.name = "GmailImportWaitError";
+    }
+  };
+});
 
 // src/workers/google-connectors/gmail-header-match.ts
 function sameDate(a, b) {
@@ -170645,39 +170704,30 @@ function gmailHeaderMatch(client, options = {}) {
       return "none";
     const room = options.allowance?.check(GMAIL_IMPORT_MESSAGE_COST) ?? true;
     if (room !== true)
-      return { later: room };
-    const take = () => {
-      const verdict = options.allowance?.take(1) ?? true;
-      if (verdict !== true)
-        throw new AllowanceRefused(verdict);
-    };
+      return waitFor2(room);
     try {
-      return await matchWith(api2, wanted, headers, take);
+      return await matchWith(api2, wanted, headers);
     } catch (error2) {
-      if (error2 instanceof AllowanceRefused)
-        return { later: error2.reason };
+      if (error2 instanceof GmailImportWaitError)
+        return waitFor2(error2.reason);
       if (error2 instanceof GoogleRequestBudgetError)
         return { later: "gmail_requests_spent" };
       throw error2;
     }
   };
-  async function matchWith(api2, wanted, headers, take) {
+  async function matchWith(api2, wanted, headers) {
     if (options.sameAccount && checked === undefined) {
-      if (api2.getProfile)
-        take();
       const address = api2.getProfile ? (await api2.getProfile()).emailAddress : "";
       checked = address !== "" && options.sameAccount(address);
     }
     if (checked === false)
       return "none";
-    take();
     const listed = await api2.listMessages({ maxResults: MAX_CANDIDATES + 1, query: `rfc822msgid:${wanted}` });
     const candidates2 = listed.messages.map((message2) => message2.id).filter(Boolean);
     if (candidates2.length === 0 || candidates2.length > MAX_CANDIDATES)
       return "none";
     const agreeing = [];
     for (const id of candidates2) {
-      take();
       const message2 = await api2.getMessage(id, { format: "metadata", metadataHeaders: ["Message-ID", "Date", "From", "Subject"] });
       const found = new Map;
       for (const header of message2.payload?.headers ?? []) {
@@ -170692,18 +170742,13 @@ function gmailHeaderMatch(client, options = {}) {
     return agreeing.length === 1 ? { id: agreeing[0] } : "none";
   }
 }
-var AllowanceRefused, MAX_CANDIDATES = 5, SEARCHABLE, same = (a, b) => readable(a) === readable(b);
+var waitFor2, MAX_CANDIDATES = 5, SEARCHABLE, same = (a, b) => readable(a) === readable(b);
 var init_gmail_header_match = __esm(() => {
   init_postal_mime();
   init_gmail();
+  init_gmail_import_allowance();
   init_request_budget();
-  AllowanceRefused = class AllowanceRefused extends Error {
-    reason;
-    constructor(reason) {
-      super(reason);
-      this.reason = reason;
-    }
-  };
+  waitFor2 = gmailImportWait;
   SEARCHABLE = /^[^\s"()<>{}]{1,500}$/;
 });
 
@@ -173113,6 +173158,8 @@ function importAttentionItem(entry) {
       return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words2.seeWhy, archives) };
     case "scheduler":
       return { id: "archives:scheduler", sentence, fix: helpLinkFix(words2.seeWhy, archives) };
+    case "waiting":
+      return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words2.seeWhy, archives) };
     case "held":
       return {
         id: "archives:held",
@@ -173498,6 +173545,8 @@ function importsAttention(input) {
       out.push({ kind: "scheduler", setting: entry.setting });
     } else if (entry.kind === "unreadable") {
       out.push({ kind: "unreadable", reason: IMPORT_UNREADABLE_REASONS.has(entry.reason) ? entry.reason : "other" });
+    } else if (entry.kind === "waiting" && typeof entry.id === "string" && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name) && typeof entry.reason === "string" && /^[a-z_]{1,64}$/.test(entry.reason) && finite(entry.minimum) && entry.minimum > 0) {
+      out.push({ kind: "waiting", id: entry.id, name: name(entry.name), reason: entry.reason, minimum: count(entry.minimum) });
     }
   }
   return out.length > 0 ? { imports_attention: out } : {};
@@ -192732,7 +192781,19 @@ async function main() {
             approved = true;
           }
         } catch {}
-        let matchClient;
+        let importClientPromise;
+        const importClient = () => {
+          if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority)
+            return;
+          fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+          importClientPromise ??= new GoogleGmailSourceConnector({
+            credentialHandle: handle.handle,
+            ...handle.accountRole ? { account: handle.accountRole } : {},
+            requestBudget: gmailImportBudget(gmailRequestBudget, gmailImportGate),
+            maxRetries: GMAIL_IMPORT_MAX_RETRIES
+          }).apiClientForTooling();
+          return importClientPromise;
+        };
         const key2 = JSON.stringify(ownerRules);
         if (gmailArchiveSet?.key !== key2) {
           gmailArchiveSet = {
@@ -192756,35 +192817,32 @@ async function main() {
 ${key2}`;
             if (gmailLabelCache?.key === cacheKey)
               return gmailLabelCache.map;
-            if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority)
+            const client = importClient();
+            if (!client)
               return { unavailable: "gmail_labels_unavailable" };
-            fileSourceScopeAuthority.assertCurrentMail(scopeRef);
-            const room = gmailImportGate.take(1);
-            if (room !== true)
-              return { unavailable: room };
-            matchClient ??= new GoogleGmailSourceConnector({
-              credentialHandle: handle.handle,
-              ...handle.accountRole ? { account: handle.accountRole } : {},
-              requestBudget: gmailRequestBudget
-            }).apiClientForTooling();
-            const api2 = await matchClient;
+            const room = gmailImportGate.check(GMAIL_IMPORT_LABELS_COST);
+            if (room !== true) {
+              const wait = gmailImportWait(room);
+              return { unavailable: wait.later, ...wait.minimum !== undefined ? { minimum: wait.minimum } : {} };
+            }
+            const api2 = await client;
             if (!api2.listLabels)
               return { unavailable: "gmail_labels_unavailable" };
-            const map2 = new Map((await api2.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id]));
-            gmailLabelCache = { key: cacheKey, map: map2 };
-            return map2;
+            try {
+              const map2 = new Map((await api2.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id]));
+              gmailLabelCache = { key: cacheKey, map: map2 };
+              return map2;
+            } catch (error2) {
+              if (error2 instanceof GmailImportWaitError) {
+                const wait = gmailImportWait(error2.reason);
+                return { unavailable: wait.later, ...wait.minimum !== undefined ? { minimum: wait.minimum } : {} };
+              }
+              if (error2 instanceof GoogleRequestBudgetError)
+                return { unavailable: "gmail_requests_spent" };
+              throw error2;
+            }
           },
-          match: gmailHeaderMatch(async () => {
-            if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority)
-              return;
-            fileSourceScopeAuthority.assertCurrentMail(scopeRef);
-            matchClient ??= new GoogleGmailSourceConnector({
-              credentialHandle: handle.handle,
-              ...handle.accountRole ? { account: handle.accountRole } : {},
-              requestBudget: gmailRequestBudget
-            }).apiClientForTooling();
-            return matchClient;
-          }, {
+          match: gmailHeaderMatch(async () => importClient(), {
             allowance: gmailImportGate,
             sameAccount: (address) => {
               const named = readSourceRegistry(process.env).accounts.find((entry) => entry.source_id === GMAIL_SOURCE_ID)?.provider_account_hash;
@@ -195979,6 +196037,7 @@ var init_server5 = __esm(async () => {
   init_gmail_scope_browser();
   init_gmail_archive_target();
   init_gmail_header_match();
+  init_gmail_import_allowance();
   init_source_registry();
   init_gmail_live_sync();
   init_source_targets();

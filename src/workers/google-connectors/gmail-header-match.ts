@@ -22,14 +22,15 @@
 import { decodeWords } from 'postal-mime';
 import type { MboxGmailMatch, MboxMessageHeaders } from '../archive-import/mbox/gmail-input.ts';
 import { bareMessageId, type GmailApiClient } from './gmail.ts';
-import { GMAIL_IMPORT_MESSAGE_COST, type GmailImportAllowance, type GmailImportWait } from './gmail-import-allowance.ts';
-import { GoogleRequestBudgetError } from './request-budget.ts';
+import {
+  GMAIL_IMPORT_MESSAGE_COST,
+  GmailImportWaitError,
+  gmailImportWait,
+  type GmailImportAllowance,
+} from './gmail-import-allowance.ts';
 
-class AllowanceRefused extends Error {
-  constructor(readonly reason: GmailImportWait) {
-    super(reason);
-  }
-}
+const waitFor = gmailImportWait;
+import { GoogleRequestBudgetError } from './request-budget.ts';
 
 const MAX_CANDIDATES = 5;
 // A Message-ID Gmail's search can take as one term.
@@ -62,8 +63,12 @@ export interface GmailHeaderMatchOptions {
    * message delivered to both cannot take the other account's id.
    */
   sameAccount?: (address: string) => boolean;
-  /** The imports' one gate on Gmail requests. */
-  allowance?: GmailImportAllowance;
+  /**
+   * The imports' allowance (gmail-import-allowance.ts): asked whether one
+   * message's worst case may begin. The client itself is charged at the
+   * transport, every attempt and retry, by the imports' day counter.
+   */
+  allowance?: Pick<GmailImportAllowance, 'check'>;
 }
 
 export function gmailHeaderMatch(client: () => Promise<GmailApiClient | undefined>, options: GmailHeaderMatchOptions = {}): MboxGmailMatch {
@@ -75,35 +80,28 @@ export function gmailHeaderMatch(client: () => Promise<GmailApiClient | undefine
     if (!api) return 'none';
     // A message is begun only when the allowance holds its worst case; a refusal spends nothing.
     const room = options.allowance?.check(GMAIL_IMPORT_MESSAGE_COST) ?? true;
-    if (room !== true) return { later: room };
-    const take = (): void => {
-      const verdict = options.allowance?.take(1) ?? true;
-      if (verdict !== true) throw new AllowanceRefused(verdict);
-    };
+    if (room !== true) return waitFor(room);
     try {
-      return await matchWith(api, wanted, headers, take);
+      return await matchWith(api, wanted, headers);
     } catch (error) {
-      if (error instanceof AllowanceRefused) return { later: error.reason };
+      if (error instanceof GmailImportWaitError) return waitFor(error.reason);
       if (error instanceof GoogleRequestBudgetError) return { later: 'gmail_requests_spent' };
       throw error;
     }
   };
 
-  async function matchWith(api: GmailApiClient, wanted: string, headers: MboxMessageHeaders, take: () => void): Promise<{ id: string } | 'none'> {
+  async function matchWith(api: GmailApiClient, wanted: string, headers: MboxMessageHeaders): Promise<{ id: string } | 'none'> {
     if (options.sameAccount && checked === undefined) {
-      if (api.getProfile) take();
       const address = api.getProfile ? (await api.getProfile()).emailAddress : '';
       checked = address !== '' && options.sameAccount(address);
     }
     if (checked === false) return 'none';
-    take();
     const listed = await api.listMessages({ maxResults: MAX_CANDIDATES + 1, query: `rfc822msgid:${wanted}` });
     const candidates = listed.messages.map((message) => message.id).filter(Boolean);
     // More than can be told apart: none is the message.
     if (candidates.length === 0 || candidates.length > MAX_CANDIDATES) return 'none';
     const agreeing: string[] = [];
     for (const id of candidates) {
-      take();
       const message = await api.getMessage(id, { format: 'metadata', metadataHeaders: ['Message-ID', 'Date', 'From', 'Subject'] });
       const found = new Map<string, string>();
       for (const header of message.payload?.headers ?? []) {
