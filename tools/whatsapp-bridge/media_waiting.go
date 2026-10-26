@@ -7,41 +7,42 @@ package main
 //
 //   - A download is not started below the floor, and one already running
 //     stops when the volume falls below it (the temp writer checks as it
-//     writes). Its message is still spooled, with its media "waiting for
-//     disk space" (download_status mediaWaitingStatus).
-//   - The line is kept beside the media as `media/waiting/<stem>.json` (the
-//     message's file stem). The bridge alone writes, changes and removes
-//     these entries.
-//   - Every minute, while any is waiting and the volume is above the floor
-//     again, the waiting downloads are made in the order they waited, and
-//     each message is spooled again with its media: Olympus fills the
-//     waiting child from that line. One that does not fit is skipped, so the
-//     smaller ones after it still go; one that fails for a passing reason
-//     (the network) stays waiting; only one that can never be fetched (gone
-//     from WhatsApp's servers, failing its hash) is spooled as failed. An
-//     entry is removed only once its line is written and fsynced.
-//   - Olympus clears a Secret message by asking, never by touching the entry:
-//     it writes a clear request beside it, `<stem>.clear-<how>` (remove: the
-//     media is Secrets; names or content: the words are), made exclusively
-//     and fsynced, never removed by Olympus. The bridge applies every request
-//     it finds before a download and again right before spooling: `remove`
-//     drops the entry and what was downloaded for it; the others clear the
-//     words in the entry and the line. A request that lands after that last
-//     look is still met: Olympus checks every line it reads against the
-//     requests, clears the line and deletes the media it names. So a request
-//     always wins, whatever the interleaving, and nothing depends on two
-//     processes excluding each other.
-//   - A request is retired by the bridge alone, once its entry is gone and
-//     it is older than clearRequestKeep (no line for that stem can follow).
+//     writes). Its message is still spooled at once, with its media "waiting
+//     for disk space" (download_status mediaWaitingStatus).
+//   - What the later download needs is kept as `media/waiting/<stem>.json`
+//     (the message's file stem): where the media is, the keys to open it,
+//     and the digest of the line spooled for the message. Never the line's
+//     words or names: an entry Olympus never grants holds nothing Secret.
+//   - Waiting media is downloaded only after Olympus has judged its message
+//     not Secret (owner, 2026-10-26). Olympus then writes a grant beside the
+//     entry, `<stem>.grant`: the line it judged, and that line's digest. A
+//     Secret message never gets one, so its media never touches disk.
+//   - Every minute, once the volume is above the floor again, each granted
+//     entry whose grant matches it (the same digest, the same message) is
+//     downloaded in the order it waited, and the message is spooled again
+//     from the grant's line with its media: Olympus fills the waiting child
+//     from that line. An entry without a matching grant is not downloaded.
+//     One that does not fit is skipped, so the smaller ones after it still
+//     go; one that fails for a passing reason (the network) stays; only one
+//     that can never be fetched (gone from WhatsApp's servers, failing its
+//     hash) is spooled as failed. The entry and its grant go only once the
+//     line is written and fsynced, so a crash at any point leaves at most a
+//     granted download, kept or made again (the same bytes reuse the file).
+//   - An entry never granted is dropped after waitingEntryKeep: by then
+//     WhatsApp's servers no longer hold its media anyway.
 //   - A waiting entry is written whole or not at all (a temp renamed into
 //     place); the bridge sweeps a temp a killed bridge left at start and on
 //     every pass.
-//   - The capture status receipt says media is waiting, with no count, for
-//     as long as any entry remains.
+//   - The capture status receipt says media is waiting for disk space, with
+//     no count, while any entry waits and the volume is below the floor, or a
+//     granted download is still to be made. An entry waiting only for
+//     Olympus's judgment is not a disk problem.
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -56,15 +57,15 @@ import (
 )
 
 const (
-	clearRequestPrefix = ".clear-"
-	// A request outlives its entry this long, so no line Olympus has yet to read misses it.
-	clearRequestKeep    = 24 * time.Hour
-	mediaWaitingTempAge = time.Minute
 	mediaWaitingStatus  = "waiting_for_disk"
 	mediaWaitingDirName = "waiting"
-	diskFloorMinBytes   = 5 * 1024 * 1024 * 1024
-	diskFloorShare      = 20 // one twentieth: 5% of the volume
-	mediaRetryInterval  = time.Minute
+	mediaGrantSuffix    = ".grant"
+	mediaWaitingTempAge = time.Minute
+	// An entry never granted is dropped after this: WhatsApp's servers keep media for less.
+	waitingEntryKeep   = 30 * 24 * time.Hour
+	diskFloorMinBytes  = 5 * 1024 * 1024 * 1024
+	diskFloorShare     = 20 // one twentieth: 5% of the volume
+	mediaRetryInterval = time.Minute
 )
 
 // The volume a new queue reads (tests give it one with room).
@@ -118,19 +119,70 @@ func existingAncestor(dir string) string {
 	}
 }
 
+// waitingEntry is what a later download needs, and nothing the message said.
+type waitingEntry struct {
+	// The digest of the line spooled for the message (lineDigest): a grant names it.
+	LineSHA256           string `json:"line_sha256"`
+	ChatJID              string `json:"chat_jid"`
+	ID                   string `json:"id"`
+	MediaType            string `json:"media_type"`
+	MediaMime            string `json:"media_mime,omitempty"`
+	MediaDurationSeconds uint32 `json:"media_duration_seconds,omitempty"`
+	MediaKey             string `json:"media_key,omitempty"`
+	MediaDirectPath      string `json:"media_direct_path,omitempty"`
+	MediaFileSHA256      string `json:"media_file_sha256,omitempty"`
+	MediaFileEncSHA256   string `json:"media_file_enc_sha256,omitempty"`
+	MediaKeyTimestamp    int64  `json:"media_key_timestamp,omitempty"`
+}
+
+// mediaGrant is Olympus's leave to download a waiting entry's media: the line
+// it judged not Secret, and that line's digest.
+type mediaGrant struct {
+	LineSHA256 string `json:"line_sha256"`
+	Line       string `json:"line"`
+}
+
+// lineDigest is the digest of a spool line as the spool writer writes it (without its newline).
+func lineDigest(line []byte) string {
+	sum := sha256.Sum256(line)
+	return hex.EncodeToString(sum[:])
+}
+
 func (q *mediaWaitQueue) pathOf(rec spoolRecord) string {
 	return filepath.Join(q.dir, mediaFileStem(rec.ChatJID, rec.ID)+".json")
 }
 
-// save keeps a waiting message's line until its media can be downloaded.
+// grantPathOf is where Olympus writes an entry's grant.
+func grantPathOf(entryPath string) string {
+	return strings.TrimSuffix(entryPath, ".json") + mediaGrantSuffix
+}
+
+// save keeps what a waiting message's download needs, and the digest of the
+// line spooled for it (the same encoding the spool writer uses).
 func (q *mediaWaitQueue) save(rec spoolRecord) {
 	if q == nil {
 		return
 	}
-	payload, err := json.Marshal(rec)
+	line, err := json.Marshal(rec)
 	if err == nil {
-		if err = os.MkdirAll(q.dir, 0o700); err == nil {
-			err = writeFileAtomicPrivate(q.pathOf(rec), payload)
+		entry := waitingEntry{
+			LineSHA256:           lineDigest(line),
+			ChatJID:              rec.ChatJID,
+			ID:                   rec.ID,
+			MediaType:            rec.MediaType,
+			MediaMime:            rec.MediaMime,
+			MediaDurationSeconds: rec.MediaDurationSeconds,
+			MediaKey:             rec.MediaKey,
+			MediaDirectPath:      rec.MediaDirectPath,
+			MediaFileSHA256:      rec.MediaFileSHA256,
+			MediaFileEncSHA256:   rec.MediaFileEncSHA256,
+			MediaKeyTimestamp:    rec.MediaKeyTimestamp,
+		}
+		var payload []byte
+		if payload, err = json.Marshal(entry); err == nil {
+			if err = os.MkdirAll(q.dir, 0o700); err == nil {
+				err = writeFileAtomicPrivate(q.pathOf(rec), payload)
+			}
 		}
 	}
 	if err != nil {
@@ -139,7 +191,7 @@ func (q *mediaWaitQueue) save(rec spoolRecord) {
 	q.report()
 }
 
-// waiting is the waiting lines, oldest first.
+// waiting is the waiting entries, oldest first.
 func (q *mediaWaitQueue) waiting() []string {
 	entries, err := os.ReadDir(q.dir)
 	if err != nil {
@@ -151,7 +203,7 @@ func (q *mediaWaitQueue) waiting() []string {
 	}
 	var found []named
 	for _, entry := range entries {
-		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		info, err := entry.Info()
@@ -168,12 +220,29 @@ func (q *mediaWaitQueue) waiting() []string {
 	return paths
 }
 
-// report tells the capture status whether any media is waiting.
+// report tells the capture status whether media waits for disk space: an
+// entry waits while the volume is below the floor, or a granted one is still
+// to be fetched (an entry waiting only for Olympus's judgment is not a disk
+// problem).
 func (q *mediaWaitQueue) report() {
 	if q == nil || q.status == nil {
 		return
 	}
-	q.status.setMediaWaiting(len(q.waiting()) > 0)
+	waiting := false
+	low := !q.hasRoom(q.dir)
+	for _, path := range q.waiting() {
+		if low {
+			waiting = true
+			break
+		}
+		if entry, ok := readEntry(path); ok {
+			if _, granted := grantFor(path, entry); granted {
+				waiting = true
+				break
+			}
+		}
+	}
+	q.status.setMediaWaiting(waiting)
 }
 
 // sweepTemps removes the temps of waiting entries a killed bridge never
@@ -203,88 +272,39 @@ func isWaitingTemp(name string) bool {
 	return strings.HasPrefix(name, ".") && strings.Contains(name, ".json.tmp")
 }
 
-// clearHow ranks what a clear request asks: removing the media and the
-// entry is more than clearing the names, which is more than clearing the words.
-var clearHow = map[string]int{"content": 1, "names": 2, "remove": 3}
-
-// clearRequestOf is the most any clear request for this entry asks, or "".
-func (q *mediaWaitQueue) clearRequestOf(stem string) string {
-	strongest := ""
-	for how := range clearHow {
-		if _, err := os.Stat(filepath.Join(q.dir, stem+clearRequestPrefix+how)); err == nil && clearHow[how] > clearHow[strongest] {
-			strongest = how
-		}
-	}
-	return strongest
-}
-
-// applyClear clears a record as a request asks (not `remove`, which drops it).
-func applyClear(rec *spoolRecord, how string) {
-	if how != "content" && how != "names" {
-		return
-	}
-	rec.Text = ""
-	rec.PreviewTitle = ""
-	rec.PreviewDescription = ""
-	rec.PreviewURL = ""
-	rec.Mentions = nil
-	if how == "names" {
-		rec.ChatName = ""
-		rec.SenderName = ""
-		rec.SenderContactName = ""
-	}
-	rec.SecretRedacted = true
-}
-
-// retireRequests removes the clear requests whose entry is gone and that are
-// past clearRequestKeep: no line for their stem can follow.
-func (q *mediaWaitQueue) retireRequests(now time.Time) {
-	entries, err := os.ReadDir(q.dir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		at := strings.Index(name, clearRequestPrefix)
-		if at <= 0 || !entry.Type().IsRegular() {
-			continue
-		}
-		stem := name[:at]
-		if _, err := os.Stat(filepath.Join(q.dir, stem+".json")); err == nil {
-			continue
-		}
-		if info, err := entry.Info(); err == nil && now.Sub(info.ModTime()) >= clearRequestKeep {
-			_ = os.Remove(filepath.Join(q.dir, name))
-		}
-	}
-}
-
 // readEntry reads a waiting entry; ok is false for one that is gone or cannot be read.
-func readEntry(path string) (spoolRecord, bool) {
-	var rec spoolRecord
+func readEntry(path string) (waitingEntry, bool) {
+	var entry waitingEntry
 	raw, err := os.ReadFile(path)
-	if err != nil || json.Unmarshal(raw, &rec) != nil {
+	if err != nil || json.Unmarshal(raw, &entry) != nil || entry.LineSHA256 == "" {
+		return entry, false
+	}
+	return entry, true
+}
+
+// grantFor is the line an entry's grant gives leave to spool again with its
+// media, when there is a grant and it matches the entry: the same digest, a
+// line with that digest, and the same message.
+func grantFor(entryPath string, entry waitingEntry) (spoolRecord, bool) {
+	var rec spoolRecord
+	raw, err := os.ReadFile(grantPathOf(entryPath))
+	if err != nil {
+		return rec, false
+	}
+	var grant mediaGrant
+	if json.Unmarshal(raw, &grant) != nil || grant.LineSHA256 != entry.LineSHA256 || lineDigest([]byte(grant.Line)) != entry.LineSHA256 {
+		return rec, false
+	}
+	if json.Unmarshal([]byte(grant.Line), &rec) != nil || rec.ID != entry.ID || rec.ChatJID != entry.ChatJID {
 		return rec, false
 	}
 	return rec, true
 }
 
-// honour applies a waiting entry's clear request, if any, and says whether
-// the entry is still to be downloaded: `remove` drops it (the bridge owns it);
-// the others clear its words in place.
-func (q *mediaWaitQueue) honour(path string, rec *spoolRecord) bool {
-	how := q.clearRequestOf(mediaFileStem(rec.ChatJID, rec.ID))
-	if how == "remove" {
-		_ = os.Remove(path)
-		return false
-	}
-	if how != "" && !rec.SecretRedacted || how == "names" && rec.ChatName != "" {
-		applyClear(rec, how)
-		if payload, err := json.Marshal(rec); err == nil {
-			_ = writeFileAtomicPrivate(path, payload)
-		}
-	}
-	return true
+// dropEntry removes an entry and its grant, the grant last.
+func dropEntry(path string) {
+	_ = os.Remove(path)
+	_ = os.Remove(grantPathOf(path))
 }
 
 // run retries the waiting downloads every interval until ctx ends.
@@ -328,35 +348,39 @@ func permanentDownloadError(err error) bool {
 	return false
 }
 
-// retry makes the waiting downloads while the volume is above the floor, in
-// the order they waited, and spools each message again with its media. Every
-// clear request is applied before a download and again right before the
-// line is spooled (see the header). An entry goes only once `spool` says its
+// retry downloads the granted waiting media while the volume is above the
+// floor, in the order it waited, and spools each message again, from the
+// line Olympus granted, with its media. An entry without a grant that matches
+// it is not downloaded. An entry and its grant go only once `spool` says the
 // line is durably written.
 func (q *mediaWaitQueue) retry(ctx context.Context, store *audioMediaStore, spool func(spoolRecord) error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	defer q.report()
 	q.sweepTemps(mediaWaitingTempAge)
-	defer q.retireRequests(time.Now())
 	for _, path := range q.waiting() {
-		rec, ok := readEntry(path)
+		entry, ok := readEntry(path)
 		if !ok {
-			_ = os.Remove(path)
+			dropEntry(path)
 			continue
 		}
-		if !q.honour(path, &rec) {
+		rec, granted := grantFor(path, entry)
+		if !granted {
+			// Not judged yet, or judged Secret: nothing is downloaded. One never granted goes in time.
+			if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) >= waitingEntryKeep {
+				dropEntry(path)
+			}
 			continue
 		}
-		kind := store.forMediaType(rec.MediaType)
+		kind := store.forMediaType(entry.MediaType)
 		if kind == nil {
-			_ = os.Remove(path)
+			dropEntry(path)
 			continue
 		}
 		if !q.hasRoom(kind.dir) {
 			return
 		}
-		saved, size, err := kind.downloadPath(ctx, rec.ChatJID, rec.ID, rec.MediaMime, retryRequestOf(rec))
+		saved, size, err := kind.downloadPath(ctx, entry.ChatJID, entry.ID, entry.MediaMime, retryRequestOf(entry))
 		if errors.Is(err, errWaitingForDisk) {
 			// Too large for the room there is now: the smaller ones after it may still fit.
 			continue
@@ -365,32 +389,20 @@ func (q *mediaWaitQueue) retry(ctx context.Context, store *audioMediaStore, spoo
 			// A passing failure (the network): it stays waiting for the next pass.
 			continue
 		}
-		discard := func() {
-			if saved != "" {
-				_ = os.Remove(saved)
-			}
-		}
-		// The last look, right before the line is spooled: what is spooled is the entry as it is now,
-		// with every request made meanwhile applied.
-		current, ok := readEntry(path)
-		if !ok || !q.honour(path, &current) {
-			discard()
-			continue
-		}
 		if err != nil {
-			current.DownloadStatus = "failed:" + classifyDownloadError(err)
+			rec.DownloadStatus = "failed:" + classifyDownloadError(err)
 		} else {
-			current.MediaPath = saved
-			current.MediaSizeBytes = size
-			current.DownloadStatus = "ok"
+			rec.MediaPath = saved
+			rec.MediaSizeBytes = size
+			rec.DownloadStatus = "ok"
 		}
-		if err := spool(current); err != nil {
-			// Not written: the entry stays, and the next pass makes the line again.
+		if err := spool(rec); err != nil {
+			// Not written: the entry and its grant stay, and the next pass makes the line again (the
+			// same bytes reuse the file saved now).
 			log.Printf("olympus-whatsapp-bridge: could not spool a message whose media was waiting: %v", err)
-			discard()
 			continue
 		}
-		_ = os.Remove(path)
+		dropEntry(path)
 	}
 }
 
@@ -434,7 +446,7 @@ func requestOf(media whatsmeow.DownloadableMessage) mediaRequest {
 	return request
 }
 
-func retryRequestOf(rec spoolRecord) mediaRequest {
+func retryRequestOf(rec waitingEntry) mediaRequest {
 	decode := func(value string) []byte {
 		if value == "" {
 			return nil

@@ -53,7 +53,8 @@ import {
 } from './live-connector.ts';
 import { offsetAfterLines, terminatedLinesEnd } from './spool-reader.ts';
 import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
-import { WhatsAppSpoolIndex } from './spool-index.ts';
+import { WhatsAppSpoolIndex, type SpoolPlace } from './spool-index.ts';
+import { grantWhatsAppWaitingMedia } from './media-grants.ts';
 import { createWhatsAppChildReader, type WhatsAppChildReader } from './child-media.ts';
 
 export const WHATSAPP_PERSONAL_SOURCE_ID = 'whatsapp.personal.messages';
@@ -231,6 +232,16 @@ function byteOffsetOf(cursor: string | undefined): number | undefined {
   return found ? Number(found[1]) : undefined;
 }
 
+/**
+ * The spool place a committed cursor stands at: every line starting before it
+ * was judged. Without a byte offset only the files before the cursor's count.
+ */
+function committedPlaceOf(cursor: string | undefined): SpoolPlace | undefined {
+  const line = lineCursorOf(cursor);
+  const file = line === undefined ? undefined : /^(.+):\d+$/u.exec(line)?.[1];
+  return file === undefined ? undefined : { file, offset: byteOffsetOf(cursor) ?? 0 };
+}
+
 /** A committed cursor in the `<file>:<lines>` form the spool's Secrets clearing counts by. */
 function lineCursorOf(cursor: string | undefined): string | undefined {
   if (cursor === undefined) return undefined;
@@ -390,7 +401,6 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
             account,
             mediaDir,
             mediaDirs,
-            mediaWaitingDir: join(defaultWhatsAppStateDir(env), 'media', 'waiting'),
             relocateMediaPath: whatsappMovedPathMapper(env),
             ledger: tierSet.ledger,
             through: lineCursorOf(committed),
@@ -401,6 +411,25 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
           console.error(
             `[olympus:whatsapp] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
           );
+        }
+        // Media waiting for disk space is fetched only once its message is judged not Secrets (media-grants.ts).
+        // After the clearing, which a failure skips; a grant that cannot be written is tried again next pull.
+        if (!redactionFailed) {
+          try {
+            grantWhatsAppWaitingMedia({
+              waitingDir: join(defaultWhatsAppStateDir(env), 'media', 'waiting'),
+              spoolDir,
+              account,
+              ledger: tierSet.ledger,
+              committed: committedPlaceOf(
+                sanitizeWhatsAppLiveCursor(tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined),
+              ),
+            });
+          } catch (error) {
+            console.error(
+              `[olympus:whatsapp] media_grant_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
+            );
+          }
         }
       } else {
         run = await options.store.syncFromConnector(connector, sync);
@@ -451,8 +480,6 @@ export function clearWhatsAppSpoolSecrets(options: {
   mediaDir?: string;
   /** Every other folder the bridge saves media in (pictures, videos). */
   mediaDirs?: readonly string[];
-  /** Where the bridge keeps media waiting for disk space. */
-  mediaWaitingDir?: string;
   ledger: TierLedger;
   /** Where the set has committed to, `<file>:<lines>`: nothing past it is cleared yet. */
   through: string | undefined;
@@ -468,7 +495,6 @@ export function clearWhatsAppSpoolSecrets(options: {
     account: options.account,
     ...(options.mediaDir ? { mediaDir: options.mediaDir } : {}),
     ...(options.mediaDirs ? { mediaDirs: options.mediaDirs } : {}),
-    ...(options.mediaWaitingDir ? { mediaWaitingDir: options.mediaWaitingDir } : {}),
     ...(options.relocateMediaPath ? { relocateMediaPath: options.relocateMediaPath } : {}),
     ...window,
     judge,

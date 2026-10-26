@@ -200,9 +200,8 @@ type spoolRecord struct {
 	MediaFileSHA256      string            `json:"media_file_sha256,omitempty"`
 	MediaFileEncSHA256   string            `json:"media_file_enc_sha256,omitempty"`
 	MediaKeyTimestamp    int64             `json:"media_key_timestamp,omitempty"`
-	// Set by Olympus on a line it cleared as Secrets (live-connector.ts), and
-	// carried by a waiting entry it cleared, so the line the bridge spools
-	// again for it keeps the mark and is judged Secrets again.
+	// Set by Olympus on a line it cleared as Secrets (live-connector.ts); kept
+	// whenever the bridge spools a line again, so it is judged Secrets again.
 	SecretRedacted bool `json:"secret_redacted,omitempty"`
 	// Reaction payload. Present only on media_type "reaction" lines, which stay
 	// empty-text records with every required field populated so an older

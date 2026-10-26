@@ -61,6 +61,19 @@ func mediaTemps(t *testing.T, dir string) []string {
 	return temps
 }
 
+// grant writes Olympus's grant for a waiting record: the line spooled for it, and that line's digest.
+func grant(t *testing.T, store *audioMediaStore, rec spoolRecord) {
+	t.Helper()
+	line, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(mediaGrant{LineSHA256: lineDigest(line), Line: string(line)})
+	if err := os.WriteFile(grantPathOf(store.queue.pathOf(rec)), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // spaceOf is a volume with `free` of `total` bytes free, for a store's floor.
 func spaceOf(free *uint64, total uint64) func(string) (uint64, uint64, error) {
 	return func(string) (uint64, uint64, error) { return *free, total, nil }
@@ -163,6 +176,8 @@ func TestWaitingMediaIsDownloadedWhenSpaceReturnsAndTheMessageSpooledAgain(t *te
 	if rec.DownloadStatus != mediaWaitingStatus || !status.receipt().MediaWaitingForDisk {
 		t.Fatalf("record = %#v, waiting said = %v", rec, status.receipt().MediaWaitingForDisk)
 	}
+	// Olympus judged the message not Secret.
+	grant(t, store, rec)
 	var spooled []spoolRecord
 	spool := func(rec spoolRecord) error { spooled = append(spooled, rec); return nil }
 	// Still no room: nothing happens.
@@ -177,28 +192,6 @@ func TestWaitingMediaIsDownloadedWhenSpaceReturnsAndTheMessageSpooledAgain(t *te
 	}
 	if len(store.queue.waiting()) != 0 || status.receipt().MediaWaitingForDisk {
 		t.Fatalf("still waiting after it was filled")
-	}
-}
-
-func TestWaitingMediaClearedMeanwhileIsNeverKept(t *testing.T) {
-	dir := t.TempDir()
-	free := uint64(1024)
-	downloader := &streamingDownloader{chunk: []byte("secret picture"), times: 1}
-	store := newAudioMediaStore(dir, downloader)
-	store.queue.space = spaceOf(&free, testVolume)
-	rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent("secret-1", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/jpeg")}}))
-	waiting := store.queue.pathOf(rec)
-	free = testVolume
-	// Olympus judges the picture Secret while it downloads, and removes its waiting line.
-	downloader.during = func() { _ = os.Remove(waiting) }
-	var spooled []spoolRecord
-	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
-	if len(spooled) != 0 {
-		t.Fatalf("spooled a cleared message: %#v", spooled)
-	}
-	entries, _ := os.ReadDir(filepath.Join(dir, "media", "images"))
-	for _, entry := range entries {
-		t.Fatalf("kept %s for a cleared message", entry.Name())
 	}
 }
 
@@ -301,22 +294,38 @@ func TestMediaFileStemMatchesOlympus(t *testing.T) {
 	}
 }
 
-// waitFor makes a store whose picture `id` is waiting for disk space, the volume then having room again.
+// waitFor makes a store whose pictures `ids` wait for disk space, each granted by Olympus, the volume
+// then having room again.
 func waitFor(t *testing.T, downloader mediaDownloader, ids ...string) (*audioMediaStore, *uint64) {
+	t.Helper()
+	store, free, recs := waitUngranted(t, downloader, ids...)
+	for _, rec := range recs {
+		grant(t, store, rec)
+	}
+	return store, free
+}
+
+// waitUngranted is waitFor before Olympus has granted anything.
+func waitUngranted(t *testing.T, downloader mediaDownloader, ids ...string) (*audioMediaStore, *uint64, []spoolRecord) {
 	t.Helper()
 	free := uint64(1024)
 	store := newAudioMediaStore(t.TempDir(), downloader)
 	store.queue.space = spaceOf(&free, testVolume)
+	var recs []spoolRecord
 	for _, id := range ids {
-		rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent(id, &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/jpeg")}}))
+		rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent(id, &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+			Mimetype: proto.String("image/jpeg"),
+			Caption:  proto.String("the harbour at dusk"),
+		}}))
 		if rec.DownloadStatus != mediaWaitingStatus {
 			t.Fatalf("record = %#v", rec)
 		}
+		recs = append(recs, rec)
 		// Each waits in turn, oldest first.
 		time.Sleep(10 * time.Millisecond)
 	}
 	free = testVolume
-	return store, &free
+	return store, &free, recs
 }
 
 func TestAWaitingEntryGoesOnlyOnceItsLineIsWritten(t *testing.T) {
@@ -440,86 +449,95 @@ func TestStartSweepsAWaitingEntryAKilledBridgeNeverRenamed(t *testing.T) {
 	}
 }
 
-// requestClear writes a clear request as Olympus does: beside the entry, made exclusively.
-func requestClear(t *testing.T, store *audioMediaStore, id string, how string) {
-	t.Helper()
-	path := filepath.Join(store.queue.dir, mediaFileStem("15551234567@s.whatsapp.net", id)+clearRequestPrefix+how)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+func TestAWaitingEntryHoldsNothingTheMessageSaid(t *testing.T) {
+	store, _, recs := waitUngranted(t, &streamingDownloader{}, "words-1")
+	raw, err := os.ReadFile(store.queue.pathOf(recs[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = file.Close()
-}
-
-func TestAClearToRemoveMadeWhileTheMediaDownloadsIsMet(t *testing.T) {
-	downloader := &streamingDownloader{chunk: []byte("secret picture"), times: 1}
-	store, _ := waitFor(t, downloader, "inflight-1")
-	// Olympus judges the picture Secrets while it downloads.
-	downloader.during = func() { requestClear(t, store, "inflight-1", "remove") }
-	var spooled []spoolRecord
-	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
-	if len(spooled) != 0 {
-		t.Fatalf("spooled a message whose media Olympus asked to remove: %#v", spooled)
-	}
-	if len(store.queue.waiting()) != 0 {
-		t.Fatalf("the entry stayed")
-	}
-	entries, _ := os.ReadDir(store.images.dir)
-	for _, entry := range entries {
-		t.Fatalf("kept %s", entry.Name())
+	if strings.Contains(string(raw), "harbour") || strings.Contains(string(raw), recs[0].SenderName) && recs[0].SenderName != "" {
+		t.Fatalf("the entry holds the message's words: %s", raw)
 	}
 }
 
-func TestAClearOfTheWordsMadeWhileTheMediaDownloadsIsInTheLineSpooled(t *testing.T) {
+func TestWaitingMediaWithoutAGrantIsNeverDownloaded(t *testing.T) {
 	downloader := &streamingDownloader{chunk: []byte("picture"), times: 1}
-	store, _ := waitFor(t, downloader, "inflight-2")
-	entry := store.queue.waiting()[0]
-	// The waiting entry holds the caption.
-	rec, _ := readEntry(entry)
-	rec.Text = "the door code is 4411"
-	payload, _ := json.Marshal(rec)
-	if err := os.WriteFile(entry, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	downloader.during = func() { requestClear(t, store, "inflight-2", "content") }
-	var spooled []spoolRecord
-	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
-	if len(spooled) != 1 || spooled[0].Text != "" || !spooled[0].SecretRedacted || spooled[0].DownloadStatus != "ok" {
-		t.Fatalf("spooled = %#v", spooled)
-	}
-}
-
-func TestAClearToRemoveFoundBeforeTheDownloadMeansNoDownload(t *testing.T) {
-	downloader := &streamingDownloader{chunk: []byte("secret picture"), times: 1}
-	store, _ := waitFor(t, downloader, "before-1")
-	requestClear(t, store, "before-1", "remove")
-	store.queue.retry(context.Background(), store, func(spoolRecord) error { t.Fatal("spooled"); return nil })
-	if downloader.calls != 0 || len(store.queue.waiting()) != 0 {
+	store, _, _ := waitUngranted(t, downloader, "ungranted-1")
+	// Room again, but Olympus has not judged the message not Secret: nothing is fetched.
+	store.queue.retry(context.Background(), store, func(spoolRecord) error { t.Fatal("spooled without a grant"); return nil })
+	if downloader.calls != 0 || len(store.queue.waiting()) != 1 {
 		t.Fatalf("downloaded %d times, waiting %d", downloader.calls, len(store.queue.waiting()))
 	}
 }
 
-func TestClearRequestsAreRetiredOnlyOnceTheirEntryIsGoneAndTheyAreOld(t *testing.T) {
-	store, _ := waitFor(t, &streamingDownloader{err: errors.New("connection reset by peer")}, "kept-1")
-	requestClear(t, store, "kept-1", "content")
-	requestClear(t, store, "gone-1", "remove")
-	requestClear(t, store, "gone-2", "names")
-	old := time.Now().Add(-2 * clearRequestKeep)
-	gone1 := filepath.Join(store.queue.dir, mediaFileStem("15551234567@s.whatsapp.net", "gone-1")+clearRequestPrefix+"remove")
-	kept1 := filepath.Join(store.queue.dir, mediaFileStem("15551234567@s.whatsapp.net", "kept-1")+clearRequestPrefix+"content")
-	young := filepath.Join(store.queue.dir, mediaFileStem("15551234567@s.whatsapp.net", "gone-2")+clearRequestPrefix+"names")
-	for _, path := range []string{gone1, kept1} {
-		if err := os.Chtimes(path, old, old); err != nil {
+func TestAGrantThatDoesNotMatchItsEntryIsNotUsed(t *testing.T) {
+	downloader := &streamingDownloader{chunk: []byte("picture"), times: 1}
+	store, _, recs := waitUngranted(t, downloader, "mismatch-1", "mismatch-2")
+	write := func(rec spoolRecord, g mediaGrant) {
+		payload, _ := json.Marshal(g)
+		if err := os.WriteFile(grantPathOf(store.queue.pathOf(rec)), payload, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	store.queue.retireRequests(time.Now())
-	if _, err := os.Stat(gone1); !os.IsNotExist(err) {
-		t.Fatalf("an old request whose entry is gone stayed")
+	// A grant for another version of the message (its line changed since).
+	edited := recs[0]
+	edited.Text = "an edited caption"
+	line, _ := json.Marshal(edited)
+	write(recs[0], mediaGrant{LineSHA256: lineDigest(line), Line: string(line)})
+	// A grant whose digest is the entry's, over another message's line.
+	other, _ := json.Marshal(recs[0])
+	entry, _ := readEntry(store.queue.pathOf(recs[1]))
+	write(recs[1], mediaGrant{LineSHA256: entry.LineSHA256, Line: string(other)})
+	store.queue.retry(context.Background(), store, func(spoolRecord) error { t.Fatal("spooled on a grant that does not match"); return nil })
+	if downloader.calls != 0 || len(store.queue.waiting()) != 2 {
+		t.Fatalf("downloaded %d times, waiting %d", downloader.calls, len(store.queue.waiting()))
 	}
-	for _, path := range []string{kept1, young} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("%s was retired too soon", filepath.Base(path))
-		}
+}
+
+func TestTheGrantedLineIsWhatIsSpooledWithItsMedia(t *testing.T) {
+	store, _, recs := waitUngranted(t, &streamingDownloader{chunk: []byte("picture"), times: 1}, "granted-1")
+	grant(t, store, recs[0])
+	var spooled []spoolRecord
+	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
+	if len(spooled) != 1 || spooled[0].Text != "the harbour at dusk" || spooled[0].DownloadStatus != "ok" || spooled[0].MediaPath == "" {
+		t.Fatalf("spooled = %#v", spooled)
+	}
+	if len(store.queue.waiting()) != 0 {
+		t.Fatalf("the entry stayed")
+	}
+	if _, err := os.Stat(grantPathOf(store.queue.pathOf(recs[0]))); !os.IsNotExist(err) {
+		t.Fatalf("the grant stayed")
+	}
+}
+
+func TestACrashBetweenDownloadAndSpoolMakesTheGrantedDownloadAgain(t *testing.T) {
+	store, _ := waitFor(t, &streamingDownloader{chunk: []byte("picture"), times: 1}, "crash-1")
+	// The bridge stops after the download is saved and before its line is written.
+	store.queue.retry(context.Background(), store, func(spoolRecord) error { return errors.New("killed") })
+	if len(store.queue.waiting()) != 1 {
+		t.Fatalf("the entry went although its line was never written")
+	}
+	var spooled []spoolRecord
+	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
+	if len(spooled) != 1 || spooled[0].DownloadStatus != "ok" {
+		t.Fatalf("spooled = %#v", spooled)
+	}
+	// The same bytes reused the file the first download saved: one file, named by the line.
+	entries, _ := os.ReadDir(store.images.dir)
+	if len(entries) != 1 || filepath.Join(store.images.dir, entries[0].Name()) != spooled[0].MediaPath {
+		t.Fatalf("media files = %v", entries)
+	}
+}
+
+func TestAnEntryNeverGrantedIsDroppedInTime(t *testing.T) {
+	store, _, recs := waitUngranted(t, &streamingDownloader{}, "old-1")
+	path := store.queue.pathOf(recs[0])
+	old := time.Now().Add(-2 * waitingEntryKeep)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	store.queue.retry(context.Background(), store, func(spoolRecord) error { return nil })
+	if len(store.queue.waiting()) != 0 {
+		t.Fatalf("an entry never granted stayed past its time")
 	}
 }

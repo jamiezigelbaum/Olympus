@@ -701,18 +701,24 @@ export's media are (section 5).
   safeguard is the computer's own: a free-space floor on the volume, the
   larger of 5 GB and 5% of it (`media_waiting.go`). Below it no download
   starts, and one running stops (the temp writer checks as it writes); the
-  message is still spooled, its media `waiting_for_disk`, and its line is
-  kept as `media/waiting/<stem>.json`, which the bridge alone writes,
-  changes and removes (written whole; a temp a killed bridge left is swept
-  at start and on every pass). Every minute,
-  once the volume has room again, the waiting downloads are made in order
-  (one too large for the room is skipped, the smaller ones after it still
-  go; a passing failure stays waiting; only media gone from WhatsApp's
-  servers is spooled as failed) and each message is spooled again with its
-  media, which fills the waiting child. An entry goes only once its line is
-  written and fsynced. Until then
-  the capture status says media is waiting (no count), and the card shows
-  "media waiting for disk space" with what to do. Every temp has one name,
+  message is still spooled, its media `waiting_for_disk`, and what the
+  download needs is kept as `media/waiting/<stem>.json`: the message's ids,
+  its media keys and the digest of the line spooled for it, never its words
+  or names. The bridge alone writes and removes an entry (written whole; a
+  temp a killed bridge left is swept at start and on every pass). Waiting
+  media is downloaded only after Olympus has judged its message not Secret
+  (owner, 2026-10-26; see Secrets below). Every minute, once the volume has
+  room again, the granted downloads are made in order (one too large for
+  the room is skipped, the smaller ones after it still go; a passing
+  failure stays waiting; only media gone from WhatsApp's servers is spooled
+  as failed) and each message is spooled again with its media, which fills
+  the waiting child. An entry and its grant go only once that line is
+  written and fsynced, so a crash leaves a granted download that is made
+  again (the same bytes reuse the saved file). An entry never granted is
+  dropped after 30 days, when WhatsApp's servers no longer hold its media.
+  While media waits below the floor, or a granted download is still to be
+  made, the capture status says media is waiting (no count), and the card
+  shows "media waiting for disk space" with what to do. Every temp has one name,
   `.olympus-media-<pid>-<boot>-<stem>-*.tmp` (boot: this boot's nonce, since
   a pid is unique only within a boot): removed on every failure, and swept
   at start and before Secrets clearing when its writer is gone (pid dead, or
@@ -746,19 +752,20 @@ export's media are (section 5).
 - **Media folders** (`defaultWhatsAppMediaRoots`): the account's media
   folder (or, in the older layout, the audio folder) and the bridge's
   picture and video folders beside it.
-- **Secrets.** Saved media follows the judgment of what it is part of. For
-  media still waiting for disk space, Olympus never touches the bridge's
-  entry: it writes a clear request beside it (`<stem>.clear-remove` when the
-  media is Secrets, `-names` or `-content` when only the words are; made
-  exclusively, fsynced, never removed by Olympus). The bridge applies every
-  request before a download and again right before spooling: a `remove`
-  drops the entry and what was downloaded, the others clear the words in
-  the line it spools. A request that lands after that last look still wins:
-  every pass of Olympus's clearing checks each line against the requests,
-  clears the line and deletes the media it names. No lock is shared: the
-  outcome does not depend on the two processes excluding each other. The
-  bridge alone retires a request, once its entry is gone and a day has
-  passed.
+- **Secrets.** Saved media follows the judgment of what it is part of.
+  Media waiting for disk space is pulled, not pushed (`media-grants.ts`):
+  after each pull's clearing, Olympus writes `<stem>.grant` beside a
+  waiting entry once the line the entry names is the message's newest
+  line, the tier set has committed past it, and the ledger's judgment of
+  the message is neither pending nor Secrets (nor is its media child's).
+  The grant holds that line and its digest, made exclusively and fsynced.
+  The bridge downloads only an entry whose grant matches it (the same
+  digest, the same message) and spools the grant's line with the media. A
+  message judged Secrets never gets a grant, so its media is never
+  fetched, and Olympus takes back a grant whose message turned Secrets
+  before the bridge used it, or whose entry is gone. A line the clearing
+  rewrote no longer matches its entry, so it is never granted. Olympus
+  never writes or removes an entry.
 - **Reading large media.** Keeping every file does not mean reading every
   file into memory: the extraction source hands a file reader the media as
   a file (`fetchFile`), copied a chunk at a time from the descriptor the

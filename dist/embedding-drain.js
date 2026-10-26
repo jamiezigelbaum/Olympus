@@ -36878,6 +36878,15 @@ var init_live_connector = __esm(() => {
   MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
 });
 
+// src/workers/whatsapp/media-grants.ts
+var ENTRY_MAX_BYTES;
+var init_media_grants = __esm(() => {
+  init_spool_index();
+  init_spool_reader();
+  init_live_connector();
+  ENTRY_MAX_BYTES = 64 * 1024;
+});
+
 // src/workers/whatsapp/store-sync.ts
 var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT, WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES, CLEARED_FILES_KEY;
 var init_store_sync2 = __esm(() => {
@@ -36891,6 +36900,7 @@ var init_store_sync2 = __esm(() => {
   init_spool_reader();
   init_spool_file_identity();
   init_spool_index();
+  init_media_grants();
   init_child_media();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",

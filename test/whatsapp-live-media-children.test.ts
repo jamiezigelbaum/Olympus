@@ -7,7 +7,8 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { archiveInputZipMediaLocator } from '../src/workers/archive-import/input-media.ts';
@@ -21,7 +22,9 @@ import { deferredBytesAnswerFor } from '../src/workers/file-extraction/connector
 import { WHATSAPP_LANE_SYNC, whatsAppConnectorWithInputs } from '../src/workers/whatsapp/archive-target.ts';
 import { WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX, createWhatsAppChildReader } from '../src/workers/whatsapp/child-media.ts';
 import { WhatsAppExtractionSource } from '../src/workers/whatsapp/extraction-source.ts';
-import { createWhatsAppLiveSourceConnector, redactWhatsAppLiveSpoolSecrets, whatsAppBootNonce, whatsAppMediaFileStem } from '../src/workers/whatsapp/live-connector.ts';
+import { catchUpWhatsAppSpoolIndex, createWhatsAppLiveSourceConnector, redactWhatsAppLiveSpoolSecrets, whatsAppBootNonce, whatsAppMediaFileStem } from '../src/workers/whatsapp/live-connector.ts';
+import { grantWhatsAppWaitingMedia } from '../src/workers/whatsapp/media-grants.ts';
+import type { TierLedger, TierLedgerRecord } from '../src/workers/classification/tier-ledger.ts';
 import { whatsAppExtractionSourceFactory } from '../src/workers/whatsapp/extraction-factory.ts';
 import type { RawItem } from '../src/core/contracts.ts';
 import {
@@ -90,7 +93,7 @@ function lane() {
     deferredBytes: (ref) => deferredBytesAnswerFor(store.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
     readChild,
   });
-  return { root, spoolDir, images, video, audio, store, readChild, pull, extraction };
+  return { root, spoolDir, images, video, audio, store, readChild, pull, extraction, ledger: tier.set.ledger };
 }
 
 interface Row {
@@ -526,90 +529,130 @@ describe('an export\'s media of any size reaches extraction as a file (owner, 20
   }, 60_000);
 });
 
-describe('review round 6 on #558: Olympus asks the bridge to clear, and clears whatever the bridge spooled', () => {
-  const setup = (id: string, fields: Record<string, unknown>) => {
-    const target = lane();
+describe('waiting media is downloaded only after Olympus judges the message not Secret (owner, 2026-10-26)', () => {
+  const DAY = '2026-07-01.jsonl';
+  const sha = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+  // The bridge's entry: the message's ids and the digest of the line it spooled, never its words.
+  const waitFor = (target: ReturnType<typeof lane>, id: string, fields: Record<string, unknown> = {}) => {
     const waitingDir = join(target.root, 'media', 'waiting');
     mkdirSync(waitingDir, { recursive: true });
+    const line = spoolLine({ id, media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', media_key: 'a2V5', ...fields });
+    const day = join(target.spoolDir, DAY);
+    writeFileSync(day, (existsSync(day) ? readFileSync(day, 'utf8') : '') + line);
     const stem = whatsAppMediaFileStem(CHAT, id);
-    const entry = join(waitingDir, `${stem}.json`);
-    const waiting = spoolLine({ id, media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', media_key: 'a2V5', ...fields });
-    writeFileSync(entry, waiting.trim());
-    const day = join(target.spoolDir, '2026-07-01.jsonl');
-    writeFileSync(day, waiting);
-    const clear = (secret: (providerItemId: string) => 'content' | 'names' | undefined) => redactWhatsAppLiveSpoolSecrets({
-      spoolDir: target.spoolDir,
-      account: 'personal',
-      judge: (identity) => secret(identity.providerItemId),
-      mediaDirs: [target.images, target.video, target.audio],
-      mediaWaitingDir: waitingDir,
-    });
-    return { target, waitingDir, stem, entry, day, waiting, clear };
+    writeFileSync(join(waitingDir, `${stem}.json`), JSON.stringify({ line_sha256: sha(line.trimEnd()), chat_jid: CHAT, id, media_type: 'image', media_key: 'a2V5' }));
+    return { waitingDir, stem, line: line.trimEnd(), grant: join(waitingDir, `${stem}.grant`) };
   };
+  const committedAll = (target: ReturnType<typeof lane>) => ({ file: DAY, offset: readFileSync(join(target.spoolDir, DAY)).byteLength });
+  const grant = (target: ReturnType<typeof lane>, ledger: TierLedger, committed = committedAll(target)) => {
+    catchUpWhatsAppSpoolIndex(target.spoolDir, 1 << 20);
+    return grantWhatsAppWaitingMedia({ waitingDir: join(target.root, 'media', 'waiting'), spoolDir: target.spoolDir, account: 'personal', ledger, committed });
+  };
+  const judged = (tiers: Partial<TierLedgerRecord> = {}): TierLedgerRecord => ({
+    metadataTier: 'private',
+    contentTier: 'private',
+    metadataPending: false,
+    contentPending: false,
+    targetMetadataTier: null,
+    targetContentTier: null,
+    ...tiers,
+  }) as TierLedgerRecord;
+  // A ledger holding the given judgments, by provider item id.
+  const ledgerOf = (records: Record<string, TierLedgerRecord>) => ({
+    getCurrent: (identity: { providerItemId: string }) => records[identity.providerItemId],
+  }) as unknown as TierLedger;
 
-  test('a Secret picture that waits for disk space gets a request to remove it; Olympus never touches the entry', () => {
-    const { waitingDir, stem, entry, waiting, clear } = setup('R1', { text: '' });
-    clear((id) => (id === 'R1#child:media' ? 'content' : undefined));
-    expect(existsSync(join(waitingDir, `${stem}.clear-remove`))).toBe(true);
-    expect(readFileSync(join(waitingDir, `${stem}.clear-remove`), 'utf8')).toBe('remove');
-    expect(readFileSync(entry, 'utf8')).toBe(waiting.trim());
+  test('a message the tier set judged not Secret gets a grant: the line the bridge spooled, and its digest', async () => {
+    const target = lane();
+    const waiting = waitFor(target, 'G1', { text: 'the harbour at dusk' });
+    await target.pull();
+    expect(grant(target, target.ledger).granted).toBe(1);
+    const written = JSON.parse(readFileSync(waiting.grant, 'utf8')) as { line_sha256: string; line: string };
+    expect(written).toEqual({ line_sha256: sha(waiting.line), line: waiting.line });
+    // Made once: a second pass leaves it as it is.
+    expect(grant(target, target.ledger).granted).toBe(0);
   });
 
-  test('a Secret caption over a waiting picture asks the bridge to clear the words, not the picture', () => {
-    const { waitingDir, stem, entry, waiting, clear } = setup('R2', { text: 'the door code is 4411' });
-    clear((id) => (id === 'R2' ? 'content' : undefined));
-    expect(existsSync(join(waitingDir, `${stem}.clear-content`))).toBe(true);
-    expect(existsSync(join(waitingDir, `${stem}.clear-remove`))).toBe(false);
-    expect(readFileSync(entry, 'utf8')).toBe(waiting.trim());
-  });
-
-  test('a request that cannot be written fails the clearing: the line keeps its keys for the next pull', () => {
-    const { waitingDir, stem, day, waiting, clear } = setup('R3', { text: '' });
-    chmodSync(waitingDir, 0o500);
-    try {
-      expect(() => clear((id) => (id === 'R3#child:media' ? 'content' : undefined))).toThrow();
-      expect(readFileSync(day, 'utf8')).toBe(waiting);
-    } finally {
-      chmodSync(waitingDir, 0o700);
-    }
-    clear((id) => (id === 'R3#child:media' ? 'content' : undefined));
-    expect(existsSync(join(waitingDir, `${stem}.clear-remove`))).toBe(true);
-  });
-
-  test('a clear landing between the bridge\'s last look and its spool still wins: the line it spooled is cleared and its picture deleted', () => {
-    const { target, waitingDir, stem, day, clear } = setup('R4', { text: 'the door code is 4411' });
-    // Olympus asked for the picture to go...
-    clear((id) => (id === 'R4#child:media' ? 'content' : undefined));
-    expect(existsSync(join(waitingDir, `${stem}.clear-remove`))).toBe(true);
-    // ...but the bridge had already looked, and spools the message with its picture and caption.
-    const photo = join(target.images, 'R4.jpg');
-    writeFileSync(photo, 'secret picture');
-    writeFileSync(day, readFileSync(day, 'utf8') + spoolLine({ id: 'R4', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'the door code is 4411', media_key: 'a2V5' }));
-    // The next pass, which no longer judges anything itself, meets the request.
-    clear(() => undefined);
-    expect(existsSync(photo)).toBe(false);
-    const lines = readFileSync(day, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
-    for (const line of lines) {
-      expect(line).not.toHaveProperty('media_path');
-      expect(line).not.toHaveProperty('media_key');
-    }
-  });
-
-  test('a request to clear the words clears a line the bridge spooled before it saw it, and keeps the picture', () => {
-    const { target, waitingDir, stem, day } = setup('R5', { text: 'the door code is 4411' });
-    writeFileSync(join(waitingDir, `${stem}.clear-content`), 'content');
-    const photo = join(target.images, 'R5.jpg');
-    writeFileSync(photo, 'an ordinary picture');
-    writeFileSync(day, readFileSync(day, 'utf8') + spoolLine({ id: 'R5', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'the door code is 4411' }));
-    redactWhatsAppLiveSpoolSecrets({
-      spoolDir: target.spoolDir,
-      account: 'personal',
-      judge: () => undefined,
-      mediaDirs: [target.images, target.video, target.audio],
-      mediaWaitingDir: waitingDir,
+  test('a message judged Secret, still pending, or whose picture is Secret, gets no grant', () => {
+    const target = lane();
+    const secret = waitFor(target, 'S1');
+    const names = waitFor(target, 'S2');
+    const pending = waitFor(target, 'S3');
+    const picture = waitFor(target, 'S4');
+    const moving = waitFor(target, 'S5');
+    const unjudged = waitFor(target, 'S6');
+    const ledger = ledgerOf({
+      S1: judged({ contentTier: 'secrets' }),
+      S2: judged({ metadataTier: 'secrets' }),
+      S3: judged({ contentPending: true }),
+      S4: judged(),
+      'S4#child:media': judged({ contentTier: 'secrets' }),
+      S5: judged({ targetContentTier: 'secrets' }),
     });
-    expect(readFileSync(day, 'utf8')).not.toContain('door code');
-    expect(existsSync(photo)).toBe(true);
+    expect(grant(target, ledger).granted).toBe(0);
+    for (const waiting of [secret, names, pending, picture, moving, unjudged]) expect(existsSync(waiting.grant)).toBe(false);
+  });
+
+  test('no grant is written once the message turns Secret, and one written before is taken back', () => {
+    const target = lane();
+    const waiting = waitFor(target, 'T1', { text: 'see you at eight' });
+    const records: Record<string, TierLedgerRecord> = { T1: judged() };
+    expect(grant(target, ledgerOf(records)).granted).toBe(1);
+    // The bridge has not fetched it yet; the message is now judged Secrets.
+    records['T1'] = judged({ contentTier: 'secrets' });
+    expect(grant(target, ledgerOf(records)).revoked).toBe(1);
+    expect(existsSync(waiting.grant)).toBe(false);
+    expect(grant(target, ledgerOf(records)).granted).toBe(0);
+    expect(existsSync(waiting.grant)).toBe(false);
+  });
+
+  test('a version mismatch gets no grant: the entry names another line than the message\'s newest', () => {
+    const target = lane();
+    const waiting = waitFor(target, 'V1', { text: 'first words' });
+    // A later line of the same message the entry does not name.
+    writeFileSync(join(target.spoolDir, DAY), readFileSync(join(target.spoolDir, DAY), 'utf8') + spoolLine({ id: 'V1', media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', text: 'other words' }));
+    expect(grant(target, ledgerOf({ V1: judged() })).granted).toBe(0);
+    expect(existsSync(waiting.grant)).toBe(false);
+  });
+
+  test('a line Olympus cleared of its words no longer matches the entry: no grant', () => {
+    const target = lane();
+    const waiting = waitFor(target, 'C1', { text: 'the door code is 4411' });
+    redactWhatsAppLiveSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', judge: (identity) => (identity.providerItemId === 'C1' ? 'content' : undefined) });
+    expect(readFileSync(join(target.spoolDir, DAY), 'utf8')).not.toContain('door code');
+    expect(grant(target, ledgerOf({ C1: judged() })).granted).toBe(0);
+    expect(existsSync(waiting.grant)).toBe(false);
+  });
+
+  test('a line the tier set has not committed past is not judged yet: no grant', () => {
+    const target = lane();
+    const waiting = waitFor(target, 'P1');
+    expect(grant(target, ledgerOf({ P1: judged() }), { file: DAY, offset: 0 }).granted).toBe(0);
+    catchUpWhatsAppSpoolIndex(target.spoolDir, 1 << 20);
+    expect(grantWhatsAppWaitingMedia({ waitingDir: waiting.waitingDir, spoolDir: target.spoolDir, account: 'personal', ledger: ledgerOf({ P1: judged() }), committed: undefined }).granted).toBe(0);
+    expect(existsSync(waiting.grant)).toBe(false);
+  });
+
+  test('a grant whose entry is gone is taken back, and a grant temp a killed pull left is swept', () => {
+    const target = lane();
+    const waiting = waitFor(target, 'O1');
+    expect(grant(target, ledgerOf({ O1: judged() })).granted).toBe(1);
+    rmSync(join(waiting.waitingDir, `${waiting.stem}.json`));
+    const temp = join(waiting.waitingDir, `.${waiting.stem}.grant.tmp-00aa11bb22cc33dd`);
+    writeFileSync(temp, '{');
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(temp, old, old);
+    expect(grant(target, ledgerOf({ O1: judged() })).revoked).toBe(1);
+    expect(existsSync(waiting.grant)).toBe(false);
+    expect(existsSync(temp)).toBe(false);
+  });
+
+  test('the clearing writes nothing in the waiting folder: Olympus never touches an entry', () => {
+    const target = lane();
+    const waiting = waitFor(target, 'N1', { text: 'the door code is 4411' });
+    const entry = readFileSync(join(waiting.waitingDir, `${waiting.stem}.json`), 'utf8');
+    redactWhatsAppLiveSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', judge: () => 'content', mediaDirs: [target.images, target.video, target.audio] });
+    expect(readFileSync(join(waiting.waitingDir, `${waiting.stem}.json`), 'utf8')).toBe(entry);
+    expect(readdirSync(waiting.waitingDir)).toEqual([`${waiting.stem}.json`]);
   });
 });
-
