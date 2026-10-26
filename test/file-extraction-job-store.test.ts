@@ -154,6 +154,21 @@ describe('extraction job store: module identity', () => {
 });
 
 describe('extraction job store: enqueue', () => {
+  test('an item text is owed until a job reads it or settles without it', () => {
+    const { store, dbPath } = newStore();
+    const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'item-owed' };
+    // Listed, not yet queued: owed.
+    expect(store.itemTextOwed(item)).toBe(true);
+    const jobId = enqueueOne(store, 'item-owed');
+    expect(store.itemTextOwed(item)).toBe(true);
+    backdate(dbPath, jobId, { status: 'failed_retryable' });
+    expect(store.itemTextOwed(item)).toBe(true);
+    for (const status of ['metadata_only', 'failed_terminal', 'skipped_unsupported', 'indexed']) {
+      backdate(dbPath, jobId, { status });
+      expect(store.itemTextOwed(item)).toBe(false);
+    }
+  });
+
   test('a repeat enqueue of the same identity reuses the job rather than duplicating it', () => {
     const { store } = newStore();
     const first = store.enqueue({

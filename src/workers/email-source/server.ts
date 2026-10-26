@@ -6282,6 +6282,7 @@ export async function main(): Promise<void> {
               modelState: () => workerBuiltInModel?.model.status().state,
             }
           : {}),
+        ...(fileExtractionRuntime ? { extractionOwed: identity => fileExtractionRuntime.jobs.itemTextOwed(identity) } : {}),
         ownerContext: privacyOwnerWords,
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,

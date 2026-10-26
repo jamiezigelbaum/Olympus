@@ -19591,6 +19591,9 @@ var init_sniffer_store = __esm(() => {
 import { Database as Database3 } from "bun:sqlite";
 import { chmodSync as chmodSync5, closeSync as closeSync12, existsSync as existsSync20, mkdirSync as mkdirSync13, openSync as openSync12, statSync as statSync11 } from "node:fs";
 import { dirname as dirname23 } from "node:path";
+function isFailSafeMissingContentQuestion(reason) {
+  return reason.startsWith("content:sniffer:") && reason.endsWith(":fail_safe:missing_question");
+}
 function tierLedgerConversationKey(identity2) {
   return identity2.providerConversationId ?? "";
 }
@@ -125262,6 +125265,18 @@ class LocalFileExtractionJobStore {
     const { sql, params } = this.unreadJobsQuery(request);
     return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
   }
+  itemTextOwed(item) {
+    const rows = this.db.query(`
+      SELECT DISTINCT status FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+    `).all(item.provider, item.accountScope, item.providerItemId);
+    if (rows.length === 0)
+      return true;
+    const statuses = new Set(rows.map((row) => row.status));
+    if (statuses.has("indexed"))
+      return false;
+    return statuses.has("queued") || statuses.has("leased") || statuses.has("failed_retryable");
+  }
   unreadJobsQuery(request) {
     const lane = requireLaneKey(request);
     const extractorKind = requireToken3(request.extractorKind, "extractorKind");
@@ -131127,7 +131142,8 @@ function createTieredStoreExtractionSink(options) {
       const itemTitle2 = stringMetadata2(plan.item, ["title", "name", "subject"]);
       const itemPath = stringMetadata2(plan.item, ["locatorUri", "pathDisplay"]);
       const imageJudgment = plan.media ? setMediaJudgment(set2, plan.media.sha256) : undefined;
-      const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set2.holdsContentUntilJudged() || heldUntilJudged(record5.reasons);
+      const settledUnread = !record5.contentRead && record5.reasons.some(isFailSafeMissingContentQuestion);
+      const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set2.holdsContentUntilJudged() || heldUntilJudged(record5.reasons) || settledUnread;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set2, identity2) : undefined;
       const content = classifyContentTier({
         text: request.text,
@@ -169494,6 +169510,9 @@ class TierSnifferService {
               }
               continue;
             }
+            const waitingForText = missingContent && !row.contentRead && row.contentPending && this.waitingForExtraction(ledger, identity2);
+            if (waitingForText && !missingMetadata)
+              continue;
             if (!missingMetadata && !missingContent)
               continue;
             const classification = set2?.classification();
@@ -169513,7 +169532,7 @@ class TierSnifferService {
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
               missingMetadata,
-              missingContent,
+              missingContent: missingContent && !waitingForText,
               snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity2, "metadata")) && (!missingContent || !queue.questionFor(identity2, "content")),
               ...planner ? { placementFor: planner } : {}
@@ -169526,6 +169545,17 @@ class TierSnifferService {
         if (settled || retired)
           this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
       } catch {}
+    }
+  }
+  waitingForExtraction(ledger, identity2) {
+    try {
+      if (!this.options.extractionOwed)
+        return false;
+      if (ledger.copies(identity2).some((copy) => copy.state === "current" && copy.layers !== "metadata"))
+        return false;
+      return this.options.extractionOwed(identity2);
+    } catch {
+      return false;
     }
   }
   async drainMoves() {
@@ -192680,6 +192710,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       startModel: () => snifferRuntime.builtIn.startIfIdle?.(),
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
+    ...fileExtractionRuntime ? { extractionOwed: (identity2) => fileExtractionRuntime.jobs.itemTextOwed(identity2) } : {},
     ownerContext: privacyOwnerWords,
     budgetStatePath: join116(dirname91(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,

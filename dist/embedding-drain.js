@@ -49962,6 +49962,9 @@ class TierSnifferService {
               }
               continue;
             }
+            const waitingForText = missingContent && !row.contentRead && row.contentPending && this.waitingForExtraction(ledger, identity);
+            if (waitingForText && !missingMetadata)
+              continue;
             if (!missingMetadata && !missingContent)
               continue;
             const classification = set?.classification();
@@ -49981,7 +49984,7 @@ class TierSnifferService {
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
               missingMetadata,
-              missingContent,
+              missingContent: missingContent && !waitingForText,
               snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, "metadata")) && (!missingContent || !queue.questionFor(identity, "content")),
               ...planner ? { placementFor: planner } : {}
@@ -49994,6 +49997,17 @@ class TierSnifferService {
         if (settled || retired)
           this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
       } catch {}
+    }
+  }
+  waitingForExtraction(ledger, identity) {
+    try {
+      if (!this.options.extractionOwed)
+        return false;
+      if (ledger.copies(identity).some((copy) => copy.state === "current" && copy.layers !== "metadata"))
+        return false;
+      return this.options.extractionOwed(identity);
+    } catch {
+      return false;
     }
   }
   async drainMoves() {

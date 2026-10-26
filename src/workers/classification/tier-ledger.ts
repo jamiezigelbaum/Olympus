@@ -55,6 +55,11 @@ export type TierLedgerState = 'pending' | 'current' | 'moving';
  * make two different messages one ledger row. Absent means "no conversation"
  * (''), exactly as the connector store normalizes it.
  */
+/** Whether a reason records a content question settled fail-safe because none was ever asked. */
+export function isFailSafeMissingContentQuestion(reason: string): boolean {
+  return reason.startsWith('content:sniffer:') && reason.endsWith(':fail_safe:missing_question');
+}
+
 export type TierLedgerIdentity = Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId'>
   & Partial<Pick<SourceItemIdentity, 'family' | 'providerConversationId'>>;
 

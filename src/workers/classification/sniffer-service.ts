@@ -97,6 +97,13 @@ export interface TierSnifferServiceOptions {
    * the download finishes instead of waiting for an answer to start it.
    */
   startModel?: () => void;
+  /**
+   * Whether extraction still owes an item's text (not yet queued, queued, or
+   * retrying). Its content question can only exist once that text lands, so
+   * an unread item that is owed is waiting for extraction, not missing a
+   * question, and recovery leaves it pending. Absent: nothing is owed.
+   */
+  extractionOwed?: (identity: TierLedgerIdentity) => boolean;
   /** The owner's own words about privacy (privacy-profile.ts), quoted into the prompt. */
   ownerContext?: () => string | undefined;
   /** Where the day's call count is kept across restarts (owner-only JSON). */
@@ -845,6 +852,12 @@ export class TierSnifferService {
               }
               continue;
             }
+            // Unread content whose text extraction still owes has no content
+            // question yet, by design: it is waiting to be read, not lost.
+            // Names recovery proceeds; the content half stays pending.
+            const waitingForText = missingContent && !row.contentRead && row.contentPending
+              && this.waitingForExtraction(ledger, identity);
+            if (waitingForText && !missingMetadata) continue;
             if (!missingMetadata && !missingContent) continue;
             // Preserve the existing content-question repair where the stored
             // body and configured classifier can reconstruct the question.
@@ -863,7 +876,7 @@ export class TierSnifferService {
             }
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
-              missingMetadata, missingContent,
+              missingMetadata, missingContent: missingContent && !waitingForText,
               snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, 'metadata'))
                 && (!missingContent || !queue.questionFor(identity, 'content')),
@@ -879,6 +892,17 @@ export class TierSnifferService {
       } catch {
         // A queue/ledger that cannot be read remains held, retried next tick.
       }
+    }
+  }
+
+  /** An unread item that no store holds text for yet, and extraction still owes it. */
+  private waitingForExtraction(ledger: TierLedger, identity: TierLedgerIdentity): boolean {
+    try {
+      if (!this.options.extractionOwed) return false;
+      if (ledger.copies(identity).some(copy => copy.state === 'current' && copy.layers !== 'metadata')) return false;
+      return this.options.extractionOwed(identity);
+    } catch {
+      return false;
     }
   }
 
