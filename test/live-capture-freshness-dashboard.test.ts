@@ -631,3 +631,52 @@ describe('the worst reading across a source\'s pulls', () => {
     expect(card.freshness.capture).toEqual({ state: 'fresh', age_seconds: 360, threshold_seconds: THRESHOLD });
   });
 });
+
+// Kept media filled its storage (#556 review): the receipt counts a pull stores, written out literally.
+const MEDIA_FULL = { media_storage_full: 1, media_left_out_storage_full: 7 };
+const MEDIA_ROUTE = ' · ask your agent to raise the media limit or remove media you no longer need';
+const MEDIA_LINE = `media storage is full, so 7 new photos and files were kept as names only${MEDIA_ROUTE}`;
+
+describe.each(['whatsapp', 'telegram'] as const)('%s kept media that filled its storage', (which) => {
+  const spec = SOURCES[which];
+
+  test('reads Needs you with a plain line that says how many were left out and how to make room', () => {
+    const { card, row, needsYou } = build({ which, counts: receiptCounts({ ...fresh(600), ...MEDIA_FULL }) });
+    expect(card.media_storage).toEqual({ state: 'full', left_out_items: 7 });
+    expect(dashboardStatus({ source: card })).toBe('Needs you');
+    expect(dashboardAttentionLine(card)).toBe(MEDIA_LINE);
+    expect(card.setup?.next_action).toBe(`${spec.label}'s media storage is full, so new photos and files are kept as names only (7 so far). `
+      + `Nothing already kept was removed. To keep new media again, ask your agent to raise ${spec.label}'s media storage limit, `
+      + 'or to remove kept media you no longer need.');
+    expect(row.status).toBe('Needs you');
+    expect(row.detail).toBe(MEDIA_LINE);
+    // Sync now cannot make room: the control checks again once room is made.
+    expect(row.primary?.label).toBe('Check again');
+    expect(needsYou).toHaveLength(1);
+    expect(needsYou[0]!.sentence).toBe(`${spec.label} — ${MEDIA_LINE}`);
+    expect(needsYou[0]!.fix.label).toBe('Check again');
+  });
+
+  test('one left out, or none counted, reads in the singular or without a number', () => {
+    const one = build({ which, counts: receiptCounts({ ...fresh(600), media_storage_full: 1, media_left_out_storage_full: 1 }) });
+    expect(dashboardAttentionLine(one.card)).toBe(`media storage is full, so 1 new photo or file was kept as a name only${MEDIA_ROUTE}`);
+    const none = build({ which, counts: receiptCounts({ ...fresh(600), media_storage_full: 1 }) });
+    expect(dashboardAttentionLine(none.card)).toBe(`media storage is full, so new photos and files are kept as names only${MEDIA_ROUTE}`);
+  });
+
+  test('beside a stalled feed, both are said and neither hides the other', () => {
+    const { card, needsYou } = build({ which, counts: receiptCounts({ ...stale(3 * DAY), ...MEDIA_FULL }) });
+    expect(dashboardAttentionLine(card)).toBe(`capture stale: newest message 3d ago · ${MEDIA_LINE}`);
+    expect(needsYou[0]!.sentence).toBe(`${spec.label} — capture stale: newest message 3d ago · ${MEDIA_LINE}`);
+    expect(needsYou[0]!.fix.label).toBe('Check capture');
+  });
+
+  test('not full, or read from a failed pull, says nothing about media', () => {
+    const notFull = build({ which, counts: receiptCounts({ ...fresh(600), media_storage_full: 0, media_left_out_storage_full: 0 }) });
+    expect(notFull.card).not.toHaveProperty('media_storage');
+    expect(dashboardStatus({ source: notFull.card })).toBe('Fresh');
+    expect(notFull.needsYou).toEqual([]);
+    const failed = build({ which, counts: receiptCounts({ ...fresh(600), ...MEDIA_FULL }), status: 'failed' });
+    expect(failed.card).not.toHaveProperty('media_storage');
+  });
+});

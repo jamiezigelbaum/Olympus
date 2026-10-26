@@ -3,7 +3,7 @@
 // advances two trust-separated stores through the shared connector spine.
 
 import { existsSync, readdirSync, rmSync } from 'node:fs';
-import { readTelegramMediaState, sweepTelegramMediaTemporaries, TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile } from './media-child.ts';
+import { readTelegramMediaState, sweepTelegramMediaTemporaries, TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile, type TelegramMediaState } from './media-child.ts';
 import { join } from 'node:path';
 import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
@@ -129,6 +129,8 @@ export interface TelegramConnectorStoreSyncReceipt {
     capture_quiet: 0 | 1;
     /** 1 when the helper's media quota is full: new media is named only until room is made or the quota is raised. */
     media_storage_full: 0 | 1;
+    /** Media named only for want of room since the store was last not full (the source card says how many). */
+    media_left_out_storage_full: number;
   } & CaptureFreshnessCounts;
   /**
    * Whether the live feed is running: a pull can succeed on schedule while
@@ -503,7 +505,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
           now().getTime(),
           staleThresholdSeconds,
         ),
-        readTelegramMediaState(spoolDir)?.storageFull === true,
+        readTelegramMediaState(spoolDir),
       );
     },
 
@@ -757,8 +759,9 @@ function telegramSyncReceipt(
   cursorResets: number,
   trustClaimsMoved: number,
   liveness: CaptureFreshness & { quiet: boolean },
-  mediaStorageFull = false,
+  media: TelegramMediaState | undefined = undefined,
 ): TelegramConnectorStoreSyncReceipt {
+  const mediaStorageFull = media?.storageFull === true;
   const { quiet, ...capture } = liveness;
   const runs = [internal, secureLocal];
   const counts = {
@@ -780,6 +783,7 @@ function telegramSyncReceipt(
     trust_claims_moved: trustClaimsMoved,
     capture_quiet: quiet ? 1 as const : 0 as const,
     media_storage_full: mediaStorageFull ? 1 as const : 0 as const,
+    media_left_out_storage_full: mediaStorageFull ? media!.leftOutItems : 0,
     ...captureFreshnessCounts(capture),
   };
   const warnings = [

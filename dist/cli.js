@@ -51295,6 +51295,8 @@ function dashboardStatusResolution(input) {
   }
   if (dashboardCaptureProblem(source) !== undefined)
     return { status: "Needs you", mappedUnknown: false };
+  if (source.media_storage)
+    return { status: "Needs you", mappedUnknown: false };
   if (dashboardScopePending(source))
     return { status: "Waiting", mappedUnknown: false };
   if (connectionStatus === "Fresh" && source.freshness.capture?.state === "awaiting") {
@@ -51347,12 +51349,17 @@ function dashboardUnsettledWithData(source) {
   return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && DASHBOARD_UNSETTLED_CUSTODY_LABELS.has(source.connection.label);
 }
 function dashboardAttentionLine(source, options) {
-  const { reason, capture } = dashboardAttentionParts(source, options);
-  return [reason, capture].filter((part) => !!part).join(" · ");
+  const { reason, capture, media } = dashboardAttentionParts(source, options);
+  return [reason, capture, media].filter((part) => !!part).join(" · ");
 }
 function dashboardAttentionParts(source, options) {
   const capture = dashboardCaptureAttentionReason(source);
-  const withCapture = (reason) => capture ? { reason, capture } : { reason };
+  const media = source.media_storage ? DASHBOARD_MEDIA_STORAGE_COPY.reason(source.media_storage.left_out_items) : undefined;
+  const withCapture = (reason) => ({
+    reason,
+    ...capture ? { capture } : {},
+    ...media ? { media } : {}
+  });
   const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
@@ -51809,7 +51816,7 @@ function archiveFindingList(kind) {
   const lists = DASHBOARD_ARCHIVE_COPY.listOf;
   return Object.prototype.hasOwnProperty.call(lists, kind) ? lists[kind] : "not_imported";
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -51870,6 +51877,10 @@ var init_vocabulary = __esm(() => {
       unreadable: (label) => `Olympus cannot open the folder where ${label}'s files are, so it cannot move them. Ask your agent to check that your user account may open Olympus's data folder.`,
       in_the_way: (label) => `${label}'s files are where they have always been and in their own folder too, so Olympus moved nothing. Ask your agent to compare the two before anything is moved.`
     }
+  };
+  DASHBOARD_MEDIA_STORAGE_COPY = {
+    reason: (leftOut) => (leftOut === 1 ? "media storage is full, so 1 new photo or file was kept as a name only" : leftOut > 1 ? `media storage is full, so ${leftOut} new photos and files were kept as names only` : "media storage is full, so new photos and files are kept as names only") + " · ask your agent to raise the media limit or remove media you no longer need",
+    nextAction: (label, leftOut) => `${label}'s media storage is full, so new photos and files are kept as names only` + (leftOut > 0 ? ` (${leftOut} so far)` : "") + `. Nothing already kept was removed. To keep new media again, ask your agent to raise ${label}'s media storage limit, ` + "or to remove kept media you no longer need."
   };
   READINESS_REASONS = {
     "Reauthenticate this source": DASHBOARD_SIGNED_OUT,
@@ -73763,7 +73774,8 @@ function readTelegramMediaState(spoolDir) {
     if (value.kind !== "telegram_capture_media" || value.schema_version !== 1)
       return;
     const count = (field) => typeof field === "number" && Number.isSafeInteger(field) && field >= 0 ? field : 0;
-    return { storedBytes: count(value.stored_bytes), quotaBytes: count(value.quota_bytes), storageFull: value.storage_full === true };
+    const storageFull = value.storage_full === true;
+    return { storedBytes: count(value.stored_bytes), quotaBytes: count(value.quota_bytes), storageFull, leftOutItems: storageFull ? count(value.left_out_items) : 0 };
   } catch {
     return;
   }
@@ -76145,7 +76157,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
       recordBoundary(tierSet, spoolDir, "secure_local", sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor));
       if (!redactionFailed)
         recordBoundary(tierSet, spoolDir, "cleared", sanitizeTelegramCaptureCursor(tierSet.ledger.readMeta(TELEGRAM_SPOOL_CLEARED_KEY)));
-      return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed, cursorResets, protection.moved, telegramCaptureLiveness(readTelegramCaptureSpoolNewestCapturedAt(spoolDir), readTelegramCaptureHeartbeat(spoolDir), now().getTime(), staleThresholdSeconds), readTelegramMediaState(spoolDir)?.storageFull === true);
+      return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed, cursorResets, protection.moved, telegramCaptureLiveness(readTelegramCaptureSpoolNewestCapturedAt(spoolDir), readTelegramCaptureHeartbeat(spoolDir), now().getTime(), staleThresholdSeconds), readTelegramMediaState(spoolDir));
     },
     lastStoreRunCompletedAt() {
       const internal = options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.completedAt;
@@ -76291,7 +76303,8 @@ function cursorParts(cursor) {
   const separator = cursor.lastIndexOf(":");
   return [cursor.slice(0, separator), Number(cursor.slice(separator + 1))];
 }
-function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConflictItems, trustConflictEvictions, redacted, redactionFailed, cursorResets, trustClaimsMoved, liveness, mediaStorageFull = false) {
+function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConflictItems, trustConflictEvictions, redacted, redactionFailed, cursorResets, trustClaimsMoved, liveness, media = undefined) {
+  const mediaStorageFull = media?.storageFull === true;
   const { quiet, ...capture } = liveness;
   const runs = [internal, secureLocal];
   const counts = {
@@ -76310,6 +76323,7 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
     trust_claims_moved: trustClaimsMoved,
     capture_quiet: quiet ? 1 : 0,
     media_storage_full: mediaStorageFull ? 1 : 0,
+    media_left_out_storage_full: mediaStorageFull ? media.leftOutItems : 0,
     ...captureFreshnessCounts(capture)
   };
   const warnings = [
@@ -79179,6 +79193,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
   const queue = throughput?.state === "stalled" ? { ...baseQueue, label: "Needs attention", needs_attention: baseQueue.needs_attention + 1 } : baseQueue;
   const refreshFreshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
   const captureFreshness2 = schedulerCaptureFreshness(schedulers, now, capturePairedAt);
+  const mediaStorage = schedulerMediaStorage(schedulers);
   const freshness = captureFreshness2 ? { ...refreshFreshness, capture: captureFreshness2 } : refreshFreshness;
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === "embedding_lane_disabled");
   const schedule = scheduleFromSchedulers(schedulers);
@@ -79261,6 +79276,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     ...embeddingLaneDisabled ? { embedding_lane_state: "embedding_lane_disabled" } : {},
     ...vlmQueued !== undefined ? { vlm_extraction_queued: vlmQueued } : {},
     ...ingestionLedgerRow?.attention.length ? { attention_reasons: [...ingestionLedgerRow.attention] } : {},
+    ...mediaStorage ? { media_storage: mediaStorage } : {},
     ...metadataSync ? { metadata_sync: metadataSync } : {},
     ...definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {},
     ...definition.sync_name ? { sync_name: definition.sync_name } : {}
@@ -79346,6 +79362,14 @@ function dashboardSourceSetupStatus(card) {
       stage: "source_health",
       condition: "degraded",
       next_action: captureProblem.cause === "helper" ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label) : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
+      dependencies
+    };
+  }
+  if (card.media_storage && card.answer_readiness.state !== "needs_attention") {
+    return {
+      stage: "source_health",
+      condition: "degraded",
+      next_action: DASHBOARD_MEDIA_STORAGE_COPY.nextAction(card.label, card.media_storage.left_out_items),
       dependencies
     };
   }
@@ -80427,6 +80451,22 @@ function schedulerCaptureFreshness(schedulers, now, pairedAt) {
     }
   }
   return worst;
+}
+function schedulerMediaStorage(schedulers) {
+  let full = false;
+  let leftOut = 0;
+  for (const scheduler of new Set(schedulers)) {
+    for (const task of scheduler.tasks) {
+      const counts = task.last_result?.counts;
+      if (task.kind !== "sync" || !counts || task.last_result?.status === "failed" || counts.media_storage_full !== 1)
+        continue;
+      full = true;
+      const items = counts.media_left_out_storage_full;
+      if (typeof items === "number" && Number.isSafeInteger(items) && items > 0)
+        leftOut += items;
+    }
+  }
+  return full ? { state: "full", left_out_items: leftOut } : undefined;
 }
 function underCurrentPairing(verdict, nowMs, pairedAtMs) {
   const newestAtMs = verdict.age_seconds === undefined ? undefined : nowMs - verdict.age_seconds * 1000;
@@ -173551,7 +173591,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     surface: "chatgpt",
     ...degraded ? { degradedCredentials: degraded } : {}
   }).reason === "";
-  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) || missingScope(card) ? scopeFix(definition, card) : reconnect ?? (late && captureOnly ? captureFix(definition) : late ? sync ?? (capture ? captureFix(definition) : undefined) : signinMoved ? googleSigninMovedFix(definition) : undefined);
+  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) || missingScope(card) ? scopeFix(definition, card) : reconnect ?? (late && captureOnly ? captureFix(definition) : late && mediaStorageOnly(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} }) ? checkAgainFix() : late ? sync ?? (capture ? captureFix(definition) : undefined) : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu = [];
   if (sync)
     menu.push(sync);
@@ -173633,7 +173673,8 @@ function attentionItem(definition, card, actionKind, degraded, connecting, progr
   const reason = dashboardAttentionLine(card, attentionOptions);
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
   const captureOnly = captureProblem(card) && dashboardAttentionParts(card, attentionOptions).reason === "";
-  const fix = scopePending(card) || missingScope(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : captureOnly ? captureFix(definition) : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
+  const mediaOnly = mediaStorageOnly(card, attentionOptions);
+  const fix = scopePending(card) || missingScope(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : captureOnly ? captureFix(definition) : mediaOnly ? checkAgainFix() : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 function importAttentionItem(entry) {
@@ -173664,6 +173705,9 @@ function importAttentionItem(entry) {
 }
 function captureProblem(card) {
   return dashboardCaptureProblem(card) !== undefined;
+}
+function mediaStorageOnly(card, options) {
+  return card.media_storage !== undefined && !captureProblem(card) && dashboardAttentionParts(card, options).reason === "";
 }
 function captureFix(definition) {
   return helpLinkFix(DASHBOARD_CAPTURE_COPY.fixLabel, openOnComputer(definition, "reconnect"));
@@ -174137,6 +174181,7 @@ function scrubCard(definition, card) {
     ...isoOrUndefined(card.last_sync_at) ? { last_sync_at: isoOrUndefined(card.last_sync_at) } : {},
     ...card.unreadable_files ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } } : {},
     ...definition.sync_name ? { sync_name: definition.sync_name } : {},
+    ...card.media_storage?.state === "full" ? { media_storage: { state: "full", left_out_items: count(card.media_storage.left_out_items) } } : {},
     ...card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at) && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome) ? {
       last_manual_sync: {
         at: isoOrUndefined(card.last_manual_sync.at),

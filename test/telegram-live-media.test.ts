@@ -164,10 +164,12 @@ describe('review fixes (#556)', () => {
     h.capture([{ chat: '-1000001', id: '1000', text: 'hello', sentAt: '2026-10-20T09:00:00Z' }]);
     const before = await h.live.pull();
     expect(before.counts.media_storage_full).toBe(0);
-    writeFileSync(join(h.spoolDir, '.capture-media.json'), JSON.stringify({ kind: 'telegram_capture_media', schema_version: 1, stored_bytes: 2000, quota_bytes: 2000, storage_full: true, updated_at: '2026-10-20T09:00:00Z' }));
-    expect(readTelegramMediaState(h.spoolDir)).toEqual({ storedBytes: 2000, quotaBytes: 2000, storageFull: true });
+    expect(before.counts.media_left_out_storage_full).toBe(0);
+    writeFileSync(join(h.spoolDir, '.capture-media.json'), JSON.stringify({ kind: 'telegram_capture_media', schema_version: 1, stored_bytes: 2000, quota_bytes: 2000, storage_full: true, left_out_items: 7, updated_at: '2026-10-20T09:00:00Z' }));
+    expect(readTelegramMediaState(h.spoolDir)).toEqual({ storedBytes: 2000, quotaBytes: 2000, storageFull: true, leftOutItems: 7 });
     const full = await h.live.pull();
     expect(full.counts.media_storage_full).toBe(1);
+    expect(full.counts.media_left_out_storage_full).toBe(7);
     expect(full.warnings).toContain('telegram_media_storage_full');
   });
 });

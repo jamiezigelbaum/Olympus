@@ -38,6 +38,8 @@ export interface TelegramMediaState {
   quotaBytes: number;
   /** New media is named only, never kept, until room is made or the quota is raised; nothing is evicted. */
   storageFull: boolean;
+  /** Media named only for want of room since the store was last not full. */
+  leftOutItems: number;
 }
 
 const MEDIA_STATE_FILE = '.capture-media.json';
@@ -216,7 +218,8 @@ export function readTelegramMediaState(spoolDir: string): TelegramMediaState | u
     const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
     if (value.kind !== 'telegram_capture_media' || value.schema_version !== 1) return undefined;
     const count = (field: unknown) => (typeof field === 'number' && Number.isSafeInteger(field) && field >= 0 ? field : 0);
-    return { storedBytes: count(value.stored_bytes), quotaBytes: count(value.quota_bytes), storageFull: value.storage_full === true };
+    const storageFull = value.storage_full === true;
+    return { storedBytes: count(value.stored_bytes), quotaBytes: count(value.quota_bytes), storageFull, leftOutItems: storageFull ? count(value.left_out_items) : 0 };
   } catch {
     return undefined;
   }
