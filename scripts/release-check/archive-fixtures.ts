@@ -29,6 +29,9 @@ import { chatText, chatZip, mediaNames, notice, type SyntheticMessage } from '..
 import { apiMessage as gmailApiMessage, mail as gmailMail, takeoutMbox } from '../../test/support/archive-fixtures-gmail.ts';
 import type { GmailMessage } from '../../src/workers/google-connectors/gmail.ts';
 
+import { WHATSAPP_SOURCE_ID } from '../../src/core/olympus-layout.ts';
+import { WHATSAPP_BESIDE_CHAT, WHATSAPP_BESIDE_OWNER, WHATSAPP_BESIDE_SHARED, WHATSAPP_SEED_HOOK } from './archive-live-seed-whatsapp.ts';
+
 /** The folder under the home directory the archives are written to, and the picker's first press. */
 export const FIXTURE_FOLDER = 'rc-archives';
 
@@ -435,10 +438,38 @@ function whatsappSmall(token: string): BuiltArchive {
   };
 }
 
+/**
+ * The export of the WhatsApp chat the live seed holds (archive-live-seed-whatsapp.ts): the two messages live capture already has, a
+ * notice WhatsApp writes (left out, not read), and two new messages with the token, all in the direct chat of the same name, so the
+ * import joins the live chat. The owner's own messages show under the owner's name, which the import learns from the shared one.
+ */
+function whatsappBesideLive(token: string): { bytes: Uint8Array; expect: BesideLiveExpectation } {
+  const shared: SyntheticMessage[] = WHATSAPP_BESIDE_SHARED.map(([at, sender, text]) => ({ at, sender: sender ?? WHATSAPP_BESIDE_OWNER, text }));
+  const messages: SyntheticMessage[] = [
+    notice('2024-04-13T12:00:00'),
+    ...shared,
+    { at: '2024-04-15T12:00:00', sender: WHATSAPP_BESIDE_CHAT, text: `The reference word for the trip is ${token}.` },
+    { at: '2024-04-16T12:00:00', sender: WHATSAPP_BESIDE_OWNER, text: `Lunch at the harbour after, same word ${token}.` },
+  ];
+  return {
+    bytes: chatZip(chatText(messages, { style: 'ios-24-dmy' }), { textName: `WhatsApp Chat - ${WHATSAPP_BESIDE_CHAT}.txt` }),
+    expect: { read: 4, alreadyThere: 2, citationLabel: 'WhatsApp' },
+  };
+}
+
 export const WHATSAPP_FIXTURES: ArchiveFixtureSpec = {
   format: WHATSAPP_FORMAT,
   label: WHATSAPP_LABEL,
   citationLabel: WHATSAPP_CITATION,
+  // An export names no account: once the seed made one, the owner keeps `small` (another chat's history) under Archives.
+  keepApart: true,
+  besideLive: {
+    sourceId: WHATSAPP_SOURCE_ID,
+    seedHook: WHATSAPP_SEED_HOOK,
+    small: whatsappBesideLive,
+    confirmAccount: true,
+    sourceLabel: 'WhatsApp',
+  },
   extension: '.zip',
   family: 'chat',
   provider: 'whatsapp_export',

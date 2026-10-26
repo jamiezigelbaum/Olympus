@@ -29,6 +29,13 @@ export file, or a folder or zip that holds only the export. When it found the
 export but did not reach some files, those are counted on the archive as not
 looked at.
 
+A WhatsApp export does not say which WhatsApp account it is from. When the
+user has WhatsApp connected in Olympus, the dashboard asks them after they
+approve: added to WhatsApp, the chat joins the WhatsApp history Olympus already
+captures (messages it already has are not added twice) and is deleted only
+with WhatsApp's data; kept under Archives, it stays apart with its own Remove.
+The choice is the user's; do not make it for them.
+
 A Telegram Desktop export works too: its `result.json` (or the folder that
 holds it), exported as Machine-readable JSON. Messages are imported as text;
 pictures and files are counted, not imported. If the user only has the HTML

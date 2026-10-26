@@ -5,10 +5,11 @@ import { describe, expect, test } from 'bun:test';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
 import { legFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
-  besideLiveChecks, besideLiveJourney, besideLiveLine, panelArchivesOf, seedLiveChecks,
+  agentImportJourney, besideLiveChecks, besideLiveJourney, besideLiveLine, panelArchivesOf, seedLiveChecks,
   type BesideLiveObservation, type RowView,
 } from '../scripts/release-check/archive-leg.ts';
 import { liveSeedHook, registerLiveSeedHook } from '../scripts/release-check/archive-live-seeds.ts';
+import '../scripts/release-check/archive-live-seed-hooks.ts';
 import { searchWhenJudged } from '../scripts/release-check/archive-stages.ts';
 
 const fx: LegFixture = {
@@ -81,6 +82,28 @@ describe('an import beside a live input is judged', () => {
   test('the panel reading tells a source\'s import from an archive under Archives', () => {
     const panel = panelArchivesOf({ rows: [{ name: 'a', sourceImport: true }, { name: 'b' }], requests: [] });
     expect(panel.rows.map((entry) => entry.sourceImport === true)).toEqual([true, false]);
+  });
+
+  test('an export that names no account answers the account question: Add for the beside import, Keep apart for Archives', () => {
+    const beside = legFixture('beside', 'seed', 'whatsapp_chat');
+    expect(beside.accountQuestion).toEqual({ answer: 'add', sourceLabel: 'WhatsApp' });
+    const journey = besideLiveJourney(beside, '~/rc-archives/rc-beside-whatsapp_chat.zip');
+    const names = journey.steps.map((step) => step.name);
+    expect(names.some((name) => name.startsWith('Answer Add to WhatsApp'))).toBe(true);
+    const answer = journey.steps.find((step) => step.name.startsWith('Answer Add to WhatsApp'))!;
+    expect(answer.do).toMatchObject({ click: { role: 'button', name: 'Add to WhatsApp' } });
+    const apart = legFixture('agent', 'seed', 'whatsapp_chat');
+    expect(apart.accountQuestion).toEqual({ answer: 'apart' });
+    const archives = agentImportJourney(apart, '~/rc-archives/rc-agent-whatsapp_chat.zip');
+    expect(archives.steps.some((step) => step.name === `Answer ${A.account.apart}: the export stays apart`)).toBe(true);
+    // A format whose exports name their account is not asked.
+    expect(legFixture('agent', 'seed', 'mbox').accountQuestion).toBeUndefined();
+    expect(agentImportJourney(legFixture('agent', 'seed', 'mbox'), '~/rc-archives/x').steps.some((step) => step.name.startsWith('Answer'))).toBe(false);
+  });
+
+  test('the WhatsApp seed hook is registered for its beside fixture', () => {
+    expect(liveSeedHook('whatsapp').provider).toBe('whatsapp');
+    expect(liveSeedHook('whatsapp').stores({ env: { HOME: '/nonexistent-home' }, home: '/nonexistent-home' }).map((store) => store.tier)).toEqual(['private', 'personal']);
   });
 
   test('a format with no import beside a live input has no beside fixture, and an unknown hook is named', () => {

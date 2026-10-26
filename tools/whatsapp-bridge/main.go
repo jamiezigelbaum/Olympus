@@ -113,6 +113,7 @@ const (
 	// shorter in bytes than in UTF-16 code units, so a 64-BYTE bound here can
 	// never emit a token the store would refuse.
 	reactionKeyMaxBytes           = 64
+	senderContactNameMaxBytes     = 256
 	reactionTargetIDMaxBytes      = 128
 	reactionTargetChatJIDMaxBytes = 256
 )
@@ -176,11 +177,14 @@ func isCanonicalLowerUUID(value string) bool {
 // spoolRecord is the wire format of one spool line. Field names are a frozen
 // contract with src/workers/whatsapp/live-connector.ts — do not rename.
 type spoolRecord struct {
-	ID                   string            `json:"id"`
-	ChatJID              string            `json:"chat_jid"`
-	ChatName             string            `json:"chat_name"`
-	SenderJID            string            `json:"sender_jid"`
-	SenderName           string            `json:"sender_name"`
+	ID         string `json:"id"`
+	ChatJID    string `json:"chat_jid"`
+	ChatName   string `json:"chat_name"`
+	SenderJID  string `json:"sender_jid"`
+	SenderName string `json:"sender_name"`
+	// The sender's name as saved in this phone's contacts, which is what a
+	// chat export shows; absent for the owner and for a sender not saved.
+	SenderContactName    string            `json:"sender_contact_name,omitempty"`
 	FromMe               bool              `json:"from_me"`
 	Timestamp            string            `json:"timestamp"`
 	Text                 string            `json:"text"`
@@ -981,10 +985,16 @@ func recordFromMessage(ctx context.Context, client *whatsmeow.Client, audioStore
 		SenderJID:  info.Sender.String(),
 		SenderName: info.PushName,
 		FromMe:     info.IsFromMe,
-		Timestamp:  info.Timestamp.UTC().Format(time.RFC3339),
-		Text:       text,
-		Mentions:   mentions,
-		MediaType:  mediaType,
+		SenderContactName: func() string {
+			if info.IsFromMe {
+				return ""
+			}
+			return senderSavedName(ctx, client, info.Sender)
+		}(),
+		Timestamp: info.Timestamp.UTC().Format(time.RFC3339),
+		Text:      text,
+		Mentions:  mentions,
+		MediaType: mediaType,
 	}
 	rec.applyLinkPreview(evt.Message.GetExtendedTextMessage())
 	rec.applyReaction(evt.Message.GetReactionMessage())
@@ -1545,6 +1555,40 @@ func chatDisplayNameFromStores(ctx context.Context, contacts contactLookup, lids
 	default:
 		return ""
 	}
+}
+
+// senderSavedName is the sender's name as saved in the phone's contacts (an
+// offline read of the contact store), or "" when it is not saved.
+func senderSavedName(ctx context.Context, client *whatsmeow.Client, sender types.JID) string {
+	if client == nil || client.Store == nil {
+		return ""
+	}
+	return savedNameFromStores(ctx, client.Store.Contacts, client.Store.LIDs, sender)
+}
+
+func savedNameFromStores(ctx context.Context, contacts contactLookup, lids lidLookup, sender types.JID) string {
+	if contacts == nil {
+		return ""
+	}
+	jid := sender.ToNonAD()
+	if jid.Server == types.HiddenUserServer {
+		if lids == nil {
+			return ""
+		}
+		pn, err := lids.GetPNForLID(ctx, jid)
+		if err != nil || pn.IsEmpty() {
+			return ""
+		}
+		jid = pn
+	}
+	if jid.Server != types.DefaultUserServer {
+		return ""
+	}
+	contact, err := contacts.GetContact(ctx, jid)
+	if err != nil || !contact.Found {
+		return ""
+	}
+	return sanitizePreviewField(contact.FullName, senderContactNameMaxBytes)
 }
 
 func contactDisplayName(ctx context.Context, contacts contactLookup, jid types.JID) string {

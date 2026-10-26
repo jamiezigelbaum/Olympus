@@ -167,11 +167,15 @@ unchanged.
 
 Each source has one representation of its media, and both inputs use it.
 
-- **WhatsApp** keeps live's form: a media message is one row with the media
-  type and its extracted content. The archive input emits the bridge's media
-  record, and the import's media folder is registered as a readable root of
-  the account. If those files go, what was extracted stays and unread media
-  is reported as unavailable, as the child-items design reports it.
+- **WhatsApp** (revised 2026-10-26, step 5): a voice note keeps live's form,
+  one row with the media type and its transcript. A photo, video or
+  document is the message (its caption, the bridge's text since step 3) with
+  the media as a child keyed by the file's name in the export, read later by
+  a locator into the import (`archive-import/input-media.ts`). The caption
+  and the picture are two things to judge, so they are two items. A voice
+  note the bridge already saved is not added again from the export. Media
+  the export left out is a child that cannot be read, counted. Live images
+  and video become the same children in step 8.
 - **Telegram and mail** use child items, with keys both inputs can compute:
   Telegram `media` (one per message), mail the MIME part path. A photo the
   archive brings to a message live also holds is its child; if live capture
@@ -302,6 +306,7 @@ Each source's Import an archive appears as its step registers it.
    shared archive-input media reader and the Telegram extraction roster.
 5. WhatsApp: the export becomes an input (counted keys, zone alignment,
    chat joining); the bridge's records carry the contact's saved name.
+   Built (see "Built, step 5: WhatsApp").
 6. Mail: live Gmail requests `Message-ID`, and gains attachments as children;
    mbox of a Gmail account becomes a Gmail input (built, PR #546, see "Built,
    step 6"; children are built but off until Gmail attachments have a
@@ -911,6 +916,75 @@ Live WhatsApp capture, with no change to identities or stores
   adopts the same rule.
   Open: the dashboard's stale wording says "newest message" for an age that
   can now be the bridge's last connected time.
+
+## Built, step 5: WhatsApp
+
+The WhatsApp chat export is an input of the WhatsApp connector
+(`src/workers/whatsapp/archive-input.ts`, `export-match.ts`, `export-zone.ts`,
+`archive-target.ts`; the record builder in `live-connector.ts`; tests in
+`test/whatsapp-export-input.test.ts`, `test/archive-input-media.test.ts`).
+
+- **One builder.** The export reader (`archive-import/whatsapp`) reads the
+  export with its bounds, resume points and findings; the input turns each
+  message into the bridge's record, and the WhatsApp connector builds it
+  with the same code as a live message, under the intake rule, held until
+  judged, into the account's stores.
+- **Matching** (`match-keys.ts`). A message's key is its chat, its minute
+  (its second when the export shows seconds), its sender and its text
+  without media markers; keys are digests. The sender is "me" for the
+  owner; otherwise the contact's saved name, which the bridge now spools
+  (`sender_contact_name`), else the push name. Occurrences are counted on
+  the key itself in the export's order (two photos in one minute are two),
+  the count carried in the resume point across a page that ends inside a
+  minute. The live side is the spool index's digests of each live
+  message's current version (`live_keys`, built as the spool is indexed,
+  within a read budget; no rescan of the spool, no text). The export's k-th
+  message with a key is the k-th live message with it, so intake keeps one
+  item. An unmatched message with a live message of the chat within a
+  minute is counted as a near-miss (`match_near_miss`, How it was read).
+- **Both directions** (`match-ledger.ts`, `export-matches.sqlite` in the
+  spool folder, durable, digests and ids only). An export message live does
+  not hold gets an id of its own, recorded by its key and occurrence: a
+  re-import reuses it. When the bridge delivers that message later (it was
+  offline), indexing it finds the recorded id under the same key and
+  occurrence and aliases the live message to it: live capture stores it as
+  the imported item, never a second copy, and reads, reactions and Secrets
+  clearing follow the alias. (Rows are never re-keyed, as section 7 says;
+  the live message takes the item's id instead.)
+- **The owner.** The export shows the owner's own name. The name under which
+  the sample's messages match live capture's own messages most is taken as
+  the owner's.
+- **Time zone.** Chosen on the first pass from the export's messages in the
+  window live capture covers (its first and last message, a day either
+  side; up to 2,000 messages within 256 MiB of the export): this computer's
+  zone first, then every zone whose offsets on the sample's days differ,
+  keeping the one under which most keys match; converted with each line's
+  own date. No overlap or no match: this computer's zone, reported as
+  assumed (How it was read).
+- **Chats.** An export's chat joins the live chat of the same name when
+  exactly one has it; the status chat (`status@broadcast`) joins the status
+  posts. Otherwise it is a conversation of its own in the WhatsApp source.
+  The decision is kept in the input's resume point, so a chat never splits
+  across passes. Open: the "join to a chat" control on the import record is
+  not built.
+- **Status posts** are a record kind (`recordKind: 'status'`, conversation
+  "Status updates"), live and imported; live capture no longer skips them.
+- **Notices** from WhatsApp itself stay left out (owner).
+- **Media** become children (section 5), keyed `media` as live capture keys
+  its own, so a picture both inputs bring is one child; a child that can be
+  read brings content, so a later export (or live capture) with the bytes
+  fills one an earlier export left out. Reading them is the shared reader
+  of an input's media (`archive-import/input-media.ts`: a folder binding or a
+  zip member by its place, served only while the import is an input of a
+  source and not being removed); wiring it into WhatsApp's extraction is
+  step 8's.
+- **Account.** An export names no account: it joins the source's account at
+  the owner's confirmation in the import sheet, or creates it, or stays
+  under Archives by the owner's choice. WhatsApp has no exclusive runner:
+  the scheduler key keeps an import from running beside a live pull.
+- **Release check.** `ARCHIVE_FORMATS.whatsapp_chat` has an import beside a
+  seeded live input (`archive-live-seed-whatsapp.ts`): the account question
+  is answered Add, and the Archives case answers Keep apart.
 
 ## To verify before step 4
 

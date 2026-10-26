@@ -3,3 +3,5 @@
  * whose fixture has `besideLive` adds the import of its hook here.
  */
 import './archive-live-seed-telegram.ts';
+
+import './archive-live-seed-whatsapp.ts';
