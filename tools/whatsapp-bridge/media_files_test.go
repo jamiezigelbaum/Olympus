@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,12 +90,33 @@ func TestAFailedDownloadLeavesNoTemp(t *testing.T) {
 	}
 }
 
-func TestATempNamesItsWriterAndItsMessage(t *testing.T) {
+func TestATempNamesItsWriterItsBootAndItsMessage(t *testing.T) {
 	stem := mediaFileStem("15550001111@s.whatsapp.net", "ABC")
 	name := strings.Replace(mediaTempPattern(stem), "*", "123456", 1)
-	if !isMediaTemp(name) || mediaTempPID(name) != os.Getpid() || !strings.Contains(name, "-"+stem+"-") {
+	pid, boot, ok := mediaTempWriter(name)
+	if !isMediaTemp(name) || !ok || pid != os.Getpid() || boot != bootNonce || !strings.Contains(name, "-"+stem+"-") {
 		t.Fatalf("temp name %q", name)
 	}
+}
+
+// io.Copy prefers the destination's ReadFrom; the capped file's own one keeps the cap.
+func TestIoCopyIntoTheCappedFileStopsAtTheBound(t *testing.T) {
+	tmp, err := os.CreateTemp(t.TempDir(), "capped-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tmp.Close()
+	capped := &cappedFile{file: tmp, limit: 1024}
+	hasher := sha256.New()
+	n, err := io.Copy(capped, io.TeeReader(bytes.NewReader(make([]byte, 1024*1024)), hasher))
+	if !errors.Is(err, errMediaTooLarge) {
+		t.Fatalf("copy err = %v", err)
+	}
+	info, _ := tmp.Stat()
+	if n > 1024 || info.Size() > 1024 {
+		t.Fatalf("copied %d, file %d: past the bound", n, info.Size())
+	}
+	var _ whatsmeow.File = capped
 }
 
 func TestStartSweepsTempsAKilledBridgeLeftBehind(t *testing.T) {
@@ -112,20 +137,25 @@ func TestStartSweepsTempsAKilledBridgeLeftBehind(t *testing.T) {
 		}
 		return path
 	}
-	// A writer that is gone (pid 2^22 + 1 is past Linux's pid limit), an older build's, a stale one of ours,
-	// and one of ours still being written.
-	dead := write(mediaTempPrefix+"4194305-stem-1.tmp", time.Second)
-	older := write(".audio-1.tmp", time.Second)
-	stale := write(strings.Replace(mediaTempPattern("stem"), "*", "2", 1), 2*mediaTempMaxAge)
-	running := write(strings.Replace(mediaTempPattern("stem"), "*", "3", 1), time.Second)
+	// A writer that is gone (pid 2^22 + 1 is past Linux's pid limit), a live pid of another boot, an older
+	// build's temp past the age, and one older build's still fresh.
+	dead := write(mediaTempPrefix+"4194305-"+bootNonce+"-stem-1.tmp", time.Second)
+	otherBoot := write(fmt.Sprintf("%s%d-ffffffff-stem-2.tmp", mediaTempPrefix, os.Getpid()), time.Second)
+	older := write(".audio-1.tmp", 2*mediaTempMaxAge)
+	olderFresh := write(".audio-2.tmp", time.Second)
+	// A download of this bridge that stalled for hours is still running: it stays.
+	stalled := write(strings.Replace(mediaTempPattern("stem"), "*", "3", 1), 10*mediaTempMaxAge)
 	saved := write("saved-0123456789abcdef.jpg", 2*mediaTempMaxAge)
+	if bootNonce == "ffffffff" {
+		t.Skip("this boot's nonce is the fixture's other boot")
+	}
 	store.sweepTemps(time.Now())
-	for _, gone := range []string{dead, older, stale} {
+	for _, gone := range []string{dead, otherBoot, older} {
 		if _, err := os.Stat(gone); !os.IsNotExist(err) {
 			t.Fatalf("%s survived the sweep", filepath.Base(gone))
 		}
 	}
-	for _, kept := range []string{running, saved} {
+	for _, kept := range []string{stalled, olderFresh, saved} {
 		if _, err := os.Stat(kept); err != nil {
 			t.Fatalf("%s was swept: %v", filepath.Base(kept), err)
 		}

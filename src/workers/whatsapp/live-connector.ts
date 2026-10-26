@@ -64,8 +64,9 @@
 //   reads back as a metadata_only item with a Secrets floor, so a replay or a
 //   reaction re-emit judges it Secrets again.
 
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, type Dirent } from 'node:fs';
 import { basename, isAbsolute, join, relative } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
@@ -1328,8 +1329,9 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   const deleteOwnedMedia = (message: SpoolMessage): void => {
     if (!message.mediaPath || mediaRoots.length === 0) return;
     owners ??= mediaPathOwners(options.spoolDir, relocate);
-    // Keyed by the file itself, so a symlink and its target are one file.
-    const real = existingRealPath(relocate(message.mediaPath));
+    // Keyed by the file itself, so a symlink and its target are one file. A path that cannot be resolved for any
+    // reason but its being gone fails the cleanup: the keys are kept and the next pull tries again.
+    const real = realPathUnlessGone(relocate(message.mediaPath));
     if (!real) return;
     const self = chatScopedKey(message.chatJid, message.id);
     if ([...(owners.get(real) ?? [])].some((owner) => owner !== self)) return;
@@ -1431,12 +1433,18 @@ function mediaPathOwners(spoolDir: string, relocate: (path: string) => string): 
   return owners;
 }
 
-/** What a media temp's name is: `.olympus-media-<pid>-<stem>-<random>.tmp` (tools/whatsapp-bridge/media_files.go). */
-const MEDIA_TEMP = /^\.olympus-media-(\d+)-(.+)-[^-]+\.tmp$/u;
-/** An older build's temp, which names no writer. */
-const OLDER_MEDIA_TEMP = /^\.audio-.+\.tmp$/u;
-/** A temp older than this is a leftover whoever wrote it. */
+/**
+ * What a media temp's name is: `.olympus-media-<pid>-<boot>-<stem>-<random>.tmp`
+ * (tools/whatsapp-bridge/media_files.go), boot being the nonce of the boot the
+ * writer ran in.
+ */
+const MEDIA_TEMP = /^\.olympus-media-(\d+)-([0-9a-f]{8})-(.+)-[^-]+\.tmp$/u;
+/** A temp named another way: an older build's, which names no writer we can trust. */
+const OLDER_MEDIA_TEMP = /^\.(?:audio-|olympus-media-).*\.tmp$/u;
+/** An older build's temp older than this is a leftover. */
 const MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
+/** How deep a media root is walked for temps: the root, and the kind folders in it (images, video, audio). */
+const MEDIA_TEMP_DEPTH = 2;
 
 /**
  * The file stem the bridge saves a message's media under: the readable id and
@@ -1457,6 +1465,22 @@ export function whatsAppMediaFileStem(chatJid: string, id: string): string {
   return `${readable.slice(0, 64)}-${digest}`;
 }
 
+let currentBootNonce: string | undefined;
+
+/** This boot's nonce, as the bridge writes it (boot_linux.go, boot_darwin.go): a pid is unique only within a boot. */
+export function whatsAppBootNonce(): string {
+  if (currentBootNonce !== undefined) return currentBootNonce;
+  let id = '';
+  try {
+    if (process.platform === 'linux') id = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    else if (process.platform === 'darwin') id = execFileSync('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8' }).trim();
+  } catch {
+    id = '';
+  }
+  currentBootNonce = id === '' ? '00000000' : createHash('sha256').update(id).digest('hex').slice(0, 8);
+  return currentBootNonce;
+}
+
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -1466,51 +1490,85 @@ function processAlive(pid: number): boolean {
   }
 }
 
-/** Removes the media temps a killed bridge left: its writer is gone, it is an older build's, or it is too old. */
-function sweepOrphanMediaTemps(roots: readonly string[], nowMs = Date.now()): void {
-  for (const root of roots) {
-    let names: string[];
+/**
+ * Every media temp under the roots, walked to MEDIA_TEMP_DEPTH (a folder
+ * account's media root holds the images and video folders), each folder once.
+ * The one list both the sweep and a message's cleanup read, so they never
+ * look in different places.
+ */
+function mediaTempFiles(roots: readonly string[]): Array<{ path: string; name: string }> {
+  const seen = new Set<string>();
+  const found: Array<{ path: string; name: string }> = [];
+  const walk = (dir: string, depth: number): void => {
+    const real = existingRealPath(dir);
+    if (real === undefined || seen.has(real)) return;
+    seen.add(real);
+    let entries: Dirent[];
     try {
-      names = readdirSync(root);
+      entries = readdirSync(real, { withFileTypes: true });
     } catch {
-      continue;
+      return;
     }
-    for (const name of names) {
-      const ours = MEDIA_TEMP.exec(name);
-      if (!ours && !OLDER_MEDIA_TEMP.test(name)) continue;
-      const path = join(root, name);
+    for (const entry of entries) {
+      if (entry.isDirectory() && depth < MEDIA_TEMP_DEPTH) walk(join(real, entry.name), depth + 1);
+      else if (entry.isFile() && OLDER_MEDIA_TEMP.test(entry.name)) found.push({ path: join(real, entry.name), name: entry.name });
+    }
+  };
+  for (const root of roots) walk(root, 0);
+  return found;
+}
+
+/** Removes a file, failing on anything but its being gone already. */
+function removeTemp(path: string): void {
+  try {
+    rmSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+/**
+ * Removes the media temps a killed bridge left: one whose writer is gone (its
+ * pid dead, or of another boot), or an older build's past the age. A temp
+ * whose writer is alive in this boot stays, however long its download stalls.
+ */
+function sweepOrphanMediaTemps(roots: readonly string[], nowMs = Date.now()): void {
+  const boot = whatsAppBootNonce();
+  for (const { path, name } of mediaTempFiles(roots)) {
+    const named = MEDIA_TEMP.exec(name);
+    if (named) {
+      if (named[2] === boot && processAlive(Number(named[1]))) continue;
+    } else {
       try {
-        const stat = lstatSync(path);
-        if (!stat.isFile()) continue;
-        const fresh = nowMs - stat.mtimeMs < MEDIA_TEMP_MAX_AGE_MS;
-        if (ours && fresh && processAlive(Number(ours[1]))) continue;
-        rmSync(path, { force: true });
+        if (nowMs - lstatSync(path).mtimeMs < MEDIA_TEMP_MAX_AGE_MS) continue;
       } catch {
-        // Gone already, or not ours to remove.
+        continue;
       }
+    }
+    try {
+      removeTemp(path);
+    } catch {
+      // Another message's leftover: tried again before the next clearing. A Secret message's own temps are
+      // removed by its own cleanup, which fails rather than certify a temp it could not remove.
     }
   }
 }
 
-/** Removes every temp of one message's media, whoever was writing it. */
+/** Removes every temp of one message's media, whoever was writing it; a temp that cannot be removed fails the cleanup. */
 function deleteMediaTemps(message: SpoolMessage, roots: readonly string[]): void {
   const stem = whatsAppMediaFileStem(message.chatJid, message.id);
-  for (const root of roots) {
-    let names: string[];
-    try {
-      names = readdirSync(root);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      const temp = MEDIA_TEMP.exec(name);
-      if (temp?.[2] !== stem) continue;
-      try {
-        if (lstatSync(join(root, name)).isFile()) rmSync(join(root, name), { force: true });
-      } catch {
-        // Gone already.
-      }
-    }
+  for (const { path, name } of mediaTempFiles(roots)) {
+    if (MEDIA_TEMP.exec(name)?.[3] === stem) removeTemp(path);
+  }
+}
+
+/** The real path, or undefined when the file is gone; any other failure is thrown. */
+function realPathUnlessGone(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
   }
 }
 
@@ -1529,7 +1587,7 @@ function existingRealPath(path: string): string | undefined {
  */
 function deleteSavedMedia(mediaPath: string | undefined, mediaRoots: readonly string[]): void {
   if (!mediaPath || mediaRoots.length === 0) return;
-  const real = existingRealPath(mediaPath);
+  const real = realPathUnlessGone(mediaPath);
   if (!real) return;
   const inside = mediaRoots.some((root) => {
     const from = relative(root, real);

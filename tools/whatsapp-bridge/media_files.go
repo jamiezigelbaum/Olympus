@@ -7,11 +7,16 @@ package main
 //     writer that refuses past the store's bound (plus the encryption
 //     overhead), so a large attachment is never read into memory and never
 //     written whole. The size WhatsApp states is not trusted.
-//   - Every temp has one known name: `.olympus-media-<pid>-<stem>-<random>.tmp`,
-//     where the stem is the message's file stem (mediaFileStem). Every failure
-//     path removes it; a temp a killed bridge left behind is swept at start
-//     (its pid is gone, or it is older than mediaTempMaxAge), and Olympus's
-//     Secrets clearing removes a Secret message's temps by its stem.
+//   - Every temp has one known name:
+//     `.olympus-media-<pid>-<boot>-<stem>-<random>.tmp`, where boot is this
+//     boot's nonce (a pid is unique only within a boot) and the stem is the
+//     message's file stem (mediaFileStem). Every failure path removes it. A
+//     temp whose writer is alive in this boot is never swept, however long
+//     its download stalls; one whose writer is gone (its pid dead, or of
+//     another boot) is swept at start, and Olympus sweeps the same before
+//     Secrets clearing and removes a Secret message's temps by its stem. A
+//     temp named another way (an older build's) is swept once it is older
+//     than mediaTempMaxAge.
 //   - The final step links rather than renames, so an existing file is never
 //     overwritten: identical bytes (a re-delivered message) reuse it,
 //     different bytes take the next free "-N" name.
@@ -36,7 +41,7 @@ import (
 const (
 	mediaTempPrefix = ".olympus-media-"
 	mediaTempSuffix = ".tmp"
-	// A temp older than this is a leftover whoever wrote it: no single download takes so long.
+	// A temp of an older build (no writer named) older than this is a leftover.
 	mediaTempMaxAge = 30 * time.Minute
 	// What encryption adds to a file's bytes on the wire (padding and the MAC), allowed past the bound.
 	mediaEncryptionOverhead = 64
@@ -49,56 +54,100 @@ type mediaDownloader interface {
 	DownloadToFile(ctx context.Context, msg whatsmeow.DownloadableMessage, file whatsmeow.File) error
 }
 
-// cappedFile is a temp file that refuses any write past its limit.
+// cappedFile is a temp file that refuses any write past its limit. It does
+// not embed the file: an embedded *os.File would lend it ReadFrom, through
+// which io.Copy writes without asking Write, so every method is its own.
 type cappedFile struct {
-	*os.File
+	file  *os.File
 	limit int64
 }
 
+func (f *cappedFile) Read(p []byte) (int, error)                   { return f.file.Read(p) }
+func (f *cappedFile) ReadAt(p []byte, off int64) (int, error)      { return f.file.ReadAt(p, off) }
+func (f *cappedFile) Seek(offset int64, whence int) (int64, error) { return f.file.Seek(offset, whence) }
+func (f *cappedFile) Stat() (os.FileInfo, error)                   { return f.file.Stat() }
+
 func (f *cappedFile) Write(p []byte) (int, error) {
-	at, err := f.File.Seek(0, io.SeekCurrent)
+	at, err := f.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return 0, err
 	}
 	if at+int64(len(p)) > f.limit {
 		return 0, errMediaTooLarge
 	}
-	return f.File.Write(p)
+	return f.file.Write(p)
+}
+
+// ReadFrom copies within the limit, so io.Copy into this file is capped too.
+func (f *cappedFile) ReadFrom(r io.Reader) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var total int64
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			written, werr := f.Write(buf[:n])
+			total += int64(written)
+			if werr != nil {
+				return total, werr
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return total, nil
+		}
+		if err != nil {
+			return total, err
+		}
+	}
 }
 
 func (f *cappedFile) WriteAt(p []byte, off int64) (int, error) {
 	if off+int64(len(p)) > f.limit {
 		return 0, errMediaTooLarge
 	}
-	return f.File.WriteAt(p, off)
+	return f.file.WriteAt(p, off)
 }
 
 func (f *cappedFile) Truncate(size int64) error {
 	if size > f.limit {
 		return errMediaTooLarge
 	}
-	return f.File.Truncate(size)
+	return f.file.Truncate(size)
 }
+
+// bootNonce names this boot in a temp's name: a pid is unique only within a boot.
+var bootNonce = func() string {
+	id := bootID()
+	if id == "" {
+		return "00000000"
+	}
+	sum := sha256.Sum256([]byte(id))
+	return fmt.Sprintf("%x", sum[:4])
+}()
 
 // mediaTempPattern is the CreateTemp pattern for one message's media.
 func mediaTempPattern(stem string) string {
-	return fmt.Sprintf("%s%d-%s-*%s", mediaTempPrefix, os.Getpid(), stem, mediaTempSuffix)
+	return fmt.Sprintf("%s%d-%s-%s-*%s", mediaTempPrefix, os.Getpid(), bootNonce, stem, mediaTempSuffix)
+}
+
+// mediaTempWriter is the pid and boot nonce a temp's name carries; ok is false for a name that carries none.
+func mediaTempWriter(name string) (pid int, boot string, ok bool) {
+	if !strings.HasPrefix(name, mediaTempPrefix) || !strings.HasSuffix(name, mediaTempSuffix) {
+		return 0, "", false
+	}
+	parts := strings.SplitN(strings.TrimPrefix(name, mediaTempPrefix), "-", 3)
+	if len(parts) < 3 || len(parts[1]) != 8 {
+		return 0, "", false
+	}
+	pid, err := strconv.Atoi(parts[0])
+	if err != nil || pid <= 0 {
+		return 0, "", false
+	}
+	return pid, parts[1], true
 }
 
 // mediaTempPID is the pid a temp's name carries, or 0 when it carries none.
 func mediaTempPID(name string) int {
-	if !strings.HasPrefix(name, mediaTempPrefix) || !strings.HasSuffix(name, mediaTempSuffix) {
-		return 0
-	}
-	rest := strings.TrimPrefix(name, mediaTempPrefix)
-	dash := strings.IndexByte(rest, '-')
-	if dash <= 0 {
-		return 0
-	}
-	pid, err := strconv.Atoi(rest[:dash])
-	if err != nil || pid <= 0 {
-		return 0
-	}
+	pid, _, _ := mediaTempWriter(name)
 	return pid
 }
 
@@ -117,8 +166,9 @@ func processAlive(pid int) bool {
 }
 
 // sweepTemps removes the media temps a bridge that was killed left behind:
-// one whose writer is gone, an older build's, or one older than
-// mediaTempMaxAge. This bridge's own temps of a download still running stay.
+// one whose writer is gone (its pid dead, or of another boot), or an older
+// build's past mediaTempMaxAge. A temp whose writer is alive in this boot
+// stays, however long its download stalls.
 func (store *audioMediaStore) sweepTemps(now time.Time) {
 	if store == nil {
 		return
@@ -140,9 +190,11 @@ func (store *audioMediaStore) sweepTemps(now time.Time) {
 			if err != nil {
 				continue
 			}
-			pid := mediaTempPID(name)
-			ours := pid == os.Getpid()
-			if (ours || processAlive(pid)) && now.Sub(info.ModTime()) < mediaTempMaxAge {
+			if pid, boot, named := mediaTempWriter(name); named {
+				if boot == bootNonce && (pid == os.Getpid() || processAlive(pid)) {
+					continue
+				}
+			} else if now.Sub(info.ModTime()) < mediaTempMaxAge {
 				continue
 			}
 			_ = os.Remove(filepath.Join(each.dir, name))
@@ -168,7 +220,7 @@ func (store *audioMediaStore) download(ctx context.Context, chatJID string, mess
 		tmp.Close()
 		return "", 0, err
 	}
-	capped := &cappedFile{File: tmp, limit: store.maxFileBytes + mediaEncryptionOverhead}
+	capped := &cappedFile{file: tmp, limit: store.maxFileBytes + mediaEncryptionOverhead}
 	if err := store.downloader.DownloadToFile(ctx, media, capped); err != nil {
 		tmp.Close()
 		return "", 0, err

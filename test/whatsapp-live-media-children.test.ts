@@ -7,7 +7,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -16,7 +16,7 @@ import { deferredBytesAnswerFor } from '../src/workers/file-extraction/connector
 import { WHATSAPP_LANE_SYNC, whatsAppConnectorWithInputs } from '../src/workers/whatsapp/archive-target.ts';
 import { WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX, createWhatsAppChildReader } from '../src/workers/whatsapp/child-media.ts';
 import { WhatsAppExtractionSource } from '../src/workers/whatsapp/extraction-source.ts';
-import { createWhatsAppLiveSourceConnector, redactWhatsAppLiveSpoolSecrets, whatsAppMediaFileStem } from '../src/workers/whatsapp/live-connector.ts';
+import { createWhatsAppLiveSourceConnector, redactWhatsAppLiveSpoolSecrets, whatsAppBootNonce, whatsAppMediaFileStem } from '../src/workers/whatsapp/live-connector.ts';
 import { whatsAppExtractionSourceFactory } from '../src/workers/whatsapp/extraction-factory.ts';
 import type { RawItem } from '../src/core/contracts.ts';
 import { WHATSAPP_LIVE_CORPUS_ID, createWhatsAppTierLane, defaultWhatsAppMediaRoots } from '../src/workers/whatsapp/store-sync.ts';
@@ -233,18 +233,23 @@ describe('live pictures and videos are children of their message', () => {
     expect(rows(target.root).find((row) => row.id === 'C2#child:media')?.locator).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}`);
   });
 
-  test('clearing a Secret picture removes every temp of it; temps a killed bridge left are swept, a running download\'s kept', () => {
+  test('clearing a Secret picture removes every temp of it; temps a killed bridge left are swept, a stalled live download\'s kept', () => {
     const target = lane();
     const photo = join(target.images, 'T1.jpg');
     writeFileSync(photo, 'secret picture');
-    const stem = whatsAppMediaFileStem(CHAT, 'T1');
-    const own = join(target.images, `.olympus-media-${process.pid}-${stem}-111.tmp`);
-    const dead = join(target.images, `.olympus-media-4194305-${whatsAppMediaFileStem(CHAT, 'other')}-222.tmp`);
-    const stale = join(target.images, `.olympus-media-${process.pid}-${whatsAppMediaFileStem(CHAT, 'old')}-333.tmp`);
-    const running = join(target.images, `.olympus-media-${process.pid}-${whatsAppMediaFileStem(CHAT, 'other')}-444.tmp`);
-    for (const temp of [own, dead, stale, running]) writeFileSync(temp, 'partial');
-    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    utimesSync(stale, hourAgo, hourAgo);
+    const boot = whatsAppBootNonce();
+    const temp = (pid: number, nonce: string, id: string, n: number) => join(target.images, `.olympus-media-${pid}-${nonce}-${whatsAppMediaFileStem(CHAT, id)}-${n}.tmp`);
+    // The Secret message's own temp, even of a writer still running; a dead writer's; a live pid of another boot;
+    // an older build's past the age; and a live writer's download that stalled for hours.
+    const own = temp(process.pid, boot, 'T1', 1);
+    const dead = temp(4194305, boot, 'other', 2);
+    const otherBoot = temp(process.pid, boot === 'ffffffff' ? 'eeeeeeee' : 'ffffffff', 'other', 3);
+    const older = join(target.images, '.audio-4.tmp');
+    const stalled = temp(process.pid, boot, 'other', 5);
+    for (const path of [own, dead, otherBoot, older, stalled]) writeFileSync(path, 'partial');
+    const hoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+    utimesSync(older, hoursAgo, hoursAgo);
+    utimesSync(stalled, hoursAgo, hoursAgo);
     writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'T1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok' }));
     redactWhatsAppLiveSpoolSecrets({
       spoolDir: target.spoolDir,
@@ -252,8 +257,58 @@ describe('live pictures and videos are children of their message', () => {
       judge: (identity) => (identity.providerItemId === 'T1#child:media' ? 'content' : undefined),
       mediaDirs: [target.images, target.video, target.audio],
     });
-    for (const gone of [photo, own, dead, stale]) expect(existsSync(gone)).toBe(false);
-    expect(existsSync(running)).toBe(true);
+    for (const gone of [photo, own, dead, otherBoot, older]) expect(existsSync(gone)).toBe(false);
+    expect(existsSync(stalled)).toBe(true);
+  });
+
+  test('in a folder account the temps under the media folder\'s picture folder are found from its one root', () => {
+    const target = lane();
+    const mediaRoot = join(target.root, 'media');
+    const photo = join(target.images, 'F1.jpg');
+    writeFileSync(photo, 'secret picture');
+    const own = join(target.images, `.olympus-media-${process.pid}-${whatsAppBootNonce()}-${whatsAppMediaFileStem(CHAT, 'F1')}-1.tmp`);
+    const dead = join(target.video, `.olympus-media-4194305-${whatsAppBootNonce()}-${whatsAppMediaFileStem(CHAT, 'x')}-2.tmp`);
+    for (const path of [own, dead]) writeFileSync(path, 'partial');
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'F1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok' }));
+    // The folder account's media roots are the media folder alone (defaultWhatsAppMediaRoots).
+    redactWhatsAppLiveSpoolSecrets({
+      spoolDir: target.spoolDir,
+      account: 'personal',
+      judge: (identity) => (identity.providerItemId === 'F1#child:media' ? 'content' : undefined),
+      mediaDirs: [mediaRoot],
+    });
+    for (const gone of [photo, own, dead]) expect(existsSync(gone)).toBe(false);
+  });
+
+  test('a temp that cannot be removed fails the cleanup: the keys stay and the next pull tries again', () => {
+    const target = lane();
+    const photo = join(target.images, 'E1.jpg');
+    writeFileSync(photo, 'secret picture');
+    // The temp sits where only it cannot be removed; the saved picture itself could be.
+    const own = join(target.video, `.olympus-media-${process.pid}-${whatsAppBootNonce()}-${whatsAppMediaFileStem(CHAT, 'E1')}-1.tmp`);
+    writeFileSync(own, 'partial');
+    const day = join(target.spoolDir, '2026-07-01.jsonl');
+    const original = spoolLine({ id: 'E1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', media_key: 'a2V5' });
+    writeFileSync(day, original);
+    const clear = () => redactWhatsAppLiveSpoolSecrets({
+      spoolDir: target.spoolDir,
+      account: 'personal',
+      judge: (identity) => (identity.providerItemId === 'E1#child:media' ? 'content' : undefined),
+      mediaDirs: [target.images, target.video, target.audio],
+    });
+    chmodSync(target.video, 0o500);
+    try {
+      expect(clear).toThrow();
+      // Not certified: the line keeps its path and keys.
+      expect(readFileSync(day, 'utf8')).toBe(original);
+    } finally {
+      chmodSync(target.video, 0o700);
+    }
+    // Retried once removing works: cleared.
+    clear();
+    expect(existsSync(own)).toBe(false);
+    expect(existsSync(photo)).toBe(false);
+    expect(JSON.parse(readFileSync(day, 'utf8'))).not.toHaveProperty('media_key');
   });
 
   test('a live media child is held until its own judgment', async () => {

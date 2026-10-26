@@ -695,9 +695,14 @@ export's media are (section 5).
   left unsaved and its line says so (`download_status`). A download streams
   into a temp through a writer that refuses past the bound (the size the
   message states is not trusted), and every temp has one name,
-  `.olympus-media-<pid>-<stem>-*.tmp`: removed on every failure, swept at
-  start when its writer is gone or it is older than 30 minutes, and swept
-  again before Secrets clearing (`media_files.go`).
+  `.olympus-media-<pid>-<boot>-<stem>-*.tmp` (boot: this boot's nonce, since
+  a pid is unique only within a boot): removed on every failure, and swept
+  at start and before Secrets clearing when its writer is gone (pid dead, or
+  of another boot). A live writer's temp is never swept, however long its
+  download stalls; only an older build's temp is judged by age (30
+  minutes). Olympus finds temps in every media folder, the kind folders
+  inside a folder account's media root included, through one walk shared by
+  the sweep and a message's cleanup (`media_files.go`, `live-connector.ts`).
 - **The connector lists them** (`live-connector.ts`, `childrenOf`): a
   picture, video or video note line is its message (its caption, or its
   names alone) with the file as a child keyed `media`, located by
@@ -726,7 +731,10 @@ export's media are (section 5).
   picture or video is judged as its own child (`<id>#child:media`): when it
   is Secrets, its file, every temp of it (by the message's file stem), its
   path and its re-download keys go, whatever the caption's judgment; a
-  Secret caption alone leaves the picture. A voice note or document is the
+  Secret caption alone leaves the picture. A file or temp that cannot be
+  removed (anything but its being gone already) fails that line's clearing:
+  the keys stay, the pull reports the failure, and the next pull tries
+  again. A voice note or document is the
   message, so its media goes with the message's judgment. A file is deleted
   only under the media folders and only when no other message names it.
 - **Residual (owner's ruling, post-launch).** A captionless picture both
