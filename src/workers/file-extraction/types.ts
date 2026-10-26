@@ -31,6 +31,7 @@
  * be in the store before the factory can attach text to it.
  */
 
+import type { RawItemProviderText } from '../../core/contracts.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import type { StillImageReadiness } from '../../core/still-image-readiness.ts';
 import type { ExtractionCommandRunner } from './extractors/command-runner.ts';
@@ -94,6 +95,11 @@ export interface FetchedBytes {
   bytes: Uint8Array;
   mimeType?: string;
   sizeBytes?: number;
+  /**
+   * The source's own reading of the item (RawItem.providerText, contract 2.3.0):
+   * the item's text only when no reader produces any (runner.ts).
+   */
+  providerText?: RawItemProviderText;
 }
 
 /**
@@ -151,6 +157,8 @@ export interface FetchedFile {
   path: string;
   mimeType?: string;
   sizeBytes?: number;
+  /** As FetchedBytes.providerText. */
+  providerText?: RawItemProviderText;
   dispose(): Promise<void>;
 }
 
@@ -253,7 +261,9 @@ export type ExtractionArtifactKind =
   | 'sheet'
   | 'slide'
   | 'transcript'
-  | 'image_description';
+  | 'image_description'
+  /** The source's own reading of the item (RawItem.providerText), used because no reader produced text. */
+  | 'provider_text';
 
 /**
  * Structural provenance for a slice of the extracted text. This never reaches

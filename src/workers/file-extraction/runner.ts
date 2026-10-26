@@ -44,6 +44,7 @@
 
 import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
+import type { RawItemProviderText } from '../../core/contracts.ts';
 import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
 import { releaseMediaCacheFile } from '../../core/media-cache.ts';
 import { OperationError } from '../../core/operation-error.ts';
@@ -1086,6 +1087,8 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
 
   let fetched: FetchedBytes | undefined;
   let fetchedFile: FetchedFile | undefined;
+  // Over the reader's limit, with the source's own reading to fall back on (providerFallback).
+  let tooLarge = false;
   if (extractor.input.kind !== 'none') {
     let source: FileExtractionSource;
     try {
@@ -1106,8 +1109,10 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
       } else {
         fetched = await source.fetch(job.ref, { ...(maxBytes !== undefined ? { maxBytes } : {}) });
         // Defence in depth: a source that ignored the bound still cannot hand a reader more than it allows.
+        // A file over the reader's limit still has the source's own reading of it, when it gave one.
         if (maxBytes !== undefined && fetched.bytes.byteLength > maxBytes) {
-          return { status: 'skipped_too_large', errorKind: 'source_too_large' };
+          if (!fetched.providerText) return { status: 'skipped_too_large', errorKind: 'source_too_large' };
+          tooLarge = true;
         }
       }
     } catch (error) {
@@ -1172,8 +1177,11 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
     return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
   }
+  const providerText = fetched?.providerText ?? fetchedFile?.providerText;
   try {
-    output = await extractor.extract(extractorInput);
+    // A file over the reader's limit is not given to the reader; the source's own reading stands in for it.
+    output = tooLarge ? { status: 'empty_output' } : await extractor.extract(extractorInput);
+    output = providerFallback(output, providerText);
     if (output.status === 'indexed' && output.media) staged.media = output.media;
   } catch (error) {
     if (error instanceof ExtractionEgressRefusedError) {
@@ -1298,6 +1306,36 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     chunksAwaitingEmbedding: accepted.chunksAwaitingEmbedding,
     ...(output.derivations ? { derivations: output.derivations } : {}),
     ...(output.egressDestination ? { egressDestination: output.egressDestination } : {}),
+  };
+}
+
+/** The most of a source's own reading that becomes an item's text: the bounded text reader's own limit. */
+export const EXTRACTION_PROVIDER_TEXT_MAX_CHARS = 1_000_000;
+
+/**
+ * The source's own reading of an item (RawItem.providerText, docs/design/child-items.md, "Text the provider
+ * supplies"), as the item's text when no reader produced any: a reader that found nothing, read nothing it
+ * could use, or was not given a file over its limit. Our reader stays primary: an output with text is kept as
+ * it is, and a failure that may pass on a retry is left to retry. The text says whose reading it is, and that
+ * recognized words are approximate, so an answer quoting it can say so; the extraction record says it too
+ * (artifact `provider_text`). It then goes to the same sink as any text, so it is judged, held and stored the
+ * same way. Nothing here names a source.
+ */
+export function providerFallback(output: ExtractorOutput, provided: RawItemProviderText | undefined): ExtractorOutput {
+  if (!provided || provided.text.trim() === '') return output;
+  const nothing = output.status === 'empty_output' || output.status === 'metadata_only' || output.status === 'skipped_unsupported'
+    || output.status === 'skipped_too_large' || output.status === 'failed_terminal' || (output.status === 'indexed' && output.text.trim() === '');
+  if (!nothing) return output;
+  const lead = provided.form === 'recognized_words'
+    ? `Text recognized by ${provided.label} (approximate words, not an exact quote):`
+    : `Text supplied by ${provided.label}:`;
+  const terms = (provided.terms ?? []).slice(0, 500);
+  const body = [lead, provided.text.trim(), ...(terms.length > 0 ? [`Other readings: ${terms.join(', ')}`] : [])].join('\n');
+  const text = body.length > EXTRACTION_PROVIDER_TEXT_MAX_CHARS ? body.slice(0, EXTRACTION_PROVIDER_TEXT_MAX_CHARS) : body;
+  return {
+    status: 'indexed',
+    text,
+    derivations: [{ artifactKind: 'provider_text', chars: text.length, structuralRef: { label: provided.label, form: provided.form } }],
   };
 }
 

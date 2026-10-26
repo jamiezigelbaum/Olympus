@@ -327,7 +327,7 @@ export function createConnectorFileExtractionSource(
       if (fetchOptions.maxBytes !== undefined && bytes.byteLength > fetchOptions.maxBytes) {
         throw new FileExtractionSourceError('source_too_large');
       }
-      return { bytes, ...(mimeType ? { mimeType } : {}), sizeBytes: bytes.byteLength };
+      return { bytes, ...(mimeType ? { mimeType } : {}), sizeBytes: bytes.byteLength, ...(item.providerText ? { providerText: item.providerText } : {}) };
     },
 
     async fetchFile(ref: ExtractionItemRef, fileOptions: ExtractionFetchFileOptions): Promise<FetchedFile> {
@@ -354,6 +354,7 @@ export function createConnectorFileExtractionSource(
         path: handed.path,
         ...(mimeType ? { mimeType } : {}),
         ...(deferred?.sizeBytes !== undefined ? { sizeBytes: deferred.sizeBytes } : {}),
+        ...(handed.item.providerText ? { providerText: handed.item.providerText } : {}),
         dispose: fileHandOver(handed.path, handed.spooled, spoolDir, () => pruneExtractionSpoolOwner(fileOptions.spoolDir, owner)).dispose,
       };
     },
