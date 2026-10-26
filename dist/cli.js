@@ -21396,6 +21396,12 @@ class TierLedger {
     `).get(...idParams(identity2));
     return row ? writeIntentFromRow(row) : undefined;
   }
+  markUnseenDeletion(identity2) {
+    this.db.query("INSERT OR IGNORE INTO tier_unseen_deletions (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)").run(...idParams(identity2));
+  }
+  isUnseenDeletion(identity2) {
+    return this.db.query("SELECT 1 FROM tier_unseen_deletions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?").get(...idParams(identity2)) !== null;
+  }
   writeIntents() {
     return this.db.query("SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id").all().map(writeIntentFromRow);
   }
@@ -22267,6 +22273,13 @@ function tierLedgerMigrations() {
             written_at TEXT NOT NULL,
             body_version TEXT,
             item_family TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TABLE IF NOT EXISTS tier_unseen_deletions (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);
@@ -60145,14 +60158,20 @@ class TieredStoreSet {
   }
   removeChild(child) {
     try {
-      this.ledger.removeCopies(child);
-      this.ledger.clearWriteIntent(child);
-      this.secrets()?.remove(child);
       const { sourceVersion: _own, ...bare } = child;
+      this.ledger.putWriteIntent({
+        identity: bare,
+        kind: "deletion",
+        connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+        itemFamily: child.family
+      });
+      this.ledger.removeCopies(child);
+      this.secrets()?.remove(child);
       for (const store of this.openStores()) {
         store.tombstoneCopy(bare, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
         store.retireSecretLocation(bare, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
       }
+      this.ledger.clearWriteIntent(child);
       return true;
     } catch {
       return false;
@@ -60471,6 +60490,8 @@ class TieredStoreSet {
             continue;
           store.tombstoneCopy(identity2, { connectorId: intent.connectorId || TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, ...intent.kind === "secret" ? { trustTier: "S5" } : {} });
           store.advanceItemVersion(identity2, { onlyTombstoned: true });
+          if (intent.version === undefined)
+            store.retireSecretLocation(identity2, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
         }
         this.ledger.removeCopies(intent.identity);
         removed = true;
@@ -60483,6 +60504,8 @@ class TieredStoreSet {
           ...intent.kind === "secret" ? { trustTier: "S5" } : {},
           insert: true
         });
+        if (intent.kind === "deletion")
+          this.ledger.markUnseenDeletion(intent.identity);
         removed = true;
       }
       this.ledger.clearWriteIntent(intent.identity);
@@ -60956,8 +60979,10 @@ class TieredRoutingRun {
       for (const domain of TIER_DOMAIN_ORDER)
         this.set.store(domain)?.advanceItemVersion(identity2, { onlyTombstoned: true });
       this.copyRemovals.set(identityKey(identity2), identity2);
-      if (location)
+      if (location) {
         this.routedDomains.add(SECRET_LOCATION_DOMAIN);
+        ledger.markUnseenDeletion(identity2);
+      }
       return { kind: "delete", corpora: new Set(ledger.copies(identity2).map((copy) => copy.corpusId)), reason: "provider_deleted", ...location ? { location: true } : {} };
     }
     const deferred = this.set.readsContentLater(item);
@@ -60973,7 +60998,7 @@ class TieredRoutingRun {
     this.recordSecretLocation(input, text2, decision);
     const contentRead = decision.contentRead && !input.contentFetchFailed;
     if (!routed) {
-      const laneRow = hasRow && TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity2).active === true);
+      const laneRow = hasRow && (TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity2).active === true) || !ledger.isUnseenDeletion(identity2));
       if (laneRow || !deferred && (!contentRead || input.metadataOnly)) {
         this.counts.itemsLegacy += 1;
         return { kind: "legacy" };
