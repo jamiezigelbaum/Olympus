@@ -43,6 +43,7 @@
 // Everything here is source-neutral: a lane declares its legs; nothing
 // branches on which source an item came from.
 
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import type {
   RawItem,
@@ -804,6 +805,9 @@ export class TieredStoreSet {
       legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
     }
     run.finalize();
+    // The only gate for moving on: what the input accepted is read back through the stores, and the set's resume
+    // point passes only the pages whose every item is there as accepted.
+    run.counts.itemsUnstored += this.unstoredAccepted(traversal.accepted(), (item) => run.plannedKind(item));
     const cursor = legRuns[0]?.sync.cursor;
     // A pass that is not a resume point (a reconcile from the start of the
     // listing) must not overwrite the incremental lane's committed position.
@@ -989,6 +993,58 @@ export class TieredStoreSet {
   }
 
   /**
+   * Reads back what an input's listing accepted, through the same lookup intake uses, and counts the items the
+   * stores do not hold as accepted: the version is not the one reported (or a newer one), content that was
+   * brought is missing or incomplete, a deletion or Secret is still active. Per identity only the newest
+   * accepted record counts. Nothing is checked for a listing that never asked the lookup (a lane's own connector).
+   */
+  private unstoredAccepted(
+    accepted: { items: readonly RawItem[]; compareVersions?: (a: string, b: string) => number; looked?: readonly SourceItemIdentity[] },
+    plannedKind: (item: RawItem) => Plan['kind'] | undefined,
+  ): number {
+    const compare = accepted.compareVersions;
+    if (!compare) return 0;
+    const newest = new Map<string, RawItem>();
+    for (const item of accepted.items) {
+      const held = newest.get(item.identity.localItemId);
+      const a = item.identity.sourceVersion;
+      const b = held?.identity.sourceVersion;
+      const order = held === undefined || a === undefined || b === undefined ? 0 : compare(a, b);
+      if (held === undefined || order > 0 || (order === 0 && !(held.metadata['deleted'] === true && item.metadata['deleted'] !== true))) newest.set(item.identity.localItemId, item);
+    }
+    let unstored = 0;
+    for (const item of newest.values()) {
+      // An item the lane keeps as its own (legacy placement) or never routed is not the routed lanes' to hold.
+      const kind = plannedKind(item);
+      if (kind === undefined || kind === 'legacy') continue;
+      const stored = this.storedItem(item.identity, compare);
+      const version = item.identity.sourceVersion;
+      const storedOlder = version !== undefined && (stored?.version === undefined || compare(stored.version, version) < 0);
+      const storedNewer = version !== undefined && stored?.version !== undefined && compare(stored.version, version) > 0;
+      const secret = this.ledger.itemIsSecret(item.identity);
+      let ok: boolean;
+      if (item.metadata['deleted'] === true || secret) {
+        const gone = stored === undefined || stored.tombstoned === true || (secret && secretsDisposition() === 'hide_until_purge');
+        ok = storedNewer || (gone && (stored === undefined || !storedOlder || (secret && secretsDisposition() === 'hide_until_purge')));
+      } else {
+        const text = item.content.kind === 'metadata_only' ? undefined : connectorStoreItemText(item);
+        // Names alone do not bring a deleted item or a Secret back: its tombstone stands.
+        ok = stored !== undefined && (storedNewer || (stored.tombstoned === true && item.content.kind === 'metadata_only')
+          || (stored.tombstoned !== true && !storedOlder && stored.incomplete !== true && (!text || stored.hasContent)));
+      }
+      if (!ok) unstored += 1;
+    }
+    // An item the listing skipped (the same version or an older one) whose stored state is incomplete is not
+    // finished either: it counts as unstored, so the pass is not complete while a half-written item stands.
+    const accepted1 = new Set([...newest.values()].map((item) => item.identity.localItemId));
+    for (const identity of accepted.looked ?? []) {
+      if (accepted1.has(identity.localItemId)) continue;
+      if (this.storedItem(identity, compare)?.incomplete === true) unstored += 1;
+    }
+    return unstored;
+  }
+
+  /**
    * The intake lookup (contracts.ts `StoredItemLookup`): what the set holds
    * of one item, across every leg that exists, rows that are tombstones
    * included. `version` is the newest `sourceVersion` any row holds, by the
@@ -1033,7 +1089,11 @@ export class TieredStoreSet {
       return domain !== undefined && !topActive.some((leg) => leg.domain === domain);
     });
     const staleActive = below.some((leg) => !leg.tombstoned);
-    const incomplete = cutOff || staleActive;
+    // A routed item's rows are only where its ledger copies are: an active row in a store the ledger names no
+    // copy of (an item placed by a plan that did not judge what was stored) is not complete either.
+    const placed = this.ledger.isRouted(identity) ? this.ledger.copies(identity) : [];
+    const stray = !tombstoned && placed.length > 0 && topActive.some((leg) => !placed.some((copy) => this.domainForCorpus(copy.corpusId) === leg.domain));
+    const incomplete = cutOff || staleActive || stray;
     return {
       ...(newest !== undefined ? { version: newest } : {}),
       hasContent: topActive.some((leg) => leg.chunkCount > 0),
@@ -1486,6 +1546,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   private readonly plans: Map<string, PlanEntry>;
   private readonly copyRemovals: Map<string, SourceItemIdentity>;
   /** Lower copies a replacement made stale: withdrawn once the replacement is written in every leg. */
+  private readonly pendingAdvances: Map<string, SourceItemIdentity>;
   private readonly pendingWithdrawals: Map<string, { item: RawItem; domains: readonly SourceTrustDomain[]; text: readonly SourceTrustDomain[] }>;
   private readonly set: TieredStoreSet;
   private readonly mode: 'shared' | 'per_leg';
@@ -1501,6 +1562,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.plans = new Map();
     this.copyRemovals = new Map();
     this.pendingWithdrawals = new Map();
+    this.pendingAdvances = new Map();
     this.counts = {
       itemsRouted: 0,
       itemsLegacy: 0,
@@ -1513,21 +1575,22 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     };
   }
 
+  /** What the run planned for an item's version, if it routed it at all. */
+  plannedKind(item: RawItem): Plan['kind'] | undefined {
+    return this.plans.get(planKey(item))?.plan.kind;
+  }
+
   async route(input: ConnectorStoreTierRouteInput): Promise<ConnectorStoreTierRoute> {
     const domain = this.set.domainForCorpus(input.store.corpusId);
     if (!domain) throw new Error('A tier route was asked by a store outside its set.');
     // A plan is made once per item VERSION per run: a later version of the same item in one listing is
     // classified and routed on its own verdict (a key added in an edit makes it a Secret), never on the
     // earlier version's placement.
-    const key = `${identityKey(input.item.identity)}\u0000${input.item.identity.sourceVersion ?? ''}`;
+    const key = planKey(input.item);
     let entry = this.plans.get(key);
     if (!entry) {
       entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
       this.plans.set(key, entry);
-      // An input's record (it carries the hold) that no store takes now is not stored: say so.
-      if (entry.plan.kind === 'hold' && entry.plan.reason === 'move_queued' && input.item.holdContentUntilJudged === true) {
-        this.counts.itemsUnstored += 1;
-      }
     }
     if (this.mode === 'per_leg' && !entry.handedOff) {
       entry.handedOff = true;
@@ -1552,6 +1615,17 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.pendingWithdrawals.clear();
     for (const identity of this.copyRemovals.values()) this.set.ledger.removeCopies(identity);
     this.copyRemovals.clear();
+    for (const identity of this.pendingAdvances.values()) {
+      // Every active row of the item must hold the same version before it moves: a leg that still holds an
+      // older body (a crash or a failed write) keeps it, and the record is replayed.
+      const versions = new Set<string | undefined>();
+      for (const domain of TIER_DOMAIN_ORDER) {
+        const state = this.set.store(domain)?.storedItemState(identity);
+        if (state && !state.tombstoned) versions.add(state.version);
+      }
+      if (versions.size <= 1) for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(identity);
+    }
+    this.pendingAdvances.clear();
   }
 
   private routeFor(plan: Plan, corpusId: string, domain: SourceTrustDomain): ConnectorStoreTierRoute {
@@ -1586,14 +1660,6 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const { item, connector } = input;
     const identity = item.identity;
     const ledger = this.set.ledger;
-    // An earlier version of this item in the run was a Secret or a deletion, whose copy rows are forgotten when
-    // the run ends. A later version is planned on what the item is after that, so they go now (its plan is
-    // cached for the later legs, which tombstone what that earlier plan named).
-    const earlier = identityKey(identity);
-    if (item.metadata['deleted'] !== true && this.copyRemovals.has(earlier)) {
-      ledger.removeCopies(identity);
-      this.copyRemovals.delete(earlier);
-    }
     // Legacy first: an item any store already holds a row for, that this
     // set's ledger never routed, is the lane's — whatever else the ledger
     // says about other items.
@@ -1609,6 +1675,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         return { kind: 'legacy' };
       }
       this.counts.routedDeletions += 1;
+      // A row that is already a tombstone takes the deletion's version too (a live row takes it with its own tombstone).
+      for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(identity, { onlyTombstoned: true });
       this.copyRemovals.set(identityKey(identity), identity);
       return { kind: 'delete', corpora: new Set(ledger.copies(identity).map((copy) => copy.corpusId)), reason: 'provider_deleted' };
     }
@@ -1649,6 +1717,11 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         // A routed item seen without its text: nothing proves its content
         // tier, so its copies are left exactly as they are.
         this.counts.contentUnreadHeld += 1;
+        // The record's version is accepted though its names are not written: the stored rows keep their text,
+        // and the version the lookup reports moves to it, so an older record can never overwrite them.
+        // The move waits for `finalize`: it happens only once every leg's rows agree on one version, so a body
+        // an earlier record brought can never be hidden behind a version it has not landed under.
+        this.pendingAdvances.set(identityKey(identity), identity);
         return { kind: 'hold', reason: 'content_unread' };
       }
       // Re-listed without text in a lane whose text arrives later: the names
@@ -1694,7 +1767,12 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     });
     // Left Secrets in this write (the owner's restore): its extraction jobs
     // keep their names again from this listing's enqueue on.
-    if (recorded.outcome !== 'secrets') retireSecretRedactions(ledger, { identity });
+    if (recorded.outcome !== 'secrets') {
+      retireSecretRedactions(ledger, { identity });
+      // The newest plan of an item decides its copy rows: an earlier Secret or deletion of this run no longer
+      // owes their removal once a later version is placed.
+      this.copyRemovals.delete(identityKey(identity));
+    }
     switch (recorded.outcome) {
       case 'secrets':
         this.counts.itemsSecrets += 1;
@@ -1705,7 +1783,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         forgetSecretInSideStores({ ledger, identity });
         // Every accepted Secret version advances the version the lookup reports, whether or not the copy rows
         // are still there to be tombstoned with it.
-        for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(identity);
+        for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(identity, { onlyTombstoned: true });
         // A Secret is present while its location row is (child-visibility.ts), so it always has
         // one: an item no store ever held gets it in the Private store, location only (no names,
         // no text), written by that store's own pass so its owner row says the provider lists it.
@@ -1904,6 +1982,24 @@ function identityKey(identity: Pick<SourceItemIdentity, 'provider' | 'accountSco
   return tierLedgerIdentityKey(identity);
 }
 
+/**
+ * A plan is made once per thing judged: the item's identity and version AND a digest of the names and body that
+ * were classified. A record of the same version with another body is judged again, never placed by the plan of
+ * the one before it.
+ */
+function planKey(item: RawItem): string {
+  const judged = createHash('sha256')
+    .update(JSON.stringify([
+      item.content.kind,
+      item.content.kind === 'metadata_only' ? '' : connectorStoreItemText(item) ?? '',
+      stringMetadata(item, ['title', 'name', 'subject']) ?? '',
+      stringMetadata(item, ['locatorUri', 'pathDisplay', 'url']) ?? '',
+      item.metadata['deleted'] === true,
+    ]))
+    .digest('hex');
+  return `${identityKey(item.identity)}\u0000${item.identity.sourceVersion ?? ''}\u0000${judged}`;
+}
+
 function stringMetadata(item: RawItem, keys: readonly string[]): string | undefined {
   for (const key of keys) {
     const value = item.metadata[key];
@@ -1918,16 +2014,27 @@ function stringMetadata(item: RawItem, keys: readonly string[]): string | undefi
  * traversal that threw is never replayed: its recording is partial and the
  * run is aborting anyway.
  */
-export function recordedTraversal(connector: SourceConnector, storedItem?: StoredItemLookup): SourceConnector {
+export function recordedTraversal(
+  connector: SourceConnector,
+  storedItem?: StoredItemLookup,
+): SourceConnector & { accepted(): { items: readonly RawItem[]; compareVersions?: (a: string, b: string) => number; looked: readonly SourceItemIdentity[] } } {
   const pages: SourceConnectorListPage[] = [];
   let recorded = false;
   let failed = false;
+  // The order of versions the connector's own lookup calls used: the read-back compares by it.
+  let compareVersions: ((a: string, b: string) => number) | undefined;
+  // Every item the listing asked the store about, whatever it decided: the read-back also covers the ones it skipped.
+  const looked = new Map<string, SourceItemIdentity>();
+  const lookup: StoredItemLookup | undefined = storedItem
+    ? (identity, compare) => { compareVersions = compare; looked.set(identityKey(identity as SourceItemIdentity), identity as SourceItemIdentity); return storedItem(identity, compare); }
+    : undefined;
   return {
     id: connector.id,
     family: connector.family,
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId: string): Promise<RawItem> => connector.fetchItem(localItemId),
     classificationSignals: (item: RawItem) => connector.classificationSignals(item),
+    accepted: () => ({ items: pages.flatMap((page) => page.items), looked: [...looked.values()], ...(compareVersions ? { compareVersions } : {}) }),
     listItems(options: SourceConnectorListOptions = {}): AsyncIterable<SourceConnectorListPage> {
       if (recorded) {
         return (async function* (): AsyncGenerator<SourceConnectorListPage> {
@@ -1939,7 +2046,7 @@ export function recordedTraversal(connector: SourceConnector, storedItem?: Store
           // The store lane tells the connector what is stored, so it decides per record, before it
           // builds the item, whether the record applies (contracts.ts, 2.2.0). The later legs replay
           // the recording, so the decision is made once per run.
-          for await (const page of connector.listItems(storedItem && !options.storedItem ? { ...options, storedItem } : options)) {
+          for await (const page of connector.listItems(lookup && !options.storedItem ? { ...options, storedItem: lookup } : options)) {
             pages.push(page);
             yield page;
           }
