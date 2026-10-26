@@ -3676,13 +3676,17 @@ function declaredConnectorStoreMounts(env = process.env) {
 }
 function retiredPathSettings(env = process.env) {
   const found = Object.keys(env).filter((name) => RETIRED_PATH_SETTING.test(name) && env[name]?.trim()).sort().map((name) => `${name}=${env[name].trim()}`);
+  if (declaredConnectorStoreMounts(env) === "unreadable")
+    found.push(`${MOUNTS_ENV} (cannot be read)`);
   const mounts = declaredConnectorStoreMountPaths(env);
   for (const mount of mounts) {
     if (!hasFolderLayout(mount.sourceId) || !accountStoreNames(mount.sourceId).includes(mount.trustDomain))
       continue;
     const placed = resolvedStorePath(mount.sourceId, mount.trustDomain, env);
-    if (resolve4(mount.dbPath) !== resolve4(placed))
+    const usual = hasLegacyLayout(mount.sourceId) ? [placed, accountStorePath({ source_id: mount.sourceId, slot: DEFAULT_ACCOUNT_SLOT, layout: "legacy" }, mount.trustDomain, env)] : [placed];
+    if (!usual.some((path) => resolve4(path) === resolve4(mount.dbPath))) {
       found.push(`${MOUNTS_ENV} ${mount.corpusId} dbPath=${mount.dbPath} (Olympus keeps it at ${placed})`);
+    }
   }
   return found;
 }
@@ -3785,7 +3789,7 @@ var init_source_placement = __esm(() => {
   init_messaging_capture_grant_file();
   init_source_corpus_registry();
   init_source_registry();
-  RETIRED_PATH_SETTING = /^OLYMPUS_\w+_DB_PATH$|^OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH$/;
+  RETIRED_PATH_SETTING = /^(?!OLYMPUS_SOURCE_INGESTION_REMOTE_)OLYMPUS_\w+_DB_PATH$|^OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH$/;
 });
 
 // src/core/worker-transport.ts
@@ -78653,6 +78657,7 @@ function readRegistryOrUnreadable(env) {
 }
 function exportOlympusData(options) {
   const destination = requirePath(options.destination, "--output");
+  refuseRetiredPathSettings(options, "export");
   const selected = selectExportAccounts(options.sourceId, options);
   refuseExportDuringMove(selected, options);
   const durabilityBoundary = exportDurabilityBoundary(destination);
@@ -78790,6 +78795,8 @@ function deleteOlympusData(options) {
   if (options.all !== true && !options.sourceId) {
     throw new OperationError("invalid_params", "Data delete requires --all or --source <id>.");
   }
+  if (options.dryRun !== true)
+    refuseRetiredPathSettings(options, "delete");
   if (options.all === true)
     return deleteAllOlympusData(options);
   const account = requireAccount5(options.sourceId, options);
@@ -79083,7 +79090,15 @@ function deleteOlympusDataWithCustody(options) {
   const env = envForContext(options);
   return holds.reduce((run, hold) => () => hold.exclusive(env, run), () => deleteUnderCustody(options))();
 }
+function refuseRetiredPathSettings(context2, action) {
+  const retired = retiredPathSettings(envForContext(context2));
+  if (retired.length === 0)
+    return;
+  throw new OperationError("invalid_params", `Refusing to ${action} local data while these path settings, which are no longer read, are set: ${retired.join("; ")}.`, "Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then try again. Nothing was changed.");
+}
 function deleteUnderCustody(options) {
+  if (options.dryRun !== true)
+    refuseRetiredPathSettings(options, "delete");
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
     throw new OperationError("invalid_params", custody.requirement === "source_disconnected" ? requireAccount5(options.sourceId, options).files.pairing ? `Unpair ${options.sourceId} cleanly before deleting its local data (${custody.observed.replace(/_/g, " ")}).` : `Disconnect ${options.sourceId} before deleting its local data.` : custody.observed === "relay_running" ? "Turn remote access off before deleting local data: the relay process is still running." : custody.observed === "engine_loaded" ? "Stop the Olympus engine before deleting local data: launchd would start it again." : "Stop or uninstall the Olympus worker before deleting local data.", custody.next_action);

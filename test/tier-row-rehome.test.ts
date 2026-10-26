@@ -349,8 +349,8 @@ describe('Private-row re-home', () => {
       const lane = createDropboxTierLane({
         secureStore: secure,
         env: {
-          OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(dir, 'dropbox-internal.sqlite'),
-          OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(dir, 'dropbox-public.sqlite'),
+          // The tier stores go where the layout puts them, under this test's own home.
+          HOME: join(dir, 'home'),
         },
         policy: defaultDropboxIngestionPolicy(),
       });
@@ -516,7 +516,7 @@ describe('Private-row re-home', () => {
       const secure = new LocalConnectorStore({ dbPath: join(dir, 'wa-secure.sqlite'), corpusId: 'secure_local.whatsapp.live', family: 'chat', trustDomain: 'secure_local' });
       const lane = createWhatsAppTierLane({
         store: secure,
-        env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(dir, 'wa-internal.sqlite') },
+        env: { HOME: join(dir, 'home') },
       });
       cleanups.push(() => {
         lane.newStores.internal?.current()?.close();

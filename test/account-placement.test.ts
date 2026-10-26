@@ -16,6 +16,7 @@ import {
   placedAccount,
   resolvedRawPath,
   resolvedStorePath,
+  retiredPathSettings,
 } from '../src/core/source-placement.ts';
 import { readSourceRegistry, sourceRegistryPath, updateSourceRegistry } from '../src/core/source-registry.ts';
 import {
@@ -151,10 +152,15 @@ describe('placement: a new account', () => {
     expect(decideAccountLayout('gmail.email', env).layout).toBe('legacy');
   });
 
-  test.each(FOLDER_LAYOUT_SOURCES.map((id) => [id]))('%s: an env override pins it legacy', (sourceId) => {
+  // Since step 6 only a messaging account's capture paths relocate its files; a retired per-store
+  // override pins nothing (the worker refuses to start while one is set, core/source-placement.ts).
+  test.each(FOLDER_LAYOUT_SOURCES.map((id) => [id]))('%s: a capture path pins it legacy; a retired store override does not', (sourceId) => {
     const names = legacyOverrideEnvNames(sourceId);
-    if (sourceId === 'archive.imports') expect(names).toEqual(['OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH']);
-    else expect(names.length).toBeGreaterThan(0);
+    if (sourceId === 'telegram.messages' || sourceId === 'whatsapp.personal.messages') expect(names.length).toBeGreaterThan(0);
+    else expect(names).toEqual([]);
+    for (const retired of ['OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH', 'OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH', 'OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH']) {
+      expect(decideAccountLayout(sourceId, { ...env, [retired]: join(dir, 'elsewhere', 'file') }).layout, retired).toBe('folder');
+    }
     for (const name of names) {
       const pinned = { ...env, [name]: join(dir, 'elsewhere', 'file') };
       expect(decideAccountLayout(sourceId, pinned)).toEqual({ layout: 'legacy', why: `${name} pins its files` });
@@ -181,20 +187,21 @@ describe('placement: a new account', () => {
     expect(decideAccountLayout('telegram.messages', { ...env, OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER: 'true' }).layout).toBe('folder');
   });
 
-  test('a connector-store mount that names the account\'s corpus pins it legacy; another source\'s does not', () => {
+  // Since step 6 a mount of a source with a folder layout names no path (the worker ignores it), so it pins
+  // nothing. A mount elsewhere, or a list that cannot be read, stops the worker before anything moves instead.
+  test('a connector-store mount pins nothing; one the worker would refuse is a retired setting', () => {
     const mount = (corpusId: string, trustDomain: string) => JSON.stringify([{ corpusId, trustDomain, dbPath: join(dir, 'mount.sqlite') }]);
     const mounted = { ...env, [MOUNTS]: mount('internal.readwise.library', 'internal') };
-    expect(decideAccountLayout('readwise.library', mounted).layout).toBe('legacy');
-    expect(decideAccountLayout('readwise.library', mounted).why).toContain(MOUNTS);
-    expect(decideAccountLayout('x.bookmarks', mounted).layout).toBe('folder');
+    expect(decideAccountLayout('readwise.library', mounted).layout).toBe('folder');
+    expect(retiredPathSettings(mounted)).toEqual([expect.stringContaining(`${MOUNTS} internal.readwise.library dbPath=${join(dir, 'mount.sqlite')}`)]);
     // An archive corpus of any family belongs to archive.imports.
     const archive = { ...env, [MOUNTS]: mount('secure_local.archive.chat.example', 'secure_local') };
     expect(decideAccountLayout('x.bookmarks', archive).layout).toBe('folder');
-    // A list nobody can read moves nothing.
     for (const text of ['{ not json', '{"corpusId":"x"}']) {
       for (const sourceId of FOLDER_LAYOUT_SOURCES) {
-        expect(decideAccountLayout(sourceId, { ...env, [MOUNTS]: text }).layout).toBe('legacy');
+        expect(decideAccountLayout(sourceId, { ...env, [MOUNTS]: text }).layout).toBe('folder');
       }
+      expect(retiredPathSettings({ ...env, [MOUNTS]: text })).toEqual([`${MOUNTS} (cannot be read)`]);
     }
   });
 
@@ -589,6 +596,7 @@ describe('every process reaches the same answer', () => {
     const here = join(import.meta.dir, '..', 'src');
     return `
       import { archiveImportFamilies } from '${here}/core/archive-formats.ts';
+      import { resolvedRawPath, resolvedStorePath } from '${here}/core/source-placement.ts';
       import { telegramPairingSessionPaths, telegramSessionBasePath, whatsappPairingSessionPaths, whatsappStateDir } from '${here}/core/pairing-session-paths.ts';
       import { defaultTelegramCaptureSpoolDir } from '${here}/workers/telegram-messages/capture-spool-connector.ts';
       import { defaultWhatsAppMediaDir, defaultWhatsAppSpoolDir, defaultWhatsAppStateDir } from '${here}/workers/whatsapp/store-sync.ts';

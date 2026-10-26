@@ -741,7 +741,7 @@ describe('an empty legacy account is placed in a folder at worker boot, and noth
     }
   });
 
-  test('an override, a mount or the native-capture flag keeps it legacy; so does one that lists a corpus, is paired, or is not active', () => {
+  test('a capture path or the native-capture flag keeps it legacy; so does one that lists a corpus, is paired, or is not active', () => {
     const pins: Array<[string, Env]> = [
       [TELEGRAM, { OLYMPUS_TELEGRAM_SESSION_PATH: '/elsewhere/telegram.session' }],
       [TELEGRAM, { OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH: '/elsewhere/cursor.json' }],
@@ -749,16 +749,25 @@ describe('an empty legacy account is placed in a folder at worker boot, and noth
       [TELEGRAM, { OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER: 'true' }],
       [WHATSAPP, { OLYMPUS_WHATSAPP_STATE_DIR: '/elsewhere/whatsapp' }],
       [WHATSAPP, { OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR: '/elsewhere/media' }],
-      [WHATSAPP, { OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH: '/elsewhere/wa.db' }],
       [WHATSAPP, { OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER: '1' }],
-      [TELEGRAM, { OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{ corpusId: 'internal.telegram.messages', trustDomain: 'internal', dbPath: '/elsewhere/t.sqlite' }]) }],
-      [TELEGRAM, { OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: '{not json' }],
     ];
     for (const [sourceId, pin] of pins) {
       const f = fresh();
       legacyEntry(f.env, sourceId);
       expect(replaceEmptyLegacyAccounts({ ...f.env, ...pin }), JSON.stringify(pin)).toEqual([]);
       expect(layouts(f.env)[sourceId], JSON.stringify(pin)).toBe('active:legacy');
+    }
+    // Since step 6 a retired store override or a mount names no path, so neither pins an empty account
+    // (the worker refuses to start while one is set, before this pass runs).
+    const retired: Array<[string, Env]> = [
+      [WHATSAPP, { OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH: '/elsewhere/wa.db' }],
+      [TELEGRAM, { OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{ corpusId: 'internal.telegram.messages', trustDomain: 'internal', dbPath: '/elsewhere/t.sqlite' }]) }],
+    ];
+    for (const [sourceId, setting] of retired) {
+      const f = fresh();
+      legacyEntry(f.env, sourceId);
+      expect(replaceEmptyLegacyAccounts({ ...f.env, ...setting }), JSON.stringify(setting)).toEqual([sourceId]);
+      expect(layouts(f.env)[sourceId], JSON.stringify(setting)).toBe('active:folder');
     }
 
     const listed = fresh();

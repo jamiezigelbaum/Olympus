@@ -256,17 +256,17 @@ describe('Delete never reaches into another account', () => {
     expect(readFileSync(join(outside, 'precious.txt'), 'utf8')).toBe('mine');
   });
 
-  // The legacy account's retained override: `OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH`
-  // names a file inside Readwise's folder. Removing Readwise's folder whole would take X's store.
-  test('a legacy account whose retained override points inside the folder keeps its store, and the delete is refused naming it', () => {
+  // A retired override (`OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH`) that names a file inside
+  // Readwise's folder is no longer read (source storage step 6), so nothing resolves X there any more; the
+  // delete refuses while it is set rather than take the folder with that file in it.
+  test('a retired override pointing inside the folder makes the delete refuse, naming it, and nothing is removed', () => {
     const { homeDir, env: base } = fixture();
     const stores = connectReadwise(base);
     __sourceStorageTestHooks.disableAdoption();
     const xStore = join(readwiseFolder(base), 'stores', 'x.sqlite');
+    put(xStore, 'x');
     const env = { ...base, OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH: xStore };
-    createXBookmarksConnectorStore(resolvedStorePath('x.bookmarks', 'internal', env), env).close();
-    expect(resolvedStorePath('x.bookmarks', 'internal', env)).toBe(xStore);
-    expect(existsSync(xStore)).toBe(true);
+    expect(resolvedStorePath('x.bookmarks', 'internal', env)).not.toBe(xStore);
     const before = snapshot(olympusDataRoot(env));
 
     let message = '';
@@ -276,16 +276,11 @@ describe('Delete never reaches into another account', () => {
       message = error instanceof OperationError ? `${error.message}\n${error.suggestion ?? ''}` : String(error);
     }
 
-    expect(message).toContain('overlaps another source');
-    expect(message).toContain(xStore);
-    expect(message).toContain(readwiseFolder(env));
+    expect(message).toContain('no longer read');
+    expect(message).toContain(`OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH=${xStore}`);
     expect(snapshot(olympusDataRoot(env))).toEqual(before);
     for (const store of stores) expect(existsSync(store)).toBe(true);
-    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, dryRun: true })).toThrow(/overlaps another source/);
-    // Deleting the account that owns the override takes its store and leaves the folder that holds it.
-    deleteOlympusData({ sourceId: 'x.bookmarks', homeDir, env });
-    expect(existsSync(xStore)).toBe(false);
-    for (const store of stores) expect(existsSync(store)).toBe(true);
+    expect(existsSync(xStore)).toBe(true);
   });
 
   // A connector-store mount (Reflect, Roam, an operator's own) places its store by path, which may be inside

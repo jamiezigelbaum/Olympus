@@ -18,6 +18,7 @@ import {
 } from '../src/workers/dropbox-files/index.ts';
 import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 
 // A deleted Dropbox folder arrives as ONE entry for its whole subtree: the
 // descendants' own paths are never listed. These tests pin that the entry is
@@ -720,8 +721,8 @@ describe('a deleted folder through the per-tier stores', () => {
   async function tierFixture() {
     const root = workspace();
     const env = {
-      OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
-      OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-public.sqlite'),
+      // The tier stores go where the layout puts them, under this test's own home.
+      HOME: join(root, 'home'),
       OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(root, 'no-exclusions.json'),
     };
     const metadataClient = client({
@@ -831,7 +832,7 @@ describe('a deleted folder through the per-tier stores', () => {
   test('a tier store still building its locator index holds the folder event for a pass instead of losing it', async () => {
     const fixture = await tierFixture();
     // The Personal store as an upgrade leaves it: projection empty and gated.
-    const db = new Database(join(fixture.root, 'dropbox-internal.sqlite'));
+    const db = new Database(resolvedStorePath('dropbox.files', 'internal', { HOME: join(fixture.root, 'home') }));
     try {
       db.exec(`
         DELETE FROM item_locator_identities;

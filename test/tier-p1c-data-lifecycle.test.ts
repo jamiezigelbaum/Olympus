@@ -1,8 +1,8 @@
 // P1c data lifecycle: every new tier store of the Dropbox, Readwise, X and
 // WhatsApp lanes, and each lane's set ledger and secret-locations index (beside
 // its secure_local store's path, created or not), are in the lifecycle
-// inventory, so `delete --source` takes exactly that source's files, relocated
-// or not, and `delete --all` takes every one.
+// inventory, so `delete --source` takes exactly that source's files, wherever
+// its account's layout puts them, and `delete --all` takes every one.
 
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -75,19 +75,13 @@ describe('P1c tier stores are covered by data deletion', () => {
     ]);
   });
 
-  test('delete --source takes a lane\'s set ledger, secret index and new tier stores only, even relocated; delete --all takes the rest', () => {
+  test('delete --source takes a lane\'s set ledger, secret index and new tier stores only; delete --all takes the rest', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-p1c-lifecycle-'));
     try {
       const homeDir = join(dir, 'home');
-      const elsewhere = join(dir, 'elsewhere');
       const env = {
         HOME: homeDir,
         XDG_DATA_HOME: join(dir, 'xdg-data'),
-        // Relocated outside every Olympus root.
-        OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: join(elsewhere, 'dropbox-secure.sqlite'),
-        OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(elsewhere, 'dropbox-internal.sqlite'),
-        OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH: join(elsewhere, 'readwise-secure.sqlite'),
-        OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(elsewhere, 'whatsapp-internal.db'),
       };
       const dropbox = seed({
         provider: 'dropbox',

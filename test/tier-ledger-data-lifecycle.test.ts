@@ -3,7 +3,8 @@
 // store (`<store>.tier-ledger.sqlite`), and the lifecycle inventory enumerates
 // it beside each connector store: `delete --source X` takes exactly that
 // source's ledgers, and `delete --all` finds every ledger wherever its store
-// was relocated (a *_DB_PATH override, XDG_DATA_HOME, the WhatsApp state dir).
+// sits (XDG_DATA_HOME, the WhatsApp state dir). A retired `*_DB_PATH` override
+// is no longer read: delete refuses while one is set (source storage step 6).
 
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -35,8 +36,6 @@ function fixture(): { dir: string; homeDir: string; env: Record<string, string>;
   const env = {
     HOME: homeDir,
     XDG_DATA_HOME: join(dir, 'xdg-data'),
-    // Relocated outside every Olympus root.
-    OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH: join(dir, 'elsewhere', 'readwise.sqlite'),
     OLYMPUS_WHATSAPP_STATE_DIR: join(homeDir, '.local', 'state', 'olympus', 'whatsapp-moved'),
   };
   const paths = {
@@ -69,7 +68,7 @@ describe('tier ledgers are covered by data deletion', () => {
     }
   });
 
-  test('delete --source takes that source ledger rows, including a relocated store, and nothing else', () => {
+  test('delete --source takes that source ledger rows and nothing else', () => {
     const { dir, homeDir, env, paths } = fixture();
     try {
       const gmailLedger = seedLedger(paths.gmail, 'gmail');
@@ -86,7 +85,7 @@ describe('tier ledgers are covered by data deletion', () => {
     }
   });
 
-  test('delete --all finds every ledger: XDG, a *_DB_PATH override and the WhatsApp state dir', () => {
+  test('delete --all finds every ledger: XDG and the WhatsApp state dir', () => {
     const { dir, homeDir, env, paths } = fixture();
     try {
       const ledgers = Object.entries(paths).map(([name, storePath]) => [name, seedLedger(storePath, name)] as const);
@@ -99,6 +98,20 @@ describe('tier ledgers are covered by data deletion', () => {
         expect(existsSync(`${ledgerPath}-wal`)).toBe(false);
         expect(existsSync(`${ledgerPath}-shm`)).toBe(false);
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a retired store override makes delete refuse, with the store and its ledger left as they are', () => {
+    const { dir, homeDir, env } = fixture();
+    try {
+      const relocated = join(dir, 'elsewhere', 'readwise.sqlite');
+      const ledger = seedLedger(relocated, 'readwise');
+      const withOverride = { ...env, OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH: relocated };
+      expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env: withOverride })).toThrow(/no longer read/);
+      expect(() => deleteOlympusData({ all: true, homeDir, env: withOverride })).toThrow(/no longer read/);
+      expect(existsSync(ledger)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

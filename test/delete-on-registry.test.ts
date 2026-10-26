@@ -184,10 +184,16 @@ describe('the running worker marks, the boot removes', () => {
     const { homeDir, env } = fixture();
     connectReadwise(env);
     const folder = accountFolder({ source_id: 'readwise.library', slot: '1' }, env);
-    // Another source's store placed inside this folder by an override.
+    // Another source's store placed inside this folder by a connector-store mount
+    // (a source with no folder layout names its path there).
     const intruder = put(join(folder, 'raw', 'theirs.sqlite'));
-    const envWithOverride = { ...env, OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH: intruder };
-    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env: envWithOverride, applyAtRestart: true })).toThrow('overlaps');
+    const envWithMount = {
+      ...env,
+      OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([
+        { dbPath: intruder, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' },
+      ]),
+    };
+    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env: envWithMount, applyAtRestart: true })).toThrow('overlaps');
     expect(findRegistryAccount(readSourceRegistry(env), 'readwise.library', '1')?.state).toBe('active');
   });
 
