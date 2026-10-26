@@ -2205,6 +2205,8 @@ export const DASHBOARD_ARCHIVE_COPY = {
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
     system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
     message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
+    // WhatsApp export beside live capture (whatsapp/archive-input.ts).
+    match_near_miss: { one: '1 message may also be in the live chat, shown differently there (a renamed contact, an edited caption), so it was kept as its own', many: '{n} messages may also be in the live chat, shown differently there (a renamed contact, an edited caption), so each was kept as its own' },
     // Old records only (the status updates chat used to be left out; it is read like any chat now).
     status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
     // Notes exports (Reflect, Roam): archive-import/notes/note.ts NOTE_FINDINGS.
@@ -2279,6 +2281,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
     message_content_unsupported: 'not_imported',
     system_message: 'how_read',
     message_empty: 'how_read',
+    match_near_miss: 'how_read',
     message_without_text: 'how_read',
     status_updates: 'not_imported',
     service_message: 'not_imported',

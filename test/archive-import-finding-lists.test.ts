@@ -59,6 +59,7 @@ describe('the two lists under an archive', () => {
     const howRead = [
       'time_zone_assumed', 'date_order_assumed', 'item_start_assumed', 'zip_overlap_unchecked', 'assumption',
       'item_repeated', 'system_message', 'message_empty', 'message_without_text', 'note_empty', 'note_date_assumed',
+      'match_near_miss',
     ];
     const notImported = [
       'media_not_imported', 'section_not_imported', 'file_damaged', 'files_not_looked_at', 'files_unconfirmed',
