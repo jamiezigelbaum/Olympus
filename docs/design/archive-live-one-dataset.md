@@ -66,10 +66,14 @@ runs so it never moves the live cursor; its findings; its progress; and, for
 an archive, the import record with a Stop control. Stopping keeps what was
 imported.
 
-A source with no live connector (Reflect, Roam, Evernote), mail that matches
-no Gmail account, and an archive of a different account than the connected
-one stay under Archives as today (`archive.imports`, one account scope per
-import), with their Remove.
+Mail that matches no Gmail account, and an archive of a different account
+than the connected one, stay under Archives as today (`archive.imports`, one
+account scope per import), with their Remove; the dashboard shows them under
+Other archives. A source with no live connector (Reflect, Roam, Evernote) is a
+source of its own on the dashboard, with its own card listing its imports
+(step 7), and its imports are stored the same way, under `archive.imports`
+with their Remove, as [source storage](source-storage.md) keeps archive-only
+formats.
 
 ### 2. Intake: one version per item, chosen before judging
 
@@ -295,7 +299,8 @@ Each source's Import an archive appears as its step registers it.
 6. Mail: live Gmail requests `Message-ID`, with the background pass, and
    gains attachments as children; mbox of a Gmail account becomes a Gmail
    input. After storage's account-identity step.
-7. Reflect, Roam, Evernote: their own sources, assets as children.
+7. Reflect, Roam, Evernote: their own sources, assets as children (built,
+   see "Built, step 7").
 8. Live Telegram media and live WhatsApp images and video, so both
    inputs bring the same media.
 
@@ -375,7 +380,19 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   brought. A record without a version is accepted as the version the store
   holds and keeps it. The page's provisional state records deletions and
   carries content a names-only record did not remove. Children that only a
-  superseded parent listed stay (they are items of their own).
+  superseded parent listed stay (they are items of their own). Names alone
+  never bring a deletion or a Secret back, within a page or across pages: a
+  names-only record after a deletion stays a deletion at the newer version, and
+  only content from after the item's last deletion is carried forward. A merged
+  item resumes from the record that brought its content, so a pass cut between
+  the two does not lose it. The routing plan is keyed by the item's identity,
+  its version and a digest of the text and names judged, so two bodies of one
+  version are each judged. Known residual: a deletion of an item no pass ever
+  stored leaves no row, so a later tie or unversioned body can still be stored.
+- **A refused item is told (2026-10-26).** When placement refuses an item (for
+  example a trust domain that does not match), the import still completes but
+  shows it as a gap, "Not imported" (`item_refused`), with the count, as the
+  other fail-closed skips do.
 - **Counting.** An import counts its own run ("N items from this archive, of
   which M were already there"), advanced under the position of the record it
   last read so a replay after a crash counts each record once; the card counts
@@ -411,6 +428,51 @@ says so.
 - **ChatGPT.** The section is there too; its button opens the computer's
   dashboard. A card's own Import an archive is on the computer only (the picker
   is the computer's).
+
+## Built, step 7
+
+Reflect, Roam and Evernote are sources of their own on the dashboard, and an
+Evernote export is a new format whose attachments are child items.
+
+- **One card each.** A format no live connector reads names its import-only
+  source in the format registry (`ArchiveFormatDefinition.sourceCard`):
+  `reflect.archive` (Reflect's JSON and Markdown exports), `roam.archive` and
+  `evernote.archive`, the ids their source postures already had. Each card sits
+  in Sources with "Import an archive", whose picker takes only that source's
+  exports, and lists its imports with their progress, findings and Remove (as
+  the Archives row does). "Import another archive" sends the same file to the
+  same card, and Other archives no longer lists them. A start says "Importing
+  Field notes.enex into Evernote. It shows in Evernote as it is read."
+- **Storage does not move.** The imports stay where source-storage.md (step 4e)
+  keeps archive-only formats: `archive.imports`'s note store set, one account
+  scope per import, with their Remove. The cards are views of the public
+  Archives source (`public_source_id`), so no new public source id, scheduler
+  source, store set or relay enum is added, and nothing moves on disk. What
+  this does not give: deleting one card's imports together (each has its
+  Remove, and the Archives source's Delete removes all), and a card count of
+  items by corpus (the card counts its imports).
+- **Not inputs of a connector.** No live connector reads these formats, so
+  there is no live input to share a dataset with and no `ArchiveSourceTarget`:
+  the format's archive connector reads each export, as before. Two exports of
+  the same graph are two imports (their notes are identified by place), as
+  under Archives.
+- **Evernote (.enex).** A shared streaming XML reader
+  (`archive-import/xml-stream.ts`) hands out one `<note>` at a time with a
+  resume point, never holding base64 `<data>`; it reports its byte range. Each
+  note is a note item (ENML to plain lines; `<en-crypt>` is never decrypted and
+  is reported as content Olympus cannot read). Each `<resource>` is a child item
+  with a locator to its base64 range, read later by the extraction factory and
+  judged on its own.
+- **Assets of Reflect and Roam: there are none to read.** Their exports link to
+  pictures on the provider's servers rather than holding them (community
+  reports for Roam's Export All; Reflect's documentation does not say), and an
+  import never fetches from the network. Evernote is the only one of the three
+  whose export holds its files, so it is the only one with children.
+- **Evernote's recognition text.** The reader turns `<recognition>` into the
+  best candidate per word in reading order (`evernote/recognition.ts`), but the
+  contract has no `RawItem.providerText` yet (child-items.md, "Text the
+  provider supplies"), so only a count goes on the child for now. Needs the
+  contract field and the extractor's fallback.
 
 ## To verify before step 4
 

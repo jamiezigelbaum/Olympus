@@ -3043,7 +3043,7 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
         : action.kind === 'needs_setup'
           ? `Open Set up for ${card.label}, register the provider app, then start authorization.`
           : action.kind === 'archive_import'
-            ? 'Import an archive from this page: choose a mail export on this computer.'
+            ? `${action.label} from this page: choose an export on this computer.`
             : `Connect one ${card.label} account from this page.`,
       dependencies,
     };

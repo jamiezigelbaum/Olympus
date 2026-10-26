@@ -254,7 +254,9 @@ ledger, and they converge with the live items rather than sit beside them.
 Storage's part (step 4e):
 
 - **Imports for a live source get no stores of their own.** `archive.imports`
-  stays the source for archive-only formats (Reflect, Roam, Evernote), for mail
+  stays the storage source for archive-only formats (Reflect, Roam, Evernote:
+  each shown as a source of its own on the dashboard since step 7 of
+  archive-live-one-dataset.md, its imports still stored here), for mail
   that matches no Gmail account, and for an archive of another account than the
   connected one. Its `<family>.<tier>` stores, account scopes and per-import
   Remove are unchanged. Archive import never shipped in a release, so nothing

@@ -58,6 +58,23 @@ describe('a source\'s own Import an archive', () => {
     expect(h.runtime.state.list()[0]!.target).toBeUndefined();
   });
 
+  test('an export that does not name its account is asked about from the card exactly as from Import another archive', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive();
+    h.evidence.current = { kind: 'none' };
+    const path = h.writeExport('unnamed.mbox', []);
+    const generic = await h.dashboard.approve({ key: path });
+    const fromCard = await h.dashboard.approve({ key: path, sourceId: FIXTURE_SOURCE_ID });
+    expect(generic).toMatchObject({ ok: true, status: 'confirm_account', source: { id: FIXTURE_SOURCE_ID } });
+    expect(fromCard).toEqual(generic);
+    expect(h.runtime.state.list()).toEqual([]);
+    // Kept apart from the card: under Other archives, as from the general button.
+    const apart = await h.dashboard.approve({ key: path, sourceId: FIXTURE_SOURCE_ID, keepApart: true });
+    expect(apart).toMatchObject({ ok: true, status: 'started' });
+    expect(apart.ok && apart.status === 'started' ? apart.source : 'none').toBeUndefined();
+    expect(h.runtime.state.list()[0]!.target).toBeUndefined();
+  });
+
   test('a card no source registers is refused before anything is read', async () => {
     const h = onePipelineHarness(cleanups);
     const path = h.writeExport('own.mbox', []);

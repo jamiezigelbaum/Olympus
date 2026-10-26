@@ -823,9 +823,11 @@ export function chatgptDashboardClient(
       // Import an archive (computer only): the picker over this computer's files, in place; from a
       // source's ⋯ menu, for that source's exports only.
       action = () => {
-        // Back on the dashboard after the picker, the ⋯ menu it came from is closed.
-        if (source) state.open['menu:' + source.id] = false;
-        startArchivePick(key, typeof fix.archiveSource === 'string' ? fix.archiveSource : '');
+        // Back on the dashboard after the picker, the ⋯ menu it came from is closed, and focus returns to
+        // the menu's own button, which is in sight (the entry inside the closed menu is not).
+        const fromMenu = key.indexOf('menu:') === 0;
+        if (fromMenu && source) state.open['menu:' + source.id] = false;
+        startArchivePick(fromMenu ? 'summary:' + key.slice(0, key.lastIndexOf(':')) : key, typeof fix.archiveSource === 'string' ? fix.archiveSource : '');
       };
     } else if (typeof fix.archiveFocus === 'string' && fix.archiveFocus) {
       // A Needs you line about one archive or request (computer only): straight to it, in place.

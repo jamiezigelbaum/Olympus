@@ -366,6 +366,38 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     ]);
   });
 
+  test('Back to Olympus from a menu\'s Import an archive puts focus on that menu\'s own button, with the menu closed', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]),
+      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+    });
+    const row = sourceRow(page, 'Telegram');
+    (row.querySelector('summary') as HTMLElement).click();
+    await settle();
+    (Array.from(row.querySelectorAll('.menu-panel button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
+    await settle();
+    page.button(A.pick.back).click();
+    await until(() => page.doc.querySelector('[data-key="summary:menu:telegram.messages"]') !== null && page.doc.activeElement?.getAttribute('data-key') === 'summary:menu:telegram.messages');
+    expect(page.doc.activeElement?.getAttribute('data-key')).toBe('summary:menu:telegram.messages');
+    const menu = sourceRow(page, 'Telegram').querySelector('details.menu') as HTMLDetailsElement;
+    expect(menu.open).toBe(false);
+  });
+
+  test('one file, the same outcome from either button: the preview routes both through one path', () => {
+    const ask = (key: string, state: string, extra: Record<string, unknown> = {}) => (previewArchiveApprove({ key, ...extra }, state) as { structuredContent: any }).structuredContent;
+    const mbox = '/Users/you/Mail exports/Takeout-2026-10.mbox';
+    // The account question is asked whichever button chose the file, and the answer decides.
+    expect(ask(mbox, 'archives-account-confirm')).toMatchObject({ status: 'confirm_account' });
+    expect(ask(mbox, 'archives-account-confirm', { source_id: 'gmail.email' })).toMatchObject({ status: 'confirm_account' });
+    expect(ask(mbox, 'archives-account-confirm', { keep_apart: true })).toEqual({ status: 'started', name: 'Takeout-2026-10.mbox' });
+    expect(ask(mbox, 'archives-account-confirm', { source_id: 'gmail.email', keep_apart: true })).toEqual({ status: 'started', name: 'Takeout-2026-10.mbox' });
+    expect(ask(mbox, 'archives-account-confirm', { source_id: 'gmail.email', confirm_account: true })).toMatchObject({ status: 'started', source: { id: 'gmail.email' } });
+    // A Telegram export goes into Telegram from either button.
+    const telegram = '/Users/you/Telegram exports/result.json';
+    expect(ask(telegram, 'archives-none')).toEqual(ask(telegram, 'archives-none', { source_id: 'telegram.messages' }));
+    expect(ask(telegram, 'archives-none')).toMatchObject({ status: 'started', source: { id: 'telegram.messages' } });
+  });
+
   test('another kind of export is refused in the picker with the route to Import another archive', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => previewState('sources-import-imported'),

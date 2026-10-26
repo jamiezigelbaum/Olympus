@@ -43,6 +43,7 @@
 // Everything here is source-neutral: a lane declares its legs; nothing
 // branches on which source an item came from.
 
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import type {
   RawItem,
@@ -1081,7 +1082,11 @@ export class TieredStoreSet {
       return domain !== undefined && !topActive.some((leg) => leg.domain === domain);
     });
     const staleActive = below.some((leg) => !leg.tombstoned);
-    const incomplete = cutOff || staleActive;
+    // A routed item's rows are only where its ledger copies are: an active row in a store the ledger names no
+    // copy of (an item placed by a plan that did not judge what was stored) is not complete either.
+    const placed = this.ledger.isRouted(identity) ? this.ledger.copies(identity) : [];
+    const stray = !tombstoned && placed.length > 0 && topActive.some((leg) => !placed.some((copy) => this.domainForCorpus(copy.corpusId) === leg.domain));
+    const incomplete = cutOff || staleActive || stray;
     return {
       ...(newest !== undefined ? { version: newest } : {}),
       hasContent: topActive.some((leg) => leg.chunkCount > 0),
@@ -1563,7 +1568,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
 
   /** What the run planned for an item's version, if it routed it at all. */
   plannedKind(item: RawItem): Plan['kind'] | undefined {
-    return this.plans.get(`${identityKey(item.identity)}\u0000${item.identity.sourceVersion ?? ''}`)?.plan.kind;
+    return this.plans.get(planKey(item))?.plan.kind;
   }
 
   async route(input: ConnectorStoreTierRouteInput): Promise<ConnectorStoreTierRoute> {
@@ -1572,7 +1577,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // A plan is made once per item VERSION per run: a later version of the same item in one listing is
     // classified and routed on its own verdict (a key added in an edit makes it a Secret), never on the
     // earlier version's placement.
-    const key = `${identityKey(input.item.identity)}\u0000${input.item.identity.sourceVersion ?? ''}`;
+    const key = planKey(input.item);
     let entry = this.plans.get(key);
     if (!entry) {
       entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
@@ -1953,6 +1958,24 @@ interface TierLedgerRecordLike {
 
 function identityKey(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): string {
   return tierLedgerIdentityKey(identity);
+}
+
+/**
+ * A plan is made once per thing judged: the item's identity and version AND a digest of the names and body that
+ * were classified. A record of the same version with another body is judged again, never placed by the plan of
+ * the one before it.
+ */
+function planKey(item: RawItem): string {
+  const judged = createHash('sha256')
+    .update(JSON.stringify([
+      item.content.kind,
+      item.content.kind === 'metadata_only' ? '' : connectorStoreItemText(item) ?? '',
+      stringMetadata(item, ['title', 'name', 'subject']) ?? '',
+      stringMetadata(item, ['locatorUri', 'pathDisplay', 'url']) ?? '',
+      item.metadata['deleted'] === true,
+    ]))
+    .digest('hex');
+  return `${identityKey(item.identity)}\u0000${item.identity.sourceVersion ?? ''}\u0000${judged}`;
 }
 
 function stringMetadata(item: RawItem, keys: readonly string[]): string | undefined {

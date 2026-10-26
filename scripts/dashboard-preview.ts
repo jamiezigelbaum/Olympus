@@ -1233,6 +1233,7 @@ export function previewArchiveBrowse(args: { parent_key?: unknown }) {
       folder('Downloads', { access: { state: 'needs_permission', message: MAC_ACCESS_COPY.needsPermission } }),
       folder('Mail exports'),
       folder('Telegram exports'),
+      folder('Notes exports'),
       { key: '/@disk-1', name: 'Backup Drive', kind: 'folder', has_children: true, selectable: true, is_disk: true },
     ];
   } else if (parent === `${LOCAL_FILES_HOME}/Mail exports`) {
@@ -1240,6 +1241,12 @@ export function previewArchiveBrowse(args: { parent_key?: unknown }) {
       folder('Inbox.mbox', {}, parent),
       file('Takeout-2026-10.mbox', 6_420_000_000, parent),
       file('notes.txt', 2_400, parent),
+    ];
+  } else if (parent === `${LOCAL_FILES_HOME}/Notes exports`) {
+    nodes = [
+      file('Field notes.enex', 48_200_000, parent),
+      file('Reflect export.zip', 12_400_000, parent),
+      file('Roam-Export-1760180000000.zip', 8_900_000, parent),
     ];
   } else if (parent === `${LOCAL_FILES_HOME}/Telegram exports`) {
     nodes = [
@@ -1264,10 +1271,22 @@ export function previewArchiveBrowse(args: { parent_key?: unknown }) {
  * each source's connector reads its archives as inputs (archive-live-one-dataset.md,
  * steps 4 to 7). Invented: no source registers here.
  */
+const PREVIEW_NOTES_FILES: Readonly<Record<string, (name: string) => boolean>> = {
+  'reflect.archive': (name) => /^reflect/i.test(name) && /\.(?:zip|json)$/i.test(name),
+  'roam.archive': (name) => /^roam/i.test(name) && /\.(?:zip|json)$/i.test(name),
+  'evernote.archive': (name) => /\.enex$/i.test(name),
+};
 const PREVIEW_ARCHIVE_SOURCES = [
   { sourceId: 'gmail.email', label: 'Gmail', formats: [MBOX_ARCHIVE_FORMAT], accepts: (name: string) => name.endsWith('.mbox') },
   { sourceId: 'telegram.messages', label: 'Telegram', formats: [TELEGRAM_JSON_ARCHIVE_FORMAT], accepts: (name: string) => name === 'result.json' || name.startsWith('DataExport') },
   { sourceId: 'whatsapp.personal.messages', label: 'WhatsApp', formats: [WHATSAPP_ARCHIVE_FORMAT], accepts: (name: string) => name.startsWith('WhatsApp Chat') || name === '_chat.txt' },
+  // Import-only sources, as the format registry names them (archive-live-one-dataset.md, step 7).
+  ...archiveSourceCards().map((card) => ({
+    sourceId: card.id,
+    label: card.label,
+    formats: [...card.formats],
+    accepts: PREVIEW_NOTES_FILES[card.id] ?? (() => false),
+  })),
 ];
 
 /** The computer meta's archiveSources for an archives or source-import state. */
@@ -1275,11 +1294,7 @@ export function previewArchiveSources(state: string): ComputerArchiveSourceMeta[
   if (!state.startsWith('archives-') && !isSourceImportState(state)) return undefined;
   // While the list of imports cannot be read, no card imports (dashboard.ts archiveSources).
   if (state === 'archives-unreadable') return undefined;
-  return [
-    ...PREVIEW_ARCHIVE_SOURCES.map((entry) => ({ sourceId: entry.sourceId, label: entry.label, intro: archivePickIntro(entry.formats) })),
-    // Import-only sources, as the format registry names them (dashboard.ts archiveSources).
-    ...archiveSourceCards().map((card) => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats) })),
-  ];
+  return PREVIEW_ARCHIVE_SOURCES.map((entry) => ({ sourceId: entry.sourceId, label: entry.label, intro: archivePickIntro(entry.formats) }));
 }
 
 /**
@@ -1289,32 +1304,50 @@ export function previewArchiveSources(state: string): ComputerArchiveSourceMeta[
  */
 export function previewArchiveApprove(args: { key?: unknown; request_id?: unknown; confirm_account?: unknown; keep_apart?: unknown; source_id?: unknown }, state = '') {
   const key = typeof args.key === 'string' ? args.key : '';
-  const asked = state === 'archives-account-confirm' || state === 'archives-account-request';
   const name = typeof args.request_id === 'string' ? 'Takeout-2026-10.mbox' : key.split('/').pop() ?? '';
-  // A source's own Import an archive: only that source's exports (archive-import/dashboard.ts not_this_source).
-  const own = typeof args.source_id === 'string' ? PREVIEW_ARCHIVE_SOURCES.find((entry) => entry.sourceId === args.source_id) : undefined;
-  if (own) {
-    if (own.accepts(name)) return { content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name, source: { id: own.sourceId, label: own.label } } };
-    return {
-      content: [{ type: 'text', text: ARCHIVE_APPROVE_COPY.not_this_source.split('{source}').join(own.label).split('{formats}').join(own.formats.map((format) => format.label).join(', ')) }],
-      structuredContent: { error: 'not_this_source' },
-      isError: true,
-    };
+  // A source's own Import an archive only narrows which exports are taken (archive-import/dashboard.ts
+  // not_this_source); where a taken export goes, and the account question, are the same for both buttons.
+  if (typeof args.source_id === 'string') {
+    const own = PREVIEW_ARCHIVE_SOURCES.find((entry) => entry.sourceId === args.source_id);
+    if (!own) return { content: [{ type: 'text', text: ARCHIVE_APPROVE_COPY.unknown_source }], structuredContent: { error: 'unknown_source' }, isError: true };
+    if (!own.accepts(name)) {
+      return {
+        content: [{ type: 'text', text: ARCHIVE_APPROVE_COPY.not_this_source.split('{source}').join(own.label).split('{formats}').join(own.formats.map((format) => format.label).join(', ')) }],
+        structuredContent: { error: 'not_this_source' },
+        isError: true,
+      };
+    }
   }
-  if (!name.endsWith('.mbox')) {
+  return previewArchiveRoute(name, args, state);
+}
+
+/**
+ * Where a taken export goes in the preview, whichever button chose it (start.ts resolveArchiveTarget): a
+ * Telegram or WhatsApp export into its source; an mbox stays under Other archives (it carries no Gmail
+ * account), except in the archives-account-* states, where it may be the connected Gmail's and the owner is
+ * asked first; their answer adds it to Gmail or keeps it apart.
+ */
+function previewArchiveRoute(name: string, args: { confirm_account?: unknown; keep_apart?: unknown }, state: string) {
+  const started = (source?: { sourceId: string; label: string }) => ({
+    content: [{ type: 'text', text: 'Importing.' }],
+    structuredContent: { status: 'started', name, ...(source ? { source: { id: source.sourceId, label: source.label } } : {}) },
+  });
+  const reads = PREVIEW_ARCHIVE_SOURCES.find((entry) => entry.accepts(name));
+  if (!reads) {
     return {
       content: [{ type: 'text', text: ARCHIVE_APPROVE_COPY.unsupported.split('{formats}').join(ARCHIVE_FORMATS.map((format) => format.label).join(', ')) }],
       structuredContent: { error: 'unsupported' },
       isError: true,
     };
   }
-  if (asked && args.confirm_account !== true && args.keep_apart !== true) {
-    return {
-      content: [{ type: 'text', text: 'Waiting for which account.' }],
-      structuredContent: { status: 'confirm_account', name, source: { id: PREVIEW_SOURCE_ID, label: 'Gmail' } },
-    };
-  }
-  return { content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name } };
+  if (reads.sourceId !== PREVIEW_SOURCE_ID) return started(reads);
+  const asked = state === 'archives-account-confirm' || state === 'archives-account-request';
+  if (!asked || args.keep_apart === true) return started();
+  if (args.confirm_account === true) return started(reads);
+  return {
+    content: [{ type: 'text', text: 'Waiting for which account.' }],
+    structuredContent: { status: 'confirm_account', name, source: { id: PREVIEW_SOURCE_ID, label: 'Gmail' } },
+  };
 }
 
 /**
