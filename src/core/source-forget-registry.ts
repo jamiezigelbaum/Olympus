@@ -367,7 +367,7 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
   {
     // The imports that were inputs of this source: their items went with its stores; the record and the media files they bound stay outside.
     id: 'archive-imports-of-source',
-    file: 'archive-imports.json',
+    file: 'archive-imports',
     modules: [],
     forget(account, context, { dryRun }) {
       const path = defaultArchiveImportStatePath(context.env);

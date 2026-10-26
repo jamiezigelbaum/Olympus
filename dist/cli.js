@@ -79147,7 +79147,7 @@ var init_source_forget_registry = __esm(() => {
     },
     {
       id: "archive-imports-of-source",
-      file: "archive-imports.json",
+      file: "archive-imports",
       modules: [],
       forget(account, context2, { dryRun }) {
         const path = defaultArchiveImportStatePath(context2.env);
