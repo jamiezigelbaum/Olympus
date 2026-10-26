@@ -2358,6 +2358,12 @@ export interface ConnectorStoreSearchFilters {
   /** An actual provider observation under this connector's current scope binding. */
   observedConnectorId?: string;
   /**
+   * An observation by any connector whose id starts with this prefix (the
+   * source's imported archives, `archive.`, which the owner approved one by
+   * one): beside `observedConnectorId`, or alone when there is no live scope.
+   */
+  observedConnectorIdPrefix?: string;
+  /**
    * Rooted locator path matched case-insensitively at a segment boundary.
    * Exact path and descendants match; string-prefix siblings do not.
    */
@@ -11697,6 +11703,18 @@ export class LocalConnectorStore {
     return this.db.query('SELECT 1 AS present FROM items LIMIT 1').get() !== null;
   }
 
+  /** Whether any live (not tombstoned) row matches these filters. */
+  holdsItemsMatching(filters: ConnectorStoreSearchFilters): boolean {
+    const scoped = connectorStoreFilterSql(filters);
+    return this.db.query(`SELECT 1 AS present FROM items i WHERE i.tombstoned = 0 ${scoped.sql} LIMIT 1`).get(...scoped.params) !== null;
+  }
+
+  /** The account scopes a provider's rows are kept under, at most `limit` of them (tombstones included). */
+  itemAccountScopes(provider: string, limit = 2): string[] {
+    const rows = this.db.query('SELECT DISTINCT account_scope AS scope FROM items WHERE provider = ? LIMIT ?').all(provider, limit) as Array<{ scope: string }>;
+    return rows.map((row) => row.scope);
+  }
+
   /**
    * Whether the file this store opened has since been removed or replaced on
    * disk (`olympus data delete --source` may run while the worker stays up,
@@ -14543,6 +14561,7 @@ function normalizeOptionalAccountScope(value: string | undefined): string | unde
 interface NormalizedConnectorStoreSearchFilters {
   provider?: string;
   observedConnectorId?: string;
+  observedConnectorIdPrefix?: string;
   locatorPathScope?: string;
   locatorPathScopes?: readonly string[];
   locatorPathExcludedScopes?: readonly string[];
@@ -14592,6 +14611,9 @@ export function normalizeConnectorStoreSearchFilters(
   const normalized = {
     ...(provider ? { provider } : {}),
     ...(value.observedConnectorId ? { observedConnectorId: requireNonEmpty(value.observedConnectorId, 'Observed connector id') } : {}),
+    ...(value.observedConnectorIdPrefix
+      ? { observedConnectorIdPrefix: requireNonEmpty(value.observedConnectorIdPrefix, 'Observed connector id prefix') }
+      : {}),
     ...(locatorPathScope ? { locatorPathScope } : {}),
     ...(locatorPathScopes.length > 0 ? { locatorPathScopes } : {}),
     ...(locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {}),
@@ -14623,9 +14645,15 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     clauses.push('AND i.provider = ?');
     params.push(normalized.provider);
   }
-  if (normalized.observedConnectorId) {
+  if (normalized.observedConnectorId && normalized.observedConnectorIdPrefix) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND (scope_owner.connector_id = ? OR substr(scope_owner.connector_id, 1, length(?)) = ?) AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorId, normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
+  } else if (normalized.observedConnectorId) {
     clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
     params.push(normalized.observedConnectorId);
+  } else if (normalized.observedConnectorIdPrefix) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND substr(scope_owner.connector_id, 1, length(?)) = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push('AND i.source_scope_generation = ?');
