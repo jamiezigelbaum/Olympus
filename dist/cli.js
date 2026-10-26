@@ -166668,7 +166668,8 @@ function inputConnector(builder, input) {
                 ...item.identity.sourceVersion !== undefined ? { version: item.identity.sourceVersion } : {},
                 hasContent: hasContent(item) || !deleted && before?.hasContent === true && before.tombstoned !== true,
                 ...deleted || before?.tombstoned === true && !hasContent(item) ? { tombstoned: true } : {},
-                ...before?.incomplete === true && before.version === item.identity.sourceVersion ? { incomplete: true } : {}
+                ...before?.incomplete === true && before.version === item.identity.sourceVersion ? { incomplete: true } : {},
+                ...before?.incomplete === true && before.version === item.identity.sourceVersion && before.owedBodyVersion !== undefined && !hasContent(item) ? { owedBodyVersion: before.owedBodyVersion } : {}
               });
               units.push({ record: offset + position, entry: index, parent: entries[0].identity.localItemId, item });
             });
