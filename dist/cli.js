@@ -64495,7 +64495,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
   };
 }
 function releaseInputs(detail) {
-  const namesOnly = new Set(detail.namesOnlyCandidateIndexes ?? []);
+  const namesOnly = new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []].filter((index) => (detail.pack.candidates[index]?.chunks.length ?? 1) === 0 && !detail.pack.candidates[index]?.tables?.length));
   const items = detail.pack.candidates.map((candidate, index) => {
     const item = candidate.provenance.sourceItem;
     return {

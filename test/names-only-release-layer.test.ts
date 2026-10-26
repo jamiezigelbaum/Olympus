@@ -36,7 +36,7 @@ function privateFileCheck(): { check: ReleaseCheck; seen: ReleaseInput[][] } {
   };
 }
 
-function handlerFor(check: ReleaseCheck) {
+function handlerFor(check: ReleaseCheck, marker: 'namesOnly' | 'contentPrivate' = 'contentPrivate') {
   const item = (id: string) => ({ family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: id, localItemId: `personal:${id}` });
   const hit = (id: string, title: string) => ({ sourceItem: item(id), provenance: { sourceItem: item(id), citation: { title } }, score: 1, rawExposed: false as const });
   return createAnalystSourceIndexAnswerHandler({
@@ -60,7 +60,7 @@ function handlerFor(check: ReleaseCheck) {
           async fetchLocalContent(request: { provenance: { sourceItem: { providerItemId: string } } }) {
             const sensitivity = buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' });
             return request.provenance.sourceItem.providerItemId === 'private-file'
-              ? { sensitivity, chunks: [], namesOnly: true }
+              ? { sensitivity, chunks: [], ...(marker === 'contentPrivate' ? { contentPrivate: true } : { namesOnly: true }) }
               : { sensitivity, chunks: ['Inspected both hives on Saturday.'] };
           },
         },
@@ -70,10 +70,12 @@ function handlerFor(check: ReleaseCheck) {
 }
 
 describe('a names-only candidate in the release check', () => {
-  test('is a names-layer input, so a Private file matched by name does not withhold the answer', async () => {
+  // contentPrivate: a Private file whose names stay Personal (the store's own
+  // marker, connector-store/local-index.ts); namesOnly: the owner's Names-only choice.
+  for (const marker of ['contentPrivate', 'namesOnly'] as const) test(`(${marker}) is a names-layer input, so a Private file matched by name does not withhold the answer`, async () => {
     const { check, seen } = privateFileCheck();
     const sink = createReleaseManifestSink();
-    const result = await runWithReleaseManifestSink(sink, () => handlerFor(check).answer({ question: 'How many items do I have about beekeeping?' }));
+    const result = await runWithReleaseManifestSink(sink, () => handlerFor(check, marker).answer({ question: 'How many items do I have about beekeeping?' }));
 
     expect(result.answer).not.toBe(ANSWER_BECAME_PRIVATE);
     expect(result.answer).toContain(ANSWER);
