@@ -2807,7 +2807,10 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/disconnect" },
     { method: "POST", path: "/dashboard/delete-source-data" },
     { method: "POST", path: "/dashboard/unpair" },
-    { method: "POST", path: "/dashboard/archive-import/browse" },
+    { method: "POST", path: "/dashboard/archive-import/upload-start" },
+    { method: "POST", path: "/dashboard/archive-import/upload-file" },
+    { method: "POST", path: "/dashboard/archive-import/upload-status" },
+    { method: "POST", path: "/dashboard/archive-import/upload-cancel" },
     { method: "POST", path: "/dashboard/archive-import/approve" },
     { method: "POST", path: "/dashboard/archive-import/decline" },
     { method: "POST", path: "/dashboard/archive-import/remove" },
@@ -46976,6 +46979,9 @@ function comparable(records, files) {
 function findSameVersionImport(records, files) {
   return comparable(records, files).find((record) => record.files.every((file, index) => sameVersion(file, files[index])));
 }
+function findSameInProgressImport(records, files) {
+  return comparable(records, files).find((record) => (record.status === "importing" || record.status === "stopped") && record.files.every((file, index) => sameSample(file, files[index]) && Math.abs(file.mtime_ms - files[index].mtime_ms) <= 2));
+}
 function findProbableCopies(records, files) {
   return comparable(records, files).filter((record) => record.files.every((file, index) => sameSample(file, files[index]) && file.sha256 !== undefined));
 }
@@ -51768,7 +51774,7 @@ function unknownStatus(value) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value };
 }
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
-  return `Choose a file or folder on this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus reads it where it is and never changes it.`;
+  return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus makes a copy in its own storage to read it, removes that copy once it has read what it needs, and never changes the original.`;
 }
 function dashboardArchiveNouns(family) {
   const nouns = DASHBOARD_ARCHIVE_NOUNS;
@@ -52214,12 +52220,23 @@ var init_vocabulary = __esm(() => {
       back: "Back to Olympus",
       title: "Import another archive",
       intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
-      source: "This computer",
-      makePrivate: "Import",
-      makePrivateFor: "Import {name}",
-      alreadyPrivate: "Imported",
-      busy: "Starting…",
-      chooseAnother: "Choose another"
+      zone: "Upload folder",
+      over: "Drop to import",
+      hint: "Drag a folder here, or click to choose one.",
+      zoneLabel: "Upload folder: choose a folder, or drop one here",
+      chooseFile: "or choose a file",
+      reading: "Reading the folder…",
+      uploading: "Uploading {name}",
+      progress: "{sent} of {total}",
+      progressFiles: "{sent} of {total} · {files} of {of} files",
+      paused: "This computer is low on space. The upload waits and goes on by itself when space is free.",
+      cancel: "Cancel",
+      starting: "Starting…",
+      empty: "There was no file in that. Drop a folder or a file from this computer.",
+      unreadable: "Olympus could not read what you dropped. Try again.",
+      failed: "The upload stopped before it finished. Nothing was imported. Try again.",
+      several: "{n} items",
+      chooseAnother: "Start over"
     },
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
@@ -134076,19 +134093,415 @@ function packagedGooglePilotClientId() {
 }
 var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "604346037984-oukrdn4ouh8n2fctggracadt0fdd2lps.apps.googleusercontent.com", PACKAGED_GOOGLE_PILOT_CLIENT_ID = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__", GOOGLE_PILOT_CLIENT_ID_SENTINEL = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__";
 
+// src/workers/archive-import/staging.ts
+import { randomBytes as randomBytes26 } from "node:crypto";
+import { existsSync as existsSync81, mkdirSync as mkdirSync55, readdirSync as readdirSync19, realpathSync as realpathSync18, rmSync as rmSync26, statSync as statSync34, statfsSync as statfsSync2, utimesSync } from "node:fs";
+import { open as open5 } from "node:fs/promises";
+import { sep as sep15, join as join105, resolve as resolve20 } from "node:path";
+function sanitizeUploadPath(raw) {
+  const bad = () => {
+    throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
+  };
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_PATH_CHARS)
+    return bad();
+  if (/[\u0000-\u001f\u007f]/.test(raw))
+    return bad();
+  if (raw.startsWith("/") || raw.startsWith("\\") || /^[A-Za-z]:/.test(raw))
+    return bad();
+  const parts = raw.split("/");
+  if (parts.length > MAX_DEPTH)
+    return bad();
+  for (const part of parts) {
+    if (part === "" || part === "." || part === "..")
+      return bad();
+    if (part.split("\\").some((piece) => piece === ".."))
+      return bad();
+    if (Buffer.byteLength(part, "utf8") > MAX_NAME_BYTES)
+      return bad();
+  }
+  return parts;
+}
+function createArchiveUploads(options) {
+  const freeBytes = options.freeBytes ?? ((path) => {
+    const stats = statfsSync2(path);
+    return Number(stats.bavail) * Number(stats.bsize);
+  });
+  const headroomFor = (path) => {
+    if (options.headroomBytes !== undefined)
+      return options.headroomBytes;
+    if (options.freeBytes)
+      return ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES;
+    try {
+      const stats = statfsSync2(path);
+      return Math.min(ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, Number(stats.blocks) * Number(stats.bsize) / 4);
+    } catch {
+      return ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES;
+    }
+  };
+  const pause = options.pause ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+  const now = options.now ?? (() => Date.now());
+  const sessions = new Map;
+  let rootPath;
+  let closed = false;
+  const stagingRoot = () => {
+    if (rootPath)
+      return rootPath;
+    mkdirSync55(options.root, { recursive: true, mode: 448 });
+    rootPath = realpathSync18.native(options.root);
+    return rootPath;
+  };
+  const contained = (parent, child) => child === parent || child.startsWith(parent + sep15);
+  const session = (uploadId) => {
+    const found = typeof uploadId === "string" && ID2.test(uploadId) ? sessions.get(uploadId) : undefined;
+    if (!found)
+      throw new ArchiveUploadError("unknown_upload", ARCHIVE_UPLOAD_COPY.unknown_upload, 404);
+    return found;
+  };
+  const drop = (found) => {
+    sessions.delete(found.id);
+    rmSync26(found.dir, { recursive: true, force: true });
+  };
+  const roomFor = async (found, needed) => {
+    let waited = false;
+    try {
+      for (;; ) {
+        if (found.cancelled || closed)
+          return false;
+        let free;
+        try {
+          free = freeBytes(found.files);
+        } catch {
+          return true;
+        }
+        if (free - needed >= headroomFor(found.files))
+          return true;
+        waited = true;
+        found.paused = true;
+        found.lastTouch = now();
+        await pause(SPACE_POLL_MS);
+      }
+    } finally {
+      if (waited)
+        found.paused = false;
+    }
+  };
+  const receive = async (uploadId, relPath, body, receiveOptions = {}) => {
+    const found = session(uploadId);
+    if (found.cancelled)
+      throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+    const segments = sanitizeUploadPath(relPath);
+    const key2 = segments.join("/");
+    const offset = receiveOptions.offset ?? 0;
+    const final = receiveOptions.final ?? true;
+    if (!Number.isSafeInteger(offset) || offset < 0)
+      throw new ArchiveUploadError("bad_offset", ARCHIVE_UPLOAD_COPY.bad_offset, 400);
+    const declared = receiveOptions.declaredBytes;
+    if (declared !== undefined && Number.isFinite(declared) && declared > ARCHIVE_UPLOAD_MAX_CHUNK_BYTES)
+      throw new ArchiveUploadError("chunk_too_large", ARCHIVE_UPLOAD_COPY.chunk_too_large, 413);
+    if (offset === 0) {
+      if (found.paths.has(key2))
+        throw new ArchiveUploadError("duplicate_file", ARCHIVE_UPLOAD_COPY.duplicate_file, 409);
+      found.paths.add(key2);
+      found.partials.set(key2, { written: 0, busy: true });
+    } else {
+      const partial2 = found.partials.get(key2);
+      if (!partial2 || partial2.busy || partial2.written !== offset)
+        throw new ArchiveUploadError("bad_offset", ARCHIVE_UPLOAD_COPY.bad_offset, 409);
+      partial2.busy = true;
+    }
+    found.active += 1;
+    found.lastTouch = now();
+    let handle;
+    let target = "";
+    let created = false;
+    let written = 0;
+    let reader;
+    const stop = () => {
+      reader?.cancel().catch(() => {
+        return;
+      });
+    };
+    found.abort.add(stop);
+    try {
+      const parent = join105(found.files, ...segments.slice(0, -1));
+      try {
+        mkdirSync55(parent, { recursive: true, mode: 448 });
+        if (!contained(realpathSync18.native(found.files), realpathSync18.native(parent)))
+          throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
+      } catch (error2) {
+        if (error2 instanceof ArchiveUploadError)
+          throw error2;
+        throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path, 409);
+      }
+      target = join105(parent, segments[segments.length - 1]);
+      if (!contained(found.files, resolve20(target)))
+        throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
+      if (!await roomFor(found, declared !== undefined && Number.isFinite(declared) && declared > 0 ? declared : 0)) {
+        throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+      }
+      try {
+        handle = await open5(target, offset === 0 ? "wx" : "r+", 384);
+      } catch (error2) {
+        const code = error2?.code;
+        throw code === "EEXIST" ? new ArchiveUploadError("duplicate_file", ARCHIVE_UPLOAD_COPY.duplicate_file, 409) : new ArchiveUploadError("write_failed", ARCHIVE_UPLOAD_COPY.write_failed, 500);
+      }
+      created = offset === 0;
+      if (offset > 0)
+        created = true;
+      if (body) {
+        reader = body.getReader();
+        let sinceCheck = 0;
+        for (;; ) {
+          let step;
+          try {
+            step = await reader.read();
+          } catch {
+            throw new ArchiveUploadError(found.cancelled ? "cancelled" : "unreadable", found.cancelled ? ARCHIVE_UPLOAD_COPY.cancelled : ARCHIVE_UPLOAD_COPY.unreadable, found.cancelled ? 409 : 400);
+          }
+          if (step.done)
+            break;
+          const chunk = step.value;
+          if (found.cancelled)
+            throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+          found.lastTouch = now();
+          if (written + chunk.byteLength > ARCHIVE_UPLOAD_MAX_CHUNK_BYTES)
+            throw new ArchiveUploadError("chunk_too_large", ARCHIVE_UPLOAD_COPY.chunk_too_large, 413);
+          sinceCheck += chunk.byteLength;
+          if (sinceCheck >= SPACE_CHECK_EVERY_BYTES) {
+            sinceCheck = 0;
+            if (!await roomFor(found, chunk.byteLength))
+              throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+          }
+          try {
+            let done = 0;
+            while (done < chunk.byteLength) {
+              const { bytesWritten } = await handle.write(chunk, done, chunk.byteLength - done, offset + written + done);
+              done += bytesWritten;
+            }
+          } catch {
+            throw new ArchiveUploadError("write_failed", ARCHIVE_UPLOAD_COPY.write_failed, 507);
+          }
+          written += chunk.byteLength;
+          found.bytes += chunk.byteLength;
+        }
+        if (found.cancelled)
+          throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+      }
+      await handle.close();
+      handle = undefined;
+      if (!final) {
+        found.partials.set(key2, { written: offset + written, busy: false });
+        return { bytes: written };
+      }
+      found.partials.delete(key2);
+      const modified = receiveOptions.modified;
+      if (modified !== undefined && Number.isFinite(modified) && modified > 0 && modified < 4102444800000) {
+        try {
+          const when = new Date(modified);
+          utimesSync(target, when, when);
+        } catch {}
+      }
+      found.fileCount += 1;
+      return { bytes: written };
+    } catch (error2) {
+      if (handle)
+        await handle.close().catch(() => {
+          return;
+        });
+      if (created && existsSync81(target))
+        rmSync26(target, { force: true });
+      found.paths.delete(key2);
+      found.partials.delete(key2);
+      found.bytes -= offset + written;
+      throw error2;
+    } finally {
+      found.abort.delete(stop);
+      found.active -= 1;
+      found.lastTouch = now();
+    }
+  };
+  return {
+    begin() {
+      if (closed)
+        throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+      const root = stagingRoot();
+      const uploadId = randomBytes26(16).toString("hex");
+      const dir = join105(root, uploadId);
+      mkdirSync55(join105(dir, "files"), { recursive: true, mode: 448 });
+      sessions.set(uploadId, {
+        id: uploadId,
+        dir,
+        files: join105(dir, "files"),
+        fileCount: 0,
+        bytes: 0,
+        active: 0,
+        paused: false,
+        cancelled: false,
+        lastTouch: now(),
+        abort: new Set,
+        paths: new Set,
+        partials: new Map
+      });
+      return { uploadId };
+    },
+    receive,
+    status(uploadId) {
+      const found = session(uploadId);
+      return {
+        state: found.paused ? "paused_disk_full" : found.active > 0 ? "receiving" : "idle",
+        files: found.fileCount,
+        bytes: found.bytes
+      };
+    },
+    cancel(uploadId, keep) {
+      if (typeof uploadId !== "string" || !ID2.test(uploadId))
+        return false;
+      const found = sessions.get(uploadId);
+      const dir = found?.dir ?? (existsSync81(options.root) ? join105(stagingRoot(), uploadId) : undefined);
+      if (!dir)
+        return false;
+      if (keep?.(dir)) {
+        if (found) {
+          found.cancelled = true;
+          for (const stop of [...found.abort])
+            stop();
+          sessions.delete(uploadId);
+        }
+        return false;
+      }
+      if (found) {
+        found.cancelled = true;
+        for (const stop of [...found.abort])
+          stop();
+        sessions.delete(uploadId);
+      }
+      rmSync26(dir, { recursive: true, force: true });
+      return true;
+    },
+    chosenPath(uploadId) {
+      const found = session(uploadId);
+      if (found.cancelled)
+        throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
+      if (found.active > 0 || found.partials.size > 0)
+        throw new ArchiveUploadError("upload_closed", "Files are still arriving. Wait until the upload has finished.", 409);
+      const entries = readdirSync19(found.files);
+      const top = entries.length === 1 ? join105(found.files, entries[0]) : found.files;
+      const canonical2 = realpathSync18.native(top);
+      if (!contained(realpathSync18.native(found.dir), canonical2))
+        throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
+      return canonical2;
+    },
+    handOver(uploadId) {
+      const found = typeof uploadId === "string" && ID2.test(uploadId) ? sessions.get(uploadId) : undefined;
+      if (!found)
+        return;
+      found.cancelled = true;
+      for (const stop of [...found.abort])
+        stop();
+      sessions.delete(uploadId);
+    },
+    release(uploadId, keep) {
+      if (typeof uploadId !== "string" || !ID2.test(uploadId))
+        return;
+      const found = sessions.get(uploadId);
+      const dir = found?.dir ?? (existsSync81(options.root) ? join105(stagingRoot(), uploadId) : undefined);
+      if (!dir || keep?.(dir))
+        return;
+      sessions.delete(uploadId);
+      rmSync26(dir, { recursive: true, force: true });
+    },
+    sweep(needed) {
+      if (!rootPath && !existsSync81(options.root))
+        return;
+      let root;
+      try {
+        root = stagingRoot();
+      } catch {
+        return;
+      }
+      let names;
+      try {
+        names = readdirSync19(root);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        if (!ID2.test(name))
+          continue;
+        const dir = join105(root, name);
+        const found = sessions.get(name);
+        if (found && (found.active > 0 || now() - found.lastTouch < ARCHIVE_UPLOAD_IDLE_MS))
+          continue;
+        try {
+          if (!statSync34(dir).isDirectory())
+            continue;
+        } catch {
+          continue;
+        }
+        if (needed(dir)) {
+          sessions.delete(name);
+          continue;
+        }
+        if (found)
+          found.cancelled = true;
+        sessions.delete(name);
+        rmSync26(dir, { recursive: true, force: true });
+      }
+    },
+    close() {
+      closed = true;
+      for (const found of sessions.values()) {
+        found.cancelled = true;
+        for (const stop of [...found.abort])
+          stop();
+      }
+    }
+  };
+}
+var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY;
+var init_staging = __esm(() => {
+  ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+  ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+  ARCHIVE_UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
+  SPACE_CHECK_EVERY_BYTES = 16 * 1024 * 1024;
+  ARCHIVE_UPLOAD_IDLE_MS = 30 * 60000;
+  ID2 = /^[0-9a-f]{32}$/;
+  ArchiveUploadError = class ArchiveUploadError extends Error {
+    code;
+    status;
+    constructor(code, message2, status = 400) {
+      super(message2);
+      this.code = code;
+      this.status = status;
+      this.name = "ArchiveUploadError";
+    }
+  };
+  ARCHIVE_UPLOAD_COPY = {
+    bad_path: "Olympus could not take a file with that name or place in the folder. Choose the folder again.",
+    duplicate_file: "The same file came twice in one upload. Choose the folder again.",
+    bad_offset: "A part of a file arrived out of order. Choose the folder again.",
+    chunk_too_large: "A part of a file was larger than Olympus takes in one piece. Choose the folder again.",
+    unknown_upload: "This upload is no longer here. Choose the folder again.",
+    upload_closed: "This upload was already finished. Choose the folder again.",
+    cancelled: "This upload was cancelled.",
+    unreadable: "Olympus could not read what was sent. Choose the folder again.",
+    write_failed: "Olympus could not save the file on this computer. Check that its disk has room, then choose the folder again."
+  };
+});
+
 // src/core/messaging-account-move.ts
 import { readFileSync as readFileSync70 } from "node:fs";
 import { homedir as homedir40 } from "node:os";
-import { join as join105, resolve as resolve20 } from "node:path";
+import { join as join106, resolve as resolve21 } from "node:path";
 function namesDefaultLegacySession(source, value2, env) {
   const trimmed2 = value2.trim();
   if (trimmed2 === "")
     return false;
   if (source === "telegram") {
     const base = trimmed2.endsWith(".session") ? trimmed2.slice(0, -".session".length) : trimmed2;
-    return resolve20(base) === resolve20(legacyTelegramSessionBase(env));
+    return resolve21(base) === resolve21(legacyTelegramSessionBase(env));
   }
-  return resolve20(whatsappStateDirFromValue(trimmed2)) === resolve20(legacyWhatsAppDefaultStateDir(env));
+  return resolve21(whatsappStateDirFromValue(trimmed2)) === resolve21(legacyWhatsAppDefaultStateDir(env));
 }
 function movedSessionValue(source, value2, env) {
   try {
@@ -134105,7 +134518,7 @@ function folderSessionValue(source, env) {
   return source === "telegram" ? accountSessionPath(account, env) : accountRawPath(account, "whatsapp", env);
 }
 function handleRegistryPath(env) {
-  return env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join105(env.HOME?.trim() || homedir40(), ".config", "olympus", "handles.json");
+  return env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join106(env.HOME?.trim() || homedir40(), ".config", "olympus", "handles.json");
 }
 async function sessionPathKeys(source, secretStore) {
   const keys = new Set([source === "telegram" ? "telegram.personal.session_path" : "whatsapp.personal_local.session_path"]);
@@ -134233,7 +134646,7 @@ var init_messaging_account_move = __esm(() => {
 import {
   chmod as chmod2,
   mkdir as mkdir5,
-  open as open5,
+  open as open6,
   rename as rename2,
   stat as stat5,
   unlink
@@ -134357,7 +134770,7 @@ async function appendSourceAnswerLatencyLine(path, record5, options = {}) {
   if (Number.isFinite(maxBytes) && maxBytes > 0) {
     await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line2), maxBytes);
   }
-  const handle = await open5(path, "a", 384);
+  const handle = await open6(path, "a", 384);
   try {
     await handle.chmod(384);
     await handle.appendFile(line2, "utf8");
@@ -135124,7 +135537,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
   }
-  return new Promise((resolve21, reject) => {
+  return new Promise((resolve22, reject) => {
     let settled = false;
     let timer;
     let removeAbortListener;
@@ -135147,7 +135560,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         return;
       settled = true;
       cleanup();
-      resolve21(response);
+      resolve22(response);
     };
     const abort = () => {
       const error2 = new Error("Source watch HTTPS request aborted.");
@@ -135271,14 +135684,14 @@ function mountDashboardController(options) {
   function queryAll(selector) {
     return Array.from(root.querySelectorAll(selector));
   }
-  function setSheetOpen(sheet, open6) {
-    sheet.classList.toggle("on", open6);
-    sheet.setAttribute("aria-hidden", open6 ? "false" : "true");
+  function setSheetOpen(sheet, open7) {
+    sheet.classList.toggle("on", open7);
+    sheet.setAttribute("aria-hidden", open7 ? "false" : "true");
     if (!sheet.id)
       return;
     queryAll("[data-sheet-toggle]").forEach((toggle) => {
       if (toggle.dataset.sheetToggle === `#${sheet.id}`)
-        toggle.setAttribute("aria-expanded", open6 ? "true" : "false");
+        toggle.setAttribute("aria-expanded", open7 ? "true" : "false");
     });
   }
   function say(form, message2) {
@@ -135839,13 +136252,13 @@ function mountDashboardController(options) {
       return;
     }
     const openSheets = queryAll(".sheet.on").map((sheet) => sheet.id);
-    const open6 = new Set(queryAll("details[open]").map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
+    const open7 = new Set(queryAll("details[open]").map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
     const active = activeElement();
     const focused = focusKey(active);
     root.innerHTML = result.body;
     queryAll("details").forEach((node) => {
       const key2 = node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || "";
-      if (open6.has(key2))
+      if (open7.has(key2))
         node.open = true;
     });
     for (const id of openSheets) {
@@ -135949,9 +136362,9 @@ function mountDashboardController(options) {
     if (!target || !root.contains(target))
       return;
     const menu = target.closest("details.rowmenu");
-    queryAll("details.rowmenu[open]").forEach((open6) => {
-      if (open6 !== menu || target.closest("[data-sheet-toggle],a[href]"))
-        open6.open = false;
+    queryAll("details.rowmenu[open]").forEach((open7) => {
+      if (open7 !== menu || target.closest("[data-sheet-toggle],a[href]"))
+        open7.open = false;
     });
     const toggle = target.closest("[data-sheet-toggle]");
     if (toggle) {
@@ -135959,22 +136372,22 @@ function mountDashboardController(options) {
       const sheet = selector ? query(selector) : null;
       if (!sheet)
         return;
-      const open6 = !sheet.classList.contains("on");
-      if (open6) {
+      const open7 = !sheet.classList.contains("on");
+      if (open7) {
         queryAll(".sheet.on").forEach((other) => {
           if (other !== sheet && !other.contains(toggle))
             setSheetOpen(other, false);
         });
       }
-      setSheetOpen(sheet, open6);
-      toggle.setAttribute("aria-expanded", open6 ? "true" : "false");
-      if (open6) {
+      setSheetOpen(sheet, open7);
+      toggle.setAttribute("aria-expanded", open7 ? "true" : "false");
+      if (open7) {
         if (!sheet.hasAttribute("tabindex"))
           sheet.setAttribute("tabindex", "-1");
         sheet.focus();
       }
       const form = sheet.querySelector('form[data-connect-kind="oauth"][data-oauth-autostart]');
-      if (open6 && form && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
+      if (open7 && form && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
         startedFromSheet.add(form);
         form.requestSubmit();
       }
@@ -137777,10 +138190,12 @@ function unreadableNames(input) {
     return [chars.length > UNREADABLE_NAME_MAX_CHARS ? `${chars.slice(0, UNREADABLE_NAME_MAX_CHARS - 1).join("")}…` : line2];
   });
 }
-var UNREADABLE_NAMES_IN_RESULT = 5, UNREADABLE_NAME_MAX_CHARS = 120, COMPUTER_UNREADABLE_FILES_LIMIT = 200, DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_BROWSE_TOOL_NAME = "olympus_archive_browse", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop", COMPUTER_LOCAL_SESSION_TOOL_NAMES, PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
+var UNREADABLE_NAMES_IN_RESULT = 5, UNREADABLE_NAME_MAX_CHARS = 120, COMPUTER_UNREADABLE_FILES_LIMIT = 200, DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_UPLOAD_START_TOOL_NAME = "olympus_archive_upload_start", ARCHIVE_UPLOAD_STATUS_TOOL_NAME = "olympus_archive_upload_status", ARCHIVE_UPLOAD_CANCEL_TOOL_NAME = "olympus_archive_upload_cancel", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop", COMPUTER_LOCAL_SESSION_TOOL_NAMES, PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   COMPUTER_LOCAL_SESSION_TOOL_NAMES = [
-    ARCHIVE_BROWSE_TOOL_NAME,
+    ARCHIVE_UPLOAD_START_TOOL_NAME,
+    ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
+    ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
     ARCHIVE_APPROVE_TOOL_NAME,
     ARCHIVE_DECLINE_TOOL_NAME,
     ARCHIVE_REMOVE_TOOL_NAME,
@@ -137805,7 +138220,9 @@ var init_dashboard_contract = __esm(() => {
     UNPAIR_SOURCE_TOOL_NAME,
     OPEN_UNREADABLE_FILE_TOOL_NAME,
     UNREADABLE_FILES_PAGE_TOOL_NAME,
-    ARCHIVE_BROWSE_TOOL_NAME,
+    ARCHIVE_UPLOAD_START_TOOL_NAME,
+    ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
+    ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
     ARCHIVE_APPROVE_TOOL_NAME,
     ARCHIVE_DECLINE_TOOL_NAME,
     ARCHIVE_REMOVE_TOOL_NAME,
@@ -137855,12 +138272,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId++;
     post2({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve21, reject) => {
+    return new Promise((resolve22, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve21, reject, timer };
+      pending[id] = { resolve: resolve22, reject, timer };
     });
   }
   function notify(method, params) {
@@ -137868,6 +138285,26 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function openai() {
     return window.openai || null;
+  }
+  const uploadProgress = {};
+  function uploadFile(uploadId, path, file, modified, progress) {
+    const id = nextId++;
+    uploadProgress[id] = progress;
+    const finish = (value2) => {
+      delete uploadProgress[id];
+      return value2;
+    };
+    post2({ jsonrpc: "2.0", id, method: "olympus/upload-file", params: { upload_id: uploadId, path, modified, file } });
+    return new Promise((resolve22) => {
+      pending[id] = {
+        resolve: (result) => resolve22(finish(result && typeof result === "object" ? result : { ok: false })),
+        reject: () => resolve22(finish({ ok: false })),
+        timer: null
+      };
+    });
+  }
+  function abortUpload(uploadId) {
+    notify("olympus/upload-abort", { upload_id: uploadId });
   }
   window.addEventListener("message", (event) => {
     if (event.source !== window.parent)
@@ -137884,6 +138321,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         entry.reject(message2.error);
       else
         entry.resolve(message2.result);
+      return;
+    }
+    if (message2.method === "olympus/upload-progress") {
+      const params = message2.params;
+      if (params && typeof params.request === "number" && typeof params.loaded === "number" && uploadProgress[params.request])
+        uploadProgress[params.request](params.loaded);
       return;
     }
     if (message2.method === "ui/notifications/tool-result") {
@@ -138405,10 +138848,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       action = () => openPrivacy(key2);
     } else if (fix.archiveImport === true && picker) {
       action = () => {
-        const fromMenu = key2.indexOf("menu:") === 0;
-        if (fromMenu && source)
-          state.open["menu:" + source.id] = false;
-        startArchivePick(fromMenu ? "summary:" + key2.slice(0, key2.lastIndexOf(":")) : key2, typeof fix.archiveSource === "string" ? fix.archiveSource : "");
+        startArchivePick(key2, typeof fix.archiveSource === "string" ? fix.archiveSource : "");
       };
     } else if (typeof fix.archiveFocus === "string" && fix.archiveFocus) {
       action = () => focusArchive(String(fix.archiveFocus));
@@ -138601,9 +139041,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return null;
     const W = H.copy;
     const sentence = count2 === 1 ? W.waiting.one : fill2(W.waiting.many, { count: Math.floor(count2) });
-    const open6 = button(W.open, "need:waiting", () => openLink(href), "warn");
-    open6.setAttribute("aria-label", W.open + " " + W.rows.privateAnswers.title);
-    const body = add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open6));
+    const open7 = button(W.open, "need:waiting", () => openLink(href), "warn");
+    open7.setAttribute("aria-label", W.open + " " + W.rows.privateAnswers.title);
+    const body = add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open7));
     const row = add(el("li", "row need"), body);
     row.setAttribute("data-waiting-private", String(Math.floor(count2)));
     return row;
@@ -138681,6 +139121,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const context2 = { id, label: String(source.label || id) };
     const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary);
     const isSync = (entry) => !!entry && entry.tool === config2.syncTool;
+    const own3 = archiveSourceMeta(id);
+    if (own3) {
+      add(controls, fixControl({ label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own3.sourceId }, "import:" + id, "plain", true, context2));
+      row.className += " has-import";
+    }
     if (fix && !(checking && isSync(fix)))
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context2));
     if (checking)
@@ -138698,11 +139143,6 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const unpair = unpairEntry(id);
     if (unpair)
       menu.push(unpair);
-    const own3 = archiveSourceMeta(id);
-    if (own3) {
-      const destructive = menu.findIndex((entry) => !!entry && entry.destructive === true);
-      menu.splice(destructive < 0 ? menu.length : destructive, 0, { label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own3.sourceId });
-    }
     let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "⋯");
@@ -139857,12 +140297,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const key2 = "more-on-computer";
     const line2 = add(el("div", "section more-on-computer"), el("p", "muted", P.moreOnComputer));
     const remote = remoteMode();
-    const open6 = button(P.moreOnComputerOpen, key2, remote ? () => toggleRemote(key2) : () => openLink(href), "plain");
-    open6.className = "btn link";
-    open6.setAttribute("aria-label", P.moreOnComputerOpenLabel);
+    const open7 = button(P.moreOnComputerOpen, key2, remote ? () => toggleRemote(key2) : () => openLink(href), "plain");
+    open7.className = "btn link";
+    open7.setAttribute("aria-label", P.moreOnComputerOpenLabel);
     if (remote)
-      open6.setAttribute("aria-expanded", state.open["remote:" + key2] ? "true" : "false");
-    return add(line2, open6, remote ? remoteBox(key2, href) : null);
+      open7.setAttribute("aria-expanded", state.open["remote:" + key2] ? "true" : "false");
+    return add(line2, open7, remote ? remoteBox(key2, href) : null);
   }
   function computerSection() {
     if (!onComputer())
@@ -139878,9 +140318,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const words2 = W.rows[key2];
       const text2 = add(el("div", "row-text"), el("p", "", words2.title), el("p", "muted", words2.line));
       const href = state.hostLinks[key2];
-      const open6 = button(W.open, "computer:" + key2, () => openLink(href), "plain");
-      open6.setAttribute("aria-label", W.open + " " + words2.title);
-      add(list, add(el("li", "row"), text2, open6));
+      const open7 = button(W.open, "computer:" + key2, () => openLink(href), "plain");
+      open7.setAttribute("aria-label", W.open + " " + words2.title);
+      add(list, add(el("li", "row"), text2, open7));
     }
     return add(section, list);
   }
@@ -139938,6 +140378,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     fill: fill2,
     count,
     call: callRaw,
+    upload: uploadFile,
+    abortUpload,
     render,
     reportHeight,
     openLink,
@@ -140478,6 +140920,8 @@ function chatgptPickerProgram(kit) {
   const WINDOWS = ["6m", "1y", "2y", "5y", "all"];
   const CATEGORIES = ["primary", "updates", "forums", "social", "promotions"];
   let p = null;
+  let drop = null;
+  let dropSession = 0;
   let session = 0;
   let timer = null;
   const ACCOUNT = "@account";
@@ -140670,69 +141114,492 @@ function chatgptPickerProgram(kit) {
       kit.fullscreen();
     openScope(sourceId, sourceLabel4, words2.title, "", "", undefined, { words: words2, taken: taken.slice(), done });
   }
+  const UPLOAD_PARALLEL = 4;
+  const UPLOAD_STATUS_MS = 2000;
+  const UPLOAD_PAINT_MS = 150;
   function pickArchive(words2, done, sourceId) {
     stopTimer();
     session++;
+    p = null;
     if (kit.compact())
       kit.fullscreen();
-    openScope("", words2.source, words2.title, "", "", undefined, { words: words2, taken: [], done: () => done(null), archive: { done, sourceId: sourceId || "" } });
+    dropSession++;
+    drop = {
+      words: words2,
+      done,
+      sourceId: sourceId || "",
+      mine: dropSession,
+      attempt: 0,
+      phase: "idle",
+      name: "",
+      uploadId: "",
+      total: 0,
+      sent: 0,
+      files: 0,
+      filesDone: 0,
+      paused: false,
+      error: "",
+      access: null,
+      confirm: null,
+      poll: null,
+      paint: null,
+      input: null
+    };
+    kit.render("picker:back");
   }
-  function archiveMode() {
-    return !!p && !!p.pick && !!p.pick.archive;
+  function dropLive(mine, attempt) {
+    return !!drop && drop.mine === mine && (attempt === undefined || drop.attempt === attempt);
   }
   function errorSentence(result) {
     const parts = result && Array.isArray(result.content) ? result.content : [];
     const text2 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
     return text2 ? String(text2.text) : "";
   }
-  function approveArchive(key2, name, answer) {
-    if (!archiveMode() || p.loading || p.saving)
+  function stopDropTimers() {
+    if (!drop)
       return;
-    p.saving = true;
-    p.savingKey = key2;
-    p.saveError = "";
-    p.saveAccess = null;
-    p.confirm = null;
-    kit.render("picker:pick:" + key2);
-    const mine = session;
-    const refused2 = (text2, access) => {
-      if (mine !== session || !p)
+    if (drop.poll)
+      clearInterval(drop.poll);
+    if (drop.paint)
+      clearTimeout(drop.paint);
+    drop.poll = null;
+    drop.paint = null;
+  }
+  function discardUpload() {
+    if (!drop)
+      return;
+    drop.attempt++;
+    stopDropTimers();
+    const id = drop.uploadId;
+    drop.uploadId = "";
+    if (id) {
+      kit.abortUpload(id);
+      kit.call(T.archiveUploadCancel, { upload_id: id }).then(() => {
         return;
-      p.saving = false;
-      p.savingKey = "";
-      p.saveError = text2 || Q.loadFailed;
-      p.saveAccess = access && typeof access.message === "string" && access.message ? access : null;
-      kit.render("picker:archive-error");
+      }, () => {
+        return;
+      });
+    }
+  }
+  function leaveDrop(picked) {
+    if (!drop)
+      return;
+    if (!picked)
+      discardUpload();
+    stopDropTimers();
+    const done = drop.done;
+    drop = null;
+    dropSession++;
+    done(picked);
+  }
+  function cancelDrop() {
+    if (!drop)
+      return;
+    discardUpload();
+    drop.phase = "idle";
+    drop.error = "";
+    drop.access = null;
+    drop.confirm = null;
+    kit.render("picker:drop:zone");
+  }
+  function dropFail(text2, access) {
+    if (!drop)
+      return;
+    discardUpload();
+    drop.phase = "error";
+    drop.error = text2 || drop.words.failed;
+    drop.access = access && typeof access.message === "string" && access.message ? access : null;
+    kit.render("picker:drop:retry");
+  }
+  function entryFiles(entry, prefix, found, gone) {
+    if (gone() || !entry)
+      return Promise.resolve();
+    if (entry.isFile) {
+      return new Promise((resolve22) => {
+        entry.file((file) => {
+          found.push({ file, path: prefix + entry.name });
+          resolve22();
+        }, () => resolve22());
+      });
+    }
+    if (!entry.isDirectory)
+      return Promise.resolve();
+    const reader = entry.createReader();
+    const here = prefix + entry.name + "/";
+    const next = () => new Promise((resolve22) => {
+      reader.readEntries((batch) => {
+        if (!batch.length || gone()) {
+          resolve22();
+          return;
+        }
+        batch.reduce((chain, child) => chain.then(() => entryFiles(child, here, found, gone)), Promise.resolve()).then(() => next().then(resolve22));
+      }, () => resolve22());
+    });
+    return next();
+  }
+  function dropped(event, gone) {
+    const transfer = event.dataTransfer;
+    if (!transfer)
+      return null;
+    const entries = [];
+    const plain = [];
+    const items = transfer.items ? Array.prototype.slice.call(transfer.items) : [];
+    for (const item of items) {
+      if (!item || item.kind !== "file")
+        continue;
+      const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+      if (entry)
+        entries.push(entry);
+      else {
+        const file = typeof item.getAsFile === "function" ? item.getAsFile() : null;
+        if (file)
+          plain.push({ file, path: file.name });
+      }
+    }
+    if (!items.length) {
+      for (const file of Array.prototype.slice.call(transfer.files || []))
+        plain.push({ file, path: file.name });
+    }
+    if (!entries.length && !plain.length)
+      return null;
+    const found = plain.slice();
+    return entries.reduce((chain, entry) => chain.then(() => entryFiles(entry, "", found, gone)), Promise.resolve()).then(() => found);
+  }
+  function chosen(input) {
+    const items = Array.prototype.slice.call(input.files || []).map((file) => ({ file, path: file.webkitRelativePath || file.name }));
+    try {
+      input.value = "";
+    } catch {}
+    return items;
+  }
+  function topName(items) {
+    const tops = {};
+    for (const item of items)
+      tops[String(item.path).split("/")[0]] = true;
+    const names = Object.keys(tops);
+    return names.length === 1 ? names[0] : fill2(drop.words.several, { n: kit.count(names.length) });
+  }
+  function paintSoon() {
+    if (!drop || drop.paint)
+      return;
+    const mine = drop.mine;
+    drop.paint = setTimeout(() => {
+      if (!dropLive(mine))
+        return;
+      drop.paint = null;
+      if (drop.phase === "uploading")
+        kit.render("picker:drop:cancel");
+    }, UPLOAD_PAINT_MS);
+  }
+  function beginUpload(collect) {
+    if (!drop || drop.phase !== "idle" && drop.phase !== "error")
+      return;
+    const mine = drop.mine;
+    drop.attempt++;
+    const attempt = drop.attempt;
+    drop.phase = "reading";
+    drop.error = "";
+    drop.access = null;
+    drop.name = "";
+    drop.sent = 0;
+    drop.filesDone = 0;
+    kit.render("picker:drop:cancel");
+    collect().then((items) => {
+      if (!dropLive(mine, attempt))
+        return;
+      if (!items.length) {
+        dropFail(drop.words.empty);
+        return;
+      }
+      let total = 0;
+      for (const item of items)
+        total += item.file.size || 0;
+      drop.name = topName(items);
+      drop.total = total;
+      drop.files = items.length;
+      kit.call(T.archiveUploadStart, {}).then((result) => {
+        if (!dropLive(mine, attempt))
+          return;
+        const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
+        if (!result || result.isError || !content || typeof content.upload_id !== "string" || !content.upload_id) {
+          dropFail(errorSentence(result));
+          return;
+        }
+        drop.uploadId = content.upload_id;
+        drop.phase = "uploading";
+        drop.poll = setInterval(() => pollUpload(mine, attempt), UPLOAD_STATUS_MS);
+        kit.render("picker:drop:cancel");
+        sendAll(mine, attempt, content.upload_id, items);
+      }, () => dropFail(""));
+    }, () => {
+      if (dropLive(mine, attempt))
+        dropFail(drop.words.unreadable);
+    });
+  }
+  function pollUpload(mine, attempt) {
+    if (!dropLive(mine, attempt) || drop.phase !== "uploading" || !drop.uploadId)
+      return;
+    kit.call(T.archiveUploadStatus, { upload_id: drop.uploadId }).then((result) => {
+      if (!dropLive(mine, attempt) || drop.phase !== "uploading")
+        return;
+      const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
+      const paused = !!content && content.status === "paused_disk_full";
+      if (paused !== drop.paused) {
+        drop.paused = paused;
+        kit.render("picker:drop:cancel");
+      }
+    }, () => {
+      return;
+    });
+  }
+  function sendAll(mine, attempt, uploadId, items) {
+    let next = 0;
+    let finished = 0;
+    let failure2 = null;
+    const inflight = {};
+    const sentNow = () => {
+      let sum2 = finished;
+      for (const key2 of Object.keys(inflight))
+        sum2 += inflight[Number(key2)];
+      return sum2;
     };
-    const only = p.pick.archive.sourceId ? { source_id: p.pick.archive.sourceId } : {};
-    kit.call(T.archiveApprove, answer ? { key: key2, ...only, ...answer } : { key: key2, ...only }).then((result) => {
-      if (mine !== session || !p)
+    const worker = () => {
+      if (failure2 || !dropLive(mine, attempt) || next >= items.length)
+        return Promise.resolve();
+      const at = next++;
+      const item = items[at];
+      inflight[at] = 0;
+      return kit.upload(uploadId, item.path, item.file, item.file.lastModified, (loaded) => {
+        inflight[at] = loaded;
+        if (dropLive(mine, attempt)) {
+          drop.sent = sentNow();
+          paintSoon();
+        }
+      }).then((outcome) => {
+        delete inflight[at];
+        if (!outcome || outcome.ok !== true) {
+          if (!failure2)
+            failure2 = outcome || {};
+          return;
+        }
+        finished += item.file.size || 0;
+        if (dropLive(mine, attempt)) {
+          drop.filesDone++;
+          drop.sent = sentNow();
+          paintSoon();
+        }
+        return worker();
+      });
+    };
+    const lanes = [];
+    for (let lane = 0;lane < Math.min(UPLOAD_PARALLEL, items.length); lane++)
+      lanes.push(worker());
+    Promise.all(lanes).then(() => {
+      if (!dropLive(mine, attempt))
+        return;
+      if (failure2) {
+        if (failure2.cancelled)
+          return;
+        dropFail(typeof failure2.message === "string" ? failure2.message : "");
+        return;
+      }
+      if (drop.paint) {
+        clearTimeout(drop.paint);
+        drop.paint = null;
+      }
+      if (drop.poll) {
+        clearInterval(drop.poll);
+        drop.poll = null;
+      }
+      approveDrop();
+    });
+  }
+  function approveDrop(answer) {
+    if (!drop || !drop.uploadId)
+      return;
+    const mine = drop.mine;
+    const attempt = drop.attempt;
+    const uploadId = drop.uploadId;
+    const name = drop.name;
+    drop.phase = "approving";
+    drop.confirm = null;
+    kit.render("picker:drop:approving");
+    const only = drop.sourceId ? { source_id: drop.sourceId } : {};
+    kit.call(T.archiveApprove, answer ? { upload_id: uploadId, ...only, ...answer } : { upload_id: uploadId, ...only }).then((result) => {
+      if (!dropLive(mine, attempt))
         return;
       const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
       const status = content ? content.status : "";
       if (!result || result.isError || status !== "started" && status !== "checking" && status !== "already_imported" && status !== "confirm_account") {
-        refused2(errorSentence(result), content ? content.access : null);
+        drop.uploadId = "";
+        dropFail(errorSentence(result), content ? content.access : null);
         return;
       }
       if (status === "confirm_account") {
         const source = content.source && typeof content.source === "object" && typeof content.source.label === "string" ? content.source.label : "";
-        p.saving = false;
-        p.savingKey = "";
-        p.confirm = { key: key2, name: typeof content.name === "string" && content.name ? content.name : name, source, reconfirm: content.reconfirm === true };
-        kit.render("picker:confirm");
+        drop.phase = "confirm";
+        drop.confirm = { name: typeof content.name === "string" && content.name ? content.name : name, source, reconfirm: content.reconfirm === true };
+        kit.render("picker:drop:confirm");
         return;
       }
-      const done = p.pick.archive.done;
       const picked = { name: typeof content.name === "string" && content.name ? content.name : name, status };
       if (typeof content.archive_name === "string" && content.archive_name)
         picked.archiveName = content.archive_name;
       if (status === "started" && content.source && typeof content.source.label === "string" && content.source.label)
         picked.source = { label: content.source.label };
-      stopTimer();
-      p = null;
-      session++;
-      done(picked);
-    }, () => refused2("", null));
+      drop.uploadId = "";
+      leaveDrop(picked);
+    }, () => {
+      if (dropLive(mine, attempt))
+        dropFail("");
+    });
+  }
+  function dropView() {
+    const page2 = el("main", "page picker");
+    const words2 = drop.words;
+    const top = el("div", "picker-top");
+    const backButton = kit.button(words2.back, "picker:back", escape2, "plain");
+    backButton.className = "btn back";
+    add(top, backButton);
+    add(page2, top);
+    add(page2, el("h1", "", words2.title));
+    add(page2, el("p", "muted", words2.intro));
+    const body = el("div", "picker-body drop-body");
+    if (drop.error) {
+      const banner = el("div", "banner");
+      banner.setAttribute("role", "alert");
+      add(banner, add(el("div", "banner-body"), el("p", "", drop.error)));
+      add(body, banner);
+      if (drop.access)
+        add(body, accessNote(drop.access, null));
+    }
+    const phase = drop.phase;
+    if (phase === "idle" || phase === "error")
+      add(body, dropZone());
+    else if (phase === "confirm")
+      add(body, confirmBox());
+    else
+      add(body, progressBox());
+    add(page2, body);
+    return page2;
+  }
+  function dropZone() {
+    const words2 = drop.words;
+    const wrap = el("div", "drop");
+    const zone = el("button", "drop-zone");
+    zone.type = "button";
+    zone.setAttribute("data-key", "picker:drop:zone");
+    zone.setAttribute("aria-label", words2.zoneLabel);
+    const title = el("span", "drop-title", words2.zone);
+    const hint = el("span", "drop-hint", words2.hint);
+    add(zone, title, hint);
+    const folderInput = el("input");
+    folderInput.type = "file";
+    folderInput.setAttribute("webkitdirectory", "");
+    folderInput.setAttribute("directory", "");
+    folderInput.className = "drop-input";
+    folderInput.setAttribute("tabindex", "-1");
+    folderInput.setAttribute("aria-hidden", "true");
+    folderInput.setAttribute("aria-label", words2.zoneLabel);
+    folderInput.setAttribute("data-key", "picker:drop:folder-input");
+    const fileInput = el("input");
+    fileInput.type = "file";
+    fileInput.className = "drop-input";
+    fileInput.setAttribute("tabindex", "-1");
+    fileInput.setAttribute("aria-hidden", "true");
+    fileInput.setAttribute("aria-label", words2.chooseFile);
+    fileInput.setAttribute("data-key", "picker:drop:file-input");
+    const mine = drop.mine;
+    const take = (input) => () => {
+      const items = chosen(input);
+      if (items.length && dropLive(mine))
+        beginUpload(() => Promise.resolve(items));
+    };
+    folderInput.addEventListener("change", take(folderInput));
+    fileInput.addEventListener("change", take(fileInput));
+    zone.addEventListener("click", () => folderInput.click());
+    const over = (on) => {
+      zone.setAttribute("data-over", on ? "true" : "false");
+      title.textContent = on ? words2.over : words2.zone;
+    };
+    let depth2 = 0;
+    zone.addEventListener("dragenter", (event) => {
+      event.preventDefault();
+      depth2++;
+      over(true);
+    });
+    zone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      if (event.dataTransfer)
+        event.dataTransfer.dropEffect = "copy";
+    });
+    zone.addEventListener("dragleave", () => {
+      depth2 = Math.max(0, depth2 - 1);
+      if (!depth2)
+        over(false);
+    });
+    zone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      depth2 = 0;
+      over(false);
+      const reading = dropped(event, () => !dropLive(mine));
+      if (reading)
+        beginUpload(() => reading);
+      else
+        dropFail(words2.empty);
+    });
+    add(wrap, zone, add(el("p", "drop-or"), kit.button(words2.chooseFile, "picker:drop:file", () => fileInput.click(), "plain")), folderInput, fileInput);
+    return wrap;
+  }
+  function progressBox() {
+    const words2 = drop.words;
+    const box = el("div", "drop-progress");
+    box.setAttribute("role", "status");
+    if (drop.phase === "reading")
+      add(box, el("p", "", words2.reading));
+    else if (drop.phase === "approving")
+      add(box, el("p", "", words2.starting));
+    else {
+      const share = drop.total > 0 ? Math.min(1, drop.sent / drop.total) : drop.files > 0 ? Math.min(1, drop.filesDone / drop.files) : 0;
+      add(box, el("p", "strong", fill2(words2.uploading, { name: drop.name })));
+      const bar = el("div", "bar");
+      bar.setAttribute("role", "progressbar");
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", "100");
+      bar.setAttribute("aria-valuenow", String(Math.round(share * 100)));
+      bar.setAttribute("aria-label", fill2(words2.uploading, { name: drop.name }));
+      const fillNode = el("div", "bar-fill");
+      fillNode.style.width = Math.round(share * 1000) / 10 + "%";
+      add(bar, fillNode);
+      add(box, bar);
+      add(box, el("p", "muted", fill2(drop.files > 1 ? words2.progressFiles : words2.progress, {
+        sent: size(drop.sent),
+        total: size(drop.total),
+        files: kit.count(drop.filesDone),
+        of: kit.count(drop.files)
+      })));
+      if (drop.paused)
+        add(box, el("p", "fnote strong", words2.paused));
+    }
+    if (drop.phase !== "approving")
+      add(box, add(el("div", "actions"), kit.button(words2.cancel, "picker:drop:cancel", cancelDrop, "plain")));
+    return box;
+  }
+  function confirmBox() {
+    const words2 = drop.words.account;
+    const source = drop.confirm.source || words2.sourceFallback;
+    const name = drop.confirm.name;
+    const ask = el("div", "banner");
+    ask.setAttribute("role", "group");
+    ask.setAttribute("aria-label", fill2(words2.line, { name, source }));
+    const answer = (extra, label, labelFor2, focus, style) => {
+      const control = kit.button(label, focus, () => approveDrop(extra), style);
+      control.setAttribute("aria-label", labelFor2);
+      return control;
+    };
+    const again = drop.confirm.reconfirm;
+    add(ask, add(el("div", "banner-body"), el("p", "", fill2(again ? words2.reconfirm.line : words2.line, { name, source })), el("p", "muted", fill2(again ? words2.reconfirm.note : words2.note, { name, source })), add(el("div", "actions"), answer({ confirm_account: true }, fill2(words2.add, { name, source }), fill2(words2.addFor, { name, source }), "picker:confirm", "main"), ...again ? [] : [answer({ keep_apart: true }, words2.apart, fill2(words2.apartFor, { name, source }), "picker:confirm-apart", "plain")], kit.button(drop.words.chooseAnother, "picker:confirm-other", cancelDrop, "plain"))));
+    return ask;
   }
   function openScope(id, label, title, returnKey, notice, initial, pick2) {
     stopTimer();
@@ -140755,9 +141622,6 @@ function chatgptPickerProgram(kit) {
       saving: false,
       saveError: "",
       discarding: false,
-      savingKey: "",
-      saveAccess: null,
-      confirm: null,
       roots: [],
       rootCursor: "",
       branches: new Map,
@@ -140809,9 +141673,6 @@ function chatgptPickerProgram(kit) {
   function validBrowse(page2) {
     return !!page2 && typeof page2 === "object" && typeof page2.account_generation === "string" && !!page2.account_generation && typeof page2.scope_revision === "string" && !!page2.scope_revision && Array.isArray(page2.nodes) && page2.nodes.every(validNode);
   }
-  function validArchiveBrowse(page2) {
-    return !!page2 && typeof page2 === "object" && Array.isArray(page2.nodes) && page2.nodes.every(validNode);
-  }
   function failLoad(retry, focus) {
     p.loading = "";
     p.error = Q.loadFailed;
@@ -140820,11 +141681,10 @@ function chatgptPickerProgram(kit) {
   }
   function list(parentKey2, append, after) {
     const cursor = append ? parentKey2 ? p.cursors.get(parentKey2) : p.rootCursor : "";
-    const archive = archiveMode();
-    const args = archive ? {} : { source_id: p.id };
+    const args = { source_id: p.id };
     if (parentKey2)
       args.parent_key = parentKey2;
-    if (!archive && parentKey2 && (p.ancestors.get(parentKey2) || []).length)
+    if (parentKey2 && (p.ancestors.get(parentKey2) || []).length)
       args.ancestor_keys = p.ancestors.get(parentKey2).slice(0, 64);
     if (cursor)
       args.cursor = cursor;
@@ -140833,11 +141693,11 @@ function chatgptPickerProgram(kit) {
     const focus = append ? "picker:more:" + parentKey2 : p.loaded ? "" : "picker:back";
     kit.render(focus);
     const mine = session;
-    kit.call(archive ? T.archiveBrowse : T.scopeList, args).then((result) => {
+    kit.call(T.scopeList, args).then((result) => {
       if (mine !== session || !p)
         return;
       const page2 = scopeData(result);
-      if (!(archive ? validArchiveBrowse(page2) : validBrowse(page2))) {
+      if (!validBrowse(page2)) {
         failLoad(() => list(parentKey2, append, after), "picker:retry");
         return;
       }
@@ -141174,13 +142034,13 @@ function chatgptPickerProgram(kit) {
     return lines;
   }
   function anyChosen() {
-    let chosen = false;
+    let chosen2 = false;
     p.own.forEach((_state, key2) => {
       const state = effective(key2);
       if (state === "ingest" || state === "metadata_only")
-        chosen = true;
+        chosen2 = true;
     });
-    return chosen;
+    return chosen2;
   }
   function saveFolders() {
     if (!canSaveFolders())
@@ -141350,14 +142210,6 @@ function chatgptPickerProgram(kit) {
   }
   function pickButton(key2, name, focusKey) {
     const words2 = p.pick.words;
-    if (archiveMode()) {
-      const busy = p.saving && p.savingKey === key2;
-      const control2 = kit.button(busy ? words2.busy : words2.makePrivate, focusKey, p.loading || p.saving ? null : () => approveArchive(key2, name), "plain");
-      if (busy)
-        control2.setAttribute("aria-busy", "true");
-      control2.setAttribute("aria-label", fill2(words2.makePrivateFor, { name }));
-      return control2;
-    }
     if (p.pick.taken.indexOf(key2) >= 0)
       return kit.button(words2.alreadyPrivate, focusKey, null, "plain");
     const control = kit.button(words2.makePrivate, focusKey, p.loading ? null : () => leave("", false, { key: key2, name }), "plain");
@@ -141368,25 +142220,22 @@ function chatgptPickerProgram(kit) {
     const key2 = node.key;
     const li = el("li", "frow pick");
     const label = (target) => {
-      if (archiveMode())
-        nameParts(target, node.name, "", node);
-      else
-        add(target, el("span", "fname-text", node.name));
+      add(target, el("span", "fname-text", node.name));
       return target;
     };
     if (node.has_children) {
-      const open6 = el("button", "fname");
-      open6.type = "button";
-      open6.setAttribute("data-key", "picker:open:" + key2);
-      label(open6);
+      const open7 = el("button", "fname");
+      open7.type = "button";
+      open7.setAttribute("data-key", "picker:open:" + key2);
+      label(open7);
       const chevron = el("span", "chev", "›");
       chevron.setAttribute("aria-hidden", "true");
-      add(open6, chevron);
+      add(open7, chevron);
       if (p.loading || p.saving)
-        open6.disabled = true;
+        open7.disabled = true;
       else
-        open6.addEventListener("click", () => drill(key2));
-      add(li, open6);
+        open7.addEventListener("click", () => drill(key2));
+      add(li, open7);
     } else
       add(li, label(el("p", "fname leaf")));
     if (node.selectable !== false)
@@ -141425,18 +142274,18 @@ function chatgptPickerProgram(kit) {
     const busy = p.loading || p.saving;
     let label;
     if (node.has_children) {
-      const open6 = el("button", "fname");
-      open6.type = "button";
-      open6.setAttribute("data-key", "picker:open:" + key2);
-      open6.setAttribute("aria-label", fill2(Q.openFolder, { name: node.name }));
+      const open7 = el("button", "fname");
+      open7.type = "button";
+      open7.setAttribute("data-key", "picker:open:" + key2);
+      open7.setAttribute("aria-label", fill2(Q.openFolder, { name: node.name }));
       if (busy)
-        open6.disabled = true;
+        open7.disabled = true;
       else
-        open6.addEventListener("click", () => drill(key2));
+        open7.addEventListener("click", () => drill(key2));
       const chevron = el("span", "fopen", "›");
       chevron.setAttribute("aria-hidden", "true");
-      add(open6, chevron);
-      label = open6;
+      add(open7, chevron);
+      label = open7;
     } else {
       label = el("p", "fname leaf");
       const spacer = el("span", "fopen-gap");
@@ -141572,36 +142421,6 @@ function chatgptPickerProgram(kit) {
       error2.setAttribute("role", "alert");
       add(error2, add(el("div", "banner-body"), el("p", "", p.error), add(el("div", "actions"), kit.button(Q.tryAgain, "picker:retry", () => p.retry && p.retry(), "plain"))));
       add(body, error2);
-    }
-    if (archiveMode() && p.confirm) {
-      const words2 = p.pick.words.account;
-      const source = p.confirm.source || words2.sourceFallback;
-      const name = p.confirm.name;
-      const ask = el("div", "banner");
-      ask.setAttribute("role", "group");
-      ask.setAttribute("aria-label", fill2(words2.line, { name, source }));
-      const answer = (extra, label, labelFor2, focus, style) => {
-        const control = kit.button(label, focus, p.saving ? null : () => approveArchive(p.confirm.key, p.confirm.name, extra), style);
-        control.setAttribute("aria-label", labelFor2);
-        return control;
-      };
-      add(ask, add(el("div", "banner-body"), el("p", "", fill2(p.confirm.reconfirm ? words2.reconfirm.line : words2.line, { name, source })), el("p", "muted", fill2(p.confirm.reconfirm ? words2.reconfirm.note : words2.note, { name, source })), add(el("div", "actions"), answer({ confirm_account: true }, fill2(words2.add, { name, source }), fill2(words2.addFor, { name, source }), "picker:confirm", "main"), ...p.confirm.reconfirm ? [] : [answer({ keep_apart: true }, words2.apart, fill2(words2.apartFor, { name, source }), "picker:confirm-apart", "plain")], kit.button(p.pick.words.chooseAnother, "picker:confirm-other", () => {
-        p.confirm = null;
-        kit.render(p.path.length ? "picker:up" : "picker:back");
-      }, "plain"))));
-      add(body, ask);
-    }
-    if (archiveMode() && p.saveError) {
-      const error2 = el("div", "banner");
-      error2.setAttribute("role", "alert");
-      add(error2, add(el("div", "banner-body"), el("p", "", p.saveError), add(el("div", "actions"), kit.button(p.pick.words.chooseAnother, "picker:archive-error", () => {
-        p.saveError = "";
-        p.saveAccess = null;
-        kit.render(p.path.length ? "picker:up" : "picker:back");
-      }, "plain"))));
-      add(body, error2);
-      if (p.saveAccess)
-        add(body, accessNote(p.saveAccess, null));
     }
   }
   function folderFooter() {
@@ -141906,6 +142725,8 @@ function chatgptPickerProgram(kit) {
     leave("", true);
   }
   function view3() {
+    if (drop)
+      return dropView();
     const page2 = el("main", "page picker");
     if (!p)
       return page2;
@@ -141937,6 +142758,10 @@ function chatgptPickerProgram(kit) {
     return page2;
   }
   function escape2() {
+    if (drop) {
+      leaveDrop(null);
+      return;
+    }
     if (!p)
       return;
     if (p.discarding) {
@@ -141948,8 +142773,14 @@ function chatgptPickerProgram(kit) {
       back();
   }
   if (typeof document !== "undefined") {
+    for (const name of ["dragover", "drop"]) {
+      document.addEventListener(name, (event) => {
+        if (drop)
+          event.preventDefault();
+      });
+    }
     document.addEventListener("keydown", (event) => {
-      if (!p || event.key !== "Escape" || event.defaultPrevented)
+      if (!p && !drop || event.key !== "Escape" || event.defaultPrevented)
         return;
       event.preventDefault();
       escape2();
@@ -141960,7 +142791,7 @@ function chatgptPickerProgram(kit) {
     start,
     pickFolder,
     pickArchive,
-    active: () => !!p,
+    active: () => !!p || !!drop,
     view: view3,
     afterRender: () => {
       return;
@@ -141974,7 +142805,9 @@ var init_picker = __esm(() => {
     connectSource: CONNECT_SOURCE_TOOL_NAME,
     scopeList: SCOPE_LIST_TOOL_NAME,
     scopeSet: SCOPE_SET_TOOL_NAME,
-    archiveBrowse: ARCHIVE_BROWSE_TOOL_NAME,
+    archiveUploadStart: ARCHIVE_UPLOAD_START_TOOL_NAME,
+    archiveUploadStatus: ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
+    archiveUploadCancel: ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
     archiveApprove: ARCHIVE_APPROVE_TOOL_NAME
   };
   CHATGPT_PICKER_MAIL_ARGS = { list: "draft", set: "mail" };
@@ -142490,12 +143323,12 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     const asked = L.questionsKey(s.description);
     area.addEventListener("input", () => {
       s.description = area.value;
-      const open6 = s.confirmStep;
+      const open7 = s.confirmStep;
       const could = canSave();
       changed();
       const noted = !!s.questionsError;
       s.questionsError = "";
-      if (open6 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
+      if (open7 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
         kit.render("privacy:description");
     });
     add(page2, add(field, area));
@@ -143006,6 +143839,18 @@ summary{cursor:pointer;border-radius:0.375rem}
 textarea.text{resize:vertical;min-height:4.5rem}
 .picker-body{display:flex;flex-direction:column;container-type:inline-size}
 .picker-body>.intro{margin-bottom:1rem}
+.drop{display:flex;flex-direction:column;align-items:stretch;gap:0.5rem}
+.drop-zone{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.25rem;width:100%;min-height:11rem;padding:1.5rem 1rem;font:inherit;text-align:center;color:var(--text);background:var(--surface);border:2px dashed var(--muted);border-radius:0.75rem;cursor:pointer}
+.drop-zone:hover,.drop-zone[data-over=true]{border-color:var(--accent);background:var(--info-bg)}
+.drop-zone[data-over=true]{border-style:solid}
+.drop-title{font-size:1.125rem;font-weight:600}
+.drop-hint{color:var(--muted);font-size:0.875rem}
+.drop-or{margin:0;text-align:center}
+.drop-or .btn{min-height:0;padding:0.25rem 0.5rem;border:0;background:none;color:var(--accent);font-size:0.875rem;font-weight:500}
+.drop-input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden}
+.drop-progress{display:flex;flex-direction:column;gap:0.5rem;padding:1rem;border:1px solid var(--line);border-radius:0.75rem;background:var(--surface)}
+.drop-progress p{margin:0}
+.drop-progress .bar-fill{transition:width 0.15s linear}
 .account{display:flex;align-items:center;gap:0.75rem;width:100%;min-height:3.5rem;padding:0.625rem 0.875rem;margin:0 0 0.75rem;font:inherit;text-align:left;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:0.75rem;cursor:pointer}
 .two-line{flex:1;min-width:0;display:flex;flex-direction:column;gap:0.125rem}
 .two-top{font-weight:600}
@@ -143096,7 +143941,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-import.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.row.source.has-import.has-actions:not(.has-menu)>.source-actions{grid-row:2;justify-content:flex-start}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
 });
@@ -143177,6 +144022,22 @@ function dashboardHostBridge(config2, io) {
     }
     io.callTool(name, args).then((result) => reply(id, result), () => reply(id, refused2("Could not reach Olympus.")));
   }
+  function uploadFile(id, params) {
+    const uploadId = params && typeof params.upload_id === "string" ? params.upload_id : "";
+    const path = params && typeof params.path === "string" ? params.path : "";
+    const file = params ? params.file : undefined;
+    const modified = params && typeof params.modified === "number" && Number.isFinite(params.modified) ? params.modified : 0;
+    const blob = !!file && typeof file === "object" && typeof file.size === "number" && typeof file.slice === "function";
+    if (config2.kind !== "computer" || !io.uploadFile || readOnly || !/^[0-9a-f]{32}$/.test(uploadId) || !path || path.length > 4096 || !blob) {
+      reply(id, { ok: false });
+      return;
+    }
+    const progress = (loaded) => {
+      if (typeof loaded === "number" && Number.isFinite(loaded))
+        post2({ jsonrpc: "2.0", method: "olympus/upload-progress", params: { request: id, loaded } });
+    };
+    io.uploadFile({ uploadId, path, modified, file }, progress).then((outcome) => reply(id, outcome && typeof outcome === "object" ? outcome : { ok: false }), () => reply(id, { ok: false }));
+  }
   function onMessage(event) {
     if (event.source !== io.frame.contentWindow)
       return;
@@ -143196,6 +144057,13 @@ function dashboardHostBridge(config2, io) {
         return;
       case "tools/call":
         callTool(id, params);
+        return;
+      case "olympus/upload-file":
+        uploadFile(id, params);
+        return;
+      case "olympus/upload-abort":
+        if (io.abortUpload && params && typeof params.upload_id === "string")
+          io.abortUpload(params.upload_id);
         return;
       case "ui/open-link":
         if (openLink(params && params.url))
@@ -143339,6 +144207,86 @@ function hostProgram(input, bridge) {
       return response.ok ? response.json().then((result) => remember(name, result)) : failed();
     });
   }
+  const sending = {};
+  const stopped = {};
+  function abortUpload(uploadId) {
+    stopped[uploadId] = true;
+    for (const request of (sending[uploadId] || []).slice())
+      request.abort();
+    delete sending[uploadId];
+  }
+  function uploadFile(upload, progress) {
+    if (expired || stopped[upload.uploadId])
+      return Promise.resolve({ ok: false, cancelled: !!stopped[upload.uploadId] });
+    return localUnlock(input.uploadTool).then(() => new Promise((resolve22) => {
+      if (!csrfToken || stopped[upload.uploadId]) {
+        resolve22({ ok: false, cancelled: !!stopped[upload.uploadId] });
+        return;
+      }
+      const size = upload.file.size;
+      const piece = input.uploadChunkBytes > 0 ? input.uploadChunkBytes : size || 1;
+      function send(offset) {
+        if (stopped[upload.uploadId]) {
+          resolve22({ ok: false, cancelled: true });
+          return;
+        }
+        const end = Math.min(size, offset + piece);
+        const last = end >= size;
+        const request = new XMLHttpRequest;
+        const list = sending[upload.uploadId] || (sending[upload.uploadId] = []);
+        list.push(request);
+        const forget = () => {
+          const at = list.indexOf(request);
+          if (at >= 0)
+            list.splice(at, 1);
+        };
+        request.open("POST", input.uploadPath);
+        request.setRequestHeader("X-Olympus-CSRF", csrfToken);
+        request.setRequestHeader("X-Olympus-Upload-Id", upload.uploadId);
+        request.setRequestHeader("X-Olympus-Upload-Path", encodeURIComponent(upload.path));
+        if (upload.modified > 0)
+          request.setRequestHeader("X-Olympus-Upload-Modified", String(Math.round(upload.modified)));
+        request.setRequestHeader("X-Olympus-Upload-Offset", String(offset));
+        request.setRequestHeader("X-Olympus-Upload-Final", last ? "1" : "0");
+        request.setRequestHeader("Content-Type", "application/octet-stream");
+        request.upload.onprogress = (event) => progress(offset + event.loaded);
+        request.onload = () => {
+          forget();
+          if (request.status === 401 || request.status === 403) {
+            lockPage();
+            resolve22({ ok: false });
+            return;
+          }
+          if (request.status >= 200 && request.status < 300) {
+            if (last)
+              resolve22({ ok: true });
+            else
+              send(end);
+            return;
+          }
+          let message2;
+          try {
+            const body = JSON.parse(request.responseText);
+            if (body && body.error && typeof body.error.message === "string")
+              message2 = body.error.message;
+          } catch {
+            message2 = undefined;
+          }
+          resolve22(message2 ? { ok: false, message: message2 } : { ok: false });
+        };
+        request.onerror = () => {
+          forget();
+          resolve22({ ok: false });
+        };
+        request.onabort = () => {
+          forget();
+          resolve22({ ok: false, cancelled: true });
+        };
+        request.send(offset === 0 && last ? upload.file : upload.file.slice(offset, end));
+      }
+      send(0);
+    }));
+  }
   let landing;
   if (window.location.hash.indexOf(input.openFragment) === 0) {
     const wanted = window.location.hash.slice(input.openFragment.length);
@@ -143351,6 +144299,8 @@ function hostProgram(input, bridge) {
   handle = bridge(landing ? { ...input.bridge, landing } : input.bridge, {
     frame,
     callTool,
+    uploadFile,
+    abortUpload,
     openUrl(url) {
       const own3 = Object.keys(input.bridge.links).map((key2) => input.bridge.links[key2]).concat(Object.keys(input.bridge.openTargets).map((key2) => input.bridge.openTargets[key2]));
       let parsed;
@@ -143370,9 +144320,9 @@ function hostProgram(input, bridge) {
   const how = document.getElementById("gate-how");
   if (toggle && how) {
     toggle.addEventListener("click", () => {
-      const open6 = how.hidden;
-      how.hidden = !open6;
-      toggle.setAttribute("aria-expanded", open6 ? "true" : "false");
+      const open7 = how.hidden;
+      how.hidden = !open7;
+      toggle.setAttribute("aria-expanded", open7 ? "true" : "false");
     });
   }
   const copy = document.querySelector("[data-gate-copy]");
@@ -143497,6 +144447,9 @@ function renderComputerHostPage(input) {
     landings: panelOpenTargetSources(),
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
+    uploadPath: DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH,
+    uploadTool: ARCHIVE_UPLOAD_START_TOOL_NAME,
+    uploadChunkBytes: ARCHIVE_UPLOAD_CHUNK_BYTES,
     words: DASHBOARD_HOST_GATE_COPY,
     updateSupported: installer !== undefined,
     updateWords: { notice: DASHBOARD_UPDATE_COPY.notice("{version}"), copied: DASHBOARD_UPDATE_COPY.copied, copyFailed: DASHBOARD_UPDATE_COPY.copyFailed }
@@ -143527,12 +144480,13 @@ function renderComputerHostPage(input) {
   ].join(`
 `);
 }
-var DASHBOARD_HTML_PATH = "/dashboard", DASHBOARD_TOOLS_CALL_PATH = "/dashboard/tools/call", DASHBOARD_PANEL_READ_QUERY_PARAM = "panel-read", DASHBOARD_LOCAL_PAGES, HOST_CSS, COMPUTER_HOST_PAGE_CSP;
+var DASHBOARD_HTML_PATH = "/dashboard", DASHBOARD_TOOLS_CALL_PATH = "/dashboard/tools/call", DASHBOARD_PANEL_READ_QUERY_PARAM = "panel-read", DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH = "/dashboard/archive-import/upload-file", DASHBOARD_LOCAL_PAGES, HOST_CSS, COMPUTER_HOST_PAGE_CSP;
 var init_host_page = __esm(() => {
   init_update_check();
   init_dashboard_contract();
   init_outside_help();
   init_page();
+  init_staging();
   init_vocabulary();
   init_open_targets();
   DASHBOARD_LOCAL_PAGES = {
@@ -144504,7 +145458,7 @@ function setupBlurb(source) {
   if (action.kind === "this_computer")
     return "Choose the folders on this computer Olympus may read. Nothing is read until you choose.";
   if (action.kind === "archive_import")
-    return "Import a mail export from this computer on the dashboard. Olympus reads it where it is and never changes it.";
+    return "Import a mail export from this computer on the dashboard. Olympus copies it into its own storage to read it, and never changes the original.";
   return "";
 }
 function connectAction(source) {
@@ -144670,12 +145624,12 @@ function chatgptMarkdownRender(doc2, container, text3) {
         i2++;
         continue;
       }
-      const open6 = fence(line2);
-      if (open6) {
+      const open7 = fence(line2);
+      if (open7) {
         endPara();
         i2++;
         const body = [];
-        while (i2 < lines.length && !(fence(lines[i2]) && fence(lines[i2])[0] === open6[0] && fence(lines[i2]).length >= open6.length))
+        while (i2 < lines.length && !(fence(lines[i2]) && fence(lines[i2])[0] === open7[0] && fence(lines[i2]).length >= open7.length))
           body.push(lines[i2++]);
         if (i2 < lines.length)
           i2++;
@@ -145455,7 +146409,7 @@ var init_request_peer = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac5, randomBytes as randomBytes26, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+import { createHmac as createHmac5, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -145475,7 +146429,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
-  const sessionSecret = createHmac5("sha256", options.sessionSecret?.trim() || randomBytes26(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
+  const sessionSecret = createHmac5("sha256", options.sessionSecret?.trim() || randomBytes27(32).toString("base64url")).update("olympus-dashboard-control-key-v1").update("\x00").update(authToken ?? "").digest("base64url");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -145851,7 +146805,10 @@ function isDashboardControlRoute(request) {
     "/dashboard/disconnect",
     "/dashboard/delete-source-data",
     "/dashboard/unpair",
-    "/dashboard/archive-import/browse",
+    "/dashboard/archive-import/upload-start",
+    "/dashboard/archive-import/upload-file",
+    "/dashboard/archive-import/upload-status",
+    "/dashboard/archive-import/upload-cancel",
     "/dashboard/archive-import/approve",
     "/dashboard/archive-import/decline",
     "/dashboard/archive-import/remove",
@@ -145904,7 +146861,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(sessionSecret, origin, nowMs, grade = "bearer") {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes26(24).toString("base64url"),
+    nonce: randomBytes27(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(sessionSecret, origin),
     grade
@@ -146221,7 +147178,10 @@ var init_http = __esm(() => {
     "/dashboard/consult/standard"
   ];
   DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS = [
-    "/dashboard/archive-import/browse",
+    "/dashboard/archive-import/upload-start",
+    "/dashboard/archive-import/upload-file",
+    "/dashboard/archive-import/upload-status",
+    "/dashboard/archive-import/upload-cancel",
     "/dashboard/archive-import/approve",
     "/dashboard/archive-import/decline",
     "/dashboard/archive-import/remove",
@@ -146487,13 +147447,13 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync30, copyFileSync as copyFileSync2, existsSync as existsSync81, lstatSync as lstatSync41, mkdirSync as mkdirSync55, readFileSync as readFileSync72 } from "node:fs";
+import { chmodSync as chmodSync30, copyFileSync as copyFileSync2, existsSync as existsSync82, lstatSync as lstatSync41, mkdirSync as mkdirSync56, readFileSync as readFileSync72 } from "node:fs";
 import { dirname as dirname83 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync81(path)) {
+  if (!existsSync82(path)) {
     return {
       path,
       present: false,
@@ -146542,7 +147502,7 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync81(path)) {
+  if (existsSync82(path)) {
     const stat6 = lstatSync41(path);
     if (stat6.isSymbolicLink() || !stat6.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
@@ -146551,7 +147511,7 @@ function writeSourceIngestionExclusionsFile(options) {
     copyFileSync2(path, backupPath);
     chmodSync30(backupPath, 384);
   } else {
-    mkdirSync55(dirname83(path), { recursive: true, mode: 448 });
+    mkdirSync56(dirname83(path), { recursive: true, mode: 448 });
   }
   writePrivateFileAtomicSync(path, text3);
   return {
@@ -146876,12 +147836,12 @@ class SpawnCommandRunner {
     try {
       return await Promise.race([
         completed,
-        new Promise((resolve21) => {
+        new Promise((resolve22) => {
           termTimer = setTimeout(() => {
             child.kill();
             killTimer = setTimeout(() => {
               child.kill("SIGKILL");
-              resolve21({
+              resolve22({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -146905,10 +147865,10 @@ function safeDetail(value2) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash76, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
-import { readFileSync as readFileSync73, statSync as statSync34 } from "node:fs";
+import { createHash as createHash76, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { readFileSync as readFileSync73, statSync as statSync35 } from "node:fs";
 import { homedir as homedir42 } from "node:os";
-import { join as join107, resolve as resolve21 } from "node:path";
+import { join as join108, resolve as resolve22 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -147108,7 +148068,7 @@ function createEmailSourceWorker(options = {}) {
               let releaseTicket;
               if (caller?.surface !== "remote") {
                 pruneReleaseTickets();
-                releaseTicket = randomBytes27(32).toString("base64url");
+                releaseTicket = randomBytes28(32).toString("base64url");
                 releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60000, manifests: manifests.manifests });
                 while (releaseTickets.size > 256)
                   releaseTickets.delete(releaseTickets.keys().next().value);
@@ -147890,7 +148850,7 @@ function createEmailSourceWorker(options = {}) {
               }));
             }).catch((error2) => {
               const failureKind = manualSyncFailureKind(error2);
-              const failureRef = failureKind === "unknown" ? randomBytes27(8).toString("hex") : undefined;
+              const failureRef = failureKind === "unknown" ? randomBytes28(8).toString("hex") : undefined;
               if (failureRef || !(error2 instanceof EmailSourceWorkerError) && !(error2 instanceof OperationError)) {
                 logSourceWorkerInternalError(request, error2, failureRef);
               }
@@ -148251,22 +149211,58 @@ function createEmailSourceWorker(options = {}) {
           if (request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
             throw new EmailSourceWorkerError(403, "mac_dashboard_only", "Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.");
           }
+          if (url.pathname === "/dashboard/archive-import/upload-file") {
+            const header = (name) => request.headers.get(name) ?? "";
+            let relPath;
+            try {
+              relPath = decodeURIComponent(header("X-Olympus-Upload-Path"));
+            } catch {
+              throw new EmailSourceWorkerError(400, "bad_path", "The name of the file could not be read.");
+            }
+            const modified = Number(header("X-Olympus-Upload-Modified"));
+            const declared = Number(header("Content-Length"));
+            const offsetHeader = header("X-Olympus-Upload-Offset");
+            const offset = offsetHeader === "" ? 0 : Number(offsetHeader);
+            const final = header("X-Olympus-Upload-Final") !== "0";
+            try {
+              const received = await archiveImports.upload.receive(header("X-Olympus-Upload-Id"), relPath, request.body, {
+                ...Number.isFinite(modified) && modified > 0 ? { modified } : {},
+                ...Number.isFinite(declared) && declared > 0 ? { declaredBytes: declared } : {},
+                offset,
+                final
+              });
+              return json({ ok: true, bytes: received.bytes });
+            } catch (error2) {
+              if (error2 instanceof ArchiveUploadError)
+                throw new EmailSourceWorkerError(error2.status, error2.code, error2.message);
+              throw error2;
+            }
+          }
           const record5 = await parseObjectBody(request);
-          if (url.pathname === "/dashboard/archive-import/browse") {
-            const parentKey2 = asOptionalString(record5.parent_key);
-            const cursor = asOptionalString(record5.cursor);
-            return json({
-              ok: true,
-              ...await archiveImports.browse({ ...parentKey2 ? { parentKey: parentKey2 } : {}, ...cursor ? { cursor } : {} })
-            });
+          if (url.pathname === "/dashboard/archive-import/upload-start") {
+            return await withDashboardGrantMutation(async () => json({ ok: true, upload_id: archiveImports.upload.start().uploadId }));
+          }
+          if (url.pathname === "/dashboard/archive-import/upload-status" || url.pathname === "/dashboard/archive-import/upload-cancel") {
+            const uploadId = asOptionalString(record5.upload_id);
+            if (!uploadId)
+              throw new EmailSourceWorkerError(400, "invalid_request", "upload_id is required.");
+            try {
+              if (url.pathname.endsWith("-cancel"))
+                return json({ ok: true, ...archiveImports.upload.cancel(uploadId) });
+              return json({ ok: true, ...archiveImports.upload.status(uploadId) });
+            } catch (error2) {
+              if (error2 instanceof ArchiveUploadError)
+                throw new EmailSourceWorkerError(error2.status, error2.code, error2.message);
+              throw error2;
+            }
           }
           if (url.pathname === "/dashboard/archive-import/approve") {
             return await withDashboardGrantMutation(async () => {
               assertDashboardModelsReady();
-              const key2 = asOptionalString(record5.key);
+              const uploadId = asOptionalString(record5.upload_id);
               const requestId = asOptionalString(record5.request_id);
-              if (key2 === undefined === (requestId === undefined)) {
-                throw new EmailSourceWorkerError(400, "invalid_request", "Give either key or request_id.");
+              if (uploadId === undefined === (requestId === undefined)) {
+                throw new EmailSourceWorkerError(400, "invalid_request", "Give either upload_id or request_id.");
               }
               const confirmAccount = asOptionalBoolean(record5.confirm_account) === true;
               const keepApart = asOptionalBoolean(record5.keep_apart) === true;
@@ -148275,10 +149271,10 @@ function createEmailSourceWorker(options = {}) {
               }
               const answer = { ...confirmAccount ? { confirmAccount: true } : {}, ...keepApart ? { keepApart: true } : {} };
               const sourceId = asOptionalString(record5.source_id);
-              if (sourceId !== undefined && key2 === undefined) {
-                throw new EmailSourceWorkerError(400, "invalid_request", "source_id goes with a chosen key.");
+              if (sourceId !== undefined && uploadId === undefined) {
+                throw new EmailSourceWorkerError(400, "invalid_request", "source_id goes with an upload.");
               }
-              return json(await archiveImports.approve(key2 !== undefined ? { key: key2, ...sourceId !== undefined ? { sourceId } : {}, ...answer } : { requestId, ...answer }));
+              return json(await archiveImports.approve(uploadId !== undefined ? { uploadId, ...sourceId !== undefined ? { sourceId } : {}, ...answer } : { requestId, ...answer }));
             });
           }
           if (url.pathname === "/dashboard/archive-import/stop") {
@@ -148925,8 +149921,8 @@ function createEmailSourceWorker(options = {}) {
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
     let release;
-    dashboardGrantMutationTail = new Promise((resolve22) => {
-      release = resolve22;
+    dashboardGrantMutationTail = new Promise((resolve23) => {
+      release = resolve23;
     });
     await previous;
     try {
@@ -149242,7 +150238,7 @@ function isSqliteBusyError(error2) {
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep4(ms) {
-  return new Promise((resolve22) => setTimeout(resolve22, ms));
+  return new Promise((resolve23) => setTimeout(resolve23, ms));
 }
 async function parseConsultAskRequest(request) {
   const record5 = await parseObjectBody(request);
@@ -150275,10 +151271,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve21(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve22(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve21(path)))].sort();
+  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve22(path)))].sort();
   const a = normalize5(left);
   const b = normalize5(right);
   return a.length === b.length && a.every((value2, index) => value2 === b[index]);
@@ -150471,7 +151467,7 @@ function assertDashboardSourceMayRead(source, sourceDashboard, disconnected) {
 }
 function dashboardRegistryStamp(registryPath) {
   try {
-    const stat6 = statSync34(registryPath);
+    const stat6 = statSync35(registryPath);
     return `${stat6.mtimeMs}:${stat6.size}`;
   } catch {
     return "absent";
@@ -150639,7 +151635,7 @@ function dashboardStorageNotices() {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync73(join107(homedir42(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync73(join108(homedir42(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -151196,6 +152192,7 @@ var init_email_source = __esm(() => {
   init_selected_item_safety();
   init_venice_models();
   init_public_surface();
+  init_staging();
   init_messaging_capture();
   init_unpaired_sources();
   init_pairing_session_paths();
@@ -151614,8 +152611,8 @@ var init_locations = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire7 } from "node:module";
-import { existsSync as existsSync82, readFileSync as readFileSync74 } from "node:fs";
-import { dirname as dirname84, join as join108 } from "node:path";
+import { existsSync as existsSync83, readFileSync as readFileSync74 } from "node:fs";
+import { dirname as dirname84, join as join109 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
   const home2 = context2.home;
   const globs = IGNORE_SEGMENTS.map((segment) => `**/${segment}`);
@@ -151701,7 +152698,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync82(snapshotPath))
+    if (!existsSync83(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -151830,11 +152827,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join108(dir, "node_modules");
-    if (!existsSync82(join108(candidate, "@parcel", "watcher")))
+    const candidate = join109(dir, "node_modules");
+    if (!existsSync83(join109(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire7(join108(dirname84(candidate), "package.json"));
+      const requireFrom = createRequire7(join109(dirname84(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error2) {
       failures.push(error2 instanceof Error ? error2.message : String(error2));
@@ -151874,8 +152871,8 @@ var init_watch_hub = __esm(() => {
 
 // src/workers/local-files/connector.ts
 import { createHash as createHash77, randomUUID as randomUUID29 } from "node:crypto";
-import { realpathSync as realpathSync18, rmSync as rmSync26, readdirSync as readdirSync19 } from "node:fs";
-import { join as join109, posix as posix3 } from "node:path";
+import { realpathSync as realpathSync19, rmSync as rmSync27, readdirSync as readdirSync20 } from "node:fs";
+import { join as join110, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
   for (const part of rel.split("/")) {
@@ -151952,7 +152949,7 @@ function createLocalFilesSourceConnector(options) {
       throw new LocalFilesRootMissingError(root);
     let real;
     try {
-      real = realpathSync18.native(configured);
+      real = realpathSync19.native(configured);
     } catch {
       throw new LocalFilesRootMissingError(root);
     }
@@ -152166,15 +153163,15 @@ function createLocalFilesSourceConnector(options) {
       }
     }
   }
-  const snapshotFile = (gen) => join109(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
+  const snapshotFile = (gen) => join110(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
   const pruneSnapshots = (keep) => {
     if (!options.watch)
       return;
     const keepNames = new Set(keep.map((gen) => `${options.connectorId}.${gen}.snap`));
     try {
-      for (const name of readdirSync19(options.watch.snapshotDir)) {
+      for (const name of readdirSync20(options.watch.snapshotDir)) {
         if (name.startsWith(`${options.connectorId}.`) && name.endsWith(".snap") && !keepNames.has(name)) {
-          rmSync26(join109(options.watch.snapshotDir, name), { force: true });
+          rmSync27(join110(options.watch.snapshotDir, name), { force: true });
         }
       }
     } catch {}
@@ -152352,7 +153349,7 @@ function createLocalFilesSourceConnector(options) {
         throw new FileExtractionSourceError("source_unavailable");
       let scopeRoot;
       try {
-        scopeRoot = ScopeRoot.open(realpathSync18.native(rootReal));
+        scopeRoot = ScopeRoot.open(realpathSync19.native(rootReal));
       } catch {
         throw new FileExtractionSourceError("source_unavailable");
       }
@@ -152756,8 +153753,8 @@ function createLocalFilesOwnRootsCleanup(options) {
           walk.done = true;
         else
           walk.after = page2.next;
-        await new Promise((resolve22) => {
-          setImmediate(resolve22);
+        await new Promise((resolve23) => {
+          setImmediate(resolve23);
         });
       }
     }
@@ -152784,8 +153781,8 @@ function createLocalFilesOwnRootsCleanup(options) {
       });
       const work = running;
       let timer;
-      const bound = new Promise((resolve22) => {
-        timer = setTimeout(() => resolve22({ removed: removedNow, complete: false }), maxMs);
+      const bound = new Promise((resolve23) => {
+        timer = setTimeout(() => resolve23({ removed: removedNow, complete: false }), maxMs);
         timer.unref?.();
       });
       return Promise.race([work, bound]).finally(() => {
@@ -152898,7 +153895,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve22) => setTimeout(resolve22, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve23) => setTimeout(resolve23, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -154677,9 +155674,9 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync83, mkdirSync as mkdirSync56, opendirSync, readFileSync as readFileSync75 } from "node:fs";
+import { existsSync as existsSync84, mkdirSync as mkdirSync57, opendirSync, readFileSync as readFileSync75 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname85, join as join110 } from "node:path";
+import { dirname as dirname85, join as join111 } from "node:path";
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -154762,10 +155759,10 @@ class MacPermissions {
     if (!this.active)
       return;
     const tops = [
-      ["desktop", join110(this.home, "Desktop")],
-      ["documents", join110(this.home, "Documents")],
-      ["downloads", join110(this.home, "Downloads")],
-      ["icloud", join110(this.home, "Library", "Mobile Documents")]
+      ["desktop", join111(this.home, "Desktop")],
+      ["documents", join111(this.home, "Documents")],
+      ["downloads", join111(this.home, "Downloads")],
+      ["icloud", join111(this.home, "Library", "Mobile Documents")]
     ];
     for (const [kind, root] of tops) {
       if (isWithinScopePath(realPath, root))
@@ -154783,7 +155780,7 @@ class MacPermissions {
       return true;
     if (realPath === "/" || realPath === "/Volumes")
       return true;
-    return [join110(this.home, "Desktop"), join110(this.home, "Documents"), join110(this.home, "Downloads"), join110(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+    return [join111(this.home, "Desktop"), join111(this.home, "Documents"), join111(this.home, "Downloads"), join111(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
   }
   nodeAccess(guard) {
     if (this.recall(guard) === "granted")
@@ -154818,7 +155815,7 @@ class MacPermissions {
     return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
   hasFullDiskAccess() {
-    for (const path of [join110(this.home, "Library", "Safari"), join110(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+    for (const path of [join111(this.home, "Library", "Safari"), join111(this.home, "Library", "Application Support", "com.apple.TCC")]) {
       try {
         this.listProtected(path);
         return true;
@@ -154849,8 +155846,8 @@ class MacPermissions {
       });
       this.inFlight.set(guard.root, pending);
     }
-    const waiting = new Promise((resolve22) => {
-      const timer = setTimeout(() => resolve22("waiting"), this.askTimeoutMs);
+    const waiting = new Promise((resolve23) => {
+      const timer = setTimeout(() => resolve23("waiting"), this.askTimeoutMs);
       timer.unref?.();
       pending.finally(() => clearTimeout(timer)).catch(() => {
         return;
@@ -154872,7 +155869,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync56(dirname85(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync57(dirname85(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -154881,7 +155878,7 @@ class MacPermissions {
     if (this.memory)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync83(this.memoryPath)) {
+    if (this.memoryPath && existsSync84(this.memoryPath)) {
       try {
         const parsed = JSON.parse(readFileSync75(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
@@ -154929,7 +155926,7 @@ var init_mac_permissions = __esm(() => {
 });
 
 // src/workers/local-files/scheduler-source.ts
-import { realpathSync as realpathSync19 } from "node:fs";
+import { realpathSync as realpathSync20 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 function retryTomorrow(context2, reason, afterMs = DAY_MS3) {
   const attempted = Date.parse(context2?.attemptedAt ?? new Date().toISOString());
@@ -154943,7 +155940,7 @@ function createLocalFilesSchedulerSource(input) {
   }
   const roots = input.policy.roots;
   const tasks = [];
-  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync19(homedir43()) });
+  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync20(homedir43()) });
   const volumeResolver = input.volumes ?? input.watch?.volumes;
   const needsHelper = (scopePath) => {
     if (!macPermissions.active || macPermissions.hasHelper())
@@ -155248,9 +156245,9 @@ async function blobToArrayBuffer(blob) {
     return await blob.arrayBuffer();
   }
   const fr = new FileReader;
-  return new Promise((resolve22, reject) => {
+  return new Promise((resolve23, reject) => {
     fr.onload = () => {
-      resolve22(fr.result);
+      resolve23(fr.result);
     };
     fr.onerror = () => {
       reject(fr.error);
@@ -156107,16 +157104,16 @@ class MimeNode {
     for (let parts of foldedLines) {
       let rawLine = parts.join(`
 `);
-      let sep15 = rawLine.indexOf(":");
-      let rawKey = sep15 < 0 ? rawLine : rawLine.slice(0, sep15);
+      let sep16 = rawLine.indexOf(":");
+      let rawKey = sep16 < 0 ? rawLine : rawLine.slice(0, sep16);
       this.rawHeaderLines.push({
         key: rawKey.toLowerCase(),
         line: rawLine
       });
       let unfoldedLine = parts.join("");
-      sep15 = unfoldedLine.indexOf(":");
-      let key2 = sep15 < 0 ? unfoldedLine : unfoldedLine.slice(0, sep15);
-      let value2 = sep15 < 0 ? "" : trimWsp(foldLineBreaks(unfoldedLine.slice(sep15 + 1)));
+      sep16 = unfoldedLine.indexOf(":");
+      let key2 = sep16 < 0 ? unfoldedLine : unfoldedLine.slice(0, sep16);
+      let value2 = sep16 < 0 ? "" : trimWsp(foldLineBreaks(unfoldedLine.slice(sep16 + 1)));
       this.headers.push({ key: key2.toLowerCase(), originalKey: key2, value: value2 });
       const lowerKey = key2.toLowerCase();
       if (CONTENT_HEADERS.has(lowerKey) && !seenContentHeaders.has(lowerKey)) {
@@ -158551,15 +159548,15 @@ function replaceTags(str, prefix, pattern, replacement) {
   parts.push(str.slice(copied));
   return parts.join("");
 }
-function replaceBlocks(str, open6, openToGt, close, closeToGt, replacement) {
+function replaceBlocks(str, open7, openToGt, close, closeToGt, replacement) {
   const nextGt = createFinder(str, />/g);
   const nextClose = createFinder(str, close);
   const parts = [];
   let copied = 0;
   let searchFrom = 0;
   while (true) {
-    open6.lastIndex = searchFrom;
-    const opener = open6.exec(str);
+    open7.lastIndex = searchFrom;
+    const opener = open7.exec(str);
     if (!opener) {
       break;
     }
@@ -164370,7 +165367,7 @@ var init_source_targets = __esm(() => {
 });
 
 // src/workers/archive-import/start.ts
-import { lstatSync as lstatSync42, realpathSync as realpathSync20 } from "node:fs";
+import { lstatSync as lstatSync42, realpathSync as realpathSync21 } from "node:fs";
 import { posix as posix4 } from "node:path";
 function prepareArchiveImport(input) {
   const path = input.path;
@@ -164378,7 +165375,7 @@ function prepareArchiveImport(input) {
     return { kind: "unreadable", code: "escape" };
   let kind;
   try {
-    if (realpathSync20.native(path) !== path)
+    if (realpathSync21.native(path) !== path)
       return { kind: "unreadable", code: "escape" };
     const stat6 = lstatSync42(path);
     if (stat6.isFile())
@@ -164420,7 +165417,7 @@ function prepareArchiveImport(input) {
     };
     const files = buildArchiveManifest(root, relPaths);
     const records = input.state.list();
-    const same = findSameVersionImport(records, files);
+    const same = findSameVersionImport(records, files) ?? findSameInProgressImport(records, files);
     if (same)
       return { kind: "already_imported", archive: same };
     const sourceTarget = input.targets?.forFormat(detection.format.id);
@@ -164472,7 +165469,7 @@ async function resolveArchiveTarget(prepared, options) {
   if (source.evidence.kind === "archives")
     return { kind: "apart", reason: "not_this_source" };
   const importAccountId = source.evidence.kind === "account" ? source.evidence.importAccountId : undefined;
-  const resolve22 = () => {
+  const resolve23 = () => {
     const resolution = resolveImportAccount(source.sourceId, importAccountId, {
       env: options.env,
       ...options.ownerConfirmed === true ? { ownerConfirmed: true } : {}
@@ -164481,7 +165478,7 @@ async function resolveArchiveTarget(prepared, options) {
     const identity3 = (options.ownerConfirmed === true || created) && resolution.account ? importAccountIdentity(source.sourceId, options.env) : undefined;
     return { resolution, identity: identity3 };
   };
-  const { resolution: resolved, identity: identity2 } = target.exclusive ? await target.exclusive(async () => resolve22()) : resolve22();
+  const { resolution: resolved, identity: identity2 } = target.exclusive ? await target.exclusive(async () => resolve23()) : resolve23();
   if (resolved.match === "different")
     return { kind: "apart", reason: "different_account" };
   if (resolved.match === "unproven" || !resolved.account)
@@ -164539,7 +165536,8 @@ function commitArchiveImport(state, prepared, digests) {
       return { kind: "unreadable", code: error2.code };
     throw error2;
   }
-  const same = findSameVersionImport(state.list(), prepared.record.files);
+  const list = state.list();
+  const same = findSameVersionImport(list, prepared.record.files) ?? findSameInProgressImport(list, prepared.record.files);
   if (same)
     return { kind: "already_imported", archive: same };
   return { kind: "started", archive: state.create(prepared.record) };
@@ -164567,7 +165565,7 @@ var init_start = __esm(() => {
 });
 
 // src/workers/archive-import/runtime.ts
-import { existsSync as existsSync84 } from "node:fs";
+import { existsSync as existsSync85 } from "node:fs";
 function createArchiveImportRuntime(options = {}) {
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
@@ -164613,7 +165611,7 @@ function createArchiveImportRuntime(options = {}) {
     }
   };
   const hasData = (family) => {
-    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync84(path)))
+    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync85(path)))
       return true;
     try {
       return state.list().some((record5) => record5.family === family);
@@ -164630,7 +165628,7 @@ function createArchiveImportRuntime(options = {}) {
     existingLanes: () => families.filter(hasData).map((family) => lane(family)),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
-      return existsSync84(path) ? openWaitingPrivateQuestionStore(path) : undefined;
+      return existsSync85(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
     start: (path) => startArchiveImport({ state, path }),
     subscribeWork: (wake) => {
@@ -164982,7 +165980,7 @@ var init_agent = __esm(() => {
 });
 
 // src/workers/archive-import/removal.ts
-import { existsSync as existsSync85 } from "node:fs";
+import { existsSync as existsSync86 } from "node:fs";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
   return state.update(archiveId, (record5) => {
     if (record5.status === "removing" || record5.target)
@@ -165016,7 +166014,7 @@ function deleteWaitingAnswers(options, input) {
 }
 function deleteJudgeQuestions(lane, provider, accountScope) {
   const path = tierSnifferPathForLedger(lane.ledger.dbPath);
-  if (path !== ":memory:" && !existsSync85(path))
+  if (path !== ":memory:" && !existsSync86(path))
     return 0;
   const sniffer = openTierSniffer({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, { dbPath: path });
   try {
@@ -165080,6 +166078,7 @@ var init_removal = __esm(() => {
 // src/workers/archive-import/dashboard.ts
 import { homedir as homedir44 } from "node:os";
 import { posix as posix6 } from "node:path";
+import { realpathSync as realpathSync22 } from "node:fs";
 function archivePrivateModelFromSniffer(sniffer) {
   if (!sniffer)
     return "off";
@@ -165133,8 +166132,9 @@ function createArchiveImportDashboard(options) {
     env: state.env,
     ...options.now ? { now: options.now } : {}
   });
-  const pause = options.pause ?? (() => new Promise((resolve22) => setImmediate(resolve22)));
+  const pause = options.pause ?? (() => new Promise((resolve23) => setImmediate(resolve23)));
   const home2 = options.home ?? homedir44();
+  const uploads = options.uploads ?? createArchiveUploads({ root: archiveStateSiblingPath(state.path, "archive-staging") });
   let closed = false;
   let checks4 = Promise.resolve();
   const running = new Set;
@@ -165166,7 +166166,15 @@ function createArchiveImportDashboard(options) {
     return path.startsWith(`${home2}/`) ? `~${path.slice(home2.length)}` : path;
   };
   const named = (text4) => displayText(text4);
-  const where2 = (path) => named(shown(posix6.dirname(path)));
+  const stagingFolder = archiveStateSiblingPath(state.path, "archive-staging");
+  const inStaging = (path) => {
+    let canonical2 = stagingFolder;
+    try {
+      canonical2 = realpathSync22.native(stagingFolder);
+    } catch {}
+    return path.startsWith(`${canonical2}/`) || path.startsWith(`${stagingFolder}/`);
+  };
+  const where2 = (path) => inStaging(path) ? "" : named(shown(posix6.dirname(path)));
   const refresh = () => {
     try {
       options.refreshScheduler();
@@ -165182,6 +166190,36 @@ function createArchiveImportDashboard(options) {
     }
   };
   const refusal3 = (code, message2) => ({ ok: false, code, message: message2 });
+  const stillReads = (record5) => {
+    if (record5.status === "removing")
+      return false;
+    if (record5.status !== "imported")
+      return true;
+    try {
+      return (options.runtime.media.peek()?.count(record5.archive_id) ?? 0) > 0;
+    } catch {
+      return true;
+    }
+  };
+  const stagingNeeded = (dir) => {
+    const inside = (path) => path === dir || path.startsWith(`${dir}/`);
+    try {
+      if (requests.list().some((request) => (request.status === "checking" || request.status === "failed") && (inside(request.path) || request.approved !== undefined && inside(request.approved.root_path))))
+        return true;
+      return state.list().some((record5) => inside(record5.root_path) && stillReads(record5));
+    } catch {
+      return true;
+    }
+  };
+  const sweepStaging = () => {
+    if (closed)
+      return;
+    try {
+      uploads.sweep(stagingNeeded);
+    } catch (error2) {
+      console.warn(`[archive-import] staging was not tidied: ${error2 instanceof Error ? error2.name : "error"}`);
+    }
+  };
   const joinedSource = (record5) => {
     if (!record5.target)
       return {};
@@ -165605,23 +166643,14 @@ function createArchiveImportDashboard(options) {
   };
   const api2 = {
     agent: createArchiveImportAgent({ state, requests, view: () => api2.view() }),
-    async browse(request) {
-      const page2 = await options.browser.browse(request);
-      return {
-        nodes: page2.nodes.map((node) => ({
-          key: node.key,
-          ...node.parent_key !== undefined ? { parent_key: node.parent_key } : {},
-          name: node.name,
-          kind: node.kind,
-          has_children: node.has_children,
-          selectable: node.selectable,
-          ...node.size_bytes !== undefined ? { size_bytes: node.size_bytes } : {},
-          ...node.access ? { access: node.access } : {},
-          ...node.is_disk ? { is_disk: true } : {}
-        })),
-        ...page2.nextCursor ? { next_cursor: page2.nextCursor } : {},
-        ...page2.access ? { access: page2.access } : {}
-      };
+    upload: {
+      start: () => {
+        sweepStaging();
+        return uploads.begin();
+      },
+      receive: (uploadId, relPath, body, receiveOptions) => uploads.receive(uploadId, relPath, body, receiveOptions),
+      status: (uploadId) => uploads.status(uploadId),
+      cancel: (uploadId) => ({ cancelled: uploads.cancel(uploadId, stagingNeeded) })
     },
     async approve(request) {
       const blocked = notRunning();
@@ -165634,19 +166663,19 @@ function createArchiveImportDashboard(options) {
       if ("requestId" in request) {
         const waiting = requests.get(request.requestId);
         if (waiting?.status === "failed") {
-          const resolved3 = await options.browser.resolvePath(waiting.path);
-          if (!resolved3.ok)
-            return { ok: false, code: resolved3.code, message: resolved3.message, ...resolved3.access ? { access: resolved3.access } : {} };
-          return approvePath(resolved3.path, { requestId: waiting.request_id, status: "failed" }, answer);
+          const resolved2 = await options.resolver.resolvePath(waiting.path);
+          if (!resolved2.ok)
+            return { ok: false, code: resolved2.code, message: resolved2.message, ...resolved2.access ? { access: resolved2.access } : {} };
+          return approvePath(resolved2.path, { requestId: waiting.request_id, status: "failed" }, answer);
         }
         if (!waiting || waiting.status !== "pending")
           return refusal3("not_waiting", ARCHIVE_APPROVE_COPY.not_waiting);
         if (waiting.kind !== "import")
           return refusal3("not_an_import", ARCHIVE_APPROVE_COPY.not_an_import);
-        const resolved2 = await options.browser.resolvePath(waiting.path);
-        if (!resolved2.ok)
-          return { ok: false, code: resolved2.code, message: resolved2.message, ...resolved2.access ? { access: resolved2.access } : {} };
-        return approvePath(resolved2.path, { requestId: waiting.request_id, status: "pending" }, answer);
+        const resolved = await options.resolver.resolvePath(waiting.path);
+        if (!resolved.ok)
+          return { ok: false, code: resolved.code, message: resolved.message, ...resolved.access ? { access: resolved.access } : {} };
+        return approvePath(resolved.path, { requestId: waiting.request_id, status: "pending" }, answer);
       }
       let only;
       if (request.sourceId !== undefined) {
@@ -165654,10 +166683,22 @@ function createArchiveImportDashboard(options) {
         if (!only)
           return refusal3("unknown_source", ARCHIVE_APPROVE_COPY.unknown_source);
       }
-      const resolved = await options.browser.resolve(request.key);
-      if (!resolved.ok)
-        return { ok: false, code: resolved.code, message: resolved.message, ...resolved.access ? { access: resolved.access } : {} };
-      return approvePath(resolved.path, undefined, answer, only);
+      let staged;
+      try {
+        staged = uploads.chosenPath(request.uploadId);
+      } catch (error2) {
+        if (error2 instanceof ArchiveUploadError)
+          return refusal3(error2.code, error2.message);
+        throw error2;
+      }
+      const result = await approvePath(staged, undefined, answer, only);
+      const kept = result.ok ? result.status === "started" || result.status === "checking" || result.status === "confirm_account" : result.code === "imports_not_running";
+      if (result.ok && result.status === "confirm_account") {} else if (kept)
+        uploads.handOver(request.uploadId);
+      else
+        uploads.release(request.uploadId, stagingNeeded);
+      sweepStaging();
+      return result;
     },
     decline(requestId) {
       const request = requests.get(requestId);
@@ -165708,6 +166749,7 @@ function createArchiveImportDashboard(options) {
       return result;
     },
     view() {
+      sweepStaging();
       const model = options.privateModel();
       const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID2, privateModel: model };
       let records;
@@ -165816,6 +166858,7 @@ function createArchiveImportDashboard(options) {
       };
     },
     resume() {
+      sweepStaging();
       let waiting;
       try {
         waiting = requests.list().filter((request) => request.status === "checking" && !running.has(request.request_id));
@@ -165831,6 +166874,7 @@ function createArchiveImportDashboard(options) {
     idle: () => checks4,
     close() {
       closed = true;
+      uploads.close();
     }
   };
   return api2;
@@ -165845,6 +166889,8 @@ var init_dashboard2 = __esm(() => {
   init_source_scheduler();
   init_manifest2();
   init_removal();
+  init_olympus_layout();
+  init_staging();
   init_start();
   init_display_text();
   init_state();
@@ -165876,8 +166922,8 @@ var init_dashboard2 = __esm(() => {
 });
 
 // src/workers/file-extraction/connector-source.ts
-import { rmSync as rmSync27, writeFileSync as writeFileSync22 } from "node:fs";
-import { basename as basename17, join as join111, resolve as resolve22, sep as sep15 } from "node:path";
+import { rmSync as rmSync28, writeFileSync as writeFileSync22 } from "node:fs";
+import { basename as basename17, join as join112, resolve as resolve23, sep as sep16 } from "node:path";
 function isBoundedFetchConnector(connector) {
   return typeof connector.fetchItemWithin === "function";
 }
@@ -165906,7 +166952,7 @@ async function readItemToFile(connector, localItemId, options) {
   if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
     throw new FileExtractionSourceError("source_too_large");
   }
-  const path = join111(options.spoolDir, extractionSpoolFileName());
+  const path = join112(options.spoolDir, extractionSpoolFileName());
   const served = () => options.stillServed?.() ?? true;
   const refuseGone = () => {
     discardExtractionSpoolFile(path, options.spoolDir);
@@ -166090,11 +167136,11 @@ function fileHandOver(path, spooled, spoolDir, tidy) {
     async dispose() {
       if (!spooled)
         return;
-      const root = resolve22(spoolDir) + sep15;
-      const target = resolve22(path);
+      const root = resolve23(spoolDir) + sep16;
+      const target = resolve23(path);
       if (!target.startsWith(root) || basename17(target) === "")
         return;
-      rmSync27(target, { force: true });
+      rmSync28(target, { force: true });
       tidy();
     }
   };
@@ -166445,7 +167491,7 @@ async function digestArchiveFiles(root, files, shouldContinue) {
           steps.return("");
           return;
         }
-        await new Promise((resolve23) => setImmediate(resolve23));
+        await new Promise((resolve24) => setImmediate(resolve24));
       }
     } catch (error2) {
       throw fileStop(error2, file.rel_path);
@@ -166983,7 +168029,7 @@ var init_scheduler_source2 = __esm(() => {
 });
 
 // src/workers/local-files/open-target.ts
-import { realpathSync as realpathSync21, statSync as statSync35 } from "node:fs";
+import { realpathSync as realpathSync23, statSync as statSync36 } from "node:fs";
 function localFilesOpenRoots(volumes, approvedScopePaths) {
   const roots = [];
   for (const scopePath of approvedScopePaths()) {
@@ -166991,8 +168037,8 @@ function localFilesOpenRoots(volumes, approvedScopePaths) {
     if (!resolved)
       continue;
     try {
-      const real = realpathSync21.native(resolved);
-      if (statSync35(real).isDirectory() && !roots.includes(real))
+      const real = realpathSync23.native(resolved);
+      if (statSync36(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
   }
@@ -167013,8 +168059,8 @@ function createLocalFilesOpenTargets(options) {
     if (!resolved)
       return;
     try {
-      const real = realpathSync21.native(resolved);
-      return statSync35(real).isFile() ? { localPath: real } : undefined;
+      const real = realpathSync23.native(resolved);
+      return statSync36(real).isFile() ? { localPath: real } : undefined;
     } catch {
       return;
     }
@@ -167028,7 +168074,7 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash85 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { existsSync as existsSync86, lstatSync as lstatSync43, readFileSync as readFileSync76, readdirSync as readdirSync20, realpathSync as realpathSync22 } from "node:fs";
+import { existsSync as existsSync87, lstatSync as lstatSync43, readFileSync as readFileSync76, readdirSync as readdirSync21, realpathSync as realpathSync24 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 
 class VolumeResolver {
@@ -167160,7 +168206,7 @@ class VolumeResolver {
 function probeIgnoresCaseIn(dir) {
   let names;
   try {
-    names = readdirSync20(dir);
+    names = readdirSync21(dir);
   } catch {
     return;
   }
@@ -167215,11 +168261,11 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync86(dir))
+    if (!existsSync87(dir))
       return result;
-    for (const name of readdirSync20(dir)) {
+    for (const name of readdirSync21(dir)) {
       try {
-        result.set(realpathSync22(`${dir}/${name}`), name);
+        result.set(realpathSync24(`${dir}/${name}`), name);
       } catch {}
     }
   } catch {}
@@ -167542,18 +168588,18 @@ var init_source_scope_browser = __esm(() => {
 
 // src/workers/local-files/mac-settings.ts
 import { spawn as spawn9 } from "node:child_process";
-import { existsSync as existsSync87 } from "node:fs";
+import { existsSync as existsSync88 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
-import { join as join112 } from "node:path";
+import { join as join113 } from "node:path";
 function helperAppPathForHome(home2 = homedir46()) {
-  return join112(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
+  return join113(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run2 = deps.run ?? ((command, args) => {
     spawn9(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync87)(helper))
+  if ((deps.exists ?? existsSync88)(helper))
     run2("/usr/bin/open", ["-R", helper]);
   run2("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -167562,12 +168608,12 @@ var init_mac_settings = __esm(() => {
 });
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync44, readdirSync as readdirSync21, realpathSync as realpathSync23 } from "node:fs";
+import { lstatSync as lstatSync44, readdirSync as readdirSync22, realpathSync as realpathSync25 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
-import { join as join113 } from "node:path";
+import { join as join114 } from "node:path";
 function safeRealpath(path) {
   try {
-    return realpathSync23.native(path);
+    return realpathSync25.native(path);
   } catch {
     return path;
   }
@@ -167583,7 +168629,7 @@ function ancestorScopePaths(scopePath) {
   }
   return out;
 }
-function localFilesListing(options, mode) {
+function localFilesListing(options) {
   const volumes = options.volumes ?? new VolumeResolver;
   const home2 = safeRealpath(options.home ?? options.context?.home ?? homedir47());
   const context2 = options.context ?? {
@@ -167591,14 +168637,14 @@ function localFilesListing(options, mode) {
     home: home2,
     volumeIgnoresCase: (volumeId, path) => volumes.ignoresCase(volumeId, path)
   };
-  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync21(realPath, { withFileTypes: true }));
+  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync22(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home: home2,
-    memoryPath: join113(olympusDataDir(), "local-files", "folder-access.json")
+    memoryPath: join114(olympusDataDir(), "local-files", "folder-access.json")
   });
   const node = (scopePath, name, parentKey2, access) => {
-    const own3 = mode === "folders" && isInsideOwnRoot(scopePath, context2);
-    const reason = own3 ? "olympus_data" : mode === "folders" ? defaultExclusionForFolder(scopePath, context2) : undefined;
+    const own3 = isInsideOwnRoot(scopePath, context2);
+    const reason = own3 ? "olympus_data" : defaultExclusionForFolder(scopePath, context2);
     return {
       key: scopePath,
       ...parentKey2 !== undefined ? { parent_key: parentKey2 } : {},
@@ -167610,14 +168656,6 @@ function localFilesListing(options, mode) {
       ...access ? { access } : {}
     };
   };
-  const fileNode = (scopePath, name, parentKey2) => ({
-    key: scopePath,
-    ...parentKey2 !== undefined ? { parent_key: parentKey2 } : {},
-    name: name.normalize("NFC"),
-    kind: "file",
-    has_children: false,
-    selectable: true
-  });
   const childFolders = (realPath, parentKey2) => {
     let entries;
     try {
@@ -167637,11 +168675,9 @@ function localFilesListing(options, mode) {
       }
       throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
     }
-    const offered = (entry) => !entry.isSymbolicLink() && (entry.isDirectory() || mode === "archive" && entry.isFile() && !entry.name.startsWith("."));
+    const offered = (entry) => !entry.isSymbolicLink() && entry.isDirectory();
     return entries.filter(offered).map((entry) => {
-      const childReal = join113(realPath, entry.name);
-      if (!entry.isDirectory())
-        return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2);
+      const childReal = join114(realPath, entry.name);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
       const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
       return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2, access);
@@ -167655,7 +168691,7 @@ function localFilesListing(options, mode) {
   };
   const browse = async (request) => {
     const parent = request.parentKey === undefined ? undefined : normalizeScopePath(request.parentKey);
-    const cursorScope = mode === "archive" ? ARCHIVE_CURSOR_SCOPE : LOCAL_FILES_SOURCE_ID;
+    const cursorScope = LOCAL_FILES_SOURCE_ID;
     const offsetText = decodeCursor2(cursorScope, parent ?? "", request.cursor);
     const offset = offsetText === undefined ? 0 : Number.parseInt(offsetText, 10);
     if (!Number.isInteger(offset) || offset < 0)
@@ -167680,8 +168716,7 @@ function localFilesListing(options, mode) {
           };
         })
       ];
-      if (mode === "folders")
-        access = permissions.fullDiskAccessNote();
+      access = permissions.fullDiskAccessNote();
     } else {
       const real = realPathOfScopePath(volumes, parent);
       if (!real)
@@ -167701,27 +168736,15 @@ function localFilesListing(options, mode) {
     const page2 = all.slice(offset, offset + BROWSE_PAGE_SIZE2);
     const next = offset + BROWSE_PAGE_SIZE2;
     return {
-      nodes: mode === "archive" ? page2.map(withFileSize) : page2,
+      nodes: page2,
       ...next < all.length ? { nextCursor: encodeCursor3(cursorScope, parent ?? "", String(next)) } : {},
       ...access ? { access } : {}
     };
   };
-  const withFileSize = (entry) => {
-    if (entry.kind !== "file")
-      return entry;
-    const real = realPathOfScopePath(volumes, entry.key);
-    let stat6;
-    try {
-      stat6 = real ? lstatSync44(real) : undefined;
-    } catch {
-      stat6 = undefined;
-    }
-    return stat6?.isFile() ? { ...entry, size_bytes: stat6.size } : entry;
-  };
   return { volumes, permissions, context: context2, browse };
 }
 function createLocalFilesFolderScopeBrowser(options = {}) {
-  const { volumes, permissions, context: context2, browse } = localFilesListing(options, "folders");
+  const { volumes, permissions, context: context2, browse } = localFilesListing(options);
   return {
     sourceId: LOCAL_FILES_SOURCE_ID,
     browse,
@@ -167756,7 +168779,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         }
         if (!isFolder)
           throw new Error("A selected folder could not be verified. It may have moved.");
-        const canonical2 = realpathSync23.native(real);
+        const canonical2 = realpathSync25.native(real);
         if (canonical2 !== real) {
           if (canonical2.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
             throw new Error("A selected folder is reached through a link. Choose the folder itself.");
@@ -167776,60 +168799,58 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
     }
   };
 }
-function createLocalFilesArchiveBrowser(options = {}) {
-  const { volumes, permissions, browse } = localFilesListing(options, "archive");
+function createArchivePathResolver(options = {}) {
+  const { volumes, permissions } = localFilesListing(options);
   const refuse3 = (code, message2, access) => ({ ok: false, code, message: message2, ...access ? { access } : {} });
-  const resolver = {
-    browse,
+  const resolveKey = async (key2) => {
+    let real;
+    try {
+      real = realPathOfScopePath(volumes, normalizeScopePath(key2));
+    } catch {
+      return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
+    }
+    if (!real)
+      return refuse3("disk_unavailable", ARCHIVE_PATH_COPY.disk_unavailable);
+    const volume = volumes.volumeOf(real);
+    if (permissions.active && permissions.blocksReadWithoutHelper(real, volume)) {
+      return refuse3("needs_helper", permissions.helperNeededCopy(), { state: "needs_helper", message: permissions.helperNeededCopy() });
+    }
+    const guard = permissions.guardOf(real, volume);
+    if (guard) {
+      const refused2 = await permissions.open(guard);
+      if (refused2)
+        return refuse3(refused2.state === "needs_helper" ? "needs_helper" : "needs_permission", refused2.message, refused2);
+    }
+    let stat6;
+    try {
+      stat6 = lstatSync44(real);
+    } catch {
+      return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
+    }
+    if (stat6.isSymbolicLink())
+      return refuse3("link", ARCHIVE_PATH_COPY.link);
+    if (!stat6.isFile() && !stat6.isDirectory())
+      return refuse3("not_regular", ARCHIVE_PATH_COPY.not_regular);
+    let canonical2;
+    try {
+      canonical2 = realpathSync25.native(real);
+    } catch {
+      return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
+    }
+    if (canonical2 !== real && canonical2.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
+      return refuse3("link", ARCHIVE_PATH_COPY.link);
+    }
+    return { ok: true, path: canonical2, kind: stat6.isFile() ? "file" : "folder" };
+  };
+  return {
     async resolvePath(path) {
       if (!path.startsWith("/") || path.includes("\x00"))
         return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
-      return resolver.resolve(scopePathOfRealPath(volumes, path));
-    },
-    async resolve(key2) {
-      let real;
-      try {
-        real = realPathOfScopePath(volumes, normalizeScopePath(key2));
-      } catch {
-        return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
-      }
-      if (!real)
-        return refuse3("disk_unavailable", ARCHIVE_PATH_COPY.disk_unavailable);
-      const volume = volumes.volumeOf(real);
-      if (permissions.active && permissions.blocksReadWithoutHelper(real, volume)) {
-        return refuse3("needs_helper", permissions.helperNeededCopy(), { state: "needs_helper", message: permissions.helperNeededCopy() });
-      }
-      const guard = permissions.guardOf(real, volume);
-      if (guard) {
-        const refused2 = await permissions.open(guard);
-        if (refused2)
-          return refuse3(refused2.state === "needs_helper" ? "needs_helper" : "needs_permission", refused2.message, refused2);
-      }
-      let stat6;
-      try {
-        stat6 = lstatSync44(real);
-      } catch {
-        return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
-      }
-      if (stat6.isSymbolicLink())
-        return refuse3("link", ARCHIVE_PATH_COPY.link);
-      if (!stat6.isFile() && !stat6.isDirectory())
-        return refuse3("not_regular", ARCHIVE_PATH_COPY.not_regular);
-      let canonical2;
-      try {
-        canonical2 = realpathSync23.native(real);
-      } catch {
-        return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
-      }
-      if (canonical2 !== real && canonical2.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
-        return refuse3("link", ARCHIVE_PATH_COPY.link);
-      }
-      return { ok: true, path: canonical2, kind: stat6.isFile() ? "file" : "folder" };
+      return resolveKey(scopePathOfRealPath(volumes, path));
     }
   };
-  return resolver;
 }
-var BROWSE_PAGE_SIZE2 = 100, AccessRefused, ARCHIVE_CURSOR_SCOPE = "archive.imports", ARCHIVE_PATH_COPY;
+var BROWSE_PAGE_SIZE2 = 100, AccessRefused, ARCHIVE_PATH_COPY;
 var init_scope_browser = __esm(() => {
   init_remote_access();
   init_source_scope_browser();
@@ -168074,8 +169095,8 @@ function resolveOne(request, stores, scopes) {
     ...names.authoredAt ? { authoredAt: names.authoredAt } : {}
   };
 }
-function unreadableParentOf(resolve23, request) {
-  const [names] = resolve23([request]);
+function unreadableParentOf(resolve24, request) {
+  const [names] = resolve24([request]);
   if (!names)
     return;
   const label = parentLabelText(names);
@@ -168258,8 +169279,8 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync4, lstatSync as lstatSync45, mkdirSync as mkdirSync57, readdirSync as readdirSync22, realpathSync as realpathSync24, renameSync as renameSync20, rmdirSync as rmdirSync8, statSync as statSync36, unlinkSync as unlinkSync4 } from "node:fs";
-import { basename as basename18, dirname as dirname86, isAbsolute as isAbsolute34, join as join114, relative as relative13, resolve as resolve23, sep as sep16 } from "node:path";
+import { linkSync as linkSync4, lstatSync as lstatSync45, mkdirSync as mkdirSync58, readdirSync as readdirSync23, realpathSync as realpathSync26, renameSync as renameSync20, rmdirSync as rmdirSync8, statSync as statSync37, unlinkSync as unlinkSync4 } from "node:fs";
+import { basename as basename18, dirname as dirname86, isAbsolute as isAbsolute34, join as join115, relative as relative13, resolve as resolve24, sep as sep17 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   return env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim() === "1";
 }
@@ -168298,14 +169319,14 @@ function candidates(sourceId, slot, env) {
         staged.add(legacyName);
     }
     for (const name of [...staged].sort()) {
-      found.push({ role: "raw", from: join114(legacyDir, name), to: join114(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
+      found.push({ role: "raw", from: join115(legacyDir, name), to: join115(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
     }
   }
   return found;
 }
 function listNames(dir) {
   try {
-    return readdirSync22(dir);
+    return readdirSync23(dir);
   } catch {
     return [];
   }
@@ -168331,7 +169352,7 @@ function lookAt(path) {
 function rootOf(ctx, path) {
   for (const { tag, root } of ctx.roots) {
     const below = relative13(root, path);
-    if (below === ".." || below.startsWith(`..${sep16}`) || isAbsolute34(below))
+    if (below === ".." || below.startsWith(`..${sep17}`) || isAbsolute34(below))
       continue;
     return { tag, root, below };
   }
@@ -168341,18 +169362,18 @@ function relPath(ctx, path) {
   const at = rootOf(ctx, path);
   if (!at)
     throw new TypeError("A migration path must sit in a folder the layout names.");
-  const below = at.below.split(sep16).join("/");
+  const below = at.below.split(sep17).join("/");
   return at.tag ? `@${at.tag}/${below}` : below;
 }
 function absPath(ctx, rel) {
   if (!rel.startsWith("@"))
-    return join114(ctx.root, ...rel.split("/"));
+    return join115(ctx.root, ...rel.split("/"));
   const slash = rel.indexOf("/");
   const tag = rel.slice(1, slash < 0 ? undefined : slash);
   const root = ctx.roots.find((candidate) => candidate.tag === tag && tag !== "")?.root;
   if (root === undefined || slash < 0)
     throw new TypeError(`A migration path names a folder this build does not know (${JSON.stringify(tag)}).`);
-  return join114(root, ...rel.slice(slash + 1).split("/"));
+  return join115(root, ...rel.slice(slash + 1).split("/"));
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
@@ -168396,18 +169417,18 @@ function storeNameForCorpus(sourceId, corpusId) {
 }
 function nearRealPath(path) {
   try {
-    return realpathSync24(path);
+    return realpathSync26(path);
   } catch {}
   const rest = [];
-  let near = resolve23(path);
+  let near = resolve24(path);
   for (;; ) {
     rest.unshift(basename18(near));
     const up = dirname86(near);
     if (up === near)
-      return resolve23(path);
+      return resolve24(path);
     near = up;
     try {
-      return join114(realpathSync24(near), ...rest);
+      return join115(realpathSync26(near), ...rest);
     } catch {}
   }
 }
@@ -168416,13 +169437,13 @@ function destinationIsOurs(ctx, destination) {
   const at = rootOf(ctx, parent);
   if (!at)
     return false;
-  return nearRealPath(parent) === join114(nearRealPath(at.root), at.below);
+  return nearRealPath(parent) === join115(nearRealPath(at.root), at.below);
 }
 function nearestExisting(path) {
-  let near = resolve23(path);
+  let near = resolve24(path);
   for (;; ) {
     try {
-      statSync36(near);
+      statSync37(near);
       return near;
     } catch {
       const up = dirname86(near);
@@ -168445,9 +169466,9 @@ function pinFor(ctx, sourceId) {
   if (facts?.pin)
     return skip("pinned", facts.pin);
   if (sourceId === WHATSAPP_SOURCE_ID) {
-    const moving = resolve23(legacyWhatsAppDefaultStateDir(env));
+    const moving = resolve24(legacyWhatsAppDefaultStateDir(env));
     for (const other of [legacyWhatsAppServiceStateDir(env), legacyWhatsAppLiveSyncStateDir(env, env.HOME?.trim() || undefined)]) {
-      if (resolve23(other) === moving)
+      if (resolve24(other) === moving)
         continue;
       const found = look(other);
       if (found.kind === "absent")
@@ -168482,7 +169503,7 @@ function inspect(ctx, sourceId, slot, entry) {
   }
   let folderDevice;
   try {
-    folderDevice = statSync36(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
+    folderDevice = statSync37(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
   } catch {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
@@ -168582,10 +169603,10 @@ function syncFolderChains(ctx, folders) {
     const at = rootOf(ctx, folder);
     if (!at)
       throw Object.assign(new Error("outside every root"), { code: "EINVAL" });
-    let current2 = realpathSync24(at.root);
+    let current2 = realpathSync26(at.root);
     chain.add(current2);
-    for (const part of at.below.split(sep16).filter(Boolean)) {
-      current2 = join114(current2, part);
+    for (const part of at.below.split(sep17).filter(Boolean)) {
+      current2 = join115(current2, part);
       chain.add(current2);
     }
   }
@@ -168596,7 +169617,7 @@ function syncFolderChains(ctx, folders) {
 }
 function makeFolders(ctx, moves) {
   try {
-    const real = realpathSync24(ctx.root);
+    const real = realpathSync26(ctx.root);
     const destinations = new Set;
     for (const move of moves) {
       const destination = dirname86(absPath(ctx, move.to));
@@ -168604,14 +169625,14 @@ function makeFolders(ctx, moves) {
         throw Object.assign(new Error("link"), { code: "ELOOP" });
       destinations.add(destination);
       let current2 = real;
-      for (const part of relative13(ctx.root, destination).split(sep16).filter(Boolean)) {
-        current2 = join114(current2, part);
+      for (const part of relative13(ctx.root, destination).split(sep17).filter(Boolean)) {
+        current2 = join115(current2, part);
         const found = lookAt(current2);
         if (found.kind === "dir")
           continue;
         if (found.kind !== "absent")
           throw Object.assign(new Error("not a folder"), { code: "ENOTDIR" });
-        mkdirSync57(current2, { mode: 448 });
+        mkdirSync58(current2, { mode: 448 });
       }
     }
     syncFolderChains(ctx, [...destinations]);
@@ -168640,7 +169661,7 @@ function removeEmptyFolders(ctx, moves) {
   const stop = accountFoldersRoot(ctx.env);
   const folders = new Set;
   for (const move of moves) {
-    for (let folder = dirname86(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep16}`); folder = dirname86(folder)) {
+    for (let folder = dirname86(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep17}`); folder = dirname86(folder)) {
       folders.add(folder);
       if (folder === stop)
         break;
@@ -168918,7 +169939,7 @@ function holdCaptureLocks(ctx, sourceId, slot) {
       continue;
     let lock;
     try {
-      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join114(dir, name));
+      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join115(dir, name));
     } catch {
       return giveBack(skip("unreadable", `Its capture lock (${name}) cannot be taken.`));
     }
@@ -168932,11 +169953,11 @@ function holdCaptureLocks(ctx, sourceId, slot) {
 function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
   if (!isMessaging(sourceId))
     return;
-  const rootFolders = new Set(ctx.roots.map(({ root }) => resolve23(root)));
+  const rootFolders = new Set(ctx.roots.map(({ root }) => resolve24(root)));
   const folders = new Set;
   try {
     for (const candidate of candidates(sourceId, slot, ctx.env)) {
-      const folder = resolve23(dirname86(candidate.from));
+      const folder = resolve24(dirname86(candidate.from));
       if (!rootFolders.has(folder) && rootOf(ctx, folder))
         folders.add(folder);
     }
@@ -169476,12 +170497,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname87, join as join115 } from "node:path";
+import { dirname as dirname87, join as join116 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join115(dirname87(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join116(dirname87(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -169877,7 +170898,7 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync58, readFileSync as readFileSync77 } from "node:fs";
+import { mkdirSync as mkdirSync59, readFileSync as readFileSync77 } from "node:fs";
 import { dirname as dirname88 } from "node:path";
 
 class SnifferCallBudget {
@@ -169912,7 +170933,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync58(dirname88(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync59(dirname88(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -170025,15 +171046,15 @@ async function runSnifferPass(options) {
     if (row.contentTier === "secrets" && row.reasons.includes("metadata:secret:sniffer_refused") && snifferMaterialCarriesSecret(snifferOwnMaterial(question.material)))
       return true;
     let expectedMap = row.mapRevision;
-    let open6 = row.state === "pending" && openPasses(row).includes(question.pass);
+    let open7 = row.state === "pending" && openPasses(row).includes(question.pass);
     if (row.state === "current") {
       const rejudge = target.ledger.rejudgeQuestion(question);
       if (rejudge) {
-        open6 = question.pass === "metadata" ? rejudge.decision.metadataPending : rejudge.decision.contentPending;
+        open7 = question.pass === "metadata" ? rejudge.decision.metadataPending : rejudge.decision.contentPending;
         expectedMap = rejudge.decision.mapRevision;
       }
     }
-    if (open6 && expectedMap !== question.mapRevision) {
+    if (open7 && expectedMap !== question.mapRevision) {
       if (!rekey)
         return false;
       target.sniffer.rekey(question, question.pass, expectedMap);
@@ -170041,7 +171062,7 @@ async function runSnifferPass(options) {
       question.attempts = 0;
       report.staleRekeyed += 1;
     }
-    return open6;
+    return open7;
   };
   const screenQuestion = (target, question) => {
     const screen = snifferMaterialCarriesSecret(snifferOwnMaterial(question.material)) ? "secrets" : target.screenStoredQuestion?.(question) ?? "clean";
@@ -170252,7 +171273,7 @@ var init_sniffer_resolver = __esm(() => {
 
 // src/workers/classification/sniffer-service.ts
 import { Database as Database21 } from "bun:sqlite";
-import { existsSync as existsSync88 } from "node:fs";
+import { existsSync as existsSync89 } from "node:fs";
 
 class TierSnifferService {
   options;
@@ -170337,7 +171358,7 @@ class TierSnifferService {
             continue;
         }
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync88(path);
+        const hasQueue = existsSync89(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -170539,14 +171560,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync88(bound)) {
+        if (bound && bound !== ":memory:" && existsSync89(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync88(own3))
+      if (existsSync89(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -171505,9 +172526,9 @@ data:
       const initRequest = messages.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve24) => {
+        return new Promise((resolve25) => {
           this._streamMapping.set(streamId2, {
-            resolveJson: resolve24,
+            resolveJson: resolve25,
             cleanup: () => {
               this._streamMapping.delete(streamId2);
             }
@@ -172066,22 +173087,22 @@ function measuredSourceProgress(card, scrubbed, embedding, signIn, now) {
     counts.searchable = counts.reading;
   else if (embeddingApplies)
     counts.searchableUnknown = true;
-  const open6 = phases.find((phase) => phase.state !== "done");
-  if (!open6) {
+  const open7 = phases.find((phase) => phase.state !== "done");
+  if (!open7) {
     const summary = dashboardWorkingSummary(scrubbed);
     const total2 = summary?.in_scope_items ?? 0;
     const progress = credentialsMissing ? { stage: "done", unit, done: total2, total: total2, percent: 100, stalled: true, stalledReason: "waiting_for_credentials" } : { stage: "done", unit, done: total2, total: total2, percent: 100, stalled: false };
     return { progress, counts };
   }
-  const stage = STAGE_FOR_PHASE[open6.id];
-  const measure = open6.measure;
+  const stage = STAGE_FOR_PHASE[open7.id];
+  const measure = open7.measure;
   let done = 0;
   let total = 0;
   let percent = 0;
-  if (open6.id === "metadata_sync") {
+  if (open7.id === "metadata_sync") {
     percent = undefined;
     done = found;
-    if (measure.kind === "ratio" && open6.unit !== "folders")
+    if (measure.kind === "ratio" && open7.unit !== "folders")
       total = measure.total;
     if (measure.kind === "ratio" && measure.total > 0)
       percent = clampPercent2(measure.done / measure.total * 100);
@@ -172090,20 +173111,20 @@ function measuredSourceProgress(card, scrubbed, embedding, signIn, now) {
     total = count(measure.total);
     percent = total > 0 ? clampPercent2(done / total * 100) : 0;
   } else if (measure.kind === "indeterminate") {
-    done = open6.unmeasured ? undefined : count(measure.done);
+    done = open7.unmeasured ? undefined : count(measure.done);
     percent = undefined;
   } else {
     total = count(measure.remaining);
   }
-  const reason = stalledReason({ stage, open: open6, scrubbed, embedding, credentialsMissing });
-  const stalled = reason !== undefined || open6.state === "stalled";
-  const stall = stalled ? stallDetail(card, open6, stage, reason, now) : undefined;
+  const reason = stalledReason({ stage, open: open7, scrubbed, embedding, credentialsMissing });
+  const stalled = reason !== undefined || open7.state === "stalled";
+  const stall = stalled ? stallDetail(card, open7, stage, reason, now) : undefined;
   return {
     progress: { stage, unit, ...done === undefined ? {} : { done }, total, ...percent === undefined ? {} : { percent }, stalled, ...reason ? { stalledReason: reason } : {}, ...stall ? { stall } : {} },
     counts
   };
 }
-function stallDetail(card, open6, stage, reason, now) {
+function stallDetail(card, open7, stage, reason, now) {
   if (reason !== undefined && reason !== "provider_unavailable")
     return;
   const schedule = card.schedule;
@@ -172121,10 +173142,10 @@ function stallDetail(card, open6, stage, reason, now) {
     return { cause: "failing", failure: failure2, ...failures > 0 ? { failures } : {}, ...timing, ...ref ? { ref } : {} };
   }
   const drain = card.ingestion_health?.drain_state;
-  if (open6.id === "embedding" && card.embedding_lane_state === "embedding_lane_disabled" || open6.id === "extraction" && (drain === "held" || drain === "disabled")) {
+  if (open7.id === "embedding" && card.embedding_lane_state === "embedding_lane_disabled" || open7.id === "extraction" && (drain === "held" || drain === "disabled")) {
     return { cause: "switched_off", stage };
   }
-  const movedAt = isoOrUndefined(open6.id === "metadata_sync" ? card.movement?.metadata_sync_at : open6.id === "extraction" ? card.movement?.extraction_at : card.movement?.embedding_at);
+  const movedAt = isoOrUndefined(open7.id === "metadata_sync" ? card.movement?.metadata_sync_at : open7.id === "extraction" ? card.movement?.extraction_at : card.movement?.embedding_at);
   const stillSeconds = movedAt ? Math.max(0, Math.floor((now.getTime() - Date.parse(movedAt)) / 1000)) : undefined;
   return {
     cause: "no_movement",
@@ -172270,12 +173291,12 @@ function unitFor(card) {
   return "items";
 }
 function overallProgress(rows) {
-  const open6 = rows.filter((row) => row.progress !== undefined && row.counts !== undefined && row.progress.stage !== "done");
-  if (open6.length === 0)
+  const open7 = rows.filter((row) => row.progress !== undefined && row.counts !== undefined && row.progress.stage !== "done");
+  if (open7.length === 0)
     return;
   let eta;
   let initial = false;
-  const units = new Set(open6.map((row) => row.progress.unit));
+  const units = new Set(open7.map((row) => row.progress.unit));
   const unit = units.size === 1 ? [...units][0] : "items";
   const listing = { done: 0, any: false };
   let firstWalk = false;
@@ -172284,7 +173305,7 @@ function overallProgress(rows) {
   const searchable = { done: 0, total: 0 };
   let ownDone = 0;
   let ownTotal = 0;
-  for (const { card, progress, counts } of open6) {
+  for (const { card, progress, counts } of open7) {
     if (progress.stage === "listing") {
       listing.any = true;
       listing.done += counts.found;
@@ -172325,12 +173346,12 @@ function overallProgress(rows) {
   return {
     unit,
     phase: initial ? "initial" : "refresh",
-    ...firstWalk || open6.some((row) => row.counts.searchableUnknown) || total <= 0 ? {} : {
+    ...firstWalk || open7.some((row) => row.counts.searchableUnknown) || total <= 0 ? {} : {
       percent: clampPercent2(Math.min(done, total) / total * 100),
       itemsLeft: Math.max(0, total - done)
     },
     ...eta !== undefined ? { etaSeconds: eta } : {},
-    stalled: open6.some((row) => row.progress.stalled),
+    stalled: open7.some((row) => row.progress.stalled),
     details
   };
 }
@@ -172863,7 +173884,7 @@ function chatgptPrivateAnswerProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve24) => {
+    return new Promise((resolve25) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -172874,7 +173895,7 @@ function chatgptPrivateAnswerProgram(config2) {
           return;
         }
         settled = true;
-        resolve24(db);
+        resolve25(db);
       };
       try {
         const factory = window.indexedDB;
@@ -172901,7 +173922,7 @@ function chatgptPrivateAnswerProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve24) => {
+    return new Promise((resolve25) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -172910,7 +173931,7 @@ function chatgptPrivateAnswerProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve24(value2);
+        resolve25(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -172973,7 +173994,7 @@ function chatgptPrivateAnswerProgram(config2) {
       });
     } catch {}
   }
-  async function open6(jobId, privateKey, sealed) {
+  async function open7(jobId, privateKey, sealed) {
     const macRaw = fromB64url(sealed.macPublicKey);
     const iv = fromB64url(sealed.iv);
     const ciphertext = fromB64url(sealed.ciphertext);
@@ -173045,10 +174066,10 @@ function chatgptPrivateAnswerProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve24) => setTimeout(resolve24, ms));
+    return new Promise((resolve25) => setTimeout(resolve25, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve24, reject) => {
+    return new Promise((resolve25, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -173058,7 +174079,7 @@ function chatgptPrivateAnswerProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve24(value2);
+        resolve25(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -173161,7 +174182,7 @@ function chatgptPrivateAnswerProgram(config2) {
         if (code === 200 && status === "ready") {
           let opened = null;
           try {
-            opened = readAnswer(await bounded(open6(jobId, keys.privateKey, body), deadline - Date.now(), null));
+            opened = readAnswer(await bounded(open7(jobId, keys.privateKey, body), deadline - Date.now(), null));
           } catch (error2) {
             if (mine !== run2)
               return;
@@ -173372,8 +174393,8 @@ function chatgptPrivateAnswerProgram(config2) {
     wrap.appendChild(list);
     return wrap;
   }
-  function card(open7) {
-    const node = el("section", open7 ? "card open" : "card");
+  function card(open8) {
+    const node = el("section", open8 ? "card open" : "card");
     node.setAttribute("aria-label", T.title);
     const row = el("div", "row");
     const icon = el("div", "icon");
@@ -174261,7 +175282,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, utf84(plaintext));
     return { iv: toB64url(iv), ciphertext: toB64url(new Uint8Array(ciphertext)) };
   }
-  async function open6(jobId, privateKey, sealed) {
+  async function open7(jobId, privateKey, sealed) {
     const macRaw = fromB64url(sealed.macPublicKey);
     const iv = fromB64url(sealed.iv);
     const ciphertext = fromB64url(sealed.ciphertext);
@@ -174273,7 +175294,7 @@ function chatgptPrivateQuestionProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve24) => {
+    return new Promise((resolve25) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -174284,7 +175305,7 @@ function chatgptPrivateQuestionProgram(config2) {
           return;
         }
         settled = true;
-        resolve24(db);
+        resolve25(db);
       };
       try {
         const factory = window.indexedDB;
@@ -174311,7 +175332,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve24) => {
+    return new Promise((resolve25) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -174320,7 +175341,7 @@ function chatgptPrivateQuestionProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve24(value2);
+        resolve25(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -174384,10 +175405,10 @@ function chatgptPrivateQuestionProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve24) => setTimeout(resolve24, ms));
+    return new Promise((resolve25) => setTimeout(resolve25, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve24, reject) => {
+    return new Promise((resolve25, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -174397,7 +175418,7 @@ function chatgptPrivateQuestionProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve24(value2);
+        resolve25(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -174536,7 +175557,7 @@ function chatgptPrivateQuestionProgram(config2) {
           continue;
         }
         if (response.status === 200 && body && body.status === "ready") {
-          const opened = readResult(await open6(jobId, keys.privateKey, body));
+          const opened = readResult(await open7(jobId, keys.privateKey, body));
           if (mine !== run2)
             return;
           if (!opened)
@@ -177111,10 +178132,10 @@ function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
   let timer;
-  const timeout = new Promise((resolve24) => {
+  const timeout = new Promise((resolve25) => {
     timer = setTimeout(() => {
       log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
-      resolve24(false);
+      resolve25(false);
     }, timeoutMs);
     timer.unref?.();
   });
@@ -177185,8 +178206,8 @@ async function defaultPrivateMatchProbe(question, ctx) {
   if (corpora.length === 0)
     return none2;
   const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
-  const timeout = new Promise((resolve24) => {
-    const timer = setTimeout(() => resolve24(none2), PROBE_TIMEOUT_MS2);
+  const timeout = new Promise((resolve25) => {
+    const timer = setTimeout(() => resolve25(none2), PROBE_TIMEOUT_MS2);
     timer.unref?.();
   });
   return Promise.race([
@@ -185022,7 +186043,7 @@ __export(exports_remote_mcp, {
   REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
   DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
 });
-import { existsSync as existsSync89 } from "node:fs";
+import { existsSync as existsSync90 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
 }
@@ -185181,15 +186202,15 @@ function withRemoteFailureBoundary(handler) {
     }
   };
 }
-function lazyRemoteConnectionStore(resolvePath4, open6) {
+function lazyRemoteConnectionStore(resolvePath4, open7) {
   let store;
   return (options = {}) => {
     if (store)
       return store;
     const dbPath = resolvePath4();
-    if (!options.create && !existsSync89(dbPath))
+    if (!options.create && !existsSync90(dbPath))
       return;
-    store = open6(dbPath);
+    store = open7(dbPath);
     return store;
   };
 }
@@ -185468,7 +186489,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash87, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash87, randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -185510,7 +186531,7 @@ function createRemoteOAuthHandler(options) {
   const pending = new Map;
   const codes = new Map;
   const completed = new Map;
-  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve24) => setTimeout(resolve24, ms))));
+  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve25) => setTimeout(resolve25, ms))));
   const sweep = () => {
     const at = now();
     for (const [id, entry] of pending)
@@ -185606,8 +186627,8 @@ function createRemoteOAuthHandler(options) {
       }
     }
     admitPending();
-    const requestId = randomBytes28(16).toString("hex");
-    const csrf = randomBytes28(32).toString("base64url");
+    const requestId = randomBytes29(16).toString("hex");
+    const csrf = randomBytes29(32).toString("base64url");
     const entry = {
       transaction,
       client,
@@ -185639,7 +186660,7 @@ function createRemoteOAuthHandler(options) {
   const issueCode = (requestId, entry, u) => {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
-    const code = u.installId ? mintCredential("code", u.installId) : randomBytes28(32).toString("base64url");
+    const code = u.installId ? mintCredential("code", u.installId) : randomBytes29(32).toString("base64url");
     codes.set(sha25611(code), {
       ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
@@ -186377,12 +187398,12 @@ function fitCitation(citation) {
     out.source = source;
   if (date4)
     out.date = date4;
-  const open6 = citation.open;
-  if (open6 && typeof open6 === "object") {
-    if (open6.kind === "mac" && typeof open6.token === "string" && OPEN_TOKEN.test(open6.token))
-      out.open = { kind: "mac", token: open6.token };
-    else if (open6.kind === "web") {
-      const url = httpsUrl2(open6.url);
+  const open7 = citation.open;
+  if (open7 && typeof open7 === "object") {
+    if (open7.kind === "mac" && typeof open7.token === "string" && OPEN_TOKEN.test(open7.token))
+      out.open = { kind: "mac", token: open7.token };
+    else if (open7.kind === "web") {
+      const url = httpsUrl2(open7.url);
       if (url)
         out.open = { kind: "web", url };
     }
@@ -186467,7 +187488,7 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_CLAIM_COLLECT_MS: () => PRIVATE_ANSWER_CLAIM_COLLECT_MS,
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
-import { randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
+import { randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
 import { lstatSync as lstatSync46 } from "node:fs";
 function formatAnalysisTiming(timing) {
   const fields = [`outcome=${timing.outcome}`];
@@ -186627,7 +187648,7 @@ class PrivateAnswerJobs {
         break;
       this.drop(oldest);
     }
-    const id = `oly2p.${installId}.${randomBytes29(32).toString("base64url")}`;
+    const id = `oly2p.${installId}.${randomBytes30(32).toString("base64url")}`;
     const at = this.now();
     const job = {
       id,
@@ -186680,8 +187701,8 @@ class PrivateAnswerJobs {
       const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
       if (holdMs > 0) {
         let timer;
-        await Promise.race([settled, new Promise((resolve24) => {
-          timer = setTimeout(resolve24, holdMs);
+        await Promise.race([settled, new Promise((resolve25) => {
+          timer = setTimeout(resolve25, holdMs);
           timer.unref?.();
         })]);
         clearTimeout(timer);
@@ -186841,8 +187862,8 @@ class PrivateAnswerJobs {
     let settle = () => {
       return;
     };
-    const settled = new Promise((resolve24) => {
-      settle = resolve24;
+    const settled = new Promise((resolve25) => {
+      settle = resolve25;
     });
     const analysis = {
       key: key2,
@@ -187038,10 +188059,10 @@ class PrivateAnswerJobs {
     work.catch(() => {
       return;
     });
-    const stopped = new Promise((resolve24) => {
+    const stopped = new Promise((resolve25) => {
       if (abort.signal.aborted)
-        resolve24();
-      abort.signal.addEventListener("abort", () => resolve24(), { once: true });
+        resolve25();
+      abort.signal.addEventListener("abort", () => resolve25(), { once: true });
     });
     try {
       const done = await Promise.race([work, stopped]);
@@ -187068,8 +188089,8 @@ class PrivateAnswerJobs {
     let claimSettled = () => {
       return;
     };
-    const done = new Promise((resolve24) => {
-      claimSettled = resolve24;
+    const done = new Promise((resolve25) => {
+      claimSettled = resolve25;
     });
     const abort = new AbortController;
     job.claimAbort = abort;
@@ -187108,10 +188129,10 @@ class PrivateAnswerJobs {
     }, this.timeoutFor(job.detail));
     deadlineTimer.unref?.();
     abort.signal.addEventListener("abort", () => settle({ kind: "failed" }, "aborted"), { once: true });
-    const stopped = new Promise((resolve24) => {
+    const stopped = new Promise((resolve25) => {
       if (abort.signal.aborted)
-        resolve24();
-      abort.signal.addEventListener("abort", () => resolve24(), { once: true });
+        resolve25();
+      abort.signal.addEventListener("abort", () => resolve25(), { once: true });
     });
     const record5 = (analysis) => {
       timing.recheckMs = analysis.stats.recheckMs;
@@ -187166,7 +188187,7 @@ class PrivateAnswerJobs {
         if (result && (!precomputed || stillEligible(result.usedKeys, current2)) && await stillReadable()) {
           if (settled)
             return;
-          const ack = randomBytes29(32).toString("base64url");
+          const ack = randomBytes30(32).toString("base64url");
           const plaintext = { ...this.withOpenTokens(job, result.plaintext, result.localPaths), ack };
           const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
           const outcome = { kind: "sealed", sealed };
@@ -187242,8 +188263,8 @@ class PrivateAnswerJobs {
       return;
     }
     let timer;
-    const timeout = new Promise((resolve24) => {
-      timer = setTimeout(resolve24, this.resetTimeoutMs);
+    const timeout = new Promise((resolve25) => {
+      timer = setTimeout(resolve25, this.resetTimeoutMs);
       timer.unref?.();
     });
     const settled = Promise.race([reset.then(() => {
@@ -187275,7 +188296,7 @@ class PrivateAnswerJobs {
       const path = localPaths[index];
       if (!path)
         return citation;
-      const token = randomBytes29(32).toString("base64url");
+      const token = randomBytes30(32).toString("base64url");
       opens.set(token, path);
       return { ...citation, open: { kind: "mac", token } };
     });
@@ -187502,7 +188523,7 @@ __export(exports_private_question_jobs, {
   PrivateQuestionJobs: () => PrivateQuestionJobs,
   PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS: () => PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS
 });
-import { randomBytes as randomBytes30 } from "node:crypto";
+import { randomBytes as randomBytes31 } from "node:crypto";
 function gone2() {
   return { status: 410, body: { status: "gone" } };
 }
@@ -187541,7 +188562,7 @@ class PrivateQuestionJobs {
     const engine = await generateEngineKeyPair();
     const at = this.now();
     const job = {
-      id: `oly2p.${installId}.${randomBytes30(32).toString("base64url")}`,
+      id: `oly2p.${installId}.${randomBytes31(32).toString("base64url")}`,
       createdAt: at,
       expiresAt: at + this.ttlMs,
       enginePrivateKey: engine.privateKey,
@@ -187868,10 +188889,10 @@ function untilCancelled(pending, signal) {
     return pending;
   if (signal.aborted)
     return Promise.resolve(undefined);
-  return new Promise((resolve24, reject) => {
-    const onAbort = () => resolve24(undefined);
+  return new Promise((resolve25, reject) => {
+    const onAbort = () => resolve25(undefined);
     signal.addEventListener("abort", onAbort, { once: true });
-    pending.then(resolve24, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    pending.then(resolve25, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
 }
 function asRecord21(value2) {
@@ -187943,8 +188964,8 @@ function createRemotePrivateParts(options) {
     try {
       return await Promise.race([
         options.probe(request, timeoutMs),
-        new Promise((resolve24) => {
-          timer = setTimeout(() => resolve24("unknown"), timeoutMs);
+        new Promise((resolve25) => {
+          timer = setTimeout(() => resolve25("unknown"), timeoutMs);
           timer.unref?.();
         })
       ]);
@@ -188830,7 +189851,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync31, lstatSync as lstatSync47, mkdirSync as mkdirSync59, statSync as statSync37 } from "node:fs";
+import { chmodSync as chmodSync31, lstatSync as lstatSync47, mkdirSync as mkdirSync60, statSync as statSync38 } from "node:fs";
 import { dirname as dirname89, isAbsolute as isAbsolute35 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
@@ -188916,12 +189937,12 @@ function ensureSettingsDirectory(directory) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync37(dirname89(directory));
+      statSync38(dirname89(directory));
     } catch {
       return "home_missing";
     }
     try {
-      mkdirSync59(directory, { mode: 448 });
+      mkdirSync60(directory, { mode: 448 });
       chmodSync31(directory, 448);
     } catch {
       return "directory_unavailable";
@@ -189761,36 +190782,51 @@ async function archiveRoute(options, route, body, context3) {
     }
   };
 }
-async function archiveBrowse(options, args, context3) {
-  const keys = Object.keys(args);
-  if (keys.some((key2) => key2 !== "parent_key" && key2 !== "cursor") || args.parent_key !== undefined && !archiveArg(args.parent_key) || args.cursor !== undefined && !archiveArg(args.cursor)) {
-    return refused2("parent_key and cursor must be from the picker.", "invalid_params");
-  }
-  const answer = await archiveRoute(options, "browse", args, context3);
+async function archiveUploadStart(options, args, context3) {
+  if (Object.keys(args).length > 0)
+    return refused2("An upload takes no arguments.", "invalid_params");
+  const answer = await archiveRoute(options, "upload-start", {}, context3);
   if (!answer.ok)
     return answer.result;
-  const nodes = Array.isArray(answer.parsed.nodes) ? answer.parsed.nodes : [];
+  const uploadId = answer.parsed.upload_id;
+  if (typeof uploadId !== "string" || !uploadId)
+    return refused2("Olympus could not do that. Try again.", "internal");
+  return { content: [{ type: "text", text: "Ready." }], structuredContent: { status: "started", upload_id: uploadId } };
+}
+async function archiveUploadStatus(options, args, context3) {
+  const keys = Object.keys(args);
+  if (keys.length !== 1 || keys[0] !== "upload_id" || !archiveArg(args.upload_id))
+    return refused2("upload_id is required.", "invalid_params");
+  const answer = await archiveRoute(options, "upload-status", args, context3);
+  if (!answer.ok)
+    return answer.result;
+  const state = answer.parsed.state;
+  if (state !== "receiving" && state !== "paused_disk_full" && state !== "idle")
+    return refused2("Olympus could not do that. Try again.", "internal");
+  const count2 = (value2) => typeof value2 === "number" && Number.isFinite(value2) && value2 >= 0 ? value2 : 0;
   return {
-    content: [{ type: "text", text: "Listed." }],
-    structuredContent: { status: "listed", count: nodes.length },
-    _meta: {
-      [SCOPE_UI_META_KEY]: {
-        nodes,
-        ...typeof answer.parsed.next_cursor === "string" ? { next_cursor: answer.parsed.next_cursor } : {},
-        ...answer.parsed.access && typeof answer.parsed.access === "object" ? { access: answer.parsed.access } : {}
-      }
-    }
+    content: [{ type: "text", text: state === "paused_disk_full" ? "Waiting for free space." : "Receiving." }],
+    structuredContent: { status: state, files: count2(answer.parsed.files), bytes: count2(answer.parsed.bytes) }
   };
+}
+async function archiveUploadCancel(options, args, context3) {
+  const keys = Object.keys(args);
+  if (keys.length !== 1 || keys[0] !== "upload_id" || !archiveArg(args.upload_id))
+    return refused2("upload_id is required.", "invalid_params");
+  const answer = await archiveRoute(options, "upload-cancel", args, context3);
+  if (!answer.ok)
+    return answer.result;
+  return { content: [{ type: "text", text: "Cancelled." }], structuredContent: { status: "cancelled" } };
 }
 async function archiveApprove(options, args, context3) {
   const keys = Object.keys(args).filter((key2) => key2 !== "confirm_account" && key2 !== "keep_apart" && key2 !== "source_id");
-  const byKey = keys.length === 1 && keys[0] === "key" && archiveArg(args.key);
+  const byKey = keys.length === 1 && keys[0] === "upload_id" && archiveArg(args.upload_id);
   if (args.source_id !== undefined && !(byKey && archiveArg(args.source_id)))
-    return refused2("source_id goes with a chosen key.", "invalid_params");
+    return refused2("source_id goes with an upload.", "invalid_params");
   const byRequest = keys.length === 1 && keys[0] === "request_id" && archiveArg(args.request_id);
   const answers = [args.confirm_account, args.keep_apart];
   if (!byKey && !byRequest)
-    return refused2("Give the chosen key or a request id.", "invalid_params");
+    return refused2("Give the upload or a request id.", "invalid_params");
   if (answers.some((value2) => value2 !== undefined && value2 !== true) || answers.filter((value2) => value2 === true).length > 1) {
     return refused2("Say either confirm_account or keep_apart, as true.", "invalid_params");
   }
@@ -189988,8 +191024,12 @@ function createDashboardPanelTools(options) {
         return await openUnreadableFile(options, args, context3);
       if (name === UNREADABLE_FILES_PAGE_TOOL_NAME)
         return await unreadableFilesPage(options, args, context3);
-      if (name === ARCHIVE_BROWSE_TOOL_NAME)
-        return await archiveBrowse(options, args, context3);
+      if (name === ARCHIVE_UPLOAD_START_TOOL_NAME)
+        return await archiveUploadStart(options, args, context3);
+      if (name === ARCHIVE_UPLOAD_STATUS_TOOL_NAME)
+        return await archiveUploadStatus(options, args, context3);
+      if (name === ARCHIVE_UPLOAD_CANCEL_TOOL_NAME)
+        return await archiveUploadCancel(options, args, context3);
       if (name === ARCHIVE_APPROVE_TOOL_NAME)
         return await archiveApprove(options, args, context3);
       if (name === ARCHIVE_DECLINE_TOOL_NAME)
@@ -190109,8 +191149,8 @@ __export(exports_server2, {
   accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
 });
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync90 } from "node:fs";
-import { dirname as dirname91, isAbsolute as isAbsolute36, join as join116 } from "node:path";
+import { existsSync as existsSync91 } from "node:fs";
+import { dirname as dirname91, isAbsolute as isAbsolute36, join as join117 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -190542,7 +191582,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync90(store.dbPath))
+        if (!existsSync91(store.dbPath))
           continue;
         const handle = openConnectorStore(definition.account, {
           dbPath: store.dbPath,
@@ -191724,13 +192764,13 @@ async function main() {
     }
     if (!await eligible())
       throw new Error("open refused");
-    await new Promise((resolve24, reject) => {
+    await new Promise((resolve25, reject) => {
       const args = localOpenArguments(path, roots);
       if (!args) {
         reject(new Error("open refused"));
         return;
       }
-      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve24());
+      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve25());
     });
   };
   const whatsappConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: WHATSAPP_PERSONAL_SOURCE_ID });
@@ -192839,7 +193879,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }) : undefined;
   const archiveImportDashboard = createArchiveImportDashboard({
     runtime: archiveImports,
-    browser: createLocalFilesArchiveBrowser(),
+    resolver: createArchivePathResolver(),
     refreshScheduler: () => {
       sourceScheduler?.updateSources(schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources);
     },
@@ -193503,7 +194543,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         openUrl: async (url, eligible) => {
           if (!await eligible())
             throw new Error("open refused");
-          await new Promise((resolve24, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve24()));
+          await new Promise((resolve25, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve25()));
         }
       } : {}
     });
@@ -193916,14 +194956,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           return Response.json(status, { status: 503 });
         try {
           const base = `http://127.0.0.1:${port}`;
-          const open6 = new URL(await mintDashboardOpeningUrl(base, authToken));
+          const open7 = new URL(await mintDashboardOpeningUrl(base, authToken));
           const requestedTarget = new URL(request.url).searchParams.get("target");
           const target = requestedTarget ? parseOlympusOpenUrl(`olympus://open/${requestedTarget}`) : undefined;
           if (requestedTarget && !target)
             return new Response(null, { status: 400 });
           if (target)
-            open6.hash += `&olympus_open=${openTargetToken(target)}`;
-          const origin = await desktopBridge.open(open6.pathname + open6.search + open6.hash);
+            open7.hash += `&olympus_open=${openTargetToken(target)}`;
+          const origin = await desktopBridge.open(open7.pathname + open7.search + open7.hash);
           return Response.json({ state: "listening", opened: true, url: origin + "/dashboard", hint: "A private owner ticket was opened in your desktop browser. If *.localhost resolution fails, use the owner SSH socket forward; never use the fixed origin." });
         } catch {
           return Response.json({ error: "Owner ticket could not open. Wait ten seconds and retry, or use the owner SSH socket forward." }, { status: 503 });
@@ -194023,7 +195063,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join116(dirname91(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join117(dirname91(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -195250,11 +196290,11 @@ init_messaging_capture();
 init_config();
 init_dashboard_opening();
 init_open_targets();
-import { randomBytes as randomBytes31 } from "node:crypto";
-import { existsSync as existsSync91, readFileSync as readFileSync78, openSync as openSync21, closeSync as closeSync22, writeSync as writeSync6 } from "node:fs";
+import { randomBytes as randomBytes32 } from "node:crypto";
+import { existsSync as existsSync92, readFileSync as readFileSync78, openSync as openSync21, closeSync as closeSync22, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve24 } from "node:path";
+import { resolve as resolve25 } from "node:path";
 
 // src/core/open-handler.ts
 init_open_targets();
@@ -197655,7 +198695,7 @@ function expectNoArgs(command, args) {
 init_engine_service();
 init_remote_access();
 function olympusCommandHint2(input2 = {}) {
-  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve24(olympusPackageRoot(), "bin", "olympus") });
+  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve25(olympusPackageRoot(), "bin", "olympus") });
 }
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var ZKAPI_TEST_WRITER_USAGE = "olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]";
@@ -198561,7 +199601,7 @@ function parseEvalShardExportArgs(args) {
     account,
     approved_scope_key: approvedScopeKey,
     count: count2,
-    out_dir: resolve24(out),
+    out_dir: resolve25(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
   };
@@ -198611,7 +199651,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync78(resolve24(input2), "utf8");
+    raw = readFileSync78(resolve25(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -198918,14 +199958,14 @@ function parseXReconcileRecoveryArgs(args) {
   }
   return {
     account,
-    ...stateDbPath ? { stateDbPath: resolve24(stateDbPath) } : {},
+    ...stateDbPath ? { stateDbPath: resolve25(stateDbPath) } : {},
     execute,
     ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
   };
 }
 function runXReconcileRecovery(options) {
   const stateDbPath = options.stateDbPath ?? resolvedRawPath("x.bookmarks", "x-reconcile.sqlite");
-  if (stateDbPath !== ":memory:" && !existsSync91(stateDbPath)) {
+  if (stateDbPath !== ":memory:" && !existsSync92(stateDbPath)) {
     if (!options.execute)
       return xBookmarksRecoveryStatusWithoutState();
     throw new Error("X reconciliation has no staged run to recover.");
@@ -199304,7 +200344,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes31(32).toString("base64url");
+  return randomBytes32(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};
@@ -199812,7 +200852,7 @@ async function runDataCommand(args) {
     const options = parseDataOptions(args.slice(1));
     if (!options.output.trim())
       throw new OperationError("invalid_params", "--output must be provided.");
-    const destination = resolve24(options.output.trim());
+    const destination = resolve25(options.output.trim());
     return runLocallyOrThroughWorker(() => exportOlympusData({
       destination,
       ...options.sourceId ? { sourceId: options.sourceId } : {}

@@ -146,8 +146,8 @@ describe('the dashboard words come from the registry and the family', () => {
     const two = archivePickIntro([MBOX_ARCHIVE_FORMAT, NOTES, SECOND_MAIL]);
     expect(two).toContain('a notes export (a .zip file)');
     expect(two).toContain('; or Fake fakemail');
-    expect(two.startsWith('Choose a file or folder on this computer: ')).toBe(true);
-    expect(two.endsWith('Olympus reads it where it is and never changes it.')).toBe(true);
+    expect(two.startsWith('Drop a file or folder from this computer: ')).toBe(true);
+    expect(two.endsWith('removes that copy once it has read what it needs, and never changes the original.')).toBe(true);
   });
 
   test('a family\'s nouns: messages for mail and chat, notes for notes, items for anything else', () => {

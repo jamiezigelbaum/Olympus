@@ -14203,7 +14203,7 @@ function syncMid(name) {
   return typeof name === "string" ? name : name.mid;
 }
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
-  return `Choose a file or folder on this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus reads it where it is and never changes it.`;
+  return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus makes a copy in its own storage to read it, removes that copy once it has read what it needs, and never changes the original.`;
 }
 var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
@@ -14460,12 +14460,23 @@ var init_vocabulary = __esm(() => {
       back: "Back to Olympus",
       title: "Import another archive",
       intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
-      source: "This computer",
-      makePrivate: "Import",
-      makePrivateFor: "Import {name}",
-      alreadyPrivate: "Imported",
-      busy: "Starting…",
-      chooseAnother: "Choose another"
+      zone: "Upload folder",
+      over: "Drop to import",
+      hint: "Drag a folder here, or click to choose one.",
+      zoneLabel: "Upload folder: choose a folder, or drop one here",
+      chooseFile: "or choose a file",
+      reading: "Reading the folder…",
+      uploading: "Uploading {name}",
+      progress: "{sent} of {total}",
+      progressFiles: "{sent} of {total} · {files} of {of} files",
+      paused: "This computer is low on space. The upload waits and goes on by itself when space is free.",
+      cancel: "Cancel",
+      starting: "Starting…",
+      empty: "There was no file in that. Drop a folder or a file from this computer.",
+      unreadable: "Olympus could not read what you dropped. Try again.",
+      failed: "The upload stopped before it finished. Nothing was imported. Try again.",
+      several: "{n} items",
+      chooseAnother: "Start over"
     },
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },

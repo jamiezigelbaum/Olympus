@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { FIXTURE_LABEL, FIXTURE_SOURCE_ID, onePipelineHarness, type OnePipelineHarness } from './support/one-pipeline-harness.ts';
+import { approveStaged, stageUpload } from './support/stage-upload.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -33,7 +34,7 @@ describe('a source\'s own Import an archive', () => {
     const h = onePipelineHarness(cleanups);
     h.connectLive();
     const path = h.writeExport('own.mbox', []);
-    const result = await h.dashboard.approve({ key: path, sourceId: FIXTURE_SOURCE_ID });
+    const result = await approveStaged(h.dashboard, path, { sourceId: FIXTURE_SOURCE_ID });
     // The answer names the card it joined, so the line can say where it shows.
     expect(result).toMatchObject({ ok: true, status: 'started', source: { id: FIXTURE_SOURCE_ID, label: FIXTURE_LABEL } });
     const records = h.runtime.state.list();
@@ -45,14 +46,14 @@ describe('a source\'s own Import an archive', () => {
     const h = onePipelineHarness(cleanups);
     h.connectLive();
     const path = whatsappExport(h);
-    const refused = await h.dashboard.approve({ key: path, sourceId: FIXTURE_SOURCE_ID });
+    const refused = await approveStaged(h.dashboard, path, { sourceId: FIXTURE_SOURCE_ID });
     expect(refused.ok).toBe(false);
     if (refused.ok) return;
     expect(refused.code).toBe('not_this_source');
     expect(refused.message).toBe(`This isn't a ${FIXTURE_LABEL} export. From the ${FIXTURE_LABEL} card, Olympus imports only these: Mail (mbox). For any other export, use Import another archive under Other archives.`);
     expect(h.runtime.state.list()).toEqual([]);
     // The same file through Import another archive (no source named) is taken, by what it is, under Archives.
-    const apart = await h.dashboard.approve({ key: path });
+    const apart = await approveStaged(h.dashboard, path);
     expect(apart).toMatchObject({ ok: true, status: 'started' });
     expect(apart.ok && apart.status === 'started' ? apart.source : 'none').toBeUndefined();
     expect(h.runtime.state.list()[0]!.target).toBeUndefined();
@@ -63,13 +64,13 @@ describe('a source\'s own Import an archive', () => {
     h.connectLive();
     h.evidence.current = { kind: 'none' };
     const path = h.writeExport('unnamed.mbox', []);
-    const generic = await h.dashboard.approve({ key: path });
-    const fromCard = await h.dashboard.approve({ key: path, sourceId: FIXTURE_SOURCE_ID });
+    const generic = await approveStaged(h.dashboard, path);
+    const fromCard = await approveStaged(h.dashboard, path, { sourceId: FIXTURE_SOURCE_ID });
     expect(generic).toMatchObject({ ok: true, status: 'confirm_account', source: { id: FIXTURE_SOURCE_ID } });
     expect(fromCard).toEqual(generic);
     expect(h.runtime.state.list()).toEqual([]);
     // Kept apart from the card: under Other archives, as from the general button.
-    const apart = await h.dashboard.approve({ key: path, sourceId: FIXTURE_SOURCE_ID, keepApart: true });
+    const apart = await approveStaged(h.dashboard, path, { sourceId: FIXTURE_SOURCE_ID, keepApart: true });
     expect(apart).toMatchObject({ ok: true, status: 'started' });
     expect(apart.ok && apart.status === 'started' ? apart.source : 'none').toBeUndefined();
     expect(h.runtime.state.list()[0]!.target).toBeUndefined();
@@ -78,7 +79,7 @@ describe('a source\'s own Import an archive', () => {
   test('a card no source registers is refused before anything is read', async () => {
     const h = onePipelineHarness(cleanups);
     const path = h.writeExport('own.mbox', []);
-    const refused = await h.dashboard.approve({ key: path, sourceId: 'telegram.messages' });
+    const refused = await approveStaged(h.dashboard, path, { sourceId: 'telegram.messages' });
     expect(refused).toMatchObject({ ok: false, code: 'unknown_source' });
     expect(h.runtime.state.list()).toEqual([]);
   });

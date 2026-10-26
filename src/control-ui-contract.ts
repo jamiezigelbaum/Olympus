@@ -66,7 +66,7 @@ export interface OlympusFolderScopeNode {
   key: string;
   parent_key?: string;
   name: string;
-  /** A file only in the archive picker (local-files/scope-browser.ts archive mode); every other listing offers folders. */
+  /** `file` is for a listing that offers files; every listing today offers folders (the archive picker that listed files is gone, 2026-10-26). */
   kind: 'folder' | 'file';
   has_children: boolean;
   selectable: boolean;

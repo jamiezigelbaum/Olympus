@@ -8,9 +8,11 @@
 // fails the journey that guards it. Every name and path here is invented.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   ARCHIVE_APPROVE_TOOL_NAME,
-  ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
@@ -30,7 +32,7 @@ import {
 } from '../scripts/release-check/archive-leg.ts';
 import { egressVerdict } from '../scripts/release-check/inbox.ts';
 import { runJourney, type Journey, type JourneyTrace } from '../scripts/release-check/journey.ts';
-import { PANEL_IDS, PanelDriver, browseFixtures, closeWindows, dashboardAnswer, entryFor, evalIn, live, mountPanel, settle, type Serve } from './helpers/release-check-panel.ts';
+import { PANEL_IDS, PanelDriver, closeWindows, dashboardAnswer, entryFor, evalIn, live, mountPanel, settle, uploadTools, type Serve } from './helpers/release-check-panel.ts';
 import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL } from '../src/workers/dashboard/vocabulary.ts';
 
 const fill = (template: string, values: Record<string, string>): string => Object.entries(values).reduce((out, [key, value]) => out.split(`{${key}}`).join(value), template);
@@ -737,29 +739,35 @@ describe('the leg\'s journeys on the product\'s real panel', () => {
     expect(stuck.trace.steps.find((step) => !step.ok)!.name).toContain('settles');
   });
 
-  test('the picker: Import an archive, the fixtures folder, Import on the file, and the row settles', async () => {
+  test('the drop zone: Import an archive, the file chosen in its file input, and the row settles', async () => {
     let archives: ComputerArchiveEntry[] = [];
-    const approvals: Array<{ key?: string }> = [];
+    const approvals: Array<{ upload_id?: string }> = [];
+    const drop = uploadTools();
+    const dir = mkdtempSync(join(tmpdir(), 'rc-drop-'));
+    const path = join(dir, pickerFx.fileName);
+    writeFileSync(path, 'Takeout');
     const serve: Serve = {
       [DASHBOARD_TOOL_NAME]: () => dashboardAnswer(archives),
-      [ARCHIVE_BROWSE_TOOL_NAME]: browseFixtures([pickerFx.fileName, agentFx.fileName]),
+      ...drop.serve,
       [ARCHIVE_APPROVE_TOOL_NAME]: (args) => {
         approvals.push(args);
         archives = [entryFor(pickerFx)];
-        return { content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name: pickerFx.fileName } };
+        return { content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name: drop.nameOf(String(args.upload_id)) } };
       },
     };
-    const journey = pickerImportJourney(pickerFx, { startS: 4, settleS: 4 });
-    const { trace, driver } = await runOn(serve, journey);
+    const journey = pickerImportJourney(pickerFx, path, { startS: 4, settleS: 4 });
+    const { trace, driver } = await runOn(serve, journey).finally(() => rmSync(dir, { recursive: true, force: true }));
     expect(trace.steps.filter((step) => !step.ok).map((step) => `${step.name}: expected ${step.expected}; got ${step.actual}`).join(' || ')).toBe('');
     expect(trace.ok).toBe(true);
-    expect(approvals).toEqual([{ key: `/Users/you/${FIXTURE_FOLDER}/${pickerFx.fileName}` }]);
+    // The file travelled as an upload under its own name, and the approval named that upload: no path of this computer crossed.
+    expect([...drop.uploads.values()]).toEqual([[pickerFx.fileName]]);
+    expect(approvals).toEqual([{ upload_id: expect.stringMatching(/^[0-9a-f]{32}$/) }]);
     const row = rowNamed(panelArchivesOf(evalIn(driver.win, ARCHIVE_PANEL_PROBE)), pickerFx.fileName)!;
-    expect(rowProblems(row, pickerFx.expect)).toEqual([]);
+    expect(rowProblems(row, pickerFx.expect, 'picker')).toEqual([]);
   });
 
   test('the picker journey fails when an archive is already listed (its button has moved into a menu)', async () => {
-    const { trace } = await runOn({ [DASHBOARD_TOOL_NAME]: () => dashboardAnswer([entryFor(agentFx)]) }, pickerImportJourney(pickerFx, { openS: 1, startS: 1, settleS: 1 }));
+    const { trace } = await runOn({ [DASHBOARD_TOOL_NAME]: () => dashboardAnswer([entryFor(agentFx)]) }, pickerImportJourney(pickerFx, '/unused', { openS: 1, startS: 1, settleS: 1 }));
     expect(trace.ok).toBe(false);
     expect(trace.steps[0]!.ok).toBe(false);
   });

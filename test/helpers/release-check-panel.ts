@@ -8,7 +8,9 @@ import { Window } from 'happy-dom';
 import {
   COMPUTER_META_KEY,
   OLYMPUS_HOST_CONTEXT_KEY,
-  SCOPE_UI_META_KEY,
+  ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
+  ARCHIVE_UPLOAD_START_TOOL_NAME,
+  ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
   type ComputerArchiveEntry,
   type ComputerArchivesMeta,
 } from '../../src/workers/chatgpt/dashboard-contract.ts';
@@ -54,6 +56,10 @@ export async function mountPanel(serve: Serve): Promise<{ win: Window; sent: Mes
         const handler = serve[message.params.name];
         if (handler) reply(message.id, handler(message.params.arguments ?? {}));
       } else if (message.method === 'ui/open-link') reply(message.id, {});
+      else if (message.method === 'olympus/upload-file') {
+        const handler = serve[message.method];
+        reply(message.id, handler ? handler(message.params ?? {}) : { ok: true });
+      }
     },
   };
   Object.defineProperty(win, 'parent', { value: parent, configurable: true });
@@ -85,6 +91,16 @@ export class PanelDriver implements JourneyDriver {
     return info;
   }
   async type(): Promise<boolean> { return false; }
+  /** The chosen files of a file input, each a File the DOM can read (the machine's own paths, read here), and a change event. */
+  async attach(frame: 'host' | 'panel', target: WireTarget, paths: string[]): Promise<boolean> {
+    const input = evalIn(this.frameOf(frame), `__rc.element(${JSON.stringify(target)})`) as HTMLInputElement | null;
+    if (!input) return false;
+    const win = this.frameOf(frame) as unknown as { File: typeof File; Event: typeof Event };
+    const files = await Promise.all(paths.map(async (path) => new win.File([await Bun.file(path).arrayBuffer()], path.split('/').pop() ?? path)));
+    Object.defineProperty(input, 'files', { value: files, configurable: true });
+    input.dispatchEvent(new win.Event('change', { bubbles: true }));
+    return true;
+  }
   async open(): Promise<void> { await this.go(); }
   async go(_path?: string): Promise<void> {
     this.win = await this.mount();
@@ -148,14 +164,31 @@ export function dashboardAnswer(archives: ComputerArchiveEntry[], requests: Comp
   return { ...result, structuredContent: { ...result.structuredContent, needsYou }, _meta: { ...result._meta, [COMPUTER_META_KEY]: meta } };
 }
 
-/** The picker as the machine's home shows it: the fixtures folder, with the fixture files in it. */
-export function browseFixtures(files: string[]) {
-  const home = '/Users/you';
-  const nodes = (args: { parent_key?: unknown }): unknown[] => {
-    if (!args.parent_key) return [{ key: `${home}/${FIXTURE_FOLDER}`, name: FIXTURE_FOLDER, kind: 'folder', has_children: true, selectable: true }];
-    return files.map((name) => ({ key: `${home}/${FIXTURE_FOLDER}/${name}`, parent_key: `${home}/${FIXTURE_FOLDER}`, name, kind: 'file', has_children: false, selectable: true, size_bytes: 900 }));
+/**
+ * The engine's side of a dropped file, as the panel sees it: an upload is begun, each file the host page sends is kept by name,
+ * and the approval names the upload. `nameOf` is what the approval is about (the first thing dropped).
+ */
+export function uploadTools(): { serve: Serve; nameOf: (uploadId: string) => string; uploads: Map<string, string[]> } {
+  const uploads = new Map<string, string[]>();
+  let next = 0;
+  const serve: Serve = {
+    [ARCHIVE_UPLOAD_START_TOOL_NAME]: () => {
+      const id = (next++).toString(16).padStart(32, '0');
+      uploads.set(id, []);
+      return { content: [{ type: 'text', text: 'Ready.' }], structuredContent: { status: 'started', upload_id: id } };
+    },
+    [ARCHIVE_UPLOAD_STATUS_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Receiving.' }], structuredContent: { status: 'receiving', files: 0, bytes: 0 } }),
+    [ARCHIVE_UPLOAD_CANCEL_TOOL_NAME]: (args: { upload_id?: string }) => {
+      uploads.delete(String(args.upload_id));
+      return { content: [{ type: 'text', text: 'Cancelled.' }], structuredContent: { status: 'cancelled' } };
+    },
+    // The host page's side (olympus/upload-file): the file arrived.
+    'olympus/upload-file': (params: { upload_id: string; path: string }) => {
+      uploads.get(params.upload_id)?.push(params.path);
+      return { ok: true };
+    },
   };
-  return (args: { parent_key?: unknown }) => ({ content: [{ type: 'text', text: 'Listed.' }], structuredContent: { status: 'listed' }, _meta: { [SCOPE_UI_META_KEY]: { nodes: nodes(args) } } });
+  return { serve, uploads, nameOf: (id) => (uploads.get(id)?.[0] ?? '').split('/')[0] ?? '' };
 }
 
 /** Real time, with a pause between looks so the panel's own messages are delivered; the journeys' bounds are set to a few seconds. */

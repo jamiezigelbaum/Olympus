@@ -19,6 +19,7 @@ import { installerForPlatform, type UpdateAvailable } from '../../core/update-ch
  * control says to open the controls first.
  */
 import {
+  ARCHIVE_UPLOAD_START_TOOL_NAME,
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_LOCAL_SESSION_TOOL_NAMES,
   DASHBOARD_TOOL_NAME,
@@ -30,6 +31,7 @@ import {
   CHATGPT_DASHBOARD_LIGHT,
 } from './chatgpt/page.ts';
 import { dashboardHostBridge, type DashboardHostBridgeConfig } from './host-bridge.ts';
+import { ARCHIVE_UPLOAD_CHUNK_BYTES } from '../archive-import/staging.ts';
 import {
   DASHBOARD_HOST_GATE_COPY,
   DASHBOARD_UPDATE_COPY,
@@ -52,6 +54,8 @@ export const DASHBOARD_HTML_PATH = '/dashboard';
 export const DASHBOARD_TOOLS_CALL_PATH = '/dashboard/tools/call';
 /** GET /dashboard?panel-read: the dashboard tool's result for a locked (dash_ token) reader. */
 export const DASHBOARD_PANEL_READ_QUERY_PARAM = 'panel-read';
+/** POST: one file of an archive upload, its bytes the body (archive-import/staging.ts); same session and CSRF as a tool call. */
+export const DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH = '/dashboard/archive-import/upload-file';
 
 /** The local pages the computer offers, each a query on /dashboard (the dash_ token is allowlisted by pathname). */
 export const DASHBOARD_LOCAL_PAGES = {
@@ -212,6 +216,11 @@ function hostProgram(input: {
   landings: Record<string, string>;
   hasReadToken: boolean;
   toolsCallPath: string;
+  /** Where one file of an archive upload goes, and the local tool whose unlock opens the session it needs. */
+  uploadPath: string;
+  uploadTool: string;
+  /** How large a piece of a file goes in one request (archive-import/staging.ts). */
+  uploadChunkBytes: number;
   words: typeof DASHBOARD_HOST_GATE_COPY;
   updateWords: { notice: string; copied: string; copyFailed: string };
   updateSupported: boolean;
@@ -284,6 +293,88 @@ function hostProgram(input: {
       return response.ok ? response.json().then((result) => remember(name, result)) : failed();
     });
   }
+  // The files of an archive upload, sent from here: the panel is sandboxed and cannot reach Olympus. Each file is
+  // sent as pieces (one request each, the piece read from disk as it is sent), so it never sits in memory.
+  const sending: Record<string, XMLHttpRequest[]> = {};
+  const stopped: Record<string, boolean> = {};
+  function abortUpload(uploadId: string): void {
+    stopped[uploadId] = true;
+    // A copy: each abort takes its request out of the list.
+    for (const request of (sending[uploadId] || []).slice()) request.abort();
+    delete sending[uploadId];
+  }
+  function uploadFile(
+    upload: { uploadId: string; path: string; modified: number; file: Blob },
+    progress: (loaded: number) => void,
+  ): Promise<{ ok: boolean; message?: string; cancelled?: boolean }> {
+    if (expired || stopped[upload.uploadId]) return Promise.resolve({ ok: false, cancelled: !!stopped[upload.uploadId] });
+    return localUnlock(input.uploadTool).then(() => new Promise<{ ok: boolean; message?: string; cancelled?: boolean }>((resolve) => {
+      if (!csrfToken || stopped[upload.uploadId]) {
+        resolve({ ok: false, cancelled: !!stopped[upload.uploadId] });
+        return;
+      }
+      const size = upload.file.size;
+      const piece = input.uploadChunkBytes > 0 ? input.uploadChunkBytes : size || 1;
+      // A file goes in pieces, one request at a time, each written before the next is sent: the engine never holds more
+      // than a piece, however large the file is or slowly the disk takes it.
+      function send(offset: number): void {
+        if (stopped[upload.uploadId]) {
+          resolve({ ok: false, cancelled: true });
+          return;
+        }
+        const end = Math.min(size, offset + piece);
+        const last = end >= size;
+        const request = new XMLHttpRequest();
+        const list = sending[upload.uploadId] || (sending[upload.uploadId] = []);
+        list.push(request);
+        const forget = (): void => {
+          const at = list.indexOf(request);
+          if (at >= 0) list.splice(at, 1);
+        };
+        request.open('POST', input.uploadPath);
+        request.setRequestHeader('X-Olympus-CSRF', csrfToken);
+        request.setRequestHeader('X-Olympus-Upload-Id', upload.uploadId);
+        request.setRequestHeader('X-Olympus-Upload-Path', encodeURIComponent(upload.path));
+        if (upload.modified > 0) request.setRequestHeader('X-Olympus-Upload-Modified', String(Math.round(upload.modified)));
+        request.setRequestHeader('X-Olympus-Upload-Offset', String(offset));
+        request.setRequestHeader('X-Olympus-Upload-Final', last ? '1' : '0');
+        request.setRequestHeader('Content-Type', 'application/octet-stream');
+        request.upload.onprogress = (event: ProgressEvent) => progress(offset + event.loaded);
+        request.onload = () => {
+          forget();
+          if (request.status === 401 || request.status === 403) {
+            lockPage();
+            resolve({ ok: false });
+            return;
+          }
+          if (request.status >= 200 && request.status < 300) {
+            if (last) resolve({ ok: true });
+            else send(end);
+            return;
+          }
+          let message: string | undefined;
+          try {
+            const body = JSON.parse(request.responseText) as { error?: { message?: unknown } };
+            if (body && body.error && typeof body.error.message === 'string') message = body.error.message;
+          } catch {
+            message = undefined;
+          }
+          resolve(message ? { ok: false, message } : { ok: false });
+        };
+        request.onerror = () => {
+          forget();
+          resolve({ ok: false });
+        };
+        request.onabort = () => {
+          forget();
+          resolve({ ok: false, cancelled: true });
+        };
+        // The whole file when one piece holds it; otherwise this piece of it, read from disk as it is sent.
+        request.send(offset === 0 && last ? upload.file : upload.file.slice(offset, end));
+      }
+      send(0);
+    }));
+  }
   // An open link's place in the panel (See why on one source): read against
   // the closed list, then cleared, so a reload does not land again.
   let landing: { sourceId: string } | undefined;
@@ -299,6 +390,8 @@ function hostProgram(input: {
   handle = bridge(landing ? { ...input.bridge, landing } : input.bridge, {
     frame,
     callTool,
+    uploadFile,
+    abortUpload,
     openUrl(url: string) {
       // On the computer the dashboard is already the whole app: its own pages
       // open in place (an Omarchy app window would otherwise hand them to a
@@ -442,6 +535,9 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     landings: panelOpenTargetSources(),
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
+    uploadPath: DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH,
+    uploadTool: ARCHIVE_UPLOAD_START_TOOL_NAME,
+    uploadChunkBytes: ARCHIVE_UPLOAD_CHUNK_BYTES,
     words: DASHBOARD_HOST_GATE_COPY,
     updateSupported: installer !== undefined,
     updateWords: { notice: DASHBOARD_UPDATE_COPY.notice('{version}'), copied: DASHBOARD_UPDATE_COPY.copied, copyFailed: DASHBOARD_UPDATE_COPY.copyFailed },

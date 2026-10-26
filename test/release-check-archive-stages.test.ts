@@ -11,7 +11,6 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import {
   ARCHIVE_APPROVE_TOOL_NAME,
-  ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
   DASHBOARD_TOOL_NAME,
   type ComputerArchiveEntry,
@@ -28,7 +27,7 @@ import {
   type ArchiveBrowserSession, type ArchiveHost,
 } from '../scripts/release-check/archive-stages.ts';
 import type { CheckResult } from '../scripts/release-check/report.ts';
-import { PanelDriver, browseFixtures, closeWindows, dashboardAnswer, entryFor, mountPanel, settle } from './helpers/release-check-panel.ts';
+import { PanelDriver, closeWindows, dashboardAnswer, entryFor, mountPanel, settle, uploadTools } from './helpers/release-check-panel.ts';
 
 // Each stage walks several journeys in real time (the runner looks again every 0.4 s), so a test takes seconds on a loaded runner.
 setDefaultTimeout(60_000);
@@ -74,6 +73,8 @@ class FakeMachine implements ArchiveHost {
   world: World = { settle: 'at-once', finishesFirstUpTo: 0, removalLeavesContent: false, egressFresh: [], engineFails: false, removeIgnored: false, panelUnreadable: false, engineKeepsRemoved: false };
   /** Archives the engine still lists after the page lost them. */
   ghosts: ComputerArchiveEntry[] = [];
+  /** What the panel uploaded: the engine's side of a dropped file. */
+  drop = uploadTools();
   private clock = 0;
   private nextRequest = 1;
   private readonly initialSize = new Map<string, number>();
@@ -159,9 +160,9 @@ class FakeMachine implements ArchiveHost {
   private serve() {
     return {
       [DASHBOARD_TOOL_NAME]: () => { this.tick(); return dashboardAnswer(this.archives, this.requests, this.privateModel); },
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args: { parent_key?: unknown }) => browseFixtures([...this.fixtures.keys()])(args),
-      [ARCHIVE_APPROVE_TOOL_NAME]: (args: { request_id?: string; key?: string }) => {
-        const name = args.request_id ? this.requests.find((request) => request.id === args.request_id)?.name : basename(args.key ?? '');
+      ...this.drop.serve,
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args: { request_id?: string; upload_id?: string }) => {
+        const name = args.request_id ? this.requests.find((request) => request.id === args.request_id)?.name : this.drop.nameOf(args.upload_id ?? '');
         const fx = name ? this.fixtures.get(name) : undefined;
         if (!fx) return { content: [{ type: 'text', text: 'No.' }], structuredContent: { error: 'unsupported' }, isError: true };
         this.requests = this.requests.filter((request) => request.id !== args.request_id);

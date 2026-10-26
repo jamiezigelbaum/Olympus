@@ -48,10 +48,11 @@ import { createDashboardPanelTools } from '../src/workers/email-source/dashboard
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
-import { createLocalFilesArchiveBrowser } from '../src/workers/local-files/scope-browser.ts';
+import { createArchivePathResolver } from '../src/workers/local-files/scope-browser.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { buildSourceDashboardViewModel, type DashboardImportedArchives } from '../src/workers/source-dashboard.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
+import { approveStaged, stageUpload } from './support/stage-upload.ts';
 
 const TOKEN = 'worker-secret';
 const ORIGIN = 'http://127.0.0.1:17777';
@@ -105,11 +106,11 @@ function fixture(options: { model?: ArchivePrivateModelState } = {}) {
     diskutilPlist: () => undefined,
   });
   const permissions = new MacPermissions({ home, memoryPath: join(base, 'folder-access.json'), platform: 'linux' });
-  const browser = createLocalFilesArchiveBrowser({ volumes, home, permissions });
+  const resolver = createArchivePathResolver({ volumes, home, permissions });
   let model: ArchivePrivateModelState = options.model ?? 'ready';
   const dashboard = createArchiveImportDashboard({
     runtime,
-    browser,
+    resolver,
     refreshScheduler: () => undefined,
     privateModel: () => model,
     home,
@@ -155,10 +156,12 @@ async function importAll(runtime: ArchiveImportRuntime, archiveId: string): Prom
   throw new Error('the import did not finish');
 }
 
-/** The person's approval at the dashboard, then the import run to the end. */
+/** The agent names the file, the person's approval at the dashboard follows (read in place), then the import runs to the end. */
 async function imported(f: Fixture, name: string, messages: readonly string[]): Promise<{ id: string; path: string }> {
   const path = f.write(name, mbox(messages));
-  const started = await f.dashboard.approve({ key: path });
+  const asked = await f.start(path);
+  if (asked.ok !== false || typeof asked.request_id !== 'string') throw new Error('expected a request');
+  const started = await f.dashboard.approve({ requestId: asked.request_id });
   if (!started.ok || started.status !== 'started') throw new Error('expected a start');
   await importAll(f.runtime, started.archive_id);
   return { id: started.archive_id, path };
@@ -382,7 +385,9 @@ describe('start asks and touches nothing', () => {
   test('an import that has not read anything, or stopped, is reported in its own state, not as already imported', async () => {
     const f = fixture();
     const path = f.write('Takeout.mbox', mbox([mail(0)]));
-    const started = await f.dashboard.approve({ key: path });
+    const asked = await f.start(path);
+    if (asked.ok !== false || typeof asked.request_id !== 'string') throw new Error('expected a request');
+    const started = await f.dashboard.approve({ requestId: asked.request_id });
     if (!started.ok || started.status !== 'started') throw new Error('expected a start');
     // Approved a moment ago: importing, nothing read yet.
     const importing = await f.start(path);

@@ -150,7 +150,7 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
           ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
           ...(args.openS !== undefined ? { openS: args.openS } : {}),
         };
-        const journey = args.via === 'request' ? agentImportJourney(fx, shownPath(host.home, path), bounds) : pickerImportJourney(fx, bounds);
+        const journey = args.via === 'request' ? agentImportJourney(fx, shownPath(host.home, path), bounds) : pickerImportJourney(fx, path, bounds);
         const trace = await runJourney(driver, journey);
         obs.traces.push(trace);
         const settle = stepMs(trace, 'The import settles');

@@ -438,7 +438,7 @@ const RAW_OWNER: Readonly<Record<AccountRawName, string>> = {
  * account folder's `raw/`, or the data folder for a `legacy` account): the
  * import requests and the media bindings.
  */
-export function archiveStateSiblingPath(statePath: string, name: 'archive-import-requests.json' | 'archive-media-bindings.sqlite'): string {
+export function archiveStateSiblingPath(statePath: string, name: 'archive-import-requests.json' | 'archive-media-bindings.sqlite' | 'archive-staging'): string {
   return join(dirname(statePath), name);
 }
 

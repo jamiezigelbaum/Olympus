@@ -15,10 +15,12 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import {
   ARCHIVE_APPROVE_TOOL_NAME,
-  ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
   ARCHIVE_STOP_TOOL_NAME,
+  ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
+  ARCHIVE_UPLOAD_START_TOOL_NAME,
+  ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
   DELETE_SOURCE_DATA_TOOL_NAME,
@@ -32,7 +34,7 @@ import { ARCHIVE_COMMON_FINDINGS } from '../src/core/archive-formats.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
 import { ARCHIVE_APPROVE_COPY, ARCHIVE_NOT_RUNNING_COPY } from '../src/workers/archive-import/dashboard.ts';
-import { DASHBOARD_PREVIEW_STATES, previewArchiveApprove, previewArchiveBrowse, previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
+import { DASHBOARD_PREVIEW_STATES, previewArchiveApprove, previewArchiveUploads, previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import { DASHBOARD_CHATGPT_PAGE_COPY } from '../src/workers/dashboard/vocabulary.ts';
 
 type Message = { jsonrpc?: string; id?: number; method?: string; params?: any };
@@ -47,6 +49,9 @@ interface Page {
   button(label: string): HTMLButtonElement;
   hasButton(label: string): boolean;
   calls(name?: string): Array<{ name: string; arguments: any }>;
+  /** The files the panel handed the host page to send (olympus/upload-file), and the aborts it announced. */
+  uploads(): Array<{ upload_id: string; path: string; modified: number; file: File }>;
+  aborts(): string[];
 }
 
 const windows: Window[] = [];
@@ -64,6 +69,72 @@ async function until(ready: () => boolean, ms = 3000): Promise<void> {
   while (!ready() && Date.now() < end) await settle(10);
 }
 
+/**
+ * The engine's side of a dropped file as the preview keeps it (previewArchiveUploads): an upload is begun, and the host
+ * page's files are noted by name, so the approval can say what was dropped. The host page itself is the mount's `upload`.
+ */
+function uploadServe(): Serve {
+  return {
+    [ARCHIVE_UPLOAD_START_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Ready.' }], structuredContent: { status: 'started', upload_id: previewArchiveUploads.start() } }),
+    [ARCHIVE_UPLOAD_STATUS_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Receiving.' }], structuredContent: { status: 'receiving', files: 0, bytes: 0 } }),
+    [ARCHIVE_UPLOAD_CANCEL_TOOL_NAME]: (args) => {
+      previewArchiveUploads.cancel(String(args.upload_id));
+      return { content: [{ type: 'text', text: 'Cancelled.' }], structuredContent: { status: 'cancelled' } };
+    },
+  };
+}
+/** The host page noting each file in the preview's uploads, as the engine's route does. */
+const noteUploads = (params: { upload_id: string; path: string; file: File }) => {
+  previewArchiveUploads.receive(params.upload_id, params.path, params.file.size);
+  return { ok: true };
+};
+
+type Chosen = { path: string; text?: string };
+/** What the system's dialog hands the panel: files in the input (a folder's carry their path under the folder). */
+function choose(page: Page, key: 'picker:drop:file-input' | 'picker:drop:folder-input', files: Chosen[]): void {
+  const input = page.doc.querySelector(`[data-key="${key}"]`) as HTMLInputElement | null;
+  if (!input) throw new Error(`no ${key} in: ${page.text()}`);
+  const list = files.map((entry) => {
+    const file = new page.win.File([entry.text ?? 'content'], entry.path.split('/').pop()!);
+    Object.defineProperty(file, 'webkitRelativePath', { value: key === 'picker:drop:folder-input' ? entry.path : '' });
+    return file;
+  });
+  Object.defineProperty(input, 'files', { value: list, configurable: true });
+  input.dispatchEvent(new page.win.Event('change', { bubbles: true }) as unknown as Event);
+}
+
+type Fake = { name: string; text?: string; children?: Fake[] };
+/** A dragged file or folder as the browser's entries API shows it. */
+function entryOf(win: Window, node: Fake): any {
+  if (!node.children) return { isFile: true, isDirectory: false, name: node.name, file: (done: (file: File) => void) => done(new win.File([node.text ?? 'content'], node.name) as unknown as File) };
+  return {
+    isFile: false, isDirectory: true, name: node.name,
+    createReader: () => {
+      let given = false;
+      return { readEntries: (done: (batch: any[]) => void) => { done(given ? [] : node.children!.map((child) => entryOf(win, child))); given = true; } };
+    },
+  };
+}
+/** Drops these on the zone, with what the browser's DataTransfer holds. */
+function dropOnZone(page: Page, dropped: Fake[], phase: 'enter' | 'drop' = 'drop'): HTMLElement {
+  const zone = page.doc.querySelector('[data-key="picker:drop:zone"]') as HTMLElement | null;
+  if (!zone) throw new Error(`no drop zone in: ${page.text()}`);
+  const send = (type: string) => {
+    const event = new page.win.Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { dropEffect: '', files: [], items: dropped.map((node) => ({ kind: 'file', webkitGetAsEntry: () => entryOf(page.win, node) })) },
+    });
+    zone.dispatchEvent(event as unknown as Event);
+    return event;
+  };
+  if (phase === 'enter') send('dragenter');
+  else {
+    send('dragenter');
+    send('drop');
+  }
+  return zone;
+}
+
 const LINKS = {
   keys: 'http://127.0.0.1:8787/dashboard?keys',
   agents: 'http://127.0.0.1:8787/dashboard?agents',
@@ -73,7 +144,12 @@ const LINKS = {
 const COMPUTER = { kind: 'computer', readOnly: false, links: LINKS };
 
 /** The panel on a host that answers its tool calls from `serve`; `computer: false` is ChatGPT. */
-async function mount(serve: Serve, options: { computer?: boolean; dashboard?: () => unknown } = {}): Promise<Page> {
+async function mount(serve: Serve, options: {
+  computer?: boolean;
+  dashboard?: () => unknown;
+  /** The host page's side of one file: its answer, after any progress it reports. Default: the file arrived. */
+  upload?: (params: { upload_id: string; path: string; modified: number; file: File }, progress: (loaded: number) => void) => unknown;
+} = {}): Promise<Page> {
   const computer = options.computer !== false;
   const html = chatgptDashboardPageHtml({ resultTimeoutMs: 5_000 });
   const start = html.indexOf('<script>') + '<script>'.length;
@@ -97,6 +173,11 @@ async function mount(serve: Serve, options: { computer?: boolean; dashboard?: ()
         const handler = serve[message.params.name];
         if (handler) reply(message.id, handler(message.params.arguments ?? {}));
       } else if (message.method === 'ui/open-link') reply(message.id, {});
+      else if (message.method === 'olympus/upload-file') {
+        const progress = (loaded: number) => dispatch({ jsonrpc: '2.0', method: 'olympus/upload-progress', params: { request: message.id, loaded } });
+        const answer = options.upload ? options.upload(message.params, progress) : { ok: true };
+        Promise.resolve(answer).then((result) => dispatch({ jsonrpc: '2.0', id: message.id, result }));
+      }
     },
   };
   Object.defineProperty(win, 'parent', { value: parent, configurable: true });
@@ -123,6 +204,8 @@ async function mount(serve: Serve, options: { computer?: boolean; dashboard?: ()
     calls: (name) => sent
       .filter((message) => message.method === 'tools/call' && (!name || message.params.name === name))
       .map((message) => message.params),
+    uploads: () => sent.filter((message) => message.method === 'olympus/upload-file').map((message) => message.params),
+    aborts: () => sent.filter((message) => message.method === 'olympus/upload-abort').map((message) => message.params.upload_id),
   };
   return page;
 }
@@ -203,33 +286,34 @@ function archiveLists(item: Element): { button: string | undefined; notImported:
 }
 
 describe('Import an archive on the computer', () => {
-  test('opens the picker in place over files and folders; Import approves the file and the row says it started', async () => {
+  test('opens the drop zone in place; a chosen file is uploaded, the approval names the upload, and the row says it started', async () => {
     let answer = dashboard('archives-none', meta([]));
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => answer,
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      ...uploadServe(),
       [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
-    });
+    }, { upload: noteUploads });
     expect(page.text()).toMatch(/No archives imported yet/i);
     page.button(A.importAction).click();
     await settle();
-    // In place: the computer's own listing, never a link out.
+    // In place, never a link out; the zone says what it is, and what is to be dropped.
     expect(page.sent.some((message) => message.method === 'ui/open-link')).toBe(false);
-    expect(page.calls(ARCHIVE_BROWSE_TOOL_NAME)[0]!.arguments).toEqual({});
     expect(page.text()).toContain(A.pick.intro);
-    const open = page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement | null;
-    expect(open).not.toBeNull();
-    open!.click();
-    await settle();
-    expect(page.calls(ARCHIVE_BROWSE_TOOL_NAME)[1]!.arguments).toMatchObject({ parent_key: '/Users/you/Mail exports' });
-    // A file beside a folder, each with its own Import.
-    expect(page.hasButton(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' }))).toBe(true);
-    expect(page.hasButton(fill(A.pick.makePrivateFor, { name: 'Inbox.mbox' }))).toBe(true);
+    expect(page.text()).toContain(A.pick.zone);
+    expect(page.text()).toContain(A.pick.hint);
+    // Nothing of this computer is listed: no folder rows, no Import buttons per file.
+    expect(page.doc.querySelector('[data-key^="picker:open:"]')).toBeNull();
+    expect(page.hasButton(A.pick.chooseFile)).toBe(true);
 
     answer = dashboard('archives-importing', meta([{ ...ARCHIVE, name: 'Takeout-2026-10.mbox', status: 'importing', percent: 5, items: 40, judged: 0, held: 40 }]));
-    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox', text: 'From mail' }]);
     await until(() => page.doc.querySelector('li.archive[data-archive="importing"]') !== null);
-    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { key: '/Users/you/Mail exports/Takeout-2026-10.mbox' } }]);
+    // One file, sent by the host page with its own name; no path of this computer is named anywhere.
+    expect(page.uploads().map((entry) => entry.path)).toEqual(['Takeout-2026-10.mbox']);
+    expect(page.calls(ARCHIVE_UPLOAD_START_TOOL_NAME)).toEqual([{ name: ARCHIVE_UPLOAD_START_TOOL_NAME, arguments: {} }]);
+    const uploadId = page.uploads()[0]!.upload_id;
+    expect(uploadId).toMatch(/^[0-9a-f]{32}$/);
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { upload_id: uploadId } }]);
     // Back on the dashboard, read again, with the one line that says what happened.
     expect(page.text()).not.toContain(A.pick.intro);
     expect(page.text()).toContain(fill(A.started, { name: 'Takeout-2026-10.mbox' }));
@@ -237,37 +321,112 @@ describe('Import an archive on the computer', () => {
     expect(archiveItem(page, 'importing').textContent).toContain(A.status.importing);
   });
 
-  test('a refusal stays in the picker with the engine\'s reason, and Choose another clears it', async () => {
+  test('a folder chosen in the system\'s dialog keeps its files\' relative paths, and the approval is about the folder', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      ...uploadServe(),
       [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    }, { upload: noteUploads });
+    page.button(A.importAction).click();
+    await settle();
+    choose(page, 'picker:drop:folder-input', [
+      { path: 'DataExport_2026-10-20/result.json' },
+      { path: 'DataExport_2026-10-20/chats/a/photo.jpg' },
+      { path: 'DataExport_2026-10-20/chats/b/voice.ogg' },
+    ]);
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0);
+    expect(page.uploads().map((entry) => entry.path).sort()).toEqual([
+      'DataExport_2026-10-20/chats/a/photo.jpg',
+      'DataExport_2026-10-20/chats/b/voice.ogg',
+      'DataExport_2026-10-20/result.json',
+    ]);
+    // Every file is one upload, begun once.
+    expect(new Set(page.uploads().map((entry) => entry.upload_id)).size).toBe(1);
+    expect(page.calls(ARCHIVE_UPLOAD_START_TOOL_NAME)).toHaveLength(1);
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)[0]!.arguments).toEqual({ upload_id: page.uploads()[0]!.upload_id });
+  });
+
+  test('a folder dragged onto the zone is read through its entries, every depth, and the zone answers the drag', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    }, { upload: noteUploads });
+    page.button(A.importAction).click();
+    await settle();
+    const zone = dropOnZone(page, [{ name: 'DataExport_2026-10-20', children: [{ name: 'result.json' }, { name: 'chats', children: [{ name: 'a', children: [{ name: 'photo.jpg' }] }] }] }], 'enter');
+    // While something is dragged over it, the zone says so.
+    expect(zone.getAttribute('data-over')).toBe('true');
+    expect(zone.textContent).toContain(A.pick.over);
+    zone.dispatchEvent(new page.win.Event('dragleave', { bubbles: true }) as unknown as Event);
+    expect(zone.getAttribute('data-over')).toBe('false');
+    expect(zone.textContent).toContain(A.pick.zone);
+
+    dropOnZone(page, [{ name: 'DataExport_2026-10-20', children: [{ name: 'result.json' }, { name: 'chats', children: [{ name: 'a', children: [{ name: 'photo.jpg' }] }] }] }]);
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0);
+    expect(page.uploads().map((entry) => entry.path).sort()).toEqual(['DataExport_2026-10-20/chats/a/photo.jpg', 'DataExport_2026-10-20/result.json']);
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toHaveLength(1);
+  });
+
+  test('a file dropped on the zone is one upload under its own name', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    }, { upload: noteUploads });
+    page.button(A.importAction).click();
+    await settle();
+    dropOnZone(page, [{ name: 'Takeout-2026-10.mbox', text: 'From mail' }]);
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0);
+    expect(page.uploads().map((entry) => entry.path)).toEqual(['Takeout-2026-10.mbox']);
+    expect(page.uploads()[0]!.file.size).toBe('From mail'.length);
+  });
+
+  test('a drop with nothing in it, or a folder with no file, says so and starts nothing', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
     });
     page.button(A.importAction).click();
     await settle();
-    (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
+    dropOnZone(page, [{ name: 'Empty folder', children: [] }]);
+    await until(() => page.doc.querySelector('[role="alert"]') !== null);
+    expect(page.doc.querySelector('[role="alert"]')!.textContent).toBe(A.pick.empty);
+    expect(page.calls(ARCHIVE_UPLOAD_START_TOOL_NAME)).toEqual([]);
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([]);
+    // The zone is there to try again.
+    expect(page.doc.querySelector('[data-key="picker:drop:zone"]')).not.toBeNull();
+  });
+
+  test('a refusal stays on the screen with the engine\'s reason, the zone is there again, and the refused upload is not kept', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    }, { upload: noteUploads });
+    page.button(A.importAction).click();
     await settle();
-    page.button(fill(A.pick.makePrivateFor, { name: 'notes.txt' })).click();
+    choose(page, 'picker:drop:file-input', [{ path: 'notes.txt', text: 'shopping list' }]);
     await until(() => page.doc.querySelector('[role="alert"]') !== null);
     const alert = page.doc.querySelector('[role="alert"]');
-    expect(alert).not.toBeNull();
     expect(alert!.textContent).toContain('Mail (mbox)');
-    // Still in the picker, in the same folder.
-    expect(page.hasButton(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' }))).toBe(true);
-    page.button(A.pick.chooseAnother).click();
-    await settle();
-    expect(page.doc.querySelector('[role="alert"]')).toBeNull();
-    expect(page.hasButton(fill(A.pick.makePrivateFor, { name: 'notes.txt' }))).toBe(true);
+    expect(page.text()).toContain(A.pick.intro);
+    expect(page.doc.querySelector('[data-key="picker:drop:zone"]')).not.toBeNull();
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toHaveLength(1);
+    // Another try is a new upload, not the refused one.
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 1);
+    expect(page.calls(ARCHIVE_UPLOAD_START_TOOL_NAME)).toHaveLength(2);
+    const [first, second] = page.calls(ARCHIVE_APPROVE_TOOL_NAME).map((call) => call.arguments.upload_id);
+    expect(first).not.toBe(second);
   });
 
   test('a copy of an earlier import says it is checking, and Back leaves the dashboard as it was', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([ARCHIVE])),
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      ...uploadServe(),
       [ARCHIVE_APPROVE_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Checking.' }], structuredContent: { status: 'checking', name: 'Takeout-2026-10.mbox' } }),
-    });
-    // With an archive imported, another is imported from the row's ⋯ menu.
+    }, { upload: noteUploads });
     page.button(A.importAction).click();
     await settle();
     page.button(A.pick.back).click();
@@ -276,16 +435,118 @@ describe('Import an archive on the computer', () => {
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([]);
     page.button(A.importAction).click();
     await settle();
-    (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
-    await settle();
-    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
     await until(() => page.text().includes(fill(A.checking, { name: 'Takeout-2026-10.mbox' })));
     expect(page.text()).toContain(fill(A.checking, { name: 'Takeout-2026-10.mbox' }));
+  });
+
+  test('progress shows while files are on their way, and Cancel stops them, deletes what arrived and goes back to the zone', async () => {
+    const release: Array<() => void> = [];
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    }, {
+      upload: (params, progress) => new Promise((resolve) => {
+        progress(4);
+        release.push(() => resolve({ ok: false, cancelled: true }));
+        // Never answers until the page aborts: a long upload.
+        void params;
+      }),
+    });
+    page.button(A.importAction).click();
+    await settle();
+    choose(page, 'picker:drop:folder-input', [{ path: 'Big export/result.json', text: '0123456789' }]);
+    await until(() => page.doc.querySelector('[role="progressbar"]') !== null && page.text().includes('4 bytes of 10 bytes'));
+    expect(page.text()).toContain(fill(A.pick.uploading, { name: 'Big export' }));
+    expect(page.text()).toContain(fill(A.pick.progress, { sent: '4 bytes', total: '10 bytes' }));
+    const bar = page.doc.querySelector('[role="progressbar"]')!;
+    expect(bar.getAttribute('aria-valuenow')).toBe('40');
+    // Nothing is approved while it sends.
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([]);
+    const uploadId = page.uploads()[0]!.upload_id;
+
+    page.button(A.pick.cancel).click();
+    await settle();
+    expect(page.aborts()).toEqual([uploadId]);
+    expect(page.calls(ARCHIVE_UPLOAD_CANCEL_TOOL_NAME)).toEqual([{ name: ARCHIVE_UPLOAD_CANCEL_TOOL_NAME, arguments: { upload_id: uploadId } }]);
+    expect(previewArchiveUploads.uploads.has(uploadId)).toBe(false);
+    expect(page.doc.querySelector('[role="progressbar"]')).toBeNull();
+    expect(page.doc.querySelector('[data-key="picker:drop:zone"]')).not.toBeNull();
+    // The cancelled files' late answers change nothing.
+    release.forEach((answer) => answer());
+    await settle();
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([]);
+    expect(page.doc.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  test('Back while files are on their way cancels the upload too', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+    }, { upload: () => new Promise(() => undefined) });
+    page.button(A.importAction).click();
+    await settle();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
+    await until(() => page.uploads().length > 0);
+    const uploadId = page.uploads()[0]!.upload_id;
+    page.button(A.pick.back).click();
+    await settle();
+    expect(page.aborts()).toEqual([uploadId]);
+    expect(page.calls(ARCHIVE_UPLOAD_CANCEL_TOOL_NAME)).toHaveLength(1);
+    expect(page.text()).not.toContain(A.pick.intro);
+  });
+
+  test('a file the engine could not take stops the upload, says why in the engine\'s words, and nothing is imported', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    }, { upload: () => ({ ok: false, message: 'This computer has no space left for it.' }) });
+    page.button(A.importAction).click();
+    await settle();
+    choose(page, 'picker:drop:folder-input', [{ path: 'Export/a.json' }, { path: 'Export/b.json' }]);
+    await until(() => page.doc.querySelector('[role="alert"]') !== null);
+    expect(page.doc.querySelector('[role="alert"]')!.textContent).toBe('This computer has no space left for it.');
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([]);
+    // What arrived is deleted.
+    expect(page.calls(ARCHIVE_UPLOAD_CANCEL_TOOL_NAME)).toHaveLength(1);
+    expect(page.doc.querySelector('[data-key="picker:drop:zone"]')).not.toBeNull();
+  });
+
+  test('an upload that cannot reach Olympus says it stopped and nothing was imported', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+    }, { upload: () => ({ ok: false }) });
+    page.button(A.importAction).click();
+    await settle();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
+    await until(() => page.doc.querySelector('[role="alert"]') !== null);
+    expect(page.doc.querySelector('[role="alert"]')!.textContent).toBe(A.pick.failed);
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([]);
+  });
+
+  test('while the engine waits for free space, the screen says so and goes back to plain progress when it goes on', async () => {
+    let status: 'paused_disk_full' | 'receiving' = 'paused_disk_full';
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+      [ARCHIVE_UPLOAD_STATUS_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'x' }], structuredContent: { status, files: 1, bytes: 5 } }),
+    }, { upload: () => new Promise(() => undefined) });
+    page.button(A.importAction).click();
+    await settle();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
+    await until(() => page.text().includes(A.pick.paused), 4000);
+    expect(page.text()).toContain(A.pick.paused);
+    status = 'receiving';
+    await until(() => !page.text().includes(A.pick.paused), 4000);
+    expect(page.text()).not.toContain(A.pick.paused);
   });
 });
 
 describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-25)', () => {
-  const TELEGRAM = { sourceId: 'telegram.messages', label: 'Telegram', intro: 'Choose a file or folder on this computer: a Telegram export. Olympus reads it where it is and never changes it.' };
+  const TELEGRAM = { sourceId: 'telegram.messages', label: 'Telegram', intro: 'Drop a file or folder from this computer: a Telegram export. Olympus makes a copy in its own storage to read it, removes that copy once it has read what it needs, and never changes the original.' };
 
   /** A state's answer with these cards importing their own exports. */
   function withSources(state: string, sources: unknown[] | undefined, archives = meta([])) {
@@ -328,59 +589,65 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     expect(menuLabels(row)).not.toContain('Import another archive');
   });
 
-  test('a source that reads its own exports has Import an archive in its ⋯ menu; one that does not, has none', async () => {
+  /** The labels of a card's own buttons, in the order they are drawn: the row's actions, then the ⋯ menu's. */
+  function rowButtons(row: Element): string[] {
+    return Array.from(row.querySelectorAll('.source-actions button')).map((node) => node.textContent ?? '');
+  }
+
+  test('a source that reads its own exports has Import an archive on its own row, to the left of Connect and never inside ⋯; one that does not, has none (owner, 2026-10-26)', async () => {
     const page = await mount({ [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]) });
-    expect(menuLabels(sourceRow(page, 'Telegram'))).toEqual(['Import an archive']);
+    const telegram = sourceRow(page, 'Telegram');
+    expect(rowButtons(telegram)).toEqual(['Import an archive', 'Connect']);
+    expect(menuLabels(telegram)).not.toContain('Import an archive');
+    // The same row, not a second line under it: both buttons are in the one actions box, Import first in the document.
+    const actions = telegram.querySelector('.source-actions')!;
+    const buttons = Array.from(actions.querySelectorAll('button'));
+    expect(buttons.map((node) => node.textContent)).toEqual(['Import an archive', 'Connect']);
+    expect(telegram.querySelectorAll('.source-actions').length).toBe(1);
+    expect(telegram.className).toContain('has-import');
+    expect(rowButtons(sourceRow(page, 'WhatsApp'))).not.toContain('Import an archive');
+    expect(rowButtons(sourceRow(page, 'Gmail'))).not.toContain('Import an archive');
     expect(menuLabels(sourceRow(page, 'WhatsApp'))).not.toContain('Import an archive');
-    expect(menuLabels(sourceRow(page, 'Gmail'))).not.toContain('Import an archive');
   });
 
-  test('with no card importing (none registered, or a list that cannot be read), no ⋯ menu offers it', async () => {
+  test('with no card importing (none registered, or a list that cannot be read), no card offers it', async () => {
     const page = await mount({ [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', undefined) });
     expect(page.buttons().map((node) => node.textContent)).not.toContain('Import an archive');
     expect(page.hasButton('Import another archive')).toBe(true);
   });
 
-  test('it opens the picker titled for the source, with its own exports, and every approval names the source', async () => {
+  test('it opens the drop zone titled for the source, with its own exports, and every approval names the source', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]),
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      ...uploadServe(),
       [ARCHIVE_APPROVE_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name: 'result.json', source: { id: 'telegram.messages', label: 'Telegram' } } }),
-    });
+    }, { upload: noteUploads });
     const row = sourceRow(page, 'Telegram');
-    (row.querySelector('summary') as HTMLElement).click();
-    await settle();
-    (Array.from(row.querySelectorAll('.menu-panel button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
+    (Array.from(row.querySelectorAll('.source-actions button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
     await settle();
     expect(page.text()).toContain('Import an archive into Telegram');
     expect(page.text()).toContain(TELEGRAM.intro);
     expect(page.text()).not.toContain(A.pick.intro);
-    (page.doc.querySelector('[data-key="picker:open:/Users/you/Telegram exports"]') as HTMLButtonElement).click();
-    await settle();
-    page.button(fill(A.pick.makePrivateFor, { name: 'result.json' })).click();
+    choose(page, 'picker:drop:file-input', [{ path: 'result.json', text: '{}' }]);
     // The line says where it shows: the source it joined, not Other archives.
     await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes(fill(A.startedIn, { name: 'result.json', source: 'Telegram' })));
     expect(page.text()).toContain('Importing result.json into Telegram. It shows in Telegram as it is read.');
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([
-      { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { key: '/Users/you/Telegram exports/result.json', source_id: 'telegram.messages' } },
+      { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { upload_id: page.uploads()[0]!.upload_id, source_id: 'telegram.messages' } },
     ]);
   });
 
-  test('Back to Olympus from a menu\'s Import an archive puts focus on that menu\'s own button, with the menu closed', async () => {
+  test('Back to Olympus from a card\'s Import an archive puts focus on that card\'s own Import button', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]),
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      ...uploadServe(),
     });
     const row = sourceRow(page, 'Telegram');
-    (row.querySelector('summary') as HTMLElement).click();
-    await settle();
-    (Array.from(row.querySelectorAll('.menu-panel button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
+    (Array.from(row.querySelectorAll('.source-actions button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
     await settle();
     page.button(A.pick.back).click();
-    await until(() => page.doc.querySelector('[data-key="summary:menu:telegram.messages"]') !== null && page.doc.activeElement?.getAttribute('data-key') === 'summary:menu:telegram.messages');
-    expect(page.doc.activeElement?.getAttribute('data-key')).toBe('summary:menu:telegram.messages');
-    const menu = sourceRow(page, 'Telegram').querySelector('details.menu') as HTMLDetailsElement;
-    expect(menu.open).toBe(false);
+    await until(() => page.doc.activeElement?.getAttribute('data-key') === 'import:telegram.messages');
+    expect(page.doc.activeElement?.getAttribute('data-key')).toBe('import:telegram.messages');
   });
 
   test('one file, the same outcome from either button: the preview routes both through one path', () => {
@@ -398,41 +665,35 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     expect(ask(telegram, 'archives-none')).toMatchObject({ status: 'started', source: { id: 'telegram.messages' } });
   });
 
-  test('another kind of export is refused in the picker with the route to Import another archive', async () => {
+  test('another kind of export is refused on the drop screen with the route to Import another archive', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => previewState('sources-import-imported'),
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      ...uploadServe(),
       [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
-    });
+    }, { upload: noteUploads });
     const row = sourceRow(page, 'Telegram');
-    (row.querySelector('summary') as HTMLElement).click();
+    (Array.from(row.querySelectorAll('.source-actions button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
     await settle();
-    (Array.from(row.querySelectorAll('.menu-panel button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
-    await settle();
-    (page.doc.querySelector('[data-key="picker:open:/Users/you/Telegram exports"]') as HTMLButtonElement).click();
-    await settle();
-    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
     await until(() => page.doc.querySelector('[role="alert"]') !== null);
     const alert = page.doc.querySelector('[role="alert"]')!.textContent ?? '';
     expect(alert).toContain("This isn't a Telegram export.");
     expect(alert).toContain('Import another archive');
-    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)[0]!.arguments).toEqual({ key: '/Users/you/Telegram exports/Takeout-2026-10.mbox', source_id: 'telegram.messages' });
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)[0]!.arguments).toEqual({ upload_id: page.uploads()[0]!.upload_id, source_id: 'telegram.messages' });
   });
 
   test('Import another archive names no source: its approval routes the export by what it is', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]),
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      ...uploadServe(),
       [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
-    });
+    }, { upload: noteUploads });
     page.button(A.importAction).click();
     await settle();
     expect(page.text()).toContain(A.pick.title);
-    (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
-    await settle();
-    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
     await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0);
-    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)[0]!.arguments).toEqual({ key: '/Users/you/Mail exports/Takeout-2026-10.mbox' });
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)[0]!.arguments).toEqual({ upload_id: page.uploads()[0]!.upload_id });
   });
 
   test('in ChatGPT the section is there too, and its button opens the computer\'s dashboard', async () => {
@@ -737,8 +998,8 @@ describe('each archive under the Archives row', () => {
 
   test('the picker names the formats the engine registers, from the registry', async () => {
     expect(A.pick.intro).toContain('an .mbox file from Google Takeout or Thunderbird');
-    expect(A.pick.intro.startsWith('Choose a file or folder on this computer: ')).toBe(true);
-    expect(A.pick.intro).toContain('Olympus reads it where it is and never changes it.');
+    expect(A.pick.intro.startsWith('Drop a file or folder from this computer: ')).toBe(true);
+    expect(A.pick.intro).toContain('Olympus makes a copy in its own storage to read it, removes that copy once it has read what it needs, and never changes the original.');
     // Import another archive takes any export, and says where one of a source's own goes.
     expect(A.pick.intro.endsWith('An export from one of your sources joins that source; any other is kept under Other archives.')).toBe(true);
   });
@@ -1030,7 +1291,7 @@ describe('the Archives row in ChatGPT', () => {
     const opened = page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url as string);
     expect(opened).toHaveLength(1);
     expect(opened[0]).toContain('olympusplugin.ai/open/dashboard/');
-    expect(page.calls(ARCHIVE_BROWSE_TOOL_NAME)).toEqual([]);
+    expect(page.calls(ARCHIVE_UPLOAD_START_TOOL_NAME)).toEqual([]);
   });
 });
 
@@ -1164,52 +1425,69 @@ describe('an import inside its source\'s card', () => {
 });
 
 describe('the import sheet asks which account an export belongs to', () => {
-  test('an export whose account cannot be proved asks in place; Add it joins the source, Keep it apart does not', async () => {
+  test('an export whose account cannot be proved asks in place; Add it joins the source, Keep it apart does not; the answer is about the same upload', async () => {
     const asked = { content: [{ type: 'text', text: 'Which account?' }], structuredContent: { status: 'confirm_account', name: 'Takeout-2026-10.mbox', source: { id: 'gmail.email', label: 'Gmail' } } };
     const started = { content: [{ type: 'text', text: 'Started.' }], structuredContent: { status: 'started', name: 'Takeout-2026-10.mbox', archive_id: '9d4c3b2a-7f6e-4d8c-9b0a-4e5f6a7b8c93' } };
     const answers: any[] = [];
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      ...uploadServe(),
       [ARCHIVE_APPROVE_TOOL_NAME]: (args) => {
         answers.push(args);
         return args.confirm_account === true || args.keep_apart === true ? started : asked;
       },
-    });
+    }, { upload: noteUploads });
     page.button(A.importAction).click();
     await settle();
-    (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
-    await settle();
-    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
     await until(() => page.text().includes(fill(A.account.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' })));
-    // Still in the picker, with the question beside the file and no import started.
+    // Still on the screen, with the question beside the file and no import started.
     expect(page.text()).toContain(fill(A.account.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }));
     expect(page.text()).toContain(fill(A.account.note, { source: 'Gmail' }));
-    expect(answers).toEqual([{ key: '/Users/you/Mail exports/Takeout-2026-10.mbox' }]);
+    const uploadId = page.uploads()[0]!.upload_id;
+    expect(answers).toEqual([{ upload_id: uploadId }]);
     page.button(fill(A.account.addFor, { name: 'Takeout-2026-10.mbox', source: 'Gmail' })).click();
     await until(() => answers.length > 1);
-    expect(answers[1]).toEqual({ key: '/Users/you/Mail exports/Takeout-2026-10.mbox', confirm_account: true });
+    // Nothing is uploaded again: the same upload is answered.
+    expect(answers[1]).toEqual({ upload_id: uploadId, confirm_account: true });
+    expect(page.uploads()).toHaveLength(1);
     expect(page.hasButton(A.account.apart)).toBe(false);
   });
 
-  test('asking again after the source changed account offers only Add and Choose another, and says where to keep the export apart', async () => {
+  test('asking again after the source changed account offers only Add and Start over, and says where to keep the export apart', async () => {
     const asked = { content: [{ type: 'text', text: 'Which account?' }], structuredContent: { status: 'confirm_account', reconfirm: true, name: 'Takeout-2026-10.mbox', source: { id: 'gmail.email', label: 'Gmail' } } };
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      ...uploadServe(),
       [ARCHIVE_APPROVE_TOOL_NAME]: () => asked,
-    });
+    }, { upload: noteUploads });
     page.button(A.importAction).click();
     await settle();
-    (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
-    await settle();
-    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
     await until(() => page.text().includes(fill(A.account.reconfirm.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' })));
     expect(page.text()).toContain(fill(A.account.reconfirm.note, { source: 'Gmail' }));
     expect(page.text()).toContain('Other archives');
     expect(page.hasButton(fill(A.account.addFor, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }))).toBe(true);
     expect(page.hasButton(A.account.apart)).toBe(false);
     expect(page.doc.querySelector('[data-key="picker:confirm-apart"]')).toBeNull();
+  });
+
+  test('Start over on the question deletes the upload and goes back to the zone', async () => {
+    const asked = { content: [{ type: 'text', text: 'Which account?' }], structuredContent: { status: 'confirm_account', name: 'Takeout-2026-10.mbox', source: { id: 'gmail.email', label: 'Gmail' } } };
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+      [ARCHIVE_APPROVE_TOOL_NAME]: () => asked,
+    }, { upload: noteUploads });
+    page.button(A.importAction).click();
+    await settle();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
+    await until(() => page.hasButton(A.pick.chooseAnother));
+    const uploadId = page.uploads()[0]!.upload_id;
+    page.button(A.pick.chooseAnother).click();
+    await settle();
+    expect(page.calls(ARCHIVE_UPLOAD_CANCEL_TOOL_NAME)).toEqual([{ name: ARCHIVE_UPLOAD_CANCEL_TOOL_NAME, arguments: { upload_id: uploadId } }]);
+    expect(page.doc.querySelector('[data-key="picker:drop:zone"]')).not.toBeNull();
   });
 });
 
@@ -1294,23 +1572,21 @@ describe('the preview states for imports that are inputs of a source', () => {
     const answers: any[] = [];
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => previewState('archives-account-confirm'),
-      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      ...uploadServe(),
       [ARCHIVE_APPROVE_TOOL_NAME]: (args) => {
         answers.push(args);
         return previewArchiveApprove(args, 'archives-account-confirm');
       },
-    });
+    }, { upload: noteUploads });
     page.button(A.importAction).click();
     await settle();
-    (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
-    await settle();
-    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    choose(page, 'picker:drop:file-input', [{ path: 'Takeout-2026-10.mbox' }]);
     await until(() => page.text().includes(fill(A.account.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' })));
     expect(page.text()).toContain(fill(A.account.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }));
     expect(page.hasButton(fill(A.account.addFor, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }))).toBe(true);
     expect(page.hasButton(fill(A.account.apartFor, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }))).toBe(true);
     // The first answer imported nothing; only the owner's choice starts it.
-    expect(answers).toEqual([{ key: '/Users/you/Mail exports/Takeout-2026-10.mbox' }]);
+    expect(answers).toEqual([{ upload_id: page.uploads()[0]!.upload_id }]);
     expect(previewArchiveApprove({ key: '/Users/you/Mail exports/Takeout-2026-10.mbox', keep_apart: true }, 'archives-account-confirm').structuredContent).toMatchObject({ status: 'started' });
   });
 

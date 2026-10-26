@@ -14,14 +14,20 @@
  * label id and name, which the mail contract requires). Closing the picker
  * drops the session. Pick mode (the privacy flow's Add a folder) saves
  * nothing: it hands the one picked folder's key and name back to its caller.
- * Archive mode (the computer's Import an archive) is pick mode over files and
- * folders on this computer: the one call it makes is the import's approval,
- * with the chosen opaque key, and it hands back only what came of it.
+ * Drop mode (the computer's Import an archive) is not a browser at all: a
+ * drop zone takes a folder or a file the person drags in or chooses with the
+ * system's own dialog. The page hands its files to the host (the page that
+ * frames this one), which streams them to Olympus's own storage; the one
+ * tool call that follows is the import's approval, with the upload's opaque
+ * id, and what comes back is only what came of it. A file's name is shown
+ * on the person's own screen and goes nowhere else.
  */
 import type { DASHBOARD_CHATGPT_PICKER_COPY } from '../vocabulary.ts';
 import {
   ARCHIVE_APPROVE_TOOL_NAME,
-  ARCHIVE_BROWSE_TOOL_NAME,
+  ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
+  ARCHIVE_UPLOAD_START_TOOL_NAME,
+  ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
   CONNECT_SOURCE_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
   SCOPE_SET_TOOL_NAME,
@@ -36,9 +42,13 @@ export const CHATGPT_PICKER_TOOLS = {
   scopeList: SCOPE_LIST_TOOL_NAME,
   /** {..., selections | mail} → {status: 'saved'} or {status: 'conflict'} with the fresh list in `_meta`. */
   scopeSet: SCOPE_SET_TOOL_NAME,
-  /** Computer only: {parent_key?, cursor?} → files and folders in `_meta[scopeMetaKey]` (ArchiveBrowseList). */
-  archiveBrowse: ARCHIVE_BROWSE_TOOL_NAME,
-  /** Computer only: {key} → {status: 'started' | 'checking' | 'already_imported', name, archive_name?}. */
+  /** Computer only: {} → {status: 'started', upload_id}. */
+  archiveUploadStart: ARCHIVE_UPLOAD_START_TOOL_NAME,
+  /** Computer only: {upload_id} → {status: 'receiving' | 'paused_disk_full' | 'idle', files, bytes}. */
+  archiveUploadStatus: ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
+  /** Computer only: {upload_id} → {status: 'cancelled'}; what was received is deleted. */
+  archiveUploadCancel: ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
+  /** Computer only: {upload_id, source_id?} → {status: 'started' | 'checking' | 'already_imported' | 'confirm_account', name, archive_name?}. */
   archiveApprove: ARCHIVE_APPROVE_TOOL_NAME,
 } as const;
 
@@ -79,6 +89,14 @@ export interface ChatGptPickerKit {
   fill(template: string, values: Record<string, string | number>): string;
   count(value: number): string;
   call(name: string, args: Any): Promise<Any>;
+  /**
+   * Hand one file to the host, which streams it to Olympus's own storage as part of an upload
+   * (the files never pass through a tool call). `progress` gets the bytes sent so far. Resolves
+   * `{ok: true}`, or `{ok: false, message?, cancelled?}` with the engine's own sentence.
+   */
+  upload(uploadId: string, path: string, file: File, modified: number, progress: (loaded: number) => void): Promise<Any>;
+  /** Stop every file of an upload still sending. */
+  abortUpload(uploadId: string): void;
   render(focusKey?: string): void;
   reportHeight(): void;
   openLink(href: string): void;
@@ -111,13 +129,39 @@ export interface ChatGptFolderPickWords {
   alreadyPrivate: string;
 }
 
-/** Words for importing an archive (the computer's Archives row); the caller owns them. */
-export interface ChatGptArchivePickWords extends ChatGptFolderPickWords {
-  /** The top of the listing ("This computer"). */
-  source: string;
-  /** The chosen row's control while its import is being approved. */
-  busy: string;
-  /** Beside an approval the engine refused, to go on choosing. */
+/** Words for importing an archive (the computer's Archives row): the drop zone and what follows it; the caller owns them. */
+export interface ChatGptArchivePickWords {
+  back: string;
+  title: string;
+  intro: string;
+  /** The drop zone's title ("Upload folder"), what it says while something is dragged over it, and its hint. */
+  zone: string;
+  over: string;
+  hint: string;
+  /** What the zone is called to a screen reader. */
+  zoneLabel: string;
+  /** The small link under the zone that opens the system's file dialog. */
+  chooseFile: string;
+  /** Reading a dropped folder's files, before any is sent. */
+  reading: string;
+  /** While files are on their way ({name} the folder or file). */
+  uploading: string;
+  /** The size line: {sent} of {total}; with several files also {files} of {of}. */
+  progress: string;
+  progressFiles: string;
+  /** The engine waits for free space on this computer; it goes on by itself. */
+  paused: string;
+  cancel: string;
+  /** After the files arrived, while the engine approves the import. */
+  starting: string;
+  /** A drop that held no file, a folder with nothing in it, or one the page could not read. */
+  empty: string;
+  unreadable: string;
+  /** Any other upload failure the engine gave no sentence for. */
+  failed: string;
+  /** The name of several things dropped at once ({n} of them). */
+  several: string;
+  /** Beside an approval the engine refused, to start over. */
   chooseAnother: string;
   /**
    * When the engine asks which account an export belongs to: the question, what
@@ -151,11 +195,11 @@ export interface ChatGptPicker {
    */
   pickFolder(sourceId: string, sourceLabel: string, words: ChatGptFolderPickWords, taken: string[], done: (folder: ChatGptPickedFolder | null) => void): void;
   /**
-   * Computer only: browse this computer's files and folders and import one.
-   * The picker asks the engine to approve the choice and stays open on a
-   * refusal, saying why; `done` gets what came of an approval, or null on Back.
-   * `sourceId` (a source's own Import an archive) asks the engine to take only
-   * that source's exports.
+   * Computer only: a drop zone for a folder or a file to import. What is dropped
+   * (or chosen) is uploaded and the engine is asked to approve it; the screen
+   * stays open on a refusal, saying why. `done` gets what came of an approval,
+   * or null on Back. `sourceId` (a source's own Import an archive) asks the
+   * engine to take only that source's exports.
    */
   pickArchive(words: ChatGptArchivePickWords, done: (picked: ChatGptArchivePicked | null) => void, sourceId?: string): void;
   active(): boolean;
@@ -174,6 +218,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   const CATEGORIES = ['primary', 'updates', 'forums', 'social', 'promotions'];
 
   let p: Any = null;
+  // The drop screen (Import an archive): its own session, never mixed with a scope session.
+  let drop: Any = null;
+  let dropSession = 0;
   let session = 0;
   let timer: Any = null;
   /** The whole-account row's key in focus keys (never a provider key). */
@@ -393,17 +440,32 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     openScope(sourceId, sourceLabel, words.title, '', '', undefined, { words, taken: taken.slice(), done });
   }
 
+  // ---- drop mode (Import an archive) -----------------------------------------
+  // A folder or a file dragged onto the zone, or chosen with the system's own
+  // dialog, is handed to the host file by file (kit.upload) and then imported
+  // by the approval of its upload. Nothing here lists this computer.
+  const UPLOAD_PARALLEL = 4;
+  const UPLOAD_STATUS_MS = 2000;
+  const UPLOAD_PAINT_MS = 150;
+
   function pickArchive(words: ChatGptArchivePickWords, done: (picked: ChatGptArchivePicked | null) => void, sourceId?: string): void {
     stopTimer();
     session++;
+    p = null;
     if (kit.compact()) kit.fullscreen();
-    // Back hands null to `done`; an approval hands what came of it (approveArchive).
-    openScope('', words.source, words.title, '', '', undefined, { words, taken: [], done: () => done(null), archive: { done, sourceId: sourceId || '' } });
+    dropSession++;
+    drop = {
+      words, done, sourceId: sourceId || '', mine: dropSession, attempt: 0,
+      // idle | reading | uploading | approving | confirm | error
+      phase: 'idle', name: '', uploadId: '', total: 0, sent: 0, files: 0, filesDone: 0, paused: false,
+      error: '', access: null, confirm: null, poll: null, paint: null, input: null,
+    };
+    kit.render('picker:back');
   }
 
-  /** Archive mode: the files and folders of this computer, one choice, approved by the engine. */
-  function archiveMode(): boolean {
-    return !!p && !!p.pick && !!p.pick.archive;
+  /** The drop screen this call belongs to is still the one open. */
+  function dropLive(mine: number, attempt?: number): boolean {
+    return !!drop && drop.mine === mine && (attempt === undefined || drop.attempt === attempt);
   }
 
   /** The text of a tool error (the engine's own sentence), or ''. */
@@ -413,57 +475,441 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return text ? String(text.text) : '';
   }
 
-  /**
-   * Ask the engine to import the chosen file or folder. It answers at once
-   * (a copy check runs in the background); a refusal keeps the person here
-   * with the engine's reason, and the Mac's own note when it is the Mac's
-   * privacy rules.
-   */
-  function approveArchive(key: string, name: string, answer?: Any): void {
-    if (!archiveMode() || p.loading || p.saving) return;
-    p.saving = true;
-    p.savingKey = key;
-    p.saveError = '';
-    p.saveAccess = null;
-    p.confirm = null;
-    kit.render('picker:pick:' + key);
-    const mine = session;
-    const refused = (text: string, access: Any) => {
-      if (mine !== session || !p) return;
-      p.saving = false;
-      p.savingKey = '';
-      p.saveError = text || Q.loadFailed;
-      p.saveAccess = access && typeof access.message === 'string' && access.message ? access : null;
-      kit.render('picker:archive-error');
+  function stopDropTimers(): void {
+    if (!drop) return;
+    if (drop.poll) clearInterval(drop.poll);
+    if (drop.paint) clearTimeout(drop.paint);
+    drop.poll = null;
+    drop.paint = null;
+  }
+
+  /** What was received so far is deleted, and anything still sending stops. */
+  function discardUpload(): void {
+    if (!drop) return;
+    drop.attempt++;
+    stopDropTimers();
+    const id = drop.uploadId;
+    drop.uploadId = '';
+    if (id) {
+      kit.abortUpload(id);
+      kit.call(T.archiveUploadCancel, { upload_id: id }).then(() => undefined, () => undefined);
+    }
+  }
+
+  function leaveDrop(picked: ChatGptArchivePicked | null): void {
+    if (!drop) return;
+    if (!picked) discardUpload();
+    stopDropTimers();
+    const done = drop.done;
+    drop = null;
+    dropSession++;
+    done(picked);
+  }
+
+  /** Cancel while reading or sending: back to the zone, nothing kept. */
+  function cancelDrop(): void {
+    if (!drop) return;
+    discardUpload();
+    drop.phase = 'idle';
+    drop.error = '';
+    drop.access = null;
+    drop.confirm = null;
+    kit.render('picker:drop:zone');
+  }
+
+  function dropFail(text: string, access?: Any): void {
+    if (!drop) return;
+    // Whatever arrived is no use to a failed start; the engine removes it with a refused approval, and this does for the rest.
+    discardUpload();
+    drop.phase = 'error';
+    drop.error = text || drop.words.failed;
+    drop.access = access && typeof access.message === 'string' && access.message ? access : null;
+    kit.render('picker:drop:retry');
+  }
+
+  /** Every file under a dropped entry (a folder's own files, any depth), as {file, path}. */
+  function entryFiles(entry: Any, prefix: string, found: Any[], gone: () => boolean): Promise<void> {
+    if (gone() || !entry) return Promise.resolve();
+    if (entry.isFile) {
+      return new Promise<void>((resolve) => {
+        entry.file((file: File) => {
+          found.push({ file, path: prefix + entry.name });
+          resolve();
+        }, () => resolve());
+      });
+    }
+    if (!entry.isDirectory) return Promise.resolve();
+    const reader = entry.createReader();
+    const here = prefix + entry.name + '/';
+    const next = (): Promise<void> => new Promise<void>((resolve) => {
+      reader.readEntries((batch: Any[]) => {
+        if (!batch.length || gone()) {
+          resolve();
+          return;
+        }
+        // One at a time: a folder of thousands never opens them all at once.
+        batch.reduce((chain: Promise<void>, child: Any) => chain.then(() => entryFiles(child, here, found, gone)), Promise.resolve()).then(() => next().then(resolve));
+      }, () => resolve());
+    });
+    return next();
+  }
+
+  /** What a drop or a dialog handed over, as {file, path} items. A drop reads its entries now: they expire with the event. */
+  function dropped(event: DragEvent, gone: () => boolean): Promise<Any[]> | null {
+    const transfer = event.dataTransfer;
+    if (!transfer) return null;
+    const entries: Any[] = [];
+    const plain: Any[] = [];
+    const items: Any[] = transfer.items ? Array.prototype.slice.call(transfer.items) : [];
+    for (const item of items) {
+      if (!item || item.kind !== 'file') continue;
+      const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
+      if (entry) entries.push(entry);
+      else {
+        const file = typeof item.getAsFile === 'function' ? item.getAsFile() : null;
+        if (file) plain.push({ file, path: file.name });
+      }
+    }
+    if (!items.length) {
+      for (const file of Array.prototype.slice.call(transfer.files || [])) plain.push({ file, path: file.name });
+    }
+    if (!entries.length && !plain.length) return null;
+    const found: Any[] = plain.slice();
+    return entries.reduce((chain: Promise<void>, entry: Any) => chain.then(() => entryFiles(entry, '', found, gone)), Promise.resolve()).then(() => found);
+  }
+
+  function chosen(input: HTMLInputElement): Any[] {
+    const items = Array.prototype.slice.call(input.files || []).map((file: Any) => ({ file, path: file.webkitRelativePath || file.name }));
+    // The dialog's selection is spent: choosing the same folder again must still fire.
+    try {
+      input.value = '';
+    } catch {
+      // An input that cannot be reset keeps its selection; a second choice of the same folder is then a no-op.
+    }
+    return items;
+  }
+
+  /** The name to show: the dropped folder's, the one file's, or "N items" for several. */
+  function topName(items: Any[]): string {
+    const tops: Record<string, boolean> = {};
+    for (const item of items) tops[String(item.path).split('/')[0] as string] = true;
+    const names = Object.keys(tops);
+    return names.length === 1 ? names[0]! : fill(drop.words.several, { n: kit.count(names.length) });
+  }
+
+  function paintSoon(): void {
+    if (!drop || drop.paint) return;
+    const mine = drop.mine;
+    drop.paint = setTimeout(() => {
+      if (!dropLive(mine)) return;
+      drop.paint = null;
+      if (drop.phase === 'uploading') kit.render('picker:drop:cancel');
+    }, UPLOAD_PAINT_MS);
+  }
+
+  /** Start from items already in hand, or a collector that is still reading a dropped folder. */
+  function beginUpload(collect: () => Promise<Any[]>): void {
+    if (!drop || (drop.phase !== 'idle' && drop.phase !== 'error')) return;
+    const mine = drop.mine;
+    drop.attempt++;
+    const attempt = drop.attempt;
+    drop.phase = 'reading';
+    drop.error = '';
+    drop.access = null;
+    drop.name = '';
+    drop.sent = 0;
+    drop.filesDone = 0;
+    kit.render('picker:drop:cancel');
+    collect().then((items) => {
+      if (!dropLive(mine, attempt)) return;
+      if (!items.length) {
+        dropFail(drop.words.empty);
+        return;
+      }
+      let total = 0;
+      for (const item of items) total += item.file.size || 0;
+      drop.name = topName(items);
+      drop.total = total;
+      drop.files = items.length;
+      kit.call(T.archiveUploadStart, {}).then((result) => {
+        if (!dropLive(mine, attempt)) return;
+        const content = result && result.structuredContent && typeof result.structuredContent === 'object' ? result.structuredContent : null;
+        if (!result || result.isError || !content || typeof content.upload_id !== 'string' || !content.upload_id) {
+          dropFail(errorSentence(result));
+          return;
+        }
+        drop.uploadId = content.upload_id;
+        drop.phase = 'uploading';
+        drop.poll = setInterval(() => pollUpload(mine, attempt), UPLOAD_STATUS_MS);
+        kit.render('picker:drop:cancel');
+        sendAll(mine, attempt, content.upload_id, items);
+      }, () => dropFail(''));
+    }, () => {
+      if (dropLive(mine, attempt)) dropFail(drop.words.unreadable);
+    });
+  }
+
+  /** Whether the engine is waiting for free space: said while it is, and gone when it goes on. */
+  function pollUpload(mine: number, attempt: number): void {
+    if (!dropLive(mine, attempt) || drop.phase !== 'uploading' || !drop.uploadId) return;
+    kit.call(T.archiveUploadStatus, { upload_id: drop.uploadId }).then((result) => {
+      if (!dropLive(mine, attempt) || drop.phase !== 'uploading') return;
+      const content = result && result.structuredContent && typeof result.structuredContent === 'object' ? result.structuredContent : null;
+      const paused = !!content && content.status === 'paused_disk_full';
+      if (paused !== drop.paused) {
+        drop.paused = paused;
+        kit.render('picker:drop:cancel');
+      }
+    }, () => undefined);
+  }
+
+  /** Every file, a few at a time, each as its own request; the first failure stops the rest. */
+  function sendAll(mine: number, attempt: number, uploadId: string, items: Any[]): void {
+    let next = 0;
+    let finished = 0;
+    let failure: Any = null;
+    const inflight: Record<number, number> = {};
+    const sentNow = (): number => {
+      let sum = finished;
+      for (const key of Object.keys(inflight)) sum += inflight[Number(key)]!;
+      return sum;
     };
+    const worker = (): Promise<void> => {
+      if (failure || !dropLive(mine, attempt) || next >= items.length) return Promise.resolve();
+      const at = next++;
+      const item = items[at];
+      inflight[at] = 0;
+      return kit.upload(uploadId, item.path, item.file, item.file.lastModified, (loaded: number) => {
+        inflight[at] = loaded;
+        if (dropLive(mine, attempt)) {
+          drop.sent = sentNow();
+          paintSoon();
+        }
+      }).then((outcome: Any) => {
+        delete inflight[at];
+        if (!outcome || outcome.ok !== true) {
+          if (!failure) failure = outcome || {};
+          return undefined;
+        }
+        finished += item.file.size || 0;
+        if (dropLive(mine, attempt)) {
+          drop.filesDone++;
+          drop.sent = sentNow();
+          paintSoon();
+        }
+        return worker();
+      });
+    };
+    const lanes: Array<Promise<void>> = [];
+    for (let lane = 0; lane < Math.min(UPLOAD_PARALLEL, items.length); lane++) lanes.push(worker());
+    Promise.all(lanes).then(() => {
+      if (!dropLive(mine, attempt)) return;
+      if (failure) {
+        if (failure.cancelled) return;
+        dropFail(typeof failure.message === 'string' ? failure.message : '');
+        return;
+      }
+      if (drop.paint) {
+        clearTimeout(drop.paint);
+        drop.paint = null;
+      }
+      if (drop.poll) {
+        clearInterval(drop.poll);
+        drop.poll = null;
+      }
+      approveDrop();
+    });
+  }
+
+  /**
+   * Ask the engine to import what was uploaded. It answers at once (a copy
+   * check runs in the background); a refusal keeps the person here with the
+   * engine's reason, and the Mac's own note when it is the Mac's privacy
+   * rules. The account question is answered by asking again with the same
+   * upload.
+   */
+  function approveDrop(answer?: Any): void {
+    if (!drop || !drop.uploadId) return;
+    const mine = drop.mine;
+    const attempt = drop.attempt;
+    const uploadId = drop.uploadId;
+    const name = drop.name;
+    drop.phase = 'approving';
+    drop.confirm = null;
+    kit.render('picker:drop:approving');
     // A source's own Import an archive names the source on every approval, the account answer's included.
-    const only = p.pick.archive.sourceId ? { source_id: p.pick.archive.sourceId } : {};
-    kit.call(T.archiveApprove, answer ? { key, ...only, ...answer } : { key, ...only }).then((result) => {
-      if (mine !== session || !p) return;
+    const only = drop.sourceId ? { source_id: drop.sourceId } : {};
+    kit.call(T.archiveApprove, answer ? { upload_id: uploadId, ...only, ...answer } : { upload_id: uploadId, ...only }).then((result) => {
+      if (!dropLive(mine, attempt)) return;
       const content = result && result.structuredContent && typeof result.structuredContent === 'object' ? result.structuredContent : null;
       const status = content ? content.status : '';
       if (!result || result.isError || (status !== 'started' && status !== 'checking' && status !== 'already_imported' && status !== 'confirm_account')) {
-        refused(errorSentence(result), content ? content.access : null);
+        // The engine removed the upload with a refusal.
+        drop.uploadId = '';
+        dropFail(errorSentence(result), content ? content.access : null);
         return;
       }
       if (status === 'confirm_account') {
-        // Nothing was imported: the sheet asks which account this is, in place, and the choice answers it.
+        // Nothing was imported: the screen asks which account this is, in place, and the choice answers it.
         const source = content.source && typeof content.source === 'object' && typeof content.source.label === 'string' ? content.source.label : '';
-        p.saving = false;
-        p.savingKey = '';
-        p.confirm = { key, name: typeof content.name === 'string' && content.name ? content.name : name, source, reconfirm: content.reconfirm === true };
-        kit.render('picker:confirm');
+        drop.phase = 'confirm';
+        drop.confirm = { name: typeof content.name === 'string' && content.name ? content.name : name, source, reconfirm: content.reconfirm === true };
+        kit.render('picker:drop:confirm');
         return;
       }
-      const done = p.pick.archive.done;
       const picked: ChatGptArchivePicked = { name: typeof content.name === 'string' && content.name ? content.name : name, status };
       if (typeof content.archive_name === 'string' && content.archive_name) picked.archiveName = content.archive_name;
       if (status === 'started' && content.source && typeof content.source.label === 'string' && content.source.label) picked.source = { label: content.source.label };
-      stopTimer();
-      p = null;
-      session++;
-      done(picked);
-    }, () => refused('', null));
+      // The engine keeps what an import still reads, and removes the rest.
+      drop.uploadId = '';
+      leaveDrop(picked);
+    }, () => {
+      if (dropLive(mine, attempt)) dropFail('');
+    });
+  }
+
+  function dropView(): HTMLElement {
+    const page = el('main', 'page picker');
+    const words = drop.words;
+    const top = el('div', 'picker-top');
+    const backButton = kit.button(words.back, 'picker:back', escape, 'plain');
+    backButton.className = 'btn back';
+    add(top, backButton);
+    add(page, top);
+    add(page, el('h1', '', words.title));
+    add(page, el('p', 'muted', words.intro));
+    const body = el('div', 'picker-body drop-body');
+    if (drop.error) {
+      const banner = el('div', 'banner');
+      banner.setAttribute('role', 'alert');
+      add(banner, add(el('div', 'banner-body'), el('p', '', drop.error)));
+      add(body, banner);
+      if (drop.access) add(body, accessNote(drop.access, null));
+    }
+    const phase = drop.phase;
+    if (phase === 'idle' || phase === 'error') add(body, dropZone());
+    else if (phase === 'confirm') add(body, confirmBox());
+    else add(body, progressBox());
+    add(page, body);
+    return page;
+  }
+
+  /** The drop zone: a click opens the system's folder dialog, a drop takes what was dragged in, and a file has its own small link. */
+  function dropZone(): HTMLElement {
+    const words = drop.words;
+    const wrap = el('div', 'drop');
+    const zone = el('button', 'drop-zone') as HTMLButtonElement;
+    zone.type = 'button';
+    zone.setAttribute('data-key', 'picker:drop:zone');
+    zone.setAttribute('aria-label', words.zoneLabel);
+    const title = el('span', 'drop-title', words.zone);
+    const hint = el('span', 'drop-hint', words.hint);
+    add(zone, title, hint);
+    const folderInput = el('input') as HTMLInputElement;
+    folderInput.type = 'file';
+    folderInput.setAttribute('webkitdirectory', '');
+    folderInput.setAttribute('directory', '');
+    folderInput.className = 'drop-input';
+    folderInput.setAttribute('tabindex', '-1');
+    folderInput.setAttribute('aria-hidden', 'true');
+    folderInput.setAttribute('aria-label', words.zoneLabel);
+    folderInput.setAttribute('data-key', 'picker:drop:folder-input');
+    const fileInput = el('input') as HTMLInputElement;
+    fileInput.type = 'file';
+    fileInput.className = 'drop-input';
+    fileInput.setAttribute('tabindex', '-1');
+    fileInput.setAttribute('aria-hidden', 'true');
+    fileInput.setAttribute('aria-label', words.chooseFile);
+    fileInput.setAttribute('data-key', 'picker:drop:file-input');
+    const mine = drop.mine;
+    const take = (input: HTMLInputElement) => () => {
+      const items = chosen(input);
+      if (items.length && dropLive(mine)) beginUpload(() => Promise.resolve(items));
+    };
+    folderInput.addEventListener('change', take(folderInput));
+    fileInput.addEventListener('change', take(fileInput));
+    zone.addEventListener('click', () => folderInput.click());
+    const over = (on: boolean) => {
+      zone.setAttribute('data-over', on ? 'true' : 'false');
+      title.textContent = on ? words.over : words.zone;
+    };
+    let depth = 0;
+    zone.addEventListener('dragenter', (event: DragEvent) => {
+      event.preventDefault();
+      depth++;
+      over(true);
+    });
+    zone.addEventListener('dragover', (event: DragEvent) => {
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    });
+    zone.addEventListener('dragleave', () => {
+      depth = Math.max(0, depth - 1);
+      if (!depth) over(false);
+    });
+    zone.addEventListener('drop', (event: DragEvent) => {
+      event.preventDefault();
+      depth = 0;
+      over(false);
+      // The entries expire with this event: they are all taken before anything waits.
+      const reading = dropped(event, () => !dropLive(mine));
+      if (reading) beginUpload(() => reading);
+      else dropFail(words.empty);
+    });
+    add(wrap, zone, add(el('p', 'drop-or'), kit.button(words.chooseFile, 'picker:drop:file', () => fileInput.click(), 'plain')), folderInput, fileInput);
+    return wrap;
+  }
+
+  function progressBox(): HTMLElement {
+    const words = drop.words;
+    const box = el('div', 'drop-progress');
+    box.setAttribute('role', 'status');
+    if (drop.phase === 'reading') add(box, el('p', '', words.reading));
+    else if (drop.phase === 'approving') add(box, el('p', '', words.starting));
+    else {
+      const share = drop.total > 0 ? Math.min(1, drop.sent / drop.total) : drop.files > 0 ? Math.min(1, drop.filesDone / drop.files) : 0;
+      add(box, el('p', 'strong', fill(words.uploading, { name: drop.name })));
+      const bar = el('div', 'bar');
+      bar.setAttribute('role', 'progressbar');
+      bar.setAttribute('aria-valuemin', '0');
+      bar.setAttribute('aria-valuemax', '100');
+      bar.setAttribute('aria-valuenow', String(Math.round(share * 100)));
+      bar.setAttribute('aria-label', fill(words.uploading, { name: drop.name }));
+      const fillNode = el('div', 'bar-fill');
+      fillNode.style.width = Math.round(share * 1000) / 10 + '%';
+      add(bar, fillNode);
+      add(box, bar);
+      add(box, el('p', 'muted', fill(drop.files > 1 ? words.progressFiles : words.progress, {
+        sent: size(drop.sent), total: size(drop.total), files: kit.count(drop.filesDone), of: kit.count(drop.files),
+      })));
+      if (drop.paused) add(box, el('p', 'fnote strong', words.paused));
+    }
+    if (drop.phase !== 'approving') add(box, add(el('div', 'actions'), kit.button(words.cancel, 'picker:drop:cancel', cancelDrop, 'plain')));
+    return box;
+  }
+
+  function confirmBox(): HTMLElement {
+    // The export does not prove which account it is of: ask, in place, before anything is imported.
+    const words = drop.words.account;
+    const source = drop.confirm.source || words.sourceFallback;
+    const name = drop.confirm.name;
+    const ask = el('div', 'banner');
+    ask.setAttribute('role', 'group');
+    ask.setAttribute('aria-label', fill(words.line, { name, source }));
+    const answer = (extra: Any, label: string, labelFor: string, focus: string, style: 'main' | 'plain') => {
+      const control = kit.button(label, focus, () => approveDrop(extra), style);
+      control.setAttribute('aria-label', labelFor);
+      return control;
+    };
+    const again = drop.confirm.reconfirm;
+    add(ask, add(el('div', 'banner-body'),
+      el('p', '', fill(again ? words.reconfirm.line : words.line, { name, source })),
+      el('p', 'muted', fill(again ? words.reconfirm.note : words.note, { name, source })),
+      add(el('div', 'actions'),
+        answer({ confirm_account: true }, fill(words.add, { name, source }), fill(words.addFor, { name, source }), 'picker:confirm', 'main'),
+        ...(again ? [] : [answer({ keep_apart: true }, words.apart, fill(words.apartFor, { name, source }), 'picker:confirm-apart', 'plain')]),
+        kit.button(drop.words.chooseAnother, 'picker:confirm-other', cancelDrop, 'plain'))));
+    return ask;
   }
 
   // ---- scope sessions ----------------------------------------------------
@@ -476,8 +922,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       title: title || (mail ? Q.mailTitle : Q.foldersTitle),
       loading: 'root', loaded: false, error: '', retry: null, generation: '', revision: '',
       edited: false, saving: false, saveError: '', discarding: false,
-      // archive mode: the row being approved, the Mac's note on a refusal, and the account question
-      savingKey: '', saveAccess: null, confirm: null,
       // folders
       roots: [], rootCursor: '', branches: new Map(), cursors: new Map(), catalog: new Map(),
       // Per level ('' is the root): how many more folders follow ("N more"), and levels Olympus could not list in full.
@@ -524,11 +968,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       && Array.isArray(page.nodes) && page.nodes.every(validNode);
   }
 
-  /** An archive listing has no account or saved scope to check, only its nodes. */
-  function validArchiveBrowse(page: Any): boolean {
-    return !!page && typeof page === 'object' && Array.isArray(page.nodes) && page.nodes.every(validNode);
-  }
-
   function failLoad(retry: () => void, focus: string): void {
     p.loading = '';
     p.error = Q.loadFailed;
@@ -544,12 +983,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   // rules are stored; inherited choices and Mixed are derived on every render.
   function list(parentKey: string, append: boolean, after?: () => void): void {
     const cursor = append ? (parentKey ? p.cursors.get(parentKey) : p.rootCursor) : '';
-    const archive = archiveMode();
-    // Archive mode lists this computer itself: no source, no saved scope.
-    const args: Any = archive ? {} : { source_id: p.id };
+    const args: Any = { source_id: p.id };
     if (parentKey) args.parent_key = parentKey;
     // The trail above it, so the engine can refuse a level inside a Secrets folder.
-    if (!archive && parentKey && (p.ancestors.get(parentKey) || []).length) args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
+    if (parentKey && (p.ancestors.get(parentKey) || []).length) args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
     if (cursor) args.cursor = cursor;
     p.loading = parentKey || 'root';
     p.error = '';
@@ -557,10 +994,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const focus = append ? 'picker:more:' + parentKey : p.loaded ? '' : 'picker:back';
     kit.render(focus);
     const mine = session;
-    kit.call(archive ? T.archiveBrowse : T.scopeList, args).then((result) => {
+    kit.call(T.scopeList, args).then((result) => {
       if (mine !== session || !p) return;
       const page = scopeData(result);
-      if (!(archive ? validArchiveBrowse(page) : validBrowse(page))) {
+      if (!validBrowse(page)) {
         failLoad(() => list(parentKey, append, after), 'picker:retry');
         return;
       }
@@ -1095,14 +1532,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   /** Pick mode: Make private, or Already private when the caller holds it. */
   function pickButton(key: string, name: string, focusKey: string): HTMLButtonElement {
     const words = p.pick.words;
-    if (archiveMode()) {
-      // Import: the engine approves it (or says why not) before the picker closes.
-      const busy = p.saving && p.savingKey === key;
-      const control = kit.button(busy ? words.busy : words.makePrivate, focusKey, p.loading || p.saving ? null : () => approveArchive(key, name), 'plain');
-      if (busy) control.setAttribute('aria-busy', 'true');
-      control.setAttribute('aria-label', fill(words.makePrivateFor, { name }));
-      return control;
-    }
     if (p.pick.taken.indexOf(key) >= 0) return kit.button(words.alreadyPrivate, focusKey, null, 'plain');
     const control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => leave('', false, { key, name }), 'plain');
     control.setAttribute('aria-label', fill(words.makePrivateFor, { name }));
@@ -1113,10 +1542,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   function pickRow(node: Any): HTMLElement {
     const key = node.key;
     const li = el('li', 'frow pick');
-    // Archive mode: the Mac's Needs permission and Disk tags, and a file's size, beside the name.
     const label = (target: HTMLElement): HTMLElement => {
-      if (archiveMode()) nameParts(target, node.name, '', node);
-      else add(target, el('span', 'fname-text', node.name));
+      add(target, el('span', 'fname-text', node.name));
       return target;
     };
     if (node.has_children) {
@@ -1318,44 +1745,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       add(error, add(el('div', 'banner-body'), el('p', '', p.error),
         add(el('div', 'actions'), kit.button(Q.tryAgain, 'picker:retry', () => p.retry && p.retry(), 'plain'))));
       add(body, error);
-    }
-    if (archiveMode() && p.confirm) {
-      // The export does not prove which account it is of: ask, in place, before anything is imported.
-      const words = p.pick.words.account;
-      const source = p.confirm.source || words.sourceFallback;
-      const name = p.confirm.name;
-      const ask = el('div', 'banner');
-      ask.setAttribute('role', 'group');
-      ask.setAttribute('aria-label', fill(words.line, { name, source }));
-      const answer = (extra: Any, label: string, labelFor: string, focus: string, style: 'main' | 'plain') => {
-        const control = kit.button(label, focus, p.saving ? null : () => approveArchive(p.confirm.key, p.confirm.name, extra), style);
-        control.setAttribute('aria-label', labelFor);
-        return control;
-      };
-      add(ask, add(el('div', 'banner-body'),
-        el('p', '', fill(p.confirm.reconfirm ? words.reconfirm.line : words.line, { name, source })),
-        el('p', 'muted', fill(p.confirm.reconfirm ? words.reconfirm.note : words.note, { name, source })),
-        add(el('div', 'actions'),
-          answer({ confirm_account: true }, fill(words.add, { name, source }), fill(words.addFor, { name, source }), 'picker:confirm', 'main'),
-          ...(p.confirm.reconfirm ? [] : [answer({ keep_apart: true }, words.apart, fill(words.apartFor, { name, source }), 'picker:confirm-apart', 'plain')]),
-          kit.button(p.pick.words.chooseAnother, 'picker:confirm-other', () => {
-            p.confirm = null;
-            kit.render(p.path.length ? 'picker:up' : 'picker:back');
-          }, 'plain'))));
-      add(body, ask);
-    }
-    if (archiveMode() && p.saveError) {
-      // Why the engine would not import that choice, and the Mac's own note when it is its privacy rules.
-      const error = el('div', 'banner');
-      error.setAttribute('role', 'alert');
-      add(error, add(el('div', 'banner-body'), el('p', '', p.saveError),
-        add(el('div', 'actions'), kit.button(p.pick.words.chooseAnother, 'picker:archive-error', () => {
-          p.saveError = '';
-          p.saveAccess = null;
-          kit.render(p.path.length ? 'picker:up' : 'picker:back');
-        }, 'plain'))));
-      add(body, error);
-      if (p.saveAccess) add(body, accessNote(p.saveAccess, null));
     }
   }
 
@@ -1676,6 +2065,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   function view(): HTMLElement {
+    if (drop) return dropView();
     const page = el('main', 'page picker');
     if (!p) return page;
     const top = el('div', 'picker-top');
@@ -1710,6 +2100,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
 
   /** Back and Escape: close the discard prompt, then go up a level, then leave. */
   function escape(): void {
+    if (drop) {
+      leaveDrop(null);
+      return;
+    }
     if (!p) return;
     if (p.discarding) {
       p.discarding = false;
@@ -1719,8 +2113,14 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   if (typeof document !== 'undefined') {
+    // A file dropped beside the zone must not make the browser open it in place of the page.
+    for (const name of ['dragover', 'drop']) {
+      document.addEventListener(name, (event: Event) => {
+        if (drop) event.preventDefault();
+      });
+    }
     document.addEventListener('keydown', (event: KeyboardEvent) => {
-      if (!p || event.key !== 'Escape' || event.defaultPrevented) return;
+      if ((!p && !drop) || event.key !== 'Escape' || event.defaultPrevented) return;
       event.preventDefault();
       escape();
     });
@@ -1731,7 +2131,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     start,
     pickFolder,
     pickArchive,
-    active: () => !!p,
+    active: () => !!p || !!drop,
     view,
     afterRender: () => undefined,
   };

@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { approveStaged, stageUpload } from './support/stage-upload.ts';
 import { DASHBOARD_ARCHIVE_COPY } from '../src/workers/dashboard/vocabulary.ts';
 import { readSourceRegistry, findRegistryAccount } from '../src/core/source-registry.ts';
 import { recordProviderAccount } from '../src/core/source-storage.ts';
@@ -262,7 +263,7 @@ describe('a held item stays held', () => {
 
 describe('which account an import joins', () => {
   const startedOrAsked = (h: OnePipelineHarness, name: string, records: readonly FxRecord[], answer: { confirmAccount?: true; keepApart?: true } = {}) =>
-    h.dashboard.approve({ key: h.writeExport(name, records), ...answer });
+    approveStaged(h.dashboard, h.writeExport(name, records), answer);
 
   test('the same account joins the source and writes into its stores', async () => {
     const h = onePipelineHarness(cleanups);
@@ -305,9 +306,10 @@ describe('which account an import joins', () => {
     const h = onePipelineHarness(cleanups);
     h.connectLive('account-a');
     h.evidence.current = { kind: 'none' };
-    const key = h.writeExport('none.mbox', [rec('a', 1, 'a'), rec('b', 1, 'b')]);
-    expect(await h.dashboard.approve({ key })).toMatchObject({ ok: true, status: 'confirm_account' });
-    const confirmed = await h.dashboard.approve({ key, confirmAccount: true });
+    const exportPath = h.writeExport('none.mbox', [rec('a', 1, 'a'), rec('b', 1, 'b')]);
+    const key = await stageUpload(h.dashboard, exportPath);
+    expect(await h.dashboard.approve({ uploadId: key })).toMatchObject({ ok: true, status: 'confirm_account' });
+    const confirmed = await h.dashboard.approve({ uploadId: key, confirmAccount: true });
     if (!confirmed.ok || confirmed.status !== 'started') throw new Error('expected a start after the owner said yes');
     expect(h.runtime.state.get(confirmed.archive_id)?.target?.confirmed_account).toBeDefined();
 
@@ -318,12 +320,13 @@ describe('which account an import joins', () => {
     expect(h.ids()).toEqual([]);
     expect(h.rows()).toEqual([]);
 
-    // Choosing the same export again asks the question again; a yes binds it to the account that is there.
-    expect(await h.dashboard.approve({ key })).toMatchObject({ ok: true, status: 'confirm_account', reconfirm: true, source: { id: FIXTURE_SOURCE_ID } });
+    // Dropping the same export again (a new upload of it) asks the question again; a yes binds it to the account that is there.
+    const key2 = await stageUpload(h.dashboard, exportPath);
+    expect(await h.dashboard.approve({ uploadId: key2 })).toMatchObject({ ok: true, status: 'confirm_account', reconfirm: true, source: { id: FIXTURE_SOURCE_ID } });
     // Keeping it apart is not an answer to this question: it asks again, still without importing.
-    expect(await h.dashboard.approve({ key, keepApart: true })).toMatchObject({ ok: true, status: 'confirm_account', reconfirm: true });
+    expect(await h.dashboard.approve({ uploadId: key2, keepApart: true })).toMatchObject({ ok: true, status: 'confirm_account', reconfirm: true });
     expect(h.runtime.state.get(confirmed.archive_id)?.status).toBe('stopped');
-    const again = await h.dashboard.approve({ key, confirmAccount: true });
+    const again = await h.dashboard.approve({ uploadId: key2, confirmAccount: true });
     expect(again).toMatchObject({ ok: true, status: 'started', archive_id: confirmed.archive_id });
     const done = await h.importAll(confirmed.archive_id);
     expect(done.record?.status).toBe('imported');
@@ -333,8 +336,8 @@ describe('which account an import joins', () => {
   test('an export that names no account into a source with no account yet starts without asking, and its first pass is not stopped for the account it just made', async () => {
     const h = onePipelineHarness(cleanups);
     h.evidence.current = { kind: 'none' };
-    const key = h.writeExport('fresh.mbox', [rec('a', 1, 'a')]);
-    const started = await h.dashboard.approve({ key });
+    const key = await stageUpload(h.dashboard, h.writeExport('fresh.mbox', [rec('a', 1, 'a')]));
+    const started = await h.dashboard.approve({ uploadId: key });
     if (!started.ok || started.status !== 'started') throw new Error(`expected a start, got ${JSON.stringify(started)}`);
     expect(h.runtime.state.get(started.archive_id)?.target?.confirmed_account).toBeDefined();
     const done = await h.importAll(started.archive_id);
@@ -520,7 +523,7 @@ describe('Stop', () => {
     // The owner's own Stop is not a problem to fix.
     expect(h.dashboard.present().attention ?? []).toEqual([]);
     // Choosing the same export again resumes it from its own cursor.
-    const resumed = await h.dashboard.approve({ key: join(h.home, 'Exports', 'stop.mbox') });
+    const resumed = await approveStaged(h.dashboard, join(h.home, 'Exports', 'stop.mbox'));
     expect(resumed).toMatchObject({ ok: true, status: 'started', archive_id: id });
     await h.importAll(id);
     // It read on from where it stopped: the input was handed its own cursor, not the start.
@@ -542,7 +545,7 @@ describe('Stop', () => {
         entry.status = 'stopped';
         entry.stop = { code, message: 'stopped for the test', at: new Date().toISOString() };
       });
-      const resumed = await h.dashboard.approve({ key: join(h.home, 'Exports', 'recover.mbox') });
+      const resumed = await approveStaged(h.dashboard, join(h.home, 'Exports', 'recover.mbox'));
       expect(resumed).toMatchObject({ ok: true, status: 'started', archive_id: id });
       await h.importAll(id);
       expect(h.runtime.state.get(id)?.status).toBe('imported');
@@ -558,7 +561,7 @@ describe('Stop', () => {
       entry.status = 'stopped';
       entry.stop = { code: 'resume_point_invalid', message: 'lost', at: new Date().toISOString() };
     });
-    const again = await h.dashboard.approve({ key: join(h.home, 'Exports', 'lost.mbox') });
+    const again = await approveStaged(h.dashboard, join(h.home, 'Exports', 'lost.mbox'));
     expect(again).toMatchObject({ ok: true, status: 'already_imported', archive_id: id });
     expect(h.runtime.state.get(id)?.status).toBe('stopped');
     expect(DASHBOARD_ARCHIVE_COPY.inSource.stoppedWhy.resume_point_invalid.fix).toContain('deleting the source');
@@ -585,7 +588,7 @@ describe('deleting the whole source', () => {
     expect(h.ids()).toEqual(['archive-item', 'live-item']);
     // An export of another account stays under Archives, and is not the source's to delete.
     h.evidence.current = { kind: 'archives' };
-    const apart = await h.dashboard.approve({ key: h.writeExport('apart-delete.mbox', [rec('x', 1, 'x')]) });
+    const apart = await approveStaged(h.dashboard, h.writeExport('apart-delete.mbox', [rec('x', 1, 'x')]));
     if (!apart.ok || apart.status !== 'started') throw new Error('expected a start');
 
     const result = deleteOlympusData({ sourceId: FIXTURE_SOURCE_ID, homeDir: h.home });

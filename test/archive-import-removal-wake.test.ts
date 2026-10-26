@@ -22,7 +22,7 @@ import {
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
-import { createLocalFilesArchiveBrowser } from '../src/workers/local-files/scope-browser.ts';
+import { createArchivePathResolver } from '../src/workers/local-files/scope-browser.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { SourceScheduler, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
@@ -78,7 +78,7 @@ function fixture() {
     diskutilPlist: () => undefined,
   });
   const permissions = new MacPermissions({ home, memoryPath: join(base, 'folder-access.json'), platform: 'linux' });
-  const browser = createLocalFilesArchiveBrowser({ volumes, home, permissions });
+  const resolver = createArchivePathResolver({ volumes, home, permissions });
   const stateStore = new LocalSourceSchedulerStateStore(':memory:');
   cleanups.push(() => stateStore.close());
   const start = (name: string, text: string): string => {
@@ -88,7 +88,7 @@ function fixture() {
     if (started.kind !== 'started') throw new Error(`expected a start, got ${started.kind}`);
     return started.archive.archive_id;
   };
-  return { home, exports, runtime, browser, stateStore, start };
+  return { home, exports, runtime, resolver, stateStore, start };
 }
 
 type Fixture = ReturnType<typeof fixture>;
@@ -131,7 +131,7 @@ function engine(f: Fixture, clock: Clock) {
   cleanups.push(() => scheduler.stop());
   const dashboard: ArchiveImportDashboard = createArchiveImportDashboard({
     runtime: f.runtime,
-    browser: f.browser,
+    resolver: f.resolver,
     refreshScheduler: () => scheduler.updateSources(roster(f.runtime), new Date(clock.now)),
     privateModel: () => 'ready',
     home: f.home,
