@@ -20,6 +20,8 @@ import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
 import { createLocalFilesArchiveBrowser } from '../src/workers/local-files/scope-browser.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { reflectJson, reflectNotes } from './support/archive-fixtures-reflect.ts';
+import { roamJson, roamPages } from './support/archive-fixtures-roam.ts';
+import { enexExport, evernoteNotes } from './support/archive-fixtures-evernote.ts';
 import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import { DASHBOARD_DISCONNECTED_DATA_KEPT } from '../src/workers/dashboard/vocabulary.ts';
 
@@ -114,6 +116,29 @@ describe('an import-only source\'s card', () => {
     expect(f.dashboard.present().archives).toBe(0);
     expect(f.dashboard.presentCards()['reflect.archive']).toMatchObject({ archives: 1 });
     expect(f.dashboard.presentCards()['roam.archive']).toMatchObject({ archives: 0 });
+  });
+
+  test('the agent\'s status lists every card\'s imports, though the dashboard shows them in their cards', async () => {
+    // Found by the release check: a notes import the agent asked for was missing from its status, so it could not follow it.
+    const f = fixture();
+    const files = [
+      f.write('Reflect notes.json', reflectJson(reflectNotes(2))),
+      f.write('Roam graph.json', roamJson(roamPages(2))),
+      f.write('Evernote notes.enex', enexExport(evernoteNotes(2))),
+    ];
+    const ids: string[] = [];
+    for (const path of files) {
+      const started = await f.dashboard.approve({ key: path });
+      if (!started.ok || started.status !== 'started') throw new Error(`not started: ${path}`);
+      ids.push(started.archive_id);
+    }
+    expect(f.dashboard.view().archives).toEqual([]);
+    const status = f.dashboard.agent.status();
+    if (!status.ok) throw new Error('status refused');
+    expect(status.archives.map((archive) => archive.name).sort()).toEqual(['Evernote notes.enex', 'Reflect notes.json', 'Roam graph.json']);
+    expect(status.archives.map((archive) => archive.format).sort()).toEqual(['Evernote export (.enex)', 'Reflect notes (JSON)', 'Roam notes (JSON)']);
+    // And each by its id, as the agent follows the one it asked for.
+    for (const id of ids) expect(f.dashboard.agent.status(id)).toMatchObject({ ok: true, archives: [{ archive_id: id }] });
   });
 
   test('Import another archive sends the same file to the same card', async () => {
