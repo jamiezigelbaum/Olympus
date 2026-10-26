@@ -10,6 +10,7 @@ import {
 } from '../scripts/release-check/archive-leg.ts';
 import { liveSeedHook, registerLiveSeedHook } from '../scripts/release-check/archive-live-seeds.ts';
 import '../scripts/release-check/archive-live-seed-hooks.ts';
+import { searchWhenJudged } from '../scripts/release-check/archive-stages.ts';
 
 const fx: LegFixture = {
   role: 'beside',
@@ -110,5 +111,44 @@ describe('an import beside a live input is judged', () => {
     expect(() => liveSeedHook('nothing-registered')).toThrow('no live seed hook "nothing-registered"');
     registerLiveSeedHook('test-hook', { provider: 'p', stores: () => [], seed: async () => ({ ok: true, detail: '', liveItems: 1 }) });
     expect(liveSeedHook('test-hook').provider).toBe('p');
+  });
+});
+
+describe('the search beside a live input waits for the private model', () => {
+  const host = (citedFrom: number) => {
+    let clock = 0;
+    let calls = 0;
+    const lines: string[] = [];
+    return {
+      calls: () => calls,
+      lines,
+      host: {
+        now: () => clock,
+        sleep: async (ms: number) => { clock += ms; },
+        say: (line: string) => { lines.push(line); },
+        search: async () => {
+          calls += 1;
+          // Held Private until judged: nothing is cited until the judge has run.
+          const judged = calls >= citedFrom;
+          return { ok: true, isError: false, structured: { evidence: judged ? [{ source: 'Fixture', excerpt: `the word ${fx.token}` }] : [{ source: 'Fixture', excerpt: 'another message' }] } };
+        },
+      } as unknown as Parameters<typeof searchWhenJudged>[0],
+    };
+  };
+
+  test('a search asked before the records are judged is asked again until it is cited', async () => {
+    const world = host(4);
+    const search = await searchWhenJudged(world.host, { ...fx, expect: { ...fx.expect, citationLabel: 'Fixture' } }, 900_000);
+    expect(world.calls()).toBe(4);
+    expect(search.evidence.some((item) => item.hasToken)).toBe(true);
+    expect(failing(good({ search }))).toEqual([]);
+  });
+
+  test('a search never cited within the bound is the one judged, and fails', async () => {
+    const world = host(Number.POSITIVE_INFINITY);
+    const search = await searchWhenJudged(world.host, { ...fx, expect: { ...fx.expect, citationLabel: 'Fixture' } }, 60_000);
+    expect(world.calls()).toBe(7);
+    expect(world.lines.at(-1)).toContain('NOT cited');
+    expect(failing(good({ search }))).toEqual(['archive.beside.fixture_chat.search']);
   });
 });
