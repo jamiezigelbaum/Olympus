@@ -14,7 +14,12 @@ import { registerInstalledTierClassification } from '../src/workers/classificati
 import type { TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { createArchiveExtractionRuntime } from '../src/workers/archive-import/extraction-runtime.ts';
 import { archiveExtractionTaskId, createArchiveImportsSchedulerSource } from '../src/workers/archive-import/scheduler-source.ts';
-import { EXTRACTION_PROVIDER_TEXT_MAX_CHARS, providerFallback } from '../src/workers/file-extraction/runner.ts';
+import { EXTRACTION_PROVIDER_TEXT_MAX_CHARS, createFileExtractionRunner, providerFallback } from '../src/workers/file-extraction/runner.ts';
+import { isFileExtractionSourceError } from '../src/core/file-extraction-source.ts';
+import { createConnectorFileExtractionSource } from '../src/workers/file-extraction/connector-source.ts';
+import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
+import { buildExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
+import type { ExtractionSinkRequest, ExtractorOutput, FileExtractionSource } from '../src/workers/file-extraction/types.ts';
 import { childProviderItemId, createFixtureChildConnector, type FixtureParentSpec } from './helpers/child-items-fixture.ts';
 import { childItemsArchiveHarness, FIXTURE_ARCHIVE_FORMAT } from './support/child-items-archive-harness.ts';
 
@@ -107,5 +112,57 @@ describe('through the archive extraction task', () => {
     expect(hits.map((hit) => hit.sourceItem.providerItemId)).toContain(child);
     const text = stores.flatMap((store) => store.localContent(`${archiveId}:${child}`)?.chunks ?? []).join(' ');
     expect(text).toContain('Text recognized by Evernote (approximate words, not an exact quote):');
+  });
+});
+
+describe('a file over the reader\'s limit, refused by the source', () => {
+  const CORPUS_ID = 'secure_local.fake.files';
+  const ref = { corpusId: CORPUS_ID, provider: 'fake', accountScope: 'personal', approvedScopeKey: 'fake.personal:/', providerItemId: 'scan-1', localItemId: 'personal:scan-1', mimeType: 'text/plain', name: 'scan.txt' };
+
+  test('the source\'s refusal carries its reading, and the runner uses it without giving the reader the bytes', async () => {
+    // The shared connector source refuses an item over the limit, and keeps its reading with the refusal.
+    const connector = {
+      id: 'fake', family: 'note',
+      async authenticate() {}, listItems: async function* () {}, classificationSignals: () => ({}),
+      async fetchItem(): Promise<RawItem> {
+        return { identity: { family: 'note', provider: 'fake', accountScope: 'personal', providerItemId: 'scan-1', localItemId: 'personal:scan-1' }, mimeType: 'text/plain', content: { kind: 'bytes', mimeType: 'text/plain', bytes: new Uint8Array(64) }, metadata: {}, fetchedAt: '2026-10-26T00:00:00.000Z', providerText: RECOGNIZED };
+      },
+    } as unknown as SourceConnector;
+    const source = createConnectorFileExtractionSource({
+      id: 'fake-source', corpusId: CORPUS_ID, provider: 'fake', connector,
+      candidates: { extractionCandidates: async () => ({ candidates: [], done: true }) },
+      lanes: [{ approvedScopeKey: 'fake.personal:/' }],
+    } as never);
+    const refused = await source.fetch(ref as never, { maxBytes: 10 }).then(() => undefined, (error: unknown) => error);
+    expect(isFileExtractionSourceError(refused) && refused.errorKind).toBe('source_too_large');
+    expect(isFileExtractionSourceError(refused) ? refused.providerText : undefined).toEqual(RECOGNIZED);
+
+    // The runner settles that job with the reading as the item's text; the reader is never called.
+    const jobs = new LocalFileExtractionJobStore(':memory:');
+    try {
+      let readerCalls = 0;
+      const accepted: ExtractionSinkRequest[] = [];
+      const runner = createFileExtractionRunner({
+        jobs,
+        registry: buildExtractorRegistry([{
+          kind: 'fake_text', version: 'fake-v1', input: { kind: 'bytes', maxInputBytes: 10 }, egress: 'local', accepts: () => true,
+          async extract(): Promise<ExtractorOutput> { readerCalls += 1; return { status: 'indexed', text: 'never' }; },
+        }]),
+        corpora: [{
+          corpusId: CORPUS_ID,
+          trustDomain: 'secure_local',
+          source: { ...source, fetch: async () => { throw refused; } } as FileExtractionSource,
+          sink: { async accept(request) { accepted.push(request); return { accepted: true, chunksIndexed: 1, chunksAwaitingEmbedding: 1 }; } },
+        }],
+      });
+      jobs.enqueue({ refs: [ref as never], extractorKind: 'fake_text', extractorVersion: 'fake-v1', policyDecision: 'index_allowed' });
+      const result = await runner.run({ corpusId: CORPUS_ID, provider: 'fake', accountScope: 'personal', approvedScopeKey: 'fake.personal:/' } as never);
+      expect(result.records[0]!.status).toBe('indexed');
+      expect(readerCalls).toBe(0);
+      expect(accepted[0]!.text).toContain('Text recognized by Evernote (approximate words, not an exact quote):\nmeet uniquehandwriting');
+      expect(accepted[0]!.derivations?.[0]?.artifactKind).toBe('provider_text');
+    } finally {
+      jobs.close();
+    }
   });
 });

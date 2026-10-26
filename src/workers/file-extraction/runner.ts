@@ -1089,6 +1089,8 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   let fetchedFile: FetchedFile | undefined;
   // Over the reader's limit, with the source's own reading to fall back on (providerFallback).
   let tooLarge = false;
+  // The source's own reading of an item it refused to hand over whole.
+  let refusedProviderText: RawItemProviderText | undefined;
   if (extractor.input.kind !== 'none') {
     let source: FileExtractionSource;
     try {
@@ -1120,13 +1122,21 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
       // re-derived here from a status code this module never saw. That is the
       // whole reason the seam carries a precomputed disposition.
       if (isFileExtractionSourceError(error)) {
-        return {
-          status: error.settleAs,
-          errorKind: error.errorKind,
-          ...(error.errorHash ? { errorHash: error.errorHash } : {}),
-        };
+        // Over the reader's limit, with the source's own reading of the item: that reading stands in for it
+        // (providerFallback), and the reader is never given the bytes.
+        if (error.errorKind === 'source_too_large' && error.providerText) {
+          refusedProviderText = error.providerText;
+          tooLarge = true;
+        } else {
+          return {
+            status: error.settleAs,
+            errorKind: error.errorKind,
+            ...(error.errorHash ? { errorHash: error.errorHash } : {}),
+          };
+        }
+      } else {
+        return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
       }
-      return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
     }
     if (fetched && job.ref.contentHash !== undefined && source.verifyBytes) {
       let verified = true;
@@ -1177,7 +1187,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
     return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
   }
-  const providerText = fetched?.providerText ?? fetchedFile?.providerText;
+  const providerText = fetched?.providerText ?? fetchedFile?.providerText ?? refusedProviderText;
   try {
     // A file over the reader's limit is not given to the reader; the source's own reading stands in for it.
     output = tooLarge ? { status: 'empty_output' } : await extractor.extract(extractorInput);

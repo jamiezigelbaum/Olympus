@@ -124698,6 +124698,7 @@ var init_file_extraction_source = __esm(() => {
     settleAs;
     retryable;
     errorHash;
+    providerText;
     constructor(errorKind, options = {}) {
       super(errorKind);
       this.name = "FileExtractionSourceError";
@@ -124707,6 +124708,8 @@ var init_file_extraction_source = __esm(() => {
       const errorHash = options.detailForHash === undefined ? undefined : createHash67("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
+      if (options.providerText)
+        this.providerText = options.providerText;
     }
   };
 });
@@ -131160,6 +131163,7 @@ async function settleOneJobHeld(input, staged) {
   let fetched;
   let fetchedFile;
   let tooLarge = false;
+  let refusedProviderText;
   if (extractor.input.kind !== "none") {
     let source;
     try {
@@ -131186,13 +131190,19 @@ async function settleOneJobHeld(input, staged) {
       }
     } catch (error2) {
       if (isFileExtractionSourceError(error2)) {
-        return {
-          status: error2.settleAs,
-          errorKind: error2.errorKind,
-          ...error2.errorHash ? { errorHash: error2.errorHash } : {}
-        };
+        if (error2.errorKind === "source_too_large" && error2.providerText) {
+          refusedProviderText = error2.providerText;
+          tooLarge = true;
+        } else {
+          return {
+            status: error2.settleAs,
+            errorKind: error2.errorKind,
+            ...error2.errorHash ? { errorHash: error2.errorHash } : {}
+          };
+        }
+      } else {
+        return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error2);
       }
-      return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error2);
     }
     if (fetched && job.ref.contentHash !== undefined && source.verifyBytes) {
       let verified = true;
@@ -131238,7 +131248,7 @@ async function settleOneJobHeld(input, staged) {
   if (!await extractionAuthorizationCurrent(corpus, job.ref)) {
     return { status: "blocked_policy", errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
   }
-  const providerText = fetched?.providerText ?? fetchedFile?.providerText;
+  const providerText = fetched?.providerText ?? fetchedFile?.providerText ?? refusedProviderText;
   try {
     output = tooLarge ? { status: "empty_output" } : await extractor.extract(extractorInput);
     output = providerFallback(output, providerText);
@@ -167123,7 +167133,7 @@ async function readItemToFile(connector, localItemId, options) {
     throw refusalFor(item);
   const bytes = content.kind === "bytes" ? content.bytes : new TextEncoder().encode(content.text);
   if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
+    throw new FileExtractionSourceError("source_too_large", item.providerText ? { providerText: item.providerText } : {});
   }
   const path = join112(options.spoolDir, extractionSpoolFileName());
   const served = () => options.stillServed?.() ?? true;
@@ -167245,7 +167255,7 @@ function createConnectorFileExtractionSource(options) {
       const bytes = content.kind === "bytes" ? content.bytes : new TextEncoder().encode(content.text);
       const mimeType = content.kind === "bytes" ? content.mimeType : item.mimeType;
       if (fetchOptions.maxBytes !== undefined && bytes.byteLength > fetchOptions.maxBytes) {
-        throw new FileExtractionSourceError("source_too_large");
+        throw new FileExtractionSourceError("source_too_large", item.providerText ? { providerText: item.providerText } : {});
       }
       return { bytes, ...mimeType ? { mimeType } : {}, sizeBytes: bytes.byteLength, ...item.providerText ? { providerText: item.providerText } : {} };
     },

@@ -44726,6 +44726,7 @@ class FileExtractionSourceError extends Error {
   settleAs;
   retryable;
   errorHash;
+  providerText;
   constructor(errorKind, options = {}) {
     super(errorKind);
     this.name = "FileExtractionSourceError";
@@ -44735,6 +44736,8 @@ class FileExtractionSourceError extends Error {
     const errorHash = options.detailForHash === undefined ? undefined : createHash20("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
     if (errorHash)
       this.errorHash = errorHash;
+    if (options.providerText)
+      this.providerText = options.providerText;
   }
 }
 function splitScopedLocalItemId(localItemId) {
