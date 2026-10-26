@@ -1,7 +1,9 @@
 # Source storage
 
-Status: approved by the owner 2026-10-24 (decisions 1–5 below); delivery in
-progress (steps 1–3, 4a–4c, 4e and 5 done). Replaces the storage half of the Delete work in #455/#467 (#467
+Status: approved by the owner 2026-10-24 (decisions 1–5 below); every
+delivery step is built (steps 1–3, 4a–4e, 5 and 6; step 6 2026-10-26). What
+could not be proven on this Linux host is listed under step 6's "Residual
+risk". Replaces the storage half of the Delete work in #455/#467 (#467
 frozen 2026-10-24). This page covers storage only: where each account's
 files live, who opens them, and the storage operations that Delete, Export,
 uninstall and ingestion call. The Delete feature itself (dashboard states,
@@ -126,11 +128,13 @@ Inside the data root:
   removes both.
 - There is no `OLYMPUS_DATA_DIR`: the data root follows the standalone Linux
   receipt, else `XDG_DATA_HOME` (`olympus-layout.ts`), and tests isolate
-  themselves with a throwaway HOME. The per-store `OLYMPUS_SOURCE_INDEX_*_DB_PATH`
-  overrides and `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON` path fields go
-  away (owner decision 3). Until step 6 deletes them, an override or a mount
-  that names an account's files pins that account to `legacy`, and a `folder`
-  account never honors one.
+  themselves with a throwaway HOME. The per-store `OLYMPUS_*_DB_PATH`
+  overrides are gone, and a `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON` entry
+  for a source with a folder layout names no path (step 6, owner decision 3):
+  nothing relocates a store but the data root. What still relocates a `legacy`
+  messaging account's files are its capture paths (the env a spawner hands a
+  capture child, and the Gateway-run services' plugin-config paths), which
+  pin the account to `legacy`; a `folder` account never honors one.
 - **Settings stay in the shared config files** (`file-source-scopes.json`,
   `mail-source-scopes.json`, `this-computer.json`, `source-account-bindings.json`
   and the Dropbox ingestion policy). Several sources share one file, so they
@@ -209,7 +213,8 @@ Inside the data root:
   does not know the field passes it through unchanged.
 - **Placement of a new account (4a).** An account with no entry is recorded
   `folder` only if nothing says it lives elsewhere: its source has a folder
-  layout, no env override or connector-store mount names its files, no file of
+  layout, nothing pins it (for messaging: a capture path env, native capture
+  ownership, a capture grant that names a session path), no file of
   it exists at any legacy location (stores, tier sidecars, `-wal`/`-shm`, raw
   state; lock files do not count), and every legacy location can be looked at
   (an unreadable folder or a dangling link places it `legacy`). The decision is
@@ -523,7 +528,7 @@ Imports under `archive.imports` keep their own Remove, by their account scope.
 it owns from `core/account-files.ts`: its folder when it lives in one, else
 the files the layout module's resolvers name for it (`accountStorePath`,
 `accountRawPath`, the pairing module's session paths), which are the paths its
-connector uses, overrides included. `data-lifecycle.ts` names no source
+connector uses. `data-lifecycle.ts` names no source
 (`test/delete-on-registry.test.ts`). Source-specific behavior that is not a
 path became a registered step: X's sync positions in the shared usage ledger
 are the forget step `x-bookmarks-sync-state`, and imported archives' approvals
@@ -613,7 +618,9 @@ order:
    resolvers (`legacyAccountFiles`, used for this purpose only). The account
    stays legacy, and the registry records why (`migration.state: skipped`, a
    reason code and plain words), when:
-   - `pinned`: an env override or a connector-store mount names its files;
+   - `pinned`: a capture path env, native capture ownership or a capture grant
+     names a messaging account's files (before step 6 also a per-store
+     override or a connector-store mount);
    - `unreadable`: a legacy location, or the account folder, cannot be looked at;
    - `unexpected_file`: a legacy path is a link or the wrong kind of file, or a
      folder between the data folder and a destination is a link. The check is
@@ -1016,8 +1023,8 @@ touch the store path (`eval/`).
      account, and every account with legacy files, stays `legacy`. Per-kind
      resolvers in `olympus-layout.ts` (`accountFolder`, `accountStorePath`,
      `accountRawPath`) and the placement predicate in `source-placement.ts`; the
-     connectors' `default*DbPath` functions are thin wrappers over them
-     (step 6 deletes the wrappers). The registry schema becomes 2 with the first
+     connectors' `default*DbPath` functions were thin wrappers over them
+     (step 6 deleted the wrappers). The registry schema becomes 2 with the first
      folder entry. Delete takes the whole folder, Delete all keeps
      `data-owner.lock`, Export names `raw/` and `session/` and never copies
      them. No existing file moves. Delete refuses, with nothing removed, when
@@ -1135,16 +1142,84 @@ touch the store path (`eval/`).
    uninstaller's run on a Mac (its list is checked by expanding it under
    `/bin/sh`), and a Delete through the OpenClaw-hosted Gateway's worker
    restart.
-6. **Connectors stop naming paths.** Rewrite `docs/CREATE_CONNECTOR.md`
-   Leg 3 (it still instructs each connector to define a default path and
-   says seven local indexes are grandfathered; the guard allows one), drop
-   per-store env overrides, a guard against data paths built outside the
-   layout module.
+6. **Connectors stop naming paths (done, 2026-10-26).** Built:
+   - **The layout module names every data file.** The generic composer
+     (`olympusDataPath`) is private to `src/core/olympus-layout.ts`. A shared
+     file is asked for by what it is (`SHARED_DATA_FILES`, `sharedDataPath`:
+     the registry, the owner lock, the dashboard, scheduler, watch, job and
+     remote-connection databases, the ledgers, request budgets, models); an
+     account's files by account (`accountStorePath`, `accountRawPath`,
+     `accountTrashEntry`, `accountFolderEntry`); the loose legacy files that
+     only Delete still needs (pre-1.0 indexes, the Reflect and Roam mount
+     defaults, the Telegram drain cursor, the WhatsApp live-sync script's
+     paths) are named there too.
+   - **The wrappers and the overrides are gone.** The connectors'
+     `default*DbPath` and the X reconcile wrapper are deleted; callers ask
+     `resolvedStorePath(sourceId, tier)` / `resolvedRawPath` (the storage
+     service's placement, `core/source-placement.ts`). Every per-store
+     `OLYMPUS_*_DB_PATH` is gone, and with them
+     `OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH`,
+     `OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH`,
+     `OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH`, `OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH`,
+     `OLYMPUS_REMOTE_CONNECTIONS_DB_PATH`, the embedding drain's
+     `OLYMPUS_SOURCE_EMBEDDING_DRAIN_*_DB_PATH` and the pre-1.0 index
+     overrides. None of them pins an account any more.
+   - **Mounts.** A connector-store mount of a source with a folder layout
+     names no path: its `dbPath` is ignored, it only adds a principal to the
+     store the source's lane opened, and it is skipped, and reported, when
+     that lane is not open. The ingestion ledger skips such entries and lists
+     every account's stores from the corpus roster (`placedRosterStores`), the
+     Gmail and Drive public stores included. Reflect and Roam keep their JSON
+     mounts and their paths, and Gateway-run messaging capture stays legacy
+     (both as "Layout" says).
+   - **A new source declares only its tiers** (`FOLDER_ONLY_STORES`): it has
+     no legacy layout, so every account of it is a `folder` account, even with
+     an unreadable registry or data folder, and the boot migration has
+     nothing of it to move (`test/folder-only-source.test.ts`).
+     `docs/CREATE_CONNECTOR.md` Leg 3 and the connector template say so; the
+     playbook's "seven grandfathered indexes" became the one the guard allows.
+   - **Guard** (`test/data-path-guard.test.ts`): no `src/` module outside the
+     layout module (and the Linux install receipt reader it takes the
+     standalone data root from) extends a data root with `join`/`resolve` or
+     a template string, spells a file name the layout owns, or spells the data
+     root; and no `OLYMPUS_*_DB_PATH` or the archive state override is read
+     anywhere in `src/`. A file a capture child or a store keeps inside a
+     folder the layout hands out (the bridge's `session.db` in its state
+     folder, a store's tier sidecars beside it) is named by that folder's
+     owner, as before; the layout names the folder.
+
+   **Upgrading an install that set one.** The repository's installers set
+   none of these (they served development, owner decision 3), but a host
+   configured by hand may (a systemd drop-in, a mount list). Reading the
+   default place instead would open an empty store beside the account's real
+   files, so the worker refuses to start while its environment sets any
+   `OLYMPUS_*_DB_PATH` or the archive record's path, or mounts a placed
+   source's store anywhere but where Olympus keeps it, and names each one
+   (`retiredPathSettings`, `core/source-placement.ts`). The fix is to move the
+   file to where Olympus keeps it (the message names that place for a mount;
+   an env setting's file goes back to its usual name in the data folder, or
+   in the WhatsApp state folder for WhatsApp's stores), or to drop the setting
+   if it already named that place, and start again; the boot migration then moves it into the account
+   folder like any other.
+
+   **Residual risk (what this Linux host could not prove).** Delete on a Mac
+   (OpenClaw-hosted and engine) and through the OpenClaw-hosted Gateway's
+   worker restart, the macOS uninstaller's run, paired Telegram and WhatsApp
+   devices on a Mac, and the Gateway-run native capture services reading the
+   registry: each is covered by tests on isolated homes, not by a run on that
+   platform. 4c's retirement list (below) still names the release-testing
+   runs the owner signs off.
 
 Done when: no `src/` module outside the layout module builds a data path;
 no store is opened outside the storage service; `data-lifecycle.ts` names no
 source; deleting a source removes exactly its folder plus its shared rows,
 proven on Mac, standalone Linux and OpenClaw-hosted.
+
+**Status (2026-10-26): built.** The first three hold mechanically
+(`test/data-path-guard.test.ts`, `test/store-open-guard.test.ts`,
+`test/delete-on-registry.test.ts`). The fourth is proven on standalone Linux
+and on isolated homes in tests for each layout; the Mac and OpenClaw-hosted
+runs are the residual risk under step 6.
 
 ## Owner decisions
 

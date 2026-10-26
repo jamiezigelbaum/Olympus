@@ -192,8 +192,7 @@ as for every file source.
 
 Known limits, places this rule does not cover:
 
-- Single files an owner points at with a per-store override (`*_DB_PATH`) or the
-  Telegram session file, and the WhatsApp live-drain media and transcribe
+- The Telegram session file a capture path setting points at, and the WhatsApp live-drain media and transcribe
   folders and the Telegram drain cursor.
 - A move to a folder that is not dedicated, as above: the writer's files in the
   home folder or in `~/.local/share` are the person's files as far as this source

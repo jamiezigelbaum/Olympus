@@ -30,22 +30,18 @@
  * guard's regex-literal heuristic reads a one-line block comment as a regex.
  */
 
-import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { existsSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { filterFor, forgetSqliteRows, rowsKeyedBy } from '../../core/sqlite-forget.ts';
-
-export const FILE_EXTRACTION_JOBS_DB_PATH_ENV = 'OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH';
 
 const CLEAR_NAMES_BUSY_TIMEOUT_MS = 10_000;
 
 export function defaultFileExtractionJobsDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
-  if (override) return override;
-  return olympusDataPath(env, 'file-extraction-jobs.sqlite');
+  return sharedDataPath('file-extraction-jobs', env);
 }
 
 /**

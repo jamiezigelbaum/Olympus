@@ -5,6 +5,7 @@
 // read-only. Output is counts/state only: no store path, identity, or source
 // content is emitted.
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { lstatSync } from 'node:fs';
 import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
@@ -14,8 +15,6 @@ import {
   TELEGRAM_CAPTURE_CONNECTOR_IDS,
   TELEGRAM_MESSAGES_SOURCE_ID,
   TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID,
-  defaultInternalTelegramConnectorStoreDbPath,
-  defaultProtectedTelegramConnectorStoreDbPath,
   reconcileTelegramTrustStores,
   type TelegramConnectorStores,
 } from '../src/workers/telegram-messages/index.ts';
@@ -59,8 +58,8 @@ export function parseTelegramTrustReconcileCliArgs(
   argv: readonly string[],
   env: Record<string, string | undefined> = process.env,
 ): TelegramTrustReconcileCliArgs {
-  let internalDb = defaultInternalTelegramConnectorStoreDbPath(env);
-  let protectedDb = defaultProtectedTelegramConnectorStoreDbPath(env);
+  let internalDb = resolvedStorePath('telegram.messages', 'internal', env);
+  let protectedDb = resolvedStorePath('telegram.messages', 'secure_local', env);
   let maxItems = DEFAULT_BATCH_ITEMS;
   let maxWindows = DEFAULT_MAX_WINDOWS;
   let execute = false;

@@ -17,6 +17,7 @@
  * worker listens on an owner-only Unix socket that a bridge forwards to the port
  * a browser expects; on macOS the engine itself listens on that loopback port.
  */
+import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import { spawn, spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
@@ -26,8 +27,6 @@ import { join } from 'node:path';
 import type { SourceFamily } from '../../src/core/source-index/types.ts';
 import { archiveConnectorStoreDbPath } from '../../src/workers/archive-import/store.ts';
 import { tierLedgerPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
-import { defaultReadwiseConnectorStoreDbPath } from '../../src/workers/readwise/connector.ts';
-import { defaultReadwiseSecureConnectorStoreDbPath } from '../../src/workers/readwise/tier-set.ts';
 import { desktopSandboxOrigin, runSmoke, type SmokeObservation, privateNoteKind, panelMeta, resultText } from '../chatgpt-live-smoke.ts';
 import { privateNoteKindIn } from './private-note.ts';
 import { FAKE_READWISE_PORT, FAKE_READWISE_TOKEN, startFakeReadwise } from './readwise-fake.ts';
@@ -1744,8 +1743,8 @@ function collectLogs(outDir: string): never {
  */
 function readwiseStorePaths(): Array<{ store: string; path: string }> {
   return [
-    { store: 'readwise-connector-store', path: defaultReadwiseConnectorStoreDbPath() },
-    { store: 'readwise-secure-connector-store', path: defaultReadwiseSecureConnectorStoreDbPath() },
+    { store: 'readwise-connector-store', path: resolvedStorePath('readwise.library', 'internal') },
+    { store: 'readwise-secure-connector-store', path: resolvedStorePath('readwise.library', 'secure_local') },
   ];
 }
 

@@ -36,11 +36,6 @@ export const DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID = DROPBOX_FILES_CORPUS_ID;
 export const DROPBOX_INTERNAL_FILES_CORPUS_ID = 'internal.dropbox.files';
 export const DROPBOX_PUBLIC_FILES_CORPUS_ID = 'public_safe.dropbox.files';
 
-export const DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV =
-  'OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH';
-export const DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV =
-  'OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH';
-
 /** Every Dropbox tier store's corpus, by trust domain. */
 export const DROPBOX_TIER_CORPUS_IDS: Readonly<Record<SourceTrustDomain, string>> = Object.freeze({
   public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
@@ -71,9 +66,6 @@ export const DROPBOX_INGESTION_EXCLUSION_SOURCE = 'dropbox.personal';
  */
 export const DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA = ['path_prefix', 'media'] as const;
 
-export const DROPBOX_CONNECTOR_STORE_DB_PATH_ENV =
-  'OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH';
-
 /**
  * Where an EXISTING Dropbox file (one stored before per-item routing) rests:
  * S4/secure_local, raised to S5 — tombstoned, location only — when the
@@ -86,32 +78,14 @@ export const DROPBOX_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freez
   secretsInContent: true,
 });
 
-export function defaultDropboxConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'secure_local', env);
-}
-
-export function defaultDropboxInternalConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'internal', env);
-}
-
-export function defaultDropboxPublicConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'public_safe', env);
-}
-
 /** Every Dropbox tier store's path: the lifecycle deletes all of them with the source. */
 export function dropboxTierConnectorStoreDbPaths(
   env: Record<string, string | undefined> = process.env,
 ): string[] {
   return [
-    defaultDropboxConnectorStoreDbPath(env),
-    defaultDropboxInternalConnectorStoreDbPath(env),
-    defaultDropboxPublicConnectorStoreDbPath(env),
+    resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'secure_local', env),
+    resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'internal', env),
+    resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'public_safe', env),
   ];
 }
 
@@ -155,7 +129,7 @@ export function createDropboxConnectorStore(
 ): LocalConnectorStore {
   const policy = options.policy ?? loadDropboxIngestionPolicy({ env });
   return openConnectorStore({ sourceId: DROPBOX_FILES_SOURCE_ID }, {
-    dbPath: defaultDropboxConnectorStoreDbPath(env),
+    dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'secure_local', env),
     corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
     family: 'file',
     trustDomain: 'secure_local',
@@ -177,8 +151,8 @@ export function createDropboxTierConnectorStore(
   const policy = options.policy ?? loadDropboxIngestionPolicy({ env });
   return openConnectorStore({ sourceId: DROPBOX_FILES_SOURCE_ID }, {
     dbPath: trustDomain === 'internal'
-      ? defaultDropboxInternalConnectorStoreDbPath(env)
-      : defaultDropboxPublicConnectorStoreDbPath(env),
+      ? resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'internal', env)
+      : resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'public_safe', env),
     corpusId: DROPBOX_TIER_CORPUS_IDS[trustDomain],
     family: 'file',
     trustDomain,

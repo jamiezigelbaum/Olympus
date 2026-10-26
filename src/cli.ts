@@ -1,3 +1,4 @@
+import { resolvedRawPath } from './core/source-placement.ts';
 import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
 import { workerFetch, validateWorkerSocket, workerSocketPath } from './core/worker-transport.ts';
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
@@ -106,7 +107,6 @@ import {
 } from './workers/source-ingestion-ledger.ts';
 import {
   LocalXBookmarksReconcileStateStore,
-  defaultXBookmarksReconcileStateDbPath,
   xBookmarksRecoveryStatusWithoutState,
 } from './workers/x-bookmarks/reconcile-state.ts';
 import {
@@ -1597,7 +1597,7 @@ export function parseXReconcileRecoveryArgs(args: string[]): XReconcileRecoveryC
 }
 
 export function runXReconcileRecovery(options: XReconcileRecoveryCliOptions): unknown {
-  const stateDbPath = options.stateDbPath ?? defaultXBookmarksReconcileStateDbPath();
+  const stateDbPath = options.stateDbPath ?? resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite');
   // Inspecting never creates the state: opening a missing one would make an
   // empty database in a place the account's placement was never recorded for.
   if (stateDbPath !== ':memory:' && !existsSync(stateDbPath)) {

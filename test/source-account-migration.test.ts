@@ -1048,21 +1048,27 @@ describe('an account stays where it is, and says why', () => {
     expect(strip(tree(root))).toEqual(strip(tree0));
   };
 
-  test('an override names its files (pinned): no entry is made for it', () => {
+  // Since step 6 neither a per-store override nor a mount of a source with a
+  // folder layout names a path (owner decision 3), so neither pins: the account
+  // moves. A messaging account's capture paths still pin it
+  // (test/source-account-migration-messaging.test.ts).
+  test('a dropped per-store override pins nothing: the account moves', () => {
     const { env, root } = fixture({ OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: '/elsewhere/dropbox.sqlite' });
-    seedLegacy(env, 'dropbox.files');
-    stays(env, 'dropbox.files', 'pinned', tree(root), root);
-    expect(entryOf(env, 'dropbox.files')).toBeUndefined();
+    install(env, 'dropbox.files');
+    const report = migrateAccountFolders(env);
+    expect(report.moved, JSON.stringify(report)).toEqual(['dropbox.files']);
+    expect(report.skipped).toEqual([]);
+    expect(entryOf(env, 'dropbox.files')!.layout).toBe('folder');
+    expect(existsSync(join(root, 'dropbox-files-connector-store.sqlite'))).toBe(false);
+    expect(existsSync('/elsewhere/dropbox.sqlite')).toBe(false);
   });
 
-  test('a connector-store mount names its files (pinned), and the entry that exists says so', () => {
-    const { env, root } = fixture({ OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{ corpusId: 'secure_local.dropbox.files', trustDomain: 'secure_local', dbPath: '/elsewhere/d.sqlite' }]) });
+  test('a connector-store mount of a source with a folder layout names no path: the account moves', () => {
+    const { env } = fixture({ OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{ corpusId: 'secure_local.dropbox.files', trustDomain: 'secure_local', dbPath: '/elsewhere/d.sqlite' }]) });
     install(env, 'dropbox.files');
-    stays(env, 'dropbox.files', 'pinned', tree(root), root);
-    const entry = entryOf(env, 'dropbox.files')!;
-    expect(entry.migration).toMatchObject({ state: 'skipped', reason: 'pinned' });
-    expect(entry.layout).toBe('legacy');
-    // The pin is the owner's own setting: not a Needs you row.
+    const report = migrateAccountFolders(env);
+    expect(report.moved, JSON.stringify(report)).toEqual(['dropbox.files']);
+    expect(entryOf(env, 'dropbox.files')!.layout).toBe('folder');
     expect(sourceStorageNotices(env)).toEqual([]);
   });
 

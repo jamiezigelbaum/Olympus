@@ -50,9 +50,13 @@ Two mechanical consequences you cannot talk your way past:
 
 - **Do not create `src/workers/<source>/local-index.ts`.** The guard asserts
   *exact set equality* against `ALLOWED_LOCAL_INDEX_PATHS`
-  (`test/architecture-guard.test.ts`). Seven paths are grandfathered; an eighth
-  fails the build. Your store is `LocalConnectorStore`
-  (`src/workers/connector-store/`), which every source shares.
+  (`test/architecture-guard.test.ts`). The one path allowed is the shared
+  store's own, `src/workers/connector-store/local-index.ts`; a second fails the
+  build. Your store is `LocalConnectorStore` (`src/workers/connector-store/`),
+  which every source shares, opened through the storage service (Leg 3).
+- **Do not name a path.** The engine places every file of an account in its
+  folder; a connector declares its tiers and raw state names and asks the
+  layout module for the rest (Leg 3, `test/data-path-guard.test.ts`).
 - **Do not name your source in the shared answer spine.** The guard forbids
   concrete source tokens in `src/core/analyst.ts`,
   `src/core/evidence-pack.ts`, `src/core/query-planner.ts`,
@@ -277,33 +281,70 @@ One database per corpus. Trust domains are **never** mixed in one store — an
 item the lane's placement puts in a different trust domain is rejected and
 recorded as a coverage gap, fail-closed.
 
+**A connector never names a path.** Storage is spine, not connector
+(`docs/design/source-storage.md`): every account's files live in one folder,
+`<data>/sources/<source_id>/<slot>/`, and the engine decides where each file
+goes. What your connector declares, and the only place it declares it:
+
+- **Its stores' tiers**, in the layout module's table of sources added after
+  account folders (`FOLDER_ONLY_STORES` in `src/core/olympus-layout.ts`):
+  `'<source_id>': ['secure_local', 'internal']`, say. Every account of your
+  source then lives in its folder, `stores/<tier>.sqlite`, with the tier
+  sidecars beside each store. There is no default path to write and no env
+  variable that moves a store: the per-store `OLYMPUS_*_DB_PATH` overrides were
+  deleted (owner decision 3), and a test gets its own data folder from a
+  throwaway `HOME`.
+- **Raw state that is not a store** (a spool, a cursor file, a watch snapshot)
+  is a name in the layout module's `AccountRawName`, resolved with
+  `resolvedRawPath(sourceId, name)`; it sits in the account's `raw/` and goes
+  with the folder on Delete.
+- **A shared file** (a request budget, a counter that outlives a Delete) is a
+  key in `SHARED_DATA_FILES`, resolved with `sharedDataPath(key)`. If it keys
+  rows by source, it registers a forget step in
+  `src/core/source-forget-registry.ts` (`test/store-open-guard.test.ts` holds
+  you to it).
+
+Open the store through the storage service, which reads the registry first and
+refuses an account that is being deleted or moved:
+
 ```ts
-export function create<Source>ConnectorStore(dbPath = default<Source>ConnectorStoreDbPath()) {
-  return new LocalConnectorStore({ dbPath, corpusId, family, trustDomain });
+export function create<Source>ConnectorStore(
+  dbPath = resolvedStorePath(<SOURCE>_SOURCE_ID, 'internal'),
+  env: Record<string, string | undefined> = process.env,
+): LocalConnectorStore {
+  return openConnectorStore({ sourceId: <SOURCE>_SOURCE_ID }, { dbPath, corpusId, family, trustDomain }, env);
 }
 ```
 
-Default path idiom (`XDG_DATA_HOME` or `~/.local/share`):
-`.../openclaw/olympus/<source>-connector-store.sqlite`, overridable by
-`OLYMPUS_SOURCE_INDEX_<SOURCE>_CONNECTOR_STORE_DB_PATH`.
+`resolvedStorePath` (`src/core/source-placement.ts`) turns the account and the
+tier into the path; the `dbPath` parameter is there for tests only. Never
+`new LocalConnectorStore(...)` and never `join(<a data root>, ...)`:
+`test/store-open-guard.test.ts` fails a store opened outside the storage
+service, and `test/data-path-guard.test.ts` fails a module outside the layout
+module that extends a data root, spells a file name the layout owns, or reads
+an `OLYMPUS_*_DB_PATH`. Export, Delete and uninstall find your files through
+the registry and the layout module, so you write none of that code either.
 
 Two mount idioms exist. Choose:
 
-- **Generic JSON mount** — `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON`, parsed
-  in `src/workers/email-source/server.ts` (`parseConnectorStoreMountsFromEnv`),
-  host drop-in `66-connector-stores.conf`. Entries carry
-  `dbPath`/`corpusId`/`family`/`trustDomain`, plus optionally the
-  all-or-nothing principal pair `principalProvider`/`principalAccountScope`
-  (T3/K1 — required for any capability keyed on `(family, provider)`).
-  Used by Reflect, Roam, WhatsApp, Telegram, and (principal-only, per the
-  T7 collision rule) Dropbox.
 - **Dedicated runtime factory** — `create<Source>ConnectorStoreRuntime` in
   `src/workers/email-source/server.ts` (see
   `createReadwiseConnectorStoreRuntime`), gated by its own
   `OLYMPUS_SOURCE_INDEX_<SOURCE>_CONNECTOR_STORE_ENABLED` and by the credential
   handle's provider/capability/reauth state. Required when the lane needs a
-  request budget, a sync handler, and scheduler tasks. Readwise's store is
-  never constructed from the JSON mount.
+  request budget, a sync handler, and scheduler tasks; every source with a
+  folder layout mounts this way.
+- **Generic JSON mount** — `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON`, parsed
+  in `src/workers/email-source/server.ts` (`parseConnectorStoreMountsFromEnv`),
+  host drop-in `66-connector-stores.conf`. Entries carry
+  `corpusId`/`family`/`trustDomain`, plus optionally the all-or-nothing
+  principal pair `principalProvider`/`principalAccountScope` (T3/K1 — required
+  for any capability keyed on `(family, provider)`). Only a store whose source
+  has no folder layout (Reflect, Roam, an operator's own) is placed by the
+  entry's `dbPath`. For a source with a folder layout the entry names no path
+  (a `dbPath` there is ignored): it only adds a principal to the store the
+  source's lane opened, and it is skipped, and reported, when that lane is not
+  open.
 
 Two ordering rules the tests pin:
 
@@ -472,7 +513,9 @@ Run `bun run verify` (typecheck + `bun test` + `dist:check`). If you touched
 ## Leg 7 — Host enablement
 
 The idiom is a **dedicated numbered systemd drop-in**, not the connector-stores
-JSON mount, whenever the lane has its own enable, budget, and cadence.
+JSON mount, whenever the lane has its own enable, budget, and cadence. A drop-in
+never sets a store path: none is read (Leg 3), and a worker started with a
+retired `OLYMPUS_*_DB_PATH` refuses to start, naming it.
 
 1. **Writer script** — `scripts/ops/install-private-host-<source>-connector-store.sh`,
    modelled on `install-private-host-readwise-connector-store.sh`. It writes
@@ -546,6 +589,9 @@ Practical consequences:
   `src/` changed.
 - `test/architecture-guard.test.ts` untouched and green. No new
   `local-index.ts`. No source token in the shared spine.
+- `test/data-path-guard.test.ts` and `test/store-open-guard.test.ts` green: no
+  path built outside the layout module, no store opened outside the storage
+  service.
 - The connector is thin: provider I/O and normalization only.
 - Receipts are counts-only and self-digested; the cursor never leaves the
   scheduler.
@@ -588,11 +634,11 @@ describes both options rather than picking.
    `defineConnectorCorpus`? Today the difference is that only the wrapper can
    set a storage profile and a default sensitivity — is that the rule, or is
    the wrapper legacy?
-6. **Store mount.** The Readwise T3 work order states that store is never built
-   from `SOURCE_INDEX_CONNECTOR_STORES_JSON`, but no general rule is written
-   down. Proposed rule for this skill: *a lane with a request budget, a sync
-   handler, or scheduler tasks needs a dedicated runtime factory; a passive
-   archive-import store may use the JSON mount.* Confirm or replace.
+6. **Store mount — resolved 2026-10-25 (source storage step 6).** A source
+   with a folder layout is mounted by its runtime factory at the path the
+   engine gives it; its JSON mount entry, if any, only adds a principal. Only a
+   source without a folder layout (Reflect, Roam) is placed by a mount's
+   `dbPath`.
 7. **Read authority for greenfield sources.** `readwiseReadAuthorityLane` and
    the legacy/store flip exist because Readwise has a live legacy index. A
    greenfield source (Box) has nothing to shadow. May it serve reads as soon as

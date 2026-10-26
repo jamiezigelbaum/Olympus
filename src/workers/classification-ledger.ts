@@ -19,7 +19,7 @@
  * use (`isClassifierApproved`). A model or prompt change therefore stops the
  * sniffer — items stay pending, held Private — until the owner approves it.
  */
-import { olympusDataPath } from '../core/olympus-layout.ts';
+import { sharedDataPath } from '../core/olympus-layout.ts';
 import { mkdir, open, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -76,7 +76,7 @@ export interface ClassificationLedgerReadResult {
 export function resolveClassificationLedgerPath(env: Record<string, string | undefined> = process.env): string {
   const configured = env[CLASSIFICATION_LEDGER_PATH_ENV]?.trim();
   if (configured) return configured;
-  return olympusDataPath(env, 'classification-ledger.jsonl');
+  return sharedDataPath('classification-ledger', env);
 }
 
 export async function appendClassificationLedgerEntry(path: string, entry: ClassificationLedgerEntry): Promise<void> {

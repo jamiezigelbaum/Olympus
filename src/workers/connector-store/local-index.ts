@@ -8088,7 +8088,8 @@ export class LocalConnectorStore {
             && item.content.kind === 'metadata_only'
           ) {
             try {
-              itemForStorage = await connector.fetchItem(item.identity.localItemId);
+              // The hold belongs to the listed item for its input, not to the object: a fetched replacement keeps it.
+              itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
               consecutiveContentFetchFailures = 0;
             } catch {
               contentFetchFailed = true;
@@ -9180,7 +9181,7 @@ export class LocalConnectorStore {
     if (text === undefined && item.content.kind === 'metadata_only') {
       let fetched: RawItem;
       try {
-        fetched = await connector.fetchItem(item.identity.localItemId);
+        fetched = carryHold(item, await connector.fetchItem(item.identity.localItemId));
         onContentFetchSuccess?.();
       } catch {
         gaps.push(contentFetchFailedGap(item));
@@ -14031,6 +14032,11 @@ function migrationFingerprint(contentHash: string | null, chunkHashes: readonly 
     .update('\u0000')
     .update(chunkHashes.join('\u0000'))
     .digest('hex');
+}
+
+/** An item fetched in place of a listed one keeps the listed item's hold until the private model has judged it. */
+function carryHold(listed: RawItem, fetched: RawItem): RawItem {
+  return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
 }
 
 /** The text the store would chunk for an item, exactly as the store reads it. */

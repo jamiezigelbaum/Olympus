@@ -1,3 +1,4 @@
+import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
@@ -164,14 +165,8 @@ import {
   createGoogleDriveConnectorStoreSyncHandler,
   createGoogleDriveDailyRequestBudget,
   createGoogleDriveLaneTierSet,
-  defaultGmailConnectorStoreDbPath,
-  defaultGmailPublicConnectorStoreDbPath,
-  defaultGmailSecureConnectorStoreDbPath,
-  defaultGoogleDriveConnectorStoreDbPath,
-  defaultGoogleDrivePublicConnectorStoreDbPath,
   googleDriveIngestionExclusionMatcher,
   defineGoogleDriveDocsCorpus,
-  defaultGoogleDriveSecureConnectorStoreDbPath,
   GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
   type GoogleDriveConnectorStoreSyncHandler,
@@ -184,7 +179,6 @@ import {
   createReadwiseConnectorStoreSyncHandler,
   createReadwiseDailyRequestBudget,
   defineReadwiseLibraryCorpus,
-  defaultReadwiseConnectorStoreDbPath,
   type ReadwiseConnectorStoreSyncHandler,
 } from '../readwise/index.ts';
 import {
@@ -196,8 +190,6 @@ import {
   createXBookmarksConnectorStoreSyncHandler,
   createXBookmarksContentRecoveryHandler,
   defineXBookmarksCorpus,
-  defaultXBookmarksConnectorStoreDbPath,
-  defaultXBookmarksReconcileStateDbPath,
   type XBookmarksConnectorStoreSyncHandler,
   type XBookmarksContentRecoveryHandler,
 } from '../x-bookmarks/index.ts';
@@ -208,7 +200,6 @@ import {
   DROPBOX_INGESTION_EXCLUSION_SOURCE,
   DROPBOX_FILES_CORPUS_ID,
   DROPBOX_FILES_SOURCE_ID,
-  defaultDropboxConnectorStoreDbPath,
   createDropboxEvalShardExportHandler,
   createDropboxSourceExportHandler,
   defineDropboxFilesCorpus,
@@ -232,7 +223,6 @@ import {
   LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
   createLocalFilesConnectorStore,
   createLocalFilesTierLane,
-  defaultLocalFilesConnectorStoreDbPath,
   defineLocalFilesCorpus,
   localFilesIngestionExclusionMatcher,
   localFilesWatchDir,
@@ -307,12 +297,10 @@ import {
 import {
   READWISE_SECURE_LIBRARY_CORPUS_ID,
   createReadwiseTierLane,
-  defaultReadwiseSecureConnectorStoreDbPath,
 } from '../readwise/tier-set.ts';
 import {
   X_BOOKMARKS_SECURE_CORPUS_ID,
   createXBookmarksTierLane,
-  defaultXBookmarksSecureConnectorStoreDbPath,
 } from '../x-bookmarks/tier-set.ts';
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
@@ -1142,7 +1130,7 @@ const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
     enforceable: DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA,
     matcher: (env) => dropboxIngestionExclusionMatcher(env),
     stores: (env) => [{
-      dbPath: defaultDropboxConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'secure_local', env),
       corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
       trustDomain: 'secure_local',
     }],
@@ -1154,7 +1142,7 @@ const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
     enforceable: LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
     matcher: (env) => localFilesIngestionExclusionMatcher(env),
     stores: (env) => [{
-      dbPath: defaultLocalFilesConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'secure_local', env),
       corpusId: LOCAL_FILES_CORPUS_ID,
       trustDomain: 'secure_local',
     }],
@@ -1167,12 +1155,12 @@ const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
     matcher: (env) => googleDriveIngestionExclusionMatcher(env),
     stores: (env) => [
       {
-        dbPath: defaultGoogleDriveConnectorStoreDbPath(env),
+        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', env),
         corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
         trustDomain: 'internal',
       },
       {
-        dbPath: defaultGoogleDriveSecureConnectorStoreDbPath(env),
+        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'secure_local', env),
         corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
         trustDomain: 'secure_local',
       },
@@ -2219,6 +2207,16 @@ export async function main(): Promise<void> {
   // root. A second worker on it waits a short while (restarts overlap), then
   // exits without mounting anything (core/data-owner-lock.ts).
   dataOwnerLock = takeWorkerDataOwnerLock(process.env);
+  // A retired per-store path setting would open empty stores beside the
+  // account's real files: refuse to start, naming each, before anything opens
+  // or moves (the lock goes with the process).
+  const retired = retiredPathSettings(process.env);
+  if (retired.length > 0) {
+    throw new Error(
+      `[storage] These path settings are no longer read (source storage step 6): ${retired.join('; ')}. `
+      + 'Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then start again.',
+    );
+  }
   // An account a Delete marked is removed before anything else looks at it.
   deleteMarkedAccountsAtBoot(process.env);
   // An account recorded as legacy that holds nothing is placed in a folder instead.
@@ -2736,7 +2734,7 @@ export async function main(): Promise<void> {
     tierSetFor: (store) => {
       const secrets = openTierSecretLocations(
         { sourceId: READWISE_SOURCE_ID },
-        defaultReadwiseSecureConnectorStoreDbPath(process.env),
+        resolvedStorePath(READWISE_SOURCE_ID, 'secure_local', process.env),
         READWISE_SECURE_LIBRARY_CORPUS_ID,
       );
       return existingStoreTierSet(createReadwiseTierLane({
@@ -2766,7 +2764,7 @@ export async function main(): Promise<void> {
     tierSetFor: (store) => {
       const secrets = openTierSecretLocations(
         { sourceId: X_BOOKMARKS_SOURCE_ID },
-        defaultXBookmarksSecureConnectorStoreDbPath(process.env),
+        resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'secure_local', process.env),
         X_BOOKMARKS_SECURE_CORPUS_ID,
       );
       const lane = createXBookmarksTierLane({
@@ -2798,7 +2796,7 @@ export async function main(): Promise<void> {
     : undefined;
   const gmailInternalConnectorStore = gmailConnectorStoreLane.enabled
     ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-      dbPath: defaultGmailConnectorStoreDbPath(process.env),
+      dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'internal', process.env),
       corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
       family: 'email',
       trustDomain: 'internal',
@@ -2806,7 +2804,7 @@ export async function main(): Promise<void> {
     : undefined;
   const gmailSecureConnectorStore = gmailInternalConnectorStore
     ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-      dbPath: defaultGmailSecureConnectorStoreDbPath(process.env),
+      dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'secure_local', process.env),
       corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
       family: 'email',
       trustDomain: 'secure_local',
@@ -2822,9 +2820,9 @@ export async function main(): Promise<void> {
         secure: gmailSecureConnectorStore,
         publicStore: onDemandTierStore({
           corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
-          dbPath: defaultGmailPublicConnectorStoreDbPath(process.env),
+          dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'public_safe', process.env),
           create: () => openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-            dbPath: defaultGmailPublicConnectorStoreDbPath(process.env),
+            dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'public_safe', process.env),
             corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
             family: 'email',
             trustDomain: 'public_safe',
@@ -2978,7 +2976,7 @@ export async function main(): Promise<void> {
     : undefined;
   const googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled
     ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-      dbPath: defaultGoogleDriveConnectorStoreDbPath(process.env),
+      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', process.env),
       corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
       family: 'file',
       trustDomain: 'internal',
@@ -2987,7 +2985,7 @@ export async function main(): Promise<void> {
     : undefined;
   const googleDriveSecureConnectorStore = googleDriveInternalConnectorStore
     ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-      dbPath: defaultGoogleDriveSecureConnectorStoreDbPath(process.env),
+      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'secure_local', process.env),
       corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
       family: 'file',
       trustDomain: 'secure_local',
@@ -3003,9 +3001,9 @@ export async function main(): Promise<void> {
         secure: googleDriveSecureConnectorStore,
         publicStore: onDemandTierStore({
           corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
-          dbPath: defaultGoogleDrivePublicConnectorStoreDbPath(process.env),
+          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'public_safe', process.env),
           create: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-            dbPath: defaultGoogleDrivePublicConnectorStoreDbPath(process.env),
+            dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'public_safe', process.env),
             corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
             family: 'file',
             trustDomain: 'public_safe',
@@ -6941,7 +6939,7 @@ export function createRefreshableReadwiseConnectorStoreRuntime(options: {
       ...(options.requestBudgetStatePath ? { statePath: options.requestBudgetStatePath } : {}),
     });
   const store = createReadwiseConnectorStore(
-    options.dbPath ?? defaultReadwiseConnectorStoreDbPath(env),
+    options.dbPath ?? resolvedStorePath(READWISE_SOURCE_ID, 'internal', env),
     env,
   );
   const tierSet = options.tierSetFor?.(store);
@@ -7027,7 +7025,7 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
   if (!options.enabled || !embeddingProvider) return undefined;
   const env = options.env ?? process.env;
   const store = createXBookmarksConnectorStore(
-    options.dbPath ?? defaultXBookmarksConnectorStoreDbPath(env),
+    options.dbPath ?? resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'internal', env),
     env,
   );
   const tierSet = options.tierSetFor?.(store);
@@ -7054,7 +7052,7 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
       if (cachedKey === key && cachedRuntime) return cachedRuntime;
       usageStore ??= new LocalXBookmarksApiUsageStore();
       reconcileStateStore ??= new LocalXBookmarksReconcileStateStore(
-        defaultXBookmarksReconcileStateDbPath(env, usageStore.dbPath),
+        resolvedRawPath(X_BOOKMARKS_SOURCE_ID, 'x-reconcile.sqlite', env, { usageDbPath: usageStore.dbPath }),
         env,
       );
       cachedRuntime = bindXBookmarksConnectorStoreRuntime({
@@ -7369,7 +7367,8 @@ export interface ConnectorStoreMountParsingOptions {
 }
 
 interface ValidatedConnectorStoreMountDeclaration {
-  dbPath: string;
+  /** Absent, or ignored, for a source whose stores the engine places (core/source-placement.ts `hasFolderLayout`). */
+  dbPath?: string;
   corpusId: string;
   family: Parameters<typeof defineConnectorCorpus>[0]['family'];
   trustDomain: Parameters<typeof defineConnectorCorpus>[0]['trustDomain'];
@@ -7427,6 +7426,23 @@ export function parseConnectorStoreMountsFromEnv(
   for (const declaration of declarations) {
     try {
       const collidingStore = collidingStoresByCorpusId.get(declaration.corpusId);
+      // A source whose stores the engine places names no path here (source
+      // storage step 6): its declaration only adds a principal to the store
+      // its lane opened, and a dbPath it carries is ignored.
+      if (hasFolderLayout(storageAccountForCorpus(declaration, options.registeredCorpora).sourceId)) {
+        if (!collidingStore) {
+          throw new Error('its source keeps its stores where Olympus places them; a declaration can only add a principal to the store its lane opened, and that lane is not open.');
+        }
+        const { dbPath: _ignored, ...placed } = declaration;
+        assertConnectorStoreMountIdentity(placed, collidingStore);
+        mounts.push({
+          store: collidingStore,
+          ...(declaration.principal ? { principal: declaration.principal } : {}),
+          ...(declaration.chatPrincipal ? { chatPrincipal: declaration.chatPrincipal } : {}),
+        });
+        continue;
+      }
+      if (!declaration.dbPath) throw new Error('Connector store entries require dbPath, corpusId, family, trustDomain.');
       if (collidingStore) assertConnectorStoreMountIdentity(declaration, collidingStore);
       const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
@@ -7469,7 +7485,7 @@ function assertConnectorStoreMountIdentity(
   store: LocalConnectorStore,
 ): void {
   const mismatches = [
-    ...(declaration.dbPath === store.dbPath
+    ...(declaration.dbPath === undefined || declaration.dbPath === store.dbPath
       ? []
       : [`dbPath ${JSON.stringify(declaration.dbPath)} does not match lane ${JSON.stringify(store.dbPath)}`]),
     ...(declaration.family === store.family
@@ -7493,10 +7509,10 @@ function validateConnectorStoreMountDeclaration(entry: unknown): ValidatedConnec
   const corpusId = typeof record.corpusId === 'string' ? record.corpusId.trim() : '';
   const family = typeof record.family === 'string' ? record.family.trim() : '';
   const trustDomain = typeof record.trustDomain === 'string' ? record.trustDomain.trim() : '';
-  if (!dbPath || !corpusId || !family || !trustDomain) {
+  if (!corpusId || !family || !trustDomain) {
     throw new Error('Connector store entries require dbPath, corpusId, family, trustDomain.');
   }
-  if (!isAbsolute(dbPath)) {
+  if (dbPath && !isAbsolute(dbPath)) {
     throw new Error('Connector store dbPath must be absolute.');
   }
   // Both enums are checked before the casts below. Every secure gate in this
@@ -7527,7 +7543,7 @@ function validateConnectorStoreMountDeclaration(entry: unknown): ValidatedConnec
     if (family === 'chat') chatPrincipal = principal;
   }
   return {
-    dbPath,
+    ...(dbPath ? { dbPath } : {}),
     corpusId,
     family: family as Parameters<typeof defineConnectorCorpus>[0]['family'],
     trustDomain: trustDomain as Parameters<typeof defineConnectorCorpus>[0]['trustDomain'],

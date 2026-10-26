@@ -46,7 +46,7 @@ import {
   LOCAL_FILES_POLICY_SOURCE,
   type LocalFilesContentScope,
 } from '../src/workers/local-files/scope.ts';
-import { LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV, createLocalFilesConnectorStore } from '../src/workers/local-files/store.ts';
+import { createLocalFilesConnectorStore } from '../src/workers/local-files/store.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { WatchHub, ignoreGlobsForRoot, watchIgnoreGlobs } from '../src/workers/local-files/watch-hub.ts';
 
@@ -587,7 +587,7 @@ describe('a pass over the person\'s home folder', () => {
   ) {
     passes += 1;
     const store: LocalConnectorStore = createLocalFilesConnectorStore({
-      [LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV]: join(f.base, `store-${passes}.sqlite`),
+      HOME: join(f.base, `olympus-home-${passes}`),
       [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: join(f.base, 'no-exclusions.json'),
     }, { policy: defaultLocalFilesIngestionPolicy({ stillImagesRead: false }) });
     const hub = new WatchHub();

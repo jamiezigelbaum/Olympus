@@ -3,6 +3,7 @@
 // a new module from rebuilding the expression inline, which is how the store
 // paths drifted apart in the first place.
 
+import { resolvedRawPath } from '../src/core/source-placement.ts';
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -13,12 +14,11 @@ import {
   legacyTelegramStoreRoot,
   legacyWhatsAppServiceStateDir,
   layoutHome,
-  olympusDataPath,
+  sharedDataPath,
   olympusDataRoot,
   xdgDataHome,
 } from '../src/core/olympus-layout.ts';
 import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
-import { defaultXBookmarksReconcileStateDbPath } from '../src/workers/x-bookmarks/reconcile-state.ts';
 import { lifecycleAccountFiles } from '../src/data-lifecycle.ts';
 import { olympusDataDir } from '../src/core/remote-access.ts';
 import { defaultRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
@@ -31,15 +31,15 @@ describe('olympus layout', () => {
     if (process.platform === 'linux') return; // a Linux receipt can select another root; covered by the engine-layout tests
     expect(olympusDataRoot({ HOME: home })).toBe(`${home}/.local/share/openclaw/olympus`);
     expect(olympusDataRoot({ HOME: home, XDG_DATA_HOME: '/data' })).toBe('/data/openclaw/olympus');
-    expect(olympusDataPath({ HOME: home }, 'a', 'b.sqlite')).toBe(`${home}/.local/share/openclaw/olympus/a/b.sqlite`);
+    expect(sharedDataPath('source-dashboard', { HOME: home })).toBe(`${home}/.local/share/openclaw/olympus/source-dashboard.sqlite`);
     expect(layoutHome({ HOME: '  ' })).toBe(process.env.HOME!);
     expect(xdgDataHome({ HOME: home, XDG_DATA_HOME: '  ' })).toBe(`${home}/.local/share`);
   });
 
   test('a relative XDG_DATA_HOME resolves as it always did; remote access still refuses it', () => {
     if (process.platform === 'linux') return;
-    expect(olympusDataPath({ HOME: home, XDG_DATA_HOME: 'relative/data' }, 'gmail-connector-store.sqlite'))
-      .toBe('relative/data/openclaw/olympus/gmail-connector-store.sqlite');
+    expect(sharedDataPath('source-dashboard', { HOME: home, XDG_DATA_HOME: 'relative/data' }))
+      .toBe('relative/data/openclaw/olympus/source-dashboard.sqlite');
     expect(() => olympusDataDir({ HOME: home, XDG_DATA_HOME: 'relative/data' })).toThrow(/absolute/);
     expect(() => defaultRemoteConnectionsDbPath({ HOME: home, XDG_DATA_HOME: 'relative/data' })).toThrow(/absolute/);
   });
@@ -66,16 +66,19 @@ describe('olympus layout', () => {
     const env = { HOME: home };
     const folderPath = `${olympusDataRoot(env)}/sources/x.bookmarks/1/raw/x-reconcile.sqlite`;
     expect(defaultXBookmarksApiUsageDbPath(env)).toBe(`${olympusDataRoot(env)}/x-bookmarks-api-usage.sqlite`);
-    expect(defaultXBookmarksReconcileStateDbPath(env)).toBe(folderPath);
-    expect(defaultXBookmarksReconcileStateDbPath(env, defaultXBookmarksApiUsageDbPath(env))).toBe(folderPath);
+    expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env)).toBe(folderPath);
+    expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env, { usageDbPath: defaultXBookmarksApiUsageDbPath(env) })).toBe(folderPath);
     // A folder account's reconcile state is in its folder, which a Delete takes whole.
     expect(folderPath.startsWith(`${lifecycleAccountFiles('x.bookmarks', { env }).folder}/`)).toBe(true);
-    // An account an override pins keeps the old rule: beside the usage ledger.
-    const pinned = { HOME: home, OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH: '/pinned/usage.sqlite' };
-    const workerPath = `${defaultXBookmarksApiUsageDbPath(pinned)}.reconcile`;
-    expect(workerPath).toBe('/pinned/usage.sqlite.reconcile');
-    expect(defaultXBookmarksReconcileStateDbPath(pinned)).toBe(workerPath);
-    expect(lifecycleAccountFiles('x.bookmarks', { env: pinned }).rawDatabases.map((entry) => entry.path)).toContain(workerPath);
+    // The usage and reconcile overrides are gone (step 6): setting them pins nothing and moves nothing.
+    const pinned = {
+      HOME: home,
+      OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH: '/pinned/usage.sqlite',
+      OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH: '/pinned/reconcile.sqlite',
+    };
+    expect(defaultXBookmarksApiUsageDbPath(pinned)).toBe(defaultXBookmarksApiUsageDbPath(env));
+    expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', pinned)).toBe(folderPath);
+    expect(lifecycleAccountFiles('x.bookmarks', { env: pinned }).rawDatabases.map((entry) => entry.path)).toContain(folderPath);
   });
 });
 
@@ -94,7 +97,6 @@ const ALLOWED: Record<string, string> = {
   'src/core/lifecycle.ts': 'the installed plugin versions folder (~/.local/share/olympus/versions), install layout',
   'src/core/lifecycle-artifact.ts': 'the installed plugin versions folder (~/.local/share/olympus/versions), install layout',
   'src/data-lifecycle.ts': 'builds an environment for an explicit home directory',
-  'src/core/pairing-session-paths.ts': 'names every root Olympus owns, for the delete fence',
 };
 // The data root and the legacy capture root, in any quote style, with the
 // segments split across lines or written as one path.
