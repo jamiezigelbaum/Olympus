@@ -65,8 +65,8 @@
 //   reaction re-emit judges it Secrets again.
 
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, type Dirent } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { basename, isAbsolute, join, relative } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
@@ -1396,8 +1396,11 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
         // Deleted before the line loses its path; a failure here fails the window, which the next pull clears again.
         deleteOwnedMedia(message);
         deleteMediaTemps(message, mediaRoots);
-        if (options.mediaWaitingDir) removeTemp(join(options.mediaWaitingDir, `${whatsAppMediaFileStem(message.chatJid, message.id)}.json`));
       }
+      // The bridge's waiting entry holds the whole line: gone when the media is Secret (it is never fetched), its
+      // words and names cleared as the line's are when only they are. Before the line is rewritten; a failure fails
+      // the window, which the next pull clears again.
+      if (options.mediaWaitingDir) clearWaitingEntry(options.mediaWaitingDir, message, mediaSecret || !redaction ? 'remove' : redaction);
       const namesLeft = message.chatName !== '' || message.senderName !== '' || (message.senderContactName ?? '') !== '';
       // Mentions are display names copied into the text, so they go with it.
       const textKeys = redaction ? ['preview_title', 'preview_description', 'preview_url', 'mentions'].filter((key) => key in record) : [];
@@ -1536,6 +1539,81 @@ function mediaTempFiles(roots: readonly string[], strict: boolean): Array<{ path
   };
   for (const root of roots) walk(root, 0);
   return found;
+}
+
+/** A waiting entry's temp a killed bridge never renamed into place: `.<stem>.json.tmp<random>` (writeFileAtomicPrivate). */
+const WAITING_TEMP = /^\.(.+)\.json\.tmp[^/]*$/u;
+/** Another message's waiting temp older than this is a leftover (the bridge renames its own at once). */
+const WAITING_TEMP_MAX_AGE_MS = 60 * 1000;
+
+/**
+ * Clears one message's waiting entry in the bridge's waiting folder
+ * (tools/whatsapp-bridge/media_waiting.go): removed (`remove`), or its text,
+ * link preview and mentions (and names, for `names`) cleared and the entry
+ * flagged as the spool line is, written whole. The message's own unfinished
+ * temps go with it, and any other one past the age. Anything but a file's
+ * being gone already fails the clearing.
+ */
+function clearWaitingEntry(dir: string, message: SpoolMessage, how: 'remove' | 'content' | 'names'): void {
+  const stem = whatsAppMediaFileStem(message.chatJid, message.id);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  for (const name of names) {
+    const temp = WAITING_TEMP.exec(name);
+    if (!temp) continue;
+    const path = join(dir, name);
+    if (temp[1] === stem) {
+      removeTemp(path);
+      continue;
+    }
+    try {
+      if (Date.now() - lstatSync(path).mtimeMs >= WAITING_TEMP_MAX_AGE_MS) rmSync(path, { force: true });
+    } catch {
+      // Another message's leftover: tried again next time.
+    }
+  }
+  const entry = join(dir, `${stem}.json`);
+  if (how === 'remove') {
+    removeTemp(entry);
+    return;
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(entry, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  let record: Record<string, unknown>;
+  try {
+    record = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    // Not one the bridge could read back either: it holds the line's words, so it goes.
+    removeTemp(entry);
+    return;
+  }
+  record['text'] = '';
+  for (const key of ['preview_title', 'preview_description', 'preview_url', 'mentions']) delete record[key];
+  if (how === 'names') {
+    record['chat_name'] = '';
+    record['sender_name'] = '';
+    if ('sender_contact_name' in record) record['sender_contact_name'] = '';
+  }
+  record['secret_redacted'] = true;
+  // Written whole: a temp beside it, renamed into place.
+  const temp = join(dir, `.${stem}.json.tmp${randomBytes(6).toString('hex')}`);
+  try {
+    writeFileSync(temp, JSON.stringify(record), { mode: 0o600, flag: 'wx' });
+    renameSync(temp, entry);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
 }
 
 /** Removes a file, failing on anything but its being gone already. */

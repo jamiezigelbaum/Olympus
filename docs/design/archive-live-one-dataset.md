@@ -702,9 +702,14 @@ export's media are (section 5).
   larger of 5 GB and 5% of it (`media_waiting.go`). Below it no download
   starts, and one running stops (the temp writer checks as it writes); the
   message is still spooled, its media `waiting_for_disk`, and its line is
-  kept as `media/waiting/<stem>.json`. Every minute, once the volume has
-  room again, the waiting downloads are made in order and each message is
-  spooled again with its media, which fills the waiting child. Until then
+  kept as `media/waiting/<stem>.json` (written whole; a temp a killed
+  bridge left is swept at start and before Secrets clearing). Every minute,
+  once the volume has room again, the waiting downloads are made in order
+  (one too large for the room is skipped, the smaller ones after it still
+  go; a passing failure stays waiting; only media gone from WhatsApp's
+  servers is spooled as failed) and each message is spooled again with its
+  media, which fills the waiting child. An entry goes only once its line is
+  written and fsynced. Until then
   the capture status says media is waiting (no count), and the card shows
   "media waiting for disk space" with what to do. Every temp has one name,
   `.olympus-media-<pid>-<boot>-<stem>-*.tmp` (boot: this boot's nonce, since
@@ -743,7 +748,12 @@ export's media are (section 5).
 - **Secrets.** Saved media follows the judgment of what it is part of. A
   Secret picture still waiting for disk space loses its waiting line too, so
   the bridge never fetches it (and drops what it fetched, should the line go
-  while it downloads). A
+  while it downloads); a Secret caption over a waiting picture has its words
+  cleared in the waiting line as in the spool.
+- **Reading large media.** Keeping every file does not mean reading every
+  file into memory: the extraction source hands a file reader the media as
+  a file (`fetchFile`), copied a chunk at a time from the descriptor the
+  confinement check opened. A
   picture or video is judged as its own child (`<id>#child:media`): when it
   is Secrets, its file, every temp of it (by the message's file stem), its
   path and its re-download keys go, whatever the caption's judgment; a

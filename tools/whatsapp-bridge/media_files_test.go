@@ -163,7 +163,7 @@ func TestWaitingMediaIsDownloadedWhenSpaceReturnsAndTheMessageSpooledAgain(t *te
 		t.Fatalf("record = %#v, waiting said = %v", rec, status.receipt().MediaWaitingForDisk)
 	}
 	var spooled []spoolRecord
-	spool := func(rec spoolRecord) { spooled = append(spooled, rec) }
+	spool := func(rec spoolRecord) error { spooled = append(spooled, rec); return nil }
 	// Still no room: nothing happens.
 	store.queue.retry(context.Background(), store, spool)
 	if len(spooled) != 0 || downloader.calls != 0 {
@@ -191,7 +191,7 @@ func TestWaitingMediaClearedMeanwhileIsNeverKept(t *testing.T) {
 	// Olympus judges the picture Secret while it downloads, and removes its waiting line.
 	downloader.during = func() { _ = os.Remove(waiting) }
 	var spooled []spoolRecord
-	store.queue.retry(context.Background(), store, func(rec spoolRecord) { spooled = append(spooled, rec) })
+	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
 	if len(spooled) != 0 {
 		t.Fatalf("spooled a cleared message: %#v", spooled)
 	}
@@ -297,5 +297,144 @@ func TestStartSweepsTempsAKilledBridgeLeftBehind(t *testing.T) {
 func TestMediaFileStemMatchesOlympus(t *testing.T) {
 	if got := mediaFileStem(" 15550001111:3@S.WhatsApp.net ", "3EB0/ä x"); got != "3EB0___x-ebc4198b0daec666" {
 		t.Fatalf("stem = %q", got)
+	}
+}
+
+// waitFor makes a store whose picture `id` is waiting for disk space, the volume then having room again.
+func waitFor(t *testing.T, downloader mediaDownloader, ids ...string) (*audioMediaStore, *uint64) {
+	t.Helper()
+	free := uint64(1024)
+	store := newAudioMediaStore(t.TempDir(), downloader)
+	store.queue.space = spaceOf(&free, testVolume)
+	for _, id := range ids {
+		rec, _ := recordFromMessage(context.Background(), nil, store, captionEvent(id, &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/jpeg")}}))
+		if rec.DownloadStatus != mediaWaitingStatus {
+			t.Fatalf("record = %#v", rec)
+		}
+		// Each waits in turn, oldest first.
+		time.Sleep(10 * time.Millisecond)
+	}
+	free = testVolume
+	return store, &free
+}
+
+func TestAWaitingEntryGoesOnlyOnceItsLineIsWritten(t *testing.T) {
+	store, _ := waitFor(t, &streamingDownloader{chunk: []byte("picture"), times: 1}, "durable-1")
+	failing := func(spoolRecord) error { return errors.New("spool queue closed") }
+	store.queue.retry(context.Background(), store, failing)
+	if len(store.queue.waiting()) != 1 {
+		t.Fatalf("the entry went although its line was never written")
+	}
+	var spooled []spoolRecord
+	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
+	if len(spooled) != 1 || len(store.queue.waiting()) != 0 {
+		t.Fatalf("spooled %d, waiting %d", len(spooled), len(store.queue.waiting()))
+	}
+}
+
+func TestWriteDurablyReturnsOnceTheLineIsOnDisk(t *testing.T) {
+	spoolDir := t.TempDir()
+	writer := newSpoolWriter(spoolDir)
+	go writer.run()
+	defer writer.close()
+	if err := writer.writeDurably(context.Background(), spoolRecord{ID: "durable-2", ChatJID: "15550001111@s.whatsapp.net"}); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := filepath.Glob(filepath.Join(spoolDir, "*.jsonl"))
+	if len(files) != 1 {
+		t.Fatalf("spool files = %v", files)
+	}
+	raw, _ := os.ReadFile(files[0])
+	if !strings.Contains(string(raw), `"durable-2"`) {
+		t.Fatalf("the line is not on disk when writeDurably returned")
+	}
+}
+
+func TestAPassingFailureKeepsTheMediaWaitingAndAPermanentOneEndsIt(t *testing.T) {
+	store, _ := waitFor(t, &streamingDownloader{err: errors.New("connection reset by peer")}, "blip-1")
+	status := newCaptureStatus(t.TempDir())
+	store.queue.status = status
+	var spooled []spoolRecord
+	spool := func(rec spoolRecord) error { spooled = append(spooled, rec); return nil }
+	store.queue.retry(context.Background(), store, spool)
+	if len(spooled) != 0 || len(store.queue.waiting()) != 1 || !status.receipt().MediaWaitingForDisk {
+		t.Fatalf("a network blip ended the wait: spooled %d, waiting %d", len(spooled), len(store.queue.waiting()))
+	}
+	// Gone from WhatsApp's servers: it can never be fetched, so it is spooled as failed and stops waiting.
+	store.downloader = &streamingDownloader{err: whatsmeow.ErrMediaDownloadFailedWith404}
+	store.images.downloader = store.downloader
+	store.queue.retry(context.Background(), store, spool)
+	if len(spooled) != 1 || !strings.HasPrefix(spooled[0].DownloadStatus, "failed:") || len(store.queue.waiting()) != 0 || status.receipt().MediaWaitingForDisk {
+		t.Fatalf("spooled = %#v, waiting %d", spooled, len(store.queue.waiting()))
+	}
+}
+
+// sizedDownloader writes `sizes[n]` bytes on its n-th call.
+type sizedDownloader struct {
+	sizes []int
+	calls int
+}
+
+func (d *sizedDownloader) DownloadMediaWithPathToFile(_ context.Context, _ string, _, _, _ []byte, _ whatsmeow.MediaType, _ string, _ bool, file whatsmeow.File) error {
+	size := d.sizes[d.calls%len(d.sizes)]
+	d.calls++
+	for written := 0; written < size; written += 1024 {
+		if _, err := file.Write(make([]byte, 1024)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestAMediaTooLargeForTheRoomIsSkippedAndSmallerOnesAfterItStillGo(t *testing.T) {
+	saved := diskCheckEveryBytes
+	diskCheckEveryBytes = 1024
+	defer func() { diskCheckEveryBytes = saved }()
+	// The first waiting picture is 64 KiB, the second 2 KiB; the volume has 32 KiB above its floor.
+	downloader := &sizedDownloader{sizes: []int{64 * 1024, 2 * 1024}}
+	store, _ := waitFor(t, downloader, "big-2", "small-2")
+	images := store.images.dir
+	floor := diskFloor(testVolume)
+	store.queue.space = func(string) (uint64, uint64, error) {
+		var temps uint64
+		entries, _ := os.ReadDir(images)
+		for _, entry := range entries {
+			if info, err := entry.Info(); err == nil && isMediaTemp(entry.Name()) {
+				temps += uint64(info.Size())
+			}
+		}
+		return floor + 32*1024 - temps, testVolume, nil
+	}
+	var spooled []spoolRecord
+	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
+	if len(spooled) != 1 || spooled[0].ID != "small-2" || spooled[0].DownloadStatus != "ok" {
+		t.Fatalf("spooled = %#v", spooled)
+	}
+	if waiting := store.queue.waiting(); len(waiting) != 1 || filepath.Base(waiting[0]) != mediaFileStem(spooled[0].ChatJID, "big-2")+".json" {
+		t.Fatalf("waiting = %v", waiting)
+	}
+}
+
+func TestStartSweepsAWaitingEntryAKilledBridgeNeverRenamed(t *testing.T) {
+	dir := t.TempDir()
+	store := newAudioMediaStore(dir, &fakeDownloader{})
+	waitingDir := filepath.Join(dir, "media", "waiting")
+	if err := os.MkdirAll(waitingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stem := mediaFileStem("15550001111@s.whatsapp.net", "orphan-1")
+	orphan := filepath.Join(waitingDir, "."+stem+".json.tmp123456")
+	kept := filepath.Join(waitingDir, stem+".json")
+	for _, path := range []string{orphan, kept} {
+		if err := os.WriteFile(path, []byte(`{"text":"the door code"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.sweepTemps(time.Now())
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("the orphaned temp survived the start")
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatalf("a waiting entry was swept: %v", err)
 	}
 }

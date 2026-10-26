@@ -1538,7 +1538,7 @@ func contactDisplayName(ctx context.Context, contacts contactLookup, jid types.J
 // fsync each.
 type spoolWriter struct {
 	spoolDir string
-	records  chan spoolRecord
+	records  chan spoolItem
 	done     chan struct{}
 	status   *captureStatus
 
@@ -1546,10 +1546,17 @@ type spoolWriter struct {
 	fileDate string
 }
 
+// spoolItem is one line to spool; `written`, when set, is told once the line
+// is written and fsynced (or why it was not).
+type spoolItem struct {
+	rec     spoolRecord
+	written chan<- error
+}
+
 func newSpoolWriter(spoolDir string) *spoolWriter {
 	return &spoolWriter{
 		spoolDir: spoolDir,
-		records:  make(chan spoolRecord, spoolQueueSize),
+		records:  make(chan spoolItem, spoolQueueSize),
 		done:     make(chan struct{}),
 		status:   newCaptureStatus(spoolDir),
 	}
@@ -1557,7 +1564,7 @@ func newSpoolWriter(spoolDir string) *spoolWriter {
 
 func (w *spoolWriter) enqueue(rec spoolRecord) {
 	select {
-	case w.records <- rec:
+	case w.records <- spoolItem{rec: rec}:
 	default:
 		// Queue full means the disk has been failing writes for thousands of
 		// messages; losing this line is the lesser evil vs. blocking the
@@ -1565,6 +1572,25 @@ func (w *spoolWriter) enqueue(rec spoolRecord) {
 		// receipt, which Olympus reports, not only logged.
 		w.status.recordDrop()
 		log.Print("olympus-whatsapp-bridge: spool queue full, dropping one message")
+	}
+}
+
+// writeDurably spools one line and returns once it is written and fsynced:
+// what removes the line's only other copy (a media waiting entry) waits for it.
+// It waits for room in the queue rather than dropping, since nothing else
+// holds the line once its caller lets go.
+func (w *spoolWriter) writeDurably(ctx context.Context, rec spoolRecord) error {
+	written := make(chan error, 1)
+	select {
+	case w.records <- spoolItem{rec: rec, written: written}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-written:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -1580,8 +1606,8 @@ func (w *spoolWriter) run() {
 		close(stopStatus)
 		<-statusDone
 	}()
-	for rec := range w.records {
-		batch := []spoolRecord{rec}
+	for item := range w.records {
+		batch := []spoolItem{item}
 	drain:
 		for {
 			select {
@@ -1594,10 +1620,19 @@ func (w *spoolWriter) run() {
 				break drain
 			}
 		}
-		if err := w.writeBatch(batch); err != nil {
+		records := make([]spoolRecord, 0, len(batch))
+		for _, each := range batch {
+			records = append(records, each.rec)
+		}
+		if err := w.writeBatch(records); err != nil {
 			// A spool that cannot be written means capture is silently dead.
 			// Exit loudly; systemd restarts us and offline sync re-delivers.
 			log.Fatalf("olympus-whatsapp-bridge: spool write failed: %v", err)
+		}
+		for _, each := range batch {
+			if each.written != nil {
+				each.written <- nil
+			}
 		}
 	}
 	if w.file != nil {

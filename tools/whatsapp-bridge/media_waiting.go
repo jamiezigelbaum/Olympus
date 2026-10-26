@@ -15,8 +15,16 @@ package main
 //   - Every minute, while any is waiting and the volume is above the floor
 //     again, the waiting downloads are made in the order they waited, and
 //     each message is spooled again with its media: Olympus fills the
-//     waiting child from that line.
-//   - The capture status receipt says media is waiting, with no count.
+//     waiting child from that line. One that does not fit is skipped, so the
+//     smaller ones after it still go; one that fails for a passing reason
+//     (the network) stays waiting; only one that can never be fetched (gone
+//     from WhatsApp's servers, failing its hash) is spooled as failed. An
+//     entry is removed only once its line is written and fsynced.
+//   - A waiting entry is written whole or not at all (a temp renamed into
+//     place); the temp of a write a killed bridge left is swept at start,
+//     and Olympus sweeps the same before Secrets clearing.
+//   - The capture status receipt says media is waiting, with no count, for
+//     as long as any entry remains.
 
 import (
 	"context"
@@ -151,6 +159,29 @@ func (q *mediaWaitQueue) report() {
 	q.status.setMediaWaiting(len(q.waiting()) > 0)
 }
 
+// sweepTemps removes the temps of waiting entries a killed bridge never
+// renamed into place (`.<stem>.json.tmp<random>`). Run before capture starts,
+// when no entry is being written.
+func (q *mediaWaitQueue) sweepTemps() {
+	if q == nil {
+		return
+	}
+	entries, err := os.ReadDir(q.dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && isWaitingTemp(entry.Name()) {
+			_ = os.Remove(filepath.Join(q.dir, entry.Name()))
+		}
+	}
+}
+
+// isWaitingTemp says whether a name is the temp of a waiting entry's write (writeFileAtomicPrivate).
+func isWaitingTemp(name string) bool {
+	return strings.HasPrefix(name, ".") && strings.Contains(name, ".json.tmp")
+}
+
 // run retries the waiting downloads every interval until ctx ends.
 func (q *mediaWaitQueue) run(ctx context.Context, store *audioMediaStore, writer *spoolWriter) {
 	if q == nil {
@@ -164,16 +195,40 @@ func (q *mediaWaitQueue) run(ctx context.Context, store *audioMediaStore, writer
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			q.retry(ctx, store, writer.enqueue)
+			q.retry(ctx, store, func(rec spoolRecord) error { return writer.writeDurably(ctx, rec) })
 		}
 	}
+}
+
+// permanentDownloadError says whether a download can never succeed (its
+// media gone from WhatsApp's servers, or not what its hashes say); any other
+// failure is passing, and the media keeps waiting.
+func permanentDownloadError(err error) bool {
+	var httpErr whatsmeow.DownloadHTTPError
+	if errors.As(err, &httpErr) && httpErr.Response != nil {
+		switch httpErr.Response.StatusCode {
+		case 403, 404, 410:
+			return true
+		}
+	}
+	for _, permanent := range []error{
+		whatsmeow.ErrNoURLPresent, whatsmeow.ErrUnknownMediaType, whatsmeow.ErrMediaNotAvailableOnPhone,
+		whatsmeow.ErrInvalidMediaHMAC, whatsmeow.ErrInvalidMediaEncSHA256, whatsmeow.ErrInvalidMediaSHA256,
+		whatsmeow.ErrInvalidUnencryptedMediaSHA256,
+	} {
+		if errors.Is(err, permanent) {
+			return true
+		}
+	}
+	return false
 }
 
 // retry makes the waiting downloads while the volume is above the floor, in
 // the order they waited, and spools each message again with its media. A
 // line Olympus removed meanwhile (its media judged Secrets) is never filled:
-// what was downloaded for it is deleted.
-func (q *mediaWaitQueue) retry(ctx context.Context, store *audioMediaStore, spool func(spoolRecord)) {
+// what was downloaded for it is deleted. An entry goes only once `spool` says
+// its line is durably written.
+func (q *mediaWaitQueue) retry(ctx context.Context, store *audioMediaStore, spool func(spoolRecord) error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	defer q.report()
@@ -197,7 +252,12 @@ func (q *mediaWaitQueue) retry(ctx context.Context, store *audioMediaStore, spoo
 		}
 		saved, size, err := kind.downloadPath(ctx, rec.ChatJID, rec.ID, rec.MediaMime, retryRequestOf(rec))
 		if errors.Is(err, errWaitingForDisk) {
-			return
+			// Too large for the room there is now: the smaller ones after it may still fit.
+			continue
+		}
+		if err != nil && !permanentDownloadError(err) {
+			// A passing failure (the network): it stays waiting for the next pass.
+			continue
 		}
 		if _, gone := os.Stat(path); gone != nil {
 			// Cleared while it downloaded: the media is never kept.
@@ -213,7 +273,11 @@ func (q *mediaWaitQueue) retry(ctx context.Context, store *audioMediaStore, spoo
 			rec.MediaSizeBytes = size
 			rec.DownloadStatus = "ok"
 		}
-		spool(rec)
+		if err := spool(rec); err != nil {
+			// Not written: the entry stays, and the next pass makes the line again.
+			log.Printf("olympus-whatsapp-bridge: could not spool a message whose media was waiting: %v", err)
+			continue
+		}
 		_ = os.Remove(path)
 	}
 }

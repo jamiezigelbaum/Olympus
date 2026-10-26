@@ -474,3 +474,82 @@ describe('every piece of media is kept; the one safeguard is free disk space (ow
   });
 });
 
+describe('review round 4 on #558: no Secret left in a waiting line, large media never read whole', () => {
+  test('a Secret caption over a picture that waits for disk space clears the words in its waiting line; the line stays', () => {
+    const target = lane();
+    const waitingDir = join(target.root, 'media', 'waiting');
+    mkdirSync(waitingDir, { recursive: true });
+    const stem = whatsAppMediaFileStem(CHAT, 'W3');
+    const entry = join(waitingDir, `${stem}.json`);
+    const original = JSON.parse(spoolLine({ id: 'W3', media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', text: 'the door code is 4411', media_key: 'a2V5' })) as Record<string, unknown>;
+    writeFileSync(entry, JSON.stringify(original));
+    // The bridge was killed while writing this message's entry, and another's long ago; a third is being written now.
+    const ownTemp = join(waitingDir, `.${stem}.json.tmp111`);
+    const oldTemp = join(waitingDir, `.${whatsAppMediaFileStem(CHAT, 'other')}.json.tmp222`);
+    const freshTemp = join(waitingDir, `.${whatsAppMediaFileStem(CHAT, 'busy')}.json.tmp333`);
+    for (const path of [ownTemp, oldTemp, freshTemp]) writeFileSync(path, '{"text":"partial"}');
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(oldTemp, hourAgo, hourAgo);
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), `${JSON.stringify(original)}\n`);
+    redactWhatsAppLiveSpoolSecrets({
+      spoolDir: target.spoolDir,
+      account: 'personal',
+      judge: (identity) => (identity.providerItemId === 'W3' ? 'content' : undefined),
+      mediaDirs: [target.images, target.video, target.audio],
+      mediaWaitingDir: waitingDir,
+    });
+    const kept = JSON.parse(readFileSync(entry, 'utf8')) as Record<string, unknown>;
+    expect(kept['text']).toBe('');
+    expect(kept['secret_redacted']).toBe(true);
+    // The picture is not Secret: it is still fetched when there is room.
+    expect(kept['media_key']).toBe('a2V5');
+    expect(readFileSync(entry, 'utf8')).not.toContain('door code');
+    for (const gone of [ownTemp, oldTemp]) expect(existsSync(gone)).toBe(false);
+    expect(existsSync(freshTemp)).toBe(true);
+  });
+
+  test('a large video is handed to a file reader as a file, copied a chunk at a time, never read whole', async () => {
+    const target = lane();
+    const clip = join(target.video, 'V7.mp4');
+    const size = 70 * 1024 * 1024;
+    writeFileSync(clip, Buffer.alloc(size, 9));
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'V7', media_type: 'video', media_mime: 'video/mp4', media_path: clip, download_status: 'ok' }));
+    await target.pull();
+    // A reader that would load it into memory fails the test.
+    const toFile = target.readChild.toFile;
+    const guarded = Object.assign(() => { throw new Error('read into memory'); }, { toFile }) as unknown as typeof target.readChild;
+    const source = new WhatsAppExtractionSource({
+      id: 'whatsapp-test-extraction',
+      corpusId: WHATSAPP_LIVE_CORPUS_ID,
+      provider: 'whatsapp',
+      accountScope: 'personal',
+      approvedScopeKey: 'whatsapp.personal.messages',
+      mediaRoots: [target.audio],
+      candidates: connectorStoreExtractionCandidateReader(target.store),
+      locators: target.store,
+      deferredBytes: (ref) => deferredBytesAnswerFor(target.store.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
+      readChild: guarded,
+    });
+    const ref = (await source.listCandidates({ limit: 10 })).candidates.find((candidate) => candidate.providerItemId === 'V7#child:media')!;
+    const spoolDir = join(target.root, 'extraction-spool');
+    const file = await source.fetchFile(ref, { spoolDir });
+    expect(file.sizeBytes).toBe(size);
+    expect(file.path.startsWith(spoolDir)).toBe(true);
+    expect(readFileSync(file.path).byteLength).toBe(size);
+    await file.dispose();
+    expect(existsSync(file.path)).toBe(false);
+  }, 60_000);
+
+  test('a voice note is handed over as a file too, from under the media folders only', async () => {
+    const target = lane();
+    const voice = join(target.audio, 'A5.ogg');
+    writeFileSync(voice, 'ogg bytes');
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'A5', media_type: 'audio', media_mime: 'audio/ogg', media_path: voice, download_status: 'ok' }));
+    await target.pull();
+    const ref = (await target.extraction.listCandidates({ limit: 10 })).candidates.find((candidate) => candidate.providerItemId === 'A5')!;
+    const file = await target.extraction.fetchFile(ref, { spoolDir: join(target.root, 'extraction-spool') });
+    expect(readFileSync(file.path, 'utf8')).toBe('ogg bytes');
+    await file.dispose();
+  });
+});
+

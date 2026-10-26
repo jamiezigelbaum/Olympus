@@ -36814,9 +36814,11 @@ var init_input_media = __esm(() => {
 });
 
 // src/workers/whatsapp/child-media.ts
+var COPY_CHUNK_BYTES;
 var init_child_media = __esm(() => {
   init_file_extraction_source();
   init_input_media();
+  COPY_CHUNK_BYTES = 1024 * 1024;
 });
 
 // src/core/source-inputs.ts
@@ -36860,7 +36862,7 @@ var init_spool_reader = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, MEDIA_TEMP_MAX_AGE_MS;
+var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, MEDIA_TEMP_MAX_AGE_MS, WAITING_TEMP_MAX_AGE_MS;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
@@ -36874,6 +36876,7 @@ var init_live_connector = __esm(() => {
   TARGET_READ_CHUNK_BYTES = 4 * 1024;
   CHILD_MEDIA_TYPES = new Set(["image", "video", "video_note"]);
   MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
+  WAITING_TEMP_MAX_AGE_MS = 60 * 1000;
 });
 
 // src/workers/whatsapp/store-sync.ts
@@ -44996,6 +44999,8 @@ init_file_extraction_source();
 init_child_media();
 
 // src/workers/whatsapp/extraction-source.ts
+init_spool();
+init_child_media();
 init_file_extraction_source();
 
 // src/workers/whatsapp/extraction-factory.ts
