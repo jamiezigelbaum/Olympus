@@ -1174,7 +1174,7 @@ export class TieredStoreSet {
         version: pending.version,
         hasContent: false,
         incomplete: true as const,
-        ...(owesBody && pending.bodyVersion !== undefined ? { owedBodyVersion: pending.bodyVersion } : {}),
+        ...(owesBody ? { owedBodyVersion: pending.bodyVersion ?? pending.version } : {}),
       };
     }
     const newest = found.reduce<string | undefined>(
@@ -1195,7 +1195,8 @@ export class TieredStoreSet {
     const owedLeads = owesBody && owed.version !== undefined && (newest === undefined || compareVersions(owed.version, newest) > 0);
     const owedBody = owesBody && owed.version !== undefined && (owedLeads || !tombstoned);
     const incomplete = owedBody;
-    const owedBodyVersion = owedBody ? owed?.bodyVersion : undefined;
+    // (Always stated for an owed body: the version itself when no older record brought it.)
+    const owedBodyVersion = owedBody ? owed?.bodyVersion ?? owed?.version : undefined;
     // A pending version move is the item's version too, ahead of rows that are older.
     const moving = pending?.kind === 'advance' && pending.version !== undefined && (newest === undefined || compareVersions(pending.version, newest) > 0) ? pending.version : undefined;
     const version = intentLeads ? hidden : moving !== undefined ? moving : owedBody && (newest === undefined || compareVersions(owed.version!, newest) > 0) ? owed.version : newest;
