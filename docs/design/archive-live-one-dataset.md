@@ -411,6 +411,17 @@ Live WhatsApp capture, with no change to identities or stores
 `test/whatsapp-live-review-fixes.test.ts` and
 `tools/whatsapp-bridge/capture_status_test.go`).
 
+- **The spool contract.** A spool file is append-only for every writer but
+  one: the bridge only appends whole lines, and Olympus's own clearing of
+  Secrets rewrites a line in place at its own length, updating what it
+  keeps of the file (what was cleared, the index's record) in the same step,
+  so its rewrite never reads as a break. Anything else breaks the contract
+  (a file replaced, cut and written again, edited) and is caught cheaply: at
+  every boundary kept in a file (cleared-through, indexed-through) the
+  digest of the 4 KiB ending there is kept too, and is read again before the
+  boundary is trusted (`connector-store/spool-file-identity.ts`). A mismatch
+  is a file read again from its start: cleared again in full, its index rows
+  rebuilt.
 - **One builder, the intake rule.** The spool is the WhatsApp connector's
   live input: its records become items through the connector's one record
   builder under the shared intake rule (`core/source-inputs.ts`), versions

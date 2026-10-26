@@ -74511,6 +74511,69 @@ var init_reaction_index = __esm(() => {
   init_reactions();
 });
 
+// src/workers/connector-store/spool-file-identity.ts
+import { createHash as createHash50 } from "node:crypto";
+import { closeSync as closeSync16, openSync as openSync16, readSync as readSync4, statSync as statSync22 } from "node:fs";
+function spoolFileIdentity(path) {
+  try {
+    const stats = statSync22(path);
+    const birth = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? Math.floor(stats.birthtimeMs) : 0;
+    return {
+      size: stats.size,
+      ...stats.ino > 0 ? { ino: stats.ino } : {},
+      identity: `${stats.dev}:${stats.ino}:${birth}:${firstLineDigest(path)}`
+    };
+  } catch {
+    return;
+  }
+}
+function firstLineDigest(path) {
+  let fd2;
+  try {
+    fd2 = openSync16(path, "r");
+  } catch {
+    return "-";
+  }
+  try {
+    const head = Buffer.alloc(SPOOL_IDENTITY_HEAD_BYTES);
+    const read = readSync4(fd2, head, 0, SPOOL_IDENTITY_HEAD_BYTES, 0);
+    const newline = head.subarray(0, read).indexOf(NEWLINE);
+    if (newline < 0 && read < SPOOL_IDENTITY_HEAD_BYTES)
+      return "none";
+    return createHash50("sha256").update(head.subarray(0, newline < 0 ? read : newline + 1)).digest("hex").slice(0, 16);
+  } finally {
+    closeSync16(fd2);
+  }
+}
+function spoolBoundaryDigest(path, offset) {
+  if (!Number.isSafeInteger(offset) || offset < 0)
+    return;
+  let fd2;
+  try {
+    fd2 = openSync16(path, "r");
+  } catch {
+    return;
+  }
+  try {
+    const start = Math.max(0, offset - SPOOL_BOUNDARY_WINDOW_BYTES);
+    const window2 = Buffer.alloc(offset - start);
+    const read = window2.length === 0 ? 0 : readSync4(fd2, window2, 0, window2.length, start);
+    if (read < window2.length)
+      return;
+    return createHash50("sha256").update(`${offset}\x00`).update(window2).digest("hex").slice(0, 24);
+  } finally {
+    closeSync16(fd2);
+  }
+}
+function spoolBoundaryHolds(path, offset, recorded) {
+  return spoolBoundaryDigest(path, offset) === recorded;
+}
+var SPOOL_IDENTITY_HEAD_BYTES, NEWLINE = 10, SPOOL_BOUNDARY_WINDOW_BYTES;
+var init_spool_file_identity = __esm(() => {
+  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
+});
+
 // src/workers/whatsapp/spool-index.ts
 import { Database as Database15 } from "bun:sqlite";
 import { chmodSync as chmodSync18, existsSync as existsSync50 } from "node:fs";
@@ -74542,7 +74605,7 @@ class WhatsAppSpoolIndex {
           DROP TABLE IF EXISTS reactions;
           DROP TABLE IF EXISTS meta;
           DROP TABLE IF EXISTS files;
-          CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
+          CREATE TABLE files (name TEXT PRIMARY KEY, identity TEXT NOT NULL, indexed_to INTEGER NOT NULL, boundary TEXT NOT NULL) WITHOUT ROWID;
           CREATE TABLE messages (
             chat TEXT NOT NULL, id TEXT NOT NULL, chat_jid TEXT NOT NULL, file TEXT NOT NULL, offset INTEGER NOT NULL,
             PRIMARY KEY (chat, id)
@@ -74589,20 +74652,43 @@ class WhatsAppSpoolIndex {
       return;
     this.db.query("INSERT INTO meta (key, value) VALUES ('high_water', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(JSON.stringify(to));
   }
-  reconcile(present) {
-    const known = this.db.query("SELECT name, identity, size FROM files").all();
-    for (const { name, identity: identity2, size } of known) {
-      const now = present.get(name);
-      if (now !== undefined && now.identity === identity2 && now.size >= size)
+  reconcile(spoolDir) {
+    const known = this.db.query("SELECT name, identity, indexed_to, boundary FROM files").all();
+    for (const { name, identity: identity2, indexed_to: indexedTo, boundary } of known) {
+      const path = join61(spoolDir, name);
+      const now = spoolFileIdentity(path);
+      if (now !== undefined && now.identity === identity2 && now.size >= indexedTo && spoolBoundaryHolds(path, indexedTo, boundary))
         continue;
       this.forgetFile(name);
     }
   }
-  noteFile(name, identity2, size) {
+  noteFile(spoolDir, name, indexedTo) {
+    const path = join61(spoolDir, name);
+    const identity2 = spoolFileIdentity(path);
+    const boundary = spoolBoundaryDigest(path, indexedTo);
+    if (!identity2 || boundary === undefined)
+      return;
     this.db.query(`
-      INSERT INTO files (name, identity, size) VALUES (?, ?, ?)
-      ON CONFLICT (name) DO UPDATE SET identity = excluded.identity, size = MAX(files.size, excluded.size)
-    `).run(name, identity2, size);
+      INSERT INTO files (name, identity, indexed_to, boundary) VALUES (?, ?, ?, ?)
+      ON CONFLICT (name) DO UPDATE SET identity = excluded.identity, indexed_to = excluded.indexed_to, boundary = excluded.boundary
+      WHERE excluded.indexed_to >= files.indexed_to
+    `).run(name, identity2.identity, indexedTo, boundary);
+  }
+  refreshFile(spoolDir, name) {
+    const row = this.db.query("SELECT indexed_to FROM files WHERE name = ?").get(name);
+    if (!row)
+      return;
+    const path = join61(spoolDir, name);
+    const identity2 = spoolFileIdentity(path);
+    const boundary = spoolBoundaryDigest(path, row.indexed_to);
+    if (!identity2 || boundary === undefined) {
+      this.forgetFile(name);
+      return;
+    }
+    this.db.query("UPDATE files SET identity = ?, boundary = ? WHERE name = ?").run(identity2.identity, boundary, name);
+  }
+  fileNames() {
+    return this.db.query("SELECT name FROM files ORDER BY name").all().map((row) => row.name);
   }
   forgetFile(file) {
     this.db.transaction(() => {
@@ -74641,48 +74727,10 @@ class WhatsAppSpoolIndex {
     return this.db.transaction(work)();
   }
 }
-var WHATSAPP_SPOOL_INDEX_FILE = "spool-index.sqlite", SCHEMA = 3;
+var WHATSAPP_SPOOL_INDEX_FILE = "spool-index.sqlite", SCHEMA = 4;
 var init_spool_index = __esm(() => {
+  init_spool_file_identity();
   init_reaction_index();
-});
-
-// src/workers/connector-store/spool-file-identity.ts
-import { createHash as createHash50 } from "node:crypto";
-import { closeSync as closeSync16, openSync as openSync16, readSync as readSync4, statSync as statSync22 } from "node:fs";
-function spoolFileIdentity(path) {
-  try {
-    const stats = statSync22(path);
-    const birth = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? Math.floor(stats.birthtimeMs) : 0;
-    return {
-      size: stats.size,
-      ...stats.ino > 0 ? { ino: stats.ino } : {},
-      identity: `${stats.dev}:${stats.ino}:${birth}:${firstLineDigest(path)}`
-    };
-  } catch {
-    return;
-  }
-}
-function firstLineDigest(path) {
-  let fd2;
-  try {
-    fd2 = openSync16(path, "r");
-  } catch {
-    return "-";
-  }
-  try {
-    const head = Buffer.alloc(SPOOL_IDENTITY_HEAD_BYTES);
-    const read = readSync4(fd2, head, 0, SPOOL_IDENTITY_HEAD_BYTES, 0);
-    const newline = head.subarray(0, read).indexOf(NEWLINE);
-    if (newline < 0 && read < SPOOL_IDENTITY_HEAD_BYTES)
-      return "none";
-    return createHash50("sha256").update(head.subarray(0, newline < 0 ? read : newline + 1)).digest("hex").slice(0, 16);
-  } finally {
-    closeSync16(fd2);
-  }
-}
-var SPOOL_IDENTITY_HEAD_BYTES, NEWLINE = 10;
-var init_spool_file_identity = __esm(() => {
-  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
 });
 
 // src/workers/whatsapp/spool-reader.ts
@@ -75051,15 +75099,8 @@ async function* liveRecords(spoolDir, options) {
   const index = WhatsAppSpoolIndex.open(spoolDir);
   const pass = { budget: { bytesLeft: options.passByteBudget }, maxRecordBytes: options.maxRecordBytes, findings: options.findings, index };
   try {
-    if (index) {
-      const present = new Map;
-      for (const file of listSpoolFiles(spoolDir)) {
-        const identity2 = spoolFileIdentity(join63(spoolDir, file));
-        if (identity2)
-          present.set(file, { identity: identity2.identity, size: identity2.size });
-      }
-      index.reconcile(present);
-    }
+    if (index)
+      index.reconcile(spoolDir);
     position = resolveStart(spoolDir, position, pass);
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
       options.findings.passBudgetReached += 1;
@@ -75122,11 +75163,9 @@ function catchUpIndex(spoolDir, index, until, pass) {
     let offset = file === mark.file ? mark.offset : 0;
     const end = file === target.file ? target.offset : Number.POSITIVE_INFINITY;
     let paused = false;
-    const identity2 = spoolFileIdentity(join63(spoolDir, file));
-    if (!identity2)
+    if (!spoolFileIdentity(join63(spoolDir, file)))
       continue;
     index.transaction(() => {
-      index.noteFile(file, identity2.identity, identity2.size);
       for (const record of spoolRecords(join63(spoolDir, file), offset, pass.maxRecordBytes, pass.budget)) {
         if (record.kind === "paused") {
           offset = record.offset;
@@ -75142,6 +75181,7 @@ function catchUpIndex(spoolDir, index, until, pass) {
           break;
       }
       index.advance({ file, offset: Math.min(offset, end) });
+      index.noteFile(spoolDir, file, Math.min(offset, end));
     });
     if (paused || pass.budget.bytesLeft <= 0)
       return comparePlaces(index.highWater() ?? mark, target) >= 0;
@@ -75176,9 +75216,15 @@ function readSpoolPage(spoolDir, start, limit, pass) {
   const projectedItems = () => messages.length + reEmitTargets.size;
   let position = start;
   const index = pass.index;
+  const reached = new Map;
   const finish = (result) => {
-    if (index && result.position?.offset !== undefined)
+    if (index && result.position?.offset !== undefined) {
       index.advance({ file: result.position.file, offset: result.position.offset });
+      if (result.position.skipping !== true)
+        reached.set(result.position.file, result.position.offset);
+      for (const [file, offset] of reached)
+        index.noteFile(spoolDir, file, offset);
+    }
     return result;
   };
   const run = () => {
@@ -75190,9 +75236,6 @@ function readSpoolPage(spoolDir, start, limit, pass) {
       let offset = fromStart ? start.offset ?? 0 : 0;
       const skipping = fromStart && start.skipping === true;
       position = { file, line: lineIndex, offset, ...skipping ? { skipping: true } : {} };
-      const identity2 = spoolFileIdentity(join63(spoolDir, file));
-      if (index && identity2)
-        index.noteFile(file, identity2.identity, identity2.size);
       for (const record of spoolRecords(join63(spoolDir, file), offset, pass.maxRecordBytes, pass.budget, skipping)) {
         if (record.kind === "paused") {
           if (record.firstSeen)
@@ -75207,6 +75250,7 @@ function readSpoolPage(spoolDir, start, limit, pass) {
         offset = record.endOffset;
         lineIndex += 1;
         position = { file, line: lineIndex, offset };
+        reached.set(file, offset);
         if (record.kind === "oversized") {
           if (!record.continued)
             pass.findings.oversizedRecords += 1;
@@ -75688,6 +75732,12 @@ function spoolPositionOf(cursor) {
   const inside = /^~in1~\d+~\d+~([\s\S]+)$/u.exec(cursor);
   return inside ? inside[1] : cursor;
 }
+function byteOffsetOf(cursor) {
+  if (cursor === undefined)
+    return;
+  const found = /@(\d+)$/u.exec(spoolPositionOf(cursor) ?? "");
+  return found ? Number(found[1]) : undefined;
+}
 function lineCursorOf(cursor) {
   if (cursor === undefined)
     return;
@@ -75779,7 +75829,8 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
             mediaDir,
             relocateMediaPath: whatsappMovedPathMapper(env),
             ledger: tierSet.ledger,
-            through: lineCursorOf(committed)
+            through: lineCursorOf(committed),
+            ...byteOffsetOf(committed) !== undefined ? { throughOffset: byteOffsetOf(committed) } : {}
           });
         } catch (error) {
           redactionFailed = true;
@@ -75815,32 +75866,37 @@ function clearWhatsAppSpoolSecrets(options) {
   let failure;
   const judge2 = createSpoolSecretJudge({ ledger: options.ledger, floor: true });
   const files = spoolFileNames(options.spoolDir);
+  const rewritten = new Set;
   for (const file of files) {
     if (file > throughFile)
       break;
-    const before = spoolFileIdentity(join64(options.spoolDir, file));
+    const path = join64(options.spoolDir, file);
+    const before = spoolFileIdentity(path);
     if (!before)
       continue;
     const end = file === throughFile ? throughLine : ALL_LINES;
     const known = recorded[file];
-    const same = known !== undefined && known.identity === before.identity && known.size <= before.size;
-    if (same && (known.lines === ALL_LINES ? known.size === before.size && end === ALL_LINES : end !== ALL_LINES && known.lines >= end)) {
+    const same = known !== undefined && known.identity === before.identity && before.size >= known.offset && spoolBoundaryHolds(path, known.offset, known.boundary);
+    if (same && (end === ALL_LINES ? known.lines === ALL_LINES && before.size === known.offset : known.lines !== ALL_LINES && known.lines >= end)) {
       next[file] = known;
       continue;
     }
     const start = same && known.lines !== ALL_LINES ? known.lines : 0;
     try {
-      result = addCaptureSpoolRedactions(result, redact({
+      const cleared = redact({
         from: `${file}:${start}`,
         through: `${file}:${end === ALL_LINES ? Number.MAX_SAFE_INTEGER : end}`
-      }, judge2));
+      }, judge2);
+      if (cleared.recordsRedacted + cleared.recordsBlanked > 0)
+        rewritten.add(file);
+      result = addCaptureSpoolRedactions(result, cleared);
     } catch (error) {
       failure = error;
       break;
     }
-    const after = spoolFileIdentity(join64(options.spoolDir, file));
-    if (after)
-      next[file] = { identity: after.identity, size: after.size, lines: end };
+    const entry = clearedFileNow(path, end, end === ALL_LINES ? undefined : options.throughOffset);
+    if (entry)
+      next[file] = entry;
   }
   const present = new Set(files);
   for (const [file, known] of Object.entries(recorded)) {
@@ -75848,6 +75904,7 @@ function clearWhatsAppSpoolSecrets(options) {
       next[file] = known;
   }
   options.ledger.writeMeta(CLEARED_FILES_KEY, JSON.stringify(next));
+  refreshIndex(options.spoolDir, rewritten);
   if (failure !== undefined)
     throw failure;
   const sweep = sweepCaptureSpoolWhenSecretsChange({
@@ -75855,7 +75912,43 @@ function clearWhatsAppSpoolSecrets(options) {
     stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
     sweep: (sweepJudge) => redact({ through: options.through }, sweepJudge)
   });
+  if (sweep && sweep.recordsRedacted + sweep.recordsBlanked > 0) {
+    for (const [file, known] of Object.entries(next)) {
+      const entry = clearedFileNow(join64(options.spoolDir, file), known.lines, known.offset);
+      if (entry)
+        next[file] = entry;
+      else
+        delete next[file];
+    }
+    options.ledger.writeMeta(CLEARED_FILES_KEY, JSON.stringify(next));
+    refreshIndex(options.spoolDir, new Set(files));
+  }
   return addCaptureSpoolRedactions(result, sweep);
+}
+function clearedFileNow(path, lines, offset) {
+  const identity2 = spoolFileIdentity(path);
+  if (!identity2)
+    return;
+  const at = lines === ALL_LINES ? identity2.size : offset ?? offsetAfterLines(path, lines);
+  if (at === undefined)
+    return;
+  const boundary = spoolBoundaryDigest(path, at);
+  if (boundary === undefined)
+    return;
+  return { identity: identity2.identity, lines, offset: at, boundary };
+}
+function refreshIndex(spoolDir, files) {
+  if (files.size === 0)
+    return;
+  const index = WhatsAppSpoolIndex.open(spoolDir);
+  if (!index)
+    return;
+  try {
+    for (const file of files)
+      index.refreshFile(spoolDir, file);
+  } finally {
+    index.close();
+  }
 }
 function readClearedFiles(ledger) {
   const raw = ledger.readMeta(CLEARED_FILES_KEY);
@@ -75865,7 +75958,7 @@ function readClearedFiles(ledger) {
     const parsed = JSON.parse(raw);
     const valid = {};
     for (const [file, entry] of Object.entries(parsed)) {
-      if (entry && typeof entry.identity === "string" && Number.isSafeInteger(entry.size) && Number.isSafeInteger(entry.lines))
+      if (entry && typeof entry.identity === "string" && typeof entry.boundary === "string" && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines))
         valid[file] = entry;
     }
     return valid;
@@ -75941,6 +76034,8 @@ var init_store_sync2 = __esm(() => {
   init_capture_freshness();
   init_live_connector();
   init_spool_reader();
+  init_spool_file_identity();
+  init_spool_index();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local"

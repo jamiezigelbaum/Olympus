@@ -111,6 +111,56 @@ describe('Secrets cleanup is owed per file identity', () => {
   });
 });
 
+describe('the append-only contract, checked at every boundary', () => {
+  for (const longer of [false, true]) {
+    test(`a file cut and written again in place (${longer ? 'longer' : 'the same size'}) with a known Secret is cleared again`, async () => {
+      const target = lane();
+      const file = join(target.spoolDir, '2026-10-25.jsonl');
+      const secret = line('s1', { text: `prod key ${keyFor(9)}` });
+      const original = line('a') + secret + line('b');
+      writeFileSync(file, original);
+      await target.sync.pull();
+      expect(readFileSync(file, 'utf8')).not.toContain(keyFor(9));
+      // The same inode, cut and written again: the Secret is back, and the file is as long, or longer.
+      writeFileSync(file, longer ? original + line('c') : original);
+      const receipt = await target.sync.pull();
+      expect(receipt.warnings ?? []).not.toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
+      expect(readFileSync(file, 'utf8')).not.toContain(keyFor(9));
+    });
+  }
+
+  test('a file rewritten in place, longer, without a reaction line no longer has that reaction emitted', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-longer-'));
+    roots.push(dir);
+    const day = join(dir, '2026-10-24.jsonl');
+    const gone = reaction('r1', 'm1', '👍', 'actor-1@s.whatsapp.net');
+    writeFileSync(day, line('m1') + gone);
+    const first = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems());
+    // The same inode, written again longer: a message of exactly the reaction line's length where it was (so the old cursor
+    // still falls on a line's start and the first line is the same), then one more line.
+    const stand = line('m2', { text: 'z'.repeat(Buffer.byteLength(gone) - Buffer.byteLength(line('m2', { text: '' }))) });
+    expect(Buffer.byteLength(stand)).toBe(Buffer.byteLength(gone));
+    writeFileSync(day, line('m1') + stand + line('m3'));
+    writeFileSync(join(dir, '2026-10-25.jsonl'), reaction('r2', 'm1', '❤️', 'actor-2@s.whatsapp.net'));
+    const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor: first.at(-1)!.nextCursor! }));
+    const item = pages.flatMap((page) => [...page.items]).find((entry) => entry.identity.providerItemId === 'm1');
+    expect((item?.metadata['reactions'] as Array<{ key: string }>).map((entry) => entry.key)).toEqual(['❤️']);
+  });
+
+  test('clearing a Secret keeps its own bookkeeping: the next pull neither rebuilds the index nor clears the file again', async () => {
+    const target = lane();
+    const file = join(target.spoolDir, '2026-10-25.jsonl');
+    writeFileSync(file, line('s1', { text: `prod key ${keyFor(10)}` }) + line('a'));
+    const first = await target.sync.pull();
+    expect(first.counts.spool_records_redacted).toBe(1);
+    // A file the next pull would clear again is one it opens for writing: read-only, that would fail.
+    chmodSync(file, 0o400);
+    const idle = await target.sync.pull();
+    expect(idle.warnings ?? []).not.toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
+    expect(idle.counts.spool_records_redacted).toBe(0);
+  });
+});
+
 describe('a file keeps its identity across inode reuse', () => {
   test('a file rewritten in place (the same inode) with other lines of the same length is indexed again', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-inode-'));
@@ -159,12 +209,13 @@ function truth(spoolDir: string): Map<string, Map<string, string | undefined>> {
 }
 
 describe('spool bookkeeping under churn', () => {
-  for (const seed of [1, 7, 42, 1234]) {
+  for (const seed of [1, 7, 42, 1234, 9001, 31337]) {
     test(`seed ${seed}: no known Secret survives a successful pull, and no reaction is emitted from a file that is gone`, async () => {
       const next = random(seed);
       const target = lane();
       const days = ['2026-10-21.jsonl', '2026-10-22.jsonl', '2026-10-23.jsonl', '2026-10-24.jsonl', '2026-10-25.jsonl'];
       const secrets: string[] = [];
+      const secretLines: string[] = [];
       let counter = 0;
       let listCursor: string | undefined;
       let failing: string | undefined;
@@ -181,7 +232,9 @@ describe('spool bookkeeping under churn', () => {
         } else if (roll < 0.5) {
           const key = keyFor(counter);
           secrets.push(key);
-          appendFileSync(pathOf(day), line(`s${counter}`, { text: `deploy key ${key}` }));
+          const secretLine = line(`s${counter}`, { text: `deploy key ${key}` });
+          secretLines.push(secretLine);
+          appendFileSync(pathOf(day), secretLine);
         } else if (roll < 0.65) {
           const ids = messageIds();
           if (ids.length > 0) {
@@ -199,10 +252,18 @@ describe('spool bookkeeping under churn', () => {
             const victim = pathOf(existing[Math.floor(next() * existing.length)]!);
             const lines = readFileSync(victim, 'utf8').split('\n').filter(Boolean);
             const kind = next();
-            const content = kind < 0.66 ? `${[...lines].reverse().join('\n')}\n` : `${lines.slice(0, Math.max(1, Math.floor(lines.length / 2))).join('\n')}\n`;
+            const reordered = `${[...lines].reverse().join('\n')}\n`;
             if (lines.length > 0) {
-              if (kind < 0.33) writeFileSync(victim, content);
-              else replaceByRename(victim, content);
+              if (kind < 0.2) writeFileSync(victim, reordered);
+              else if (kind < 0.4) replaceByRename(victim, reordered);
+              else if (kind < 0.6) replaceByRename(victim, `${lines.slice(0, Math.max(1, Math.floor(lines.length / 2))).join('\n')}\n`);
+              else if (kind < 0.8) {
+                // In place and longer, without its reaction lines.
+                writeFileSync(victim, `${lines.filter((raw) => !raw.includes('"media_type":"reaction"')).join('\n')}\n${line(`x${counter}`, { text: 'x'.repeat(200) })}`);
+              } else if (secretLines.length > 0) {
+                // Cut and written again in place, with a known Secret back in it.
+                writeFileSync(victim, `${lines.join('\n')}\n${secretLines[Math.floor(next() * secretLines.length)]!}`);
+              }
             }
           }
         } else if (roll < 0.9) {
