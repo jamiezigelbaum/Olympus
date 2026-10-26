@@ -1018,13 +1018,31 @@ export class TieredStoreSet {
     if (this.finishPendingIntents()) await this.sweepOrphanedChildren();
   }
 
+  /**
+   * Whether the stored state supersedes a body or names write that is still owed: only a deletion of the very
+   * version it owes (a deletion beats content at one version) does. Rows existing, tombstones of an older version
+   * included, never clear it: a restoration of a deleted item is owed past the old tombstone. A newer write replaces
+   * the intent itself (one per item), so no newer row needs to be read here.
+   */
+  private intentSuperseded(intent: TierWriteIntent): boolean {
+    const identity = { ...intent.identity, ...(intent.version !== undefined ? { sourceVersion: intent.version } : {}) } as SourceItemIdentity;
+    if (intent.version === undefined) {
+      // No version to compare: owed nothing once the item has rows and none is live (it was deleted since).
+      return this.anyLegHasRow(identity) && TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
+    }
+    return TIER_DOMAIN_ORDER.some((domain) => {
+      const row = this.store(domain)?.storedItemState(identity);
+      return row?.tombstoned === true && row.version === intent.version;
+    });
+  }
+
   finishPendingIntents(): boolean {
     let removed = false;
     for (const intent of this.ledger.writeIntents()) {
       const identity = { ...intent.identity, ...(intent.version !== undefined ? { sourceVersion: intent.version } : {}) } as SourceItemIdentity;
       if (intent.kind === 'content' || intent.kind === 'names') {
-        // Owed until its own record is read again; an item since deleted, or whose rows are all tombstones, is owed nothing.
-        if (this.anyLegHasRow(identity) && TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true)) this.ledger.clearWriteIntent(intent.identity);
+        // Owed until its own record is read again, or until the stored state supersedes it.
+        if (this.intentSuperseded(intent)) this.ledger.clearWriteIntent(intent.identity);
         continue;
       }
       if (intent.kind === 'advance') {
@@ -1172,7 +1190,10 @@ export class TieredStoreSet {
     // A body still owed to a leg (a write cut off before it landed everywhere) is the item's state: its version is
     // the item's, and only its own record, or a newer one, completes it.
     const owed = this.ledger.writeIntent(identity);
-    const owedBody = (owed?.kind === 'content' || owed?.kind === 'names') && owed.version !== undefined && !tombstoned;
+    const owesBody = owed?.kind === 'content' || owed?.kind === 'names';
+    // A body owed at a version above every row (a restoration over an old tombstone included) is the item's state.
+    const owedLeads = owesBody && owed.version !== undefined && (newest === undefined || compareVersions(owed.version, newest) > 0);
+    const owedBody = owesBody && owed.version !== undefined && (owedLeads || !tombstoned);
     const incomplete = owedBody;
     const owedBodyVersion = owedBody ? owed?.bodyVersion : undefined;
     // A pending version move is the item's version too, ahead of rows that are older.
@@ -1180,8 +1201,8 @@ export class TieredStoreSet {
     const version = intentLeads ? hidden : moving !== undefined ? moving : owedBody && (newest === undefined || compareVersions(owed.version!, newest) > 0) ? owed.version : newest;
     return {
       ...(version !== undefined ? { version } : {}),
-      hasContent: !intentLeads && topActive.some((leg) => leg.chunkCount > 0),
-      ...(tombstoned ? { tombstoned: true as const } : {}),
+      hasContent: !intentLeads && !owedLeads && topActive.some((leg) => leg.chunkCount > 0),
+      ...(tombstoned && !owedLeads ? { tombstoned: true as const } : {}),
       ...(incomplete ? { incomplete: true as const } : {}),
       ...(owedBodyVersion !== undefined ? { owedBodyVersion } : {}),
     };

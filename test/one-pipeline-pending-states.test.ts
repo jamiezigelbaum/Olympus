@@ -97,6 +97,35 @@ describe('a cascade never lowers a version', () => {
   });
 });
 
+describe('a pending write is superseded only by the stored state that outranks it', () => {
+  test('a restoration cut off over an old tombstone stays owed: an older body is refused and the restoration finishes', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive();
+    await h.importAll(await h.startImport('one.mbox', [rec('a', 1, 'the first words')]));
+    await h.importAll(await h.startImport('gone.mbox', [rec('a', 2, undefined, { deleted: true })]));
+    expect(h.textOf('a')).toBe('');
+    // The restoration's intent commits; the run stops before any row is written.
+    const orig = h.set.ledger.withWriteIntent.bind(h.set.ledger);
+    let thrown = false;
+    h.set.ledger.withWriteIntent = ((...args: Parameters<typeof orig>) => {
+      const out = orig(...args);
+      if (!thrown) { thrown = true; throw new Error('injected crash'); }
+      return out;
+    }) as typeof orig;
+    await h.pull(await h.startImport('nine.mbox', [rec('a', 9, 'the ninth words')])).catch(() => undefined);
+    expect(thrown).toBe(true);
+    // The pass start keeps the intent: tombstones of an older version do not supersede it.
+    await h.set.finishWritesCutOff();
+    expect(h.set.ledger.writeIntents().map((intent) => [intent.kind, intent.version])).toEqual([['content', '9']]);
+    expect(stateOf(h, 'a')).toMatchObject({ version: '9', incomplete: true });
+    await h.importAll(await h.startImport('five.mbox', [rec('a', 5, 'the fifth words')]));
+    expect(h.textOf('a')).toBe('');
+    await h.importAll(await h.startImport('nine-again.mbox', [rec('a', 9, 'the ninth words')]));
+    expect(h.textOf('a')).toBe('the ninth words');
+    expect(h.set.ledger.writeIntents()).toEqual([]);
+  });
+});
+
 describe('a failed child removal stays owed', () => {
   test('a child whose removal failed is not readable again when its parent comes back as a Secret', async () => {
     const h = onePipelineHarness(cleanups);
