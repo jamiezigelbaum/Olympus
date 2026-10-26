@@ -148,7 +148,8 @@ export async function readItemToFile(
   if (content.kind === 'metadata_only') throw refusalFor(item);
   const bytes = content.kind === 'bytes' ? content.bytes : new TextEncoder().encode(content.text);
   if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
-    throw new FileExtractionSourceError('source_too_large');
+    // Over the limit, the bytes are not handed over; the source's own reading of them still is.
+    throw new FileExtractionSourceError('source_too_large', item.providerText ? { providerText: item.providerText } : {});
   }
   const path = join(options.spoolDir, extractionSpoolFileName());
   const served = (): boolean => options.stillServed?.() ?? true;
@@ -325,9 +326,10 @@ export function createConnectorFileExtractionSource(
       const bytes = content.kind === 'bytes' ? content.bytes : new TextEncoder().encode(content.text);
       const mimeType = content.kind === 'bytes' ? content.mimeType : item.mimeType;
       if (fetchOptions.maxBytes !== undefined && bytes.byteLength > fetchOptions.maxBytes) {
-        throw new FileExtractionSourceError('source_too_large');
+        // Over the limit, the bytes are not handed over; the source's own reading of them still is.
+        throw new FileExtractionSourceError('source_too_large', item.providerText ? { providerText: item.providerText } : {});
       }
-      return { bytes, ...(mimeType ? { mimeType } : {}), sizeBytes: bytes.byteLength };
+      return { bytes, ...(mimeType ? { mimeType } : {}), sizeBytes: bytes.byteLength, ...(item.providerText ? { providerText: item.providerText } : {}) };
     },
 
     async fetchFile(ref: ExtractionItemRef, fileOptions: ExtractionFetchFileOptions): Promise<FetchedFile> {
@@ -354,6 +356,7 @@ export function createConnectorFileExtractionSource(
         path: handed.path,
         ...(mimeType ? { mimeType } : {}),
         ...(deferred?.sizeBytes !== undefined ? { sizeBytes: deferred.sizeBytes } : {}),
+        ...(handed.item.providerText ? { providerText: handed.item.providerText } : {}),
         dispose: fileHandOver(handed.path, handed.spooled, spoolDir, () => pruneExtractionSpoolOwner(fileOptions.spoolDir, owner)).dispose,
       };
     },

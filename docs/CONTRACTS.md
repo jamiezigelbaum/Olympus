@@ -354,6 +354,24 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-26 (v2.3.0, additive, builds on 2.2.0 and lands after it): **text the
+  provider supplies** (`docs/design/child-items.md`, "Text the provider
+  supplies", decided in #532).
+  Optional `RawItem.providerText` (`text`, `form`: `prose` or
+  `recognized_words`, `label`, optional `terms`). The shared extractor uses it
+  as an item's text only when no reader produced any (a generated description
+  such as a prepared photo's "Photo" is no reader's text), never over a failure,
+  and keeps what the reader's output owed (its derivations and warnings, so an
+  item waiting for OCR is still read once OCR is ready). Every line says whose
+  reading it is ("[Recognized by Evernote, approximate words] …"), and it goes
+  through the same sink, judge, hold and store as any extracted text. The extraction record names it (`provider_text`). No store
+  schema change. First supplier: the Evernote archive connector, from an
+  attachment's `<recognition>`. Not yet (needed before this lands): stored
+  reader text winning over provider text for the same source version (the
+  store keeps no record of which produced an item's text), and a citation field
+  naming the provider; also the provider's words as extra search terms when a
+  reader did produce text.
+  Version: 2.3.0. Fingerprint: `config/source-pipeline-contract-version.json`.
 - 2026-10-25 (v2.2.0, additive): **one pipeline for a source's two ways in**
   (owner direction 2026-10-25; `docs/design/archive-live-one-dataset.md`,
   reviewed in two rounds). Additive and optional, no existing field changes:
@@ -798,7 +816,9 @@ see both change logs. `2.1.0` (2026-10-25) adds the optional child-item
 fields (`parent`, `deferredBytes`, `fetchItem`'s locator argument,
 `parentLabel`); see the change log. `2.2.0` (2026-10-25) adds connector inputs
 with their own cursors (`forInput`), the intake lookup (`storedItem`) and the
-per-item hold (`holdContentUntilJudged`); see the change log.
+per-item hold (`holdContentUntilJudged`); see the change log. `2.3.0`
+(2026-10-26) adds the text a source supplies of its own reading of an item
+(`providerText`); see the change log.
 
 ## Change log
 
