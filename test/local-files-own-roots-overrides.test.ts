@@ -41,7 +41,6 @@ import {
   type LocalFilesContentScope,
 } from '../src/workers/local-files/scope.ts';
 import {
-  LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV,
   LOCAL_FILES_CORPUS_ID,
   createLocalFilesConnectorStore,
   createLocalFilesTierLane,
@@ -335,7 +334,7 @@ describe('a pass over home, with a Telegram spool moved to ~/capture', () => {
     passes += 1;
     const approval = choose(home);
     const store = createLocalFilesConnectorStore({
-      [LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV]: join(base, `store-${passes}.sqlite`),
+      HOME: join(base, `olympus-home-${passes}`),
       [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: join(base, 'no-exclusions.json'),
     }, { policy: defaultLocalFilesIngestionPolicy({ stillImagesRead: false }) });
     const hub = new WatchHub();

@@ -170,9 +170,11 @@ export class WhatsAppSpoolIndex {
   /**
    * Brings the index in line with the files that are there (name to
    * identity): a file that is gone loses its rows; one whose identity changed
-   * loses them and is indexed again from its start.
+   * loses them and is indexed again from its start. `reset` is called first
+   * when any file was replaced, and must count it durably: only then does
+   * the index forget.
    */
-  reconcile(spoolDir: string, owe?: (replaced: readonly string[]) => void): string[] {
+  reconcile(spoolDir: string, reset?: (replaced: readonly string[]) => void): string[] {
     const known = this.db.query('SELECT name, identity, indexed_to, boundary FROM files').all() as
       Array<{ name: string; identity: string; indexed_to: number; boundary: string }>;
     const replaced: string[] = [];
@@ -186,9 +188,9 @@ export class WhatsAppSpoolIndex {
       else gone.push(name);
     }
     replaced.sort();
-    // The read again every reader owes is written first, and durably (spool-obligations.ts); only then does the
-    // index forget what it held. A failure in between owes it still, and finds the file again next time.
-    if (replaced.length > 0) owe?.(replaced);
+    // The reset is counted first, and durably (spool-resets.ts); only then does the index forget what it held.
+    // A failure in between has counted it still, and finds the file again next time (one more reset, harmless).
+    if (replaced.length > 0) reset?.(replaced);
     this.db.transaction(() => {
       for (const name of [...gone, ...replaced]) this.forgetFile(name);
     })();
@@ -196,9 +198,10 @@ export class WhatsAppSpoolIndex {
   }
 
   /**
-   * This build of the index: a random id made when the index was built, so
-   * a cursor handed out by an earlier build (the index deleted since, or of
-   * another shape) is never taken to have read what this one knows.
+   * This build of the index: a random id made when the index was built. The
+   * reset counter (spool-resets.ts) counts a build it has not seen as a reset:
+   * a rebuilt index no longer knows what the files held, so a breach of the
+   * spool contract in between could not be found.
    */
   generation(): string {
     const row = this.db.query("SELECT value FROM meta WHERE key = 'generation'").get() as { value: string } | null;

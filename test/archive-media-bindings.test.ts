@@ -30,7 +30,6 @@ import { resolvedRawPath } from '../src/core/source-placement.ts';
 import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import {
-  ARCHIVE_MEDIA_BINDINGS_FILE,
   ARCHIVE_MEDIA_DEFAULT_READ_BYTES,
   ArchiveMediaBindingStore,
   archiveMediaAccess,
@@ -100,14 +99,14 @@ describe('where the bindings live is the layout resolvers\' answer', () => {
   test('a folder account keeps them in its raw folder; a legacy one beside its record, wherever that is', () => {
     const home = temp();
     const env = { HOME: home, XDG_DATA_HOME: join(home, 'xdg') };
-    expect(accountRawPath(account('folder'), ARCHIVE_MEDIA_BINDINGS_FILE, env))
+    expect(accountRawPath(account('folder'), 'archive-media-bindings.sqlite', env))
       .toBe(join(accountFolder({ source_id: 'archive.imports', slot: '1' }, env), 'raw', 'archive-media-bindings.sqlite'));
-    expect(accountRawPath(account('legacy'), ARCHIVE_MEDIA_BINDINGS_FILE, env))
+    expect(accountRawPath(account('legacy'), 'archive-media-bindings.sqlite', env))
       .toBe(join(olympusDataRoot(env), 'archive-media-bindings.sqlite'));
-    // The record can be relocated; the bindings follow it, as the requests do.
+    // No env variable relocates the record since step 6; a record a caller keeps elsewhere has its bindings beside it.
     const moved = { ...env, OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH: join(home, 'elsewhere', 'records.json') };
-    expect(accountRawPath(account('legacy'), ARCHIVE_MEDIA_BINDINGS_FILE, moved))
-      .toBe(join(home, 'elsewhere', 'archive-media-bindings.sqlite'));
+    expect(accountRawPath(account('legacy'), 'archive-media-bindings.sqlite', moved))
+      .toBe(join(olympusDataRoot(env), 'archive-media-bindings.sqlite'));
     expect(archiveMediaBindingsPath(join(home, 'elsewhere', 'records.json'))).toBe(join(home, 'elsewhere', 'archive-media-bindings.sqlite'));
   });
 
@@ -115,7 +114,7 @@ describe('where the bindings live is the layout resolvers\' answer', () => {
     const home = temp();
     const env = { HOME: home, XDG_DATA_HOME: join(home, 'xdg') };
     const agree = (): string => {
-      const resolved = resolvedRawPath('archive.imports', ARCHIVE_MEDIA_BINDINGS_FILE, env);
+      const resolved = resolvedRawPath('archive.imports', 'archive-media-bindings.sqlite', env);
       expect(defaultArchiveMediaBindingsPath(env)).toBe(resolved);
       expect(archiveMediaBindingsPath(defaultArchiveImportStatePath(env))).toBe(resolved);
       return resolved;
@@ -131,7 +130,7 @@ describe('where the bindings live is the layout resolvers\' answer', () => {
   test('a file at the legacy location is evidence of a legacy account, and only this source owns the name', () => {
     const env = { HOME: temp() };
     expect(legacyAccountPaths('archive.imports', env).raw).toContain(join(olympusDataRoot(env), 'archive-media-bindings.sqlite'));
-    expect(() => accountRawPath({ source_id: 'x.bookmarks', slot: '1', layout: 'folder' }, ARCHIVE_MEDIA_BINDINGS_FILE, env)).toThrow(TypeError);
+    expect(() => accountRawPath({ source_id: 'x.bookmarks', slot: '1', layout: 'folder' }, 'archive-media-bindings.sqlite', env)).toThrow(TypeError);
   });
 });
 

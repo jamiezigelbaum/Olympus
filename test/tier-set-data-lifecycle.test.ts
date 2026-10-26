@@ -1,9 +1,10 @@
 // P1b data lifecycle: a tiered store set's ledger (the secure store's
 // co-located ledger), its secret-locations index (beside the same store) and
 // its on-demand Public store are all in the lifecycle inventory, so
-// `delete --source` takes exactly that source's files, relocated or not, and
-// `delete --all` takes every one.
+// `delete --source` takes exactly that source's files, wherever its account's
+// layout puts them, and `delete --all` takes every one.
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,10 +16,6 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import {
   GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
-  defaultGmailPublicConnectorStoreDbPath,
-  defaultGmailSecureConnectorStoreDbPath,
-  defaultGoogleDrivePublicConnectorStoreDbPath,
-  defaultGoogleDriveSecureConnectorStoreDbPath,
 } from '../src/workers/google-connectors/index.ts';
 
 function seed(secureStorePath: string, publicStorePath: string, provider: string): string[] {
@@ -50,24 +47,20 @@ describe('tiered store sets are covered by data deletion', () => {
   test('the Public stores are in their sources\' inventory', () => {
     const env = { HOME: '/home/owner', XDG_DATA_HOME: '/data' };
     const paths = (sourceId: string) => lifecycleAccountFiles(sourceId, { env }).stores;
-    expect(paths('gmail.email')).toContain(defaultGmailPublicConnectorStoreDbPath(env));
-    expect(paths('google_drive.docs')).toContain(defaultGoogleDrivePublicConnectorStoreDbPath(env));
+    expect(paths('gmail.email')).toContain(resolvedStorePath('gmail.email', 'public_safe', env));
+    expect(paths('google_drive.docs')).toContain(resolvedStorePath('google_drive.docs', 'public_safe', env));
   });
 
-  test('delete --source takes the set ledger, the secret-locations index and the Public store of that source only, even relocated', () => {
+  test('delete --source takes the set ledger, the secret-locations index and the Public store of that source only', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-set-lifecycle-'));
     try {
       const homeDir = join(dir, 'home');
       const env = {
         HOME: homeDir,
         XDG_DATA_HOME: join(dir, 'xdg-data'),
-        // The Drive secure store (and so its set ledger and secret index) and
-        // the Gmail Public store are relocated outside every Olympus root.
-        OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH: join(dir, 'elsewhere', 'drive-secure.sqlite'),
-        OLYMPUS_SOURCE_INDEX_GMAIL_PUBLIC_CONNECTOR_STORE_DB_PATH: join(dir, 'elsewhere', 'gmail-public.sqlite'),
       };
-      const gmail = seed(defaultGmailSecureConnectorStoreDbPath(env), defaultGmailPublicConnectorStoreDbPath(env), 'gmail');
-      const drive = seed(defaultGoogleDriveSecureConnectorStoreDbPath(env), defaultGoogleDrivePublicConnectorStoreDbPath(env), 'google_drive');
+      const gmail = seed(resolvedStorePath('gmail.email', 'secure_local', env), resolvedStorePath('gmail.email', 'public_safe', env), 'gmail');
+      const drive = seed(resolvedStorePath('google_drive.docs', 'secure_local', env), resolvedStorePath('google_drive.docs', 'public_safe', env), 'google_drive');
       for (const path of [...gmail, ...drive]) expect(existsSync(path)).toBe(true);
 
       deleteOlympusData({ sourceId: 'google_drive.docs', homeDir, env });

@@ -26,8 +26,6 @@ export {
   createWhatsAppConnectorStore,
   createWhatsAppTierLane,
   createWhatsAppConnectorStoreSyncHandler,
-  defaultWhatsAppConnectorStoreDbPath,
-  defaultWhatsAppInternalConnectorStoreDbPath,
   WHATSAPP_INTERNAL_CORPUS_ID,
   defaultWhatsAppMediaDir,
   defaultWhatsAppMediaRoots,

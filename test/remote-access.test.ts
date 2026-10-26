@@ -41,7 +41,6 @@ function home(workerEnv = ''): { env: Record<string, string>; dir: string; root:
   const env = {
     HOME: homeDir,
     OLYMPUS_CONFIG: join(root, 'missing-config.json'),
-    OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: join(root, 'remote-connections.sqlite'),
   };
   return { env, dir: remoteAccessDir({ HOME: homeDir }), root };
 }

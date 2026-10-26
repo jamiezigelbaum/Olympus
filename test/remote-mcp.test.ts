@@ -19,6 +19,7 @@ import { V0_4_HERMES_MCP_TOOLS } from '../src/core/public-surface.ts';
 import {
   openRemoteConnectionStore,
   REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS,
+  resolveRemoteConnectionsDbPath,
   type RemoteConnectionStore,
 } from '../src/core/remote-connections.ts';
 import { runConnectionsCommand } from '../src/cli.ts';
@@ -401,21 +402,25 @@ describe('review fixes', () => {
     expect(runConnectionsCommand(['list'], env)).toMatchObject({ db_path: expected });
     expect(existsSync(join(dir, 'shell-xdg'))).toBe(false);
 
-    // An explicit path in worker.env is what the worker uses, so the CLI does too.
+    // No env variable relocates the database since source storage step 6: a
+    // path variable in worker.env or the shell changes nothing.
     const pinned = join(dir, 'pinned', 'rc.sqlite');
     writeWorkerEnv(home, `XDG_DATA_HOME=${workerXdg}\nOLYMPUS_REMOTE_CONNECTIONS_DB_PATH=${pinned}\n`);
-    expect(runConnectionsCommand(['list'], env)).toMatchObject({ db_path: pinned });
-    // And an explicit shell path is the owner naming the database outright.
+    expect(runConnectionsCommand(['list'], env)).toMatchObject({ db_path: expected });
     const shellPinned = join(dir, 'shell-pinned', 'rc.sqlite');
     expect(runConnectionsCommand(['list'], { ...env, OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: shellPinned }))
-      .toMatchObject({ db_path: shellPinned });
+      .toMatchObject({ db_path: expected });
+    expect(existsSync(pinned)).toBe(false);
+    expect(existsSync(shellPinned)).toBe(false);
   });
 
   test('data delete --all removes the connection database, revoking every token; export names it as left behind', () => {
     const home = join(dir, 'lifecycle-home');
     mkdirSync(home, { recursive: true });
-    const dbPath = join(dir, 'outside-roots', 'remote-connections.sqlite');
-    const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share'), OLYMPUS_REMOTE_CONNECTIONS_DB_PATH: dbPath };
+    // A data folder relocated outside the home's roots by XDG_DATA_HOME.
+    const env = { HOME: home, XDG_DATA_HOME: join(dir, 'outside-roots') };
+    const dbPath = resolveRemoteConnectionsDbPath(env);
+    expect(dbPath.startsWith(join(dir, 'outside-roots'))).toBe(true);
     const outside = openRemoteConnectionStore(dbPath);
     const { token } = outside.create('Muse');
     outside.close();

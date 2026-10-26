@@ -19,7 +19,7 @@
 import { readFileSync } from 'node:fs';
 import { writePrivateFileAtomicSync } from '../../src/core/atomic-file.ts';
 import { withFileLeaseSync } from '../../src/core/file-lease.ts';
-import { olympusDataPath, type LayoutEnv } from '../../src/core/olympus-layout.ts';
+import { sharedDataPath, type LayoutEnv } from '../../src/core/olympus-layout.ts';
 
 export const SOURCE_REGISTRY_SCHEMA = 1;
 
@@ -54,7 +54,7 @@ export class SourceRegistryError extends Error {
 }
 
 export function sourceRegistryPath(env: LayoutEnv = process.env): string {
-  return olympusDataPath(env, 'registry.json');
+  return sharedDataPath('registry', env);
 }
 
 export function readSourceRegistry(env: LayoutEnv = process.env): SourceRegistry {

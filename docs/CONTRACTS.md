@@ -146,7 +146,8 @@ Notes:
   item holds, whether it holds content, and whether it is incomplete or
   tombstoned) and applies the record only if it is newer in that order, or at
   the same version brings content the stored item lacks or completes an item
-  cut off between legs; an older record never applies, whatever the
+  cut off between legs (the write's own record, `owedBodyVersion`, even when it
+  is older); an older record never applies, whatever the
   completeness or visibility of what is stored (it never restores a deleted
   item or a Secret, nor overwrites an item written to one leg only); on a tie
   the live record is kept. The rule

@@ -49,8 +49,6 @@ async function main(): Promise<void> {
   const connector = createWhatsAppLiveSourceConnector({
     spoolDir,
     ...(args.account ? { account: args.account } : {}),
-    // Sender repair reads with its own cursor: the replays it owes are its own, never the drain's.
-    consumer: args.mode === 'repair-senders' ? `${WHATSAPP_LIVE_CONNECTOR_ID}:sender-repair` : WHATSAPP_LIVE_CONNECTOR_ID,
   });
   const store = openConnectorStore({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, {
     dbPath,

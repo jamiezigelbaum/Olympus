@@ -6,7 +6,10 @@ import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
-import { WHATSAPP_SOURCE_ID, legacyWhatsAppLiveSyncStateDir } from '../../core/olympus-layout.ts';
+import {
+  legacyWhatsAppLiveSyncPaths,
+  WHATSAPP_SOURCE_ID,
+} from '../../core/olympus-layout.ts';
 import { placedAccount, resolvedRawPath, resolvedStorePath, whatsappMovedPathMapper } from '../../core/source-placement.ts';
 import type {
   LocalConnectorStore,
@@ -118,9 +121,9 @@ export interface WhatsAppConnectorStoreSyncReceipt {
     capture_stale_threshold_seconds: number;
     capture_age_seconds?: number;
     /** 1 when the bridge reports capture running and no message arrived within the threshold. */
-    capture_quiet?: number;
+    capture_quiet: 0 | 1;
     /** 1 when the bridge says it is disconnected (past a short grace): capture has stopped. */
-    capture_stopped?: number;
+    capture_stopped: 0 | 1;
     /**
      * Spool lines whose message was judged Secrets and that this pull
      * rewrote without their text (blanked ones included).
@@ -171,12 +174,6 @@ export function defaultWhatsAppMediaRoots(
   return [resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media-root', env)];
 }
 
-export function defaultWhatsAppConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env);
-}
-
 /**
  * Where scripts/whatsapp-live-sync.ts reads and writes: the account's own
  * folder when it lives in one, else the places that script always used, which
@@ -189,10 +186,9 @@ export function whatsAppLiveSyncScriptPaths(
   homeDir: string | undefined = homedir(),
 ): { spoolDir: string; dbPath: string } {
   if (placedAccount(WHATSAPP_SOURCE_ID, env).layout === 'folder') {
-    return { spoolDir: defaultWhatsAppSpoolDir(env), dbPath: defaultWhatsAppConnectorStoreDbPath(env) };
+    return { spoolDir: defaultWhatsAppSpoolDir(env), dbPath: resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env) };
   }
-  const stateDir = legacyWhatsAppLiveSyncStateDir(env, homeDir ?? homedir());
-  return { spoolDir: join(stateDir, 'spool'), dbPath: join(stateDir, 'connector-store.db') };
+  return legacyWhatsAppLiveSyncPaths(env, homeDir ?? homedir());
 }
 
 // The store may also contain archive-import runs. Only a cursor shaped like the
@@ -213,7 +209,7 @@ function spoolPositionOf(cursor: string): string | undefined {
 /** The byte offset a committed cursor stands at, when it carries one (not inside an over-long record). */
 function byteOffsetOf(cursor: string | undefined): number | undefined {
   if (cursor === undefined) return undefined;
-  const found = /@(\d+)(?:~r[0-9a-f]+\.\d+)?$/u.exec(spoolPositionOf(cursor) ?? '');
+  const found = /@(\d+)(?:~r[0-9a-f.]+)?$/u.exec(spoolPositionOf(cursor) ?? '');
   return found ? Number(found[1]) : undefined;
 }
 
@@ -222,12 +218,6 @@ function lineCursorOf(cursor: string | undefined): string | undefined {
   if (cursor === undefined) return undefined;
   const position = spoolPositionOf(cursor);
   return position === undefined ? undefined : whatsAppSpoolLineCursor(position);
-}
-
-export function defaultWhatsAppInternalConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(WHATSAPP_SOURCE_ID, 'internal', env);
 }
 
 /**
@@ -259,7 +249,7 @@ export function createWhatsAppTierLane(options: {
     throw new Error('The WhatsApp lane\'s own store is secure_local.');
   }
   const env = options.env ?? process.env;
-  const internalDbPath = defaultWhatsAppInternalConnectorStoreDbPath(env);
+  const internalDbPath = resolvedStorePath(WHATSAPP_SOURCE_ID, 'internal', env);
   return createExistingStoreTierLane({
     setId: WHATSAPP_PERSONAL_SOURCE_ID,
     store: options.store,
@@ -289,7 +279,7 @@ export function createWhatsAppConnectorStore(
   env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
   return openConnectorStore({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, {
-    dbPath: defaultWhatsAppConnectorStoreDbPath(env),
+    dbPath: resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env),
     corpusId: WHATSAPP_LIVE_CORPUS_ID,
     family: 'chat',
     trustDomain: 'secure_local',
@@ -318,7 +308,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   const mediaDir = options.mediaDir?.trim() || defaultWhatsAppMediaDir(env);
   // One connector per pull, so each receipt counts what that pull read.
   const connectorFor = (findings: WhatsAppSpoolPassFindings) => ({
-    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings, consumer: WHATSAPP_PRODUCT_CONNECTOR_ID }),
+    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings }),
     // The private drain retains WHATSAPP_LIVE_CONNECTOR_ID until it is retired
     // after observed qualification. A distinct product cursor prevents either
     // writer from advancing or regressing the other's traversal meanwhile.

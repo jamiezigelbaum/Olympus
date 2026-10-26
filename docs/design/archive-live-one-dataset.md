@@ -90,7 +90,7 @@ decides again.
   item written to one leg only, or left as a Secret's location or a
   deletion's tombstone, still has its version, so an old export never
   restores what was deleted or made a Secret, nor overwrites a partly
-  written item. A record of an incomplete item's own version completes it.
+  written item. A record of an incomplete item's own version completes it (an item is incomplete while a write intent for it is pending).
 - At the same version, a record applies only when it brings content the
   stored item lacks: mail outside the Gmail window is names-only, and a live
   WhatsApp photo is metadata only (the bridge downloads voice notes alone).
@@ -391,12 +391,37 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   children, and a page cut resumes at the earliest record any unyielded item
   still depends on (a merged names-only item depends on the record that
   brought its body), so a cut never loses a body or stores a child ahead of
-  its parent. A names-only version move (`content_unread`) waits for the end of
-  the run and happens only when every active row of the item holds one version,
-  so a body one leg has not written is never hidden behind a newer version. A
-  deletion of the version a half-finished deletion holds finishes it (content
-  never does), and an item the listing skipped whose stored state is incomplete
-  counts as unstored.
+  its parent.
+- **Write intents (2026-10-26).** An item's legs are written one after the
+  other, so a crash between them used to leave a half state that the next pass
+  had to interpret from the rows (an "incomplete" rule in the intake, a live
+  tie exception, a deferred names-only version move, a hold on skipped
+  incomplete items). That is gone. The ledger holds one **write intent** per
+  item (`tier_write_intents`, schema 10), written in the same transaction as
+  the placement and cleared last, after every leg has its write. Kinds:
+  `deletion` and `secret` (redone from the intent alone), `advance` (a version
+  move over rows that hold the item; the intent is the redo), `content` and
+  `names` (a body or names the legs are owed). At the start of every pass,
+  before any record is read, the set finishes every deletion, secret and
+  advance intent, and the children of a finished deletion go with it. While an
+  intent is pending the lookup reports the intended state (the intent's version
+  and `incomplete`), and reads hide an item with a deletion or Secret intent at
+  once. No path lowers a stored version: a names-only record moves a version by
+  an `advance` intent put in place of the content intent it follows, once every
+  leg has its write. Deviation from "keep the body in the Private held copy":
+  the body and the names are not kept in the ledger, so a `content` or
+  `names` intent is repaired by replaying its own record; when a newer
+  names-only record took an older record's body, the intent also holds that
+  record's version (`bodyVersion`, read back as `owedBodyVersion`) so the replay
+  applies that record at the item's version. Residuals: a deletion of a
+  never-stored item leaves no row; an owed `content` or `names` write waits
+  for its own record; a newer names-only record holds behind an earlier run's
+  owed write until that write is finished.
+- **The hold survives a fetch (2026-10-26).** A held archive item's hold is
+  carried by whatever replaces it: the archive input decorates `fetchItem` as
+  well as `listItems`, and the local-index lane keeps the hold on both of its
+  `fetchItem` replacements. `test/archive-import-hold-guard.test.ts` fails when
+  a connector method is added without a decision (`holds` or `neutral`).
 - **A refused item is told (2026-10-26).** When placement refuses an item (for
   example a trust domain that does not match), the import still completes but
   shows it as a gap, "Not imported" (`item_refused`), with the count, as the
@@ -444,21 +469,24 @@ Live WhatsApp capture, with no change to identities or stores
   what a scan reached, fixed before the scan starts (the lines the file held
   then, or the cursor's), never recounted after: a line appended while
   clearing runs is owed to the next pull. A listing reset (a file replaced,
-  or a cursor recovered) is a durable obligation of every reader with its
-  own cursor (the product pull, sender repair; `spool-obligations.ts`, not
-  the disposable index), written before the index forgets the file, carried
-  as `~r<generation>.<epoch>` on the cursors a reader is handed after it,
-  and settled only by that reader's own cursor coming back from after it:
-  one reader never settles another's, and a pass that fails before its
-  cursor commits still owes the read again. The generation is a random id
-  per build of the index, so a cursor of an earlier build settles nothing
-  and its file is read again from its start. Every other durable write that comes before the one
+  cut or rewritten under a cursor, or the disposable index rebuilt, since it
+  then no longer knows what the files held) adds one to a single durable
+  counter beside the spool (`spool-resets.ts`), written before the index
+  forgets anything. Every cursor carries the count as `~r<count>`; a cursor
+  with another count, or none, reads the whole spool again from its start.
+  That is safe because intake is idempotent by identity and version, and a
+  reset is rare enough for a full replay to be cheap. Nothing is owed or
+  settled per reader: a reader is caught up when its cursor carries the
+  current count, so one reader catching up never affects another, and a pass
+  that fails before its cursor commits reads the spool again. A counter that
+  cannot be opened fails the listing before anything is forgotten. Every
+  other durable write that comes before the one
   that depends on it is safe to repeat: a Secrets rewrite before its cleared
   record (redone, the same rewrite), the index's rows before the tier set's
   cursor (read again from the old cursor, the rows already there), the match
   ledger's ids and aliases before the store (the same ids again), and the
   index's refresh after clearing (a missed refresh reads as a replacement,
-  owed and read again).
+  counted and read again).
 - **One builder, the intake rule.** The spool is the WhatsApp connector's
   live input: its records become items through the connector's one record
   builder under the shared intake rule (`core/source-inputs.ts`), versions

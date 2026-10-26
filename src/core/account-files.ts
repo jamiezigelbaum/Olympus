@@ -13,12 +13,12 @@
  * which are exactly the paths its connector reads and writes, overrides
  * included; and the pairing module names its session (core/pairing-session-paths.ts).
  *
- * Kept here, not in the layout module, are only what no connector resolves any
- * more: the pre-1.0 per-family indexes an upgraded install still has on disk,
- * and the stores the connector-store mount list places (Reflect, Roam).
+ * The layout module names every path here too: the pre-1.0 per-family
+ * indexes an upgraded install still has on disk, and the stores the
+ * connector-store mount list places (Reflect, Roam). This module only says
+ * which of them an account owns.
  */
 import { lstatSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   FOLDER_LAYOUT_SOURCES,
@@ -28,7 +28,10 @@ import {
   accountRawPath,
   accountStoreNames,
   accountStorePath,
-  olympusDataPath,
+  legacyTelegramSpoolDrainCursorPath,
+  mountedStorePaths,
+  mountedStoreSources,
+  preCutoverIndex,
   xBookmarksApiUsageDbPath,
   type AccountRawName,
   type LayoutAccount,
@@ -84,52 +87,6 @@ export interface AccountFilesContext {
 }
 
 /**
- * Stores only the connector-store mount list places, by its default `dbPath`
- * (`OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON`, pinned in
- * `config/private-host.env`). No worker resolves them, so they are named here:
- * a lifecycle test fails if a mounted `dbPath` is named by no account. Apple
- * Messages is absent on purpose: no install mounts it and its lane is pinned
- * off (identity air-gap), so it owns no store to lose.
- */
-const MOUNTED_STORES: Readonly<Record<string, readonly string[]>> = {
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-  'reflect.notes': ['reflect-notes.sqlite'],
-  'roam.notes': ['roam-notes.sqlite'],
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
-};
-
-/**
- * The grandfathered per-family index an install upgraded across the Slice 2
- * cut still holds. Nothing reads it any more, but it sits in the data root,
- * which Delete all removes, so Export copies it and Delete takes it with its
- * account. Each carries its own retired schema marker (never the connector
- * store's), and the env override the deleted reader honored still finds it.
- */
-const PRE_CUTOVER_INDEXES: Readonly<Record<string, { file: string; override: string; storeId: string }>> = {
-  'gmail.email': { file: 'email-index.sqlite', override: 'OLYMPUS_EMAIL_INDEX_DB_PATH', storeId: 'email-index' },
-  'dropbox.files': {
-    file: 'dropbox-files-index.sqlite',
-    override: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_DB_PATH',
-    storeId: 'dropbox-files-index',
-  },
-  'google_drive.docs': {
-    file: 'google-drive-docs-index.sqlite',
-    override: 'OLYMPUS_SOURCE_INDEX_DRIVE_INDEX_DB_PATH',
-    storeId: 'google-drive-docs-index',
-  },
-  'telegram.messages': {
-    file: 'telegram-messages-index.sqlite',
-    override: 'OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH',
-    storeId: 'telegram-messages-index',
-  },
-  'readwise.library': {
-    file: 'readwise-index.sqlite',
-    override: 'OLYMPUS_SOURCE_INDEX_READWISE_INDEX_DB_PATH',
-    storeId: 'readwise-index',
-  },
-};
-
-/**
  * The order a source's stores are listed in, where it is not the layout's: as
  * its connector listed them (WhatsApp's protected store first), so the
  * manifest and the messaging resolution golden keep their order.
@@ -145,7 +102,7 @@ const SOURCE_ALIASES: Readonly<Record<string, readonly string[]>> = {
 
 /** Every source the data lifecycle can hold files for: each with a layout, and each the mount list places. */
 export function lifecycleSourceIds(): string[] {
-  return [...new Set([...FOLDER_LAYOUT_SOURCES, ...Object.keys(MOUNTED_STORES)])];
+  return [...new Set([...FOLDER_LAYOUT_SOURCES, ...mountedStoreSources()])];
 }
 
 export function lifecycleSourceAliases(sourceId: string): readonly string[] {
@@ -191,11 +148,8 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
   const folder = folderPath !== undefined && (account.layout === 'folder' || existsOnDisk(folderPath)) ? folderPath : undefined;
   const stores = inDataFolder(() => hasLayout
     ? (STORE_ORDER[sourceId] ?? accountStoreNames(sourceId, archiveImportFamilies())).map((name) => accountStorePath(account, name, env))
-    : (MOUNTED_STORES[sourceId] ?? []).map((file) => olympusDataPath(env, file)));
-  const preCutover = PRE_CUTOVER_INDEXES[sourceId];
-  const preCutoverPath = preCutover
-    ? inDataFolder(() => env[preCutover.override]?.trim() || olympusDataPath(env, preCutover.file)).value
-    : undefined;
+    : mountedStorePaths(sourceId, env));
+  const preCutover = inDataFolder(() => preCutoverIndex(sourceId, env)).value;
   const files: AccountFiles = {
     account,
     ...(folder ? { folder } : {}),
@@ -203,7 +157,7 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
       if (stores.error !== undefined) throw stores.error;
       return stores.value!;
     },
-    ...(preCutover && preCutoverPath ? { preCutoverIndex: { path: preCutoverPath, storeId: preCutover.storeId } } : {}),
+    ...(preCutover ? { preCutoverIndex: preCutover } : {}),
     raw: [],
     rawDatabases: [],
     settings: sourceId === 'dropbox.files' ? [dropboxIngestionPolicyPath(context)] : [],
@@ -212,24 +166,24 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
   const pairingContext = { env, layout: account.layout };
   if (sourceId === TELEGRAM_SOURCE_ID) files.pairing = telegramPairingSessionPaths(pairingContext);
   if (sourceId === WHATSAPP_SOURCE_ID) files.pairing = whatsappPairingSessionPaths(pairingContext);
-  const raw = (name: AccountRawName, options: { usageDbPath?: string } = {}): string => accountRawPath(account, name, env, options);
+  const rawPath = (name: AccountRawName, options: { usageDbPath?: string } = {}): string => accountRawPath(account, name, env, options);
   switch (sourceId) {
     case 'local.files':
       // The change snapshots that let a restart catch up without a rescan.
-      files.raw.push(raw('watch'));
+      files.raw.push(rawPath('watch'));
       break;
     case 'archive.imports':
       // The record of each import and the imports asked for but not yet
       // recorded; and the media files each import bound, by name. The
       // person's own export files are never touched.
-      files.raw.push(raw('archive-imports.json'), raw('archive-import-requests.json'));
-      files.rawDatabases.push({ path: raw('archive-media-bindings.sqlite'), storeId: ARCHIVE_MEDIA_BINDINGS_STORE_ID });
+      files.raw.push(rawPath('archive-imports.json'), rawPath('archive-import-requests.json'));
+      files.rawDatabases.push({ path: rawPath('archive-media-bindings.sqlite'), storeId: ARCHIVE_MEDIA_BINDINGS_STORE_ID });
       break;
     case 'x.bookmarks':
       // X's reconcile snapshots per X user id. The usage ledger beside them is
       // the quota ledger and stays; its sync checkpoints are a forget step.
       files.rawDatabases.push({
-        path: raw('x-reconcile.sqlite', { usageDbPath: xBookmarksApiUsageDbPath(env) }),
+        path: rawPath('x-reconcile.sqlite', { usageDbPath: xBookmarksApiUsageDbPath(env) }),
         storeId: X_BOOKMARKS_RECONCILE_STATE_STORE_ID,
       });
       break;
@@ -239,7 +193,7 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
       // has written into it. A legacy account's login is Unpair's, kept back
       // here; a folder account's is in its folder and goes with it.
       if (account.layout === 'folder') {
-        files.raw.push(raw('telegram-spool'), raw('telegram-gateway'));
+        files.raw.push(rawPath('telegram-spool'), rawPath('telegram-gateway'));
       } else {
         files.raw.push(...legacyTelegramCaptureState(account, env));
         files.preserved.push(...files.pairing!);
@@ -249,7 +203,7 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
       // The spool carries every message's full text, the session the
       // linked-device keys, and media the captured audio: a folder account
       // keeps all of it in its one state folder.
-      files.raw.push(...(account.layout === 'folder' ? [raw('whatsapp')] : legacyWhatsAppCaptureState(account, env, files.pairing!)));
+      files.raw.push(...(account.layout === 'folder' ? [rawPath('whatsapp')] : legacyWhatsAppCaptureState(account, env, files.pairing!)));
       break;
   }
   files.raw = [...new Set(files.raw)];
@@ -289,11 +243,9 @@ export function retainedCaptureGrants(handleRegistryPath: string): Array<{
 }
 
 function legacyTelegramCaptureState(account: AccountFilesAccount, env: LayoutEnv): string[] {
-  const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim()
-    || join(env.XDG_STATE_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'state'), 'olympus', 'telegram-spool-drain');
   return [
     accountRawPath(account, 'telegram-spool', env),
-    env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim() || join(drainStateDir, 'cursor.json'),
+    legacyTelegramSpoolDrainCursorPath(env),
     accountRawPath(account, 'telegram-gateway', env),
   ];
 }

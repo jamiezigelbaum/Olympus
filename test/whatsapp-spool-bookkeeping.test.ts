@@ -13,6 +13,7 @@ import { Database } from 'bun:sqlite';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { WHATSAPP_SPOOL_INDEX_FILE, WhatsAppSpoolIndex } from '../src/workers/whatsapp/spool-index.ts';
 import { createWhatsAppLiveSourceConnector, emptyWhatsAppSpoolPassFindings } from '../src/workers/whatsapp/live-connector.ts';
+import { WHATSAPP_SPOOL_RESET_FILE } from '../src/workers/whatsapp/spool-resets.ts';
 import {
   WHATSAPP_LIVE_CORPUS_ID,
   WHATSAPP_SPOOL_REDACTION_FAILED_WARNING,
@@ -311,56 +312,134 @@ describe('review round 6', () => {
     // Retried from the old cursor (the failed pass committed none): c is read.
     const retried = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor }));
     expect(retried.flatMap((page) => page.items.map((item: RawItem) => item.identity.providerItemId))).toContain('c');
-    // Once a cursor handed out after the reset comes back, the obligation is done: nothing is read again.
+    // Once a cursor carrying the new count comes back, the reset is done: nothing is read again.
     const settled = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor: retried.at(-1)!.nextCursor! }));
     expect(settled.flatMap((page) => [...page.items])).toEqual([]);
   });
 });
 
-describe('review round 7', () => {
+describe('one reset counter (review round 8)', () => {
   const idsOf = (pages: readonly SourceConnectorListPage[]) => pages.flatMap((page) => page.items.map((item: RawItem) => item.identity.providerItemId));
-
-  test('another reader settling its own replay never erases the one ingestion owes', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-consumers-'));
+  const list = (dir: string, cursor?: string, extra: { limit?: number; passByteBudget?: number } = {}) =>
+    drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, ...(extra.passByteBudget ? { passByteBudget: extra.passByteBudget } : {}) })
+      .listItems({ ...(cursor ? { cursor } : {}), ...(extra.limit ? { limit: extra.limit } : {}) }));
+  const spool = (name: string) => {
+    const dir = mkdtempSync(join(tmpdir(), `whatsapp-bookkeeping-${name}-`));
     roots.push(dir);
+    return dir;
+  };
+  /** Lists from `cursor` until a listing reads nothing new; fails if that never happens (a replay that never settles). */
+  async function settle(dir: string, cursor: string | undefined, limit?: number): Promise<{ ids: string[]; cursor: string | undefined }> {
+    const ids: string[] = [];
+    for (let pass = 0; pass < 20; pass += 1) {
+      const pages = await list(dir, cursor, limit ? { limit } : {});
+      const read = idsOf(pages);
+      cursor = pages.at(-1)?.nextCursor ?? cursor;
+      if (read.length === 0) return { ids, cursor };
+      ids.push(...read);
+    }
+    throw new Error('the listing never settled');
+  }
+
+  test('every cursor carries the reset count, and a cursor that carries none reads the whole spool again', async () => {
+    const dir = spool('count');
+    writeFileSync(join(dir, '2026-10-24.jsonl'), line('a'));
+    writeFileSync(join(dir, '2026-10-25.jsonl'), line('b'));
+    const cursor = (await list(dir)).at(-1)!.nextCursor!;
+    expect(cursor).toMatch(/~r0$/u);
+    // The same place without a count (an older cursor): it cannot say no reset happened since, so a is read again.
+    const findings = emptyWhatsAppSpoolPassFindings();
+    const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, findings }).listItems({ cursor: cursor.replace(/~r\d+$/u, '') }));
+    expect(idsOf(pages)).toEqual(['a', 'b']);
+    expect(findings.cursorsRecovered).toBe(1);
+  });
+
+  test('a reset reaches every reader: one reader catching up never stops another reading it', async () => {
+    const dir = spool('readers');
     const day = join(dir, '2026-10-24.jsonl');
     writeFileSync(day, line('a') + line('b'));
-    const ingest = (cursor?: string) => drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, consumer: 'ingest' }).listItems(cursor ? { cursor } : {}));
-    const repair = (cursor?: string, limit?: number) => drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, consumer: 'sender-repair' })
-      .listItems({ ...(cursor ? { cursor } : {}), ...(limit ? { limit } : {}) }));
-    const committed = (await ingest()).at(-1)!.nextCursor!;
-    const repaired = (await repair()).at(-1)!.nextCursor!;
+    const ingest = (await list(dir)).at(-1)!.nextCursor!;
+    const repair = (await list(dir)).at(-1)!.nextCursor!;
     writeFileSync(day, line('a') + line('c'));
-    // Ingestion's replay fails after the invalidation committed.
+    // Ingestion's replay fails after the reset was counted.
     const noteFile = WhatsAppSpoolIndex.prototype.noteFile;
     WhatsAppSpoolIndex.prototype.noteFile = function failing() { throw new Error('crash during the replay'); };
     try {
-      await expect(ingest(committed)).rejects.toThrow('crash during the replay');
+      await expect(list(dir, ingest)).rejects.toThrow('crash during the replay');
     } finally {
       WhatsAppSpoolIndex.prototype.noteFile = noteFile;
     }
-    // Sender repair reads its own replay, one item at a time, and resumes its cursor: it settles only its own.
-    const first = await repair(repaired, 1);
-    await repair(first.at(-1)!.nextCursor!, 1);
-    // Ingestion, retried from its committed cursor, still owes the read again: c is read.
-    expect(idsOf(await ingest(committed))).toContain('c');
+    // Sender repair reads the replay one item at a time and catches up.
+    const repaired = await settle(dir, repair, 1);
+    expect(repaired.ids).toContain('c');
+    // Ingestion, retried from its committed cursor, still reads it: c is read.
+    expect(idsOf(await list(dir, ingest))).toContain('c');
   });
 
-  test('a cursor of an earlier build of the index never settles a newer reset', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-generation-'));
-    roots.push(dir);
+  test('after the index is rebuilt a replay settles: nothing is emitted again forever, and the new line is read', async () => {
+    const dir = spool('rebuild');
     const day = join(dir, '2026-10-24.jsonl');
     writeFileSync(day, line('a') + line('b'));
-    let cursor = (await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems())).at(-1)!.nextCursor!;
+    let cursor = (await list(dir)).at(-1)!.nextCursor!;
     writeFileSync(day, line('a') + line('c'));
-    cursor = (await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor }))).at(-1)!.nextCursor!;
-    expect(cursor).toMatch(/~r[0-9a-f]+\.\d+$/u);
-    // The disposable index is deleted (its epochs start again), and the file is written again before any listing:
-    // the new build never held the file, so only the cursor's own generation can say it is stale.
+    cursor = (await settle(dir, cursor)).cursor!;
+    // The disposable index is deleted, and the file is written again before any listing: the new build never held
+    // the file, so only the rebuild being counted can say the old cursor is stale.
     rmSync(join(dir, WHATSAPP_SPOOL_INDEX_FILE), { force: true });
     writeFileSync(day, line('a') + line('d'));
-    // The old cursor names another build: it settles nothing, and its file is read again.
-    expect(idsOf(await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor })))).toContain('d');
+    const replay = await settle(dir, cursor);
+    expect(replay.ids).toContain('d');
+    // Read once: a is emitted by the replay, then never again.
+    expect(replay.ids.filter((id) => id === 'a')).toHaveLength(1);
+    expect(idsOf(await list(dir, replay.cursor))).toEqual([]);
+  });
+
+  test('a cursor in a later file still reads an earlier file written again while the index was gone', async () => {
+    const dir = spool('earlier');
+    const first = join(dir, '2026-10-24.jsonl');
+    writeFileSync(first, line('a') + line('b'));
+    writeFileSync(join(dir, '2026-10-25.jsonl'), line('x'));
+    const cursor = (await list(dir)).at(-1)!.nextCursor!;
+    expect(cursor.startsWith('2026-10-25.jsonl:')).toBe(true);
+    rmSync(join(dir, WHATSAPP_SPOOL_INDEX_FILE), { force: true });
+    writeFileSync(first, line('a') + line('e'));
+    const replay = await settle(dir, cursor);
+    expect(replay.ids).toContain('e');
+    expect(idsOf(await list(dir, replay.cursor))).toEqual([]);
+  });
+
+  test('a counter that cannot be opened fails the listing before the index forgets anything', async () => {
+    const dir = spool('closed');
+    const day = join(dir, '2026-10-24.jsonl');
+    writeFileSync(day, line('a') + line('b'));
+    const cursor = (await list(dir)).at(-1)!.nextCursor!;
+    writeFileSync(day, line('a') + line('c'));
+    // The counter's place is taken by a folder: it cannot be opened.
+    for (const suffix of ['', '-wal', '-shm']) rmSync(join(dir, `${WHATSAPP_SPOOL_RESET_FILE}${suffix}`), { force: true });
+    mkdirSync(join(dir, WHATSAPP_SPOOL_RESET_FILE));
+    await expect(list(dir, cursor)).rejects.toThrow('reset counter');
+    // The index still holds the file as it was: with the counter back (empty, so the old cursor's count matches),
+    // the rewrite is still found, counted and read. Had the failed pass forgotten the file, c would be missed.
+    rmSync(join(dir, WHATSAPP_SPOOL_RESET_FILE), { recursive: true, force: true });
+    const replay = await settle(dir, cursor);
+    expect(replay.ids).toContain('c');
+  });
+
+  test('a record larger than the whole pass budget is still read, one record a pass at least', async () => {
+    const dir = spool('budget');
+    const ids = ['p0', 'p1', 'p2', 'p3', 'p4'];
+    writeFileSync(join(dir, '2026-10-24.jsonl'), ids.map((id) => line(id, { text: `${id} ${'y'.repeat(600)}` })).join(''));
+    const read: string[] = [];
+    let cursor: string | undefined;
+    for (let pass = 0; pass < ids.length; pass += 1) {
+      const pages = await list(dir, cursor, { passByteBudget: 64 });
+      const got = idsOf(pages);
+      expect(got.length).toBeGreaterThanOrEqual(1);
+      read.push(...got);
+      cursor = pages.at(-1)?.nextCursor ?? cursor;
+      if (read.length >= ids.length) break;
+    }
+    expect(read).toEqual(ids);
   });
 });
 

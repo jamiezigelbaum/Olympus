@@ -1,3 +1,4 @@
+import { resolvedRawPath } from '../src/core/source-placement.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +9,6 @@ import {
   XApiError,
   createXBookmarksApiSourceConnector,
   defaultXBookmarksLiveSyncConfig,
-  defaultXBookmarksReconcileStateDbPath,
   type XBookmarkPost,
   type XBookmarksLiveSyncConfig,
 } from '../src/workers/x-bookmarks/index.ts';
@@ -209,7 +209,7 @@ async function withStateFiles(
   const usagePath = join(dir, 'usage.sqlite');
   const usage = new LocalXBookmarksApiUsageStore(usagePath);
   try {
-    await run({ usage, statePath: defaultXBookmarksReconcileStateDbPath({}, usagePath) });
+    await run({ usage, statePath: resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', {}, { usageDbPath: usagePath }) });
   } finally {
     usage.close();
     rmSync(dir, { recursive: true, force: true });

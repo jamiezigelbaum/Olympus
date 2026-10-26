@@ -280,20 +280,6 @@ export interface XBookmarksPreservationFloorAssessment {
 }
 
 /**
- * Where X's reconcile state lives. The usage ledger is shared (it is the
- * quota ledger, kept when X is deleted), so the state no longer derives from
- * its path: it is the account's own `raw/x-reconcile.sqlite` once X lives in a
- * folder. A `legacy` account keeps the old rule (core/olympus-layout.ts).
- * `usageDbPath` is the ledger of a caller that was given one.
- */
-export function defaultXBookmarksReconcileStateDbPath(
-  env: Record<string, string | undefined> = process.env,
-  usageDbPath?: string,
-): string {
-  return resolvedRawPath(X_BOOKMARKS_SOURCE_ID, 'x-reconcile.sqlite', env, usageDbPath === undefined ? {} : { usageDbPath });
-}
-
-/**
  * X-private restart state. This store never participates in counts-only
  * admin/status responses; raw folder inventory is exposed only through the
  * explicit internal accessor used by acceptance tests and repair tooling.
@@ -302,7 +288,7 @@ export class LocalXBookmarksReconcileStateStore {
   readonly dbPath: string;
   private readonly db: Database;
 
-  constructor(dbPath = defaultXBookmarksReconcileStateDbPath(), env: Record<string, string | undefined> = process.env) {
+  constructor(dbPath = resolvedRawPath(X_BOOKMARKS_SOURCE_ID, 'x-reconcile.sqlite'), env: Record<string, string | undefined> = process.env) {
     this.dbPath = dbPath;
     if (dbPath !== ':memory:') {
       // This can be the account's first file, before its store opens.

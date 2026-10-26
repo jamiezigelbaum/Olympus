@@ -62,6 +62,7 @@ import {
 } from '../src/workers/dropbox-files/index.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 
 // Built at runtime: the repository refuses literal credential patterns.
 const FAKE_AWS_KEY = ['AKIA', 'QRSTUVWXYZ234567'].join('');
@@ -81,8 +82,8 @@ const closers: Array<() => void> = [];
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'olympus-fresh-tiers-'));
   env = {
-    OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
-    OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-public.sqlite'),
+    // The tier stores go where the layout puts them, under this test's own home.
+    HOME: join(root, 'home'),
     OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(root, 'no-exclusions.json'),
     OLYMPUS_TIER_RULES_PATH: join(root, 'olympus', 'tier-rules.json'),
     OLYMPUS_PRIVACY_PROFILE_PATH: join(root, 'olympus', 'privacy.json'),
@@ -186,7 +187,7 @@ describe('fresh install: Personal by default, flagged items wait, Secrets never 
     // The secret is Secret: stored nowhere, its location only.
     expect(install.lane.ledger.getCurrent(identity('id:secret'))).toMatchObject({ contentTier: 'secrets' });
     // Public is retired: no Public store was ever created.
-    expect(existsSync(env.OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH!)).toBe(false);
+    expect(existsSync(resolvedStorePath('dropbox.files', 'public_safe', env))).toBe(false);
 
     const { result } = await olympusSearch(install, 'orchard');
     const evidence = (result.structuredContent as { evidence: Array<{ title?: string; excerpt?: string }> }).evidence;

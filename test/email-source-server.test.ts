@@ -201,10 +201,12 @@ describe('canonical source-worker server configuration', () => {
   test('mounts only valid declared connector stores and reports invalid entries', () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-server-mounts-'));
     const failures: string[] = [];
+    // A source without a folder layout: its declaration places its store by
+    // dbPath (one with a folder layout names no path; see the mount guards).
     const raw = JSON.stringify([
       {
-        dbPath: join(root, 'gmail.sqlite'),
-        corpusId: 'internal.gmail.email',
+        dbPath: join(root, 'mail-export.sqlite'),
+        corpusId: 'internal.mail-export.email',
         family: 'email',
         trustDomain: 'internal',
         principalProvider: 'gmail',
@@ -224,7 +226,7 @@ describe('canonical source-worker server configuration', () => {
     try {
       expect(mounts).toHaveLength(1);
       expect(mounts[0]?.store).toMatchObject({
-        corpusId: 'internal.gmail.email',
+        corpusId: 'internal.mail-export.email',
         family: 'email',
         trustDomain: 'internal',
       });

@@ -96,7 +96,8 @@ import {
   type WhatsAppReactionIndex,
 } from './reaction-index.ts';
 import { WhatsAppSpoolIndex, comparePlaces, type SpoolPlace } from './spool-index.ts';
-import { WhatsAppSpoolObligations } from './spool-obligations.ts';
+import { WhatsAppSpoolResets } from './spool-resets.ts';
+import { CHILD_ITEM_ID_SEPARATOR, childProviderItemId } from '../../core/child-item-id.ts';
 import { WhatsAppMatchLedger } from './match-ledger.ts';
 import { OWNER_SENDER, liveMatchKeys, nameKey } from './match-keys.ts';
 import {
@@ -134,8 +135,6 @@ export interface WhatsAppLiveSourceConnectorOptions {
   passByteBudget?: number;
   /** A record longer than this is skipped and counted (default 1 MiB). */
   maxRecordBytes?: number;
-  /** Who reads with the cursors this connector hands out (default its id): each reader owes its own replays. */
-  consumer?: string;
 }
 
 /** What one or more listings skipped or recovered, as counts only. */
@@ -234,9 +233,8 @@ interface SpoolPosition {
   offset?: number;
   /** The place is inside an over-long record whose rest is still to be skipped (it was counted). */
   skipping?: true;
-  /** The index generation and the replay epoch this cursor was handed out at (spool-obligations.ts). */
-  generation?: string;
-  epoch?: number;
+  /** The spool's reset count this cursor was handed out at (spool-resets.ts); absent on a cursor that carries none. */
+  reset?: number;
 }
 
 /**
@@ -348,7 +346,6 @@ export function createWhatsAppLiveSourceConnector(
       passByteBudget,
       maxRecordBytes,
       findings,
-      consumer: options.consumer ?? CONNECTOR_ID,
     }),
   };
   const connector = inputConnector(builder, input);
@@ -428,7 +425,7 @@ function createRecordBuilder(
     },
     async fetchItem(localItemId, fetchOptions) {
       const locator = fetchOptions?.deferredBytes?.locator;
-      if (locator === undefined || !localItemId.includes('#child:')) return fetchItem(localItemId);
+      if (locator === undefined || !localItemId.includes(CHILD_ITEM_ID_SEPARATOR)) return fetchItem(localItemId);
       // A child an export brought is read by its locator.
       if (!readChild) throw new Error('This WhatsApp account cannot read imported media yet.');
       const bytes = readChild(locator, {});
@@ -469,16 +466,17 @@ export function createWhatsAppRecordBuilder(options: WhatsAppRecordBuilderOption
 function childIdentity(parent: SourceItemIdentity, child: WhatsAppChildRecord): SourceItemIdentity {
   return {
     ...parent,
-    providerItemId: `${parent.providerItemId}#child:${child.key}`,
-    localItemId: `${parent.localItemId}#child:${child.key}`,
+    providerItemId: childProviderItemId(parent.providerItemId, child.key),
+    // The local id is built the same way, from the parent's local id.
+    localItemId: childProviderItemId(parent.localItemId, child.key),
     parent: { providerItemId: parent.providerItemId, localItemId: parent.localItemId },
   };
 }
 
 function childIdentityFromLocalId(localItemId: string, account: string): SourceItemIdentity {
   const { chatJid, providerItemId } = localItemIdParts(localItemId, account);
-  const parentId = providerItemId.slice(0, providerItemId.indexOf('#child:'));
-  const parentLocal = localItemId.slice(0, localItemId.indexOf('#child:'));
+  const parentId = providerItemId.slice(0, providerItemId.indexOf(CHILD_ITEM_ID_SEPARATOR));
+  const parentLocal = localItemId.slice(0, localItemId.indexOf(CHILD_ITEM_ID_SEPARATOR));
   return {
     family: 'chat',
     provider: PROVIDER,
@@ -615,12 +613,10 @@ interface SpoolPassState {
   index: WhatsAppSpoolIndex | undefined;
   /** What the export inputs agreed with live capture: a live message an import holds already is stored as that item. */
   ledger?: WhatsAppMatchLedger | undefined;
-  /** Who reads with this cursor: replays are owed to, and settled by, each reader on its own. */
-  consumer: string;
-  obligations: WhatsAppSpoolObligations | undefined;
-  /** The index generation and replay epoch the cursors this listing hands out carry. */
-  generation?: string;
-  epoch?: number;
+  /** The spool's durable reset counter; a listing never reads without it. */
+  resets: WhatsAppSpoolResets;
+  /** The reset count the cursors this listing hands out carry. */
+  reset: number;
 }
 
 /**
@@ -630,54 +626,49 @@ interface SpoolPassState {
  */
 async function* liveRecords(
   spoolDir: string,
-  options: { cursor?: string; limit: number; passByteBudget: number; maxRecordBytes: number; findings: WhatsAppSpoolPassFindings; consumer: string },
+  options: { cursor?: string; limit: number; passByteBudget: number; maxRecordBytes: number; findings: WhatsAppSpoolPassFindings },
 ): AsyncGenerator<SourceRecordPage<WhatsAppRecord>> {
   let position = positionFromCursor(options.cursor);
-  const index = WhatsAppSpoolIndex.open(spoolDir);
+  // No spool folder: nothing captured, nothing to read or reset.
+  if (!existsSync(spoolDir)) return;
+  // Fails closed: a counter that cannot be opened ends the listing here, before the index forgets anything.
+  const resets = WhatsAppSpoolResets.open(spoolDir);
+  let index: WhatsAppSpoolIndex | undefined;
+  try {
+    index = WhatsAppSpoolIndex.open(spoolDir);
+  } catch (error) {
+    resets.close();
+    throw error;
+  }
   const ledger = WhatsAppMatchLedger.open(spoolDir);
-  const obligations = WhatsAppSpoolObligations.open(spoolDir);
   const pass: SpoolPassState = {
     budget: { bytesLeft: options.passByteBudget },
     maxRecordBytes: options.maxRecordBytes,
     findings: options.findings,
     index,
-    consumer: options.consumer,
-    obligations,
+    resets,
+    reset: resets.current(),
     ledger,
   };
   try {
-    // The index is trusted only for the files that are there, as they are.
-    // A file that broke the spool contract (replaced, cut and written again) is read again from its start, with
-    // everything after it: every boundary in it (the index's, the cursor's) is dropped.
-    // The reset is a durable obligation of each reader (spool-obligations.ts), written before the index forgets,
-    // and settled only by that reader's own cursor coming back from after it.
-    obligations?.register(options.consumer);
-    const generation = index?.generation();
-    if (index && generation !== undefined) {
-      index.reconcile(spoolDir, (replaced) => { obligations?.oweEveryone(replaced[0]!, generation); });
-      pass.generation = generation;
-      if (position !== undefined && position.generation !== undefined && position.generation !== generation) {
-        // Handed out by another build of the index: nothing it saw can be trusted, so its file is read again.
-        pass.findings.cursorsRecovered += 1;
-        position = { file: position.file, line: 0, offset: 0 };
-      } else {
-        const owed = obligations?.owed(options.consumer);
-        if (owed !== undefined) {
-          if (position !== undefined && position.generation === owed.generation && (position.epoch ?? -1) >= owed.epoch) {
-            obligations!.settle(options.consumer, owed.generation, position.epoch!);
-          } else if (position !== undefined && owed.file <= position.file) {
-            pass.findings.cursorsRecovered += 1;
-            position = { file: owed.file, line: 0, offset: 0 };
-          }
-        }
-      }
-      pass.epoch = obligations?.currentEpoch(generation) ?? 0;
+    // The index is trusted only for the files that are there, as they are. A file that broke the spool contract
+    // (replaced, cut and written again), or a rebuilt index (it no longer knows what the files held), counts one
+    // reset of the whole spool, written durably before the index forgets anything (spool-resets.ts).
+    if (index) {
+      pass.reset = resets.noteIndexBuild(index.generation());
+      index.reconcile(spoolDir, () => { pass.reset = resets.bump(); });
+    }
+    // A cursor of another reset count, or of none, reads the whole spool again from its start: intake is
+    // idempotent by identity and version, so nothing is stored twice.
+    if (position !== undefined && position.reset !== pass.reset) {
+      pass.findings.cursorsRecovered += 1;
+      position = undefined;
     }
     position = resolveStart(spoolDir, position, pass);
     // The index catches up to where this listing starts before any page is aggregated from it.
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
       options.findings.passBudgetReached += 1;
-      yield { records: [], ...(position ? { nextCursor: cursorFromPosition(position, pass.generation, pass.epoch) } : {}), done: false };
+      yield { records: [], ...(position ? { nextCursor: cursorFromPosition(position, pass.reset) } : {}), done: false };
       return;
     }
     for (;;) {
@@ -685,7 +676,7 @@ async function* liveRecords(
       position = page.position;
       yield {
         records: pageRecords(spoolDir, page, pass).map((record) => aliased(record, ledger)),
-        ...(position === undefined ? {} : { nextCursor: cursorFromPosition(position, pass.generation, pass.epoch) }),
+        ...(position === undefined ? {} : { nextCursor: cursorFromPosition(position, pass.reset) }),
         done: page.exhausted,
       };
       if (page.exhausted) return;
@@ -699,17 +690,17 @@ async function* liveRecords(
   } finally {
     index?.close();
     ledger?.close();
-    obligations?.close();
+    resets.close();
   }
 }
 
 /**
  * Where the cursor's place is in its file now. A cursor's file only grows, so
  * a file shorter than the cursor, or one where the cursor's offset is not the
- * start of a line, was replaced: it is read again from its start (the intake
- * rule keeps what the stores hold newer) and counted. A cursor whose file has
- * gone goes on at the next file, counted too. A cursor written before offsets
- * is resolved by counting its lines once.
+ * start of a line, was replaced: that counts one reset, and the whole spool is
+ * read again from its start (the intake rule keeps what the stores hold
+ * newer), counted. A cursor whose file has gone goes on at the next file,
+ * counted too.
  */
 function resolveStart(spoolDir: string, start: SpoolPosition | undefined, pass: SpoolPassState): SpoolPosition | undefined {
   if (start === undefined) return undefined;
@@ -719,16 +710,13 @@ function resolveStart(spoolDir: string, start: SpoolPosition | undefined, pass: 
     pass.findings.cursorFilesMissing += 1;
     return start;
   }
-  const recovered = (): SpoolPosition => {
+  const recovered = (): undefined => {
     pass.findings.cursorsRecovered += 1;
-    // Owed durably to every reader before the index forgets, as reconcile owes it: a pass that fails before its
-    // cursor commits reads the file again next time, even if by then the file has grown past the old cursor.
-    if (pass.index && pass.generation !== undefined) {
-      const epoch = pass.obligations?.oweEveryone(start.file, pass.generation);
-      if (epoch !== undefined) pass.epoch = epoch;
-    }
+    // One reset of the whole spool, counted durably before the index forgets, as reconcile counts it: a pass that
+    // fails before its cursor commits reads the spool again next time, whatever the file has grown to by then.
+    pass.reset = pass.resets.bump();
     pass.index?.forgetFile(start.file);
-    return { file: start.file, line: 0, offset: 0 };
+    return undefined;
   };
   if (start.offset === undefined) {
     const offset = offsetAfterLines(path, start.line);
@@ -752,12 +740,19 @@ function resolveStart(spoolDir: string, start: SpoolPosition | undefined, pass: 
 export function catchUpWhatsAppSpoolIndex(spoolDir: string, budgetBytes: number): boolean {
   const index = WhatsAppSpoolIndex.open(spoolDir);
   if (!index) return false;
-  const ledger = WhatsAppMatchLedger.open(spoolDir);
-  const obligations = WhatsAppSpoolObligations.open(spoolDir);
+  let resets: WhatsAppSpoolResets;
   try {
-    // A file that broke the spool contract is owed to every reader before the index forgets it, as a listing owes it.
-    const generation = index.generation();
-    index.reconcile(spoolDir, (replaced) => { obligations?.oweEveryone(replaced[0]!, generation); });
+    resets = WhatsAppSpoolResets.open(spoolDir);
+  } catch (error) {
+    index.close();
+    throw error;
+  }
+  const ledger = WhatsAppMatchLedger.open(spoolDir);
+  try {
+    // A file that broke the spool contract, or a rebuilt index, counts one reset before the index forgets, as a
+    // listing counts it.
+    resets.noteIndexBuild(index.generation());
+    index.reconcile(spoolDir, () => { resets.bump(); });
     const files = listSpoolFiles(spoolDir);
     const last = files.at(-1);
     if (last === undefined) return true;
@@ -769,9 +764,8 @@ export function catchUpWhatsAppSpoolIndex(spoolDir: string, budgetBytes: number)
       findings: emptyWhatsAppSpoolPassFindings(),
       index,
       ledger,
-      consumer: CONNECTOR_ID,
-      obligations,
-      generation,
+      resets,
+      reset: resets.current(),
     };
     // Up to the file's end as it is now (a stat, no read): a fragment being written is not a record, so indexing
     // stops at the last whole line and the high-water mark says where; the next catch-up goes on from there.
@@ -779,7 +773,7 @@ export function catchUpWhatsAppSpoolIndex(spoolDir: string, budgetBytes: number)
   } finally {
     index.close();
     ledger?.close();
-    obligations?.close();
+    resets.close();
   }
 }
 
@@ -1045,7 +1039,7 @@ function sameWhatsAppChat(left: string, right: string): boolean {
 
 /** A message id scoped to its chat, which is the only scope it is unique in. */
 function chatScopedKey(chatJid: string, id: string): string {
-  return `${normalizeWhatsAppJid(chatJid)} ${id}`;
+  return `${normalizeWhatsAppJid(chatJid)}\u0000${id}`;
 }
 
 function listSpoolFiles(spoolDir: string): string[] {
@@ -1146,13 +1140,13 @@ function parseSpoolLine(line: string): SpoolMessage | undefined {
  * (clearing Secrets) count by. `<file>:<lines>` alone is a cursor written
  * before offsets, still read.
  */
-const CURSOR = /^(.+):(\d+)@(\d+)(s?)(?:~r([0-9a-f]+)\.(\d+))?$/u;
+// `~r<count>`: the spool's reset count (spool-resets.ts). Any other suffix (an earlier form) carries no count.
+const CURSOR = /^(.+):(\d+)@(\d+)(s?)(?:~r([0-9a-f.]+))?$/u;
 const LEGACY_CURSOR = /^(.+):(\d+)$/u;
 
-function cursorFromPosition(position: SpoolPosition, generation = position.generation, epoch = position.epoch): string {
+function cursorFromPosition(position: SpoolPosition, reset = position.reset): string {
   if (position.offset === undefined) return `${position.file}:${position.line}`;
-  const replay = generation !== undefined && epoch !== undefined ? `~r${generation}.${epoch}` : '';
-  return `${position.file}:${position.line}@${position.offset}${position.skipping ? 's' : ''}${replay}`;
+  return `${position.file}:${position.line}@${position.offset}${position.skipping ? 's' : ''}${reset !== undefined ? `~r${reset}` : ''}`;
 }
 
 function positionFromCursor(cursor: string | undefined): SpoolPosition | undefined {
@@ -1165,7 +1159,7 @@ function positionFromCursor(cursor: string | undefined): SpoolPosition | undefin
       line: Number(found[2]),
       offset: Number(found[3]),
       ...(found[4] === 's' ? { skipping: true as const } : {}),
-      ...(found[5] !== undefined && found[6] !== undefined ? { generation: found[5], epoch: Number(found[6]) } : {}),
+      ...(found[5] !== undefined && /^\d+$/u.test(found[5]) ? { reset: Number(found[5]) } : {}),
     };
   }
   const legacy = LEGACY_CURSOR.exec(text);
