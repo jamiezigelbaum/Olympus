@@ -7,14 +7,21 @@
 // connector builds it exactly as it builds a live message
 // (live-connector.ts, createWhatsAppRecordBuilder), into the account's stores.
 //
-// - Matching (export-match.ts): a message whose counted key live capture
-//   holds takes the live message's id and time, so the intake rule keeps one
-//   item; one it does not hold gets an id of its own, the same in a second
-//   export of the chat.
-// - Time zone (export-zone.ts): chosen once, on the first pass, from a sample
-//   of the export: this computer's zone first, then any zone whose offsets on
-//   the sample's days differ, keeping the one under which most keys match.
-//   With no match, this computer's zone, said as assumed.
+// - Matching (match-keys.ts): a message's key is its chat, its time slot, its
+//   sender and its text without media markers, and messages with equal keys
+//   are counted on the key itself, in the export's order. The k-th export
+//   message with a key is the k-th live message with it (the live side is
+//   the spool index's digests of live capture's current versions, caught up
+//   within a budget, never a rescan of the spool). One it does not find gets
+//   an id of its own, recorded in the match ledger (match-ledger.ts) by its
+//   key and occurrence: the same in a second import, and the item a live
+//   message found later with the same key and occurrence is stored as.
+// - Time zone (export-zone.ts): chosen once, on the first pass, from the
+//   export's messages in the window live capture covers (its first and last
+//   message, a day either side): this computer's zone first, then any zone
+//   whose offsets on the sample's days differ, keeping the one under which
+//   most keys match. With no overlap or no match, this computer's zone, said
+//   as assumed.
 // - The owner: the export shows the owner by name. The name under which the
 //   sample's messages match live capture's own messages most is taken as the
 //   owner's; no match leaves every sender as written.
@@ -46,17 +53,18 @@ import { isWhatsAppMediaOmitted, whatsAppAttachedFileName } from '../archive-imp
 import { ZipArchive } from '../archive-import/zip-reader.ts';
 import {
   OWNER_SENDER,
-  buildLiveIndex,
   exactKey,
   exportMessageId,
-  liveNearby,
+  looseKey,
   nameKey,
   textKey,
-  unchattedKey,
+  timeSlot,
   unsentKey,
-  type LiveIndex,
   type TimePrecision,
-} from './export-match.ts';
+} from './match-keys.ts';
+import { WhatsAppMatchLedger } from './match-ledger.ts';
+import { WhatsAppSpoolIndex } from './spool-index.ts';
+import { catchUpWhatsAppSpoolIndex } from './live-connector.ts';
 import { chooseExportTimeZone, isKnownTimeZone, wallTimeToUtcMs } from './export-zone.ts';
 import type { WhatsAppChildRecord, WhatsAppRecord } from './live-connector.ts';
 
@@ -66,8 +74,11 @@ export const WHATSAPP_EXPORT_CHAT_SERVER = 'export.whatsapp';
 const CURSOR_PREFIX = 'wa1~';
 /** Messages the first pass reads to choose the time zone and learn the owner's name. */
 const SAMPLE_MESSAGES = 2_000;
-const SAMPLE_BYTES = 32 * 1024 * 1024;
-const MAX_CHILD_KEY_CHARS = 200;
+/** How much of the export the first pass may read looking for the overlap with live capture. */
+const SAMPLE_BYTES = 256 * 1024 * 1024;
+/** How much of the live spool one pass may index before matching (the rest is matched the other way, later). */
+const LIVE_INDEX_BYTES = 64 * 1024 * 1024;
+const DAY_MS = 24 * 3_600_000;
 
 export const WHATSAPP_INPUT_FINDINGS = {
   /** A message live capture may hold too, shown differently (a renamed contact, an edited caption): kept as its own. */
@@ -82,6 +93,8 @@ interface InputState {
   m?: string;
   /** Each chat met so far, by its name's hash: the live chat it joined, or '' for one of its own. */
   j: Record<string, string>;
+  /** The time slot the export was in when the page ended, and how many messages of each key it held so far. */
+  g?: { s: string; c: Record<string, number> };
 }
 
 function hash(value: string): string {
@@ -200,53 +213,74 @@ export function createWhatsAppExportInput(options: WhatsAppExportInputOptions): 
     records(listing = {}): AsyncIterable<SourceRecordPage<WhatsAppRecord>> {
       return (async function* (): AsyncGenerator<SourceRecordPage<WhatsAppRecord>> {
         const decoded = decodeCursor(listing.cursor);
-        const live = buildLiveIndex(options.spoolDir);
-        let decided: InputState;
-        if (decoded.state) {
-          decided = decoded.state;
-        } else {
-          const { assumed, ...chosen } = decide(await sampleExport(archive), live, options.zones);
-          if (assumed) archive.report({ kind: ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, class: 'gap', fileIndex: 0, offset: 0 });
-          decided = chosen;
-        }
-        const media = createMediaLocator(archive);
-        let positions: ReadonlyArray<{ fileIndex: number; offset: number }> = [];
-        const reader = createWhatsAppArchiveConnector({
-          ...archive,
-          // The input says these itself: the zone it chose, and the media it made children of.
-          report: (finding: ArchiveImportFinding) => {
-            if (finding.kind === ARCHIVE_COMMON_FINDINGS.timeZoneAssumed || finding.kind === ARCHIVE_COMMON_FINDINGS.mediaNotImported) return;
-            archive.report(finding);
-          },
-          reportItemPositions: (told) => {
-            positions = told;
-            archive.reportItemPositions?.(told);
-          },
-        });
-        for await (const page of reader.listItems({
-          ...(decoded.inner !== undefined ? { cursor: decoded.inner } : {}),
-          ...(listing.limit !== undefined ? { limit: listing.limit } : {}),
-        })) {
-          const records: WhatsAppRecord[] = [];
-          page.items.forEach((item, at) => {
-            const message = exportMessageOf(item);
-            if (!message) return;
-            const place = positions[at] ?? { fileIndex: message.sourceFileIndex, offset: 0 };
-            records.push(recordOf(message, decided, live, media, (finding) => archive.report({ ...finding, fileIndex: place.fileIndex, offset: place.offset })));
+        // Live capture's side, as the spool index holds it: caught up within a budget first.
+        catchUpWhatsAppSpoolIndex(options.spoolDir, LIVE_INDEX_BYTES);
+        const index = WhatsAppSpoolIndex.open(options.spoolDir);
+        const ledger = WhatsAppMatchLedger.open(options.spoolDir);
+        const matching: Matching = { index, ledger };
+        try {
+          let decided: InputState;
+          if (decoded.state) {
+            decided = decoded.state;
+          } else {
+            const window = index?.liveWindow();
+            const sample = window ? await sampleExport(archive, window) : [];
+            const { assumed, ...chosen } = decide(sample, matching, options.zones);
+            if (assumed) archive.report({ kind: ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, class: 'gap', fileIndex: 0, offset: 0 });
+            decided = chosen;
+          }
+          const media = createMediaLocator(archive);
+          let positions: ReadonlyArray<{ fileIndex: number; offset: number }> = [];
+          const reader = createWhatsAppArchiveConnector({
+            ...archive,
+            // The input says these itself: the zone it chose, and the media it made children of.
+            report: (finding: ArchiveImportFinding) => {
+              if (finding.kind === ARCHIVE_COMMON_FINDINGS.timeZoneAssumed || finding.kind === ARCHIVE_COMMON_FINDINGS.mediaNotImported) return;
+              archive.report(finding);
+            },
+            reportItemPositions: (told) => {
+              positions = told;
+              archive.reportItemPositions?.(told);
+            },
           });
-          positions = [];
-          const nextCursor = page.nextCursor !== undefined ? encodeCursor(decided, page.nextCursor) : undefined;
-          yield page.truncated === true
-            ? { records, ...(nextCursor ? { nextCursor } : {}), done: false, truncated: true }
-            : { records, ...(nextCursor ? { nextCursor } : {}), done: page.done };
+          for await (const page of reader.listItems({
+            ...(decoded.inner !== undefined ? { cursor: decoded.inner } : {}),
+            ...(listing.limit !== undefined ? { limit: listing.limit } : {}),
+          })) {
+            const records: WhatsAppRecord[] = [];
+            page.items.forEach((item, at) => {
+              const message = exportMessageOf(item);
+              if (!message) return;
+              const place = positions[at] ?? { fileIndex: message.sourceFileIndex, offset: 0 };
+              records.push(recordOf(message, decided, matching, media, (finding) => archive.report({ ...finding, fileIndex: place.fileIndex, offset: place.offset })));
+            });
+            positions = [];
+            const nextCursor = page.nextCursor !== undefined ? encodeCursor(decided, page.nextCursor) : undefined;
+            yield page.truncated === true
+              ? { records, ...(nextCursor ? { nextCursor } : {}), done: false, truncated: true }
+              : { records, ...(nextCursor ? { nextCursor } : {}), done: page.done };
+          }
+        } finally {
+          index?.close();
+          ledger?.close();
         }
       })();
     },
   };
 }
 
-/** Up to a few thousand of the export's messages, read without telling the import anything. */
-async function sampleExport(archive: ArchiveConnectorInput): Promise<ExportMessage[]> {
+/** Live capture's side of the matching, and what the inputs agreed so far. */
+interface Matching {
+  index: WhatsAppSpoolIndex | undefined;
+  ledger: WhatsAppMatchLedger | undefined;
+}
+
+/**
+ * The export's messages in the window live capture covers (a day either
+ * side, for any zone), read without telling the import anything, within a
+ * byte budget: what the zone and the owner's name are learned from.
+ */
+async function sampleExport(archive: ArchiveConnectorInput, window: { fromMs: number; toMs: number }): Promise<ExportMessage[]> {
   const quiet = createWhatsAppArchiveConnector({
     ...archive,
     report: () => undefined,
@@ -256,43 +290,47 @@ async function sampleExport(archive: ArchiveConnectorInput): Promise<ExportMessa
     pageSize: 500,
   });
   const sample: ExportMessage[] = [];
-  for await (const page of quiet.listItems({ limit: SAMPLE_MESSAGES })) {
+  for await (const page of quiet.listItems()) {
     for (const item of page.items) {
       const message = exportMessageOf(item);
-      if (message) sample.push(message);
+      if (!message) continue;
+      const wallMs = Date.parse(`${message.wall}Z`);
+      if (Number.isFinite(wallMs) && wallMs >= window.fromMs - DAY_MS && wallMs <= window.toMs + DAY_MS) sample.push(message);
+      if (sample.length >= SAMPLE_MESSAGES) return sample;
     }
-    if (sample.length >= SAMPLE_MESSAGES) break;
   }
   return sample;
 }
 
-function chatOf(state: InputState, live: LiveIndex, chat: string): string {
+function chatOf(state: InputState, matching: Matching, chat: string): string {
   const key = hash(nameKey(chat));
   const known = state.j[key];
   if (known !== undefined) return known === '' ? `${key}@${WHATSAPP_EXPORT_CHAT_SERVER}` : known;
   let joined = '';
   if (nameKey(chat) === WHATSAPP_STATUS_JID) joined = WHATSAPP_STATUS_JID;
   else {
-    const named = live.chatsByName.get(nameKey(chat));
-    if (named && named.size === 1) joined = [...named][0]!;
+    const named = matching.index?.chatsNamed(nameKey(chat)) ?? [];
+    if (named.length === 1) joined = named[0]!;
   }
   state.j[key] = joined;
   return joined === '' ? `${key}@${WHATSAPP_EXPORT_CHAT_SERVER}` : joined;
 }
 
 /** The time zone, the owner's name and the joins of the sampled chats. */
-function decide(sample: readonly ExportMessage[], live: LiveIndex, zones?: readonly string[]): InputState & { assumed: boolean } {
+function decide(sample: readonly ExportMessage[], matching: Matching, zones?: readonly string[]): InputState & { assumed: boolean } {
   const state: InputState = { z: '', j: {} };
+  const index = matching.index;
   const days = [...new Set(sample.map((message) => message.wall.slice(0, 10)))].slice(0, 64);
   const keyed = sample.map((message) => ({ message, caption: textKey(splitMedia(message.text).caption) }));
   // Across chats, and with the sender as written or as the owner (whose name is not known yet).
   const chosen = chooseExportTimeZone(days.length > 0 ? days : ['2020-01-01'], (zone) => {
+    if (!index) return 0;
     let matches = 0;
     for (const { message, caption } of keyed) {
       const ms = wallTimeToUtcMs(message.wall, zone);
       if (ms === undefined) continue;
-      if (live.unchatted.has(unchattedKey(ms, message.precision, nameKey(message.sender), caption))
-        || live.unchatted.has(unchattedKey(ms, message.precision, OWNER_SENDER, caption))) matches += 1;
+      if (index.hasLooseKey(message.precision, looseKey(ms, message.precision, nameKey(message.sender), caption))
+        || index.hasLooseKey(message.precision, looseKey(ms, message.precision, OWNER_SENDER, caption))) matches += 1;
     }
     return matches;
   }, zones);
@@ -301,10 +339,9 @@ function decide(sample: readonly ExportMessage[], live: LiveIndex, zones?: reado
   const votes = new Map<string, number>();
   for (const { message, caption } of keyed) {
     const ms = wallTimeToUtcMs(message.wall, state.z);
-    if (ms === undefined) continue;
-    const chat = chatOf(state, live, message.chat);
-    const others = live.unsent.get(unsentKey(chat, ms, message.precision, caption)) ?? [];
-    if (others.some((ref) => ref.fromMe)) {
+    if (ms === undefined || !index) continue;
+    const chat = chatOf(state, matching, message.chat);
+    if (index.ownerSentUnsent(message.precision, unsentKey(chat, ms, message.precision, caption))) {
       const name = hash(nameKey(message.sender));
       votes.set(name, (votes.get(name) ?? 0) + 1);
     }
@@ -371,50 +408,60 @@ function createMediaLocator(archive: ArchiveConnectorInput): MediaLocator {
   };
 }
 
-function childKey(name: string): string {
-  return name.replace(/[\u0000-\u001f]/gu, '').slice(0, MAX_CHILD_KEY_CHARS);
-}
-
-/** One export message as the bridge's record: live's message when the counted key says it is one, else its own. */
+/**
+ * One export message as the bridge's record: live's message when the counted
+ * key says it is one (under the imported id when a live message already took
+ * one), else its own, recorded in the match ledger by key and occurrence.
+ */
 function recordOf(
   message: ExportMessage,
   state: InputState,
-  live: LiveIndex,
+  matching: Matching,
   media: MediaLocator,
   report: (finding: Omit<ArchiveImportFinding, 'fileIndex' | 'offset'>) => void,
 ): WhatsAppRecord {
   const ms = wallTimeToUtcMs(message.wall, state.z) ?? Date.parse(`${message.wall}Z`);
-  const chatJid = chatOf(state, live, message.chat);
+  const chatJid = chatOf(state, matching, message.chat);
   const owner = state.m !== undefined && hash(nameKey(message.sender)) === state.m;
   const sender = owner ? OWNER_SENDER : nameKey(message.sender);
   const { caption, files, omitted } = splitMedia(message.text);
   const text = textKey(caption);
-  const ordinal = /^#(\d+)$/u.exec(message.occurrence);
-  const candidates = ordinal ? live.byKey.get(exactKey(chatJid, ms, message.precision, sender, text)) : undefined;
-  const matched = ordinal && candidates ? candidates[Number(ordinal[1])] : undefined;
-  if (!matched && liveNearby(live, chatJid, ms)) report({ kind: WHATSAPP_INPUT_FINDINGS.nearMiss, class: 'skipped' });
+  const key = exactKey(chatJid, ms, message.precision, sender, text);
+  // Messages with equal keys are counted on the key itself, in the export's order; the count carries over a
+  // page that ends inside a time slot, and starts again at the next slot.
+  const slot = `${chatJid}\u0000${timeSlot(ms, message.precision)}`;
+  if (state.g?.s !== slot) state.g = { s: slot, c: {} };
+  const ordinal = state.g.c[key] ?? 0;
+  state.g.c[key] = ordinal + 1;
+  const matched = matching.index?.liveWithKey(message.precision, key, ordinal);
+  const taken = matched ? matching.ledger?.aliasOf(matched.chatJid, matched.id) : undefined;
+  let id: string;
+  if (matched) {
+    id = taken ?? matched.id;
+  } else {
+    id = matching.ledger?.exportAt(message.precision, key, ordinal) ?? exportMessageId(key, ordinal);
+    matching.ledger?.recordExport(message.precision, key, ordinal, id, chatJid);
+    if (matching.index?.liveBetween(chatJid, ms - 60_000, ms + 60_000)) report({ kind: WHATSAPP_INPUT_FINDINGS.nearMiss, class: 'skipped' });
+  }
 
   const mediaType = matched?.mediaType ?? (files[0] !== undefined ? whatsAppMediaTypeOf(files[0]) : omitted ? 'media' : undefined);
   const children: WhatsAppChildRecord[] = [];
   // A voice note the bridge saved already holds its words; the export's copy would be the same item twice.
-  const liveHoldsMedia = matched?.mediaSaved === true;
+  const liveHoldsMedia = matched?.mediaSaved === true && mediaType === 'audio';
   if (!liveHoldsMedia) {
-    const used = new Set<string>();
-    for (const name of files) {
-      const key = childKey(name);
-      if (key === '' || used.has(key)) continue;
-      used.add(key);
+    // One child per piece of media, keyed as live capture keys its own (`media`), so a picture both inputs bring is one item.
+    files.forEach((name, at) => {
       const located = media.child(message, name);
       if (!located.available) report({ kind: ARCHIVE_COMMON_FINDINGS.mediaNotImported, class: 'gap' });
-      children.push({ key, mimeType: whatsAppMediaMime(name), ...located });
-    }
+      children.push({ key: at === 0 ? 'media' : `media-${at + 1}`, mimeType: whatsAppMediaMime(name), ...located });
+    });
     if (omitted) {
       report({ kind: ARCHIVE_COMMON_FINDINGS.mediaNotImported, class: 'gap' });
       children.push({ key: 'media', name: 'Media left out of the export', mimeType: 'application/octet-stream', available: false });
     }
   }
   return {
-    id: matched?.id ?? exportMessageId(chatJid, ms, message.precision, sender, text, message.occurrence),
+    id,
     chatJid: matched?.chatJid ?? chatJid,
     chatName: message.chat,
     senderJid: '',
