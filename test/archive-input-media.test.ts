@@ -3,7 +3,7 @@
 // served. Synthetic files only.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileExtractionSourceError } from '../src/core/file-extraction-source.ts';
@@ -13,6 +13,7 @@ import {
   parseArchiveInputMedia,
   copyArchiveInputMediaToFile,
   parseArchiveInputMediaLocator,
+  writeFully,
   readArchiveInputMedia,
 } from '../src/workers/archive-import/input-media.ts';
 import type { ArchiveImportRecord, ArchiveImportStateStore } from '../src/workers/archive-import/state.ts';
@@ -136,6 +137,25 @@ describe('every export media file is kept and read, however large (owner, 2026-1
     const dest = join(root, 'copied.jpg');
     expect(() => copyArchiveInputMediaToFile(photo, { state }, {}, dest)).toThrow(FileExtractionSourceError);
     expect(existsSync(dest)).toBe(false);
+  });
+});
+
+describe('a copy writes every byte', () => {
+  test('a write that takes fewer bytes than it was given is asked again for the rest', () => {
+    const root = mkdtempSync(join(tmpdir(), 'archive-input-media-short-'));
+    roots.push(root);
+    const dest = join(root, 'out.bin');
+    const fd = openSync(dest, 'w');
+    const data = new TextEncoder().encode('a photo of the harbour at dusk');
+    let calls = 0;
+    // A disk that takes at most three bytes a write.
+    writeFully(fd, data, (handle, buffer, offset, length) => {
+      calls += 1;
+      return writeSync(handle, buffer, offset, Math.min(3, length));
+    });
+    closeSync(fd);
+    expect(readFileSync(dest, 'utf8')).toBe('a photo of the harbour at dusk');
+    expect(calls).toBeGreaterThan(1);
   });
 });
 

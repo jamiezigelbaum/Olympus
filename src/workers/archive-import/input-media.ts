@@ -155,7 +155,7 @@ export function copyArchiveInputMediaToFile(
     serveArchiveInputMedia(locator, deps, options.maxBytes, {
       begin() {},
       write(chunk) {
-        writeSync(out, chunk);
+        writeFully(out, chunk);
         written += chunk.length;
       },
     });
@@ -166,6 +166,19 @@ export function copyArchiveInputMediaToFile(
   }
   closeSync(out);
   return written;
+}
+
+/**
+ * Writes all of `chunk` to `fd`: a write may take fewer bytes than it was
+ * given, so it is asked again for the rest until none is left.
+ */
+export function writeFully(fd: number, chunk: Uint8Array, write: (fd: number, buffer: Uint8Array, offset: number, length: number) => number = writeSync): void {
+  let done = 0;
+  while (done < chunk.length) {
+    const wrote = write(fd, chunk, done, chunk.length - done);
+    if (wrote <= 0) throw new Error('A media file could not be written.');
+    done += wrote;
+  }
 }
 
 function serveArchiveInputMedia(locator: string, deps: ArchiveInputMediaDeps, maxBytes: number | undefined, sink: MediaSink): void {
