@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ArchiveImportFinding } from '../src/core/archive-formats.ts';
@@ -21,6 +21,8 @@ import type { TieredStoreSet } from '../src/workers/connector-store/tiered-store
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createWhatsAppExportInput, WHATSAPP_INPUT_FINDINGS } from '../src/workers/whatsapp/archive-input.ts';
 import { WHATSAPP_LANE_SYNC, whatsAppConnectorWithInputs } from '../src/workers/whatsapp/archive-target.ts';
+import { catchUpWhatsAppSpoolIndex } from '../src/workers/whatsapp/live-connector.ts';
+import { WHATSAPP_SPOOL_INDEX_FILE } from '../src/workers/whatsapp/spool-index.ts';
 import { chooseExportTimeZone, wallTimeToUtcMs } from '../src/workers/whatsapp/export-zone.ts';
 import { WHATSAPP_LIVE_CORPUS_ID, createWhatsAppTierLane } from '../src/workers/whatsapp/store-sync.ts';
 import { chatText, notice, type SyntheticMessage } from './support/archive-fixtures-whatsapp.ts';
@@ -211,7 +213,7 @@ describe('a WhatsApp export beside live capture', () => {
     // Each item has one row: nothing was stored twice.
     expect(new Set(ids).size).toBe(ids.length);
     // The photo is a child of live's L4, readable by its locator; the left-out one is a child that cannot be read.
-    const photo = active.find((row) => row.id === 'L4#child:IMG-20260701-WA0001.jpg');
+    const photo = active.find((row) => row.id === 'L4#child:media');
     expect(photo?.parent).toContain(':L4');
     expect(parseArchiveInputMedia(photo!.locator!)?.kind).toBe('binding');
     expect(active.some((row) => row.id.endsWith('#child:media'))).toBe(true);
@@ -296,6 +298,127 @@ describe('the release check\'s beside-live fixture', () => {
     expect(own).toHaveLength(2);
     expect(new Set(own.map((row) => row.conversation))).toEqual(new Set(['15550100001@s.whatsapp.net']));
     expect(findings.some((finding) => finding.kind === 'time_zone_assumed')).toBe(false);
+  });
+});
+
+describe('review round 1 on #551: one matching model', () => {
+  const direct = (fields: Record<string, unknown>) => spoolLine({ chat_jid: ROWAN, chat_name: 'Rowan Hale', ...fields });
+
+  test('two different photos in one minute against one live photo: one match, one new item, each child under its own parent', async () => {
+    const target = lane();
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), [
+      direct({ id: 'L1', timestamp: '2026-07-01T13:00:10Z', text: 'Ferry at nine?' }),
+      direct({ id: 'P1', timestamp: '2026-07-01T13:05:00Z', media_type: 'image', text: '' }),
+    ].join(''));
+    await pullLive(target);
+    const text = chatText([
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'Ferry at nine?' },
+      { at: '2026-07-01T09:05:00', sender: 'Rowan Hale', text: 'IMG-20260701-WA0001.jpg (file attached)' },
+      { at: '2026-07-01T09:05:00', sender: 'Rowan Hale', text: 'IMG-20260701-WA0002.jpg (file attached)' },
+    ], { style: 'android-24-dmy' });
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', text, [], { 'IMG-20260701-WA0001.jpg': 'one', 'IMG-20260701-WA0002.jpg': 'two' });
+    const active = rows(target).filter((row) => row.tombstoned === 0);
+    const parents = active.filter((row) => !row.id.includes('#child:')).map((row) => row.id);
+    expect(parents.filter((id) => id === 'P1')).toHaveLength(1);
+    const own = parents.filter((id) => id.startsWith('wx'));
+    expect(own).toHaveLength(1);
+    const children = active.filter((row) => row.id.includes('#child:'));
+    expect(children.map((row) => row.id).sort()).toEqual([`${own[0]}#child:media`, 'P1#child:media'].sort());
+  });
+
+  test('a live message delivered after the import is the imported item, not a second copy, and a re-import reuses the ids', async () => {
+    const target = lane();
+    const text = chatText([
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'Ferry at nine?' },
+      { at: '2026-07-01T09:10:00', sender: 'Rowan Hale', text: 'Bring the map' },
+    ], { style: 'android-24-dmy' });
+    // Live capture has seen one message of the chat, so the chat joins and the zone is found by it.
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), direct({ id: 'L1', timestamp: '2026-07-01T13:00:10Z', text: 'Ferry at nine?' }));
+    await pullLive(target);
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', text);
+    const imported = activeIds(target).filter((id) => id.startsWith('wx'));
+    expect(imported).toHaveLength(1);
+    // The bridge delivers the second message late (it was offline), after the import.
+    appendFileSync(join(target.spoolDir, '2026-07-01.jsonl'), direct({ id: 'L2-late', timestamp: '2026-07-01T13:10:42Z', text: 'Bring the map' }));
+    await pullLive(target);
+    expect(activeIds(target).sort()).toEqual(['L1', ...imported].sort());
+    // A second import of the same chat adds nothing and leaves nothing behind.
+    await importExport(target, 'again/WhatsApp Chat with Rowan Hale.txt', text);
+    expect(activeIds(target).sort()).toEqual(['L1', ...imported].sort());
+  });
+
+  test('live capture is matched from the spool index: digests, no text', async () => {
+    const target = lane();
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), direct({ id: 'L1', timestamp: '2026-07-01T13:00:10Z', text: 'a very particular sentence' }));
+    expect(catchUpWhatsAppSpoolIndex(target.spoolDir, 1024 * 1024)).toBe(true);
+    const db = new Database(join(target.spoolDir, WHATSAPP_SPOOL_INDEX_FILE), { readonly: true });
+    try {
+      const keys = db.query('SELECT * FROM live_keys').all();
+      expect(keys).toHaveLength(1);
+      expect(JSON.stringify(keys)).not.toContain('particular');
+      expect(JSON.stringify(keys)).not.toContain('Rowan');
+    } finally {
+      db.close();
+    }
+  });
+
+  test('the zone is learned from the export\'s overlap with live capture, however late in the export it is', async () => {
+    const target = lane();
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), [
+      direct({ id: 'L1', timestamp: '2026-07-01T13:00:10Z', text: 'Ferry at nine?' }),
+      direct({ id: 'L2', timestamp: '2026-07-01T13:01:10Z', text: 'Or ten?' }),
+    ].join(''));
+    await pullLive(target);
+    // Three thousand older messages first: a sample of the export's start would see none of the overlap.
+    const history: SyntheticMessage[] = Array.from({ length: 3_000 }, (_, at) => ({
+      at: `2024-01-${String(1 + Math.floor(at / 1_000)).padStart(2, '0')}T${String(Math.floor((at % 1_000) / 60) % 24).padStart(2, '0')}:${String(at % 60).padStart(2, '0')}:00`,
+      sender: 'Rowan Hale',
+      text: `old note ${at}`,
+    }));
+    const text = chatText([
+      ...history,
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'Ferry at nine?' },
+      { at: '2026-07-01T09:01:00', sender: 'Rowan Hale', text: 'Or ten?' },
+    ], { style: 'android-24-dmy' });
+    const findings = await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', text);
+    expect(findings.some((finding) => finding.kind === 'time_zone_assumed')).toBe(false);
+    expect(activeIds(target).filter((id) => id === 'L1' || id === 'L2')).toHaveLength(2);
+  }, 60_000);
+
+  test('the current version of a live message is the one matched', async () => {
+    const target = lane();
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), [
+      direct({ id: 'L1', timestamp: '2026-07-01T13:00:10Z', text: 'Ferry at nine' }),
+      // The same message spooled again, its text as it reads now.
+      direct({ id: 'L1', timestamp: '2026-07-01T13:00:10Z', text: 'Ferry at ten' }),
+    ].join(''));
+    await pullLive(target);
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', chatText([
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'Ferry at ten' },
+    ], { style: 'android-24-dmy' }));
+    expect(activeIds(target)).toEqual(['L1']);
+  });
+
+  test('media left out of one export is filled in by a later export that has it', async () => {
+    const target = lane();
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), direct({ id: 'L1', timestamp: '2026-07-01T13:00:10Z', text: 'Ferry at nine?' }));
+    await pullLive(target);
+    const first = chatText([
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'Ferry at nine?' },
+      { at: '2026-07-01T09:05:00', sender: 'Rowan Hale', text: '<Media omitted>' },
+    ], { style: 'android-24-dmy' });
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', first);
+    const before = rows(target).find((row) => row.tombstoned === 0 && row.id.endsWith('#child:media'));
+    expect(before?.locator ?? '').toBe('');
+    const second = chatText([
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'Ferry at nine?' },
+      { at: '2026-07-01T09:05:00', sender: 'Rowan Hale', text: 'IMG-20260701-WA0007.jpg (file attached)' },
+    ], { style: 'android-24-dmy' });
+    await importExport(target, 'again/WhatsApp Chat with Rowan Hale.txt', second, [], { 'again/IMG-20260701-WA0007.jpg': 'bytes' });
+    const after = rows(target).filter((row) => row.tombstoned === 0 && row.id.endsWith('#child:media'));
+    expect(after).toHaveLength(1);
+    expect(after[0]!.id).toBe(before!.id);
+    expect(after[0]!.locator).toStartWith('archive-input-media:v1:');
   });
 });
 

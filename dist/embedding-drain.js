@@ -36000,6 +36000,16 @@ var init_spool_index = __esm(() => {
   init_reaction_index();
 });
 
+// src/workers/whatsapp/match-ledger.ts
+var init_match_ledger = __esm(() => {
+  init_reaction_index();
+});
+
+// src/workers/whatsapp/match-keys.ts
+var init_match_keys = __esm(() => {
+  init_reaction_index();
+});
+
 // src/workers/whatsapp/spool-reader.ts
 var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
 var init_spool_reader = __esm(() => {
@@ -36017,6 +36027,8 @@ var init_live_connector = __esm(() => {
   init_capture_spool_secrets();
   init_reaction_index();
   init_spool_index();
+  init_match_ledger();
+  init_match_keys();
   init_spool_reader();
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
   TARGET_READ_CHUNK_BYTES = 4 * 1024;
@@ -49319,17 +49331,18 @@ init_zip_reader();
 
 // src/workers/whatsapp/archive-input.ts
 init_zip_reader();
-
-// src/workers/whatsapp/export-match.ts
-init_reaction_index();
+init_match_keys();
+init_match_ledger();
+init_spool_index();
 init_live_connector();
-init_spool_reader();
 
 // src/workers/whatsapp/export-zone.ts
 var formatters = new Map;
 
 // src/workers/whatsapp/archive-input.ts
-var SAMPLE_BYTES = 32 * 1024 * 1024;
+var SAMPLE_BYTES = 256 * 1024 * 1024;
+var LIVE_INDEX_BYTES = 64 * 1024 * 1024;
+var DAY_MS2 = 24 * 3600000;
 
 // src/workers/whatsapp/archive-target.ts
 init_live_connector();

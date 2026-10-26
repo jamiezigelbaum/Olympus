@@ -1082,7 +1082,7 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
         continue;
       }
       if (outOfTime(`the ${format} import beside its live input`)) break;
-      const beside = await call<BesideLiveObservation>('archive-beside-live', `--format ${format} --seed ${sh(seed)}`, stepS + 600);
+      const beside = await call<BesideLiveObservation>('archive-beside-live', `--format ${format} --seed ${sh(seed)} --drain-s ${drainS}`, stepS + drainS + 600);
       addAll(besideLiveChecks(beside, besideFx));
     }
 

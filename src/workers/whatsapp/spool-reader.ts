@@ -183,6 +183,40 @@ export function offsetAfterLines(path: string, lines: number): number | undefine
   }
 }
 
+/**
+ * How many terminated lines a file holds now, and the offset just past the
+ * last of them. Counts newlines only: nothing is parsed or held.
+ */
+export function terminatedLinesEnd(path: string): { lines: number; offset: number } | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return undefined;
+  }
+  try {
+    const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
+    let position = 0;
+    let lines = 0;
+    let offset = 0;
+    for (;;) {
+      const read = readSync(fd, chunk, 0, CHUNK_BYTES, position);
+      if (read === 0) return { lines, offset };
+      let cursor = 0;
+      for (;;) {
+        const found = chunk.indexOf(NEWLINE, cursor);
+        if (found === -1 || found >= read) break;
+        lines += 1;
+        offset = position + found + 1;
+        cursor = found + 1;
+      }
+      position += read;
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** Whether `offset` is the start of a record in this file: its start, or just past a newline. */
 export function isRecordBoundary(path: string, offset: number): boolean {
   if (offset === 0) return true;

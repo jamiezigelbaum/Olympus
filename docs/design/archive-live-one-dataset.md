@@ -425,8 +425,22 @@ Live WhatsApp capture, with no change to identities or stores
   every boundary kept in a file (cleared-through, indexed-through) the
   digest of the 4 KiB ending there is kept too, and is read again before the
   boundary is trusted (`connector-store/spool-file-identity.ts`). A mismatch
-  is a file read again from its start: cleared again in full, its index rows
-  rebuilt.
+  is a file read again from its start, keeping none of its old boundaries:
+  cleared again in full from byte 0, its index rows rebuilt, and the
+  listing's cursor moved back to it. Detected: a file replaced, cut shorter
+  than a boundary, or rewritten in the 4 KiB before one. Not detected: a
+  rewrite in place elsewhere in the file by anything but the bridge or
+  Olympus; finding it would mean reading the whole prefix on every pass,
+  which the read bounds forbid, so the contract is held by who can write:
+  the spool folder is the owner's alone (0700, files 0600, the bridge
+  making it so at start), written only by the bridge and by Olympus.
+  Index rows, the files' records and the high-water mark commit in one
+  transaction. A boundary and its receipt (the offset and the digest that ends there)
+  are one record, written in one step, so a boundary is never trusted at an
+  offset its receipt was not taken for: a crash before clearing records its
+  new boundary leaves the old record, whose window is checked on the next
+  pull. The listing's cursor carries no receipt and is never what decides
+  whether a Secret is cleared; clearing's own record does.
 - **One builder, the intake rule.** The spool is the WhatsApp connector's
   live input: its records become items through the connector's one record
   builder under the shared intake rule (`core/source-inputs.ts`), versions
@@ -523,24 +537,38 @@ The WhatsApp chat export is an input of the WhatsApp connector
   message into the bridge's record, and the WhatsApp connector builds it
   with the same code as a live message, under the intake rule, held until
   judged, into the account's stores.
-- **Matching.** A message's key is its chat, its minute (its second when the
-  export shows seconds), its sender and its text without media markers. The
-  sender is "me" for the owner; otherwise the contact's saved name, which
-  the bridge now spools (`sender_contact_name`), else the push name. The
-  live side is read from the spool (reaction and Secret lines left out). The
-  export's k-th message with a key takes the k-th live message's id and
-  time, so intake keeps one item; past live's count it gets an id of its
-  own, stable across a second export of the chat. An unmatched message with
-  a live message of the chat within a minute is counted as a near-miss
-  (`match_near_miss`, How it was read).
+- **Matching** (`match-keys.ts`). A message's key is its chat, its minute
+  (its second when the export shows seconds), its sender and its text
+  without media markers; keys are digests. The sender is "me" for the
+  owner; otherwise the contact's saved name, which the bridge now spools
+  (`sender_contact_name`), else the push name. Occurrences are counted on
+  the key itself in the export's order (two photos in one minute are two),
+  the count carried in the resume point across a page that ends inside a
+  minute. The live side is the spool index's digests of each live
+  message's current version (`live_keys`, built as the spool is indexed,
+  within a read budget; no rescan of the spool, no text). The export's k-th
+  message with a key is the k-th live message with it, so intake keeps one
+  item. An unmatched message with a live message of the chat within a
+  minute is counted as a near-miss (`match_near_miss`, How it was read).
+- **Both directions** (`match-ledger.ts`, `export-matches.sqlite` in the
+  spool folder, durable, digests and ids only). An export message live does
+  not hold gets an id of its own, recorded by its key and occurrence: a
+  re-import reuses it. When the bridge delivers that message later (it was
+  offline), indexing it finds the recorded id under the same key and
+  occurrence and aliases the live message to it: live capture stores it as
+  the imported item, never a second copy, and reads, reactions and Secrets
+  clearing follow the alias. (Rows are never re-keyed, as section 7 says;
+  the live message takes the item's id instead.)
 - **The owner.** The export shows the owner's own name. The name under which
   the sample's messages match live capture's own messages most is taken as
   the owner's.
-- **Time zone.** Chosen on the first pass from a sample (2,000 messages,
-  32 MiB): this computer's zone first, then every zone whose offsets on the
-  sample's days differ, keeping the one under which most keys match;
-  converted with each line's own date. No match: this computer's zone,
-  reported as assumed.
+- **Time zone.** Chosen on the first pass from the export's messages in the
+  window live capture covers (its first and last message, a day either
+  side; up to 2,000 messages within 256 MiB of the export): this computer's
+  zone first, then every zone whose offsets on the sample's days differ,
+  keeping the one under which most keys match; converted with each line's
+  own date. No overlap or no match: this computer's zone, reported as
+  assumed (How it was read).
 - **Chats.** An export's chat joins the live chat of the same name when
   exactly one has it; the status chat (`status@broadcast`) joins the status
   posts. Otherwise it is a conversation of its own in the WhatsApp source.
@@ -550,7 +578,10 @@ The WhatsApp chat export is an input of the WhatsApp connector
 - **Status posts** are a record kind (`recordKind: 'status'`, conversation
   "Status updates"), live and imported; live capture no longer skips them.
 - **Notices** from WhatsApp itself stay left out (owner).
-- **Media** become children (section 5). Reading them is the shared reader
+- **Media** become children (section 5), keyed `media` as live capture keys
+  its own, so a picture both inputs bring is one child; a child that can be
+  read brings content, so a later export (or live capture) with the bytes
+  fills one an earlier export left out. Reading them is the shared reader
   of an input's media (`archive-import/input-media.ts`: a folder binding or a
   zip member by its place, served only while the import is an input of a
   source and not being removed); wiring it into WhatsApp's extraction is

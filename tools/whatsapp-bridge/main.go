@@ -320,6 +320,11 @@ func run(args []string, deps bridgeDeps) error {
 	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
 		return fmt.Errorf("creating spool dir %s: %w", spoolDir, err)
 	}
+	// Owner-only even when the folder was made by something else first: the spool is append-only for this
+	// process and rewritten only by Olympus's own clearing of Secrets, so no other local user may write it.
+	if err := os.Chmod(spoolDir, 0o700); err != nil {
+		return fmt.Errorf("making spool dir %s owner-only: %w", spoolDir, err)
+	}
 
 	dbPath := filepath.Join(stateDir, sessionDBName)
 	container, err := openSessionContainer(dbPath)
