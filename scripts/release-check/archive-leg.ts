@@ -732,10 +732,16 @@ export function agentViewProblems(view: AgentArchiveView | undefined, expect: Ar
   return problems;
 }
 
-export function searchChecks(prefix: string, search: SearchView | undefined, fx: LegFixture, mode: 'cited' | 'withheld'): CheckResult[] {
+export function searchChecks(
+  prefix: string,
+  search: SearchView | undefined,
+  fx: LegFixture,
+  mode: 'cited' | 'withheld',
+  withheldBecause = 'while the private model is off',
+): CheckResult[] {
   const title = mode === 'cited'
     ? `A search for the archive's word returns it, cited as "${fx.expect.citationLabel}"`
-    : 'A search for the archive\'s word does not return its contents while the private model is off';
+    : `A search for the archive's word does not return its contents ${withheldBecause}`;
   if (!search) return [check(`${prefix}.search`, title, false, 'the search was not made')];
   if (!search.ok) return [check(`${prefix}.search`, title, false, `the search failed${search.error ? `: ${search.error}` : ''}`)];
   const hits = search.evidence.filter((item) => item.source === fx.expect.citationLabel);
@@ -997,9 +1003,17 @@ export function besideLiveChecks(obs: BesideLiveObservation | undefined, fx: Leg
   if (seen.stores.length === 0) held.push('the source\'s stores were not read');
   for (const store of seen.stores) if (store.error) held.push(`the ${store.tier} store could not be read: ${store.error}`);
   if (!seen.stores.some((store) => store.tokenRows > 0)) held.push('no store of the source holds the archive\'s content');
-  out.push(check(`${prefix}.stores`, 'The archive\'s records are in the source\'s own stores', held.length === 0,
+  // A source whose records rest Private keeps the archive's there: none of it in a lower store.
+  const withheld = beside.search === 'withheld';
+  if (withheld) {
+    for (const store of seen.stores) {
+      if (store.tier !== 'private' && store.tokenRows > 0) held.push(`the ${store.tier} store has ${store.tokenRows} row(s) with the word, which the source keeps Private`);
+    }
+  }
+  out.push(check(`${prefix}.stores`, withheld ? 'The archive\'s records are in the source\'s own stores, all in the Private one' : 'The archive\'s records are in the source\'s own stores', held.length === 0,
     held.length === 0 ? seen.stores.map((store) => `${store.tier}: ${store.tokenRows} row(s) with the word`).join(', ') : held.join('; ')));
-  out.push(...searchChecks(prefix, seen.search, { ...fx, expect: { ...fx.expect, citationLabel: beside.citationLabel } }, 'cited'));
+  out.push(...searchChecks(prefix, seen.search, { ...fx, expect: { ...fx.expect, citationLabel: beside.citationLabel } }, withheld ? 'withheld' : 'cited',
+    'once judged: the source keeps its records Private'));
   const deleted = seen.deleted;
   const gone: string[] = [];
   if (!deleted) gone.push('the source\'s Delete was not run');
