@@ -1563,30 +1563,55 @@ def media_lock() -> asyncio.Lock:
 
 
 def read_media_waiting(spool_dir: Path) -> list[dict[str, str]]:
-    """The media waiting for disk space, oldest first, each once: a chat and a message."""
+    """The media waiting for disk space, oldest first, each once: a chat and a message.
+
+    Every whole entry on a line is read, so two run together (a write cut short, then the next append) are both kept;
+    an unfinished entry at the end of a line, or anything else that does not read, is passed over, never the file."""
     items: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
+    decoder = json.JSONDecoder()
     try:
-        with open(spool_dir / MEDIA_WAITING_NAME, "r", encoding="utf-8") as lines:
+        with open(spool_dir / MEDIA_WAITING_NAME, "r", encoding="utf-8", errors="replace") as lines:
             for line in lines:
-                try:
-                    item = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(item, dict) or not isinstance(item.get("chat"), str) or not isinstance(item.get("message"), str):
-                    continue
-                key = (item["chat"], item["message"])
-                if key not in seen:
-                    seen.add(key)
-                    items.append({"chat": key[0], "message": key[1]})
+                at = 0
+                while True:
+                    start = line.find("{", at)
+                    if start < 0:
+                        break
+                    try:
+                        item, end = decoder.raw_decode(line, start)
+                    except ValueError:
+                        at = start + 1
+                        continue
+                    at = end
+                    if not isinstance(item, dict) or not isinstance(item.get("chat"), str) or not isinstance(item.get("message"), str):
+                        continue
+                    key = (item["chat"], item["message"])
+                    if key not in seen:
+                        seen.add(key)
+                        items.append({"chat": key[0], "message": key[1]})
     except OSError:
         return []
     return items
 
 
+# The entries the waiting list holds, read once from its file and kept with it, so a pause already listed (a retry
+# that still does not fit) is not appended again. None until first read.
+media_waiting_keys: dict[str, set[tuple[str, str]] | None] = {"keys": None}
+
+
+def media_waiting_known(spool_dir: Path) -> set[tuple[str, str]]:
+    keys = media_waiting_keys["keys"]
+    if keys is None:
+        keys = {(item["chat"], item["message"]) for item in read_media_waiting(spool_dir)}
+        media_waiting_keys["keys"] = keys
+    return keys
+
+
 def write_media_waiting(spool_dir: Path, items: list[dict[str, str]]) -> None:
     """The whole list again (after entries are done), atomically; an empty list leaves no file."""
     path = spool_dir / MEDIA_WAITING_NAME
+    media_waiting_keys["keys"] = {(item["chat"], item["message"]) for item in items}
     if not items:
         try:
             path.unlink()
@@ -1603,17 +1628,38 @@ def write_media_waiting(spool_dir: Path, items: list[dict[str, str]]) -> None:
     os.replace(temporary, path)
 
 
+def append_whole(descriptor: int, data: bytes) -> None:
+    """Every byte, however many writes it takes: a write may take fewer than it was given."""
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("no progress writing the media waiting list")
+        view = view[written:]
+
+
 def media_waits(folder: Path, chat: str, message_id: str, attachment: dict[str, Any]) -> None:
-    """New media paused for disk space: named on its message as waiting, and listed to be filled in once space returns."""
+    """New media paused for disk space: named on its message as waiting, and listed (once) to be filled in once space
+    returns. Appended, never rewritten here."""
     attachment["mediaLeftOut"] = MEDIA_WAITING
     try:
-        path = folder.parent / MEDIA_WAITING_NAME
-        # Appended, never rewritten here: a line repeated is read once.
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        spool_dir = folder.parent
+        known = media_waiting_known(spool_dir)
+        key = (chat, message_id)
+        if key in known:
+            return
+        path = spool_dir / MEDIA_WAITING_NAME
+        line = (json.dumps({"chat": chat, "message": message_id}, separators=(",", ":")) + "\n").encode("utf-8")
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
         try:
-            os.write(descriptor, (json.dumps({"chat": chat, "message": message_id}, separators=(",", ":")) + "\n").encode("utf-8"))
+            # A line an earlier write left unfinished is closed first, so this entry starts a line of its own.
+            size = os.fstat(descriptor).st_size
+            if size > 0 and os.pread(descriptor, 1, size - 1) != b"\n":
+                line = b"\n" + line
+            append_whole(descriptor, line)
         finally:
             os.close(descriptor)
+        known.add(key)
     except Exception:
         pass
 

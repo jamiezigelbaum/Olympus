@@ -380,4 +380,56 @@ print(json.dumps({"count": len(listed), "first": listed[0], "last": listed[-1], 
     expect(out.last).toEqual({ chat: '-1000001', message: '150000' });
     expect(out.file).toBe('.capture-media-waiting.jsonl');
   }, 60_000);
+
+  // Astra, round 5 (#556): the waiting list stays readable and does not grow while it waits.
+  pythonTest('writes that take fewer bytes than given still leave whole entries, one per line', async () => {
+    const dir = spool();
+    const out = await python(`
+folder = reader.media_dir()
+folder.mkdir(parents=True)
+real_write = reader.os.write
+def short(descriptor, data):
+    return real_write(descriptor, bytes(data)[:5])
+reader.os.write = short
+for n in (1, 2, 3):
+    reader.media_waits(folder, "-1000001", str(n), {})
+reader.os.write = real_write
+lines = open(folder.parent / reader.MEDIA_WAITING_NAME).read().splitlines()
+print(json.dumps({"lines": lines, "waiting": waiting()}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.lines).toEqual(['{"chat":"-1000001","message":"1"}', '{"chat":"-1000001","message":"2"}', '{"chat":"-1000001","message":"3"}']);
+    expect(out.waiting.map((item: { message: string }) => item.message)).toEqual(['1', '2', '3']);
+  });
+
+  pythonTest('entries run together are both read, an unfinished one is passed over, and the next pause starts its own line', async () => {
+    const dir = spool();
+    mkdirSync(join(dir, 'media'), { recursive: true });
+    // A write cut short and the next append, then a write cut short at the end of the file.
+    writeFileSync(join(dir, '.capture-media-waiting.jsonl'), '{"chat":"-1000001","message":"1"}{"chat":"-1000001","message":"2"}\n{"chat":"-1000001","mess');
+    const out = await python(`
+before = waiting()
+reader.media_waits(reader.media_dir(), "-1000001", "3", {})
+print(json.dumps({"before": before, "after": waiting()}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.before.map((item: { message: string }) => item.message)).toEqual(['1', '2']);
+    expect(out.after.map((item: { message: string }) => item.message)).toEqual(['1', '2', '3']);
+  });
+
+  pythonTest('a stalled retry does not list its media again: 100 retries of a file that does not fit leave one line', async () => {
+    const dir = spool();
+    const out = await python(`${retry}
+disk["free"], disk["total"] = 1 * GB, 100 * GB
+big = Msg(80, photo_id=80)
+big.stated = 2 * GB
+asyncio.run(reader.capture_message_media(big, record(80, size=2 * GB)))
+disk["free"] = 6 * GB
+for _ in range(100):
+    asyncio.run(ask(Client({80: big})))
+lines = open(reader.media_dir().parent / reader.MEDIA_WAITING_NAME).read().splitlines()
+print(json.dumps({"lines": len(lines), "waiting": waiting(), "downloads": big.downloads}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.lines).toBe(1);
+    expect(out.waiting).toEqual([{ chat: '-1000001', message: '80' }]);
+    expect(out.downloads).toBe(0);
+  });
 });

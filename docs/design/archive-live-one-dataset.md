@@ -644,8 +644,9 @@ Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
   their stated sizes, under a lock) and again every few MB while the bytes
   arrive. A paused message is still captured and ingested; its attachment
   says `mediaLeftOut: waiting_for_disk`, so its child does too, and it is
-  listed in `.capture-media-waiting.jsonl` beside the spool: appended to,
-  rewritten only as entries are done, never truncated.
+  listed in `.capture-media-waiting.jsonl` beside the spool: appended to
+  (each entry once, written whole), rewritten only as entries are done, never
+  truncated, and read entry by entry so a damaged line loses nothing else.
 - **Filled in once space returns.** Each gateway cycle, once there is room,
   the helper fetches the waiting messages again, downloads their media and
   captures them again with it; the newer capture brings the readable child
