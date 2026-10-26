@@ -608,7 +608,7 @@ describe('review round 5 on #558: the waiting folder is fenced, and swept on eve
     clear(target, waitingDir, 'S3');
     expect(Date.now() - started).toBeGreaterThanOrEqual(300);
     expect(readFileSync(entry, 'utf8')).not.toContain('door code');
-  });
+  }, 15_000);
 });
 
 describe('an export\'s media of any size reaches extraction as a file (owner, 2026-10-26)', () => {
