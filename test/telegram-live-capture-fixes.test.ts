@@ -554,3 +554,39 @@ describe('review fixes, round 2 (Astra, #545)', () => {
     }
   });
 });
+
+describe('review bot findings (#545)', () => {
+  test('a carried version spends the pass budget, so the spool behind it is still read', async () => {
+    const internalA = record('A', { text: 'A ordinary' });
+    const secure = (id: string, text: string) => {
+      const line = JSON.parse(record(id, { text }));
+      line.trust_domain = 'secure_local';
+      line.corpus_id = PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID;
+      line.classification = { trust_domain: 'secure_local', reason: 'fixture' };
+      return `${JSON.stringify(line)}\n`;
+    };
+    const dir = spool({ '2026-10-01.jsonl': internalA + secure('A', 'A protected') + secure('C', 'C protected') });
+    const s = stores(dir);
+    try {
+      const sync = createTelegramConnectorStoreSyncHandler({ stores: s, spoolDir: dir, maxItems: 2 });
+      for (let pull = 0; pull < 6; pull += 1) await sync.pull();
+      expect(s.secureLocal.localContent(`${ACCOUNT}:chat-1:C`)?.chunks.join(' ')).toBe('C protected');
+      expect(s.secureLocal.localContent(`${ACCOUNT}:chat-1:A`)?.chunks.join(' ')).toBe('A protected');
+      expect(s.internal.localContent(`${ACCOUNT}:chat-1:A`)?.chunks.join(' ') ?? '').toBe('');
+    } finally {
+      s.close();
+    }
+  });
+
+  test('a remembered offset of a file truncated and written again under the same inode is not trusted', () => {
+    const first = record('1');
+    const second = record('2');
+    const dir = spool({ '2026-10-01.jsonl': first + second });
+    // Read to the end, so the offset of line 2 is remembered.
+    expect(readTelegramCaptureSpool({ spoolDir: dir }).resumeCursor).toBe('2026-10-01.jsonl:2');
+    // The same inode, rewritten as one line ending exactly where line 2 did.
+    const length = Buffer.byteLength(first + second);
+    writeFileSync(join(dir, '2026-10-01.jsonl'), `${'x'.repeat(length - 1)}\n`);
+    expect(telegramCaptureSpoolCursorState(dir, '2026-10-01.jsonl:2')).toBe('reset');
+  });
+});

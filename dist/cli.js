@@ -21396,6 +21396,12 @@ class TierLedger {
     `).get(...idParams(identity2));
     return row ? writeIntentFromRow(row) : undefined;
   }
+  markUnseenDeletion(identity2) {
+    this.db.query("INSERT OR IGNORE INTO tier_unseen_deletions (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)").run(...idParams(identity2));
+  }
+  isUnseenDeletion(identity2) {
+    return this.db.query("SELECT 1 FROM tier_unseen_deletions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?").get(...idParams(identity2)) !== null;
+  }
   writeIntents() {
     return this.db.query("SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id").all().map(writeIntentFromRow);
   }
@@ -22267,6 +22273,13 @@ function tierLedgerMigrations() {
             written_at TEXT NOT NULL,
             body_version TEXT,
             item_family TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TABLE IF NOT EXISTS tier_unseen_deletions (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);
@@ -60155,14 +60168,20 @@ class TieredStoreSet {
   }
   removeChild(child) {
     try {
-      this.ledger.removeCopies(child);
-      this.ledger.clearWriteIntent(child);
-      this.secrets()?.remove(child);
       const { sourceVersion: _own, ...bare } = child;
+      this.ledger.putWriteIntent({
+        identity: bare,
+        kind: "deletion",
+        connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+        itemFamily: child.family
+      });
+      this.ledger.removeCopies(child);
+      this.secrets()?.remove(child);
       for (const store of this.openStores()) {
         store.tombstoneCopy(bare, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
         store.retireSecretLocation(bare, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
       }
+      this.ledger.clearWriteIntent(child);
       return true;
     } catch {
       return false;
@@ -60458,12 +60477,22 @@ class TieredStoreSet {
     if (this.finishPendingIntents())
       await this.sweepOrphanedChildren();
   }
+  intentSuperseded(intent) {
+    const identity2 = { ...intent.identity, ...intent.version !== undefined ? { sourceVersion: intent.version } : {} };
+    if (intent.version === undefined) {
+      return this.anyLegHasRow(identity2) && TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity2).active !== true);
+    }
+    return TIER_DOMAIN_ORDER.some((domain) => {
+      const row = this.store(domain)?.storedItemState(identity2);
+      return row?.tombstoned === true && row.version === intent.version;
+    });
+  }
   finishPendingIntents() {
     let removed = false;
     for (const intent of this.ledger.writeIntents()) {
       const identity2 = { ...intent.identity, ...intent.version !== undefined ? { sourceVersion: intent.version } : {} };
       if (intent.kind === "content" || intent.kind === "names") {
-        if (this.anyLegHasRow(identity2) && TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity2).active !== true))
+        if (this.intentSuperseded(intent))
           this.ledger.clearWriteIntent(intent.identity);
         continue;
       }
@@ -60481,6 +60510,8 @@ class TieredStoreSet {
             continue;
           store.tombstoneCopy(identity2, { connectorId: intent.connectorId || TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, ...intent.kind === "secret" ? { trustTier: "S5" } : {} });
           store.advanceItemVersion(identity2, { onlyTombstoned: true });
+          if (intent.version === undefined)
+            store.retireSecretLocation(identity2, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
         }
         this.ledger.removeCopies(intent.identity);
         removed = true;
@@ -60493,6 +60524,8 @@ class TieredStoreSet {
           ...intent.kind === "secret" ? { trustTier: "S5" } : {},
           insert: true
         });
+        if (intent.kind === "deletion")
+          this.ledger.markUnseenDeletion(intent.identity);
         removed = true;
       }
       this.ledger.clearWriteIntent(intent.identity);
@@ -60549,8 +60582,19 @@ class TieredStoreSet {
     }
     const pending = this.ledger.writeIntent(identity2);
     const hidden = (pending?.kind === "deletion" || pending?.kind === "secret") && pending.version !== undefined ? pending.version : undefined;
-    if (found.length === 0)
-      return hidden === undefined ? undefined : { version: hidden, hasContent: false, tombstoned: true };
+    if (found.length === 0) {
+      if (pending?.version === undefined)
+        return;
+      if (hidden !== undefined)
+        return { version: hidden, hasContent: false, tombstoned: true };
+      const owesBody2 = pending.kind === "content" || pending.kind === "names";
+      return {
+        version: pending.version,
+        hasContent: false,
+        incomplete: true,
+        ...owesBody2 && pending.bodyVersion !== undefined ? { owedBodyVersion: pending.bodyVersion } : {}
+      };
+    }
     const newest = found.reduce((best, leg) => leg.version !== undefined && (best === undefined || compareVersions(leg.version, best) > 0) ? leg.version : best, undefined);
     const top = newest === undefined ? found : found.filter((leg) => leg.version !== undefined && compareVersions(leg.version, newest) === 0);
     const below = found.filter((leg) => !top.includes(leg));
@@ -60558,14 +60602,17 @@ class TieredStoreSet {
     const intentLeads = hidden !== undefined && (newest === undefined || compareVersions(hidden, newest) > 0);
     const tombstoned = topActive.length === 0 || intentLeads;
     const owed = this.ledger.writeIntent(identity2);
-    const owedBody = (owed?.kind === "content" || owed?.kind === "names") && owed.version !== undefined && !tombstoned;
+    const owesBody = owed?.kind === "content" || owed?.kind === "names";
+    const owedLeads = owesBody && owed.version !== undefined && (newest === undefined || compareVersions(owed.version, newest) > 0);
+    const owedBody = owesBody && owed.version !== undefined && (owedLeads || !tombstoned);
     const incomplete = owedBody;
     const owedBodyVersion = owedBody ? owed?.bodyVersion : undefined;
-    const version = intentLeads ? hidden : owedBody && (newest === undefined || compareVersions(owed.version, newest) > 0) ? owed.version : newest;
+    const moving = pending?.kind === "advance" && pending.version !== undefined && (newest === undefined || compareVersions(pending.version, newest) > 0) ? pending.version : undefined;
+    const version = intentLeads ? hidden : moving !== undefined ? moving : owedBody && (newest === undefined || compareVersions(owed.version, newest) > 0) ? owed.version : newest;
     return {
       ...version !== undefined ? { version } : {},
-      hasContent: !intentLeads && topActive.some((leg) => leg.chunkCount > 0),
-      ...tombstoned ? { tombstoned: true } : {},
+      hasContent: !intentLeads && !owedLeads && topActive.some((leg) => leg.chunkCount > 0),
+      ...tombstoned && !owedLeads ? { tombstoned: true } : {},
       ...incomplete ? { incomplete: true } : {},
       ...owedBodyVersion !== undefined ? { owedBodyVersion } : {}
     };
@@ -60954,8 +61001,10 @@ class TieredRoutingRun {
       for (const domain of TIER_DOMAIN_ORDER)
         this.set.store(domain)?.advanceItemVersion(identity2, { onlyTombstoned: true });
       this.copyRemovals.set(identityKey(identity2), identity2);
-      if (location)
+      if (location) {
         this.routedDomains.add(SECRET_LOCATION_DOMAIN);
+        ledger.markUnseenDeletion(identity2);
+      }
       return { kind: "delete", corpora: new Set(ledger.copies(identity2).map((copy) => copy.corpusId)), reason: "provider_deleted", ...location ? { location: true } : {} };
     }
     const deferred = this.set.readsContentLater(item);
@@ -60971,7 +61020,7 @@ class TieredRoutingRun {
     this.recordSecretLocation(input, text2, decision);
     const contentRead = decision.contentRead && !input.contentFetchFailed;
     if (!routed) {
-      const laneRow = hasRow && TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity2).active === true);
+      const laneRow = hasRow && (TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity2).active === true) || !ledger.isUnseenDeletion(identity2));
       if (laneRow || !deferred && (!contentRead || input.metadataOnly)) {
         this.counts.itemsLegacy += 1;
         return { kind: "legacy" };
@@ -72885,8 +72934,74 @@ var init_capture_spool_secrets = __esm(() => {
   SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
 
+// src/workers/connector-store/spool-file-identity.ts
+import { createHash as createHash47 } from "node:crypto";
+import { closeSync as closeSync16, openSync as openSync16, readSync as readSync4, statSync as statSync22 } from "node:fs";
+function spoolFileIdentity(path) {
+  try {
+    const stats = statSync22(path);
+    const birth = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? Math.floor(stats.birthtimeMs) : 0;
+    return {
+      size: stats.size,
+      ...stats.ino > 0 ? { ino: stats.ino } : {},
+      identity: `${stats.dev}:${stats.ino}:${birth}:${firstLineDigest(path)}`
+    };
+  } catch {
+    return;
+  }
+}
+function sameSpoolFile(recorded, path) {
+  return spoolFileIdentity(path)?.identity === recorded;
+}
+function firstLineDigest(path) {
+  let fd2;
+  try {
+    fd2 = openSync16(path, "r");
+  } catch {
+    return "-";
+  }
+  try {
+    const head = Buffer.alloc(SPOOL_IDENTITY_HEAD_BYTES);
+    const read = readSync4(fd2, head, 0, SPOOL_IDENTITY_HEAD_BYTES, 0);
+    const newline = head.subarray(0, read).indexOf(NEWLINE);
+    if (newline < 0 && read < SPOOL_IDENTITY_HEAD_BYTES)
+      return "none";
+    return createHash47("sha256").update(head.subarray(0, newline < 0 ? read : newline + 1)).digest("hex").slice(0, 16);
+  } finally {
+    closeSync16(fd2);
+  }
+}
+function spoolBoundaryDigest(path, offset) {
+  if (!Number.isSafeInteger(offset) || offset < 0)
+    return;
+  let fd2;
+  try {
+    fd2 = openSync16(path, "r");
+  } catch {
+    return;
+  }
+  try {
+    const start = Math.max(0, offset - SPOOL_BOUNDARY_WINDOW_BYTES);
+    const window2 = Buffer.alloc(offset - start);
+    const read = window2.length === 0 ? 0 : readSync4(fd2, window2, 0, window2.length, start);
+    if (read < window2.length)
+      return;
+    return createHash47("sha256").update(`${offset}\x00`).update(window2).digest("hex").slice(0, 24);
+  } finally {
+    closeSync16(fd2);
+  }
+}
+function spoolBoundaryHolds(path, offset, recorded) {
+  return spoolBoundaryDigest(path, offset) === recorded;
+}
+var SPOOL_IDENTITY_HEAD_BYTES, NEWLINE = 10, SPOOL_BOUNDARY_WINDOW_BYTES;
+var init_spool_file_identity = __esm(() => {
+  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
+});
+
 // src/workers/telegram-messages/spool-lines.ts
-import { readSync as readSync4 } from "node:fs";
+import { readSync as readSync5 } from "node:fs";
 function* spoolFileLines(fd2, start, size, maxLineBytes) {
   const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
   let position = start;
@@ -72894,7 +73009,7 @@ function* spoolFileLines(fd2, start, size, maxLineBytes) {
   let held = 0;
   let oversize = false;
   while (position < size) {
-    const read = readSync4(fd2, buffer, 0, Math.min(CHUNK_BYTES, size - position), position);
+    const read = readSync5(fd2, buffer, 0, Math.min(CHUNK_BYTES, size - position), position);
     if (read <= 0)
       break;
     let from = 0;
@@ -72926,8 +73041,11 @@ function* spoolFileLines(fd2, start, size, maxLineBytes) {
 function rememberSpoolOffset(path, stat2, line, offset) {
   if (line <= 0)
     return;
+  const digest3 = spoolBoundaryDigest(path, offset);
+  if (!digest3)
+    return;
   const list = (hints.get(path) ?? []).filter((hint) => hint.line !== line && hint.dev === stat2.dev && hint.ino === stat2.ino);
-  list.push({ dev: stat2.dev, ino: stat2.ino, line, offset });
+  list.push({ dev: stat2.dev, ino: stat2.ino, line, offset, digest: digest3 });
   list.sort((a, b) => a.line - b.line);
   while (list.length > MAX_HINTS_PER_FILE)
     list.shift();
@@ -72945,7 +73063,9 @@ function spoolLineOffset(fd2, path, stat2, line) {
   for (const hint of hints.get(path) ?? []) {
     if (hint.line > line || hint.dev !== stat2.dev || hint.ino !== stat2.ino || hint.offset > stat2.size)
       continue;
-    if (hint.offset > 0 && (readSync4(fd2, byte, 0, 1, hint.offset - 1) !== 1 || byte[0] !== 10))
+    if (hint.offset > 0 && (readSync5(fd2, byte, 0, 1, hint.offset - 1) !== 1 || byte[0] !== 10))
+      continue;
+    if (!spoolBoundaryHolds(path, hint.offset, hint.digest))
       continue;
     if (hint.line >= fromLine) {
       fromLine = hint.line;
@@ -72958,7 +73078,7 @@ function spoolLineOffset(fd2, path, stat2, line) {
   let position = fromOffset;
   let counted = fromLine;
   while (position < stat2.size) {
-    const read = readSync4(fd2, buffer, 0, Math.min(CHUNK_BYTES, stat2.size - position), position);
+    const read = readSync5(fd2, buffer, 0, Math.min(CHUNK_BYTES, stat2.size - position), position);
     if (read <= 0)
       break;
     let from = 0;
@@ -72980,6 +73100,7 @@ function spoolLineOffset(fd2, path, stat2, line) {
 }
 var CHUNK_BYTES, MAX_HINT_FILES = 64, MAX_HINTS_PER_FILE = 16, hints;
 var init_spool_lines = __esm(() => {
+  init_spool_file_identity();
   CHUNK_BYTES = 1 << 20;
   hints = new Map;
 });
@@ -73420,13 +73541,16 @@ function compareTelegramVersions(a, b) {
   const [rightVersion = "", rightMark] = b.split(CAPTURE_MARK);
   const left = VERSION_TIME.exec(leftVersion);
   const right = VERSION_TIME.exec(rightVersion);
-  if (!left || !right)
-    return 0;
-  const difference = Date.parse(left[1]) - Date.parse(right[1]);
-  if (!Number.isFinite(difference))
-    return 0;
-  if (difference !== 0)
-    return Math.sign(difference);
+  if (!left || !right) {
+    if (left || right || leftVersion !== rightVersion)
+      return !left && right ? -1 : left && !right ? 1 : -1;
+  } else {
+    const difference = Date.parse(left[1]) - Date.parse(right[1]);
+    if (!Number.isFinite(difference))
+      return 0;
+    if (difference !== 0)
+      return Math.sign(difference);
+  }
   if (leftMark === rightMark)
     return 0;
   if (leftMark === undefined)
@@ -73590,8 +73714,8 @@ var init_media_child = __esm(() => {
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts
-import { createHash as createHash47 } from "node:crypto";
-import { closeSync as closeSync16, existsSync as existsSync49, lstatSync as lstatSync27, openSync as openSync16, readSync as readSync5, readdirSync as readdirSync6 } from "node:fs";
+import { createHash as createHash48 } from "node:crypto";
+import { closeSync as closeSync17, existsSync as existsSync49, lstatSync as lstatSync27, openSync as openSync17, readSync as readSync6, readdirSync as readdirSync6 } from "node:fs";
 import { join as join60 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
   return resolvedRawPath(TELEGRAM_SOURCE_ID, "telegram-spool", env);
@@ -73654,6 +73778,11 @@ function createTelegramCaptureSpoolConnector(options) {
         let remaining = budget;
         if (carried.length > 0) {
           yield { records: carried.map((record) => ({ record })), ...cursor ? { nextCursor: cursor } : {}, done: false };
+          if (remaining !== undefined) {
+            remaining -= carried.length;
+            if (remaining <= 0)
+              return;
+          }
         }
         for (;; ) {
           const result = readTelegramCaptureSpool({
@@ -73724,7 +73853,9 @@ function readTelegramCaptureSpool(options) {
       if (!stat2.isFile() || stat2.isSymbolicLink()) {
         throw new Error("Telegram capture spool refuses non-regular JSONL files.");
       }
-      const fd2 = openSync16(path, "r");
+      const fd2 = openSync17(path, "r");
+      let lastLine = 0;
+      let lastEnd = 0;
       try {
         const startLine = cursor?.file === name ? cursor.line : 0;
         const startOffset = spoolLineOffset(fd2, path, stat2, startLine);
@@ -73741,7 +73872,8 @@ function readTelegramCaptureSpool(options) {
           linesRead += 1;
           bytesRead = bytesBefore + (line.end - startOffset);
           resumeCursor = `${name}:${lineIndex}`;
-          rememberSpoolOffset(path, stat2, lineIndex, line.end);
+          lastLine = lineIndex;
+          lastEnd = line.end;
           const atEnd = isLastFile && line.end >= stat2.size;
           const spent = bytesRead >= maxReadBytes || linesRead >= MAX_LINES_PER_READ;
           const stop = () => {
@@ -73798,7 +73930,9 @@ function readTelegramCaptureSpool(options) {
             break outer;
         }
       } finally {
-        closeSync16(fd2);
+        if (lastLine > 0)
+          rememberSpoolOffset(path, stat2, lastLine, lastEnd);
+        closeSync17(fd2);
       }
     }
   return {
@@ -73817,11 +73951,11 @@ function telegramCaptureCursorOffset(spoolDir, cursorText) {
     const stat2 = lstatSync27(path);
     if (!stat2.isFile() || stat2.isSymbolicLink())
       return;
-    const fd2 = openSync16(path, "r");
+    const fd2 = openSync17(path, "r");
     try {
       return spoolLineOffset(fd2, path, stat2, cursor.line);
     } finally {
-      closeSync16(fd2);
+      closeSync17(fd2);
     }
   } catch {
     return;
@@ -73838,11 +73972,11 @@ function telegramCaptureSpoolCursorState(spoolDir, cursorText, names = telegramC
   const stat2 = lstatSync27(path);
   if (!stat2.isFile() || stat2.isSymbolicLink())
     return "ok";
-  const fd2 = openSync16(path, "r");
+  const fd2 = openSync17(path, "r");
   try {
     return spoolLineOffset(fd2, path, stat2, cursor.line) === undefined ? "reset" : "ok";
   } finally {
-    closeSync16(fd2);
+    closeSync17(fd2);
   }
 }
 function readTelegramCaptureSpoolNewestCapturedAt(spoolDir) {
@@ -73878,11 +74012,11 @@ function readTelegramCaptureHeartbeat(spoolDir) {
     if (!stat2.isFile() || stat2.isSymbolicLink() || stat2.size > MAX_HEARTBEAT_BYTES)
       return;
     const buffer = Buffer.alloc(stat2.size);
-    const fd2 = openSync16(path, "r");
+    const fd2 = openSync17(path, "r");
     try {
-      readSync5(fd2, buffer, 0, buffer.length, 0);
+      readSync6(fd2, buffer, 0, buffer.length, 0);
     } finally {
-      closeSync16(fd2);
+      closeSync17(fd2);
     }
     const value = JSON.parse(buffer.toString("utf8"));
     if (!isRecordValue(value) || value.kind !== "telegram_capture_heartbeat" || value.schema_version !== 1)
@@ -73899,11 +74033,11 @@ function spoolTailLines(path) {
     return [];
   const start = Math.max(0, stat2.size - MAX_TAIL_SCAN_BYTES);
   const buffer = Buffer.alloc(stat2.size - start);
-  const fd2 = openSync16(path, "r");
+  const fd2 = openSync17(path, "r");
   try {
     let read = 0;
     while (read < buffer.length) {
-      const got = readSync5(fd2, buffer, read, buffer.length - read, start + read);
+      const got = readSync6(fd2, buffer, read, buffer.length - read, start + read);
       if (got <= 0)
         break;
       read += got;
@@ -73917,7 +74051,7 @@ function spoolTailLines(path) {
       lines.shift();
     return lines;
   } finally {
-    closeSync16(fd2);
+    closeSync17(fd2);
   }
 }
 function redactTelegramCaptureSpoolSecrets(options) {
@@ -74082,7 +74216,7 @@ function readTelegramCaptureSpoolNewest(options) {
     const stat2 = lstatSync27(path);
     if (!stat2.isFile() || stat2.isSymbolicLink())
       continue;
-    const fd2 = openSync16(path, "r");
+    const fd2 = openSync17(path, "r");
     try {
       let lineNumber = 0;
       for (const line of spoolFileLines(fd2, 0, stat2.size, MAX_RECORD_BYTES)) {
@@ -74104,7 +74238,7 @@ function readTelegramCaptureSpoolNewest(options) {
         }
       }
     } finally {
-      closeSync16(fd2);
+      closeSync17(fd2);
     }
   }
   return newest;
@@ -74304,7 +74438,7 @@ function normalizeBudget(value) {
   return value;
 }
 function sha2563(value) {
-  return createHash47("sha256").update(value).digest("hex");
+  return createHash48("sha256").update(value).digest("hex");
 }
 function telegramConversationKind(chatType) {
   switch (chatType?.toLowerCase()) {
@@ -74357,72 +74491,6 @@ var init_capture_spool_connector = __esm(() => {
     "boosts",
     "inviter"
   ]);
-});
-
-// src/workers/connector-store/spool-file-identity.ts
-import { createHash as createHash48 } from "node:crypto";
-import { closeSync as closeSync17, openSync as openSync17, readSync as readSync6, statSync as statSync22 } from "node:fs";
-function spoolFileIdentity(path) {
-  try {
-    const stats = statSync22(path);
-    const birth = Number.isFinite(stats.birthtimeMs) && stats.birthtimeMs > 0 ? Math.floor(stats.birthtimeMs) : 0;
-    return {
-      size: stats.size,
-      ...stats.ino > 0 ? { ino: stats.ino } : {},
-      identity: `${stats.dev}:${stats.ino}:${birth}:${firstLineDigest(path)}`
-    };
-  } catch {
-    return;
-  }
-}
-function sameSpoolFile(recorded, path) {
-  return spoolFileIdentity(path)?.identity === recorded;
-}
-function firstLineDigest(path) {
-  let fd2;
-  try {
-    fd2 = openSync17(path, "r");
-  } catch {
-    return "-";
-  }
-  try {
-    const head = Buffer.alloc(SPOOL_IDENTITY_HEAD_BYTES);
-    const read = readSync6(fd2, head, 0, SPOOL_IDENTITY_HEAD_BYTES, 0);
-    const newline = head.subarray(0, read).indexOf(NEWLINE);
-    if (newline < 0 && read < SPOOL_IDENTITY_HEAD_BYTES)
-      return "none";
-    return createHash48("sha256").update(head.subarray(0, newline < 0 ? read : newline + 1)).digest("hex").slice(0, 16);
-  } finally {
-    closeSync17(fd2);
-  }
-}
-function spoolBoundaryDigest(path, offset) {
-  if (!Number.isSafeInteger(offset) || offset < 0)
-    return;
-  let fd2;
-  try {
-    fd2 = openSync17(path, "r");
-  } catch {
-    return;
-  }
-  try {
-    const start = Math.max(0, offset - SPOOL_BOUNDARY_WINDOW_BYTES);
-    const window2 = Buffer.alloc(offset - start);
-    const read = window2.length === 0 ? 0 : readSync6(fd2, window2, 0, window2.length, start);
-    if (read < window2.length)
-      return;
-    return createHash48("sha256").update(`${offset}\x00`).update(window2).digest("hex").slice(0, 24);
-  } finally {
-    closeSync17(fd2);
-  }
-}
-function spoolBoundaryHolds(path, offset, recorded) {
-  return spoolBoundaryDigest(path, offset) === recorded;
-}
-var SPOOL_IDENTITY_HEAD_BYTES, NEWLINE = 10, SPOOL_BOUNDARY_WINDOW_BYTES;
-var init_spool_file_identity = __esm(() => {
-  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
-  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
 });
 
 // src/workers/telegram-messages/protection-claims.ts
@@ -75302,6 +75370,9 @@ function telegramContactBaseKey(value) {
   const userId = telegramScalar(value.user_id);
   if (userId)
     return `user${userId}`;
+  const peerId = telegramScalar(value.id);
+  if (peerId)
+    return `peer${(telegramScalar(value.type) ?? "").replace(/[^a-z_]+/g, "")}:${peerId}`;
   const phone = telegramScalar(value.phone_number)?.replace(/\D+/g, "");
   if (phone)
     return `phone${createHash50("sha256").update(phone).digest("hex").slice(0, 24)}`;
@@ -75343,13 +75414,13 @@ function contactOccurrencesOf(root, file) {
   try {
     const json = new JsonStreamReader(telegramJsonSource(fileByteSource(reader)), {
       itemPaths: [
-        ...CONTACT_SECTIONS.map((section) => [section, "list", "*"]),
-        ["sessions", "about"],
-        ["web_sessions", "about"],
+        ...CONTACT_SECTIONS.map((section) => [section, "list"]),
+        ["sessions"],
+        ["web_sessions"],
         ["other_data"],
-        ["chats", "about"],
-        ["left_chats", "about"],
-        ["messages", "*"]
+        ["chats"],
+        ["left_chats"],
+        ["messages"]
       ],
       maxItemBytes: 1024 * 1024
     });

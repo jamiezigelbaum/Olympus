@@ -40,6 +40,9 @@ export function telegramContactBaseKey(value: unknown): string {
   if (!isRecord(value)) return 'unreadable';
   const userId = telegramScalar(value.user_id);
   if (userId) return `user${userId}`;
+  // A frequent contact names its peer by `id` and the peer's kind by `type` (a person, a group, a channel).
+  const peerId = telegramScalar(value.id);
+  if (peerId) return `peer${(telegramScalar(value.type) ?? '').replace(/[^a-z_]+/g, '')}:${peerId}`;
   const phone = telegramScalar(value.phone_number)?.replace(/\D+/g, '');
   if (phone) return `phone${createHash('sha256').update(phone).digest('hex').slice(0, 24)}`;
   const names = [value.first_name, value.last_name, value.name, value.category, value.date_unixtime ?? value.date]
@@ -83,9 +86,10 @@ function contactOccurrencesOf(root: ScopeRoot, file: ArchiveFileEntry): Map<stri
   try {
     const json = new JsonStreamReader(telegramJsonSource(fileByteSource(reader)), {
       itemPaths: [
-        ...CONTACT_SECTIONS.map((section) => [section, 'list', '*']),
-        // Past the contact lists: the first of these ends the scan.
-        ['sessions', 'about'], ['web_sessions', 'about'], ['other_data'], ['chats', 'about'], ['left_chats', 'about'], ['messages', '*'],
+        // A path names the container: each contact is a child of its list, claimed whole.
+        ...CONTACT_SECTIONS.map((section) => [section, 'list']),
+        // Past the contact lists: the first child of any of these ends the scan.
+        ['sessions'], ['web_sessions'], ['other_data'], ['chats'], ['left_chats'], ['messages'],
       ],
       maxItemBytes: 1024 * 1024,
     });

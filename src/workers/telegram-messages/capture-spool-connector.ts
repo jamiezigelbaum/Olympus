@@ -207,6 +207,11 @@ export function createTelegramCaptureSpoolConnector(options: {
         if (carried.length > 0) {
           // Ahead of the spool, and at the lane's own resume point: nothing of the spool is passed by it.
           yield { records: carried.map((record) => ({ record })), ...(cursor ? { nextCursor: cursor } : {}), done: false };
+          // Carried records are items of this pass too: they spend its budget like the spool's own.
+          if (remaining !== undefined) {
+            remaining -= carried.length;
+            if (remaining <= 0) return;
+          }
         }
         for (;;) {
           // Every page reads on from its cursor (the byte offset of a cursor
@@ -312,6 +317,9 @@ export function readTelegramCaptureSpool(options: {
       throw new Error('Telegram capture spool refuses non-regular JSONL files.');
     }
     const fd = openSync(path, 'r');
+    // Where this read stopped in the file, remembered once it is done (one digest per read, not per line).
+    let lastLine = 0;
+    let lastEnd = 0;
     try {
       const startLine = cursor?.file === name ? cursor.line : 0;
       const startOffset = spoolLineOffset(fd, path, stat, startLine);
@@ -329,7 +337,8 @@ export function readTelegramCaptureSpool(options: {
         linesRead += 1;
         bytesRead = bytesBefore + (line.end - startOffset);
         resumeCursor = `${name}:${lineIndex}`;
-        rememberSpoolOffset(path, stat, lineIndex, line.end);
+        lastLine = lineIndex;
+        lastEnd = line.end;
         const atEnd = isLastFile && line.end >= stat.size;
         // One read is bounded in the bytes and lines it consumes, whatever this
         // lane keeps of them: past either bound it hands back where it stopped,
@@ -400,6 +409,7 @@ export function readTelegramCaptureSpool(options: {
         if (stop()) break outer;
       }
     } finally {
+      if (lastLine > 0) rememberSpoolOffset(path, stat, lastLine, lastEnd);
       closeSync(fd);
     }
   }

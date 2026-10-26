@@ -416,15 +416,22 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   names-only record holds behind an earlier run's owed write until that write is
   finished.
 - **Pending states hold the boundary (2026-10-26).** The lookup reads the
-  persisted intent before any row: a pending Secret or deletion is the item's
-  state (tombstoned, at its version) even when no store holds a row yet, so an
-  older record never replaces it. A deletion of an item no store ever held is
+  persisted intent before any row, and no row is never read as absent: a pending
+  Secret or deletion is the item's state (tombstoned, at its version) even when
+  no store holds a row yet, and a pending body or names write is the item at
+  its version, incomplete, with the version of the record whose body is owed,
+  so an older record never replaces it and the owed write is replayed. A deletion of an item no store ever held is
   recorded as a tombstone row in the Private store (with a `deletion` intent
   that carries the item's family, so a cut-off write is finished from the intent
   alone), which also refuses older versions afterwards; rows that are all
-  tombstones are not a lane's item, so a newer record routes it afresh. A
+  tombstones the ledger marks as such an unseen deletion are not a lane's item,
+  so a newer record routes it afresh; a tombstone a lane left keeps the lane's
+  placement. A
   parent's deletion tombstones each leg's child at that leg's own version
-  (a cascade is not an event of the child). A record whose body is empty
+  (a cascade is not an event of the child), under a versionless `deletion`
+  intent written per child before its removal and cleared when it is whole,
+  so a failed removal is finished at the next pass start and hides the child
+  meanwhile, whatever becomes of the parent. A record whose body is empty
   (text that is blank: authoritative for a connector that sent it, unlike a
   record with no body at all) replaces the stored text in every leg before the
   version moves, under a `content` intent so a cut is repeated by its replay.
