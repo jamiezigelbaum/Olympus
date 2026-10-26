@@ -2168,8 +2168,13 @@ function lazySecretStore(env: Record<string, string | undefined>): SecretStore {
 }
 
 export async function main(): Promise<void> {
+  // First, before anything mounts or opens a store: this worker owns the data
+  // root. A second worker on it waits a short while (restarts overlap), then
+  // exits without mounting anything (core/data-owner-lock.ts).
+  dataOwnerLock = takeWorkerDataOwnerLock(process.env);
   // A retired per-store path setting would open empty stores beside the
-  // account's real files: refuse to start, naming each, before anything opens.
+  // account's real files: refuse to start, naming each, before anything opens
+  // or moves (the lock goes with the process).
   const retired = retiredPathSettings(process.env);
   if (retired.length > 0) {
     throw new Error(
@@ -2177,10 +2182,6 @@ export async function main(): Promise<void> {
       + 'Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then start again.',
     );
   }
-  // First, before anything mounts or opens a store: this worker owns the data
-  // root. A second worker on it waits a short while (restarts overlap), then
-  // exits without mounting anything (core/data-owner-lock.ts).
-  dataOwnerLock = takeWorkerDataOwnerLock(process.env);
   // An account a Delete marked is removed before anything else looks at it.
   deleteMarkedAccountsAtBoot(process.env);
   // An account recorded as legacy that holds nothing is placed in a folder instead.

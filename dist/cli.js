@@ -189800,11 +189800,11 @@ function lazySecretStore(env) {
   };
 }
 async function main() {
+  dataOwnerLock = takeWorkerDataOwnerLock(process.env);
   const retired = retiredPathSettings(process.env);
   if (retired.length > 0) {
     throw new Error(`[storage] These path settings are no longer read (source storage step 6): ${retired.join("; ")}. ` + "Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then start again.");
   }
-  dataOwnerLock = takeWorkerDataOwnerLock(process.env);
   deleteMarkedAccountsAtBoot(process.env);
   replaceEmptyAccountsAtBoot(process.env);
   await moveAccountsAtBoot(process.env);
