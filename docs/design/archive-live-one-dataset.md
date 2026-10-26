@@ -475,6 +475,16 @@ connector; any other mbox stays under Archives, as before.
   one item. The Private store's approved-scope filter (status counts, private
   embedding) accepts an observation by an import's input (`archive.<id>`)
   beside the live lane's scoped one: the owner approved each import.
+- **Before Gmail is connected.** Importing Takeout first and connecting
+  later is a normal first run. Live approval governs live reads, not the
+  account's own stores: an import pass embeds what it writes, as a live pull
+  does (under the live scope binding when there is an approval); with no live
+  lane, a Gmail scheduler source with no sync of its own carries the
+  embedding sweep and the private meaning backfill; and the Private store's
+  counts and backfill accept what the imports brought (`archive.` observations
+  alone) while live Gmail is not connected and approved. Live mail stored
+  under an approval that no longer stands is neither counted nor embedded by
+  that path.
 - **What an import does not apply.** The owner's mail scope (skipped
   senders and categories, the one-time-code filter, the content window)
   governs what live reads; an import is its own approval, as it was under

@@ -30348,7 +30348,7 @@ function normalizeConnectorStoreSearchFilters(value) {
   const normalized = {
     ...provider ? { provider } : {},
     ...value.observedConnectorId ? { observedConnectorId: requireNonEmpty(value.observedConnectorId, "Observed connector id") } : {},
-    ...value.observedConnectorId && value.observedConnectorIdPrefix ? { observedConnectorIdPrefix: requireNonEmpty(value.observedConnectorIdPrefix, "Observed connector id prefix") } : {},
+    ...value.observedConnectorIdPrefix ? { observedConnectorIdPrefix: requireNonEmpty(value.observedConnectorIdPrefix, "Observed connector id prefix") } : {},
     ...locatorPathScope ? { locatorPathScope } : {},
     ...locatorPathScopes.length > 0 ? { locatorPathScopes } : {},
     ...locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {},
@@ -30383,6 +30383,9 @@ function connectorStoreFilterSql(filters) {
   } else if (normalized.observedConnectorId) {
     clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
     params.push(normalized.observedConnectorId);
+  } else if (normalized.observedConnectorIdPrefix) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND substr(scope_owner.connector_id, 1, length(?)) = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push("AND i.source_scope_generation = ?");
@@ -154303,6 +154306,16 @@ function createGmailConnectorStoreSchedulerSource(input) {
     lastSyncCompletedAt: lastCompletedAt
   };
 }
+function createGmailImportedHistorySchedulerSource(input) {
+  return {
+    sourceId: SCHEDULER_SOURCE_IDS.gmail,
+    corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+    cadence: "continuous",
+    intervalMs: input.config.worker.scheduler.syncIntervalSeconds * 1000,
+    freshnessThresholdHours: input.config.worker.scheduler.freshnessThresholdHours,
+    tasks: []
+  };
+}
 function createGoogleDriveConnectorStoreSchedulerSource(input) {
   if (!input.liveSync)
     return;
@@ -169010,8 +169023,12 @@ function gmailInternalStoreStatusScope(authority) {
 function gmailPrivateStoreStatusScope(input) {
   const { authority, handle } = input;
   const ref = authority?.mailPolicyRef();
-  if (!ref || !handle || !authority)
-    return { itemsAllowed: false, contentAllowed: false };
+  if (!ref || !handle || !authority) {
+    if (!input.importAccountScope)
+      return { itemsAllowed: false, contentAllowed: false };
+    const imported = { provider: "gmail", observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX };
+    return { accountScope: input.importAccountScope, itemFilters: imported, contentAllowed: true, contentFilters: imported };
+  }
   const approval = authority.assertCurrentMail(ref);
   const accountScope = handle.accountRole?.trim() || "personal";
   const itemFilters = {
@@ -191531,7 +191548,8 @@ function localPrivateEmbeddingTargets(input) {
     fileSourceScopeAuthority,
     readScope: connectorStoreReadScope,
     connectorStoreAccountScopes,
-    gmailAccountScope
+    gmailAccountScope,
+    gmailImportAccountScope
   } = input;
   const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
   if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== "built-in" || policy?.activationMode !== "hybrid_shadow" && policy?.activationMode !== "hybrid_primary")
@@ -191546,6 +191564,16 @@ function localPrivateEmbeddingTargets(input) {
     const registered3 = sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
     if (!definition || definition.activationMode === "lexical_only" || definition.embeddingPolicy === "disabled" || registered3?.activationMode === "lexical_only" || registered3?.embeddingPolicy === "disabled")
       return [];
+    if (source.sourceId === SCHEDULER_SOURCE_IDS.gmail && (!ref || !fileSourceScopeAuthority)) {
+      if (!gmailImportAccountScope)
+        return [];
+      return [{
+        store,
+        provider: secureLocalPolicyEmbeddingProvider,
+        accountScope: gmailImportAccountScope,
+        filters: { provider: "gmail", observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX }
+      }];
+    }
     if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles].some((id) => id === source.sourceId) && (!ref || !fileSourceScopeAuthority))
       return [];
     const scope = connectorStoreReadScope(store);
@@ -192794,7 +192822,10 @@ async function main() {
           }).apiClientForTooling();
           return importClientPromise;
         };
-        const key2 = JSON.stringify(ownerRules);
+        const bound = (provider) => provider && approved && scopeRef && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(provider, fileSourceScopeAuthority, scopeRef) : provider;
+        const internalEmbedder = bound(sourceIndexEmbeddingProvider);
+        const secureEmbedder = secureLocalPolicyEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider) ? bound(secureLocalPolicyEmbeddingProvider) : undefined;
+        const key2 = JSON.stringify([ownerRules, approved ? scopeRef?.revision ?? null : null]);
         if (gmailArchiveSet?.key !== key2) {
           gmailArchiveSet = {
             key: key2,
@@ -192804,7 +192835,9 @@ async function main() {
               secureStore: gmailSecureConnectorStore,
               ...gmailTierLane?.publicStore ? { publicLeg: gmailTierLane.publicStore } : {},
               ...gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {},
-              tierClassification: { ...ownerRules.length > 0 ? { rules: [...ownerRules] } : {} }
+              tierClassification: { ...ownerRules.length > 0 ? { rules: [...ownerRules] } : {} },
+              ...internalEmbedder ? { internalEmbeddingProvider: internalEmbedder } : {},
+              ...secureEmbedder ? { secureEmbeddingProvider: secureEmbedder } : {}
             })
           };
         }
@@ -193349,7 +193382,11 @@ ${key2}`;
         capability: "gmail.email.sync",
         handles: readActiveConnectedHandles(process.env)
       });
-      return gmailPrivateStoreStatusScope({ authority: fileSourceScopeAuthority, handle: handle ? { accountRole: gmailItemScopeFor(handle) } : undefined });
+      return gmailPrivateStoreStatusScope({
+        authority: fileSourceScopeAuthority,
+        handle: handle ? { accountRole: gmailItemScopeFor(handle) } : undefined,
+        importAccountScope: gmailItemScopeFor(handle)
+      });
     }
     if (store === gmailInternalConnectorStore)
       return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
@@ -194060,6 +194097,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         });
       })
     ].filter((source) => source !== undefined);
+    if (!sources.some((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail) && gmailInternalConnectorStore && gmailSecureConnectorStore && [gmailInternalConnectorStore, gmailSecureConnectorStore].some((store) => store.itemAccountScopes("gmail", 1).length > 0)) {
+      sources.push(createGmailImportedHistorySchedulerSource({ config: olympusConfig }));
+    }
     const sweptSources = withEmbeddingSweep(sources, (source) => {
       const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
       corpusIds.add(source.corpusId);
@@ -194091,7 +194131,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       fileSourceScopeAuthority,
       readScope: connectorStoreReadScope,
       connectorStoreAccountScopes,
-      gmailAccountScope: currentGmailHandle ? gmailItemScopeFor(currentGmailHandle) : undefined
+      gmailAccountScope: currentGmailHandle ? gmailItemScopeFor(currentGmailHandle) : undefined,
+      gmailImportAccountScope: gmailItemScopeFor(currentGmailHandle)
     }));
     const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
     return {

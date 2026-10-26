@@ -2358,9 +2358,9 @@ export interface ConnectorStoreSearchFilters {
   /** An actual provider observation under this connector's current scope binding. */
   observedConnectorId?: string;
   /**
-   * With `observedConnectorId`: an observation by any connector whose id starts
-   * with this prefix counts too (the source's imported archives, `archive.`,
-   * which the owner approved one by one).
+   * An observation by any connector whose id starts with this prefix (the
+   * source's imported archives, `archive.`, which the owner approved one by
+   * one): beside `observedConnectorId`, or alone when there is no live scope.
    */
   observedConnectorIdPrefix?: string;
   /**
@@ -14598,7 +14598,7 @@ export function normalizeConnectorStoreSearchFilters(
   const normalized = {
     ...(provider ? { provider } : {}),
     ...(value.observedConnectorId ? { observedConnectorId: requireNonEmpty(value.observedConnectorId, 'Observed connector id') } : {}),
-    ...(value.observedConnectorId && value.observedConnectorIdPrefix
+    ...(value.observedConnectorIdPrefix
       ? { observedConnectorIdPrefix: requireNonEmpty(value.observedConnectorIdPrefix, 'Observed connector id prefix') }
       : {}),
     ...(locatorPathScope ? { locatorPathScope } : {}),
@@ -14638,6 +14638,9 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
   } else if (normalized.observedConnectorId) {
     clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
     params.push(normalized.observedConnectorId);
+  } else if (normalized.observedConnectorIdPrefix) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND substr(scope_owner.connector_id, 1, length(?)) = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push('AND i.source_scope_generation = ?');

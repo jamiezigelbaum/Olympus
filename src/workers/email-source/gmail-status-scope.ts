@@ -39,10 +39,21 @@ export function gmailInternalStoreStatusScope(
 export function gmailPrivateStoreStatusScope(input: {
   authority: Pick<FileSourceScopeAuthority, 'mailPolicyRef' | 'assertCurrentMail'> | undefined;
   handle: Pick<ConnectedCredentialHandle, 'accountRole'> | undefined;
+  /**
+   * The account scope Gmail's items are kept under, for mail an import brought
+   * in: counted whether or not live Gmail is connected and approved, since the
+   * owner approved each import on its own. Live approval governs live reads.
+   */
+  importAccountScope?: string;
 }): ConnectorStoreStatusScope {
   const { authority, handle } = input;
   const ref = authority?.mailPolicyRef();
-  if (!ref || !handle || !authority) return { itemsAllowed: false, contentAllowed: false };
+  if (!ref || !handle || !authority) {
+    if (!input.importAccountScope) return { itemsAllowed: false, contentAllowed: false };
+    // No live approval: what the imports brought, and only that.
+    const imported = { provider: 'gmail', observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX };
+    return { accountScope: input.importAccountScope, itemFilters: imported, contentAllowed: true, contentFilters: imported };
+  }
   const approval = authority.assertCurrentMail(ref);
   const accountScope = handle.accountRole?.trim() || 'personal';
   const itemFilters = {
