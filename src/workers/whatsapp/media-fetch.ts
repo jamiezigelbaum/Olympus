@@ -40,6 +40,7 @@
 import { Database } from 'bun:sqlite';
 import { randomBytes } from 'node:crypto';
 import {
+  chmodSync,
   closeSync,
   constants,
   copyFileSync,
@@ -59,6 +60,7 @@ import { join } from 'node:path';
 import type { SourceConnectorInput, SourceConnectorListOptions } from '../../core/contracts.ts';
 import { childProviderItemId } from '../../core/child-item-id.ts';
 import { inputConnector } from '../../core/source-inputs.ts';
+import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import type { TierLedgerRecord } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreSyncOptions } from '../connector-store/index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
@@ -243,8 +245,10 @@ class WaitingMediaState {
   private constructor(private readonly db: Database) {}
 
   static open(spoolDir: string): WaitingMediaState {
-    const db = new Database(join(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE));
-    db.run('PRAGMA journal_mode = WAL');
+    const path = join(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE);
+    const db = new Database(path, { create: true });
+    chmodSync(path, 0o600);
+    db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     db.run(`CREATE TABLE IF NOT EXISTS waiting (
       stem TEXT PRIMARY KEY,
       chat_jid TEXT NOT NULL,
@@ -293,7 +297,7 @@ class WaitingMediaState {
   }
 
   close(): void {
-    this.db.close();
+    closeSqliteStore(this.db);
   }
 
   private row(stem: string): WaitingMediaRow | undefined {
