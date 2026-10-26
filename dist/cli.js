@@ -101067,9 +101067,9 @@ function clearWhatsAppSpoolSecrets(options) {
       continue;
     const known = recorded[file];
     const same = holds(path, before, known);
-    const certified = known?.judgedLines ?? known?.lines ?? 0;
+    const certified = known?.judgedLines ?? 0;
     const end = same && file === throughFile ? throughLine : ALL_LINES;
-    if (same && (end === ALL_LINES ? before.size === known.size && certified === known.lines : certified >= end)) {
+    if (same && (end === ALL_LINES ? before.size === known.size && certified >= known.lines : certified >= end)) {
       next[file] = known;
       continue;
     }
@@ -101086,9 +101086,10 @@ function clearWhatsAppSpoolSecrets(options) {
       failure2 = error;
       break;
     }
-    const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size);
+    const judged = file === throughFile ? Math.min(scanned.lines, throughLine) : scanned.lines;
+    const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size, judged);
     if (entry)
-      next[file] = file === throughFile && end === ALL_LINES && scanned.lines > throughLine ? { ...entry, judgedLines: throughLine } : entry;
+      next[file] = entry;
     else
       delete next[file];
   }
@@ -101123,9 +101124,9 @@ function clearWhatsAppSpoolSecrets(options) {
         break;
       }
       budget -= scanned.offset;
-      const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size);
+      const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size, 0);
       if (entry)
-        next[file] = { ...entry, judgedLines: 0 };
+        next[file] = entry;
       else
         delete next[file];
     }
@@ -101141,7 +101142,7 @@ function clearWhatsAppSpoolSecrets(options) {
   });
   if (sweep && sweep.recordsRedacted + sweep.recordsBlanked > 0) {
     for (const [file, known] of Object.entries(next)) {
-      const entry = clearedFileNow(join88(options.spoolDir, file), known.lines, known.offset, known.size);
+      const entry = clearedFileNow(join88(options.spoolDir, file), known.lines, known.offset, known.size, known.judgedLines);
       if (entry)
         next[file] = entry;
       else
@@ -101155,14 +101156,14 @@ function clearWhatsAppSpoolSecrets(options) {
 function holds(path, now, known) {
   return known !== undefined && known.identity === now.identity && now.size >= known.offset && spoolBoundaryHolds(path, known.offset, known.boundary);
 }
-function clearedFileNow(path, lines, offset, size) {
+function clearedFileNow(path, lines, offset, size, judgedLines) {
   const identity2 = spoolFileIdentity(path);
   if (!identity2)
     return;
   const boundary = spoolBoundaryDigest(path, offset);
   if (boundary === undefined)
     return;
-  return { identity: identity2.identity, lines, offset, boundary, size };
+  return { identity: identity2.identity, lines, offset, boundary, size, judgedLines: Math.min(judgedLines, lines) };
 }
 function refreshIndex(spoolDir, files) {
   if (files.size === 0)
@@ -101185,8 +101186,10 @@ function readClearedFiles(ledger) {
     const parsed = JSON.parse(raw);
     const valid = {};
     for (const [file, entry] of Object.entries(parsed)) {
-      if (entry && typeof entry.identity === "string" && typeof entry.boundary === "string" && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines) && entry.lines >= 0 && Number.isSafeInteger(entry.size) && (entry.judgedLines === undefined || Number.isSafeInteger(entry.judgedLines) && entry.judgedLines >= 0))
-        valid[file] = entry;
+      if (entry && typeof entry.identity === "string" && typeof entry.boundary === "string" && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines) && entry.lines >= 0 && Number.isSafeInteger(entry.size)) {
+        const judgedLines = Number.isSafeInteger(entry.judgedLines) && entry.judgedLines >= 0 ? Math.min(entry.judgedLines, entry.lines) : 0;
+        valid[file] = { ...entry, judgedLines };
+      }
     }
     return valid;
   } catch {

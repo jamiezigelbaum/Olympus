@@ -461,16 +461,16 @@ export function clearWhatsAppSpoolSecrets(options: {
     if (!before) continue;
     const known = recorded[file];
     const same = holds(path, before, known);
-    // How far the record is certified for a later judgment: a file cleared ahead of the cursor, none of it.
-    const certified = known?.judgedLines ?? known?.lines ?? 0;
+    // How far the record is certified for a later judgment (a file cleared ahead of the cursor: none of it).
+    const certified = known?.judgedLines ?? 0;
     // A file before the cursor's is cleared whole; the cursor's own, up to the cursor. A file that broke the
     // spool contract (or was never cleared) keeps none of its old boundaries: it is cleared whole, from its start.
     const end = same && file === throughFile ? throughLine : ALL_LINES;
-    if (same && (end === ALL_LINES ? before.size === known!.size && certified === known!.lines : certified >= end)) {
+    if (same && (end === ALL_LINES ? before.size === known.size && certified >= known.lines : certified >= end)) {
       next[file] = known!;
       continue;
     }
-    const start = same ? Math.min(certified, known!.lines) : 0;
+    const start = same ? Math.min(certified, known.lines) : 0;
     // Where this scan stops is fixed before it starts: the lines the file holds now (a whole file) or the cursor's.
     // A line appended while it runs is past that boundary, so it is owed to the next pull, never certified unread.
     const scanned = end === ALL_LINES
@@ -487,9 +487,11 @@ export function clearWhatsAppSpoolSecrets(options: {
     }
     // Recorded at the boundary scanned, as the file is after its own rewrite (its first line may have changed): the
     // size is the one before the scan, so anything written since is owed.
-    const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size);
-    // The cursor's own file cleared whole: what lies past the cursor is not judged yet, so it is not certified.
-    if (entry) next[file] = file === throughFile && end === ALL_LINES && scanned.lines > throughLine ? { ...entry, judgedLines: throughLine } : entry;
+    // Certified up to what was judged: all of it, but for the cursor's own file cleared whole, only up to the cursor
+    // (what lies past it is not judged yet).
+    const judged = file === throughFile ? Math.min(scanned.lines, throughLine) : scanned.lines;
+    const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size, judged);
+    if (entry) next[file] = entry;
     else delete next[file];
   }
   // Files not reached keep what was recorded of them (a failure stops the pass); files that are gone are forgotten.
@@ -519,8 +521,8 @@ export function clearWhatsAppSpoolSecrets(options: {
         break;
       }
       budget -= scanned.offset;
-      const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size);
-      if (entry) next[file] = { ...entry, judgedLines: 0 };
+      const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size, 0);
+      if (entry) next[file] = entry;
       else delete next[file];
     }
   }
@@ -536,7 +538,8 @@ export function clearWhatsAppSpoolSecrets(options: {
     // A whole-spool pass may have rewritten any file: every record of a file is taken again, at the boundary it had.
     for (const [file, known] of Object.entries(next)) {
       // Taken again at the boundary it had, never past it: the sweep cleared only what the window had.
-      const entry = clearedFileNow(join(options.spoolDir, file), known.lines, known.offset, known.size);
+      // What it certified is kept as it was: the sweep certifies nothing new.
+      const entry = clearedFileNow(join(options.spoolDir, file), known.lines, known.offset, known.size, known.judgedLines);
       if (entry) next[file] = entry;
       else delete next[file];
     }
@@ -559,10 +562,12 @@ interface ClearedFile {
   boundary: string;
   size: number;
   /**
-   * Present on a file cleared ahead of the cursor: the lines of it certified
-   * for a later judgment (none). Absent: all `lines`.
+   * The lines of it certified for a later judgment: all `lines` once the
+   * cursor has passed them, none for a file cleared ahead of the cursor. A
+   * record without it (older, or unreadable) certifies none, so it is cleared
+   * again in full once.
    */
-  judgedLines?: number;
+  judgedLines: number;
 }
 
 const ALL_LINES = -1;
@@ -579,15 +584,16 @@ const CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 /**
  * A file's cleared record at the boundary that was scanned (`lines` lines,
  * ending at `offset`), with its identity and the digest there as the file is
- * now. Never recounted: a boundary is what a scan reached, not what the file
- * holds by the time it is recorded.
+ * now, and the lines of it certified for a later judgment. Never recounted: a
+ * boundary is what a scan reached, not what the file holds by the time it is
+ * recorded. Every record is made here, so none loses what it certified.
  */
-function clearedFileNow(path: string, lines: number, offset: number, size: number): ClearedFile | undefined {
+function clearedFileNow(path: string, lines: number, offset: number, size: number, judgedLines: number): ClearedFile | undefined {
   const identity = spoolFileIdentity(path);
   if (!identity) return undefined;
   const boundary = spoolBoundaryDigest(path, offset);
   if (boundary === undefined) return undefined;
-  return { identity: identity.identity, lines, offset, boundary, size };
+  return { identity: identity.identity, lines, offset, boundary, size, judgedLines: Math.min(judgedLines, lines) };
 }
 
 function refreshIndex(spoolDir: string, files: ReadonlySet<string>): void {
@@ -610,8 +616,11 @@ function readClearedFiles(ledger: TierLedger): Record<string, ClearedFile> {
     for (const [file, entry] of Object.entries(parsed)) {
       if (entry && typeof entry.identity === 'string' && typeof entry.boundary === 'string'
         && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines) && entry.lines >= 0
-        && Number.isSafeInteger(entry.size)
-        && (entry.judgedLines === undefined || (Number.isSafeInteger(entry.judgedLines) && entry.judgedLines >= 0))) valid[file] = entry;
+        && Number.isSafeInteger(entry.size)) {
+        // Fails closed: a missing or unreadable certification certifies nothing.
+        const judgedLines = Number.isSafeInteger(entry.judgedLines) && entry.judgedLines >= 0 ? Math.min(entry.judgedLines, entry.lines) : 0;
+        valid[file] = { ...entry, judgedLines };
+      }
     }
     return valid;
   } catch {

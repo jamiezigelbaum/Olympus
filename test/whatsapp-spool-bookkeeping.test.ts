@@ -14,7 +14,9 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { WHATSAPP_SPOOL_INDEX_FILE, WhatsAppSpoolIndex } from '../src/workers/whatsapp/spool-index.ts';
 import { createWhatsAppLiveSourceConnector, emptyWhatsAppSpoolPassFindings } from '../src/workers/whatsapp/live-connector.ts';
 import { WHATSAPP_SPOOL_RESET_FILE } from '../src/workers/whatsapp/spool-resets.ts';
+import { addCaptureSpoolRedactions, sweepCaptureSpoolWhenSecretsChange } from '../src/workers/connector-store/capture-spool-secrets.ts';
 import {
+  WHATSAPP_SPOOL_REDACTION_STATE_KEY,
   WHATSAPP_LIVE_CORPUS_ID,
   WHATSAPP_SPOOL_REDACTION_FAILED_WARNING,
   clearWhatsAppSpoolSecrets,
@@ -492,6 +494,57 @@ describe('review round 9', () => {
     clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
     clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
     expect(left()).toEqual([]);
+  });
+
+  test('a sweep keeps what a record certified: a Secret cleared ahead of the cursor is cleared again when reached', async () => {
+    const target = lane();
+    const day1 = join(target.spoolDir, '2026-10-24.jsonl');
+    const day2 = join(target.spoolDir, '2026-10-25.jsonl');
+    // Plain text: only the judgment below makes these Secrets.
+    const a = line('a', { text: 'the alarm code is the year we met' });
+    const x = line('x', { text: 'the safe opens on our anniversary' });
+    writeFileSync(day1, a + line('b'));
+    writeFileSync(day2, x);
+    await target.sync.pull();
+    // Both files put back: the listing replays from day 1, one item a pull; day 2 is cleared ahead, certified for none.
+    replaceByRename(day1, a + line('b'));
+    replaceByRename(day2, x);
+    await target.sync.pull({ max_items: 1 });
+    // a and x are judged Secrets now, and the owner says so too (so the replay's own judgment keeps them Secrets):
+    // the sweep clears a, and stops at the cursor, before day 2.
+    for (const id of ['a', 'x']) {
+      judgeSecret(target.ledger, id);
+      target.ledger.setOverride(
+        { provider: 'whatsapp', accountScope: 'personal', providerItemId: id, providerConversationId: 'chat-1@s.whatsapp.net' },
+        { kind: 'tier', tier: 'secrets' },
+      );
+    }
+    await target.sync.pull({ max_items: 1 });
+    expect(readFileSync(day1, 'utf8')).not.toContain('alarm code');
+    for (let pull = 0; pull < 3; pull += 1) await target.sync.pull({ max_items: 1 });
+    expect(readFileSync(day2, 'utf8')).not.toContain('the safe opens');
+  });
+
+  test('a record written before certification was kept is cleared again in full, once', async () => {
+    const target = lane();
+    const day = join(target.spoolDir, '2026-10-24.jsonl');
+    writeFileSync(day, line('a') + line('s', { text: 'the door code is the year we met' }));
+    // Pulled and cleared while s was not Secret: nothing changes, and the record covers both lines.
+    await target.sync.pull();
+    expect(readFileSync(day, 'utf8')).toContain('the door code');
+    judgeSecret(target.ledger, 's');
+    // The sweep is told the set of Secrets did not change, so only the per-file record decides.
+    sweepCaptureSpoolWhenSecretsChange({ ledger: target.ledger, stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY, sweep: () => addCaptureSpoolRedactions() });
+    // The record as an older build wrote it: no certification.
+    const key = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
+    const records = JSON.parse(target.ledger.readMeta(key)!) as Record<string, Record<string, unknown>>;
+    for (const record of Object.values(records)) delete record.judgedLines;
+    target.ledger.writeMeta(key, JSON.stringify(records));
+    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-24.jsonl:2' });
+    expect(readFileSync(day, 'utf8')).not.toContain('the door code');
+    // Once: the record it leaves certifies the file, so the next pull reads no spool file.
+    const after = JSON.parse(target.ledger.readMeta(key)!) as Record<string, { judgedLines: number; lines: number }>;
+    expect(after['2026-10-24.jsonl']).toMatchObject({ judgedLines: 2, lines: 2 });
   });
 
   test('an index that cannot be opened hands out no cursor', async () => {
