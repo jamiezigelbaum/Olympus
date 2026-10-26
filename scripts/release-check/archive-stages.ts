@@ -214,7 +214,7 @@ export async function seedLiveStage(host: ArchiveHost, args: { format: string })
  * The export of a seeded source's own account, on the agent path: it must join the source (listed in its card, with what it read and
  * how much was already there, and no Remove), be found by a search, and go with the source's Delete, which ends the stage.
  */
-export async function besideLiveStage(host: ArchiveHost, args: { format: string; seed: string; settleS?: number; startS?: number; openS?: number }): Promise<BesideLiveObservation> {
+export async function besideLiveStage(host: ArchiveHost, args: { format: string; seed: string; settleS?: number; startS?: number; openS?: number; drainS?: number }): Promise<BesideLiveObservation> {
   const fx = legFixture('beside', args.seed, args.format);
   const obs: BesideLiveObservation = { ok: false, format: fx.format, fileName: fx.fileName, token: fx.token, traces: [], settled: false, settleMs: 0, stores: [] };
   try {
@@ -239,8 +239,11 @@ export async function besideLiveStage(host: ArchiveHost, args: { format: string;
       obs.settleMs = settle.ms;
       host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
       obs.row = await rowNow(host, driver, fx.fileName, 5_000);
+      // An imported record is held Private until the private model has judged it, so the search waits for that, within
+      // the leg's own drain bound for this machine, as the agent path's import does before its search.
+      const cited = { ...fx, expect: { ...fx.expect, citationLabel: fx.beside!.citationLabel } };
+      obs.search = await searchWhenJudged(host, cited, (args.drainS ?? drainBoundS(host.os)) * 1_000);
       obs.stores = host.readSourceStores!(beside.seedHook, fx.token);
-      obs.search = await searchFor(host, { ...fx, expect: { ...fx.expect, citationLabel: fx.beside!.citationLabel } });
       // The history goes only with the source: its Delete, then nothing of the archive in its stores or on the page.
       const deleted = host.deleteSourceData!(beside.sourceId);
       const deleteOk = deleted.code === 0 && (deleted.json === undefined || (deleted.json as { ok?: unknown }).ok !== false);
@@ -279,6 +282,24 @@ async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView>
     hasToken: [entry?.excerpt, entry?.title].some((field) => typeof field === 'string' && field.includes(fx.token)),
   }));
   return { ok: answer.ok && !answer.isError, isError: answer.isError, evidence, ...(answer.error ? { error: answer.error } : {}) };
+}
+
+/**
+ * The search for an import inside a source's card, once what it imported has been judged: the source's import is not in the
+ * agent's archive status (its records are the source's), so the wait is on the search itself, asked again every ten seconds until it
+ * is cited with the archive's word or the bound runs out; the last answer is what the check judges.
+ */
+export async function searchWhenJudged(host: ArchiveHost, fx: LegFixture, boundMs: number): Promise<SearchView> {
+  const started = host.now();
+  for (;;) {
+    const search = await searchFor(host, fx);
+    const cited = search.ok && search.evidence.some((item) => item.source === fx.expect.citationLabel && item.hasToken);
+    if (cited || host.now() - started >= boundMs) {
+      host.say(`search beside live: ${cited ? 'cited' : 'NOT cited'} after ${Math.round((host.now() - started) / 1000)} s`);
+      return search;
+    }
+    await host.sleep(10_000);
+  }
 }
 
 /** Waits until the archive has no message waiting for the private model, or the bound; reads the dashboard row after. */

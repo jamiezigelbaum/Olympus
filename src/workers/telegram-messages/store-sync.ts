@@ -2,10 +2,11 @@
 // Provider/session work remains in the thin Telethon helper; this module only
 // advances two trust-separated stores through the shared connector spine.
 
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
+import type { ArchiveSourceTarget } from '../archive-import/source-targets.ts';
 import { sameSpoolFile, spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import { openConnectorStore } from '../../core/source-storage.ts';
 import type {
@@ -50,6 +51,8 @@ import {
   telegramCaptureCursorOffset,
   type TelegramCaptureSpoolRecord,
 } from './capture-spool-connector.ts';
+import { telegramArchiveTarget } from './archive-target.ts';
+import { telegramRecordBuilder } from './record-builder.ts';
 
 export const TELEGRAM_MESSAGES_SOURCE_ID = 'telegram.messages';
 export const TELEGRAM_PERSONAL_ACCOUNT_SCOPE = 'telegram.personal';
@@ -144,7 +147,19 @@ export interface TelegramConnectorStoreSyncReceipt {
 export interface TelegramConnectorStoreSyncHandler {
   pull(request?: { max_items?: number }): Promise<TelegramConnectorStoreSyncReceipt>;
   lastStoreRunCompletedAt(): string | undefined;
+  /**
+   * The Telegram source as a target of imported archives: a Telegram Desktop
+   * export of this account is one more input of this connector, written into
+   * these stores through this lane's own set (archive-target.ts).
+   */
+  archiveTarget(): ArchiveSourceTarget;
 }
+
+// The placement and content options every input of the connector writes with.
+const TELEGRAM_LANE_SYNC = {
+  internal: { placement: { trustTier: 'S3', trustDomain: 'internal' }, fetchContent: true, deferMetadataOnlyContent: true },
+  secure_local: { placement: { trustTier: 'S4', trustDomain: 'secure_local' }, fetchContent: true, deferMetadataOnlyContent: true },
+} as const;
 
 export function createTelegramConnectorStores(
   env: Record<string, string | undefined> = process.env,
@@ -245,6 +260,9 @@ export function createTelegramConnectorStoreSyncHandler(options: {
     internalStore: options.stores.internal,
     secureStore: options.stores.secureLocal,
     splitLayers: false,
+    // A child (a photo or file an export's message carries) is listed by name with the means to read
+    // its bytes later; its content lands when it is read.
+    contentArrivesLaterFor: (item) => item.deferredBytes !== undefined,
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
   });
   // What the stores hold of an item, for the connector's intake: a record older than the stored version
@@ -396,11 +414,9 @@ export function createTelegramConnectorStoreSyncHandler(options: {
             ...resolved,
           }),
           sync: {
-            placement: { trustTier: 'S3', trustDomain: 'internal' },
+            ...TELEGRAM_LANE_SYNC.internal,
             ...(cursors.internal ? { cursor: cursors.internal } : {}),
             maxItems,
-            fetchContent: true,
-            deferMetadataOnlyContent: true,
           },
         },
         {
@@ -415,11 +431,9 @@ export function createTelegramConnectorStoreSyncHandler(options: {
             ...resolved,
           }),
           sync: {
-            placement: { trustTier: 'S4', trustDomain: 'secure_local' },
+            ...TELEGRAM_LANE_SYNC.secure_local,
             ...(cursors.secureLocal ? { cursor: cursors.secureLocal } : {}),
             maxItems,
-            fetchContent: true,
-            deferMetadataOnlyContent: true,
           },
         },
       ]);
@@ -495,7 +509,34 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       if (!internal || !secureLocal) return undefined;
       return internal < secureLocal ? internal : secureLocal;
     },
+
+    archiveTarget(): ArchiveSourceTarget {
+      // An export's records are ordinary chat messages until the owner's chat rules or the judge say
+      // otherwise: they take the internal lane's placement, held Private until judged (source-input.ts).
+      const connector = createTelegramCaptureSpoolConnector({ spoolDir, trustDomain: 'internal', storedItem });
+      return telegramArchiveTarget({
+        set: tierSet,
+        connector,
+        builder: telegramRecordBuilder({
+          trustDomain: 'internal',
+          fetchItem: (localItemId) => connector.fetchItem(localItemId),
+        }),
+        account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
+        sync: TELEGRAM_LANE_SYNC.internal,
+        liveSince: () => telegramCaptureSince(spoolDir),
+      });
+    },
   };
+}
+
+/** The day live capture began: the date of the spool's oldest file. */
+function telegramCaptureSince(spoolDir: string): string | undefined {
+  try {
+    const first = readdirSync(spoolDir).filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)).sort()[0];
+    return first?.slice(0, 10);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -618,13 +659,28 @@ function resolveTelegramTrustClaims(
     }
     // The secure lane's own row, or a claim kept from a record already read past: the item is protected.
     const claimed = telegramClaimKept(set, identity.localItemId);
-    if (!claimed && !stores.secureLocal.itemPresence(identity).active) continue;
+    if (!claimed && !secureLaneClaims(stores, set, identity)) continue;
     resolvedTrustByItemId.set(identity.localItemId, 'secure_local');
     secureClaims.set(identity.localItemId, identity);
     // This looser record is newer than the claimed copy: it is the version that moves.
     if (newer(identity.sourceVersion, stores.secureLocal.storedItemState(identity)?.version)) moveWhole.set(identity.localItemId, identity.sourceVersion);
   }
   return { resolvedTrustByItemId, secureClaims: [...secureClaims.values()], moveWhole };
+}
+
+/**
+ * Whether the secure-local LANE claims an item: its row in the secure store
+ * was written by that lane, or it predates tier routing (no ledger record), as
+ * every pre-tier row the trust invariant was written for does. A row the tier
+ * set placed there for its content, or one an imported export brought (held
+ * Private until judged), is not the lane's claim: the item's chat is still an
+ * ordinary chat, its later edits keep coming through the internal lane, and
+ * the set places each version by its own tiers.
+ */
+function secureLaneClaims(stores: TelegramConnectorStores, set: TieredStoreSet, identity: SourceItemIdentity): boolean {
+  if (!stores.secureLocal.itemPresence(identity).active) return false;
+  if (stores.secureLocal.itemOwnerPresent(identity, TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local, 'observed')) return true;
+  return set.ledger.getCurrent(identity) === undefined;
 }
 
 function cursorFile(cursor: string): string {

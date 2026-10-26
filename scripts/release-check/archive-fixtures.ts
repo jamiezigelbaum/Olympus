@@ -87,6 +87,13 @@ export interface BesideLiveSpec {
   seedHook: string;
   /** The export of the account the hook seeds, with the token in a record the live input does not hold. */
   small(token: string): { bytes: Uint8Array; expect: BesideLiveExpectation };
+  /**
+   * The export does not name its account (a WhatsApp chat export), so the dashboard asks the owner whether it is the connected
+   * account's, and the journey answers "Add to <sourceLabel>".
+   */
+  confirmAccount?: true;
+  /** The source as the dashboard's account question names it ("WhatsApp"). */
+  sourceLabel?: string;
 }
 
 export interface ArchiveFixtureSpec {
@@ -107,7 +114,15 @@ export interface ArchiveFixtureSpec {
    * an export of ANOTHER account, so it stays under Archives and keeps covering that path.
    */
   besideLive?: BesideLiveSpec;
+  /**
+   * The format's exports do not name their account, so once the source holds one (the beside-live seed made it) the dashboard asks
+   * whether `small` is that account's: the agent journey answers "Keep it under Archives", which is how such an export stays apart.
+   */
+  keepApart?: true;
 }
+
+/** The account question the dashboard asks after Import, and the answer the journey gives. */
+export type AccountAnswer = { answer: 'add'; sourceLabel: string } | { answer: 'apart' };
 
 /** What the model-off and changed-file stages need besides `small`. */
 export interface ArchiveStressSpec extends ArchiveFixtureSpec {
@@ -309,7 +324,10 @@ function telegramSmall(token: string): BuiltArchive {
       telegramText(6, 'The photos are in the shared album.', telegramAt('2024-03-09')),
     ],
   });
-  const text = telegramJson(telegramFullExport({ chats: [chat], omit: TELEGRAM_OTHER_PARTS }));
+  // Another account's export than the one the live seed pairs (archive-live-seed-telegram.ts): it stays under Archives.
+  const exported = telegramFullExport({ chats: [chat], omit: TELEGRAM_OTHER_PARTS });
+  (exported.personal_information as Record<string, unknown>).user_id = TELEGRAM_OTHER_USER_ID;
+  const text = telegramJson(exported);
   return {
     bytes: bytesOf(text),
     expect: {
@@ -326,6 +344,45 @@ function telegramSmall(token: string): BuiltArchive {
   };
 }
 
+/** The account the live seed pairs, and another one whose export stays under Archives. */
+export const TELEGRAM_SEEDED_USER_ID = 1001;
+const TELEGRAM_OTHER_USER_ID = 2002;
+
+/**
+ * What the live seed and the export beside it share: one group (a basic group, so live keys it `-<id>`) and the messages the live
+ * input already holds, at the same times, so the import finds them already there.
+ */
+export const TELEGRAM_BESIDE_LIVE = {
+  chatId: 1_000_001,
+  chatName: 'Release Check Live Group',
+  shared: [
+    { index: 0, day: '2024-04-01', text: 'The boat leaves from the north quay at eight.' },
+    { index: 1, day: '2024-04-02', text: 'Bring the blue tarp and the spare rope.' },
+  ],
+} as const;
+
+/**
+ * The paired account's own export: the two messages its live input holds, three more (one with the word), and the profile that names
+ * the account. Six records read, two already there.
+ */
+function telegramBesideLive(token: string): { bytes: Uint8Array; expect: BesideLiveExpectation } {
+  const shared = TELEGRAM_BESIDE_LIVE.shared.map((message) => telegramText(message.index, message.text, telegramAt(message.day)));
+  const chat = telegramChat({
+    name: TELEGRAM_BESIDE_LIVE.chatName,
+    type: 'private_group',
+    id: TELEGRAM_BESIDE_LIVE.chatId,
+    messages: [
+      ...shared,
+      telegramText(2, 'The forecast says calm water until noon.', telegramAt('2024-04-03')),
+      telegramText(3, `The reference word for the boat trip is ${token}.`, telegramAt('2024-04-04')),
+      telegramText(4, 'Back by six, before the light goes.', telegramAt('2024-04-05')),
+    ],
+  });
+  const exported = telegramFullExport({ chats: [chat], omit: TELEGRAM_OTHER_PARTS });
+  (exported.personal_information as Record<string, unknown>).user_id = TELEGRAM_SEEDED_USER_ID;
+  return { bytes: bytesOf(telegramJson(exported)), expect: { read: 6, alreadyThere: 2, citationLabel: TELEGRAM_CITATION } };
+}
+
 export const TELEGRAM_FIXTURES: ArchiveFixtureSpec = {
   format: TELEGRAM_FORMAT,
   label: TELEGRAM_LABEL,
@@ -334,6 +391,7 @@ export const TELEGRAM_FIXTURES: ArchiveFixtureSpec = {
   family: 'chat',
   provider: 'telegram_export',
   small: telegramSmall,
+  besideLive: { sourceId: 'telegram.messages', seedHook: 'telegram', small: telegramBesideLive },
 };
 
 // ---------------------------------------------------------------------------
@@ -629,6 +687,7 @@ export const SOURCE_INPUT_FORMATS: Readonly<Record<string, SourceInputFixtureSpe
   [GMAIL_TAKEOUT_FIXTURES.id]: GMAIL_TAKEOUT_FIXTURES,
 };
 
+
 /** The format the picker, model-off and changed-file stages use. */
 export const STRESS_FORMAT = 'mbox';
 
@@ -649,6 +708,8 @@ export interface LegFixture {
   /** The folder and file under the home directory, with the separators the machine uses. */
   relPath: string;
   expect: ArchiveExpectation;
+  /** The account question this fixture's import is asked after Import, and the answer the journey gives. */
+  accountQuestion?: AccountAnswer;
   /** The `beside` role: what its import beside the live input must come to. */
   beside?: BesideLiveExpectation;
   bytes: Uint8Array;
@@ -686,12 +747,18 @@ export function legFixture(role: FixtureRole, seed: string, format: string = STR
     if (!beside) throw new Error(`the "${format}" fixtures have no import beside a live input`);
     const made = beside.small(token);
     const expect: ArchiveExpectation = { label: formatOf.label, citationLabel: made.expect.citationLabel, family: formatOf.family, messages: made.expect.read, earliest: '', latest: '', notImported: [], howRead: [] };
-    return { role, format, fileName: `rc-beside-${format}${formatOf.extension}`, token, relPath: `${FIXTURE_FOLDER}/rc-beside-${format}${formatOf.extension}`, expect, beside: made.expect, bytes: made.bytes };
+    return {
+      role, format, fileName: `rc-beside-${format}${formatOf.extension}`, token, relPath: `${FIXTURE_FOLDER}/rc-beside-${format}${formatOf.extension}`, expect, beside: made.expect, bytes: made.bytes,
+      ...(beside.confirmAccount ? { accountQuestion: { answer: 'add' as const, sourceLabel: beside.sourceLabel ?? formatOf.label } } : {}),
+    };
   }
   if (role === 'held') built = stressSpec().plain(token);
   else if (role === 'bulk') built = { bytes: stressSpec().bulk(token, count), expect: { label: spec.label, citationLabel: spec.citationLabel, family: spec.family, messages: count, earliest: '', latest: '', notImported: [], howRead: [] } };
   else built = spec.small(token);
-  return { role, format, fileName, token, relPath: `${FIXTURE_FOLDER}/${fileName}`, expect: built.expect, bytes: built.bytes };
+  return {
+    role, format, fileName, token, relPath: `${FIXTURE_FOLDER}/${fileName}`, expect: built.expect, bytes: built.bytes,
+    ...(role === 'agent' && spec.keepApart ? { accountQuestion: { answer: 'apart' as const } } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

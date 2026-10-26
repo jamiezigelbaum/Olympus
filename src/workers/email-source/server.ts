@@ -231,6 +231,7 @@ import { createLocalFilesOwnRootsCleanup } from '../local-files/own-roots-cleanu
 import { createLocalFilesProviderStoreSyncHandler } from '../local-files/provider-store-sync.ts';
 import { createLocalFilesSchedulerSource } from '../local-files/scheduler-source.ts';
 import { createArchiveImportRuntime } from '../archive-import/runtime.ts';
+import { archiveSourceTargets } from '../archive-import/source-targets.ts';
 import {
   archiveImportScheduling,
   archivePrivateModelFromSniffer,
@@ -3319,6 +3320,10 @@ export async function main(): Promise<void> {
         ...(tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}),
       })
     : undefined;
+  // A Telegram Desktop export of this account is one more input of the Telegram connector, read into
+  // these stores beside live capture (docs/design/archive-live-one-dataset.md). Without the live lane
+  // an export stays under Archives, as before.
+  if (telegramConnectorStoreSync) archiveSourceTargets.register(telegramConnectorStoreSync.archiveTarget());
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(
     process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS,
     'OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS',
