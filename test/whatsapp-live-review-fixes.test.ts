@@ -212,7 +212,8 @@ describe('the packaged bridge', () => {
     const bridge = join(import.meta.dir, '..', 'tools', 'whatsapp-bridge');
     const sources = readdirSync(bridge).filter((name) => name.endsWith('.go') && !name.endsWith('_test.go'));
     expect(sources).toContain('capture_status.go');
-    for (const name of sources) expect(V0_4_PUBLIC_PACKAGE_FILES).toContain(`tools/whatsapp-bridge/${name}`);
+    const packaged: readonly string[] = V0_4_PUBLIC_PACKAGE_FILES;
+    for (const name of sources) expect(packaged).toContain(`tools/whatsapp-bridge/${name}`);
   });
 });
 
