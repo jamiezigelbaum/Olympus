@@ -14,6 +14,7 @@
 // The set ledger is the secure store's own co-located ledger, so every
 // lifecycle path that finds the secure store finds it.
 
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { openTierLedger } from '../../core/source-storage.ts';
@@ -30,8 +31,6 @@ import {
 import {
   DROPBOX_TIER_CORPUS_IDS,
   createDropboxTierConnectorStore,
-  defaultDropboxInternalConnectorStoreDbPath,
-  defaultDropboxPublicConnectorStoreDbPath,
 } from './connector-store.ts';
 import { DROPBOX_FILES_SOURCE_ID } from './corpus-adapter.ts';
 
@@ -57,8 +56,8 @@ export function createDropboxTierLane(options: {
   const leg = (domain: 'internal' | 'public_safe'): OnDemandTierStore => onDemandTierStore({
     corpusId: DROPBOX_TIER_CORPUS_IDS[domain],
     dbPath: domain === 'internal'
-      ? defaultDropboxInternalConnectorStoreDbPath(env)
-      : defaultDropboxPublicConnectorStoreDbPath(env),
+      ? resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'internal', env)
+      : resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'public_safe', env),
     create: () => createDropboxTierConnectorStore(domain, env, {
       ...(options.policy ? { policy: options.policy } : {}),
       tierLedger: ledger,

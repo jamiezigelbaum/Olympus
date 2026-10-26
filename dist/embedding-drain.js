@@ -2,12 +2,608 @@ import { createRequire } from "node:module";
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
+// src/workers/classification/tier-ledger-path.ts
+function tierLedgerPathForStore(storeDbPath) {
+  if (storeDbPath === ":memory:")
+    return ":memory:";
+  const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
+  return `${base}${TIER_LEDGER_FILE_SUFFIX}`;
+}
+function secretLocationsPathForStore(storeDbPath) {
+  if (storeDbPath === ":memory:")
+    return ":memory:";
+  const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
+  return `${base}${SECRET_LOCATIONS_FILE_SUFFIX}`;
+}
+function tierSnifferPathForLedger(ledgerPath) {
+  if (ledgerPath === ":memory:")
+    return ":memory:";
+  const base = ledgerPath.endsWith(TIER_LEDGER_FILE_SUFFIX) ? ledgerPath.slice(0, -TIER_LEDGER_FILE_SUFFIX.length) : ledgerPath;
+  return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
+}
+function tierSnifferPathForStore(storeDbPath) {
+  if (storeDbPath === ":memory:")
+    return ":memory:";
+  const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
+  return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
+}
+var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_SQLITE_STORE_ID = "olympus_secret_locations", SECRET_LOCATIONS_FILE_SUFFIX = ".secret-locations.sqlite", TIER_SNIFFER_SQLITE_STORE_ID = "olympus_tier_sniffer", TIER_SNIFFER_FILE_SUFFIX = ".tier-sniffer.sqlite";
+
+// src/core/archive-formats.ts
+function startsWithFromLine(head) {
+  if (!head || head.length < FROM_LINE.length)
+    return false;
+  return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+function lastNameOf(name) {
+  return name.split("/").pop() ?? name;
+}
+function whatsAppNoiseName(name) {
+  const base = lastNameOf(name);
+  return name.endsWith("/") || name.startsWith("__MACOSX/") || name.includes("/__MACOSX/") || base.startsWith("._") || base === ".DS_Store";
+}
+function whatsAppNamed(name) {
+  return !whatsAppNoiseName(name) && WHATSAPP_TEXT_NAME.test(lastNameOf(name));
+}
+function startsLikeWhatsAppChat(head) {
+  if (!head || head.length < 10 || head.includes(0))
+    return false;
+  for (const raw of new TextDecoder("utf-8").decode(head).split(`
+`).slice(0, 8)) {
+    const line = raw.replace(WHATSAPP_LINE_NOISE, "").replace(WHATSAPP_NARROW_SPACES, " ").replace(/\r$/, "");
+    if (line.trim() === "")
+      continue;
+    return WHATSAPP_FIRST_LINE.test(line);
+  }
+  return false;
+}
+function whatsAppIsExport(entry, needName) {
+  if (entry.kind !== "file")
+    return false;
+  if (entry.members) {
+    return entry.members.some((member) => member.kind === "file" && !whatsAppNoiseName(member.relPath) && member.relPath.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(member.relPath)) && startsLikeWhatsAppChat(member.head));
+  }
+  return entry.name.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(entry.name)) && startsLikeWhatsAppChat(entry.head);
+}
+function archiveHeadText(head) {
+  return head && head.length > 0 ? leniencyDecoder.decode(head) : "";
+}
+function isJunkArchiveMember(name) {
+  const parts = name.split("/").filter((part) => part !== "");
+  return parts.includes("__MACOSX") || (parts[parts.length - 1] ?? "").startsWith(".");
+}
+function reflectDailyNoteDate(fileName) {
+  const match = DAILY_NOTE_FILE.exec(fileName.trim());
+  if (!match)
+    return;
+  const weekday = match[1].slice(0, 3).toLowerCase();
+  const month = MONTHS.indexOf(match[2].slice(0, 3).toLowerCase());
+  const day = Number(match[3]);
+  const year = Number(match[4]);
+  if (!WEEKDAYS.includes(weekday) || month < 0 || day < 1 || day > 31)
+    return;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+function headRecordKeys(head) {
+  const text = archiveHeadText(head);
+  const n = text.length;
+  let i = 0;
+  const isSpace = (char) => char === " " || char === "\t" || char === `
+` || char === "\r";
+  while (i < n && isSpace(text[i]))
+    i += 1;
+  const stack = [];
+  let shape;
+  let listDepth = 0;
+  let closed = false;
+  let hasElements = false;
+  let objectRoot = false;
+  let notesNotAList = false;
+  if (text[i] === "[") {
+    shape = "list";
+    listDepth = 1;
+    stack.push("a");
+  } else if (text[i] === "{") {
+    objectRoot = true;
+    stack.push("o");
+  } else {
+    return;
+  }
+  i += 1;
+  const records = [];
+  let current;
+  while (i < n) {
+    const char = text[i];
+    if (listDepth > 0 && stack.length === listDepth && !isSpace(char) && char !== "," && char !== "]")
+      hasElements = true;
+    if (char === '"') {
+      let end = i + 1;
+      while (end < n && text[end] !== '"')
+        end += text[end] === "\\" ? 2 : 1;
+      if (end >= n)
+        break;
+      const raw = text.slice(i + 1, end);
+      let after = end + 1;
+      while (after < n && isSpace(text[after]))
+        after += 1;
+      if (text[after] === ":" && stack[stack.length - 1] === "o") {
+        if (listDepth > 0 && stack.length === listDepth + 1) {
+          current?.add(raw);
+        } else if (shape === undefined && stack.length === 1 && raw === REFLECT_NOTES_LIST_KEY) {
+          let value = after + 1;
+          while (value < n && isSpace(text[value]))
+            value += 1;
+          if (text[value] === "[") {
+            shape = "notes";
+            listDepth = 2;
+          } else if (value < n) {
+            notesNotAList = true;
+          }
+        }
+      }
+      i = end + 1;
+      continue;
+    }
+    if (char === "[" || char === "{") {
+      stack.push(char === "[" ? "a" : "o");
+      if (char === "{" && listDepth > 0 && stack.length === listDepth + 1) {
+        current = new Set;
+        records.push(current);
+      }
+    } else if (char === "]" || char === "}") {
+      stack.pop();
+      if (listDepth > 0 && stack.length < listDepth) {
+        closed = true;
+        listDepth = 0;
+      }
+      if (stack.length === 0)
+        break;
+      if (listDepth > 0 && stack.length === listDepth)
+        current = undefined;
+    }
+    i += 1;
+  }
+  if (!shape) {
+    if (objectRoot && !notesNotAList && stack.length > 0) {
+      return { shape: "notes", records: [], empty: false, firstRecordCut: true, unreached: true };
+    }
+    return;
+  }
+  const open = listDepth > 0;
+  return { shape, records, empty: closed && !hasElements, firstRecordCut: open && records.length === 1 && current !== undefined, unreached: false };
+}
+function isReflectRecord(keys) {
+  return REFLECT_BODY_KEYS.some((key) => keys.has(key)) && REFLECT_NOTE_KEYS.some((key) => keys.has(key));
+}
+function isRoamRecord(keys) {
+  return keys.has("title") && (ROAM_TIME_KEYS.some((key) => keys.has(key)) || keys.has("children") && keys.has("uid"));
+}
+function recordsFormat(records, shape) {
+  const reflect = records.some(isReflectRecord);
+  const roam = records.some(isRoamRecord);
+  if (reflect === roam)
+    return;
+  if (roam)
+    return shape === "list" ? "roam" : undefined;
+  return "reflect";
+}
+function notesJsonFormat(probe) {
+  const parsed = headRecordKeys(probe.head);
+  if (!parsed)
+    return;
+  const fromHead = recordsFormat(parsed.records, parsed.shape);
+  if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys)
+    return fromHead;
+  let scanned = SCANNED.get(probe);
+  if (!scanned) {
+    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    scanned = { keys };
+    SCANNED.set(probe, scanned);
+  }
+  return scanned.keys ? recordsFormat([scanned.keys], parsed.shape) : undefined;
+}
+function detectFile(probe, reads) {
+  if (probe.chosen.kind === "file")
+    return reads(probe.chosen) ? [""] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry));
+  return found.length === 1 ? [found[0].relPath] : undefined;
+}
+function zipJsonMembers(entry) {
+  return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
+}
+function readsJsonExport(entry, format) {
+  const other = format === "reflect" ? "roam" : "reflect";
+  if (entry.members) {
+    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
+    return members.includes(format) && !members.includes(other);
+  }
+  return notesJsonFormat(entry) === format;
+}
+function isTelegramJsonHead(head) {
+  if (!head || head.length === 0)
+    return false;
+  const text = new TextDecoder("utf-8").decode(head);
+  return TELEGRAM_FULL_HEAD.test(text) || TELEGRAM_CHAT_HEAD.test(text);
+}
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
+}
+function isArchiveCorpusId(corpusId, trustDomain) {
+  return corpusId.startsWith(`${trustDomain}.archive.`);
+}
+function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
+  return [...new Set(formats.map((format) => format.family))];
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var init_archive_formats = __esm(() => {
+  FROM_LINE = [70, 114, 111, 109, 32];
+  MBOX_ARCHIVE_FORMAT = Object.freeze({
+    id: "mbox",
+    label: "Mail (mbox)",
+    family: "email",
+    provider: "mbox",
+    chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
+    citationLabel: "Imported mail",
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
+      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
+        return;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  WHATSAPP_DATE = String.raw`\d{1,4}[./-]\s?\d{1,2}[./-]\s?\d{1,4}`;
+  WHATSAPP_TIME = String.raw`\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s?[ap]\.?\s?m\.?)?`;
+  WHATSAPP_FIRST_LINE = new RegExp(`^(?:\\[\\s?${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s?\\]|${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s[-\\u2013]\\s)`, "i");
+  WHATSAPP_LINE_NOISE = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
+  WHATSAPP_NARROW_SPACES = new RegExp("[\\u00a0\\u202f\\u2007\\u2009]", "g");
+  WHATSAPP_TEXT_NAME = /^(?:_chat|whatsapp chat (?:with|-)\s+\S.*)\.txt$/i;
+  WHATSAPP_ARCHIVE_FORMAT = Object.freeze({
+    id: "whatsapp_chat",
+    label: "WhatsApp chat export",
+    family: "chat",
+    provider: "whatsapp_export",
+    chooseHint: "a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)",
+    citationLabel: "WhatsApp",
+    probeNames: Object.freeze(["*.txt", "*.zip"]),
+    signatureNames: Object.freeze(["_chat.txt", "WhatsApp Chat with *.txt", "WhatsApp Chat - *.txt", "WhatsApp Chat*.zip"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return whatsAppIsExport(probe.chosen, false) ? [""] : undefined;
+      const found = probe.children.filter((entry) => whatsAppIsExport(entry, true)).map((entry) => entry.relPath).sort();
+      return found.length > 0 ? found : undefined;
+    },
+    unconfirmed(probe) {
+      if (probe.chosen.kind === "file")
+        return 0;
+      return probe.children.filter((entry) => !whatsAppIsExport(entry, true) && whatsAppIsExport(entry, false)).length;
+    }
+  });
+  leniencyDecoder = new TextDecoder("utf-8");
+  WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?:\.(?:md|markdown))?$/i;
+  REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
+  REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
+  ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
+  SCANNED = new WeakMap;
+  REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-json",
+    label: "Reflect notes (JSON)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
+  });
+  REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-markdown",
+    label: "Reflect notes (Markdown zip)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export as Markdown (the .zip file)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*, *, ????.md"]),
+    detect: (probe) => detectFile(probe, (entry) => {
+      if (!entry.members || /^roam/i.test(entry.name))
+        return false;
+      const files = entry.members.filter((member) => member.kind === "file" && !isJunkArchiveMember(member.relPath));
+      if (files.some((member) => /\.json$/i.test(member.name)))
+        return false;
+      const notes = files.filter((member) => /\.(?:md|markdown)$/i.test(member.name));
+      if (notes.length === 0)
+        return false;
+      return /reflect/i.test(entry.name) || notes.some((member) => reflectDailyNoteDate(member.name) !== undefined) || notes.some((member) => /reflect\.app\//i.test(archiveHeadText(member.head)));
+    })
+  });
+  ROAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "roam-json",
+    label: "Roam notes (JSON)",
+    family: "note",
+    provider: "roam",
+    chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
+    citationLabel: "Roam",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
+  TELEGRAM_EXPORT_SECTIONS = Object.freeze([
+    "personal_information",
+    "profile_pictures",
+    "stories",
+    "profile_music",
+    "contacts",
+    "frequent_contacts",
+    "sessions",
+    "web_sessions",
+    "other_data",
+    "chats",
+    "left_chats"
+  ]);
+  TELEGRAM_FULL_HEAD = new RegExp(String.raw`^\s*\{\s*(?:"about"\s*:\s*${JSON_STRING}\s*,\s*)?"(?:${TELEGRAM_EXPORT_SECTIONS.join("|")})"\s*:\s*[\[{]`);
+  TELEGRAM_CHAT_HEAD = new RegExp(String.raw`^\s*\{\s*(?:"name"\s*:\s*(?:null|${JSON_STRING})\s*,\s*)?"type"\s*:\s*(?:null|${JSON_STRING})\s*,\s*"id"\s*:\s*-?\d+\s*,\s*"messages"\s*:\s*\[`);
+  TELEGRAM_HTML_NAME = /^(?:messages\d*|export_results)\.html?$/i;
+  TELEGRAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "telegram_json",
+    label: "Telegram Desktop export (JSON)",
+    family: "chat",
+    provider: "telegram_export",
+    chooseHint: "a Telegram Desktop export (its result.json file, or the folder that holds it; export it as Machine-readable JSON)",
+    citationLabel: "Telegram",
+    probeNames: ["result.json", "messages.html", "export_results.html"],
+    unsupportedVariants: Object.freeze([
+      Object.freeze({
+        matches(probe) {
+          if (probe.chosen.kind === "file")
+            return TELEGRAM_HTML_NAME.test(probe.chosen.name);
+          return probe.children.some((entry) => entry.kind === "file" && TELEGRAM_HTML_NAME.test(entry.name));
+        },
+        advice: "This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat's menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it."
+      })
+    ]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return isTelegramJsonHead(probe.chosen.head) ? [""] : undefined;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name.toLowerCase() === "result.json" && isTelegramJsonHead(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([
+    MBOX_ARCHIVE_FORMAT,
+    WHATSAPP_ARCHIVE_FORMAT,
+    REFLECT_JSON_ARCHIVE_FORMAT,
+    REFLECT_MARKDOWN_ARCHIVE_FORMAT,
+    ROAM_JSON_ARCHIVE_FORMAT,
+    TELEGRAM_JSON_ARCHIVE_FORMAT
+  ]);
+  CONNECTOR_FACTORIES = new Map;
+});
+
+// src/core/openclaw-plugin-remote.ts
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute as isAbsolutePath, join } from "node:path";
+function openClawConfigPath(homeDir, env) {
+  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
+  if (explicit && isAbsolutePath(explicit))
+    return explicit;
+  const stateDir = env.OPENCLAW_STATE_DIR?.trim();
+  return join(stateDir && isAbsolutePath(stateDir) ? stateDir : join(homeDir, ".openclaw"), "openclaw.json");
+}
+function readOpenClawPluginRemote(env) {
+  const path = openClawConfigPath(env.HOME?.trim() || homedir(), env);
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { hosted: false };
+    return { hosted: true, path, unreadable: true };
+  }
+  const parsed = parseOpenClawConfigText(text);
+  if (parsed === undefined)
+    return { hosted: true, path, unreadable: true };
+  const entries = asRecord(asRecord(asRecord(parsed)?.plugins)?.entries);
+  const entry = entries && Object.hasOwn(entries, "olympus") ? asRecord(entries.olympus) : undefined;
+  if (!entry || entry.enabled === false)
+    return { hosted: false };
+  return { hosted: true, path, remote: asRecord(asRecord(entry.config)?.remote) };
+}
+function parseOpenClawConfigText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const json5 = globalThis.Bun?.JSON5;
+    if (!json5)
+      return;
+    try {
+      return json5.parse(text);
+    } catch {
+      return;
+    }
+  }
+}
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+var init_openclaw_plugin_remote = () => {};
+
+// src/core/atomic-file.ts
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { open, rename, rm } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+async function writePrivateFileAtomic(path, text) {
+  const temp = temporaryPathFor(path);
+  try {
+    const file = await open(temp, "wx", 384);
+    try {
+      await file.writeFile(text, "utf8");
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    await rename(temp, path);
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => {
+      return;
+    });
+    throw error;
+  }
+  await syncDirectory(dirname(path));
+}
+function writePrivateFileAtomicSync(path, text, options = {}) {
+  const temp = temporaryPathFor(path);
+  try {
+    const descriptor = openSync(temp, "wx", 384);
+    try {
+      writeFileSync(descriptor, text, { encoding: "utf8" });
+      fsyncSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
+    renameSync(temp, path);
+    options.onPublished?.();
+  } catch (error) {
+    try {
+      rmSync(temp, { force: true });
+    } catch {}
+    throw error;
+  }
+  syncDirectorySync(dirname(path));
+}
+function ensurePrivateDirectoryTreeSync(root, target) {
+  const normalizedRoot = resolveTrustedRoot(root);
+  const normalizedTarget = resolveWithinRoot(normalizedRoot, target);
+  assertDirectoryComponent(normalizedRoot);
+  const suffix = relative(normalizedRoot, normalizedTarget);
+  if (!suffix)
+    return;
+  let current = normalizedRoot;
+  for (const component of suffix.split(sep)) {
+    current = resolve(current, component);
+    if (existsSync(current)) {
+      assertDirectoryComponent(current);
+      continue;
+    }
+    mkdirSync(current, { mode: 448 });
+    syncDirectorySync(dirname(current));
+    syncDirectorySync(current);
+  }
+}
+function ensurePrivateRootDirectorySync(root) {
+  const normalizedRoot = resolveTrustedRoot(root);
+  if (existsSync(normalizedRoot)) {
+    assertDirectoryComponent(normalizedRoot, "managed custody root");
+    return;
+  }
+  let ancestor = dirname(normalizedRoot);
+  while (!existsSync(ancestor)) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor)
+      break;
+    ancestor = parent;
+  }
+  assertDirectoryComponent(ancestor, "managed custody root ancestor");
+  ensurePrivateDirectoryTreeSync(ancestor, normalizedRoot);
+}
+function temporaryPathFor(path) {
+  return `${path}.${randomUUID()}.tmp`;
+}
+async function syncDirectory(path) {
+  const directory = await open(path, "r");
+  try {
+    try {
+      await directory.sync();
+    } catch (error) {
+      if (!isUnsupportedDirectorySyncError(error))
+        throw error;
+    }
+  } finally {
+    await directory.close();
+  }
+}
+function syncDirectorySync(path) {
+  const descriptor = openSync(path, "r");
+  try {
+    try {
+      fsyncSync(descriptor);
+    } catch (error) {
+      if (!isUnsupportedDirectorySyncError(error))
+        throw error;
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+}
+function resolveTrustedRoot(root) {
+  if (!isAbsolute(root) || /[\0\r\n]/.test(root)) {
+    throw new Error(`Managed path root must be absolute: ${root}`);
+  }
+  return resolve(root);
+}
+function resolveWithinRoot(root, path) {
+  if (!isAbsolute(path) || /[\0\r\n]/.test(path)) {
+    throw new Error(`Managed path must be absolute: ${path}`);
+  }
+  const normalized = resolve(path);
+  const suffix = relative(root, normalized);
+  if (suffix === ".." || suffix.startsWith(`..${sep}`) || isAbsolute(suffix)) {
+    throw new Error(`Managed path escapes its custody root: ${path}`);
+  }
+  return normalized;
+}
+function assertDirectoryComponent(path, label = "managed path") {
+  let stats;
+  try {
+    stats = lstatSync(path);
+  } catch {
+    throw new Error(`Could not inspect ${label} directory component: ${path}`);
+  }
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error(`Refusing non-directory or symlink ${label} component: ${path}`);
+  }
+}
+function isUnsupportedDirectorySyncError(error) {
+  if (!error || typeof error !== "object" || !("code" in error))
+    return false;
+  return error.code === "EINVAL" || error.code === "EBADF" || error.code === "ENOTSUP";
+}
+var init_atomic_file = () => {};
+
+// src/core/linux-desktop-entry.ts
+import { dirname as dirname2, isAbsolute as isAbsolute2, join as join2 } from "node:path";
+function linuxDesktopEntryPaths(layout) {
+  return {
+    desktop: join2(layout.dataHome, "applications", `${ID}.desktop`),
+    icon: join2(layout.dataHome, "icons/hicolor/512x512/apps", `${ID}.png`)
+  };
+}
+var ID = "ai.olympusplugin.Olympus";
+var init_linux_desktop_entry = __esm(() => {
+  init_atomic_file();
+  init_linux_engine_layout();
+});
+
 // src/core/file-lease.ts
 import { execFileSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createRequire as createRequire2 } from "node:module";
-import { dirname } from "node:path";
+import { dirname as dirname3 } from "node:path";
 async function withFileLease(targetPath, callback, options = {}) {
   const owner = await acquireFileLease(targetPath, normalizeOptions(options));
   try {
@@ -72,7 +668,7 @@ class AsyncFileLeaseOwner {
 async function acquireFileLease(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
-  await mkdir(dirname(lockPath), { recursive: true, mode: 448 });
+  await mkdir(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const lock = tryKernelLock(lockPath);
     if (lock)
@@ -85,7 +681,7 @@ async function acquireFileLease(targetPath, options) {
 function acquireFileLeaseSync(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
-  mkdirSync(dirname(lockPath), { recursive: true, mode: 448 });
+  mkdirSync2(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const lock = tryKernelLock(lockPath);
     if (lock)
@@ -108,9 +704,9 @@ function openSqlite(path) {
   return connection;
 }
 function tryKernelLock(lockPath) {
-  if (!existsSync(lockPath)) {
+  if (!existsSync2(lockPath)) {
     try {
-      closeSync(openSync(lockPath, "wx", 384));
+      closeSync2(openSync2(lockPath, "wx", 384));
     } catch (error) {
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
@@ -177,7 +773,7 @@ function positiveInteger(value, fallback) {
   return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.floor(value);
 }
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -211,244 +807,6 @@ var init_file_lease = __esm(() => {
     }
   };
   CURRENT_BOOT_ID = process.platform === "darwin" ? darwinBootId() : undefined;
-});
-
-// src/core/atomic-file.ts
-import { randomUUID } from "node:crypto";
-import {
-  closeSync as closeSync2,
-  existsSync as existsSync2,
-  fsyncSync,
-  lstatSync,
-  mkdirSync as mkdirSync2,
-  openSync as openSync2,
-  renameSync,
-  rmSync,
-  writeFileSync
-} from "node:fs";
-import { open, rename, rm } from "node:fs/promises";
-import { dirname as dirname2, isAbsolute, relative, resolve, sep } from "node:path";
-async function writePrivateFileAtomic(path, text) {
-  const temp = temporaryPathFor(path);
-  try {
-    const file = await open(temp, "wx", 384);
-    try {
-      await file.writeFile(text, "utf8");
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    await rename(temp, path);
-  } catch (error) {
-    await rm(temp, { force: true }).catch(() => {
-      return;
-    });
-    throw error;
-  }
-  await syncDirectory(dirname2(path));
-}
-function writePrivateFileAtomicSync(path, text, options = {}) {
-  const temp = temporaryPathFor(path);
-  try {
-    const descriptor = openSync2(temp, "wx", 384);
-    try {
-      writeFileSync(descriptor, text, { encoding: "utf8" });
-      fsyncSync(descriptor);
-    } finally {
-      closeSync2(descriptor);
-    }
-    renameSync(temp, path);
-    options.onPublished?.();
-  } catch (error) {
-    try {
-      rmSync(temp, { force: true });
-    } catch {}
-    throw error;
-  }
-  syncDirectorySync(dirname2(path));
-}
-function ensurePrivateDirectoryTreeSync(root, target) {
-  const normalizedRoot = resolveTrustedRoot(root);
-  const normalizedTarget = resolveWithinRoot(normalizedRoot, target);
-  assertDirectoryComponent(normalizedRoot);
-  const suffix = relative(normalizedRoot, normalizedTarget);
-  if (!suffix)
-    return;
-  let current = normalizedRoot;
-  for (const component of suffix.split(sep)) {
-    current = resolve(current, component);
-    if (existsSync2(current)) {
-      assertDirectoryComponent(current);
-      continue;
-    }
-    mkdirSync2(current, { mode: 448 });
-    syncDirectorySync(dirname2(current));
-    syncDirectorySync(current);
-  }
-}
-function ensurePrivateRootDirectorySync(root) {
-  const normalizedRoot = resolveTrustedRoot(root);
-  if (existsSync2(normalizedRoot)) {
-    assertDirectoryComponent(normalizedRoot, "managed custody root");
-    return;
-  }
-  let ancestor = dirname2(normalizedRoot);
-  while (!existsSync2(ancestor)) {
-    const parent = dirname2(ancestor);
-    if (parent === ancestor)
-      break;
-    ancestor = parent;
-  }
-  assertDirectoryComponent(ancestor, "managed custody root ancestor");
-  ensurePrivateDirectoryTreeSync(ancestor, normalizedRoot);
-}
-function temporaryPathFor(path) {
-  return `${path}.${randomUUID()}.tmp`;
-}
-async function syncDirectory(path) {
-  const directory = await open(path, "r");
-  try {
-    try {
-      await directory.sync();
-    } catch (error) {
-      if (!isUnsupportedDirectorySyncError(error))
-        throw error;
-    }
-  } finally {
-    await directory.close();
-  }
-}
-function syncDirectorySync(path) {
-  const descriptor = openSync2(path, "r");
-  try {
-    try {
-      fsyncSync(descriptor);
-    } catch (error) {
-      if (!isUnsupportedDirectorySyncError(error))
-        throw error;
-    }
-  } finally {
-    closeSync2(descriptor);
-  }
-}
-function resolveTrustedRoot(root) {
-  if (!isAbsolute(root) || /[\0\r\n]/.test(root)) {
-    throw new Error(`Managed path root must be absolute: ${root}`);
-  }
-  return resolve(root);
-}
-function resolveWithinRoot(root, path) {
-  if (!isAbsolute(path) || /[\0\r\n]/.test(path)) {
-    throw new Error(`Managed path must be absolute: ${path}`);
-  }
-  const normalized = resolve(path);
-  const suffix = relative(root, normalized);
-  if (suffix === ".." || suffix.startsWith(`..${sep}`) || isAbsolute(suffix)) {
-    throw new Error(`Managed path escapes its custody root: ${path}`);
-  }
-  return normalized;
-}
-function assertDirectoryComponent(path, label = "managed path") {
-  let stats;
-  try {
-    stats = lstatSync(path);
-  } catch {
-    throw new Error(`Could not inspect ${label} directory component: ${path}`);
-  }
-  if (!stats.isDirectory() || stats.isSymbolicLink()) {
-    throw new Error(`Refusing non-directory or symlink ${label} component: ${path}`);
-  }
-}
-function isUnsupportedDirectorySyncError(error) {
-  if (!error || typeof error !== "object" || !("code" in error))
-    return false;
-  return error.code === "EINVAL" || error.code === "EBADF" || error.code === "ENOTSUP";
-}
-var init_atomic_file = () => {};
-
-// src/core/operation-error.ts
-var OperationError;
-var init_operation_error = __esm(() => {
-  OperationError = class OperationError extends Error {
-    code;
-    suggestion;
-    constructor(code, message, suggestion) {
-      super(message);
-      this.name = "OperationError";
-      this.code = code;
-      this.suggestion = suggestion;
-    }
-    toJSON() {
-      return {
-        error: this.code,
-        message: this.message,
-        ...this.suggestion ? { suggestion: this.suggestion } : {}
-      };
-    }
-  };
-});
-
-// src/core/openclaw-plugin-remote.ts
-import { readFileSync as readFileSync2 } from "node:fs";
-import { homedir } from "node:os";
-import { isAbsolute as isAbsolutePath, join } from "node:path";
-function openClawConfigPath(homeDir, env) {
-  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
-  if (explicit && isAbsolutePath(explicit))
-    return explicit;
-  const stateDir = env.OPENCLAW_STATE_DIR?.trim();
-  return join(stateDir && isAbsolutePath(stateDir) ? stateDir : join(homeDir, ".openclaw"), "openclaw.json");
-}
-function readOpenClawPluginRemote(env) {
-  const path = openClawConfigPath(env.HOME?.trim() || homedir(), env);
-  let text;
-  try {
-    text = readFileSync2(path, "utf8");
-  } catch (error) {
-    if (error?.code === "ENOENT")
-      return { hosted: false };
-    return { hosted: true, path, unreadable: true };
-  }
-  const parsed = parseOpenClawConfigText(text);
-  if (parsed === undefined)
-    return { hosted: true, path, unreadable: true };
-  const entries = asRecord(asRecord(asRecord(parsed)?.plugins)?.entries);
-  const entry = entries && Object.hasOwn(entries, "olympus") ? asRecord(entries.olympus) : undefined;
-  if (!entry || entry.enabled === false)
-    return { hosted: false };
-  return { hosted: true, path, remote: asRecord(asRecord(entry.config)?.remote) };
-}
-function parseOpenClawConfigText(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const json5 = globalThis.Bun?.JSON5;
-    if (!json5)
-      return;
-    try {
-      return json5.parse(text);
-    } catch {
-      return;
-    }
-  }
-}
-function asRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-var init_openclaw_plugin_remote = () => {};
-
-// src/core/linux-desktop-entry.ts
-import { dirname as dirname3, isAbsolute as isAbsolute2, join as join2 } from "node:path";
-function linuxDesktopEntryPaths(layout) {
-  return {
-    desktop: join2(layout.dataHome, "applications", `${ID}.desktop`),
-    icon: join2(layout.dataHome, "icons/hicolor/512x512/apps", `${ID}.png`)
-  };
-}
-var ID = "ai.olympusplugin.Olympus";
-var init_linux_desktop_entry = __esm(() => {
-  init_atomic_file();
-  init_linux_engine_layout();
 });
 
 // src/core/linux-engine-layout.ts
@@ -642,6 +1000,567 @@ var init_linux_engine_layout = __esm(() => {
     "sources/dropbox.personal.ingestion.json",
     "sources/ingestion-exclusions.json"
   ];
+});
+
+// src/core/olympus-layout.ts
+import { homedir as homedir3 } from "node:os";
+import { basename, dirname as dirname5, isAbsolute as isAbsolute4, join as join4, resolve as resolve3 } from "node:path";
+function layoutHome(env = process.env) {
+  return env.HOME?.trim() || homedir3();
+}
+function xdgDataHome(env = process.env) {
+  return env.XDG_DATA_HOME?.trim() || join4(layoutHome(env), ".local", "share");
+}
+function olympusDataRoot(env = process.env) {
+  const standalone = standaloneLinuxDataDir(env);
+  if (standalone)
+    return standalone;
+  return join4(xdgDataHome(env), "openclaw", "olympus");
+}
+function olympusDataPath(env, ...segments) {
+  return join4(olympusDataRoot(env), ...segments);
+}
+function sharedDataPath(name, env = process.env) {
+  return olympusDataPath(env, SHARED_DATA_FILES[name]);
+}
+function legacyCaptureDataRoot(env = process.env) {
+  return join4(xdgDataHome(env), "olympus");
+}
+function legacyWhatsAppServiceStateDir(env = process.env) {
+  return join4(env.HOME ?? homedir3(), ".local", "share", "olympus", "whatsapp-live");
+}
+function legacyTelegramStoreRoot(env = process.env) {
+  return standaloneLinuxDataDir(env) ?? join4(layoutHome(env), ".local", "share", "openclaw", "olympus");
+}
+function legacyTelegramGatewayStateDir(env = process.env) {
+  return env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim() || join4(env.XDG_STATE_HOME?.trim() || join4(layoutHome(env), ".local", "state"), "olympus", "telegram-capture-gateway");
+}
+function folderSegment(value, what) {
+  if (!FOLDER_SEGMENT.test(value) || value === "." || value === "..") {
+    throw new TypeError(`An account folder needs a plain ${what}; got ${JSON.stringify(value)}.`);
+  }
+  return value;
+}
+function accountFolder(account, env = process.env) {
+  return olympusDataPath(env, ACCOUNT_FOLDERS_DIR, folderSegment(account.source_id, "source id"), folderSegment(account.slot, "slot"));
+}
+function accountFoldersRoot(env = process.env) {
+  return olympusDataPath(env, ACCOUNT_FOLDERS_DIR);
+}
+function hasLegacyLayout(sourceId) {
+  return sourceId in LEGACY_STORES;
+}
+function legacyStoreFile(sourceId, name) {
+  if (sourceId === ARCHIVE_IMPORTS) {
+    const [family, tier, extra] = name.split(".");
+    if (!family || !tier || extra !== undefined || !(tier in ARCHIVE_FILE_LABEL)) {
+      throw new TypeError(`An archive store is named <family>.<tier>; got ${JSON.stringify(name)}.`);
+    }
+    return { file: `archive-${family}${ARCHIVE_FILE_LABEL[tier]}-connector-store.sqlite` };
+  }
+  const file = LEGACY_STORES[sourceId]?.[name];
+  if (!file)
+    throw new TypeError(`${sourceId} has no store named ${JSON.stringify(name)}.`);
+  return file;
+}
+function legacyFilePath(env, entry) {
+  return entry.dir ? join4(entry.dir.resolved(env), entry.file) : olympusDataPath(env, entry.file);
+}
+function accountStorePath(account, name, env = process.env) {
+  if (!STORE_NAME.test(name))
+    throw new TypeError(`A store name is a tier or <family>.<tier>; got ${JSON.stringify(name)}.`);
+  if (account.layout === "folder")
+    return join4(accountFolder(account, env), "stores", `${name}.sqlite`);
+  if (!hasLegacyLayout(account.source_id))
+    throw new TypeError(`${account.source_id} has no legacy layout: its stores live in its account folder.`);
+  return legacyFilePath(env, legacyStoreFile(account.source_id, name));
+}
+function accountSiblingStorePath(storeDbPath, tier) {
+  const file = basename(storeDbPath);
+  if (!file.endsWith(".sqlite"))
+    return;
+  const name = file.slice(0, -".sqlite".length);
+  if (!STORE_NAME.test(name))
+    return;
+  const dot = name.lastIndexOf(".");
+  const ownTier = name.slice(dot + 1);
+  if (!TIERS.includes(ownTier))
+    return;
+  const stores = dirname5(storeDbPath);
+  const slot = dirname5(stores);
+  const source = dirname5(slot);
+  if (basename(stores) !== "stores" || basename(dirname5(source)) !== ACCOUNT_FOLDERS_DIR)
+    return;
+  if (!FOLDER_SEGMENT.test(basename(slot)) || !FOLDER_SEGMENT.test(basename(source)))
+    return;
+  return join4(stores, `${name.slice(0, dot + 1)}${tier}.sqlite`);
+}
+function legacyOverrideEnvNames(sourceId) {
+  return [...messagingRawOverrides(sourceId)];
+}
+function xBookmarksApiUsageDbPath(env = process.env) {
+  return sharedDataPath("x-usage", env);
+}
+function accountRawPath(account, name, env = process.env, options = {}) {
+  if (RAW_OWNER[name] !== account.source_id)
+    throw new TypeError(`${account.source_id} has no raw state named ${name}.`);
+  const messaging = messagingRawPath(account, name, env);
+  if (messaging !== undefined)
+    return messaging;
+  const usage = options.usageDbPath;
+  if (name === "x-reconcile.sqlite") {
+    if (account.layout === "legacy") {
+      if (usage === ":memory:")
+        return ":memory:";
+      if (usage?.trim())
+        return `${usage.trim()}.reconcile`;
+      return `${xBookmarksApiUsageDbPath(env)}.reconcile`;
+    }
+    if (usage === ":memory:")
+      return ":memory:";
+    const relocated = usage?.trim();
+    if (relocated && relocated !== xBookmarksApiUsageDbPath(env))
+      return `${relocated}.reconcile`;
+  } else if (account.layout === "legacy") {
+    if (name === "watch")
+      return olympusDataPath(env, "local-files-watch");
+    return olympusDataPath(env, name);
+  }
+  return join4(accountFolder(account, env), "raw", name);
+}
+function accountStoreNames(sourceId, archiveFamilies = []) {
+  return sourceId === ARCHIVE_IMPORTS ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`)) : FOLDER_ONLY_STORES[sourceId] ? [...FOLDER_ONLY_STORES[sourceId]] : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => file ? [tier] : []);
+}
+function legacyAccountPaths(sourceId, env = process.env, archiveFamilies = []) {
+  if (!hasLegacyLayout(sourceId))
+    return { stores: [], raw: [] };
+  const names = accountStoreNames(sourceId, archiveFamilies);
+  const stores = names.map((name) => {
+    const entry = legacyStoreFile(sourceId, name);
+    return entry.dir ? join4(entry.dir.default(env), entry.file) : olympusDataPath(env, entry.file);
+  });
+  const raw = [];
+  if (sourceId === "local.files")
+    raw.push(olympusDataPath(env, "local-files-watch"));
+  if (sourceId === "x.bookmarks")
+    raw.push(`${olympusDataPath(env, "x-bookmarks-api-usage.sqlite")}.reconcile`);
+  if (sourceId === ARCHIVE_IMPORTS) {
+    raw.push(olympusDataPath(env, "archive-imports.json"), olympusDataPath(env, "archive-import-requests.json"), olympusDataPath(env, "archive-media-bindings.sqlite"));
+  }
+  const messaging = legacyMessagingPaths(sourceId, env);
+  return { stores: [...stores, ...messaging.stores], raw: [...raw, ...messaging.raw] };
+}
+function messagingRawOwners() {
+  return {
+    "telegram-spool": "telegram.messages",
+    "telegram-gateway": "telegram.messages",
+    whatsapp: "whatsapp.personal.messages",
+    "whatsapp-spool": "whatsapp.personal.messages",
+    "whatsapp-media": "whatsapp.personal.messages",
+    "whatsapp-media-root": "whatsapp.personal.messages"
+  };
+}
+function messagingRawOverrides(sourceId) {
+  if (sourceId === TELEGRAM_SOURCE_ID)
+    return TELEGRAM_PATH_OVERRIDES;
+  if (sourceId === WHATSAPP_SOURCE_ID)
+    return WHATSAPP_PATH_OVERRIDES;
+  return [];
+}
+function nativeCaptureOwnerPin(sourceId, env = process.env) {
+  const name = sourceId === TELEGRAM_SOURCE_ID ? NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram : sourceId === WHATSAPP_SOURCE_ID ? NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp : undefined;
+  const value = name ? env[name]?.trim().toLowerCase() : undefined;
+  return name && value && !["false", "0", "no"].includes(value) ? `${name} (native capture)` : undefined;
+}
+function olympusStateRoot(env = process.env) {
+  return join4(env.XDG_STATE_HOME?.trim() || join4(layoutHome(env), ".local", "state"), "olympus");
+}
+function telegramStoreDirs() {
+  return { resolved: legacyTelegramStoreRoot, default: legacyTelegramStoreRoot };
+}
+function legacyWhatsAppStateDir(env) {
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join4(legacyCaptureDataRoot(env), "whatsapp-live");
+}
+function whatsappStateDirs() {
+  return { resolved: legacyWhatsAppStateDir, default: (env) => join4(legacyCaptureDataRoot(env), "whatsapp-live") };
+}
+function isMessagingRawName(name) {
+  return MESSAGING_RAW_NAMES.includes(name);
+}
+function messagingRawPath(account, name, env) {
+  if (!isMessagingRawName(name))
+    return;
+  if (account.layout === "folder") {
+    const raw = join4(accountFolder(account, env), "raw");
+    if (name === "telegram-spool" || name === "telegram-gateway")
+      return join4(raw, name);
+    if (name === "whatsapp")
+      return join4(raw, "whatsapp");
+    if (name === "whatsapp-spool")
+      return join4(raw, "whatsapp", "spool");
+    if (name === "whatsapp-media-root")
+      return join4(raw, "whatsapp", "media");
+    return join4(raw, "whatsapp", "media", "audio");
+  }
+  switch (name) {
+    case "telegram-spool":
+      return env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join4(legacyCaptureDataRoot(env), "telegram-capture", "spool");
+    case "telegram-gateway":
+      return legacyTelegramGatewayStateDir(env);
+    case "whatsapp":
+      return legacyWhatsAppStateDir(env);
+    case "whatsapp-spool":
+      return env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join4(legacyWhatsAppStateDir(env), "spool");
+    case "whatsapp-media":
+    case "whatsapp-media-root": {
+      const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
+      return env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || join4(transcribeStateDir || legacyWhatsAppStateDir(env), "media", "audio");
+    }
+  }
+}
+function accountSessionPath(account, env = process.env) {
+  if (account.source_id !== TELEGRAM_SOURCE_ID)
+    throw new TypeError(`${account.source_id} has no Telegram session.`);
+  if (account.layout === "folder")
+    return join4(accountFolder(account, env), "session", "telegram");
+  const configured = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
+  return configured ? configured.endsWith(".session") ? configured.slice(0, -".session".length) : configured : join4(legacyCaptureDataRoot(env), "telegram", "telegram.personal");
+}
+function folderCaptureEnv(account, env = process.env) {
+  if (account.layout !== "folder")
+    throw new TypeError("Only a folder account has its capture paths set from its folder.");
+  if (account.source_id === TELEGRAM_SOURCE_ID) {
+    return {
+      OLYMPUS_TELEGRAM_SESSION_PATH: accountSessionPath(account, env),
+      OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: accountRawPath(account, "telegram-gateway", env),
+      OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: accountRawPath(account, "telegram-spool", env)
+    };
+  }
+  if (account.source_id === WHATSAPP_SOURCE_ID)
+    return { OLYMPUS_WHATSAPP_STATE_DIR: accountRawPath(account, "whatsapp", env) };
+  throw new TypeError(`${account.source_id} has no capture child.`);
+}
+function folderCaptureEnvRemoved(account) {
+  return account.source_id === TELEGRAM_SOURCE_ID ? ["OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR", "OLYMPUS_TELEGRAM_GATEWAY_BACKFILL_REQUESTS_PATH"] : [];
+}
+function folderCaptureDirs(account, env = process.env) {
+  if (account.layout !== "folder")
+    return [];
+  if (account.source_id === TELEGRAM_SOURCE_ID) {
+    return [
+      dirname5(accountSessionPath(account, env)),
+      accountRawPath(account, "telegram-gateway", env),
+      accountRawPath(account, "telegram-spool", env)
+    ];
+  }
+  return account.source_id === WHATSAPP_SOURCE_ID ? [accountRawPath(account, "whatsapp", env)] : [];
+}
+function legacyMessagingPaths(sourceId, env) {
+  if (sourceId === TELEGRAM_SOURCE_ID) {
+    const capture = legacyCaptureDataRoot(env);
+    const state = olympusStateRoot(env);
+    return {
+      stores: [],
+      raw: [
+        join4(capture, "telegram"),
+        join4(capture, "telegram-capture"),
+        join4(state, "telegram-capture-gateway"),
+        join4(state, "telegram-spool-drain")
+      ]
+    };
+  }
+  if (sourceId === WHATSAPP_SOURCE_ID) {
+    return { stores: [], raw: [join4(legacyCaptureDataRoot(env), "whatsapp-live"), legacyWhatsAppServiceStateDir(env)] };
+  }
+  return { stores: [], raw: [] };
+}
+function mediaCacheRoot(env = process.env) {
+  const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
+  return configured ? join4(configured, "olympus-media") : olympusDataPath(env, "media-cache");
+}
+function whatsappStateDirFromValue(value) {
+  const trimmed = value.trim();
+  return basename(trimmed) === WHATSAPP_SESSION_FILE ? dirname5(trimmed) : trimmed;
+}
+function linuxInstallRoots(env) {
+  if (process.platform !== "linux")
+    return [];
+  try {
+    const layout = resolveLinuxEngineLayout(env);
+    return [
+      layout.configDir,
+      layout.dataDir,
+      layout.packageDir,
+      join4(layout.dataHome, "olympus"),
+      dirname5(layout.stateDir),
+      dirname5(layout.cacheDir),
+      ...layout.runtimeDir ? [layout.runtimeDir] : []
+    ];
+  } catch {
+    return [];
+  }
+}
+function olympusSharedBases(env = process.env) {
+  const home = layoutHome(env);
+  const bases = [
+    home,
+    join4(home, ".local"),
+    join4(home, ".local", "share"),
+    join4(home, ".local", "state"),
+    join4(home, ".config"),
+    join4(home, ".cache"),
+    join4(home, "Library"),
+    join4(home, "Library", "Application Support"),
+    join4(home, "Library", "Logs")
+  ];
+  for (const [name, value] of Object.entries(env)) {
+    if (name.startsWith("XDG_") && value?.trim())
+      bases.push(value.trim());
+  }
+  return bases.filter((path) => isAbsolute4(path)).map((path) => resolve3(path));
+}
+function isDedicatedFolder(path, sharedBases) {
+  const fold = (value) => process.platform === "darwin" ? value.toLowerCase() : value;
+  const folder = fold(resolve3(path));
+  if (folder === "/")
+    return false;
+  return !sharedBases.some((base) => {
+    const shared = fold(resolve3(base));
+    return shared === folder || shared.startsWith(`${folder}/`);
+  });
+}
+function isDedicatedOlympusFolder(path, env = process.env) {
+  return isDedicatedFolder(path, olympusSharedBases(env));
+}
+function olympusOwnLocations(env = process.env, capture = {}) {
+  const home = layoutHome(env);
+  const xdg = (name, fallback) => env[name]?.trim() || join4(home, fallback);
+  const fixed = [
+    olympusDataRoot(env),
+    mediaCacheRoot(env),
+    legacyCaptureDataRoot(env),
+    legacyWhatsAppServiceStateDir(env),
+    legacyTelegramStoreRoot(env),
+    join4(xdg("XDG_STATE_HOME", ".local/state"), "olympus", "telegram-capture-gateway"),
+    join4(home, ".olympus"),
+    join4(home, ".config", "olympus"),
+    join4(home, ".local", "share", "olympus"),
+    join4(home, ".local", "share", "openclaw", "olympus"),
+    join4(home, ".local", "state", "olympus"),
+    join4(home, ".cache", "olympus"),
+    join4(home, "Library", "Logs", "Olympus"),
+    join4(home, "Library", "Application Support", "Olympus"),
+    join4(xdg("XDG_CONFIG_HOME", ".config"), "olympus"),
+    join4(xdg("XDG_STATE_HOME", ".local/state"), "olympus"),
+    join4(xdg("XDG_CACHE_HOME", ".cache"), "olympus"),
+    ...linuxInstallRoots(env)
+  ];
+  const moved = [];
+  const place = (value) => {
+    const trimmed = value?.trim();
+    if (!trimmed || !isAbsolute4(trimmed))
+      return;
+    const dir = resolve3(trimmed);
+    if (isDedicatedOlympusFolder(dir, env))
+      moved.push(dir);
+  };
+  const whatsappState = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
+  if (whatsappState)
+    place(whatsappStateDirFromValue(whatsappState));
+  place(capture.whatsappStateDir);
+  place(env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR);
+  place(env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR);
+  place(capture.telegramStateDir);
+  place(env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR);
+  place(env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR);
+  place(capture.telegramSpoolDir);
+  const clean = (paths) => [...new Set(paths.filter((path) => isAbsolute4(path)).map((path) => resolve3(path)))];
+  return { fixed: clean(fixed), moved: clean(moved) };
+}
+var SHARED_DATA_FILES, WHATSAPP_SESSION_FILE = "session.db", ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, STORE_NAME, TIERS, gmailStore = (infix) => ({ file: `gmail-${infix}connector-store.sqlite` }), driveStore = (infix) => ({ file: `google-drive-${infix}connector-store.sqlite` }), dropboxStore = (infix) => ({ file: `dropbox-files-${infix}connector-store.sqlite` }), localFilesStore = (infix) => ({ file: `local-files-${infix}connector-store.sqlite` }), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_ONLY_STORES, FOLDER_LAYOUT_SOURCES, RAW_OWNER, TELEGRAM_SOURCE_ID = "telegram.messages", WHATSAPP_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_BRIDGE_LOCK_NAME = "bridge.lock", MESSAGING_RAW_NAMES, NATIVE_CAPTURE_OWNER_ENV_NAMES, TELEGRAM_PATH_OVERRIDES, WHATSAPP_PATH_OVERRIDES, MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR";
+var init_olympus_layout = __esm(() => {
+  init_linux_engine_layout();
+  SHARED_DATA_FILES = {
+    registry: "registry.json",
+    "data-owner-lock": "data-owner.lock",
+    "remote-connections": "remote-connections.sqlite",
+    "source-dashboard": "source-dashboard.sqlite",
+    "source-scheduler": "source-scheduler.sqlite",
+    "source-watches": "source-watches.sqlite",
+    "file-extraction-jobs": "file-extraction-jobs.sqlite",
+    "ingestion-doctor-state": "source-ingestion-doctor-state.json",
+    "embedding-ledger": "embedding-ledger.jsonl",
+    "classification-ledger": "classification-ledger.jsonl",
+    "answer-latency": "source-answer-latency.jsonl",
+    "x-usage": "x-bookmarks-api-usage.sqlite",
+    "readwise-request-budget": "readwise-daily-request-budget.json",
+    "gmail-request-budget": "gmail-daily-request-budget.json",
+    "google-drive-request-budget": "google-drive-daily-request-budget.json",
+    "credential-broker-state": "credential-broker-state.json",
+    "waiting-private-questions": "waiting-private-questions.sqlite",
+    "tier-migration": "tier-migration",
+    models: "models",
+    "built-in-embedding": "models/built-in-embedding",
+    "built-in-reasoning": "models/built-in-reasoning",
+    "built-in-transcription": "models/built-in-transcription"
+  };
+  FOLDER_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+  STORE_NAME = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?$/;
+  TIERS = ["secure_local", "internal", "public_safe"];
+  LEGACY_STORES = {
+    "gmail.email": {
+      internal: gmailStore(""),
+      secure_local: gmailStore("secure-"),
+      public_safe: gmailStore("public-")
+    },
+    "google_drive.docs": {
+      internal: driveStore(""),
+      secure_local: driveStore("secure-"),
+      public_safe: driveStore("public-")
+    },
+    "dropbox.files": {
+      secure_local: dropboxStore(""),
+      internal: dropboxStore("internal-"),
+      public_safe: dropboxStore("public-")
+    },
+    "local.files": {
+      secure_local: localFilesStore(""),
+      internal: localFilesStore("internal-"),
+      public_safe: localFilesStore("public-")
+    },
+    "readwise.library": {
+      internal: { file: "readwise-connector-store.sqlite" },
+      secure_local: { file: "readwise-secure-connector-store.sqlite" },
+      public_safe: undefined
+    },
+    "x.bookmarks": {
+      internal: { file: "x-bookmarks-connector-store.sqlite" },
+      secure_local: { file: "x-bookmarks-secure-connector-store.sqlite" },
+      public_safe: undefined
+    },
+    "archive.imports": { secure_local: undefined, internal: undefined, public_safe: undefined },
+    "telegram.messages": {
+      internal: { file: "telegram-internal-connector-store.sqlite", dir: telegramStoreDirs() },
+      secure_local: { file: "telegram-protected-connector-store.sqlite", dir: telegramStoreDirs() },
+      public_safe: undefined
+    },
+    "whatsapp.personal.messages": {
+      internal: { file: "connector-store-internal.db", dir: whatsappStateDirs() },
+      secure_local: { file: "connector-store.db", dir: whatsappStateDirs() },
+      public_safe: undefined
+    }
+  };
+  ARCHIVE_FILE_LABEL = { secure_local: "", internal: "-internal", public_safe: "-public" };
+  FOLDER_ONLY_STORES = {};
+  FOLDER_LAYOUT_SOURCES = [...Object.keys(LEGACY_STORES), ...Object.keys(FOLDER_ONLY_STORES)];
+  RAW_OWNER = {
+    watch: "local.files",
+    "x-reconcile.sqlite": "x.bookmarks",
+    "archive-imports.json": ARCHIVE_IMPORTS,
+    "archive-import-requests.json": ARCHIVE_IMPORTS,
+    "archive-media-bindings.sqlite": ARCHIVE_IMPORTS,
+    ...messagingRawOwners()
+  };
+  MESSAGING_RAW_NAMES = [
+    "telegram-spool",
+    "telegram-gateway",
+    "whatsapp",
+    "whatsapp-spool",
+    "whatsapp-media",
+    "whatsapp-media-root"
+  ];
+  NATIVE_CAPTURE_OWNER_ENV_NAMES = {
+    telegram: "OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER",
+    whatsapp: "OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER"
+  };
+  TELEGRAM_PATH_OVERRIDES = [
+    "OLYMPUS_TELEGRAM_SESSION_PATH",
+    "OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR",
+    "OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR",
+    "OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR",
+    "OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR",
+    "OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH",
+    "OLYMPUS_TELEGRAM_GATEWAY_BACKFILL_REQUESTS_PATH"
+  ];
+  WHATSAPP_PATH_OVERRIDES = [
+    "OLYMPUS_WHATSAPP_STATE_DIR",
+    "OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR",
+    "OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR",
+    "OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR"
+  ];
+});
+
+// src/core/messaging-capture-grant-file.ts
+import { closeSync as closeSync3, constants, fstatSync, lstatSync as lstatSync3, openSync as openSync3, readFileSync as readFileSync4 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { dirname as dirname6, join as join5 } from "node:path";
+function captureGrantPathBeside(source, handleRegistryPath) {
+  return join5(dirname6(handleRegistryPath), `messaging-capture.${source}.json`);
+}
+function captureGrantPathFromEnv(source, env) {
+  const configured = env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim();
+  return captureGrantPathBeside(source, configured || join5(env.HOME?.trim() || homedir4(), ".config", "olympus", "handles.json"));
+}
+function readCaptureGrantFile(path) {
+  try {
+    lstatSync3(path);
+  } catch (error) {
+    const code = error?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? { kind: "missing" } : { kind: "invalid" };
+  }
+  let descriptor;
+  try {
+    descriptor = openSync3(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const info = fstatSync(descriptor);
+    const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (!info.isFile() || (info.mode & 18) !== 0 || currentUid !== undefined && info.uid !== currentUid) {
+      return { kind: "invalid" };
+    }
+    const value = JSON.parse(readFileSync4(descriptor, "utf8"));
+    if (value.version !== 1 || !["telegram", "whatsapp"].includes(value.source) || !value.handle)
+      return { kind: "invalid" };
+    if (value.sessionPath !== undefined && (typeof value.sessionPath !== "string" || value.sessionPath === ""))
+      return { kind: "invalid" };
+    if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment))
+      return { kind: "invalid" };
+    return { kind: "valid", grant: value };
+  } catch {
+    return { kind: "invalid" };
+  } finally {
+    if (descriptor !== undefined)
+      closeSync3(descriptor);
+  }
+}
+function captureGrantSessionEvidence(source, grantPath) {
+  const read = readCaptureGrantFile(grantPath);
+  if (read.kind === "missing")
+    return { kind: "none" };
+  if (read.kind === "invalid" || read.grant.source !== source)
+    return { kind: "unreadable" };
+  return read.grant.sessionPath === undefined ? { kind: "none" } : { kind: "path", sessionPath: read.grant.sessionPath };
+}
+var init_messaging_capture_grant_file = () => {};
+
+// src/core/operation-error.ts
+var OperationError;
+var init_operation_error = __esm(() => {
+  OperationError = class OperationError extends Error {
+    code;
+    suggestion;
+    constructor(code, message, suggestion) {
+      super(message);
+      this.name = "OperationError";
+      this.code = code;
+      this.suggestion = suggestion;
+    }
+    toJSON() {
+      return {
+        error: this.code,
+        message: this.message,
+        ...this.suggestion ? { suggestion: this.suggestion } : {}
+      };
+    }
+  };
 });
 
 // src/core/source-index/types.ts
@@ -1208,31 +2127,285 @@ var init_source_corpus_registry = __esm(() => {
   PUBLIC_CORPUS_DECLARATIONS = new Map(DEFAULT_SOURCE_CORPORA.map((corpus) => [corpus.corpusId, corpus]));
 });
 
+// src/core/source-registry.ts
+import { readFileSync as readFileSync5 } from "node:fs";
+function sourceAccountMovePending(account) {
+  return account.migration?.state === "moving" || account.migration?.state === "reverting";
+}
+function sourceRegistryPath(env = process.env) {
+  return sharedDataPath("registry", env);
+}
+function readSourceRegistry(env = process.env) {
+  return readSourceRegistryAt(sourceRegistryPath(env));
+}
+function updateSourceRegistry(env, mutate) {
+  return updateSourceRegistryAt(sourceRegistryPath(env), mutate);
+}
+function updateSourceRegistryAt(path, mutate) {
+  return withFileLeaseSync(path, (lease) => {
+    const current = readSourceRegistryAt(path);
+    const next = mutate(current) ?? current;
+    next.schema = next.accounts.some(sourceAccountMovePending) ? SOURCE_REGISTRY_MOVING_SCHEMA : next.accounts.some((account) => account.layout === "folder") ? SOURCE_REGISTRY_FOLDER_SCHEMA : SOURCE_REGISTRY_SCHEMA;
+    const text = `${JSON.stringify(validateRegistry(next, path), null, 2)}
+`;
+    lease.commit(() => writePrivateFileAtomicSync(path, text));
+    return next;
+  });
+}
+function findRegistryAccount(registry, sourceId, slot) {
+  return registry.accounts.find((account) => account.source_id === sourceId && account.slot === slot);
+}
+function readSourceRegistryAt(path) {
+  let text;
+  try {
+    text = readFileSync5(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { schema: SOURCE_REGISTRY_SCHEMA, accounts: [] };
+    throw new SourceRegistryError(path, "cannot be read");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new SourceRegistryError(path, "not JSON");
+  }
+  return validateRegistry(parsed, path);
+}
+function validateRegistry(value, path) {
+  if (!isRecord(value))
+    throw new SourceRegistryError(path, "not an object");
+  if (!KNOWN_SCHEMAS.includes(value.schema))
+    throw new SourceRegistryError(path, `unknown schema ${JSON.stringify(value.schema)}`);
+  if (!Array.isArray(value.accounts))
+    throw new SourceRegistryError(path, "accounts is not a list");
+  const seen = new Set;
+  for (const [index, account] of value.accounts.entries()) {
+    if (!isValidAccount(account))
+      throw new SourceRegistryError(path, `account #${index + 1} is malformed`);
+    const key = `${account.source_id}\x00${account.slot}`;
+    if (seen.has(key))
+      throw new SourceRegistryError(path, `${account.source_id} slot ${account.slot} is listed twice`);
+    seen.add(key);
+  }
+  return value;
+}
+function isValidAccount(value) {
+  return isRecord(value) && nonEmptyString(value.source_id) && nonEmptyString(value.slot) && typeof value.state === "string" && STATES.includes(value.state) && typeof value.layout === "string" && LAYOUTS.includes(value.layout) && Array.isArray(value.corpus_ids) && value.corpus_ids.every(nonEmptyString) && (value.provider_account_hash === undefined || nonEmptyString(value.provider_account_hash)) && nonEmptyString(value.created_at) && (value.migration === undefined || isValidMigration(value.migration));
+}
+function isValidMigration(value) {
+  if (!isRecord(value))
+    return false;
+  const pending = value.state === "moving" || value.state === "reverting";
+  return typeof value.state === "string" && MIGRATION_STATES.includes(value.state) && nonEmptyString(value.at) && (value.reason === undefined || nonEmptyString(value.reason)) && (value.detail === undefined || typeof value.detail === "string") && (value.moves === undefined || Array.isArray(value.moves) && value.moves.every(isValidMove)) && (!pending || Array.isArray(value.moves)) && (value.checked === undefined || Array.isArray(value.checked) && value.checked.every(isValidCheck));
+}
+function isValidMove(value) {
+  return isRecord(value) && typeof value.role === "string" && MOVE_ROLES.includes(value.role) && nonEmptyString(value.from) && nonEmptyString(value.to) && (value.kind === "file" || value.kind === "dir") && (value.db === undefined || value.db === true) && nonEmptyString(value.dev) && nonEmptyString(value.ino) && typeof value.size === "number" && Number.isSafeInteger(value.size) && value.size >= 0;
+}
+function isValidCheck(value) {
+  return isRecord(value) && nonEmptyString(value.file) && (value.result === "ok" || value.result === "damaged" || value.result === "not_checked");
+}
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var SOURCE_REGISTRY_SCHEMA = 1, SOURCE_REGISTRY_FOLDER_SCHEMA = 2, SOURCE_REGISTRY_MOVING_SCHEMA = 3, KNOWN_SCHEMAS, DEFAULT_ACCOUNT_SLOT = "1", SourceRegistryError, STATES, LAYOUTS, MIGRATION_STATES, MOVE_ROLES;
+var init_source_registry = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_olympus_layout();
+  KNOWN_SCHEMAS = [SOURCE_REGISTRY_SCHEMA, SOURCE_REGISTRY_FOLDER_SCHEMA, SOURCE_REGISTRY_MOVING_SCHEMA];
+  SourceRegistryError = class SourceRegistryError extends Error {
+    code = "source_registry_unreadable";
+    path;
+    constructor(path, detail) {
+      super(`The source registry at ${path} is unreadable (${detail}); no source store opens until it is repaired.`);
+      this.name = "SourceRegistryError";
+      this.path = path;
+    }
+  };
+  STATES = ["active", "deleting", "deleted"];
+  LAYOUTS = ["legacy", "folder"];
+  MIGRATION_STATES = ["moving", "reverting", "done", "skipped", "failed"];
+  MOVE_ROLES = ["store", "ledger", "secrets", "sniffer", "raw"];
+});
+
+// src/core/source-placement.ts
+import { accessSync, constants as constants2, lstatSync as lstatSync4, statSync } from "node:fs";
+import { isAbsolute as isAbsolute5, join as join6, relative as relative3, resolve as resolve4, sep as sep3 } from "node:path";
+function hasFolderLayout(sourceId) {
+  return FOLDER_LAYOUT_SOURCES.includes(sourceId);
+}
+function decideAccountLayout(sourceId, env = process.env) {
+  if (!hasFolderLayout(sourceId))
+    return { layout: "legacy", why: "its source has no folder layout" };
+  if (!hasLegacyLayout(sourceId))
+    return { layout: "folder", why: "its source never had legacy paths" };
+  const pin = pinnedLegacyBy(sourceId, env);
+  if (pin)
+    return { layout: "legacy", why: `${pin} pins its files` };
+  const root = dataRootState(env);
+  if (root === "unreadable")
+    return { layout: "legacy", why: "the data folder cannot be looked at" };
+  const existing = legacyFilesState(sourceId, env);
+  if (existing === "present")
+    return { layout: "legacy", why: "its files are already at the legacy paths" };
+  if (existing === "unreadable")
+    return { layout: "legacy", why: "a legacy path cannot be looked at" };
+  return { layout: "folder", why: root === "absent" ? "nothing is stored yet" : "new account with no legacy files" };
+}
+function placedAccount(sourceId, env = process.env, slot = DEFAULT_ACCOUNT_SLOT) {
+  if (!hasFolderLayout(sourceId))
+    return { source_id: sourceId, slot, layout: "legacy" };
+  let entry;
+  try {
+    entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
+  } catch (error) {
+    if (error instanceof SourceRegistryError) {
+      return { source_id: sourceId, slot, layout: !hasLegacyLayout(sourceId) || hasAccountFolderOnDisk(sourceId, slot, env) ? "folder" : "legacy" };
+    }
+    return { source_id: sourceId, slot, layout: hasLegacyLayout(sourceId) ? "legacy" : "folder" };
+  }
+  return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
+}
+function accountMovePending(sourceId, env = process.env, slot = DEFAULT_ACCOUNT_SLOT) {
+  try {
+    const entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
+    return entry !== undefined && sourceAccountMovePending(entry);
+  } catch {
+    return false;
+  }
+}
+function resolvedStorePath(sourceId, name, env = process.env) {
+  return accountStorePath(placedAccount(sourceId, env), name, env);
+}
+function hasAccountFolderOnDisk(sourceId, slot, env) {
+  try {
+    lstatSync4(accountFolder({ source_id: sourceId, slot }, env));
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isInsideAccountFolder(dbPath, account, env = process.env) {
+  return resolve4(dbPath).startsWith(`${resolve4(accountFolder(account, env))}${sep3}`);
+}
+function storageAccountForCorpus(corpus, registered = []) {
+  const known = [...registered, ...defaultSourceCorpusRegistryConfig().corpora].find((entry) => entry.corpusId === corpus.corpusId);
+  if (known)
+    return { sourceId: known.sourceId };
+  if (isArchiveCorpusId(corpus.corpusId, corpus.trustDomain))
+    return { sourceId: ARCHIVE_IMPORTS_SOURCE_ID };
+  const prefix = `${corpus.trustDomain}.`;
+  const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : "";
+  return { sourceId: unprefixed || corpus.corpusId };
+}
+function pinnedLegacyBy(sourceId, env, withGrant = true) {
+  for (const name of legacyOverrideEnvNames(sourceId)) {
+    if (env[name]?.trim())
+      return name;
+  }
+  const native = nativeCaptureOwnerPin(sourceId, env);
+  if (native)
+    return native;
+  return withGrant ? captureGrantPin(sourceId, env) : undefined;
+}
+function captureGrantPin(sourceId, env) {
+  const source = sourceId === TELEGRAM_SOURCE_ID ? "telegram" : sourceId === WHATSAPP_SOURCE_ID ? "whatsapp" : undefined;
+  if (!source)
+    return;
+  const evidence = captureGrantSessionEvidence(source, captureGrantPathFromEnv(source, env));
+  if (evidence.kind === "path")
+    return "its capture grant (names the session path)";
+  return evidence.kind === "unreadable" ? "its capture grant (cannot be read)" : undefined;
+}
+function dataRootState(env) {
+  let root;
+  try {
+    root = olympusDataRoot(env);
+  } catch {
+    return "unreadable";
+  }
+  try {
+    const link = lstatSync4(root);
+    const target = link.isSymbolicLink() ? statSync(root) : link;
+    if (!target.isDirectory())
+      return "unreadable";
+    accessSync(root, constants2.R_OK | constants2.X_OK);
+    return "present";
+  } catch (error) {
+    return error?.code === "ENOENT" && !isDanglingLink(root) ? "absent" : "unreadable";
+  }
+}
+function isDanglingLink(path) {
+  try {
+    return lstatSync4(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+function legacyFilesState(sourceId, env) {
+  const { stores, raw } = legacyAccountPaths(sourceId, env, archiveImportFamilies());
+  const candidates = [
+    ...raw.flatMap(withSqliteFiles),
+    ...stores.flatMap((store) => [
+      store,
+      tierLedgerPathForStore(store),
+      secretLocationsPathForStore(store),
+      tierSnifferPathForStore(store)
+    ].flatMap(withSqliteFiles))
+  ];
+  let unreadable = false;
+  for (const path of candidates) {
+    try {
+      lstatSync4(path);
+      return "present";
+    } catch (error) {
+      if (error?.code !== "ENOENT")
+        unreadable = true;
+    }
+  }
+  return unreadable ? "unreadable" : "none";
+}
+function withSqliteFiles(path) {
+  return [path, `${path}-wal`, `${path}-shm`];
+}
+var ARCHIVE_IMPORTS_SOURCE_ID = "archive.imports";
+var init_source_placement = __esm(() => {
+  init_archive_formats();
+  init_olympus_layout();
+  init_messaging_capture_grant_file();
+  init_source_corpus_registry();
+  init_source_registry();
+});
+
 // src/core/owner-config-read.ts
-import { readFileSync as readFileSync4, statSync, lstatSync as lstatSync3 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join4 } from "node:path";
+import { readFileSync as readFileSync6, statSync as statSync2, lstatSync as lstatSync5 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { join as join7 } from "node:path";
 function linuxOwnerConfigPath(name, env = process.env) {
   if (process.platform !== "linux")
     return;
   const layout = resolveLinuxEngineLayout(env);
   const owned = !!readLinuxEngineReceipt(layout.receiptPath) || env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1";
   if (!owned && name !== "sovereignty.json")
-    return join4(layout.home, ".olympus", name);
-  if ((owned ? [name, ...LEGACY_LINUX_POLICY_FILES] : [name]).some((file) => lstatSync3(join4(layout.home, ".olympus", file), { throwIfNoEntry: false }))) {
+    return join7(layout.home, ".olympus", name);
+  if ((owned ? [name, ...LEGACY_LINUX_POLICY_FILES] : [name]).some((file) => lstatSync5(join7(layout.home, ".olympus", file), { throwIfNoEntry: false }))) {
     throw new Error("Legacy Olympus settings still need migration. Complete the Linux engine upgrade, or back up and migrate an unreceipted installation, before using its settings; existing privacy protections were not ignored.");
   }
-  return join4(layout.configDir, name);
+  return join7(layout.configDir, name);
 }
 function defaultOwnerConfigPath(name, env = process.env) {
-  return linuxOwnerConfigPath(name, env) ?? join4(homedir3(), ".olympus", name);
+  return linuxOwnerConfigPath(name, env) ?? join7(homedir5(), ".olympus", name);
 }
 function defaultSovereigntyConfigPath(env = process.env) {
-  return linuxOwnerConfigPath("sovereignty.json", env) ?? join4(env.HOME?.trim() || homedir3(), ".olympus", "sovereignty.json");
+  return linuxOwnerConfigPath("sovereignty.json", env) ?? join7(env.HOME?.trim() || homedir5(), ".olympus", "sovereignty.json");
 }
 function ownerConfigStamp(path) {
   try {
-    return stampOf(statSync(path));
+    return stampOf(statSync2(path));
   } catch {
     return "missing";
   }
@@ -1240,7 +2413,7 @@ function ownerConfigStamp(path) {
 function readOwnerConfigFile(path) {
   let before;
   try {
-    before = statSync(path);
+    before = statSync2(path);
   } catch (error) {
     return error.code === "ENOENT" ? { status: "missing" } : { status: "refused", reason: "unreadable", stamp: "unreadable" };
   }
@@ -1250,13 +2423,13 @@ function readOwnerConfigFile(path) {
   }
   let text;
   try {
-    text = readFileSync4(path, "utf8");
+    text = readFileSync6(path, "utf8");
   } catch {
     return { status: "refused", reason: "unreadable", stamp };
   }
   let after;
   try {
-    after = statSync(path);
+    after = statSync2(path);
   } catch {
     return { status: "refused", reason: "torn_read", stamp };
   }
@@ -1424,14 +2597,14 @@ function stripJpegMetadata(bytes) {
 var SOI = 216, SOS = 218, APP0 = 224, APP1 = 225, APP2 = 226, APP14 = 238, COM = 254;
 
 // src/workers/file-extraction/extractors/image-preparers.ts
-import { accessSync, constants as fsConstants, existsSync as existsSync3, readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
-import { delimiter, join as join5 } from "node:path";
+import { accessSync as accessSync2, constants as fsConstants, existsSync as existsSync3, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
+import { delimiter, join as join8 } from "node:path";
 function readPreparedOutput(path) {
   try {
-    const info = statSync2(path);
+    const info = statSync3(path);
     if (!info.isFile() || info.size === 0 || info.size > MAX_PREPARED_BYTES)
       throw new PreparedOutputError;
-    return new Uint8Array(readFileSync5(path));
+    return new Uint8Array(readFileSync7(path));
   } catch {
     throw new PreparedOutputError;
   }
@@ -1458,7 +2631,7 @@ function createSipsPreparer(options = {}) {
     command,
     decodeArgs,
     async prepare(context) {
-      const first = join5(context.tempDir, "prepared.jpg");
+      const first = join8(context.tempDir, "prepared.jpg");
       await context.commandRunner({
         command,
         args: decodeArgs(context.inputPath, first),
@@ -1472,7 +2645,7 @@ function createSipsPreparer(options = {}) {
       const needsMatch = srgbProfile !== undefined && profile !== undefined && iccProfileColorSpace(profile) === "RGB " && !iccProfileIsSrgb(profile);
       const turn = SIPS_ORIENTATION_ARGS[orientation] ?? [];
       if (needsMatch || turn.length > 0) {
-        const second = join5(context.tempDir, "upright.jpg");
+        const second = join8(context.tempDir, "upright.jpg");
         await context.commandRunner({
           command,
           args: [...needsMatch ? ["-m", srgbProfile] : [], ...turn, first, "--out", second],
@@ -1502,7 +2675,7 @@ function createVipsPreparer(options = {}) {
     command,
     decodeArgs,
     async prepare(context) {
-      const output = join5(context.tempDir, "prepared.jpg");
+      const output = join8(context.tempDir, "prepared.jpg");
       await context.commandRunner({
         command,
         args: decodeArgs(context.inputPath, output),
@@ -1519,11 +2692,11 @@ function findExecutable(name, searchPath = process.env.PATH) {
   for (const directory of searchPath.split(delimiter)) {
     if (!directory)
       continue;
-    const candidate = join5(directory, name);
+    const candidate = join8(directory, name);
     try {
-      if (!statSync2(candidate).isFile())
+      if (!statSync3(candidate).isFile())
         continue;
-      accessSync(candidate, fsConstants.X_OK);
+      accessSync2(candidate, fsConstants.X_OK);
       return candidate;
     } catch {}
   }
@@ -1667,7 +2840,7 @@ var init_still_image_formats = __esm(() => {
 
 // src/core/http-timeout.ts
 function untilAborted(work, signal) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve5, reject) => {
     if (signal.aborted) {
       work.catch(() => {
         return;
@@ -1677,7 +2850,7 @@ function untilAborted(work, signal) {
     }
     const onAbort = () => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
-    work.then(resolve3, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    work.then(resolve5, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
 }
 async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
@@ -1809,8 +2982,8 @@ async function fetchBoundedText(fetchImpl, url, init, options = {}) {
     if (activeReader) {
       await Promise.race([
         releaseBodyReader(activeReader),
-        new Promise((resolve3) => {
-          setTimeout(resolve3, 0);
+        new Promise((resolve5) => {
+          setTimeout(resolve5, 0);
         })
       ]);
     }
@@ -1878,7 +3051,7 @@ var init_http_timeout = __esm(() => {
 
 // src/workers/source-index/pinned-download.ts
 import { createHash } from "node:crypto";
-import { closeSync as closeSync3, createReadStream, existsSync as existsSync4, openSync as openSync3, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync3, writeSync } from "node:fs";
+import { closeSync as closeSync4, createReadStream, existsSync as existsSync4, openSync as openSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync4, writeSync } from "node:fs";
 async function downloadPinnedFile(options) {
   const { fetchImpl, url, target, partial, expectedBytes, algorithm, encoding, noun, stallMs, error } = options;
   let hash = createHash(algorithm);
@@ -1889,7 +3062,7 @@ async function downloadPinnedFile(options) {
     if (fd !== undefined) {
       const open2 = fd;
       fd = undefined;
-      closeSync3(open2);
+      closeSync4(open2);
     }
   };
   const mismatch = (message) => {
@@ -1904,7 +3077,7 @@ async function downloadPinnedFile(options) {
   };
   try {
     if (existsSync4(partial)) {
-      const size = statSync3(partial).size;
+      const size = statSync4(partial).size;
       if (size > 0 && size < expectedBytes) {
         await hashPartial(partial, hash, options.verifyTimeoutMs);
         received = size;
@@ -1949,7 +3122,7 @@ async function downloadPinnedFile(options) {
         } else if (received > 0) {
           try {
             close();
-            fd = openSync3(partial, "w", 420);
+            fd = openSync4(partial, "w", 420);
           } catch (cause) {
             throw disk(cause);
           }
@@ -1960,7 +3133,7 @@ async function downloadPinnedFile(options) {
         options.onStart();
         if (fd === undefined) {
           try {
-            fd = openSync3(partial, received > 0 ? "a" : "w", 420);
+            fd = openSync4(partial, received > 0 ? "a" : "w", 420);
           } catch (cause) {
             throw disk(cause);
           }
@@ -2012,7 +3185,7 @@ async function downloadPinnedFile(options) {
         controller.abort();
       }
       if (retry)
-        await new Promise((resolve3) => setTimeout(resolve3, RETRY_DELAY_MS * 2 ** (retries - 1)));
+        await new Promise((resolve5) => setTimeout(resolve5, RETRY_DELAY_MS * 2 ** (retries - 1)));
     }
     close();
     if (received !== expectedBytes || hash.digest(encoding) !== options.digest) {
@@ -2055,512 +3228,6 @@ var init_pinned_download = __esm(() => {
   REQUEST_BYTES = 256 * 1024 ** 2;
   InterruptedRead = class InterruptedRead extends Error {
   };
-});
-
-// src/core/olympus-layout.ts
-import { homedir as homedir4 } from "node:os";
-import { basename, dirname as dirname5, isAbsolute as isAbsolute4, join as join6, resolve as resolve3 } from "node:path";
-function layoutHome(env = process.env) {
-  return env.HOME?.trim() || homedir4();
-}
-function xdgDataHome(env = process.env) {
-  return env.XDG_DATA_HOME?.trim() || join6(layoutHome(env), ".local", "share");
-}
-function olympusDataRoot(env = process.env) {
-  const standalone = standaloneLinuxDataDir(env);
-  if (standalone)
-    return standalone;
-  return join6(xdgDataHome(env), "openclaw", "olympus");
-}
-function olympusDataPath(env, ...segments) {
-  return join6(olympusDataRoot(env), ...segments);
-}
-function legacyCaptureDataRoot(env = process.env) {
-  return join6(xdgDataHome(env), "olympus");
-}
-function legacyWhatsAppServiceStateDir(env = process.env) {
-  return join6(env.HOME ?? homedir4(), ".local", "share", "olympus", "whatsapp-live");
-}
-function legacyTelegramStoreRoot(env = process.env) {
-  return standaloneLinuxDataDir(env) ?? join6(layoutHome(env), ".local", "share", "openclaw", "olympus");
-}
-function legacyTelegramGatewayStateDir(env = process.env) {
-  return env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim() || join6(env.XDG_STATE_HOME?.trim() || join6(layoutHome(env), ".local", "state"), "olympus", "telegram-capture-gateway");
-}
-function folderSegment(value, what) {
-  if (!FOLDER_SEGMENT.test(value) || value === "." || value === "..") {
-    throw new TypeError(`An account folder needs a plain ${what}; got ${JSON.stringify(value)}.`);
-  }
-  return value;
-}
-function accountFolder(account, env = process.env) {
-  return olympusDataPath(env, ACCOUNT_FOLDERS_DIR, folderSegment(account.source_id, "source id"), folderSegment(account.slot, "slot"));
-}
-function accountFoldersRoot(env = process.env) {
-  return olympusDataPath(env, ACCOUNT_FOLDERS_DIR);
-}
-function legacyStoreFile(sourceId, name) {
-  if (sourceId === ARCHIVE_IMPORTS) {
-    const [family, tier, extra] = name.split(".");
-    if (!family || !tier || extra !== undefined || !(tier in ARCHIVE_FILE_LABEL)) {
-      throw new TypeError(`An archive store is named <family>.<tier>; got ${JSON.stringify(name)}.`);
-    }
-    return { file: `archive-${family}${ARCHIVE_FILE_LABEL[tier]}-connector-store.sqlite` };
-  }
-  const file = LEGACY_STORES[sourceId]?.[name];
-  if (!file)
-    throw new TypeError(`${sourceId} has no store named ${JSON.stringify(name)}.`);
-  return file;
-}
-function legacyFilePath(env, entry) {
-  for (const name of overrideNamesOf(entry)) {
-    const configured = env[name]?.trim();
-    if (configured)
-      return configured;
-  }
-  return entry.dir ? join6(entry.dir.resolved(env), entry.file) : olympusDataPath(env, entry.file);
-}
-function accountStorePath(account, name, env = process.env) {
-  if (!STORE_NAME.test(name))
-    throw new TypeError(`A store name is a tier or <family>.<tier>; got ${JSON.stringify(name)}.`);
-  if (account.layout === "folder")
-    return join6(accountFolder(account, env), "stores", `${name}.sqlite`);
-  return legacyFilePath(env, legacyStoreFile(account.source_id, name));
-}
-function accountSiblingStorePath(storeDbPath, tier) {
-  const file = basename(storeDbPath);
-  if (!file.endsWith(".sqlite"))
-    return;
-  const name = file.slice(0, -".sqlite".length);
-  if (!STORE_NAME.test(name))
-    return;
-  const dot = name.lastIndexOf(".");
-  const ownTier = name.slice(dot + 1);
-  if (!TIERS.includes(ownTier))
-    return;
-  const stores = dirname5(storeDbPath);
-  const slot = dirname5(stores);
-  const source = dirname5(slot);
-  if (basename(stores) !== "stores" || basename(dirname5(source)) !== ACCOUNT_FOLDERS_DIR)
-    return;
-  if (!FOLDER_SEGMENT.test(basename(slot)) || !FOLDER_SEGMENT.test(basename(source)))
-    return;
-  return join6(stores, `${name.slice(0, dot + 1)}${tier}.sqlite`);
-}
-function legacyOverrideEnvNames(sourceId) {
-  const names = Object.values(LEGACY_STORES[sourceId] ?? {}).flatMap((file) => overrideNamesOf(file));
-  return [...names, ...LEGACY_RAW_OVERRIDES[sourceId] ?? [], ...messagingRawOverrides(sourceId)];
-}
-function xBookmarksApiUsageDbPath(env = process.env) {
-  return env[X_USAGE_OVERRIDE]?.trim() || olympusDataPath(env, "x-bookmarks-api-usage.sqlite");
-}
-function legacyArchiveStatePath(env) {
-  return env[ARCHIVE_STATE_OVERRIDE]?.trim() || olympusDataPath(env, "archive-imports.json");
-}
-function accountRawPath(account, name, env = process.env, options = {}) {
-  if (RAW_OWNER[name] !== account.source_id)
-    throw new TypeError(`${account.source_id} has no raw state named ${name}.`);
-  const messaging = messagingRawPath(account, name, env);
-  if (messaging !== undefined)
-    return messaging;
-  const usage = options.usageDbPath;
-  if (name === "x-reconcile.sqlite") {
-    if (account.layout === "legacy") {
-      const configured = env[X_RECONCILE_OVERRIDE]?.trim();
-      if (configured)
-        return configured;
-      if (usage === ":memory:")
-        return ":memory:";
-      if (usage?.trim())
-        return `${usage.trim()}.reconcile`;
-      return `${xBookmarksApiUsageDbPath(env)}.reconcile`;
-    }
-    if (usage === ":memory:")
-      return ":memory:";
-    const relocated = usage?.trim();
-    if (relocated && relocated !== xBookmarksApiUsageDbPath(env))
-      return `${relocated}.reconcile`;
-  } else if (account.layout === "legacy") {
-    if (name === "watch")
-      return olympusDataPath(env, "local-files-watch");
-    const state = legacyArchiveStatePath(env);
-    return name === "archive-imports.json" ? state : join6(dirname5(state), name);
-  }
-  return join6(accountFolder(account, env), "raw", name);
-}
-function accountStoreNames(sourceId, archiveFamilies = []) {
-  return sourceId === ARCHIVE_IMPORTS ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`)) : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => file ? [tier] : []);
-}
-function legacyAccountPaths(sourceId, env = process.env, archiveFamilies = []) {
-  const names = accountStoreNames(sourceId, archiveFamilies);
-  const stores = names.map((name) => {
-    const entry = legacyStoreFile(sourceId, name);
-    return entry.dir ? join6(entry.dir.default(env), entry.file) : olympusDataPath(env, entry.file);
-  });
-  const raw = [];
-  if (sourceId === "local.files")
-    raw.push(olympusDataPath(env, "local-files-watch"));
-  if (sourceId === "x.bookmarks")
-    raw.push(`${olympusDataPath(env, "x-bookmarks-api-usage.sqlite")}.reconcile`);
-  if (sourceId === ARCHIVE_IMPORTS) {
-    raw.push(olympusDataPath(env, "archive-imports.json"), olympusDataPath(env, "archive-import-requests.json"), olympusDataPath(env, "archive-media-bindings.sqlite"));
-  }
-  const messaging = legacyMessagingPaths(sourceId, env);
-  return { stores: [...stores, ...messaging.stores], raw: [...raw, ...messaging.raw] };
-}
-function messagingRawOwners() {
-  return {
-    "telegram-spool": "telegram.messages",
-    "telegram-gateway": "telegram.messages",
-    whatsapp: "whatsapp.personal.messages",
-    "whatsapp-spool": "whatsapp.personal.messages",
-    "whatsapp-media": "whatsapp.personal.messages",
-    "whatsapp-media-root": "whatsapp.personal.messages"
-  };
-}
-function messagingRawOverrides(sourceId) {
-  if (sourceId === TELEGRAM_SOURCE_ID)
-    return TELEGRAM_PATH_OVERRIDES;
-  if (sourceId === WHATSAPP_SOURCE_ID)
-    return WHATSAPP_PATH_OVERRIDES;
-  return [];
-}
-function nativeCaptureOwnerPin(sourceId, env = process.env) {
-  const name = sourceId === TELEGRAM_SOURCE_ID ? NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram : sourceId === WHATSAPP_SOURCE_ID ? NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp : undefined;
-  const value = name ? env[name]?.trim().toLowerCase() : undefined;
-  return name && value && !["false", "0", "no"].includes(value) ? `${name} (native capture)` : undefined;
-}
-function olympusStateRoot(env = process.env) {
-  return join6(env.XDG_STATE_HOME?.trim() || join6(layoutHome(env), ".local", "state"), "olympus");
-}
-function telegramStoreDirs() {
-  return { resolved: legacyTelegramStoreRoot, default: legacyTelegramStoreRoot };
-}
-function legacyWhatsAppStateDir(env) {
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join6(legacyCaptureDataRoot(env), "whatsapp-live");
-}
-function whatsappStateDirs() {
-  return { resolved: legacyWhatsAppStateDir, default: (env) => join6(legacyCaptureDataRoot(env), "whatsapp-live") };
-}
-function isMessagingRawName(name) {
-  return MESSAGING_RAW_NAMES.includes(name);
-}
-function messagingRawPath(account, name, env) {
-  if (!isMessagingRawName(name))
-    return;
-  if (account.layout === "folder") {
-    const raw = join6(accountFolder(account, env), "raw");
-    if (name === "telegram-spool" || name === "telegram-gateway")
-      return join6(raw, name);
-    if (name === "whatsapp")
-      return join6(raw, "whatsapp");
-    if (name === "whatsapp-spool")
-      return join6(raw, "whatsapp", "spool");
-    if (name === "whatsapp-media-root")
-      return join6(raw, "whatsapp", "media");
-    return join6(raw, "whatsapp", "media", "audio");
-  }
-  switch (name) {
-    case "telegram-spool":
-      return env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join6(legacyCaptureDataRoot(env), "telegram-capture", "spool");
-    case "telegram-gateway":
-      return legacyTelegramGatewayStateDir(env);
-    case "whatsapp":
-      return legacyWhatsAppStateDir(env);
-    case "whatsapp-spool":
-      return env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join6(legacyWhatsAppStateDir(env), "spool");
-    case "whatsapp-media":
-    case "whatsapp-media-root": {
-      const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
-      return env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || join6(transcribeStateDir || legacyWhatsAppStateDir(env), "media", "audio");
-    }
-  }
-}
-function accountSessionPath(account, env = process.env) {
-  if (account.source_id !== TELEGRAM_SOURCE_ID)
-    throw new TypeError(`${account.source_id} has no Telegram session.`);
-  if (account.layout === "folder")
-    return join6(accountFolder(account, env), "session", "telegram");
-  const configured = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
-  return configured ? configured.endsWith(".session") ? configured.slice(0, -".session".length) : configured : join6(legacyCaptureDataRoot(env), "telegram", "telegram.personal");
-}
-function folderCaptureEnv(account, env = process.env) {
-  if (account.layout !== "folder")
-    throw new TypeError("Only a folder account has its capture paths set from its folder.");
-  if (account.source_id === TELEGRAM_SOURCE_ID) {
-    return {
-      OLYMPUS_TELEGRAM_SESSION_PATH: accountSessionPath(account, env),
-      OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: accountRawPath(account, "telegram-gateway", env),
-      OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: accountRawPath(account, "telegram-spool", env)
-    };
-  }
-  if (account.source_id === WHATSAPP_SOURCE_ID)
-    return { OLYMPUS_WHATSAPP_STATE_DIR: accountRawPath(account, "whatsapp", env) };
-  throw new TypeError(`${account.source_id} has no capture child.`);
-}
-function folderCaptureEnvRemoved(account) {
-  return account.source_id === TELEGRAM_SOURCE_ID ? ["OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR", "OLYMPUS_TELEGRAM_GATEWAY_BACKFILL_REQUESTS_PATH"] : [];
-}
-function folderCaptureDirs(account, env = process.env) {
-  if (account.layout !== "folder")
-    return [];
-  if (account.source_id === TELEGRAM_SOURCE_ID) {
-    return [
-      dirname5(accountSessionPath(account, env)),
-      accountRawPath(account, "telegram-gateway", env),
-      accountRawPath(account, "telegram-spool", env)
-    ];
-  }
-  return account.source_id === WHATSAPP_SOURCE_ID ? [accountRawPath(account, "whatsapp", env)] : [];
-}
-function legacyMessagingPaths(sourceId, env) {
-  if (sourceId === TELEGRAM_SOURCE_ID) {
-    const capture = legacyCaptureDataRoot(env);
-    const state = olympusStateRoot(env);
-    return {
-      stores: [],
-      raw: [
-        join6(capture, "telegram"),
-        join6(capture, "telegram-capture"),
-        join6(state, "telegram-capture-gateway"),
-        join6(state, "telegram-spool-drain")
-      ]
-    };
-  }
-  if (sourceId === WHATSAPP_SOURCE_ID) {
-    return { stores: [], raw: [join6(legacyCaptureDataRoot(env), "whatsapp-live"), legacyWhatsAppServiceStateDir(env)] };
-  }
-  return { stores: [], raw: [] };
-}
-function mediaCacheRoot(env = process.env) {
-  const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
-  return configured ? join6(configured, "olympus-media") : olympusDataPath(env, "media-cache");
-}
-function whatsappStateDirFromValue(value) {
-  const trimmed = value.trim();
-  return basename(trimmed) === "session.db" ? dirname5(trimmed) : trimmed;
-}
-function linuxInstallRoots(env) {
-  if (process.platform !== "linux")
-    return [];
-  try {
-    const layout = resolveLinuxEngineLayout(env);
-    return [
-      layout.configDir,
-      layout.dataDir,
-      layout.packageDir,
-      join6(layout.dataHome, "olympus"),
-      dirname5(layout.stateDir),
-      dirname5(layout.cacheDir),
-      ...layout.runtimeDir ? [layout.runtimeDir] : []
-    ];
-  } catch {
-    return [];
-  }
-}
-function olympusSharedBases(env = process.env) {
-  const home = layoutHome(env);
-  const bases = [
-    home,
-    join6(home, ".local"),
-    join6(home, ".local", "share"),
-    join6(home, ".local", "state"),
-    join6(home, ".config"),
-    join6(home, ".cache"),
-    join6(home, "Library"),
-    join6(home, "Library", "Application Support"),
-    join6(home, "Library", "Logs")
-  ];
-  for (const [name, value] of Object.entries(env)) {
-    if (name.startsWith("XDG_") && value?.trim())
-      bases.push(value.trim());
-  }
-  return bases.filter((path) => isAbsolute4(path)).map((path) => resolve3(path));
-}
-function isDedicatedFolder(path, sharedBases) {
-  const fold = (value) => process.platform === "darwin" ? value.toLowerCase() : value;
-  const folder = fold(resolve3(path));
-  if (folder === "/")
-    return false;
-  return !sharedBases.some((base) => {
-    const shared = fold(resolve3(base));
-    return shared === folder || shared.startsWith(`${folder}/`);
-  });
-}
-function isDedicatedOlympusFolder(path, env = process.env) {
-  return isDedicatedFolder(path, olympusSharedBases(env));
-}
-function olympusOwnLocations(env = process.env, capture = {}) {
-  const home = layoutHome(env);
-  const xdg = (name, fallback) => env[name]?.trim() || join6(home, fallback);
-  const fixed = [
-    olympusDataRoot(env),
-    mediaCacheRoot(env),
-    legacyCaptureDataRoot(env),
-    legacyWhatsAppServiceStateDir(env),
-    legacyTelegramStoreRoot(env),
-    join6(xdg("XDG_STATE_HOME", ".local/state"), "olympus", "telegram-capture-gateway"),
-    join6(home, ".olympus"),
-    join6(home, ".config", "olympus"),
-    join6(home, ".local", "share", "olympus"),
-    join6(home, ".local", "share", "openclaw", "olympus"),
-    join6(home, ".local", "state", "olympus"),
-    join6(home, ".cache", "olympus"),
-    join6(home, "Library", "Logs", "Olympus"),
-    join6(home, "Library", "Application Support", "Olympus"),
-    join6(xdg("XDG_CONFIG_HOME", ".config"), "olympus"),
-    join6(xdg("XDG_STATE_HOME", ".local/state"), "olympus"),
-    join6(xdg("XDG_CACHE_HOME", ".cache"), "olympus"),
-    ...linuxInstallRoots(env)
-  ];
-  const moved = [];
-  const place = (value) => {
-    const trimmed = value?.trim();
-    if (!trimmed || !isAbsolute4(trimmed))
-      return;
-    const dir = resolve3(trimmed);
-    if (isDedicatedOlympusFolder(dir, env))
-      moved.push(dir);
-  };
-  const whatsappState = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
-  if (whatsappState)
-    place(whatsappStateDirFromValue(whatsappState));
-  place(capture.whatsappStateDir);
-  place(env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR);
-  place(env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR);
-  place(capture.telegramStateDir);
-  place(env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR);
-  place(env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR);
-  place(capture.telegramSpoolDir);
-  const clean = (paths) => [...new Set(paths.filter((path) => isAbsolute4(path)).map((path) => resolve3(path)))];
-  return { fixed: clean(fixed), moved: clean(moved) };
-}
-var ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, STORE_NAME, TIERS, gmailStore = (infix, overrideInfix) => ({
-  file: `gmail-${infix}connector-store.sqlite`,
-  override: `OLYMPUS_SOURCE_INDEX_GMAIL_${overrideInfix}CONNECTOR_STORE_DB_PATH`
-}), driveStore = (infix, overrideInfix) => ({
-  file: `google-drive-${infix}connector-store.sqlite`,
-  override: `OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_${overrideInfix}CONNECTOR_STORE_DB_PATH`
-}), dropboxStore = (infix, overrideInfix) => ({
-  file: `dropbox-files-${infix}connector-store.sqlite`,
-  override: `OLYMPUS_SOURCE_INDEX_DROPBOX_${overrideInfix}CONNECTOR_STORE_DB_PATH`
-}), localFilesStore = (infix, overrideInfix) => ({
-  file: `local-files-${infix}connector-store.sqlite`,
-  override: `OLYMPUS_SOURCE_INDEX_LOCAL_FILES_${overrideInfix}CONNECTOR_STORE_DB_PATH`
-}), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_LAYOUT_SOURCES, overrideNamesOf = (entry) => entry?.override === undefined ? [] : typeof entry.override === "string" ? [entry.override] : entry.override, RAW_OWNER, ARCHIVE_STATE_OVERRIDE = "OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH", X_USAGE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH", X_RECONCILE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH", LEGACY_RAW_OVERRIDES, TELEGRAM_SOURCE_ID = "telegram.messages", WHATSAPP_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_BRIDGE_LOCK_NAME = "bridge.lock", MESSAGING_RAW_NAMES, NATIVE_CAPTURE_OWNER_ENV_NAMES, TELEGRAM_PATH_OVERRIDES, WHATSAPP_PATH_OVERRIDES, MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR";
-var init_olympus_layout = __esm(() => {
-  init_linux_engine_layout();
-  FOLDER_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-  STORE_NAME = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?$/;
-  TIERS = ["secure_local", "internal", "public_safe"];
-  LEGACY_STORES = {
-    "gmail.email": {
-      internal: gmailStore("", ""),
-      secure_local: gmailStore("secure-", "SECURE_"),
-      public_safe: gmailStore("public-", "PUBLIC_")
-    },
-    "google_drive.docs": {
-      internal: driveStore("", ""),
-      secure_local: driveStore("secure-", "SECURE_"),
-      public_safe: driveStore("public-", "PUBLIC_")
-    },
-    "dropbox.files": {
-      secure_local: dropboxStore("", ""),
-      internal: dropboxStore("internal-", "INTERNAL_"),
-      public_safe: dropboxStore("public-", "PUBLIC_")
-    },
-    "local.files": {
-      secure_local: localFilesStore("", ""),
-      internal: localFilesStore("internal-", "INTERNAL_"),
-      public_safe: localFilesStore("public-", "PUBLIC_")
-    },
-    "readwise.library": {
-      internal: {
-        file: "readwise-connector-store.sqlite",
-        override: "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH"
-      },
-      secure_local: {
-        file: "readwise-secure-connector-store.sqlite",
-        override: "OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH"
-      },
-      public_safe: undefined
-    },
-    "x.bookmarks": {
-      internal: {
-        file: "x-bookmarks-connector-store.sqlite",
-        override: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH"
-      },
-      secure_local: {
-        file: "x-bookmarks-secure-connector-store.sqlite",
-        override: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_SECURE_CONNECTOR_STORE_DB_PATH"
-      },
-      public_safe: undefined
-    },
-    "archive.imports": { secure_local: undefined, internal: undefined, public_safe: undefined },
-    "telegram.messages": {
-      internal: { file: "telegram-internal-connector-store.sqlite", dir: telegramStoreDirs() },
-      secure_local: { file: "telegram-protected-connector-store.sqlite", dir: telegramStoreDirs() },
-      public_safe: undefined
-    },
-    "whatsapp.personal.messages": {
-      internal: {
-        file: "connector-store-internal.db",
-        override: "OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH",
-        dir: whatsappStateDirs()
-      },
-      secure_local: {
-        file: "connector-store.db",
-        override: [
-          "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH",
-          "OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH",
-          "OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH"
-        ],
-        dir: whatsappStateDirs()
-      },
-      public_safe: undefined
-    }
-  };
-  ARCHIVE_FILE_LABEL = { secure_local: "", internal: "-internal", public_safe: "-public" };
-  FOLDER_LAYOUT_SOURCES = Object.keys(LEGACY_STORES);
-  RAW_OWNER = {
-    watch: "local.files",
-    "x-reconcile.sqlite": "x.bookmarks",
-    "archive-imports.json": ARCHIVE_IMPORTS,
-    "archive-import-requests.json": ARCHIVE_IMPORTS,
-    "archive-media-bindings.sqlite": ARCHIVE_IMPORTS,
-    ...messagingRawOwners()
-  };
-  LEGACY_RAW_OVERRIDES = {
-    "x.bookmarks": [X_USAGE_OVERRIDE, X_RECONCILE_OVERRIDE],
-    [ARCHIVE_IMPORTS]: [ARCHIVE_STATE_OVERRIDE]
-  };
-  MESSAGING_RAW_NAMES = [
-    "telegram-spool",
-    "telegram-gateway",
-    "whatsapp",
-    "whatsapp-spool",
-    "whatsapp-media",
-    "whatsapp-media-root"
-  ];
-  NATIVE_CAPTURE_OWNER_ENV_NAMES = {
-    telegram: "OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER",
-    whatsapp: "OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER"
-  };
-  TELEGRAM_PATH_OVERRIDES = [
-    "OLYMPUS_TELEGRAM_SESSION_PATH",
-    "OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR",
-    "OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR",
-    "OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR",
-    "OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR",
-    "OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH",
-    "OLYMPUS_TELEGRAM_GATEWAY_BACKFILL_REQUESTS_PATH"
-  ];
-  WHATSAPP_PATH_OVERRIDES = [
-    "OLYMPUS_WHATSAPP_STATE_DIR",
-    "OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR",
-    "OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR",
-    "OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR"
-  ];
 });
 
 // src/workers/source-index/built-in-embedding/manifest.ts
@@ -2791,39 +3458,39 @@ var init_zip = () => {};
 // src/workers/source-index/built-in-embedding/assets.ts
 import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
 import {
-  closeSync as closeSync4,
+  closeSync as closeSync5,
   createReadStream as createReadStream2,
   existsSync as existsSync5,
   mkdirSync as mkdirSync4,
-  openSync as openSync4,
-  readFileSync as readFileSync6,
+  openSync as openSync5,
+  readFileSync as readFileSync8,
   renameSync as renameSync3,
   rmSync as rmSync3,
-  statSync as statSync4,
+  statSync as statSync5,
   writeFileSync as writeFileSync2,
   writeSync as writeSync2
 } from "node:fs";
-import { basename as basename2, dirname as dirname6, isAbsolute as isAbsolute5, join as join7 } from "node:path";
+import { basename as basename2, dirname as dirname7, isAbsolute as isAbsolute6, join as join9 } from "node:path";
 function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
-  const root = configured || olympusDataPath(env, "models", "built-in-embedding");
-  if (!isAbsolute5(root))
+  const root = configured || sharedDataPath("built-in-embedding", env);
+  if (!isAbsolute6(root))
     throw new TypeError("The built-in embedding directory must be an absolute path.");
   return {
     root,
-    modelDir: join7(root, model.modelId),
-    runtimeDir: model.runtime === "litert" ? join7(root, `litert-lm-${liteRtRuntime.version}-${platform}`) : join7(root, `onnxruntime-${runtime.version}-${platform}`),
-    statusPath: join7(root, "status.json"),
-    lockPath: join7(root, "install.lock")
+    modelDir: join9(root, model.modelId),
+    runtimeDir: model.runtime === "litert" ? join9(root, `litert-lm-${liteRtRuntime.version}-${platform}`) : join9(root, `onnxruntime-${runtime.version}-${platform}`),
+    statusPath: join9(root, "status.json"),
+    lockPath: join9(root, "install.lock")
   };
 }
 function installedBuiltInEmbedding(paths, model = BUILT_IN_EMBEDDING_MODEL, platform = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const liteRt = model.runtime === "litert" ? liteRtRuntime.platforms[platform] : undefined;
   return {
-    modelPath: join7(paths.modelDir, model.model.name),
-    ...model.vocabulary ? { vocabularyPath: join7(paths.modelDir, model.vocabulary.name) } : {},
+    modelPath: join9(paths.modelDir, model.model.name),
+    ...model.vocabulary ? { vocabularyPath: join9(paths.modelDir, model.vocabulary.name) } : {},
     runtimeDir: paths.runtimeDir,
-    ...liteRt ? { libraryPath: join7(paths.runtimeDir, basename2(liteRt.library)) } : {}
+    ...liteRt ? { libraryPath: join9(paths.runtimeDir, basename2(liteRt.library)) } : {}
   };
 }
 function currentPlatform() {
@@ -2840,7 +3507,7 @@ function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDIN
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync6(builtInEmbeddingPaths(env, model).statusPath, "utf8"));
+    const parsed = JSON.parse(readFileSync8(builtInEmbeddingPaths(env, model).statusPath, "utf8"));
     return parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -2850,7 +3517,7 @@ function readBuiltInEmbeddingVision(env = process.env, model = BUILT_IN_EMBEDDIN
   if (!model.vision)
     return "unknown";
   try {
-    const parsed = JSON.parse(readFileSync6(join7(builtInEmbeddingPaths(env, model).root, "vision.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync8(join9(builtInEmbeddingPaths(env, model).root, "vision.json"), "utf8"));
     if (parsed.modelId !== model.modelId || typeof parsed.vision !== "boolean")
       return "unknown";
     return parsed.vision ? "ready" : "unavailable";
@@ -2866,7 +3533,7 @@ function reportBuiltInEmbeddingVision(vision, options = {}) {
   try {
     const root = builtInEmbeddingPaths(options.env, model).root;
     mkdirSync4(root, { recursive: true, mode: 448 });
-    const path = join7(root, "vision.json");
+    const path = join9(root, "vision.json");
     temporary = `${path}.${process.pid}.tmp`;
     writeFileSync2(temporary, `${JSON.stringify({
       modelId: model.modelId,
@@ -2906,14 +3573,14 @@ async function installBuiltInEmbedding(options = {}) {
       const fetchImpl = options.fetchImpl ?? fetch;
       const stallMs = options.downloadStallMs ?? DOWNLOAD_STALL_MS;
       const pending = [
-        ...modelFiles.filter((file) => !existsSync5(join7(paths.modelDir, file.name)))
+        ...modelFiles.filter((file) => !existsSync5(join9(paths.modelDir, file.name)))
       ];
       const pendingPackages = runtimePackages.length > 0 && !runtimeInstalled(paths.runtimeDir, runtimePackages) ? runtimePackages : [];
       const bytesTotal = pending.reduce((sum, file) => sum + file.bytes, 0) + pendingPackages.reduce((sum, pack) => sum + pack.bytes, 0);
       reporter.begin(bytesTotal);
       ensureDirectory(paths.modelDir);
       for (const file of pending) {
-        await downloadVerified(fetchImpl, file.url, join7(paths.modelDir, file.name), file.bytes, {
+        await downloadVerified(fetchImpl, file.url, join9(paths.modelDir, file.name), file.bytes, {
           kind: "sha256",
           expected: file.sha256
         }, reporter, labelFor(file), stallMs);
@@ -2946,19 +3613,19 @@ async function installLiteRt(options, model, paths, platform, reporter, installe
     if (wantsRuntime && liteRtInstalled(paths.runtimeDir, wheel) && !await liteRtLibraryIntact(paths.runtimeDir, wheel)) {
       rmSync3(paths.runtimeDir, { recursive: true, force: true });
     }
-    const complete = () => modelFiles.every((file) => existsSync5(join7(paths.modelDir, file.name))) && (!wantsRuntime || liteRtInstalled(paths.runtimeDir, wheel));
+    const complete = () => modelFiles.every((file) => existsSync5(join9(paths.modelDir, file.name))) && (!wantsRuntime || liteRtInstalled(paths.runtimeDir, wheel));
     if (!complete()) {
       await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
         if (complete())
           return;
         const fetchImpl = options.fetchImpl ?? fetch;
         const stallMs = options.downloadStallMs ?? DOWNLOAD_STALL_MS;
-        const pending = modelFiles.filter((file) => !existsSync5(join7(paths.modelDir, file.name)));
+        const pending = modelFiles.filter((file) => !existsSync5(join9(paths.modelDir, file.name)));
         const runtimePending = wantsRuntime && !liteRtInstalled(paths.runtimeDir, wheel);
         reporter.begin(pending.reduce((sum, file) => sum + file.bytes, 0) + (runtimePending ? wheel.bytes : 0));
         ensureDirectory(paths.modelDir);
         for (const file of pending) {
-          await downloadVerified(fetchImpl, file.url, join7(paths.modelDir, file.name), file.bytes, {
+          await downloadVerified(fetchImpl, file.url, join9(paths.modelDir, file.name), file.bytes, {
             kind: "sha256",
             expected: file.sha256
           }, reporter, "Downloading the built-in search model", stallMs);
@@ -2980,40 +3647,40 @@ async function installLiteRt(options, model, paths, platform, reporter, installe
 }
 function readLiteRtMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync6(join7(runtimeDir, RUNTIME_MARKER), "utf8"));
+    return JSON.parse(readFileSync8(join9(runtimeDir, RUNTIME_MARKER), "utf8"));
   } catch {
     return;
   }
 }
 function liteRtInstalled(runtimeDir, wheel) {
   const marker = readLiteRtMarker(runtimeDir);
-  return marker?.sha256 === wheel.sha256 && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? "") && existsSync5(join7(runtimeDir, basename2(wheel.library)));
+  return marker?.sha256 === wheel.sha256 && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? "") && existsSync5(join9(runtimeDir, basename2(wheel.library)));
 }
 async function liteRtLibraryIntact(runtimeDir, wheel) {
   const expected = readLiteRtMarker(runtimeDir)?.librarySha256;
-  return expected !== undefined && await sha256File(join7(runtimeDir, basename2(wheel.library))) === expected;
+  return expected !== undefined && await sha256File(join9(runtimeDir, basename2(wheel.library))) === expected;
 }
 async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
   const staging = `${runtimeDir}.staging-${randomUUID2()}`;
   ensureDirectory(staging);
   try {
-    const archivePath = join7(staging, wheel.name);
+    const archivePath = join9(staging, wheel.name);
     await downloadVerified(fetchImpl, wheel.url, archivePath, wheel.bytes, {
       kind: "sha256",
       expected: wheel.sha256
     }, reporter, "Downloading the search runtime", stallMs);
     reporter.set("verifying", "Unpacking the search runtime");
-    const library = readZipEntry(readFileSync6(archivePath), wheel.library);
+    const library = readZipEntry(readFileSync8(archivePath), wheel.library);
     if (!library)
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
-    writeFileSync2(join7(staging, basename2(wheel.library)), library, { mode: 493 });
+    writeFileSync2(join9(staging, basename2(wheel.library)), library, { mode: 493 });
     rmSync3(archivePath, { force: true });
     const marker = {
       wheel: wheel.name,
       sha256: wheel.sha256,
       librarySha256: createHash2("sha256").update(library).digest("hex")
     };
-    writeFileSync2(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync2(join9(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync3(runtimeDir, { recursive: true, force: true });
     renameSync3(staging, runtimeDir);
@@ -3035,16 +3702,16 @@ function labelFor(file) {
   return file.name.endsWith(".onnx") ? "Downloading the built-in search model" : "Downloading the model vocabulary";
 }
 function installComplete(paths, modelFiles, runtimePackages) {
-  return modelFiles.every((file) => existsSync5(join7(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled(paths.runtimeDir, runtimePackages));
+  return modelFiles.every((file) => existsSync5(join9(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled(paths.runtimeDir, runtimePackages));
 }
 async function verifyModelFiles(dir, files, reporter) {
   for (const file of files) {
-    const path = join7(dir, file.name);
+    const path = join9(dir, file.name);
     const key = `${path}:${file.sha256}`;
     verifiedThisProcess ??= new Set;
     if (verifiedThisProcess.has(key))
       continue;
-    const size = statSync4(path).size;
+    const size = statSync5(path).size;
     const digest = size === file.bytes ? await sha256File(path) : undefined;
     if (digest !== file.sha256) {
       rmSync3(path, { force: true });
@@ -3056,7 +3723,7 @@ async function verifyModelFiles(dir, files, reporter) {
 }
 function runtimeInstalled(runtimeDir, packages) {
   try {
-    const marker = JSON.parse(readFileSync6(join7(runtimeDir, RUNTIME_MARKER), "utf8"));
+    const marker = JSON.parse(readFileSync8(join9(runtimeDir, RUNTIME_MARKER), "utf8"));
     return packages.every((pack) => marker.packages.some((entry) => entry.name === pack.name && entry.integrity === pack.integrity));
   } catch {
     return false;
@@ -3067,20 +3734,20 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
   ensureDirectory(staging);
   try {
     for (const pack of packages) {
-      const archivePath = join7(staging, `${pack.name}.tgz`);
+      const archivePath = join9(staging, `${pack.name}.tgz`);
       await downloadVerified(fetchImpl, pack.url, archivePath, pack.bytes, {
         kind: "integrity",
         expected: pack.integrity
       }, reporter, "Downloading the search runtime", stallMs);
       reporter.set("verifying", "Unpacking the search runtime");
-      const archive = readFileSync6(archivePath);
+      const archive = readFileSync8(archivePath);
       const files = readTarGz(archive, (path) => runtimeEntryWanted(pack.name, path, platform));
       if (files.length === 0) {
         throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${pack.name} had no files for ${platform}.`);
       }
       for (const file of files) {
-        const target = join7(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
-        ensureDirectory(dirname6(target));
+        const target = join9(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
+        ensureDirectory(dirname7(target));
         writeFileSync2(target, file.data, { mode: file.mode & 493 || 420 });
       }
       rmSync3(archivePath, { force: true });
@@ -3088,7 +3755,7 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
     const marker = {
       packages: packages.map((pack) => ({ name: pack.name, integrity: pack.integrity }))
     };
-    writeFileSync2(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync2(join9(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync3(runtimeDir, { recursive: true, force: true });
     renameSync3(staging, runtimeDir);
@@ -3135,7 +3802,7 @@ function integrityAlgorithm(integrity) {
   return algorithm;
 }
 function sha256File(path, timeoutMs = 10 * 60000) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const hash = createHash2("sha256");
     let settled = false;
     const stream = createReadStream2(path);
@@ -3148,7 +3815,7 @@ function sha256File(path, timeoutMs = 10 * 60000) {
         stream.destroy();
         reject(error);
       } else {
-        resolve4(hash.digest("hex"));
+        resolve5(hash.digest("hex"));
       }
     };
     const timer = setTimeout(() => finish(new BuiltInEmbeddingInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -3163,7 +3830,7 @@ async function withInstallLock(lockPath, waitMs, run) {
     if (Date.now() > deadline) {
       throw new BuiltInEmbeddingInstallError("download_failed", "Another Olympus process is still installing the built-in search model.");
     }
-    await new Promise((resolve4) => setTimeout(resolve4, LOCK_POLL_MS));
+    await new Promise((resolve5) => setTimeout(resolve5, LOCK_POLL_MS));
   }
   try {
     await run();
@@ -3173,9 +3840,9 @@ async function withInstallLock(lockPath, waitMs, run) {
 }
 function tryAcquireLock(lockPath) {
   try {
-    const fd = openSync4(lockPath, "wx", 384);
+    const fd = openSync5(lockPath, "wx", 384);
     writeSync2(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
-    closeSync4(fd);
+    closeSync5(fd);
     return true;
   } catch {
     if (lockIsStale(lockPath)) {
@@ -3187,7 +3854,7 @@ function tryAcquireLock(lockPath) {
 }
 function lockIsStale(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync6(lockPath, "utf8"));
+    const holder = JSON.parse(readFileSync8(lockPath, "utf8"));
     if (typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS)
       return true;
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
@@ -3201,7 +3868,7 @@ function lockIsStale(lockPath) {
     return false;
   } catch {
     try {
-      return Date.now() - statSync4(lockPath).mtimeMs > STALE_LOCK_MS;
+      return Date.now() - statSync5(lockPath).mtimeMs > STALE_LOCK_MS;
     } catch {
       return true;
     }
@@ -3274,7 +3941,7 @@ class ProgressReporter {
       return;
     this.lastWriteMs = nowMs;
     try {
-      mkdirSync4(dirname6(this.statusPath), { recursive: true, mode: 448 });
+      mkdirSync4(dirname7(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
       writeFileSync2(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
@@ -3303,9 +3970,9 @@ var init_assets = __esm(() => {
 
 // src/core/still-image-readiness.ts
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync as readFileSync7, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdtempSync, readFileSync as readFileSync9, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join8 } from "node:path";
+import { join as join10 } from "node:path";
 function spawnRun(command, args, timeoutMs) {
   const result = spawnSync(command, args, { stdio: "ignore", timeout: timeoutMs, killSignal: "SIGKILL" });
   return { ok: !result.error && result.status === 0 };
@@ -3346,14 +4013,14 @@ function probeStillImageReadiness(options = {}) {
   const decoded = {};
   let directory;
   try {
-    directory = mkdtempSync(join8(tmpdir(), "olympus-image-probe-"));
+    directory = mkdtempSync(join10(tmpdir(), "olympus-image-probe-"));
     for (const format of STILL_IMAGE_FORMATS) {
-      const inputPath = join8(directory, `probe-${format}${stillImageFileExtension(format)}`);
-      const outputPath = join8(directory, `probe-${format}.jpg`);
+      const inputPath = join10(directory, `probe-${format}${stillImageFileExtension(format)}`);
+      const outputPath = join10(directory, `probe-${format}.jpg`);
       try {
         writeFileSync3(inputPath, Buffer.from(fixtures[format], "base64"), { mode: 384 });
         const result = run(preparer.command, preparer.decodeArgs(inputPath, outputPath), timeoutMs);
-        decoded[format] = result.ok && looksLikeDecodedFixture(new Uint8Array(readFileSync7(outputPath)), format);
+        decoded[format] = result.ok && looksLikeDecodedFixture(new Uint8Array(readFileSync9(outputPath)), format);
       } catch {
         decoded[format] = false;
       }
@@ -4102,8 +4769,8 @@ except Exception as error:
 });
 
 // src/core/linux-secret-backend.ts
-import { lstatSync as lstatSync4, readFileSync as readFileSync8 } from "node:fs";
-import { dirname as dirname7, isAbsolute as isAbsolute6, join as join9, resolve as resolve4 } from "node:path";
+import { lstatSync as lstatSync6, readFileSync as readFileSync10 } from "node:fs";
+import { dirname as dirname8, isAbsolute as isAbsolute7, join as join11, resolve as resolve5 } from "node:path";
 function secretStoreFailure(error) {
   if (error instanceof SecretStoreError)
     return error;
@@ -4124,21 +4791,21 @@ function resolveLinuxSecretPaths(env, paths = {}) {
   const encryptedFilePath = paths.encryptedFilePath ?? layout.secretsPath;
   const result = {
     encryptedFilePath,
-    keyFilePath: paths.keyFilePath ?? join9(dirname7(encryptedFilePath), "secrets.key"),
-    backendFilePath: paths.backendFilePath ?? join9(dirname7(encryptedFilePath), "secret-backend.json")
+    keyFilePath: paths.keyFilePath ?? join11(dirname8(encryptedFilePath), "secrets.key"),
+    backendFilePath: paths.backendFilePath ?? join11(dirname8(encryptedFilePath), "secret-backend.json")
   };
   for (const path of Object.values(result)) {
-    if (!isAbsolute6(path) || /[\0\r\n]/.test(path))
+    if (!isAbsolute7(path) || /[\0\r\n]/.test(path))
       throw new SecretStoreError("configuration", "secret paths must be absolute.");
   }
-  if (new Set(Object.values(result).map((path) => resolve4(path))).size !== 3) {
+  if (new Set(Object.values(result).map((path) => resolve5(path))).size !== 3) {
     throw new SecretStoreError("configuration", "secret paths must be distinct.");
   }
-  return { encryptedFilePath: resolve4(result.encryptedFilePath), keyFilePath: resolve4(result.keyFilePath), backendFilePath: resolve4(result.backendFilePath) };
+  return { encryptedFilePath: resolve5(result.encryptedFilePath), keyFilePath: resolve5(result.keyFilePath), backendFilePath: resolve5(result.backendFilePath) };
 }
 function readSecretFile(path) {
   try {
-    return readFileSync8(path, "utf8");
+    return readFileSync10(path, "utf8");
   } catch (error) {
     if (error.code === "ENOENT")
       return;
@@ -4146,12 +4813,12 @@ function readSecretFile(path) {
   }
 }
 function assertLinuxSecretPath(path) {
-  let current2 = resolve4(path);
+  let current2 = resolve5(path);
   let leaf = true;
   let privateParent = false;
   while (true) {
     try {
-      const stat2 = lstatSync4(current2);
+      const stat2 = lstatSync6(current2);
       if (stat2.isSymbolicLink() || (leaf ? !stat2.isFile() : !stat2.isDirectory())) {
         throw new SecretStoreError("permission", "managed paths must be real files and directories.");
       }
@@ -4167,7 +4834,7 @@ function assertLinuxSecretPath(path) {
       if (error.code !== "ENOENT")
         throw secretStoreFailure(error);
     }
-    const parent = dirname7(current2);
+    const parent = dirname8(current2);
     if (parent === current2)
       break;
     privateParent = leaf;
@@ -4181,7 +4848,7 @@ function selectLinuxSecretBackend(paths, requested) {
       throw new SecretStoreError("configuration", "unsupported Linux backend.");
     for (const path of Object.values(paths))
       assertLinuxSecretPath(path);
-    ensurePrivateRootDirectorySync(dirname7(paths.backendFilePath));
+    ensurePrivateRootDirectorySync(dirname8(paths.backendFilePath));
     return withFileLeaseSync(paths.backendFilePath, (lease) => {
       for (const path of Object.values(paths))
         assertLinuxSecretPath(path);
@@ -4230,19 +4897,19 @@ var init_linux_secret_backend = __esm(() => {
 // src/core/secret-store.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync9 } from "node:fs";
-import { homedir as homedir5, platform } from "node:os";
-import { dirname as dirname8, join as join10 } from "node:path";
+import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync11 } from "node:fs";
+import { homedir as homedir6, platform } from "node:os";
+import { dirname as dirname9, join as join12 } from "node:path";
 function defaultOlympusConfigDir(env = process.env, targetPlatform = process.platform) {
   if (targetPlatform === "linux")
     return resolveLinuxEngineLayout(env).configDir;
-  return join10(homedir5(), ".config", "olympus");
+  return join12(homedir6(), ".config", "olympus");
 }
 function defaultEncryptedSecretsPath() {
-  return join10(defaultOlympusConfigDir(), "secrets.enc");
+  return join12(defaultOlympusConfigDir(), "secrets.enc");
 }
 function defaultEncryptedSecretsKeyPath() {
-  return join10(defaultOlympusConfigDir(), "secrets.key");
+  return join12(defaultOlympusConfigDir(), "secrets.key");
 }
 function normalizeSecretRef(ref) {
   const trimmed = ref.trim();
@@ -4341,7 +5008,7 @@ class EncryptedFileSecretStore {
       assertLinuxSecretPath(this.encryptedFilePath);
       assertLinuxSecretPath(this.keyFilePath);
     }
-    const text2 = this.strictLinux ? readSecretFile(this.encryptedFilePath) : existsSync6(this.encryptedFilePath) ? readFileSync9(this.encryptedFilePath, "utf8") : undefined;
+    const text2 = this.strictLinux ? readSecretFile(this.encryptedFilePath) : existsSync6(this.encryptedFilePath) ? readFileSync11(this.encryptedFilePath, "utf8") : undefined;
     if (text2 === undefined)
       return { version: STORE_VERSION, secrets: {} };
     let encrypted;
@@ -4409,7 +5076,7 @@ class EncryptedFileSecretStore {
         tag: cipher.getAuthTag().toString("base64"),
         ciphertext: ciphertext.toString("base64")
       };
-      mkdirSync5(dirname8(this.encryptedFilePath), { recursive: true, mode: 448 });
+      mkdirSync5(dirname9(this.encryptedFilePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.encryptedFilePath, JSON.stringify(encrypted, null, 2));
     } finally {
       key.fill(0);
@@ -4443,11 +5110,11 @@ class EncryptedFileSecretStore {
     if (this.strictLinux && readSecretFile(this.keyFilePath) === undefined && readSecretFile(this.encryptedFilePath) !== undefined) {
       throw new SecretStoreError("corrupt", "wrapping key is lost; restore the original key. No replacement was generated.");
     }
-    mkdirSync5(dirname8(this.keyFilePath), { recursive: true, mode: 448 });
+    mkdirSync5(dirname9(this.keyFilePath), { recursive: true, mode: 448 });
     if (!existsSync6(this.keyFilePath)) {
       writePrivateFileAtomicSync(this.keyFilePath, randomBytes(32).toString("base64"));
     }
-    const key = Buffer.from(readFileSync9(this.keyFilePath, "utf8").trim(), "base64");
+    const key = Buffer.from(readFileSync11(this.keyFilePath, "utf8").trim(), "base64");
     if (key.length !== 32) {
       if (this.strictLinux)
         throw new SecretStoreError("corrupt", "wrapping key is invalid.");
@@ -4703,9 +5370,9 @@ var init_secret_store = __esm(() => {
 });
 
 // src/core/config.ts
-import { existsSync as existsSync7, readFileSync as readFileSync10 } from "node:fs";
-import { homedir as homedir6 } from "node:os";
-import { isAbsolute as isAbsolutePath2, join as join11, resolve as resolve5 } from "node:path";
+import { existsSync as existsSync7, readFileSync as readFileSync12 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
+import { isAbsolute as isAbsolutePath2, join as join13, resolve as resolve6 } from "node:path";
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
@@ -4719,9 +5386,9 @@ function loadConfig(env = process.env, options = {}) {
     return config2;
   }
   const config = defaultConfig();
-  const configPath = env.OLYMPUS_CONFIG ?? join11(env.HOME?.trim() || homedir6(), ".olympus", "config.json");
+  const configPath = env.OLYMPUS_CONFIG ?? join13(env.HOME?.trim() || homedir7(), ".olympus", "config.json");
   if (existsSync7(configPath)) {
-    const raw = JSON.parse(readFileSync10(configPath, "utf8"));
+    const raw = JSON.parse(readFileSync12(configPath, "utf8"));
     mergeConfig(config, raw);
   }
   applyEnvironmentOverrides(config, env);
@@ -4742,20 +5409,20 @@ function configuredCaptureLocations(env = process.env) {
   }
 }
 function installedEngineConfig(env) {
-  const home = env.HOME?.trim() || homedir6();
+  const home = env.HOME?.trim() || homedir7();
   const layout = process.platform === "linux" ? resolveLinuxEngineLayout(env) : undefined;
   const receipt = layout ? readLinuxEngineReceipt(layout.receiptPath) : undefined;
   if (receipt && receipt.installationState !== "installed")
     return;
-  const enginePath = receipt ? layout.configPath : join11(home, ".olympus", "engine.json");
-  const agentPath = receipt ? layout.unitPath : join11(home, "Library", "LaunchAgents", "ai.olympusplugin.engine.plist");
+  const enginePath = receipt ? layout.configPath : join13(home, ".olympus", "engine.json");
+  const agentPath = receipt ? layout.unitPath : join13(home, "Library", "LaunchAgents", "ai.olympusplugin.engine.plist");
   if (env.OLYMPUS_ENGINE_HOST !== "1" && !existsSync7(agentPath))
     return;
   if (!existsSync7(enginePath))
     return;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync10(enginePath, "utf8"));
+    parsed = JSON.parse(readFileSync12(enginePath, "utf8"));
   } catch {
     throw new OperationError("config_error", `${enginePath} is not valid JSON.`, "Fix or remove it, then run olympus engine install again.");
   }
@@ -4856,7 +5523,7 @@ function applyEnvironmentOverrides(config, env) {
     config.sourceIndex.enabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
   }
   if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
-    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync10(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
+    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync12(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
   }
   if (env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()) {
     config.sourceIndex.ingestionExclusionsPath = env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV].trim();
@@ -5392,7 +6059,7 @@ function validateConfig(config) {
     }
   }
   const { reportPath: creditReportPath, pauseFile: creditPausePath } = config.worker.creditMonitor;
-  if (creditReportPath && creditPausePath && resolve5(creditReportPath) === resolve5(creditPausePath)) {
+  if (creditReportPath && creditPausePath && resolve6(creditReportPath) === resolve6(creditPausePath)) {
     throw new OperationError("config_error", "worker.creditMonitor reportPath and pauseFile must be different paths.");
   }
   assertBoolean(config.worker.telegramCapture.enabled, "worker.telegramCapture.enabled");
@@ -5803,18 +6470,18 @@ var init_config = __esm(() => {
 });
 
 // src/core/data-owner-lock.ts
-import { closeSync as closeSync5, constants, existsSync as existsSync8, mkdirSync as mkdirSync6, openSync as openSync5 } from "node:fs";
+import { closeSync as closeSync6, constants as constants3, existsSync as existsSync8, mkdirSync as mkdirSync6, openSync as openSync6 } from "node:fs";
 import { createRequire as createRequire3 } from "node:module";
 import { constants as osConstants } from "node:os";
-import { dirname as dirname9 } from "node:path";
+import { dirname as dirname10 } from "node:path";
 function dataOwnerLockPath(env = process.env) {
-  return olympusDataPath(env, OWNER_LOCK_NAME);
+  return sharedDataPath("data-owner-lock", env);
 }
 function holdDataOwnerLock(env = process.env, options = {}) {
   const lockPath = dataOwnerLockPath(env);
   const deadline = Date.now() + Math.max(0, options.waitMs ?? 0);
-  if (!existsSync8(dirname9(lockPath)))
-    mkdirSync6(dirname9(lockPath), { recursive: true, mode: 448 });
+  if (!existsSync8(dirname10(lockPath)))
+    mkdirSync6(dirname10(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const fd = tryFlock(lockPath);
     if (fd !== undefined) {
@@ -5827,7 +6494,7 @@ function holdDataOwnerLock(env = process.env, options = {}) {
             return;
           held = false;
           flockLibrary().flock(fd, LOCK_UN);
-          closeSync5(fd);
+          closeSync6(fd);
         }
       };
     }
@@ -5837,7 +6504,7 @@ function holdDataOwnerLock(env = process.env, options = {}) {
   }
 }
 function tryFlock(lockPath) {
-  const fd = openSync5(lockPath, constants.O_RDWR | constants.O_CREAT | O_CLOEXEC, 384);
+  const fd = openSync6(lockPath, constants3.O_RDWR | constants3.O_CREAT | O_CLOEXEC, 384);
   let failure;
   try {
     const kernel = flockLibrary();
@@ -5847,10 +6514,10 @@ function tryFlock(lockPath) {
       failure = kernel.errno();
     } while (failure === osConstants.errno.EINTR);
   } catch (error) {
-    closeSync5(fd);
+    closeSync6(fd);
     throw error;
   }
-  closeSync5(fd);
+  closeSync6(fd);
   if (failure === osConstants.errno.EWOULDBLOCK || failure === osConstants.errno.EAGAIN)
     return;
   throw new Error(`The lock ${lockPath} could not be taken (flock errno ${failure}).`);
@@ -5887,13 +6554,13 @@ function tryHoldFileFlock(path) {
         return;
       open2 = false;
       flockLibrary().flock(fd, LOCK_UN);
-      closeSync5(fd);
+      closeSync6(fd);
     },
     handOff() {
       if (!open2)
         return;
       open2 = false;
-      closeSync5(fd);
+      closeSync6(fd);
     }
   };
 }
@@ -5914,7 +6581,7 @@ function withDataOwnerLock(env, run, options = {}) {
 function isPromiseLike(value) {
   return typeof value === "object" && value !== null && typeof value.then === "function";
 }
-var runtimeRequire2, OWNER_LOCK_NAME = "data-owner.lock", LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8, O_CLOEXEC, STOP_OLYMPUS_HINT = "olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it", DataOwnerBusyError, library;
+var runtimeRequire2, LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8, O_CLOEXEC, STOP_OLYMPUS_HINT = "olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it", DataOwnerBusyError, library;
 var init_data_owner_lock = __esm(() => {
   init_olympus_layout();
   runtimeRequire2 = createRequire3(import.meta.url);
@@ -5932,9 +6599,9 @@ var init_data_owner_lock = __esm(() => {
 });
 
 // src/core/worker-auth.ts
-import { readFileSync as readFileSync11, statSync as statSync5 } from "node:fs";
-import { homedir as homedir7 } from "node:os";
-import { join as join12 } from "node:path";
+import { readFileSync as readFileSync13, statSync as statSync6 } from "node:fs";
+import { homedir as homedir8 } from "node:os";
+import { join as join14 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
   if (config.worker.authTokenSecretRefUnresolved)
     return;
@@ -5957,10 +6624,10 @@ function workerAuthTokenFromSetupEnv(options = {}) {
 function readWorkerSetupEnv(options = {}) {
   const path = workerSetupEnvPath(options);
   try {
-    const stat2 = statSync5(path, { bigint: true });
+    const stat2 = statSync6(path, { bigint: true });
     if (!stat2.isFile() || (stat2.mode & 0o077n) !== 0n)
       return;
-    return parseWorkerSetupEnv(readFileSync11(path, "utf8"));
+    return parseWorkerSetupEnv(readFileSync13(path, "utf8"));
   } catch {
     return;
   }
@@ -5971,7 +6638,7 @@ function workerSetupEnvPath(options = {}) {
     return options.workerEnvPath;
   if (process.platform === "linux")
     return resolveLinuxEngineLayout({ ...env, HOME: options.homeDir ?? env.HOME }).workerEnvPath;
-  return join12(options.homeDir ?? optionalToken(env.HOME) ?? homedir7(), ".config", "olympus", "worker.env");
+  return join14(options.homeDir ?? optionalToken(env.HOME) ?? homedir8(), ".config", "olympus", "worker.env");
 }
 function isWorkerAuthTokenPlaceholder(value) {
   const normalized = value?.trim().toLowerCase();
@@ -6011,8 +6678,8 @@ var init_worker_auth = __esm(() => {
 });
 
 // src/core/worker-transport.ts
-import { lstatSync as lstatSync5, mkdirSync as mkdirSync7, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { dirname as dirname10, isAbsolute as isAbsolute7, join as join13, normalize, parse } from "node:path";
+import { lstatSync as lstatSync7, mkdirSync as mkdirSync7, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { dirname as dirname11, isAbsolute as isAbsolute8, join as join15, normalize, parse } from "node:path";
 function ownerId(options) {
   const uid = options.uid ?? process.getuid?.();
   if (uid === undefined)
@@ -6020,18 +6687,18 @@ function ownerId(options) {
   return uid;
 }
 function validateDirectory(path, uid, privateMode) {
-  if (!isAbsolute7(path) || normalize(path) !== path || /[\x00-\x1f\x7f]/.test(path))
+  if (!isAbsolute8(path) || normalize(path) !== path || /[\x00-\x1f\x7f]/.test(path))
     throw new Error("Unsafe worker socket directory.");
   let current2 = parse(path).root;
   for (const part of path.slice(current2.length).split("/").filter(Boolean)) {
-    current2 = join13(current2, part);
-    const stat3 = lstatSync5(current2);
+    current2 = join15(current2, part);
+    const stat3 = lstatSync7(current2);
     if (!stat3.isDirectory() || stat3.isSymbolicLink() || stat3.uid !== uid && stat3.uid !== 0)
       throw new Error("Unsafe worker socket ancestor.");
     if (stat3.mode & 18 && !(stat3.uid === 0 && stat3.mode & 512))
       throw new Error("Writable worker socket ancestor.");
   }
-  const stat2 = lstatSync5(path);
+  const stat2 = lstatSync7(path);
   if (privateMode && (stat2.uid !== uid || (stat2.mode & 511) !== 448))
     throw new Error("Worker runtime directory must be owner-owned and 0700.");
   if (realpathSync2(path) !== path)
@@ -6056,7 +6723,7 @@ function validateWorkerSocketDirectory(options = {}) {
   const path = workerSocketPath(options);
   if (!path)
     return;
-  validateDirectory(dirname10(path), ownerId(options), true);
+  validateDirectory(dirname11(path), ownerId(options), true);
   return path;
 }
 function validateWorkerSocket(options = {}) {
@@ -6064,7 +6731,7 @@ function validateWorkerSocket(options = {}) {
   if (!path)
     return;
   const uid = ownerId(options);
-  const stat2 = lstatSync5(path);
+  const stat2 = lstatSync7(path);
   if (!stat2.isSocket() || stat2.uid !== uid || (stat2.mode & 511) !== 384)
     throw new Error("Worker socket must be owner-owned and 0600.");
   return path;
@@ -6088,17 +6755,637 @@ var init_worker_transport = __esm(() => {
   init_atomic_file();
 });
 
-// src/core/classification-signals.ts
-function namesOnlyContentScopeMetadata() {
-  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
-}
-function itemContentKeptNamesOnly(item) {
-  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
-}
-var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
-
 // src/core/build-flavor.ts
 var PUBLIC_RUNTIME_BUILD = false;
+
+// src/core/google-handle-compatibility.ts
+var init_google_handle_compatibility = () => {};
+
+// src/core/publisher-oauth-client.ts
+function isGooglePublisherWebClientId(clientId, env = process.env) {
+  const candidate = clientId?.trim();
+  if (!candidate)
+    return false;
+  const override = env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID?.trim();
+  if (override && candidate === override)
+    return true;
+  return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
+}
+function googleDesktopClientSecret(clientId, env = process.env) {
+  const candidate = clientId?.trim();
+  if (!candidate)
+    return;
+  const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
+  if (overrideId && candidate === overrideId) {
+    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    if (overrideSecret)
+      return overrideSecret;
+  }
+  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
+  return known?.secret.trim() || undefined;
+}
+var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "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", GOOGLE_DESKTOP_CLIENTS;
+var init_publisher_oauth_client = __esm(() => {
+  GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
+    DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
+  ];
+  GOOGLE_DESKTOP_CLIENTS = [
+    { id: DEFAULT_GOOGLE_DESKTOP_CLIENT_ID, secret: DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET }
+  ];
+});
+
+// src/core/privacy-language.ts
+var SENSITIVITY_TIER_LABELS;
+var init_privacy_language = __esm(() => {
+  SENSITIVITY_TIER_LABELS = {
+    public: "Public",
+    private: "Personal",
+    secure: "Private",
+    secrets: "Secrets"
+  };
+});
+
+// src/core/sqlite-migrations.ts
+function currentStoreMigrations() {
+  return [
+    {
+      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
+      name: "record_existing_v1_schema",
+      up() {}
+    }
+  ];
+}
+function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > knownVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+}
+function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
+  const ordered = validateMigrations(migrations);
+  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > targetVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
+  if (options.dryRun === true) {
+    return {
+      storeId,
+      currentVersion,
+      targetVersion,
+      dryRun: true,
+      applied: [],
+      pending
+    };
+  }
+  ensureSchemaVersionTable(db);
+  const applied = [];
+  if (pending.length > 0) {
+    db.transaction(() => {
+      const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion) {
+        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+      }
+      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
+        migration.up(db);
+        writeSqliteSchemaVersion(db, storeId, migration.version);
+        applied.push({ version: migration.version, name: migration.name });
+      }
+    }).immediate();
+  }
+  return {
+    storeId,
+    currentVersion,
+    targetVersion,
+    dryRun: false,
+    applied,
+    pending: applied
+  };
+}
+function readSqliteSchemaVersion(db, storeId) {
+  if (!schemaVersionTableExists(db))
+    return 0;
+  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
+  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
+}
+function ensureSchemaVersionTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
+      store_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+  `);
+}
+function writeSqliteSchemaVersion(db, storeId, version) {
+  db.query(`
+    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(store_id) DO UPDATE SET
+      version = excluded.version,
+      applied_at = excluded.applied_at
+  `).run(storeId, version, new Date().toISOString());
+}
+function schemaVersionTableExists(db) {
+  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
+  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
+}
+function validateMigrations(migrations) {
+  const ordered = [...migrations].sort((left, right) => left.version - right.version);
+  let previous = 0;
+  for (const migration of ordered) {
+    if (!Number.isInteger(migration.version) || migration.version <= 0) {
+      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
+    }
+    if (migration.version === previous) {
+      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
+    }
+    previous = migration.version;
+  }
+  return ordered;
+}
+var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
+var init_sqlite_migrations = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/ingestion-throughput.ts
+var init_ingestion_throughput = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/local-model-policy.ts
+function isCloudForwardingModelId(modelId) {
+  const trimmed = modelId.trim().toLowerCase();
+  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  const colon = lastSegment.lastIndexOf(":");
+  if (colon < 0)
+    return false;
+  const tag = lastSegment.slice(colon + 1);
+  return tag === "cloud" || tag.endsWith("-cloud");
+}
+function assertLocalModelIdNotCloudForwarding(label, modelId) {
+  if (!isCloudForwardingModelId(modelId))
+    return;
+  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
+}
+var init_local_model_policy = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/source-model-policy.ts
+var init_source_model_policy = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/venice-models.ts
+function normalizeVeniceAnalystModelId(value) {
+  const trimmed = value.trim();
+  if (!trimmed)
+    return trimmed;
+  const key = trimmed.toLowerCase().replace(/\bvenice\b/g, " ").replace(/\bgl m\b/g, "glm").replace(/\bqwen\s*3\.6\b/g, "qwen-3-6").replace(/\bqwen\s*3\s*vl\b/g, "qwen3-vl").replace(/\bgrok\s*4\.3\b/g, "grok-4-3").replace(/\bgrok\s*4\.5\b/g, "grok-4-5").replace(/\bglm\s*5\.2\b/g, "glm-5-2").replace(/\bglm\s*5\.1\b/g, "glm-5-1").replace(/\be2e\b/g, "e2ee").replace(/\bee2e\b/g, "e2ee").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return VENICE_MODEL_ALIASES[key] ?? trimmed.toLowerCase();
+}
+function venicePrivacyCategoryForModel(value) {
+  return VENICE_MODEL_PRIVACY_CATEGORIES[normalizeVeniceAnalystModelId(value)];
+}
+async function assertVeniceEmbeddingModelAllowed(modelId, resolveCategory, signal) {
+  const resolvedModelId = modelId.trim();
+  if (/e2e{2}|ee2e/i.test(resolvedModelId)) {
+    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" uses a gated E2EE class.`, "Use the approved Venice Private or TEE embedding model; E2EE embedding remains unavailable until local key handling exists.");
+  }
+  const category = await resolveCategory(resolvedModelId, signal);
+  if (category !== "private" && category !== "tee") {
+    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" has privacy category ${category ?? "unknown"}; source embeddings require Venice Private or TEE.`, "Choose a Venice embedding model published with Private or TEE privacy metadata.");
+  }
+}
+var VENICE_MODEL_ALIASES, VENICE_MODEL_PRIVACY_CATEGORIES;
+var init_venice_models = __esm(() => {
+  init_operation_error();
+  VENICE_MODEL_ALIASES = Object.freeze({
+    default: "kimi-k3",
+    strong: "kimi-k3",
+    "strong-reasoning": "kimi-k3",
+    reasoning: "kimi-k3",
+    "secure-reasoning": "kimi-k3",
+    kimi: "kimi-k3",
+    "kimi-3": "kimi-k3",
+    "kimi-k-3": "kimi-k3",
+    "kimi-k3": "kimi-k3",
+    normal: "inkling",
+    "normal-reasoning": "inkling",
+    inkling: "inkling",
+    "most-secure": "e2ee-glm-5-2-p",
+    "slower-most-secure": "e2ee-glm-5-2-p",
+    "slow-most-secure": "e2ee-glm-5-2-p",
+    "glm-5-2-e2ee": "e2ee-glm-5-2-p",
+    "glm-5-2-ee2e": "e2ee-glm-5-2-p",
+    "glm-5-2-private": "zai-org-glm-5-2",
+    "glm-5-2-p": "e2ee-glm-5-2-p",
+    "e2ee-glm-5-2": "e2ee-glm-5-2-p",
+    "ee2e-glm-5-2": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-e2ee": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-ee2e": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-private": "zai-org-glm-5-2",
+    "glm-5-2": "zai-org-glm-5-2",
+    "fast-reasoning": "inkling",
+    "faster-reasoning": "inkling",
+    "acceptable-reasoning": "inkling",
+    "glm-5-2-fast": "zai-org-glm-5-2",
+    "glm-5-2-acceptable": "zai-org-glm-5-2",
+    "glm-5-1-e2ee": "e2ee-glm-5-1",
+    "glm-5-1-ee2e": "e2ee-glm-5-1",
+    "e2ee-glm-5-1": "e2ee-glm-5-1",
+    "ee2e-glm-5-1": "e2ee-glm-5-1",
+    "venice-glm-5-1-e2ee": "e2ee-glm-5-1",
+    "venice-glm-5-1-ee2e": "e2ee-glm-5-1",
+    "glm-5-1": "zai-org-glm-5-1",
+    "qwen-3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    vision: "kimi-k3",
+    "secure-vision": "kimi-k3",
+    "most-secure-vision": "kimi-k3",
+    "qwen-vision": "qwen3-vl-235b-a22b",
+    "qwen3-vl-vision": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-vision": "qwen3-vl-235b-a22b",
+    "qwen3-vl-235b": "qwen3-vl-235b-a22b",
+    "qwen3-vl-235b-a22b": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-235b": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-235b-a22b": "qwen3-vl-235b-a22b",
+    "qwen3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-a3b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-a3b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen-3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen-3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "vision-escalation": "kimi-k3",
+    "private-grok-4-3": "grok-4-3",
+    "grok-4-3-private": "grok-4-3",
+    "grok-4-3-vision": "grok-4-3",
+    multimodal: "kimi-k3",
+    "fast-multimodal": "kimi-k3",
+    "faster-multimodal": "kimi-k3",
+    "acceptable-multimodal": "kimi-k3",
+    "grok-4-3": "grok-4-3",
+    "grok-4-3-multimodal": "grok-4-3",
+    "grok-4-5": "grok-4-5",
+    "grok-4-5-vision": "grok-4-5",
+    "private-grok-4-5": "grok-4-5"
+  });
+  VENICE_MODEL_PRIVACY_CATEGORIES = Object.freeze({
+    "kimi-k3": "private",
+    inkling: "private",
+    "e2ee-glm-5-2-p": "e2ee",
+    "zai-org-glm-5-2": "private",
+    "e2ee-glm-5-1": "e2ee",
+    "zai-org-glm-5-1": "private",
+    "e2ee-qwen3-6-35b-a3b": "e2ee",
+    "grok-4-5": "private",
+    "qwen3-vl-235b-a22b": "private",
+    "e2ee-qwen3-vl-30b-a3b-p": "e2ee",
+    "grok-4-3": "private",
+    "claude-opus-4-7-fast": "anonymized",
+    "qwen3-6-27b": "private",
+    "tee-qwen3-5-122b-a10b": "tee"
+  });
+});
+
+// src/core/zkapi-consult-settings.ts
+import { readFileSync as readFileSync14, statSync as statSync7 } from "node:fs";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+function sovereigntyPolicyPath(env = process.env) {
+  return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim() || defaultSovereigntyConfigPath(env);
+}
+function refreshZkapiPortsFromPolicyFile(env = process.env) {
+  let path;
+  try {
+    path = sovereigntyPolicyPath(env);
+  } catch {
+    policyFile.seen = undefined;
+    policyFile.unreadable = "the sovereignty settings (layout discovery refused)";
+    return;
+  }
+  let stamp;
+  try {
+    const stat2 = statSync7(path);
+    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      policyFile.seen = `${path}:absent`;
+      policyFile.unreadable = undefined;
+    } else {
+      policyFile.seen = undefined;
+      policyFile.unreadable = path;
+    }
+    return;
+  }
+  if (policyFile.seen === stamp && policyFile.unreadable === undefined)
+    return;
+  try {
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync14(path, "utf8")));
+    for (const port of ports)
+      zkapiDaemonPorts.add(port);
+    policyFile.seen = stamp;
+    policyFile.unreadable = undefined;
+  } catch {
+    policyFile.seen = undefined;
+    policyFile.unreadable = path;
+  }
+}
+function zkapiPortsInPolicy(parsed) {
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  if (!record)
+    throw new Error("not a policy object");
+  const inner = record.sovereignty && typeof record.sovereignty === "object" ? record.sovereignty : record;
+  const profiles = inner.modelProfiles;
+  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles))
+    throw new Error("policy has no modelProfiles");
+  const ports = [];
+  for (const profile of Object.values(profiles)) {
+    if (!profile || typeof profile !== "object")
+      throw new Error("malformed profile");
+    const entry = profile;
+    if (entry.provider !== "zkapi")
+      continue;
+    const port = loopbackPort(typeof entry.baseUrl === "string" ? entry.baseUrl : undefined);
+    if (port === undefined)
+      throw new Error("zkapi profile without a loopback baseUrl");
+    ports.push(port);
+  }
+  return ports;
+}
+function endpointPort(parsed) {
+  return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+}
+function assertNotZkapiDaemonEndpoint(url, label) {
+  refreshZkapiPortsFromPolicyFile();
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return;
+  const port = endpointPort(parsed);
+  const local = loopbackPort(url) !== undefined;
+  if (local && policyFile.unreadable) {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} is a local endpoint, and the sovereignty policy at ${policyFile.unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, policyFile.unreadable);
+  }
+  if (!zkapiDaemonPorts.has(port))
+    return;
+  if (local) {
+    throw new ZkapiDaemonEndpointRefusal("daemon_port", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
+  }
+  if (!isIP(parsed.hostname.replace(/^\[|\]$/g, ""))) {
+    throw new ZkapiDaemonEndpointRefusal("hostname_on_daemon_port", `${label} names a host on port ${port}, a zkAPI daemon port; a host name could point at this machine.`);
+  }
+}
+async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
+  assertNotZkapiDaemonEndpoint(url, label);
+  const unreadable = policyFile.unreadable;
+  if (!unreadable)
+    return;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return;
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host))
+    return;
+  const port = endpointPort(parsed);
+  const refuse = () => {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} may be a local endpoint, and the sovereignty policy at ${unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, unreadable);
+  };
+  let addresses;
+  try {
+    addresses = await Promise.race([
+      lookupAll(host),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("lookup timed out")), 2000).unref?.())
+    ]);
+  } catch {
+    return refuse();
+  }
+  if (addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined))
+    refuse();
+}
+async function defaultLookupAll(hostname) {
+  return (await lookup(hostname, { all: true })).map((entry) => entry.address);
+}
+function refusalSuggestion(reason, policyPath) {
+  if (reason === "policy_unreadable") {
+    return `Fix or remove the sovereignty policy file at ${policyPath ?? "its configured path"}; until it can be read, Olympus refuses every local model endpoint.`;
+  }
+  if (reason === "hostname_on_daemon_port") {
+    return "Use a numeric address: a cloud endpoint on its own port, or 127.0.0.1 for a local model, which must then not share a zkAPI daemon port.";
+  }
+  return "This address is the zkAPI daemon, which only carries consults. Point this model at a local model server on another port.";
+}
+function isZkapiDaemonEndpointRefusal(error) {
+  return error instanceof ZkapiDaemonEndpointRefusal;
+}
+function loopbackPort(baseUrl) {
+  if (!baseUrl)
+    return;
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:" || !isLoopbackHost(url.hostname))
+    return;
+  if (url.port)
+    return Number(url.port);
+  return url.protocol === "https:" ? 443 : 80;
+}
+function isLoopbackHost(hostname) {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost"))
+    return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4)
+    return Number(v4[1]) === 127 || host === "0.0.0.0";
+  if (!host.startsWith("[") || !host.endsWith("]"))
+    return false;
+  const words = ipv6Words(host.slice(1, -1));
+  if (!words)
+    return false;
+  if (words.slice(0, 7).every((word) => word === 0) && (words[7] === 1 || words[7] === 0))
+    return true;
+  const mapped = words.slice(0, 5).every((word) => word === 0) && (words[5] === 65535 || words[5] === 0);
+  return mapped && (words[6] >> 8 === 127 || words[6] === 0 && words[7] === 0);
+}
+function ipv6Words(text2) {
+  let body = text2;
+  const tail = [];
+  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(body);
+  if (dotted) {
+    const bytes = dotted.slice(1).map(Number);
+    if (bytes.some((byte) => byte > 255))
+      return;
+    tail.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
+    body = text2.slice(0, dotted.index);
+    if (!body.endsWith("::"))
+      body = body.replace(/:$/, "");
+  }
+  const halves = body.split("::");
+  if (halves.length > 2)
+    return;
+  const parse2 = (part) => part ? part.split(":").map((word) => parseInt(word, 16)) : [];
+  const head = parse2(halves[0] ?? "");
+  const rest = halves.length === 2 ? parse2(halves[1] ?? "") : [];
+  if ([...head, ...rest].some((word) => Number.isNaN(word) || word < 0 || word > 65535))
+    return;
+  const fill = 8 - head.length - rest.length - tail.length;
+  if (fill < 0 || halves.length === 1 && fill !== 0)
+    return;
+  return [...head, ...Array(fill).fill(0), ...rest, ...tail];
+}
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, DEFAULTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
+var init_zkapi_consult_settings = __esm(() => {
+  init_owner_config_read();
+  init_operation_error();
+  ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
+  DEFAULTS = {
+    tor: "per_consult",
+    torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
+    timeoutMs: 6 * 60 * 1000,
+    torBootstrapTimeoutMs: 210 * 1000,
+    daemonReadyTimeoutMs: 120 * 1000,
+    policyWarmTimeoutMs: 180 * 1000,
+    settleTimeoutMs: 300 * 1000,
+    maxResponseBytes: 256 * 1024
+  };
+  INTEGER_BOUNDS = {
+    torSocksPort: [1024, 65535],
+    dailyRequestCap: [1, 1e6],
+    timeoutMs: [30000, 30 * 60000],
+    torBootstrapTimeoutMs: [1e4, 10 * 60000],
+    daemonReadyTimeoutMs: [5000, 10 * 60000],
+    policyWarmTimeoutMs: [5000, 10 * 60000],
+    settleTimeoutMs: [5000, 30 * 60000],
+    maxResponseBytes: [1024, 4 * 1024 * 1024]
+  };
+  SETTINGS_KEYS = new Set([
+    ...Object.keys(INTEGER_BOUNDS),
+    "tor",
+    "fundingDate",
+    "depositUsd",
+    "acknowledgements",
+    "dailySpendCapUsd",
+    "daemonExecutable",
+    "torExecutable"
+  ]);
+  zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
+  policyFile = { seen: undefined, unreadable: undefined };
+  ZkapiDaemonEndpointRefusal = class ZkapiDaemonEndpointRefusal extends OperationError {
+    reason;
+    constructor(reason, message2, policyPath) {
+      super("config_error", message2, refusalSuggestion(reason, policyPath));
+      this.name = "ZkapiDaemonEndpointRefusal";
+      this.reason = reason;
+    }
+  };
+});
+
+// src/core/sovereignty.ts
+function assertSecureAnalystPoolModelIdAllowed(profileId, rawModelId) {
+  const modelId = normalizeVeniceAnalystModelId(rawModelId);
+  if (modelId.toLowerCase().startsWith("e2ee-")) {
+    throw new SecureAnalystPoolE2EEGateError(profileId, modelId);
+  }
+}
+var BUILT_IN_EMBEDDING_MODEL_ID, SecureAnalystPoolE2EEGateError;
+var init_sovereignty = __esm(() => {
+  init_owner_config_read();
+  init_owner_config_read();
+  init_atomic_file();
+  init_file_lease();
+  init_operation_error();
+  init_local_model_policy();
+  init_config();
+  init_secret_store();
+  init_source_model_policy();
+  init_venice_models();
+  init_manifest();
+  init_zkapi_consult_settings();
+  init_source_model_policy();
+  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
+  SecureAnalystPoolE2EEGateError = class SecureAnalystPoolE2EEGateError extends OperationError {
+    profileId;
+    modelId;
+    constructor(profileId, modelId) {
+      super("source_index_policy_violation", `Secure analyst pool profile "${profileId}" uses gated E2EE model "${modelId}".`, "E2EE secure-pool dispatch remains unavailable until Olympus has local key handling; use a catalog-approved non-E2EE Venice Private/TEE model.");
+      this.name = "SecureAnalystPoolE2EEGateError";
+      this.profileId = profileId;
+      this.modelId = modelId;
+    }
+  };
+});
+// src/workers/dashboard/scheduler-markers.ts
+var OPERATOR_PAUSED_SCHEDULER_MARKERS;
+var init_scheduler_markers = __esm(() => {
+  OPERATOR_PAUSED_SCHEDULER_MARKERS = new Set([
+    "daily_api_request_guard",
+    "daily_resource_read_guard",
+    "daily_cost_guard",
+    "readwise_daily_api_request_guard",
+    "gmail_daily_api_request_guard",
+    "google_drive_daily_api_request_guard",
+    "head_api_request_reserve_guard",
+    "head_resource_read_reserve_guard",
+    "head_cost_reserve_guard",
+    "provider_rate_limit"
+  ]);
+});
+
+// src/workers/dashboard/source-failure.ts
+var SOURCE_FAILURE_KINDS, KIND_SET;
+var init_source_failure = __esm(() => {
+  init_scheduler_markers();
+  SOURCE_FAILURE_KINDS = [
+    "sign_in",
+    "network",
+    "timeout",
+    "rate_limited",
+    "provider_busy",
+    "provider_refused",
+    "daily_limit",
+    "search_model_unavailable",
+    "reader_unavailable",
+    "busy_here",
+    "setup",
+    "not_started",
+    "unknown"
+  ];
+  KIND_SET = new Set(SOURCE_FAILURE_KINDS);
+});
+
+// src/workers/dashboard/answer-ready-coverage.ts
+var init_answer_ready_coverage = () => {};
+
+// src/workers/connector-store/capture-freshness.ts
+var init_capture_freshness = () => {};
+
+// src/workers/dashboard/phases.ts
+var init_phases = __esm(() => {
+  init_source_dashboard();
+  init_vocabulary();
+  init_vocabulary();
+});
 
 // src/core/google-service-account.ts
 import { createSign } from "node:crypto";
@@ -6211,372 +7498,6 @@ function googlePublisherExchangeRefreshUrl(env = process.env) {
 var DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL = "https://auth.olympusplugin.ai/exchange/google", OAUTH_RELAY_STATE_TTL_MS;
 var init_oauth_relay = __esm(() => {
   OAUTH_RELAY_STATE_TTL_MS = 10 * 60 * 1000;
-});
-
-// src/core/publisher-oauth-client.ts
-function isGooglePublisherWebClientId(clientId, env = process.env) {
-  const candidate = clientId?.trim();
-  if (!candidate)
-    return false;
-  const override = env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID?.trim();
-  if (override && candidate === override)
-    return true;
-  return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
-}
-function googleDesktopClientSecret(clientId, env = process.env) {
-  const candidate = clientId?.trim();
-  if (!candidate)
-    return;
-  const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
-  if (overrideId && candidate === overrideId) {
-    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
-    if (overrideSecret)
-      return overrideSecret;
-  }
-  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
-  return known?.secret.trim() || undefined;
-}
-var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "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", GOOGLE_DESKTOP_CLIENTS;
-var init_publisher_oauth_client = __esm(() => {
-  GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
-    DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
-  ];
-  GOOGLE_DESKTOP_CLIENTS = [
-    { id: DEFAULT_GOOGLE_DESKTOP_CLIENT_ID, secret: DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET }
-  ];
-});
-
-// src/workers/credential-broker/connected-handles.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync12 } from "node:fs";
-import { homedir as homedir8 } from "node:os";
-import { dirname as dirname11, join as join14 } from "node:path";
-function defaultHandleRegistryPath() {
-  return join14(homedir8(), ".config", "olympus", "handles.json");
-}
-function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
-  const path = connectedHandleGrantEpochPath(registryPath);
-  if (!existsSync9(path))
-    return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync12(path, "utf8"));
-  } catch {
-    throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
-  }
-  const record = parsed;
-  if (!record || typeof record !== "object" || Array.isArray(record) || record.version !== 1 || typeof record.epoch !== "string" || !/^[a-f0-9-]{36}$/.test(record.epoch)) {
-    throw new Error("Olympus credential-grant generation has an unsupported format. Refusing connection changes.");
-  }
-  return record.epoch;
-}
-async function withConnectedHandleGrantCustody(registryPath, options, mutation) {
-  try {
-    return await withFileLease(`${registryPath}.grant-custody`, (lease) => lease.commit(async () => {
-      const currentEpoch = readConnectedHandleGrantEpoch(registryPath);
-      if (options.expectedEpoch !== undefined && options.expectedEpoch !== currentEpoch) {
-        throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
-      }
-      if (options.advanceEpoch === true) {
-        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID3() }, null, 2)}
-`);
-      }
-      return await mutation();
-    }));
-  } catch (error) {
-    if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
-      throw new ConnectedHandleGrantMutationError("credential_grant_busy", "Another connection change is in progress. Retry shortly.");
-    }
-    throw error;
-  }
-}
-function connectedHandleGrantEpochPath(registryPath) {
-  return `${registryPath}.grant-epoch.json`;
-}
-function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
-  return readConnectedHandleRegistryForWrite(path).registry;
-}
-function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath()) {
-  if (!existsSync9(path)) {
-    return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
-  }
-  const parsed = JSON.parse(readFileSync12(path, "utf8"));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Olympus handle registry must be a JSON object.");
-  }
-  const record = parsed;
-  if (record.version !== 1 || !Array.isArray(record.handles)) {
-    throw new Error("Olympus handle registry has an unsupported format.");
-  }
-  const handles = [];
-  const dropped = [];
-  const preservedUnknownHandles = [];
-  for (const [index, value] of record.handles.entries()) {
-    const normalized = normalizeConnectedHandle(value);
-    if (normalized.ok) {
-      handles.push(normalized.handle);
-      continue;
-    }
-    const drop = { index, reason: normalized.reason };
-    dropped.push(drop);
-    preservedUnknownHandles.push(value);
-  }
-  warnConnectedHandleDrops(path, dropped);
-  const registry = { version: 1, handles };
-  if (dropped.length > 0)
-    registry.dropped = dropped;
-  return { registry, preservedUnknownHandles };
-}
-function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync8(dirname11(path), { recursive: true, mode: 448 });
-  writePrivateFileAtomicSync(path, JSON.stringify({
-    version: 1,
-    handles: [
-      ...preservedUnknownHandles,
-      ...registry.handles.map(redactConnectedHandleForDisk).sort((a, b) => a.handle.localeCompare(b.handle))
-    ]
-  }, null, 2));
-}
-function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistryPath(), now = new Date) {
-  if (!existsSync9(path))
-    return false;
-  return withFileLeaseSync(path, (lease) => {
-    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
-    let changed = false;
-    const handles = registry.handles.map((handle) => {
-      if (handle.handle !== handleId)
-        return handle;
-      changed = true;
-      return {
-        ...handle,
-        backendState: {
-          kind: handle.backendState?.kind ?? "oauth2_refresh",
-          ...handle.backendState,
-          status: "reauth_required",
-          updatedAt: now.toISOString()
-        }
-      };
-    });
-    if (!changed)
-      return false;
-    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
-      version: 1,
-      handles,
-      ...registry.dropped ? { dropped: registry.dropped } : {}
-    }, path, preservedUnknownHandles));
-    return true;
-  });
-}
-function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHandleRegistryPath()) {
-  if (!existsSync9(path))
-    return false;
-  return withFileLeaseSync(path, (lease) => {
-    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
-    let changed = false;
-    const handles = registry.handles.map((handle) => {
-      if (handle.handle !== handleId || !handle.oauth2Refresh)
-        return handle;
-      if (handle.oauth2Refresh.exchangeVia === exchangeVia)
-        return handle;
-      changed = true;
-      return { ...handle, oauth2Refresh: { ...handle.oauth2Refresh, exchangeVia } };
-    });
-    if (!changed)
-      return false;
-    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
-      version: 1,
-      handles,
-      ...registry.dropped ? { dropped: registry.dropped } : {}
-    }, path, preservedUnknownHandles));
-    return true;
-  });
-}
-function connectedGrantGeneration(connectedAt, providerAccountId) {
-  return `${connectedAt}
-${providerAccountId ?? ""}`;
-}
-function deriveEnvCredentialHandlesFromRegistry(registry) {
-  return registry.handles.map((handle) => {
-    const definition = {
-      handle: handle.handle,
-      provider: handle.provider,
-      allowedCapabilities: [...handle.allowedCapabilities],
-      scopes: [...handle.scopes],
-      tokenEnvNames: [],
-      expiresInSeconds: 3600,
-      grantGeneration: connectedGrantGeneration(handle.connectedAt, handle.providerAccountId)
-    };
-    if (handle.sessionKind)
-      definition.sessionKind = handle.sessionKind;
-    if (handle.accountRole)
-      definition.accountRole = handle.accountRole;
-    if (handle.trustDomain)
-      definition.trustDomain = handle.trustDomain;
-    if (handle.tokenSecretRefs)
-      definition.tokenSecretRefs = [...handle.tokenSecretRefs];
-    if (handle.oauth2Refresh) {
-      definition.oauth2Refresh = {
-        tokenUrl: handle.oauth2Refresh.tokenUrl,
-        clientIdEnvNames: [],
-        clientSecretEnvNames: [],
-        refreshTokenEnvNames: [],
-        clientIdSecretRef: handle.oauth2Refresh.clientIdSecretRef,
-        ...handle.oauth2Refresh.clientSecretSecretRef ? { clientSecretSecretRef: handle.oauth2Refresh.clientSecretSecretRef } : {},
-        refreshTokenSecretRef: handle.oauth2Refresh.refreshTokenSecretRef,
-        scopes: [...handle.oauth2Refresh.scopes ?? handle.scopes],
-        ...handle.oauth2Refresh.exchangeVia ? { exchangeVia: handle.oauth2Refresh.exchangeVia } : {}
-      };
-    }
-    if (handle.backendState) {
-      definition.backendState = handle.backendState;
-    }
-    return definition;
-  });
-}
-function handleRegistryPathFromEnv(env, useDefault) {
-  const configured = env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim();
-  if (configured)
-    return configured;
-  return useDefault ? defaultHandleRegistryPath() : undefined;
-}
-function normalizeConnectedHandle(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return { ok: false, reason: "entry_not_object" };
-  const record = value;
-  const handle = optionalSafeLabel(record.handle);
-  const providerLabel = optionalSafeLabel(record.provider);
-  const connectedAt = typeof record.connectedAt === "string" ? record.connectedAt : undefined;
-  if (!handle)
-    return { ok: false, reason: "invalid_handle" };
-  if (!providerLabel)
-    return { ok: false, reason: "invalid_provider" };
-  if (!isCredentialProvider(providerLabel))
-    return { ok: false, reason: "unknown_provider" };
-  const provider = providerLabel;
-  if (!connectedAt)
-    return { ok: false, reason: "invalid_connected_at" };
-  const allowedCapabilities = stringArray(record.allowedCapabilities);
-  const scopes = stringArray(record.scopes);
-  if (allowedCapabilities.length === 0)
-    return { ok: false, reason: "missing_allowed_capabilities" };
-  const tokenSecretRefsResult = normalizeTokenSecretRefs(record.tokenSecretRefs);
-  if (!tokenSecretRefsResult.ok)
-    return { ok: false, reason: tokenSecretRefsResult.reason };
-  const oauth2Result = normalizeOAuth2(record.oauth2Refresh);
-  if (!oauth2Result.ok)
-    return { ok: false, reason: oauth2Result.reason };
-  const normalized = {
-    handle,
-    provider,
-    allowedCapabilities,
-    scopes,
-    connectedAt,
-    ...optionalLabelObject(record, "sessionKind"),
-    ...optionalLabelObject(record, "accountRole"),
-    ...optionalLabelObject(record, "trustDomain"),
-    ...optionalLabelObject(record, "providerAccountId")
-  };
-  const tokenSecretRefs = tokenSecretRefsResult.tokenSecretRefs;
-  if (tokenSecretRefs.length > 0)
-    normalized.tokenSecretRefs = tokenSecretRefs;
-  const oauth2 = oauth2Result.oauth2Refresh;
-  if (oauth2)
-    normalized.oauth2Refresh = oauth2;
-  if (record.backendState && typeof record.backendState === "object" && !Array.isArray(record.backendState)) {
-    normalized.backendState = record.backendState;
-  }
-  return { ok: true, handle: normalized };
-}
-function normalizeTokenSecretRefs(value) {
-  if (value === undefined)
-    return { ok: true, tokenSecretRefs: [] };
-  if (!Array.isArray(value))
-    return { ok: false, reason: "invalid_token_secret_refs" };
-  const tokenSecretRefs = stringArray(value);
-  if (tokenSecretRefs.length !== value.length || tokenSecretRefs.some((ref) => !isStoreRef(ref))) {
-    return { ok: false, reason: "invalid_token_secret_refs" };
-  }
-  return { ok: true, tokenSecretRefs };
-}
-function normalizeOAuth2(value) {
-  if (value === undefined)
-    return { ok: true };
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return { ok: false, reason: "invalid_oauth2_refresh" };
-  const record = value;
-  const tokenUrl = typeof record.tokenUrl === "string" && /^https?:\/\//.test(record.tokenUrl) ? record.tokenUrl : undefined;
-  const clientIdSecretRef = typeof record.clientIdSecretRef === "string" && isStoreRef(record.clientIdSecretRef) ? record.clientIdSecretRef : undefined;
-  const refreshTokenSecretRef = typeof record.refreshTokenSecretRef === "string" && isStoreRef(record.refreshTokenSecretRef) ? record.refreshTokenSecretRef : undefined;
-  if (!tokenUrl || !clientIdSecretRef || !refreshTokenSecretRef) {
-    return { ok: false, reason: "invalid_oauth2_refresh" };
-  }
-  const clientSecretSecretRef = typeof record.clientSecretSecretRef === "string" && isStoreRef(record.clientSecretSecretRef) ? record.clientSecretSecretRef : undefined;
-  const exchangeVia = record.exchangeVia === "publisher_endpoint" ? "publisher_endpoint" : undefined;
-  return {
-    ok: true,
-    oauth2Refresh: {
-      tokenUrl,
-      clientIdSecretRef,
-      ...clientSecretSecretRef ? { clientSecretSecretRef } : {},
-      refreshTokenSecretRef,
-      scopes: stringArray(record.scopes),
-      ...exchangeVia ? { exchangeVia } : {}
-    }
-  };
-}
-function warnConnectedHandleDrops(path, dropped) {
-  for (const drop of dropped) {
-    console.warn(`Ignoring malformed Olympus connected handle registry entry at ${path}#handles[${drop.index}]: ${drop.reason}`);
-  }
-}
-function redactConnectedHandleForDisk(handle) {
-  return {
-    ...handle,
-    scopes: [...handle.scopes],
-    allowedCapabilities: [...handle.allowedCapabilities],
-    ...handle.tokenSecretRefs ? { tokenSecretRefs: [...handle.tokenSecretRefs] } : {},
-    ...handle.oauth2Refresh ? {
-      oauth2Refresh: {
-        ...handle.oauth2Refresh,
-        scopes: [...handle.oauth2Refresh.scopes ?? []]
-      }
-    } : {}
-  };
-}
-function optionalLabelObject(record, key) {
-  const value = optionalSafeLabel(record[key]);
-  return value ? { [key]: value } : {};
-}
-function optionalSafeLabel(value) {
-  if (typeof value !== "string")
-    return;
-  const trimmed = value.trim();
-  return /^[a-zA-Z0-9._:-]{1,160}$/.test(trimmed) ? trimmed : undefined;
-}
-function stringArray(value) {
-  if (!Array.isArray(value))
-    return [];
-  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
-}
-function isStoreRef(value) {
-  if (!value.startsWith("store:"))
-    return false;
-  return isSafeSecretKey(value.slice("store:".length));
-}
-var INITIAL_CONNECTED_HANDLE_GRANT_EPOCH = "initial", ConnectedHandleGrantMutationError;
-var init_connected_handles = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_secret_store();
-  init_credential_broker();
-  ConnectedHandleGrantMutationError = class ConnectedHandleGrantMutationError extends Error {
-    code;
-    retryable = true;
-    constructor(code, message2) {
-      super(message2);
-      this.code = code;
-    }
-  };
 });
 
 // src/workers/credential-broker/index.ts
@@ -8375,1534 +9296,1967 @@ var init_credential_broker = __esm(() => {
   TOKEN_UNISSUED_STATUSES = new Set([401, 403, 404, 405, 415, 429]);
   REFRESH_TOKEN_REJECTED_DETAIL = /(?:value passed for the (?:refresh )?token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
 });
-// src/workers/dropbox-files/provider-client.ts
-class DropboxApiMetadataClient {
-  supportsNativeRecursive = true;
+
+// src/workers/credential-broker/connected-handles.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync15 } from "node:fs";
+import { homedir as homedir9 } from "node:os";
+import { dirname as dirname13, join as join16 } from "node:path";
+function defaultHandleRegistryPath() {
+  return join16(homedir9(), ".config", "olympus", "handles.json");
+}
+function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
+  const path = connectedHandleGrantEpochPath(registryPath);
+  if (!existsSync9(path))
+    return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync15(path, "utf8"));
+  } catch {
+    throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
+  }
+  const record = parsed;
+  if (!record || typeof record !== "object" || Array.isArray(record) || record.version !== 1 || typeof record.epoch !== "string" || !/^[a-f0-9-]{36}$/.test(record.epoch)) {
+    throw new Error("Olympus credential-grant generation has an unsupported format. Refusing connection changes.");
+  }
+  return record.epoch;
+}
+async function withConnectedHandleGrantCustody(registryPath, options, mutation) {
+  try {
+    return await withFileLease(`${registryPath}.grant-custody`, (lease) => lease.commit(async () => {
+      const currentEpoch = readConnectedHandleGrantEpoch(registryPath);
+      if (options.expectedEpoch !== undefined && options.expectedEpoch !== currentEpoch) {
+        throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
+      }
+      if (options.advanceEpoch === true) {
+        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID3() }, null, 2)}
+`);
+      }
+      return await mutation();
+    }));
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
+      throw new ConnectedHandleGrantMutationError("credential_grant_busy", "Another connection change is in progress. Retry shortly.");
+    }
+    throw error;
+  }
+}
+function connectedHandleGrantEpochPath(registryPath) {
+  return `${registryPath}.grant-epoch.json`;
+}
+function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
+  return readConnectedHandleRegistryForWrite(path).registry;
+}
+function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath()) {
+  if (!existsSync9(path)) {
+    return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
+  }
+  const parsed = JSON.parse(readFileSync15(path, "utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Olympus handle registry must be a JSON object.");
+  }
+  const record = parsed;
+  if (record.version !== 1 || !Array.isArray(record.handles)) {
+    throw new Error("Olympus handle registry has an unsupported format.");
+  }
+  const handles = [];
+  const dropped = [];
+  const preservedUnknownHandles = [];
+  for (const [index, value] of record.handles.entries()) {
+    const normalized = normalizeConnectedHandle(value);
+    if (normalized.ok) {
+      handles.push(normalized.handle);
+      continue;
+    }
+    const drop = { index, reason: normalized.reason };
+    dropped.push(drop);
+    preservedUnknownHandles.push(value);
+  }
+  warnConnectedHandleDrops(path, dropped);
+  const registry = { version: 1, handles };
+  if (dropped.length > 0)
+    registry.dropped = dropped;
+  return { registry, preservedUnknownHandles };
+}
+function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
+  mkdirSync8(dirname13(path), { recursive: true, mode: 448 });
+  writePrivateFileAtomicSync(path, JSON.stringify({
+    version: 1,
+    handles: [
+      ...preservedUnknownHandles,
+      ...registry.handles.map(redactConnectedHandleForDisk).sort((a, b) => a.handle.localeCompare(b.handle))
+    ]
+  }, null, 2));
+}
+function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistryPath(), now = new Date) {
+  if (!existsSync9(path))
+    return false;
+  return withFileLeaseSync(path, (lease) => {
+    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
+    let changed = false;
+    const handles = registry.handles.map((handle) => {
+      if (handle.handle !== handleId)
+        return handle;
+      changed = true;
+      return {
+        ...handle,
+        backendState: {
+          kind: handle.backendState?.kind ?? "oauth2_refresh",
+          ...handle.backendState,
+          status: "reauth_required",
+          updatedAt: now.toISOString()
+        }
+      };
+    });
+    if (!changed)
+      return false;
+    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
+      version: 1,
+      handles,
+      ...registry.dropped ? { dropped: registry.dropped } : {}
+    }, path, preservedUnknownHandles));
+    return true;
+  });
+}
+function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHandleRegistryPath()) {
+  if (!existsSync9(path))
+    return false;
+  return withFileLeaseSync(path, (lease) => {
+    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
+    let changed = false;
+    const handles = registry.handles.map((handle) => {
+      if (handle.handle !== handleId || !handle.oauth2Refresh)
+        return handle;
+      if (handle.oauth2Refresh.exchangeVia === exchangeVia)
+        return handle;
+      changed = true;
+      return { ...handle, oauth2Refresh: { ...handle.oauth2Refresh, exchangeVia } };
+    });
+    if (!changed)
+      return false;
+    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
+      version: 1,
+      handles,
+      ...registry.dropped ? { dropped: registry.dropped } : {}
+    }, path, preservedUnknownHandles));
+    return true;
+  });
+}
+function connectedGrantGeneration(connectedAt, providerAccountId) {
+  return `${connectedAt}
+${providerAccountId ?? ""}`;
+}
+function deriveEnvCredentialHandlesFromRegistry(registry) {
+  return registry.handles.map((handle) => {
+    const definition = {
+      handle: handle.handle,
+      provider: handle.provider,
+      allowedCapabilities: [...handle.allowedCapabilities],
+      scopes: [...handle.scopes],
+      tokenEnvNames: [],
+      expiresInSeconds: 3600,
+      grantGeneration: connectedGrantGeneration(handle.connectedAt, handle.providerAccountId)
+    };
+    if (handle.sessionKind)
+      definition.sessionKind = handle.sessionKind;
+    if (handle.accountRole)
+      definition.accountRole = handle.accountRole;
+    if (handle.trustDomain)
+      definition.trustDomain = handle.trustDomain;
+    if (handle.tokenSecretRefs)
+      definition.tokenSecretRefs = [...handle.tokenSecretRefs];
+    if (handle.oauth2Refresh) {
+      definition.oauth2Refresh = {
+        tokenUrl: handle.oauth2Refresh.tokenUrl,
+        clientIdEnvNames: [],
+        clientSecretEnvNames: [],
+        refreshTokenEnvNames: [],
+        clientIdSecretRef: handle.oauth2Refresh.clientIdSecretRef,
+        ...handle.oauth2Refresh.clientSecretSecretRef ? { clientSecretSecretRef: handle.oauth2Refresh.clientSecretSecretRef } : {},
+        refreshTokenSecretRef: handle.oauth2Refresh.refreshTokenSecretRef,
+        scopes: [...handle.oauth2Refresh.scopes ?? handle.scopes],
+        ...handle.oauth2Refresh.exchangeVia ? { exchangeVia: handle.oauth2Refresh.exchangeVia } : {}
+      };
+    }
+    if (handle.backendState) {
+      definition.backendState = handle.backendState;
+    }
+    return definition;
+  });
+}
+function handleRegistryPathFromEnv(env, useDefault) {
+  const configured = env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim();
+  if (configured)
+    return configured;
+  return useDefault ? defaultHandleRegistryPath() : undefined;
+}
+function normalizeConnectedHandle(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return { ok: false, reason: "entry_not_object" };
+  const record = value;
+  const handle = optionalSafeLabel(record.handle);
+  const providerLabel = optionalSafeLabel(record.provider);
+  const connectedAt = typeof record.connectedAt === "string" ? record.connectedAt : undefined;
+  if (!handle)
+    return { ok: false, reason: "invalid_handle" };
+  if (!providerLabel)
+    return { ok: false, reason: "invalid_provider" };
+  if (!isCredentialProvider(providerLabel))
+    return { ok: false, reason: "unknown_provider" };
+  const provider = providerLabel;
+  if (!connectedAt)
+    return { ok: false, reason: "invalid_connected_at" };
+  const allowedCapabilities = stringArray(record.allowedCapabilities);
+  const scopes = stringArray(record.scopes);
+  if (allowedCapabilities.length === 0)
+    return { ok: false, reason: "missing_allowed_capabilities" };
+  const tokenSecretRefsResult = normalizeTokenSecretRefs(record.tokenSecretRefs);
+  if (!tokenSecretRefsResult.ok)
+    return { ok: false, reason: tokenSecretRefsResult.reason };
+  const oauth2Result = normalizeOAuth2(record.oauth2Refresh);
+  if (!oauth2Result.ok)
+    return { ok: false, reason: oauth2Result.reason };
+  const normalized = {
+    handle,
+    provider,
+    allowedCapabilities,
+    scopes,
+    connectedAt,
+    ...optionalLabelObject(record, "sessionKind"),
+    ...optionalLabelObject(record, "accountRole"),
+    ...optionalLabelObject(record, "trustDomain"),
+    ...optionalLabelObject(record, "providerAccountId")
+  };
+  const tokenSecretRefs = tokenSecretRefsResult.tokenSecretRefs;
+  if (tokenSecretRefs.length > 0)
+    normalized.tokenSecretRefs = tokenSecretRefs;
+  const oauth2 = oauth2Result.oauth2Refresh;
+  if (oauth2)
+    normalized.oauth2Refresh = oauth2;
+  if (record.backendState && typeof record.backendState === "object" && !Array.isArray(record.backendState)) {
+    normalized.backendState = record.backendState;
+  }
+  return { ok: true, handle: normalized };
+}
+function normalizeTokenSecretRefs(value) {
+  if (value === undefined)
+    return { ok: true, tokenSecretRefs: [] };
+  if (!Array.isArray(value))
+    return { ok: false, reason: "invalid_token_secret_refs" };
+  const tokenSecretRefs = stringArray(value);
+  if (tokenSecretRefs.length !== value.length || tokenSecretRefs.some((ref) => !isStoreRef(ref))) {
+    return { ok: false, reason: "invalid_token_secret_refs" };
+  }
+  return { ok: true, tokenSecretRefs };
+}
+function normalizeOAuth2(value) {
+  if (value === undefined)
+    return { ok: true };
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return { ok: false, reason: "invalid_oauth2_refresh" };
+  const record = value;
+  const tokenUrl = typeof record.tokenUrl === "string" && /^https?:\/\//.test(record.tokenUrl) ? record.tokenUrl : undefined;
+  const clientIdSecretRef = typeof record.clientIdSecretRef === "string" && isStoreRef(record.clientIdSecretRef) ? record.clientIdSecretRef : undefined;
+  const refreshTokenSecretRef = typeof record.refreshTokenSecretRef === "string" && isStoreRef(record.refreshTokenSecretRef) ? record.refreshTokenSecretRef : undefined;
+  if (!tokenUrl || !clientIdSecretRef || !refreshTokenSecretRef) {
+    return { ok: false, reason: "invalid_oauth2_refresh" };
+  }
+  const clientSecretSecretRef = typeof record.clientSecretSecretRef === "string" && isStoreRef(record.clientSecretSecretRef) ? record.clientSecretSecretRef : undefined;
+  const exchangeVia = record.exchangeVia === "publisher_endpoint" ? "publisher_endpoint" : undefined;
+  return {
+    ok: true,
+    oauth2Refresh: {
+      tokenUrl,
+      clientIdSecretRef,
+      ...clientSecretSecretRef ? { clientSecretSecretRef } : {},
+      refreshTokenSecretRef,
+      scopes: stringArray(record.scopes),
+      ...exchangeVia ? { exchangeVia } : {}
+    }
+  };
+}
+function warnConnectedHandleDrops(path, dropped) {
+  for (const drop of dropped) {
+    console.warn(`Ignoring malformed Olympus connected handle registry entry at ${path}#handles[${drop.index}]: ${drop.reason}`);
+  }
+}
+function redactConnectedHandleForDisk(handle) {
+  return {
+    ...handle,
+    scopes: [...handle.scopes],
+    allowedCapabilities: [...handle.allowedCapabilities],
+    ...handle.tokenSecretRefs ? { tokenSecretRefs: [...handle.tokenSecretRefs] } : {},
+    ...handle.oauth2Refresh ? {
+      oauth2Refresh: {
+        ...handle.oauth2Refresh,
+        scopes: [...handle.oauth2Refresh.scopes ?? []]
+      }
+    } : {}
+  };
+}
+function optionalLabelObject(record, key) {
+  const value = optionalSafeLabel(record[key]);
+  return value ? { [key]: value } : {};
+}
+function optionalSafeLabel(value) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return /^[a-zA-Z0-9._:-]{1,160}$/.test(trimmed) ? trimmed : undefined;
+}
+function stringArray(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
+}
+function isStoreRef(value) {
+  if (!value.startsWith("store:"))
+    return false;
+  return isSafeSecretKey(value.slice("store:".length));
+}
+var INITIAL_CONNECTED_HANDLE_GRANT_EPOCH = "initial", ConnectedHandleGrantMutationError;
+var init_connected_handles = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_secret_store();
+  init_credential_broker();
+  ConnectedHandleGrantMutationError = class ConnectedHandleGrantMutationError extends Error {
+    code;
+    retryable = true;
+    constructor(code, message2) {
+      super(message2);
+      this.code = code;
+    }
+  };
+});
+
+// src/workers/credential-health.ts
+var ROTATING_PROVIDERS, PASSIVE_EVIDENCE_MAX_AGE_MS, CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS, CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS, CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS;
+var init_credential_health = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_connected_handles();
+  init_credential_broker();
+  ROTATING_PROVIDERS = new Set(["x"]);
+  PASSIVE_EVIDENCE_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+  CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS = 28 * 60 * 60 * 1000;
+  CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS = 10 * 60 * 1000;
+  CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
+});
+
+// src/core/embedding-cost-estimates.ts
+var init_embedding_cost_estimates = () => {};
+// src/core/classification-signals.ts
+function namesOnlyContentScopeMetadata() {
+  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
+}
+function itemContentKeptNamesOnly(item) {
+  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
+}
+var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
+
+// src/core/invocation-provenance.ts
+function sourceInvocationProvenance(value) {
+  return value === "operator" ? "operator" : "scheduled";
+}
+
+// src/core/file-scope-sources.ts
+function registerFileScopeSource(definition) {
+  const { sourceId, provider } = definition;
+  if (!sourceId || !provider)
+    throw new Error("A file-scope source needs a source id and a provider.");
+  if (definition.account === "provider_account" && !definition.credentialCapability) {
+    throw new Error(`File-scope source ${sourceId} binds to a provider account and needs a credential capability.`);
+  }
+  if (definition.account === "this_computer" && definition.credentialCapability) {
+    throw new Error(`File-scope source ${sourceId} binds to this computer and must not name a credential capability.`);
+  }
+  if (definitions.has(sourceId))
+    throw new Error(`File-scope source ${sourceId} is already registered.`);
+  for (const other of definitions.values()) {
+    if (other.provider === provider) {
+      throw new Error(`File-scope provider ${provider} is already registered by ${other.sourceId}.`);
+    }
+  }
+  definitions.set(sourceId, definition);
+}
+function registerBuiltIn(definition) {
+  registerFileScopeSource(definition);
+  builtInIds.add(definition.sourceId);
+}
+var definitions, builtInIds;
+var init_file_scope_sources = __esm(() => {
+  definitions = new Map;
+  builtInIds = new Set;
+  registerBuiltIn({
+    sourceId: "google_drive.docs",
+    provider: "google_drive",
+    account: "provider_account",
+    credentialCapability: "google_drive.docs.sync",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
+    corpusIdsToInvalidate: ["internal.drive.docs", "secure_local.drive.docs"],
+    filterFamily: "folder_id",
+    normalizeKey: (key) => key.trim(),
+    rootKeys: ["/", "root"],
+    label: "Google Drive",
+    dispositionSourceId: "google_drive.personal"
+  });
+  registerBuiltIn({
+    sourceId: "dropbox.files",
+    provider: "dropbox",
+    account: "provider_account",
+    credentialCapability: "dropbox.files.sync",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
+    corpusIdsToInvalidate: ["secure_local.dropbox.files"],
+    filterFamily: "locator_path",
+    normalizeKey: (key) => key.trim().toLowerCase(),
+    rootKeys: ["/"],
+    label: "Dropbox",
+    dispositionSourceId: "dropbox.personal"
+  });
+  registerBuiltIn({
+    sourceId: "local.files",
+    provider: "local_files",
+    account: "this_computer",
+    corpusIdsToInvalidate: ["secure_local.local.files"],
+    filterFamily: "locator_path",
+    normalizeKey: (key) => {
+      const trimmed = key.trim().normalize("NFC");
+      return trimmed.length > 1 ? trimmed.replace(/\/+$/, "") : trimmed;
+    },
+    rootKeys: ["/"],
+    label: "Files on this computer",
+    dispositionSourceId: "local.files",
+    wholeScopeWords: {
+      row: "Everything on this computer",
+      prompt: "Olympus will read every folder on this computer, now and later, except folders you set to Names only or Skip.",
+      confirm: "Yes, use the whole computer",
+      summary: "Everything else on this computer: fully indexed, including folders added later.",
+      onlyFull: "The whole computer is all or nothing. Set Names only or Skip on folders instead.",
+      needConfirm: "Confirm the whole computer first."
+    }
+  });
+});
+
+// src/core/source-scope-approval.ts
+var init_source_scope_approval = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_file_scope_sources();
+  init_operation_error();
+});
+
+// src/core/mail-source-scope.ts
+function gmailAfterBound(input) {
+  const cutoffSeconds = input.contentAfterMs !== undefined ? Math.floor(input.contentAfterMs / 1000) - 1 : undefined;
+  const watermarkSeconds = input.watermarkMs !== undefined ? Math.floor(input.watermarkMs / 1000) : undefined;
+  const seconds = cutoffSeconds === undefined ? watermarkSeconds : watermarkSeconds === undefined ? cutoffSeconds : Math.max(cutoffSeconds, watermarkSeconds);
+  return seconds !== undefined && seconds > 0 ? `after:${seconds}` : undefined;
+}
+function gmailBeforeBound(contentAfterMs) {
+  return `before:${Math.floor(contentAfterMs / 1000)}`;
+}
+var GMAIL_SCOPE_SENDER_SAMPLE = 100, GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
+var init_mail_source_scope = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_operation_error();
+  init_source_scope_approval();
+  GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
+});
+
+// src/core/sender-rules.ts
+function validDomain(raw) {
+  let end = raw.length;
+  while (end > 0 && (raw[end - 1] === "." || raw[end - 1] === "-"))
+    end -= 1;
+  const domain = raw.slice(0, end).toLowerCase();
+  const labels = domain.split(".");
+  if (labels.length < 2 || labels.some((label) => !label || label.startsWith("-") || label.endsWith("-")))
+    return;
+  return domain;
+}
+function scanHeader(value) {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  let angleOpens = 0;
+  let comma = false;
+  for (let index = 0;index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "\\" && index + 1 < value.length) {
+      if (depth === 0)
+        out += char + value[index + 1];
+      index += 1;
+      continue;
+    }
+    if (depth === 0 && char === '"')
+      quoted = !quoted;
+    if (!quoted && char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (!quoted && char === ")" && depth > 0) {
+      depth -= 1;
+      continue;
+    }
+    if (depth > 0)
+      continue;
+    if (!quoted && char === "<")
+      angleOpens += 1;
+    if (!quoted && char === ",")
+      comma = true;
+    out += char;
+  }
+  return { text: out, angleOpens, comma };
+}
+function parseAddrSpec(value) {
+  const spec = value.trim();
+  let local;
+  let rest;
+  if (spec.startsWith('"')) {
+    let index = 1;
+    while (index < spec.length && spec[index] !== '"')
+      index += spec[index] === "\\" ? 2 : 1;
+    if (index >= spec.length || spec[index + 1] !== "@")
+      return;
+    local = spec.slice(0, index + 1);
+    rest = spec.slice(index + 2);
+  } else {
+    const at = spec.indexOf("@");
+    if (at <= 0)
+      return;
+    local = spec.slice(0, at);
+    rest = spec.slice(at + 1);
+    for (const char of local)
+      if (!LOCAL_CHAR.test(char))
+        return;
+  }
+  for (const char of rest)
+    if (!DOMAIN_CHAR.test(char))
+      return;
+  const domain = validDomain(rest);
+  if (!domain || domain !== rest.toLowerCase())
+    return;
+  return { address: `${local.toLowerCase()}@${domain}`, domain };
+}
+function senderAddress(from) {
+  if (!from || from.length > MAX_FROM_HEADER_CHARS)
+    return;
+  const scanned = scanHeader(from);
+  if (scanned.angleOpens > 1 || scanned.comma)
+    return;
+  if (scanned.angleOpens === 1) {
+    const open2 = scanned.text.indexOf("<");
+    const close = scanned.text.indexOf(">", open2 + 1);
+    if (close < 0 || scanned.text.slice(close + 1).trim() !== "")
+      return;
+    return parseAddrSpec(scanned.text.slice(open2 + 1, close));
+  }
+  return parseAddrSpec(scanned.text);
+}
+function everyAddressIn(from) {
+  if (!from)
+    return [];
+  const text2 = from.slice(0, MAX_FROM_HEADER_CHARS);
+  const found = [];
+  for (let at = text2.indexOf("@");at >= 0; at = text2.indexOf("@", at + 1)) {
+    let start = at;
+    while (start > 0 && LOCAL_CHAR.test(text2[start - 1]))
+      start -= 1;
+    let end = at + 1;
+    while (end < text2.length && DOMAIN_CHAR.test(text2[end]))
+      end += 1;
+    if (start === at)
+      continue;
+    const domain = validDomain(text2.slice(at + 1, end));
+    if (domain)
+      found.push({ address: `${text2.slice(start, at).toLowerCase()}@${domain}`, domain });
+  }
+  return found;
+}
+function addressMatches(sender, normalizedRule) {
+  if (normalizedRule.startsWith("@")) {
+    const domain = normalizedRule.slice(1);
+    return domain !== "" && (sender.domain === domain || sender.domain.endsWith(`.${domain}`));
+  }
+  return sender.address === normalizedRule;
+}
+function senderMatchesRule(from, rule) {
+  const normalized = rule.trim().toLowerCase();
+  if (!normalized.includes("@"))
+    return false;
+  const sender = senderAddress(from);
+  return sender !== undefined && addressMatches(sender, normalized);
+}
+function ownerSenderRuleMatches(from, value, raises) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized)
+    return false;
+  if (!normalized.includes("@"))
+    return raises && (from ?? "").slice(0, MAX_FROM_HEADER_CHARS).toLowerCase().includes(normalized);
+  const sender = senderAddress(from);
+  if (sender)
+    return addressMatches(sender, normalized);
+  return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));
+}
+var MAX_FROM_HEADER_CHARS = 4096, LOCAL_CHAR, DOMAIN_CHAR;
+var init_sender_rules = __esm(() => {
+  LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
+  DOMAIN_CHAR = /[a-z0-9.-]/i;
+});
+
+// src/workers/email-source/ingest-filter.ts
+function classifyEmailIngestSkip(candidate, options = {}) {
+  const skipOtp = options.skipOtp ?? true;
+  if (skipOtp && isOtpMail(candidate))
+    return "otp";
+  const skipCategories = options.skipCategories ?? DEFAULT_SKIP_CATEGORIES;
+  if (skipCategories.length > 0 && candidate.labels) {
+    const skip = new Set(skipCategories.map((label) => label.trim().toUpperCase()).filter(Boolean));
+    for (const label of candidate.labels) {
+      if (skip.has(label.toUpperCase())) {
+        return `category:${label.toUpperCase()}`;
+      }
+    }
+  }
+  return;
+}
+function isOtpMail(candidate) {
+  if (candidate.subject && OTP_SUBJECT.test(candidate.subject))
+    return true;
+  const body = candidate.body?.trim();
+  if (body && body.length > 0 && body.length <= OTP_BODY_MAX_CHARS && OTP_BODY_CODE.test(body) && OTP_BODY_HINT.test(body)) {
+    return true;
+  }
+  return false;
+}
+function parseEmailIngestFilterOptionsFromEnv(env = process.env) {
+  const categoriesRaw = env.OLYMPUS_EMAIL_INGEST_SKIP_CATEGORIES;
+  const skipOtpRaw = env.OLYMPUS_EMAIL_INGEST_SKIP_OTP;
+  return {
+    ...categoriesRaw !== undefined ? { skipCategories: categoriesRaw.split(",").map((label) => label.trim()).filter(Boolean) } : {},
+    ...skipOtpRaw !== undefined ? { skipOtp: skipOtpRaw === "true" } : {}
+  };
+}
+var DEFAULT_SKIP_CATEGORIES, OTP_SUBJECT, OTP_BODY_CODE, OTP_BODY_HINT, OTP_BODY_MAX_CHARS = 900;
+var init_ingest_filter = __esm(() => {
+  DEFAULT_SKIP_CATEGORIES = ["CATEGORY_PROMOTIONS"];
+  OTP_SUBJECT = new RegExp([
+    "verification code",
+    "security code",
+    "one[- ]?time (pass)?(word|code)",
+    "login code",
+    "sign[- ]?in code",
+    "access code",
+    "confirmation code",
+    "your (\\w+ )?code is",
+    "\\botp\\b",
+    "2fa code"
+  ].join("|"), "i");
+  OTP_BODY_CODE = /\b\d{4,8}\b/;
+  OTP_BODY_HINT = /\b(code|verification|expires? in|valid for)\b/i;
+});
+
+// src/workers/google-connectors/classification.ts
+function accountFromGoogleHandle(handle, fallback = "personal") {
+  const trimmed = handle?.trim();
+  if (!trimmed)
+    return fallback;
+  const match = /^[a-z_]+\.([a-z0-9_-]+)(?:\.|$)/i.exec(trimmed);
+  return match?.[1] ?? fallback;
+}
+function metadataString(metadata, key) {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function metadataStringArray(metadata, key) {
+  const value = metadata[key];
+  if (!Array.isArray(value))
+    return [];
+  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
+}
+
+// src/core/sqlite-store.ts
+function closeSqliteStore(db, options = {}) {
+  if (options.checkpoint !== false) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {}
+  }
+  db.close();
+}
+
+// src/workers/google-connectors/request-budget.ts
+var GoogleRequestBudgetError;
+var init_request_budget = __esm(() => {
+  GoogleRequestBudgetError = class GoogleRequestBudgetError extends Error {
+    retryAt;
+    provider;
+    reason;
+    observedFutureUtcDay;
+    constructor(provider, retryAt, reason = "daily_api_request_guard", options = {}) {
+      super(reason === "future_utc_day" ? `${provider} request budget clock regression: persisted future UTC day ` + `${options.observedFutureUtcDay ?? "future"} is later than current UTC day ` + `${options.currentUtcDay ?? "current"}; recover with ` + "`olympus source request-budget recover-future` using the observed day." : reason === "ledger_busy" ? `${provider} request budget ledger remained busy; the provider request was refused before dispatch.` : `${provider} request deferred by daily_api_request_guard.`);
+      this.name = "GoogleRequestBudgetError";
+      this.provider = provider;
+      this.retryAt = retryAt;
+      this.reason = reason;
+      this.observedFutureUtcDay = options.observedFutureUtcDay;
+    }
+  };
+});
+
+// src/workers/google-connectors/gmail.ts
+import { createHash as createHash4 } from "node:crypto";
+
+class GoogleGmailSourceConnector {
+  id = GMAIL_PROVIDER;
+  family = "email";
+  credentialBroker;
+  credentialHandle;
+  account;
+  fetchImpl;
+  apiBaseUrl;
+  defaultMaxMessages;
+  query;
+  scope;
+  now;
+  requestBudget;
+  provenance;
+  maxRetries;
+  sleepImpl;
+  injectedClient;
+  client;
+  providerRequests = 0;
+  fetchItemCacheHits = 0;
+  attachmentsDeclared = 0;
+  attachmentBytesDeclared = 0;
+  attachmentsNotIngested = 0;
+  itemsSkippedOtp = 0;
+  itemsSkippedCategory = 0;
+  itemsSkippedStored = 0;
+  ingestFilterOptions;
+  itemsByLocalId = new Map;
+  constructor(options = {}) {
+    const env = options.env ?? process.env;
+    this.fetchImpl = options.fetch ?? fetch;
+    this.credentialBroker = options.credentialBroker ?? createEnvCredentialBroker({
+      env,
+      fetch: this.fetchImpl
+    });
+    this.credentialHandle = options.credentialHandle?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE?.trim() || "gmail.personal";
+    this.account = options.account?.trim() || accountFromGoogleHandle(this.credentialHandle);
+    this.apiBaseUrl = options.apiBaseUrl?.replace(/\/+$/, "") || GMAIL_API_BASE_URL;
+    this.defaultMaxMessages = normalizeGmailMaxMessages(options.maxMessages);
+    this.query = options.query?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim() || undefined;
+    this.requestBudget = options.requestBudget;
+    this.provenance = sourceInvocationProvenance(options.provenance);
+    this.maxRetries = options.maxRetries;
+    this.sleepImpl = options.sleep;
+    this.injectedClient = options.apiClient;
+    this.scope = options.scope;
+    this.now = options.now ?? (() => Date.now());
+    const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
+    this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
+    if (this.scope?.skippedLabelIds?.length) {
+      this.ingestFilterOptions = {
+        ...this.ingestFilterOptions,
+        skipCategories: [
+          ...this.ingestFilterOptions.skipCategories ?? ["CATEGORY_PROMOTIONS"],
+          ...this.scope.skippedLabelIds
+        ]
+      };
+    }
+  }
+  async authenticate() {
+    await this.clientForRequest();
+  }
+  async* listItems(options = {}) {
+    const client = await this.clientForRequest();
+    let scopeConfirmationsFetched = 0;
+    let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
+    const resume = decodeGmailCursor(options.cursor);
+    const cutoffMs = this.scope?.contentAfterMs;
+    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
+    const staleLeg = resume.phase === "metadata" && !metadataLeg;
+    const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
+    let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
+    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
+    const nowMs = this.now();
+    const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
+    let pageToken = staleLeg ? undefined : resume.pageToken;
+    const requestedPageTokens = new Set;
+    let listPages = 0;
+    while (remaining > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
+      if (pageToken)
+        assertNewProviderPage(requestedPageTokens, pageToken);
+      this.providerRequests += 1;
+      listPages += 1;
+      const page = await client.listMessages({
+        maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, remaining),
+        ...pageToken ? { pageToken } : {},
+        ...query ? { query } : {}
+      });
+      const listed = page.messages.filter((message2) => message2.id);
+      const items = [];
+      let messagesExamined = 0;
+      let messagesFetched = 0;
+      for (const message2 of listed) {
+        if (messagesFetched >= remaining)
+          break;
+        messagesExamined += 1;
+        const stored = this.scope?.storedItem?.(message2.id);
+        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
+          continue;
+        if (stored && (metadataLeg || stored.hasContent)) {
+          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
+            scopeConfirmationsFetched += 1;
+            messagesFetched += 1;
+            this.providerRequests += 1;
+            const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
+            const received = internalDateNumber({ internalDate: metadata.internalDate });
+            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const subject2 = metadataString(item2.metadata, "subject");
+            const from2 = metadataString(item2.metadata, "from");
+            const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray(item2.metadata, "labels") }, this.ingestFilterOptions);
+            if (!skipped && (cutoffMs === undefined || received !== undefined && received >= cutoffMs))
+              this.scope.storedItemObserved(item2);
+          }
+          this.itemsSkippedStored += 1;
+          continue;
+        }
+        messagesFetched += 1;
+        this.providerRequests += 1;
+        const fetched = await client.getMessage(message2.id, metadataLeg ? { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS } : undefined);
+        const fetchedDateMs = internalDateNumber({ internalDate: fetched.internalDate });
+        const beforeCutoff = cutoffMs !== undefined && fetchedDateMs !== undefined && fetchedDateMs < cutoffMs;
+        if (metadataLeg && !beforeCutoff)
+          continue;
+        if (beforeCutoff && stored) {
+          this.itemsSkippedStored += 1;
+          continue;
+        }
+        const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
+        this.attachmentsDeclared += metadataCount(item.metadata, "attachmentCount");
+        this.attachmentBytesDeclared += metadataCount(item.metadata, "attachmentBytesDeclared");
+        this.attachmentsNotIngested += metadataCount(item.metadata, "attachmentsNotIngested");
+        const internalDateMs = internalDateNumber(item.metadata);
+        if (!metadataLeg && internalDateMs !== undefined && (highWaterMs === undefined || internalDateMs > highWaterMs)) {
+          highWaterMs = Math.min(internalDateMs, nowMs);
+        }
+        const subject = metadataString(item.metadata, "subject") ?? metadataString(item.metadata, "title");
+        const from = metadataString(item.metadata, "from");
+        if (this.scope?.skipSenders?.some((rule) => senderMatchesRule(from, rule))) {
+          this.itemsSkippedCategory += 1;
+          continue;
+        }
+        const body = item.content.kind === "text" ? item.content.text : metadataString(item.metadata, "snippet");
+        const skip = classifyEmailIngestSkip({
+          ...subject !== undefined ? { subject } : {},
+          ...from !== undefined ? { from } : {},
+          ...body !== undefined ? { body } : {},
+          labels: metadataStringArray(item.metadata, "labels")
+        }, this.ingestFilterOptions);
+        if (skip) {
+          if (skip === "otp")
+            this.itemsSkippedOtp += 1;
+          else
+            this.itemsSkippedCategory += 1;
+          continue;
+        }
+        this.itemsByLocalId.set(item.identity.localItemId, item);
+        items.push(item);
+      }
+      remaining -= messagesFetched;
+      pageToken = page.nextPageToken;
+      const pageTruncated = messagesExamined < listed.length;
+      const legDone = !pageToken && !pageTruncated;
+      const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
+      const done = legDone && !enterMetadataLeg;
+      const promoted = promotedWatermark({
+        highWaterMs,
+        watermarkMs,
+        ...this.scope && startedMs !== undefined ? { floorMs: startedMs - TRAVERSAL_START_MARGIN_MS } : {},
+        ...cutoffMs !== undefined ? { cutoffMs } : {},
+        nowMs
+      });
+      const nextCursor = done ? encodeGmailCursor(promoted !== undefined ? { watermarkMs: promoted } : {}) : enterMetadataLeg ? encodeGmailCursor({
+        phase: "metadata",
+        ...highWaterMs !== undefined ? { highWaterMs } : {},
+        ...startedMs !== undefined ? { startedMs } : {}
+      }) : encodeGmailCursor({
+        ...watermarkMs !== undefined ? { watermarkMs } : {},
+        ...highWaterMs !== undefined ? { highWaterMs } : {},
+        ...pageToken ? { pageToken } : {},
+        ...metadataLeg ? { phase: "metadata" } : {},
+        ...startedMs !== undefined ? { startedMs } : {}
+      });
+      yield {
+        items,
+        ...nextCursor ? { nextCursor } : {},
+        done
+      };
+      if (done || pageTruncated)
+        break;
+      if (enterMetadataLeg) {
+        metadataLeg = true;
+        query = this.metadataLegQuery(cutoffMs);
+        requestedPageTokens.clear();
+      } else if (!pageToken)
+        break;
+    }
+  }
+  async fetchItem(localItemId) {
+    const item = this.itemsByLocalId.get(localItemId) ?? this.itemsByLocalId.get(`${this.account}:${localItemId}`);
+    if (!item) {
+      throw new Error(`Gmail connector cannot fetch unknown item ${hashString(localItemId).slice(0, 16)}.`);
+    }
+    this.fetchItemCacheHits += 1;
+    return item;
+  }
+  traversalStatus() {
+    return {
+      providerRequests: this.providerRequests,
+      fetchItemCacheHits: this.fetchItemCacheHits,
+      attachmentsDeclared: this.attachmentsDeclared,
+      attachmentBytesDeclared: this.attachmentBytesDeclared,
+      attachmentsNotIngested: this.attachmentsNotIngested,
+      itemsSkippedOtp: this.itemsSkippedOtp,
+      itemsSkippedCategory: this.itemsSkippedCategory,
+      itemsSkippedStored: this.itemsSkippedStored
+    };
+  }
+  requestBudgetStatus() {
+    return this.requestBudget?.status();
+  }
+  async apiClientForTooling() {
+    return this.clientForRequest();
+  }
+  classificationSignals(item) {
+    const subject = metadataString(item.metadata, "subject") ?? metadataString(item.metadata, "title");
+    const sender = metadataString(item.metadata, "from");
+    const labels = metadataStringArray(item.metadata, "labels");
+    return {
+      ...subject ? { title: subject } : {},
+      ...sender ? { sender } : {},
+      ...labels.length > 0 ? { labels } : {}
+    };
+  }
+  async clientForRequest() {
+    if (this.client)
+      return this.client;
+    if (this.injectedClient) {
+      this.client = this.requestBudget ? budgetedGmailApiClient(this.injectedClient, this.requestBudget, this.provenance) : this.injectedClient;
+      return this.client;
+    }
+    this.client = await this.restClient();
+    return this.client;
+  }
+  async restClient() {
+    const session = requireBearerTokenCredentialSession(await this.credentialBroker.issueSession({
+      handle: this.credentialHandle,
+      provider: GMAIL_PROVIDER,
+      capability: "gmail.email.sync",
+      trustDomain: "secure_local"
+    }), this.credentialHandle);
+    return new RestGmailApiClient({
+      token: session.token,
+      fetch: this.fetchImpl,
+      baseUrl: this.apiBaseUrl,
+      ...this.requestBudget ? { requestBudget: this.requestBudget } : {},
+      provenance: this.provenance,
+      ...this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {},
+      ...this.sleepImpl ? { sleep: this.sleepImpl } : {}
+    });
+  }
+  queryForWatermark(watermarkMs) {
+    if (this.scope) {
+      return this.scopedQuery(gmailAfterBound({ contentAfterMs: this.scope.contentAfterMs, watermarkMs }));
+    }
+    if (watermarkMs === undefined)
+      return this.query;
+    const after = `after:${Math.floor(watermarkMs / 1000)}`;
+    return this.query ? `${after} (${this.query})` : after;
+  }
+  metadataLegQuery(cutoffMs) {
+    return this.scopedQuery(gmailBeforeBound(cutoffMs));
+  }
+  scopedQuery(bound) {
+    const parts = [bound, this.scope?.baseQuery, this.query ? `(${this.query})` : undefined].filter((part) => Boolean(part?.trim()));
+    return parts.length > 0 ? parts.join(" ") : undefined;
+  }
+}
+function budgetedGmailApiClient(inner, budget, provenance) {
+  return {
+    listMessages(request) {
+      budget.reserve(provenance);
+      return inner.listMessages(request);
+    },
+    getMessage(id, options) {
+      budget.reserve(provenance);
+      return inner.getMessage(id, options);
+    },
+    ...inner.listLabels ? {
+      listLabels() {
+        budget.reserve(provenance);
+        return inner.listLabels();
+      }
+    } : {},
+    ...inner.getLabel ? {
+      getLabel(id) {
+        budget.reserve(provenance);
+        return inner.getLabel(id);
+      }
+    } : {}
+  };
+}
+function promotedWatermark(input) {
+  const candidates = [
+    input.highWaterMs,
+    input.watermarkMs,
+    input.floorMs,
+    input.cutoffMs !== undefined ? input.cutoffMs - 1000 : undefined
+  ].filter((value) => value !== undefined && Number.isFinite(value));
+  if (candidates.length === 0)
+    return;
+  return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
+}
+function encodeGmailCursor(cursor) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
+    return;
+  }
+  return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
+}
+function decodeGmailCursor(value) {
+  if (!value)
+    return {};
+  if (value.length > MAX_GMAIL_CURSOR_LENGTH || !value.startsWith(GMAIL_CURSOR_PREFIX)) {
+    throw new TypeError("Gmail connector cursor is invalid.");
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(value.slice(GMAIL_CURSOR_PREFIX.length), "base64url").toString("utf8"));
+    const watermarkMs = decodeCursorEpochMs(parsed.watermarkMs);
+    const highWaterMs = decodeCursorEpochMs(parsed.highWaterMs);
+    const startedMs = decodeCursorEpochMs(parsed.startedMs);
+    if (parsed.pageToken !== undefined && (typeof parsed.pageToken !== "string" || !parsed.pageToken.trim() || parsed.pageToken.length > MAX_GMAIL_CURSOR_LENGTH)) {
+      throw new Error("invalid");
+    }
+    if (parsed.phase !== undefined && parsed.phase !== "metadata")
+      throw new Error("invalid");
+    return {
+      ...watermarkMs !== undefined ? { watermarkMs } : {},
+      ...highWaterMs !== undefined ? { highWaterMs } : {},
+      ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {},
+      ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
+      ...startedMs !== undefined ? { startedMs } : {}
+    };
+  } catch {
+    throw new TypeError("Gmail connector cursor is invalid.");
+  }
+}
+function decodeCursorEpochMs(value) {
+  if (value === undefined)
+    return;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error("invalid");
+  }
+  return value;
+}
+function assertNewProviderPage(seen, pageToken) {
+  if (seen.has(pageToken))
+    throw new Error("Gmail connector pagination cursor repeated.");
+  seen.add(pageToken);
+}
+function internalDateNumber(metadata) {
+  const value = metadata["internalDate"];
+  if (typeof value !== "string" || !/^\d+$/.test(value))
+    return;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+class RestGmailApiClient {
   token;
   fetchImpl;
   baseUrl;
   maxRetries;
   sleep;
-  requestTimeoutMs;
+  requestBudget;
+  provenance;
   constructor(options) {
-    this.token = required(options.token, "Dropbox metadata token");
-    this.fetchImpl = options.fetch ?? fetch;
-    this.baseUrl = options.baseUrl?.replace(/\/+$/, "") || "https://api.dropboxapi.com/2";
-    this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_DROPBOX_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve6) => setTimeout(resolve6, ms)));
-    this.requestTimeoutMs = options.requestTimeoutMs ?? DROPBOX_METADATA_REQUEST_TIMEOUT_MS;
+    this.token = options.token;
+    this.fetchImpl = options.fetch;
+    this.baseUrl = options.baseUrl;
+    this.requestBudget = options.requestBudget;
+    this.provenance = sourceInvocationProvenance(options.provenance);
+    this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
   }
-  async listFolder(request) {
-    return this.postMetadataPage("/files/list_folder", {
-      path: request.path,
-      recursive: request.recursive,
-      limit: request.limit,
-      include_deleted: request.includeDeleted === true,
-      include_has_explicit_shared_members: false
+  async listMessages(request) {
+    const params = new URLSearchParams({
+      maxResults: String(request.maxResults),
+      includeSpamTrash: request.includeSpamTrash === true ? "true" : "false"
     });
+    if (request.pageToken)
+      params.set("pageToken", request.pageToken);
+    if (request.query)
+      params.set("q", request.query);
+    for (const labelId of request.labelIds ?? [])
+      params.append("labelIds", labelId);
+    const json = await this.getJson(`users/me/messages?${params.toString()}`);
+    const record = asRecord6(json, "Gmail messages list response");
+    return {
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord6(item, "Gmail message list item")).map((item) => ({
+        id: stringValue(item.id),
+        threadId: stringValue(item.threadId)
+      })).filter((item) => item.id) : [],
+      ...optionalStringProp(record, "nextPageToken"),
+      ...typeof record.resultSizeEstimate === "number" && Number.isFinite(record.resultSizeEstimate) ? { resultSizeEstimate: Math.max(0, Math.floor(record.resultSizeEstimate)) } : {}
+    };
   }
-  async listFolderContinue(request) {
-    return this.postMetadataPage("/files/list_folder/continue", { cursor: request.cursor });
+  async getMessage(id, options = {}) {
+    const params = new URLSearchParams({ format: options.format ?? "full" });
+    if (options.format === "metadata") {
+      for (const header of options.metadataHeaders ?? [])
+        params.append("metadataHeaders", header);
+    }
+    const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
+    return json;
   }
-  async postMetadataPage(path, body) {
-    const response = await this.send(path, body);
-    const text2 = await response.text();
-    return metadataPageFromDropboxJson(parseJsonObject2(text2, "Dropbox metadata API"));
+  async listLabels() {
+    const record = asRecord6(await this.getJson("users/me/labels"), "Gmail labels list response");
+    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord6(item, "Gmail label"))).filter((label) => label.id) : [];
   }
-  async send(path, body) {
+  async getLabel(id) {
+    return gmailLabelFromJson(asRecord6(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
+  }
+  async getJson(path) {
     let attempt = 0;
-    while (true) {
-      const response = await fetchWithBodyDeadline(this.fetchImpl, `${this.baseUrl}${path}`, {
-        method: "POST",
+    for (;; ) {
+      this.requestBudget?.reserve(this.provenance);
+      const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
         headers: {
-          Authorization: `Bearer ${this.token}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(body)
-      }, this.requestTimeoutMs);
+          Accept: "application/json",
+          Authorization: `Bearer ${this.token}`
+        }
+      });
+      const text2 = await response.text();
       if (response.ok)
-        return response;
-      const detail = await response.text().catch(() => "");
-      const error = dropboxMetadataError(response, detail);
-      if (isRetryableDropboxError(error) && attempt < this.maxRetries) {
+        return text2 ? JSON.parse(text2) : {};
+      if (isRetryableGmailStatus(response.status) && attempt < this.maxRetries) {
         attempt += 1;
-        await this.sleep(dropboxRetryDelayMs(error, attempt));
+        await this.sleep(gmailRetryDelayMs(response, attempt));
         continue;
       }
-      throw error;
+      throw new Error(`Gmail API request failed (${response.status}): ${safeProviderDetail(text2)}`);
     }
   }
 }
-function dropboxMetadataError(response, detail) {
-  const tag = dropboxErrorTag(detail);
-  if (response.status === 409 && tag === "path") {
-    let parsed;
-    try {
-      parsed = JSON.parse(detail);
-    } catch {}
-    if (parsed?.error?.[".tag"] === "path" && parsed.error.path?.[".tag"] === "not_found") {
-      return new DropboxPathNotFoundError;
+function isRetryableGmailStatus(status) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+function gmailRetryDelayMs(response, attempt) {
+  const retryAfter = response.headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    const seconds = Number.parseFloat(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000, MAX_GMAIL_RETRY_DELAY_MS);
+    }
+    const dateMs = Date.parse(retryAfter);
+    if (Number.isFinite(dateMs)) {
+      return Math.max(0, Math.min(dateMs - Date.now(), MAX_GMAIL_RETRY_DELAY_MS));
     }
   }
-  if (tag === "reset" && response.status >= 400 && response.status < 500) {
-    return new DropboxCursorResetError(response.status);
-  }
-  if (response.status === 429) {
-    const retryAfterMs = dropboxRetryAfterMs(response);
-    return new DropboxRateLimitError({
-      status: response.status,
-      ...retryAfterMs !== undefined ? { retryAfterMs } : {},
-      ...tag ? { tag } : {}
-    });
-  }
-  return new DropboxApiError(`Dropbox metadata API request failed (${response.status}${tag ? `/${tag}` : ""}).`, response.status, tag);
-}
-function isRetryableDropboxError(error) {
-  return error.status === 429 || error.status >= 500 && error.status < 600;
-}
-function dropboxRetryDelayMs(error, attempt) {
-  const declared = error instanceof DropboxRateLimitError ? error.retryAfterMs : undefined;
-  if (declared !== undefined)
-    return Math.min(declared, MAX_DROPBOX_RETRY_DELAY_MS);
   return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
 }
-function dropboxRetryAfterMs(response) {
-  const retryAfter = response.headers.get("retry-after")?.trim();
-  if (!retryAfter)
-    return;
-  const seconds = Number.parseFloat(retryAfter);
-  if (Number.isFinite(seconds) && seconds >= 0)
-    return seconds * 1000;
-  const dateMs = Date.parse(retryAfter);
-  if (Number.isFinite(dateMs))
-    return Math.max(0, dateMs - Date.now());
-  return;
-}
-function dropboxErrorTag(detail) {
-  let parsed;
-  try {
-    parsed = JSON.parse(detail);
-  } catch {
-    return;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-    return;
-  const record = parsed;
-  const error = record.error;
-  const nested = error && typeof error === "object" && !Array.isArray(error) ? error[".tag"] : undefined;
-  const summary = typeof record.error_summary === "string" ? record.error_summary.split("/")[0] : undefined;
-  return boundedErrorTag(nested) ?? boundedErrorTag(summary);
-}
-function boundedErrorTag(value) {
-  return typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : undefined;
-}
-function metadataPageFromDropboxJson(payload2) {
-  if (!Array.isArray(payload2.entries)) {
-    throw new Error("Dropbox metadata API page did not include entries.");
-  }
+function gmailLabelFromJson(record) {
+  const type = record.type === "system" || record.type === "user" ? record.type : undefined;
   return {
-    entries: payload2.entries.map(metadataEntryFromDropboxJson).filter((entry) => entry !== undefined),
-    ...typeof payload2.cursor === "string" && payload2.cursor.trim() ? { cursor: payload2.cursor.trim() } : {},
-    hasMore: payload2.has_more === true
+    id: stringValue(record.id),
+    name: stringValue(record.name),
+    ...type ? { type } : {},
+    ...typeof record.messagesTotal === "number" && Number.isFinite(record.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record.messagesTotal)) } : {}
   };
 }
-function metadataEntryFromDropboxJson(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return;
-  const record = value;
-  const tag = normalizedTag(stringValue(record[".tag"]) ?? stringValue(record.tag));
-  const name = stringValue(record.name) ?? "";
-  const pathDisplay = stringValue(record.path_display) ?? stringValue(record.pathDisplay);
-  const pathLower = stringValue(record.path_lower) ?? stringValue(record.pathLower);
-  if (tag === "deleted") {
-    const id2 = stringValue(record.id);
-    return {
-      tag,
-      name,
-      ...pathDisplay ? { pathDisplay } : {},
-      ...pathLower ? { pathLower } : {},
-      ...id2 ? { id: id2 } : {}
-    };
-  }
-  const id = stringValue(record.id);
-  if (!id || tag !== "file" && tag !== "folder")
-    return;
-  const sharingInfo = sharingInfoFromDropboxJson(record);
-  if (tag === "folder") {
-    return {
-      tag,
-      id,
-      name,
-      ...pathDisplay ? { pathDisplay } : {},
-      ...pathLower ? { pathLower } : {},
-      ...sharingInfo ? { sharingInfo } : {}
-    };
-  }
-  const size = numberValue(record.size);
-  const rev = stringValue(record.rev);
-  const contentHash = stringValue(record.content_hash) ?? stringValue(record.contentHash);
-  const clientModified = stringValue(record.client_modified) ?? stringValue(record.clientModified);
-  const serverModified = stringValue(record.server_modified) ?? stringValue(record.serverModified);
-  const mimeType = stringValue(record.mime_type) ?? stringValue(record.mimeType);
+function rawItemFromGmailMessage(message2, account, options = {}) {
+  const headers = headersFromPart(message2.payload);
+  const subject = headers.get("subject") ?? "(no subject)";
+  const rawFrom = headers.get("from") ?? "";
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
+  const date = parsedDate(headers.get("date")) ?? internalDateIso(message2.internalDate);
+  const metadataOnly = options.metadataOnly === true;
+  const attachments = gmailAttachmentInventory(message2.payload);
+  const text2 = metadataOnly ? "" : extractMessageText(message2) || (attachments.lines.length > 0 ? attachments.lines.join(`
+`) : `Subject: ${subject}`);
+  const fetchedAt = new Date().toISOString();
   return {
-    tag,
-    id,
-    name,
-    ...pathDisplay ? { pathDisplay } : {},
-    ...pathLower ? { pathLower } : {},
-    ...rev ? { rev } : {},
-    ...contentHash ? { contentHash } : {},
-    ...size !== undefined ? { size } : {},
-    ...clientModified ? { clientModified } : {},
-    ...serverModified ? { serverModified } : {},
-    ...mimeType ? { mimeType } : {},
-    ...sharingInfo ? { sharingInfo } : {}
-  };
-}
-function sharingInfoFromDropboxJson(record) {
-  const value = record.sharing_info ?? record.sharingInfo;
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return;
-  const sharing = value;
-  const sharedFolderId = stringValue(sharing.shared_folder_id) ?? stringValue(sharing.sharedFolderId);
-  const parentSharedFolderId = stringValue(sharing.parent_shared_folder_id) ?? stringValue(sharing.parentSharedFolderId);
-  const namespaceId = stringValue(sharing.namespace_id) ?? stringValue(sharing.namespaceId);
-  if (Object.keys(sharing).length === 0)
-    return;
-  return {
-    ...sharedFolderId ? { sharedFolderId } : {},
-    ...parentSharedFolderId ? { parentSharedFolderId } : {},
-    ...namespaceId ? { namespaceId } : {}
-  };
-}
-function normalizedTag(value) {
-  return value === "file" || value === "folder" || value === "deleted" ? value : undefined;
-}
-function stringValue(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-function numberValue(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-function parseJsonObject2(text2, label) {
-  let parsed;
-  try {
-    parsed = JSON.parse(text2);
-  } catch {
-    throw new Error(`${label} returned invalid JSON.`);
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`${label} returned a non-object JSON payload.`);
-  }
-  return parsed;
-}
-function required(value, label) {
-  const normalized = value.trim();
-  if (!normalized)
-    throw new Error(`${label} is required.`);
-  return normalized;
-}
-var DEFAULT_DROPBOX_MAX_RETRIES = 3, MAX_DROPBOX_RETRY_DELAY_MS = 30000, DROPBOX_METADATA_REQUEST_TIMEOUT_MS = 60000, DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS, DropboxApiError, DropboxPathNotFoundError, DropboxCursorResetError, DropboxRateLimitError;
-var init_provider_client = __esm(() => {
-  init_http_timeout();
-  DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
-  DropboxApiError = class DropboxApiError extends Error {
-    status;
-    tag;
-    constructor(message2, status, tag) {
-      super(message2);
-      this.name = "DropboxApiError";
-      this.status = status;
-      this.tag = tag;
-    }
-  };
-  DropboxPathNotFoundError = class DropboxPathNotFoundError extends DropboxApiError {
-    kind = "dropbox_path_not_found";
-    constructor() {
-      super("Dropbox metadata path was not found (409/path/not_found).", 409, "path");
-      this.name = "DropboxPathNotFoundError";
-    }
-  };
-  DropboxCursorResetError = class DropboxCursorResetError extends DropboxApiError {
-    kind = "dropbox_cursor_reset";
-    constructor(status = 409) {
-      super(`Dropbox metadata cursor was reset by the provider (${status}/reset); the traversal must restart.`, status, "reset");
-      this.name = "DropboxCursorResetError";
-    }
-  };
-  DropboxRateLimitError = class DropboxRateLimitError extends DropboxApiError {
-    kind = "dropbox_rate_limited";
-    retryAfterMs;
-    constructor(options = {}) {
-      const status = options.status ?? 429;
-      super(`Dropbox metadata API rate limited (${status})` + (options.retryAfterMs !== undefined ? `; retry after ${Math.ceil(options.retryAfterMs / 1000)}s.` : "."), status, options.tag);
-      this.name = "DropboxRateLimitError";
-      this.retryAfterMs = options.retryAfterMs;
-    }
-  };
-});
-
-// src/workers/dropbox-files/connector.ts
-var init_connector = __esm(() => {
-  init_credential_broker();
-  init_provider_client();
-});
-
-// src/core/local-model-policy.ts
-function isCloudForwardingModelId(modelId) {
-  const trimmed = modelId.trim().toLowerCase();
-  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
-  const colon = lastSegment.lastIndexOf(":");
-  if (colon < 0)
-    return false;
-  const tag = lastSegment.slice(colon + 1);
-  return tag === "cloud" || tag.endsWith("-cloud");
-}
-function assertLocalModelIdNotCloudForwarding(label, modelId) {
-  if (!isCloudForwardingModelId(modelId))
-    return;
-  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
-}
-var init_local_model_policy = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/zkapi-consult-settings.ts
-import { readFileSync as readFileSync13, statSync as statSync6 } from "node:fs";
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
-function sovereigntyPolicyPath(env = process.env) {
-  return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim() || defaultSovereigntyConfigPath(env);
-}
-function refreshZkapiPortsFromPolicyFile(env = process.env) {
-  let path;
-  try {
-    path = sovereigntyPolicyPath(env);
-  } catch {
-    policyFile.seen = undefined;
-    policyFile.unreadable = "the sovereignty settings (layout discovery refused)";
-    return;
-  }
-  let stamp;
-  try {
-    const stat2 = statSync6(path);
-    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      policyFile.seen = `${path}:absent`;
-      policyFile.unreadable = undefined;
-    } else {
-      policyFile.seen = undefined;
-      policyFile.unreadable = path;
-    }
-    return;
-  }
-  if (policyFile.seen === stamp && policyFile.unreadable === undefined)
-    return;
-  try {
-    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync13(path, "utf8")));
-    for (const port of ports)
-      zkapiDaemonPorts.add(port);
-    policyFile.seen = stamp;
-    policyFile.unreadable = undefined;
-  } catch {
-    policyFile.seen = undefined;
-    policyFile.unreadable = path;
-  }
-}
-function zkapiPortsInPolicy(parsed) {
-  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
-  if (!record)
-    throw new Error("not a policy object");
-  const inner = record.sovereignty && typeof record.sovereignty === "object" ? record.sovereignty : record;
-  const profiles = inner.modelProfiles;
-  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles))
-    throw new Error("policy has no modelProfiles");
-  const ports = [];
-  for (const profile of Object.values(profiles)) {
-    if (!profile || typeof profile !== "object")
-      throw new Error("malformed profile");
-    const entry = profile;
-    if (entry.provider !== "zkapi")
-      continue;
-    const port = loopbackPort(typeof entry.baseUrl === "string" ? entry.baseUrl : undefined);
-    if (port === undefined)
-      throw new Error("zkapi profile without a loopback baseUrl");
-    ports.push(port);
-  }
-  return ports;
-}
-function endpointPort(parsed) {
-  return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
-}
-function assertNotZkapiDaemonEndpoint(url, label) {
-  refreshZkapiPortsFromPolicyFile();
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-    return;
-  const port = endpointPort(parsed);
-  const local = loopbackPort(url) !== undefined;
-  if (local && policyFile.unreadable) {
-    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} is a local endpoint, and the sovereignty policy at ${policyFile.unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, policyFile.unreadable);
-  }
-  if (!zkapiDaemonPorts.has(port))
-    return;
-  if (local) {
-    throw new ZkapiDaemonEndpointRefusal("daemon_port", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
-  }
-  if (!isIP(parsed.hostname.replace(/^\[|\]$/g, ""))) {
-    throw new ZkapiDaemonEndpointRefusal("hostname_on_daemon_port", `${label} names a host on port ${port}, a zkAPI daemon port; a host name could point at this machine.`);
-  }
-}
-async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
-  assertNotZkapiDaemonEndpoint(url, label);
-  const unreadable = policyFile.unreadable;
-  if (!unreadable)
-    return;
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-    return;
-  const host = parsed.hostname.replace(/^\[|\]$/g, "");
-  if (isIP(host))
-    return;
-  const port = endpointPort(parsed);
-  const refuse = () => {
-    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} may be a local endpoint, and the sovereignty policy at ${unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, unreadable);
-  };
-  let addresses;
-  try {
-    addresses = await Promise.race([
-      lookupAll(host),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("lookup timed out")), 2000).unref?.())
-    ]);
-  } catch {
-    return refuse();
-  }
-  if (addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined))
-    refuse();
-}
-async function defaultLookupAll(hostname) {
-  return (await lookup(hostname, { all: true })).map((entry) => entry.address);
-}
-function refusalSuggestion(reason, policyPath) {
-  if (reason === "policy_unreadable") {
-    return `Fix or remove the sovereignty policy file at ${policyPath ?? "its configured path"}; until it can be read, Olympus refuses every local model endpoint.`;
-  }
-  if (reason === "hostname_on_daemon_port") {
-    return "Use a numeric address: a cloud endpoint on its own port, or 127.0.0.1 for a local model, which must then not share a zkAPI daemon port.";
-  }
-  return "This address is the zkAPI daemon, which only carries consults. Point this model at a local model server on another port.";
-}
-function isZkapiDaemonEndpointRefusal(error) {
-  return error instanceof ZkapiDaemonEndpointRefusal;
-}
-function loopbackPort(baseUrl) {
-  if (!baseUrl)
-    return;
-  let url;
-  try {
-    url = new URL(baseUrl);
-  } catch {
-    return;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:" || !isLoopbackHost(url.hostname))
-    return;
-  if (url.port)
-    return Number(url.port);
-  return url.protocol === "https:" ? 443 : 80;
-}
-function isLoopbackHost(hostname) {
-  const host = hostname.toLowerCase().replace(/\.$/, "");
-  if (host === "localhost" || host.endsWith(".localhost"))
-    return true;
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (v4)
-    return Number(v4[1]) === 127 || host === "0.0.0.0";
-  if (!host.startsWith("[") || !host.endsWith("]"))
-    return false;
-  const words = ipv6Words(host.slice(1, -1));
-  if (!words)
-    return false;
-  if (words.slice(0, 7).every((word) => word === 0) && (words[7] === 1 || words[7] === 0))
-    return true;
-  const mapped = words.slice(0, 5).every((word) => word === 0) && (words[5] === 65535 || words[5] === 0);
-  return mapped && (words[6] >> 8 === 127 || words[6] === 0 && words[7] === 0);
-}
-function ipv6Words(text2) {
-  let body = text2;
-  const tail = [];
-  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(body);
-  if (dotted) {
-    const bytes = dotted.slice(1).map(Number);
-    if (bytes.some((byte) => byte > 255))
-      return;
-    tail.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
-    body = text2.slice(0, dotted.index);
-    if (!body.endsWith("::"))
-      body = body.replace(/:$/, "");
-  }
-  const halves = body.split("::");
-  if (halves.length > 2)
-    return;
-  const parse2 = (part) => part ? part.split(":").map((word) => parseInt(word, 16)) : [];
-  const head = parse2(halves[0] ?? "");
-  const rest = halves.length === 2 ? parse2(halves[1] ?? "") : [];
-  if ([...head, ...rest].some((word) => Number.isNaN(word) || word < 0 || word > 65535))
-    return;
-  const fill = 8 - head.length - rest.length - tail.length;
-  if (fill < 0 || halves.length === 1 && fill !== 0)
-    return;
-  return [...head, ...Array(fill).fill(0), ...rest, ...tail];
-}
-var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, DEFAULTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
-var init_zkapi_consult_settings = __esm(() => {
-  init_owner_config_read();
-  init_operation_error();
-  ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
-  DEFAULTS = {
-    tor: "per_consult",
-    torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
-    timeoutMs: 6 * 60 * 1000,
-    torBootstrapTimeoutMs: 210 * 1000,
-    daemonReadyTimeoutMs: 120 * 1000,
-    policyWarmTimeoutMs: 180 * 1000,
-    settleTimeoutMs: 300 * 1000,
-    maxResponseBytes: 256 * 1024
-  };
-  INTEGER_BOUNDS = {
-    torSocksPort: [1024, 65535],
-    dailyRequestCap: [1, 1e6],
-    timeoutMs: [30000, 30 * 60000],
-    torBootstrapTimeoutMs: [1e4, 10 * 60000],
-    daemonReadyTimeoutMs: [5000, 10 * 60000],
-    policyWarmTimeoutMs: [5000, 10 * 60000],
-    settleTimeoutMs: [5000, 30 * 60000],
-    maxResponseBytes: [1024, 4 * 1024 * 1024]
-  };
-  SETTINGS_KEYS = new Set([
-    ...Object.keys(INTEGER_BOUNDS),
-    "tor",
-    "fundingDate",
-    "depositUsd",
-    "acknowledgements",
-    "dailySpendCapUsd",
-    "daemonExecutable",
-    "torExecutable"
-  ]);
-  zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
-  policyFile = { seen: undefined, unreadable: undefined };
-  ZkapiDaemonEndpointRefusal = class ZkapiDaemonEndpointRefusal extends OperationError {
-    reason;
-    constructor(reason, message2, policyPath) {
-      super("config_error", message2, refusalSuggestion(reason, policyPath));
-      this.name = "ZkapiDaemonEndpointRefusal";
-      this.reason = reason;
-    }
-  };
-});
-
-// src/core/model-transport.ts
-function isModelEndpointRedirectError(error) {
-  return error instanceof ModelEndpointRedirectError;
-}
-async function fetchModelEndpoint(fetchImpl, url, init) {
-  await assertNotZkapiDaemonEndpointResolved(url, "Model endpoint");
-  let response;
-  try {
-    response = await fetchImpl(url, { ...init, redirect: "error" });
-  } catch (error) {
-    if (isFetchRedirectRefusal(error))
-      throw new ModelEndpointRedirectError;
-    throw error;
-  }
-  if (isRedirectResponse(response)) {
-    discardBody(response);
-    throw new ModelEndpointRedirectError(response.status >= 300 && response.status <= 399 ? response.status : undefined);
-  }
-  return response;
-}
-function isRedirectResponse(response) {
-  return response.type === "opaqueredirect" || response.redirected === true || response.status >= 300 && response.status <= 399;
-}
-function discardBody(response) {
-  try {
-    const cancelled = response.body?.cancel();
-    if (cancelled && typeof cancelled.catch === "function") {
-      cancelled.catch(() => {
-        return;
-      });
-    }
-  } catch {}
-}
-function isFetchRedirectRefusal(error) {
-  if (error instanceof ModelEndpointRedirectError)
-    return true;
-  if (!(error instanceof Error))
-    return false;
-  if (error.code === "UnexpectedRedirect")
-    return true;
-  const cause = error.cause;
-  const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
-  return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
-}
-var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus refuses redirects on model transports and did not use the answer.", ModelEndpointRedirectError;
-var init_model_transport = __esm(() => {
-  init_zkapi_consult_settings();
-  ModelEndpointRedirectError = class ModelEndpointRedirectError extends Error {
-    code = "model_endpoint_redirect";
-    status;
-    constructor(status) {
-      super(MODEL_ENDPOINT_REDIRECT_MESSAGE);
-      this.name = "ModelEndpointRedirectError";
-      this.status = status;
-    }
-  };
-});
-
-// src/workers/source-index/embedding-identity.ts
-function embeddingProviderFamily(providerKind) {
-  return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
-}
-function declaredEmbeddingProviderFamily(providerKind) {
-  return EMBEDDING_PROVIDER_FAMILIES.find((family) => family.providerKind === providerKind);
-}
-function buildEmbeddingEpoch(input) {
-  const family = embeddingProviderFamily(input.provider);
-  const dimension = family.dimensionToken === PROVIDER_REPORTED_DIMENSION_TOKEN ? PROVIDER_REPORTED_DIMENSION_TOKEN : declaredDimensionToken(input.dimension);
-  return `${input.backend}:${family.epochProviderToken}:${input.modelId}:${dimension}`;
-}
-function declaredDimensionToken(dimension) {
-  return dimension !== undefined && Number.isSafeInteger(dimension) && dimension >= 1 ? String(dimension) : PROVIDER_REPORTED_DIMENSION_TOKEN;
-}
-function canonicalIdentity(input) {
-  return { ...input, epochId: buildEmbeddingEpoch(input) };
-}
-function canonicalEmbeddingIdentityForModel(modelId) {
-  return CANONICAL_EMBEDDING_IDENTITIES.find((identity) => identity.modelId === modelId);
-}
-function canonicalEmbeddingDimension(modelId) {
-  return canonicalEmbeddingIdentityForModel(modelId)?.dimension;
-}
-function resolveEmbeddingEpoch(input) {
-  const derived = buildEmbeddingEpoch(input);
-  const override = input.epochOverride?.trim();
-  if (!override || override === derived)
-    return derived;
-  if (!declaredEmbeddingProviderFamily(input.provider))
-    return override;
-  const [overrideBackend, , overrideModelId] = override.split(":");
-  if ((overrideBackend === "local" || overrideBackend === "cloud") && overrideBackend !== input.backend) {
-    throw refusedEmbeddingEpoch(override, input, `it names the ${overrideBackend} backend`);
-  }
-  if (overrideModelId !== undefined && overrideModelId !== input.modelId && canonicalEmbeddingIdentityForModel(overrideModelId)) {
-    throw refusedEmbeddingEpoch(override, input, `it names the model ${overrideModelId}`);
-  }
-  const contaminated = contaminatedEmbeddingEpoch(input.modelId, override);
-  if (contaminated) {
-    throw refusedEmbeddingEpoch(override, input, `it is a known contaminated epoch (${contaminated.origin})`);
-  }
-  return override;
-}
-function refusedEmbeddingEpoch(override, input, because) {
-  return new OperationError("config_error", `Embedding epoch "${override}" cannot label ${input.backend} provider ${input.provider} ` + `model ${input.modelId}: ${because}.`, "An epoch names the vectors a specific provider minted. Configure a per-provider epoch " + "instead of sharing one variable across the local and cloud embedding lanes.");
-}
-function contaminatedEmbeddingEpoch(modelId, epochId) {
-  return KNOWN_CONTAMINATED_EMBEDDING_EPOCHS.find((entry) => entry.modelId === modelId && entry.epochId === epochId);
-}
-var PROVIDER_REPORTED_DIMENSION_TOKEN = "provider-reported", EMBEDDING_PROVIDER_FAMILIES, CANONICAL_EMBEDDING_IDENTITIES, KNOWN_CONTAMINATED_EMBEDDING_EPOCHS;
-var init_embedding_identity = __esm(() => {
-  init_operation_error();
-  EMBEDDING_PROVIDER_FAMILIES = [
-    {
-      providerKind: "local-openai-compatible",
-      epochProviderToken: "openai-compatible",
-      dimensionToken: "declared"
+    identity: {
+      family: "email",
+      provider: "gmail",
+      accountScope: account,
+      providerItemId: message2.id,
+      ...message2.threadId ? { providerThreadId: message2.threadId } : {},
+      localItemId: `${account}:${message2.id}`,
+      ...message2.historyId ? { sourceVersion: message2.historyId } : {}
     },
-    {
-      providerKind: "google-gemini",
-      epochProviderToken: "google-gemini",
-      dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN
-    },
-    {
-      providerKind: "venice",
-      epochProviderToken: "venice",
-      dimensionToken: "declared"
-    },
-    {
-      providerKind: "built-in",
-      epochProviderToken: "built-in",
-      dimensionToken: "declared"
-    }
-  ];
-  CANONICAL_EMBEDDING_IDENTITIES = [
-    canonicalIdentity({
-      provider: "local-openai-compatible",
-      modelId: "secure-local-qwen3-embed",
-      backend: "local",
-      dimension: 2560
+    mimeType: "message/rfc822",
+    content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
+    metadata: Object.freeze({
+      title: subject,
+      subject,
+      from,
+      ...date ? { authoredAt: date } : {},
+      ...message2.internalDate ? { internalDate: message2.internalDate } : {},
+      ...message2.historyId ? { historyId: message2.historyId } : {},
+      ...message2.snippet && !metadataOnly ? { snippet: message2.snippet } : {},
+      ...metadataOnly ? namesOnlyContentScopeMetadata() : {},
+      labels: message2.labelIds ?? [],
+      attachmentCount: attachments.count,
+      attachmentBytesDeclared: attachments.bytes,
+      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
+      attachmentsNotIngested: attachments.count,
+      locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message2.id)}`,
+      contentHash: hashString(`${message2.historyId ?? ""}:${metadataOnly ? "metadata_only" : text2}`)
     }),
-    canonicalIdentity({
-      provider: "google-gemini",
-      modelId: "gemini-embedding-2",
-      backend: "cloud",
-      dimension: 3072
-    }),
-    canonicalIdentity({
-      provider: "venice",
-      modelId: "text-embedding-qwen3-8b",
-      backend: "cloud",
-      dimension: 4096
-    }),
-    canonicalIdentity({
-      provider: "built-in",
-      modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
-      backend: "local",
-      dimension: 768
-    }),
-    canonicalIdentity({
-      provider: "built-in",
-      modelId: "embeddinggemma-2-litert-24d962e",
-      backend: "local",
-      dimension: 768
-    })
-  ];
-  KNOWN_CONTAMINATED_EMBEDDING_EPOCHS = [
-    {
-      modelId: "secure-local-qwen3-embed",
-      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:2560",
-      origin: "code default before the provider token was pinned (dimension configured)"
-    },
-    {
-      modelId: "secure-local-qwen3-embed",
-      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
-      origin: "code default before the provider token was pinned (dimension unconfigured)"
-    },
-    {
-      modelId: "gemini-embedding-2",
-      epochId: "local:openai-compatible:secure-local-qwen3-embed:2560",
-      origin: "provider-blind OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH stamped onto a Gemini provider"
-    },
-    {
-      modelId: "gemini-embedding-2",
-      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
-      origin: "provider-blind local code-default epoch stamped onto a Gemini provider"
-    },
-    {
-      modelId: "gemini-embedding-2",
-      epochId: "cloud:google-gemini:gemini-embedding-2:3072",
-      origin: "derived Gemini epoch drift after output dimensionality became required (2026-08-17)"
-    }
-  ];
-});
-
-// src/workers/source-index/embeddings.ts
-import { Buffer as Buffer2 } from "node:buffer";
-import { createHash as createHash4 } from "node:crypto";
-import { lookup as lookup2 } from "node:dns/promises";
-import { request as httpsRequest } from "node:https";
-import { isIP as isIP2 } from "node:net";
-function isApprovedSecureSourceEmbeddingProvider(provider) {
-  return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
-}
-function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
-  const tries = `${attempts} attempt${attempts === 1 ? "" : "s"}`;
-  if (reason === 429) {
-    return {
-      message: `${provider} source embedding endpoint refused the request with HTTP 429 (rate limit or quota) after ${tries}.`,
-      suggestion: "The provider is throttling this account or its quota may be exhausted. Check the provider quota and billing before retrying; the key and model are not implicated."
-    };
-  }
-  if (reason === "network") {
-    return {
-      message: `${provider} source embedding endpoint could not be reached (network error after ${tries}).`,
-      suggestion: "A connection or DNS failure, not a key or model problem. Retry the same request shortly; if it persists, check the Gateway host network."
-    };
-  }
-  if (reason === "timeout") {
-    return {
-      message: `${provider} source embedding endpoint did not answer within its ${budgetMs}ms budget (${tries}).`,
-      suggestion: "The provider was slow or unavailable, not misconfigured. Retry the same request shortly."
-    };
-  }
-  return {
-    message: `${provider} source embedding endpoint is temporarily unavailable (HTTP ${reason} after ${tries}).`,
-    suggestion: "This is a transient provider outage, not a key or model problem. Retry the same request in a few seconds."
+    fetchedAt
   };
 }
-function abortableDelay(ms, signal) {
-  return new Promise((resolve6) => {
-    if (signal.aborted)
-      return resolve6();
-    const timer = setTimeout(done, ms);
-    function done() {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", done);
-      resolve6();
-    }
-    signal.addEventListener("abort", done, { once: true });
-  });
+function gmailAttachmentInventory(part) {
+  if (!part)
+    return { count: 0, bytes: 0, lines: [] };
+  const filename = part.filename?.trim();
+  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
+  let count = filename ? 1 : 0;
+  let bytes = size ?? 0;
+  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
+  for (const child of part.parts ?? []) {
+    const nested = gmailAttachmentInventory(child);
+    count += nested.count;
+    bytes += nested.bytes;
+    lines.push(...nested.lines);
+  }
+  return { count, bytes, lines };
 }
-function retryAfterMs(response, nowMs = Date.now()) {
-  const value = response.headers.get("retry-after")?.trim();
+function gmailAttachmentLine(filename, part, size) {
+  const details = [
+    part.mimeType?.trim() || undefined,
+    size !== undefined ? `${size} bytes` : undefined,
+    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined
+  ].filter((value) => Boolean(value));
+  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
+}
+function metadataCount(metadata, key) {
+  const value = metadata[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+function extractMessageText(message2) {
+  const plain = [];
+  const html = [];
+  collectPartText(message2.payload, plain, html);
+  const selected = plain.length > 0 ? plain.join(`
+
+`) : html.map(stripHtml).join(`
+
+`);
+  return [headersSummary(message2.payload), message2.snippet, selected].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
+
+`);
+}
+function collectPartText(part, plain, html) {
+  if (!part)
+    return;
+  if (part.filename?.trim())
+    return;
+  const decoded = part.body?.data ? decodeBase64Url(part.body.data) : undefined;
+  if (decoded && part.mimeType === "text/plain")
+    plain.push(decoded);
+  if (decoded && part.mimeType === "text/html")
+    html.push(decoded);
+  for (const child of part.parts ?? [])
+    collectPartText(child, plain, html);
+}
+function headersFromPart(part) {
+  const headers = new Map;
+  for (const header of part?.headers ?? []) {
+    const name = header.name?.trim().toLowerCase();
+    const value = header.value?.trim();
+    if (name && value)
+      headers.set(name, value);
+  }
+  return headers;
+}
+function headersSummary(part) {
+  const headers = headersFromPart(part);
+  return [
+    headers.get("subject") ? `Subject: ${headers.get("subject")}` : undefined,
+    headers.get("from") ? `From: ${headers.get("from")}` : undefined,
+    headers.get("to") ? `To: ${headers.get("to")}` : undefined,
+    headers.get("date") ? `Date: ${headers.get("date")}` : undefined
+  ].filter(Boolean).join(`
+`);
+}
+function decodeBase64Url(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(normalized, "base64").toString("utf8");
+}
+function stripHtml(value) {
+  return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+function parsedDate(value) {
   if (!value)
     return;
-  if (/^\d+$/.test(value))
-    return Number(value) * 1000;
-  const at = Date.parse(value);
-  return Number.isNaN(at) ? undefined : Math.max(0, at - nowMs);
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
 }
-async function discardBody2(response) {
-  await response.body?.cancel().catch(() => {
+function internalDateIso(value) {
+  if (!value)
     return;
-  });
+  const ms = Number.parseInt(value, 10);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
 }
-async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
-  const timedOut = (attempts) => new TransientSourceEmbeddingError(provider, "timeout", attempts, budget.budgetMs);
-  let attempt = 0;
-  for (;; ) {
-    let reason;
-    let waitMs;
-    try {
-      const response = await fetchModelEndpoint(fetchImpl, url, init);
-      attempt += 1;
-      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status))
-        return response;
-      reason = response.status;
-      const backoffMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
-      const requestedMs = retryAfterMs(response);
-      await discardBody2(response);
-      if (backoffMs !== undefined) {
-        waitMs = requestedMs ?? backoffMs;
-        if (Date.now() + waitMs >= budget.deadlineAtMs)
-          waitMs = undefined;
-      }
-    } catch (error) {
-      if (error instanceof TransientSourceEmbeddingError)
-        throw error;
-      if (isZkapiDaemonEndpointRefusal(error))
-        throw error;
-      if (isModelEndpointRedirectError(error)) {
-        throw new OperationError("source_index_error", `${provider} source embedding endpoint answered with a redirect, which is refused.`, error.message);
-      }
-      if (init.signal.aborted)
-        throw timedOut(attempt + 1);
-      attempt += 1;
-      reason = "network";
-      waitMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
-    }
-    if (waitMs === undefined) {
-      throw new TransientSourceEmbeddingError(provider, reason, attempt, budget.budgetMs);
-    }
-    if (init.signal.aborted)
-      throw timedOut(attempt);
-    await abortableDelay(waitMs, init.signal);
-    if (init.signal.aborted)
-      throw timedOut(attempt);
-  }
+function normalizeGmailMaxMessages(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
+  return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-
-class GeminiSourceEmbeddingProvider {
-  provider = "google-gemini";
-  modelId;
-  dimension;
-  configHash;
-  epochId;
-  backend = "cloud";
-  lastMediaPartsSkipped = 0;
-  mediaPartsSkipped = 0;
-  apiKey;
-  baseUrl;
-  timeoutMs;
-  fetchImpl;
-  outputDimensionality;
-  maxMediaPerInput;
-  maxMediaBytes;
-  mediaFetchTimeoutMs;
-  lookupIpAddresses;
-  mediaFetchImpl;
-  maxMediaRedirects;
-  constructor(options) {
-    const apiKey = options.apiKey.trim();
-    if (!apiKey) {
-      throw new OperationError("config_error", "Gemini source embedding API key must be configured.");
-    }
-    this.apiKey = apiKey;
-    this.modelId = normalizeGeminiModelId(options.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL);
-    this.baseUrl = (options.baseUrl ?? DEFAULT_GEMINI_API_BASE_URL).replace(/\/+$/, "");
-    this.outputDimensionality = normalizeOutputDimensionality(options.outputDimensionality);
-    this.dimension = this.outputDimensionality ?? 0;
-    this.timeoutMs = options.timeoutMs ?? 30000;
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.maxMediaPerInput = normalizeMaxMediaPerInput(options.maxMediaPerInput);
-    this.maxMediaBytes = normalizeMaxMediaBytes(options.maxMediaBytes);
-    this.mediaFetchTimeoutMs = normalizeMediaFetchTimeoutMs(options.mediaFetchTimeoutMs);
-    this.lookupIpAddresses = options.lookupIpAddresses ?? defaultLookupIpAddresses;
-    this.mediaFetchImpl = options.mediaFetchImpl ?? defaultMediaFetch;
-    this.maxMediaRedirects = normalizeMaxMediaRedirects(options.maxMediaRedirects);
-    this.epochId = resolveEmbeddingEpoch({
-      provider: this.provider,
-      modelId: this.modelId,
-      dimension: this.outputDimensionality,
-      backend: this.backend,
-      ...options.epochId ? { epochOverride: options.epochId } : {}
-    });
-    this.configHash = hashString(JSON.stringify({
-      provider: this.provider,
-      model: this.modelId,
-      baseUrl: this.baseUrl,
-      outputDimensionality: this.outputDimensionality ?? "provider-reported",
-      maxMediaPerInput: this.maxMediaPerInput,
-      maxMediaBytes: this.maxMediaBytes,
-      mediaFetchTimeoutMs: this.mediaFetchTimeoutMs,
-      maxMediaRedirects: this.maxMediaRedirects,
-      backend: this.backend
-    }));
-  }
-  async embed(inputs, options) {
-    if (inputs.length === 0)
-      return [];
-    const controller = new AbortController;
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
-    try {
-      const modelPath = `models/${this.modelId}`;
-      let mediaPartsSkipped = 0;
-      const requests = await Promise.all(inputs.map(async (input) => {
-        const contentParts = await this.contentPartsForInput(input);
-        mediaPartsSkipped += contentParts.mediaPartsSkipped;
-        return {
-          model: modelPath,
-          content: {
-            parts: contentParts.parts
-          },
-          taskType: options.taskType,
-          ...options.taskType === "RETRIEVAL_DOCUMENT" && input.title ? { title: input.title } : {},
-          ...this.outputDimensionality !== undefined ? { outputDimensionality: this.outputDimensionality } : {}
-        };
-      }));
-      this.lastMediaPartsSkipped = mediaPartsSkipped;
-      this.mediaPartsSkipped += mediaPartsSkipped;
-      const response = await fetchEmbeddingResponse(this.fetchImpl, "Gemini", `${this.baseUrl}/${modelPath}:batchEmbedContents`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": this.apiKey
-        },
-        body: JSON.stringify({
-          requests
-        }),
-        signal: controller.signal
-      }, budget);
-      if (!response.ok) {
-        throw new OperationError("source_index_error", `Gemini source embedding endpoint returned HTTP ${response.status}.`, "Check the configured Gemini API key, model, and source-index embedding policy.");
-      }
-      const vectors = parseGeminiBatchEmbeddingResponse(await response.json());
-      if (vectors.length !== inputs.length) {
-        throw new OperationError("source_index_error", "Gemini source embedding endpoint returned the wrong number of embeddings.");
-      }
-      if (this.dimension === 0 && vectors[0]) {
-        this.dimension = vectors[0].length;
-      }
-      return vectors;
-    } catch (error) {
-      if (error instanceof OperationError)
-        throw error;
-      if (controller.signal.aborted)
-        throw new TransientSourceEmbeddingError("Gemini", "timeout", 1, this.timeoutMs);
-      throw new OperationError("source_index_error", "Gemini source embedding endpoint failed.", error instanceof Error ? error.message : "Check the configured cloud embedding provider.");
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  async contentPartsForInput(input) {
-    const parts = [{ text: input.text }];
-    const mediaInputs = input.media ?? [];
-    const media = mediaInputs.slice(0, this.maxMediaPerInput);
-    let mediaPartsSkipped = Math.max(0, mediaInputs.length - media.length);
-    for (const item of media) {
-      const part = await this.inlineMediaPart(item);
-      if (part) {
-        parts.push(part);
-      } else {
-        mediaPartsSkipped += 1;
-      }
-    }
-    return { parts, mediaPartsSkipped };
-  }
-  async inlineMediaPart(input) {
-    const url = parseSafeMediaUrl(input.url);
-    if (!url)
-      return;
-    const controller = new AbortController;
-    const timeout = setTimeout(() => controller.abort(), this.mediaFetchTimeoutMs);
-    try {
-      const response = await this.fetchPublicMedia(url, controller.signal);
-      if (!response)
-        return;
-      if (!response.ok)
-        return;
-      const contentLength = Number(response.headers.get("content-length") ?? 0);
-      if (contentLength > this.maxMediaBytes)
-        return;
-      const mimeType = normalizeImageMimeType(input.mimeType ?? response.headers.get("content-type"));
-      if (!mimeType)
-        return;
-      const bytes = await readCappedMediaBody(response, this.maxMediaBytes);
-      if (!bytes)
-        return;
-      if (bytes.byteLength === 0 || bytes.byteLength > this.maxMediaBytes)
-        return;
-      return {
-        inlineData: {
-          mimeType,
-          data: Buffer2.from(bytes).toString("base64")
-        }
-      };
-    } catch {
-      return;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  async fetchPublicMedia(initialUrl, signal) {
-    let url = initialUrl;
-    for (let redirects = 0;redirects <= this.maxMediaRedirects; redirects += 1) {
-      const validatedAddresses = await publicMediaFetchAddresses(url, this.lookupIpAddresses);
-      if (!validatedAddresses)
-        return;
-      const response = await this.mediaFetchImpl(url, {
-        validatedAddresses,
-        signal
-      });
-      if (!isRedirectStatus(response.status))
-        return response;
-      const location = response.headers.get("location");
-      if (!location)
-        return;
-      const nextUrl = parseSafeMediaUrl(location, url);
-      if (!nextUrl)
-        return;
-      url = nextUrl;
-    }
-    return;
-  }
-}
-
-class OpenAICompatibleSourceEmbeddingProvider {
-  provider;
-  modelId;
-  dimension;
-  configHash;
-  epochId;
-  backend;
-  baseUrl;
-  timeoutMs;
-  fetchImpl;
-  apiKeyProvider;
-  queryInstructionPrefix;
-  sendDimensions;
-  preflight;
-  requireIndexedResponses;
-  requireDimension;
-  constructor(options) {
-    this.provider = options.provider ?? "local-openai-compatible";
-    this.backend = options.backend ?? "local";
-    this.baseUrl = this.backend === "cloud" ? normalizeVeniceSourceEmbeddingBaseUrl(options.baseUrl) : normalizeLocalSourceEmbeddingBaseUrl(options.baseUrl);
-    this.modelId = options.model.trim();
-    if (!this.modelId) {
-      throw new OperationError("config_error", "Local source embedding model must be configured.");
-    }
-    if (this.backend === "local") {
-      assertLocalModelIdNotCloudForwarding("Local source embedding model", this.modelId);
-    }
-    this.dimension = options.dimension ?? 0;
-    this.timeoutMs = options.timeoutMs ?? 30000;
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.apiKeyProvider = options.apiKeyProvider;
-    this.queryInstructionPrefix = options.queryInstructionPrefix?.trim() || undefined;
-    this.sendDimensions = options.sendDimensions === true;
-    this.preflight = options.preflight;
-    this.requireIndexedResponses = options.requireIndexedResponses === true;
-    this.requireDimension = options.requireDimension === true;
-    this.epochId = resolveEmbeddingEpoch({
-      provider: this.provider,
-      modelId: this.modelId,
-      dimension: this.dimension,
-      backend: this.backend,
-      ...options.epochId ? { epochOverride: options.epochId } : {}
-    });
-    this.configHash = hashString(JSON.stringify({
-      provider: this.provider,
-      baseUrl: this.baseUrl,
-      model: this.modelId,
-      dimension: this.dimension || "provider-reported",
-      backend: this.backend,
-      ...this.queryInstructionPrefix ? { queryInstructionPrefix: this.queryInstructionPrefix } : {},
-      ...this.sendDimensions ? { sendDimensions: true } : {},
-      ...this.requireIndexedResponses ? { requireIndexedResponses: true } : {},
-      ...this.requireDimension ? { requireDimension: true } : {}
-    }));
-  }
-  async embed(inputs, options) {
-    if (inputs.length === 0)
-      return [];
-    const controller = new AbortController;
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
-    try {
-      await this.preflight?.(controller.signal);
-      const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
-        method: "POST",
-        headers: this.requestHeaders(),
-        body: JSON.stringify({
-          model: this.modelId,
-          input: inputs.map((input) => this.formatInput(input, options.taskType)),
-          ...this.sendDimensions ? { dimensions: this.dimension } : {}
-        }),
-        signal: controller.signal
-      }, budget);
-      if (!response.ok) {
-        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned HTTP ${response.status}.`, "Check the configured source-index embedding endpoint, model, and credential.");
-      }
-      const vectors = parseOpenAICompatibleEmbeddingResponse(await response.json(), this.requireIndexedResponses);
-      if (vectors.length !== inputs.length) {
-        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned the wrong number of embeddings.`);
-      }
-      if (this.requireDimension && vectors.some((vector) => vector.length !== this.dimension)) {
-        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned a vector with the wrong dimension.`, `Expected ${this.dimension} finite values for model ${this.modelId}.`);
-      }
-      if (this.dimension === 0 && vectors[0]) {
-        this.dimension = vectors[0].length;
-      }
-      return vectors;
-    } catch (error) {
-      if (error instanceof OperationError)
-        throw error;
-      if (controller.signal.aborted)
-        throw new TransientSourceEmbeddingError(this.provider, "timeout", 1, this.timeoutMs);
-      throw new OperationError("source_index_error", `${this.provider} source embedding endpoint failed.`, error instanceof Error ? error.message : "Check the configured source-index embedding endpoint.");
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  formatInput(input, taskType) {
-    const text2 = [
-      input.title ? `Title: ${input.title}` : undefined,
-      input.text
-    ].filter((part) => Boolean(part)).join(`
-`);
-    return taskType === "RETRIEVAL_QUERY" && this.queryInstructionPrefix ? `${this.queryInstructionPrefix}
-Query:${text2}` : text2;
-  }
-  requestHeaders() {
-    const headers = new Headers({ "Content-Type": "application/json" });
-    const apiKey = this.apiKeyProvider?.()?.trim();
-    if (apiKey)
-      headers.set("Authorization", `Bearer ${apiKey}`);
-    return headers;
-  }
-}
-function cosineSimilarity(left, right) {
-  const length = Math.min(left.length, right.length);
-  let dot = 0;
-  let leftNorm = 0;
-  let rightNorm = 0;
-  for (let index = 0;index < length; index += 1) {
-    const l = left[index] ?? 0;
-    const r = right[index] ?? 0;
-    dot += l * r;
-    leftNorm += l * l;
-    rightNorm += r * r;
-  }
-  if (leftNorm === 0 || rightNorm === 0)
-    return 0;
-  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
-}
-function encodeEmbedding(vector, expectedDimension) {
-  if (vector.length !== expectedDimension) {
-    throw new OperationError("source_index_error", `Embedding dimension mismatch: expected ${expectedDimension}, received ${vector.length}.`);
-  }
-  const floats = new Float32Array(vector.length);
-  vector.forEach((value, index) => {
-    floats[index] = Number.isFinite(value) ? value : 0;
-  });
-  return new Uint8Array(floats.buffer);
-}
-function decodeEmbedding(value) {
-  let bytes;
-  if (value instanceof Uint8Array) {
-    bytes = value;
-  } else if (value instanceof ArrayBuffer) {
-    bytes = new Uint8Array(value);
-  } else if (ArrayBuffer.isView(value)) {
-    bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  } else {
-    throw new OperationError("source_index_error", "Stored source embedding payload was not a BLOB.");
-  }
-  const usableBytes = bytes.byteLength - bytes.byteLength % 4;
-  if (bytes.byteOffset % 4 !== 0) {
-    return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + usableBytes));
-  }
-  return new Float32Array(bytes.buffer, bytes.byteOffset, usableBytes / 4);
-}
-function parseGeminiBatchEmbeddingResponse(value) {
+function asRecord6(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("source_index_error", "Gemini embedding response must be a JSON object.");
-  }
-  const embeddings = value.embeddings;
-  if (!Array.isArray(embeddings)) {
-    throw new OperationError("source_index_error", "Gemini embedding response must include embeddings array.");
-  }
-  return embeddings.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new OperationError("source_index_error", `Gemini embeddings.${index} must be an object.`);
-    }
-    const values = item.values;
-    if (!Array.isArray(values) || !values.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
-      throw new OperationError("source_index_error", `Gemini embeddings.${index}.values must be a number array.`);
-    }
-    return values;
-  });
-}
-function parseOpenAICompatibleEmbeddingResponse(value, requireIndices = false) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("source_index_error", "Local source embedding response must be a JSON object.");
-  }
-  const data = value.data;
-  if (!Array.isArray(data)) {
-    throw new OperationError("source_index_error", "Local source embedding response must include data array.");
-  }
-  return data.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new OperationError("source_index_error", `Local source embedding data.${index} must be an object.`);
-    }
-    if (requireIndices && item.index !== index) {
-      throw new OperationError("source_index_error", `Venice source embedding data.${index}.index was missing or out of order.`);
-    }
-    const embedding = item.embedding;
-    if (!Array.isArray(embedding) || !embedding.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
-      throw new OperationError("source_index_error", `Local source embedding data.${index}.embedding must be a number array.`);
-    }
-    return embedding;
-  });
-}
-function normalizeMaxMediaPerInput(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MAX_MEDIA_PER_INPUT;
-  return Math.max(0, Math.min(Math.floor(value), MAX_MEDIA_PER_INPUT_LIMIT));
-}
-function normalizeMaxMediaBytes(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MAX_MEDIA_BYTES;
-  return Math.max(1, Math.floor(value));
-}
-function normalizeMediaFetchTimeoutMs(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MEDIA_FETCH_TIMEOUT_MS;
-  return Math.max(100, Math.floor(value));
-}
-function normalizeMaxMediaRedirects(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MAX_MEDIA_REDIRECTS;
-  return Math.max(0, Math.min(Math.floor(value), DEFAULT_MAX_MEDIA_REDIRECTS));
-}
-function normalizeImageMimeType(value) {
-  const mimeType = value?.split(";")[0]?.trim().toLowerCase();
-  if (!mimeType || !SUPPORTED_IMAGE_MIME_TYPES.has(mimeType))
-    return;
-  return mimeType;
-}
-function parseSafeMediaUrl(value, base) {
-  let url;
-  try {
-    url = base ? new URL(value, base) : new URL(value);
-  } catch {
-    return;
-  }
-  if (url.protocol !== "https:")
-    return;
-  return url;
-}
-function defaultMediaFetch(url, options) {
-  const address = options.validatedAddresses[0];
-  const family = address ? isIP2(address) : 0;
-  if (!address || !family || isPrivateOrReservedIp(address)) {
-    return Promise.resolve(new Response(null, { status: 403 }));
-  }
-  return new Promise((resolvePromise, rejectPromise) => {
-    const request = httpsRequest(url, {
-      method: "GET",
-      headers: MEDIA_FETCH_HEADERS,
-      lookup: (_hostname, _options, callback) => {
-        callback(null, address, family);
-      },
-      signal: options.signal
-    }, (message2) => {
-      resolvePromise(responseFromIncomingMessage(message2));
-    });
-    request.on("error", rejectPromise);
-    request.end();
-  });
-}
-function responseFromIncomingMessage(message2) {
-  const headers = new Headers;
-  for (const [name, value] of Object.entries(message2.headers)) {
-    if (Array.isArray(value)) {
-      for (const item of value)
-        headers.append(name, item);
-    } else if (value !== undefined) {
-      headers.set(name, String(value));
-    }
-  }
-  const status = message2.statusCode && message2.statusCode >= 100 && message2.statusCode <= 599 ? message2.statusCode : 502;
-  const body = status === 204 || status === 304 ? null : readableStreamFromIncomingMessage(message2);
-  return new Response(body, {
-    status,
-    headers,
-    ...message2.statusMessage ? { statusText: message2.statusMessage } : {}
-  });
-}
-async function readCappedMediaBody(response, maxBytes) {
-  if (!response.body) {
-    const bytes2 = new Uint8Array(await response.arrayBuffer());
-    return bytes2.byteLength > maxBytes ? undefined : bytes2;
-  }
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      if (!value)
-        continue;
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-      total += chunk.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel();
-        return;
-      }
-      chunks.push(chunk);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
-}
-function readableStreamFromIncomingMessage(message2) {
-  return new ReadableStream({
-    start(controller) {
-      message2.on("data", (chunk) => {
-        if (typeof chunk === "string") {
-          controller.enqueue(new TextEncoder().encode(chunk));
-          return;
-        }
-        controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
-      });
-      message2.on("end", () => controller.close());
-      message2.on("error", (error) => controller.error(error));
-    },
-    cancel() {
-      message2.destroy();
-    }
-  });
-}
-async function publicMediaFetchAddresses(url, lookupIpAddresses) {
-  const host = normalizedHostname(url);
-  if (host === "localhost" || host.endsWith(".local")) {
-    return;
-  }
-  if (isIP2(host))
-    return isPrivateOrReservedIp(host) ? undefined : [host];
-  let addresses;
-  try {
-    addresses = await lookupIpAddresses(host);
-  } catch {
-    return;
-  }
-  return addresses.length > 0 && addresses.every((address) => !isPrivateOrReservedIp(address)) ? addresses : undefined;
-}
-async function defaultLookupIpAddresses(hostname) {
-  const records = await lookup2(hostname, { all: true });
-  return records.map((record) => record.address);
-}
-function normalizedHostname(url) {
-  return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-}
-function isRedirectStatus(status) {
-  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
-}
-function isPrivateOrReservedIp(address) {
-  const normalized = address.replace(/^\[|\]$/g, "").toLowerCase();
-  const version = isIP2(normalized);
-  if (version === 4)
-    return isPrivateOrReservedIpv4(normalized);
-  if (version !== 6)
-    return true;
-  const mapped = ipv4FromMappedIpv6(normalized);
-  if (mapped)
-    return isPrivateOrReservedIpv4(mapped);
-  const firstSegment = Number.parseInt(normalized.split(":")[0] || "0", 16);
-  return normalized === "::" || normalized === "::1" || normalized.startsWith("2001:db8:") || firstSegment >= 64512 && firstSegment <= 65023 || firstSegment >= 65152 && firstSegment <= 65215 || firstSegment >= 65280 && firstSegment <= 65535;
-}
-function isPrivateOrReservedIpv4(address) {
-  const parts = address.split(".").map((part) => Number.parseInt(part, 10));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
-    return true;
-  const [a = 0, b = 0] = parts;
-  return a === 0 || a === 10 || a === 127 || a === 100 && b >= 64 && b <= 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 0 || a === 192 && b === 168 || a === 198 && (b === 18 || b === 19) || a === 198 && b === 51 || a === 203 && b === 0 || a >= 224;
-}
-function ipv4FromMappedIpv6(address) {
-  const words = expandIpv6Words(address);
-  if (!words || words.length !== 8)
-    return;
-  if (words.slice(0, 5).some((word) => word !== 0) || words[5] !== 65535) {
-    return;
-  }
-  const [high = 0, low = 0] = words.slice(6);
-  return [
-    high >> 8 & 255,
-    high & 255,
-    low >> 8 & 255,
-    low & 255
-  ].join(".");
-}
-function expandIpv6Words(address) {
-  const normalized = replaceDottedIpv4Tail(address);
-  if (!normalized)
-    return;
-  const parts = normalized.split("::");
-  if (parts.length > 2)
-    return;
-  const left = ipv6WordsFromPart(parts[0] ?? "");
-  const right = parts.length === 2 ? ipv6WordsFromPart(parts[1] ?? "") : [];
-  if (!left || !right)
-    return;
-  if (parts.length === 1)
-    return left.length === 8 ? left : undefined;
-  const missing = 8 - left.length - right.length;
-  if (missing < 1)
-    return;
-  return [
-    ...left,
-    ...Array.from({ length: missing }, () => 0),
-    ...right
-  ];
-}
-function replaceDottedIpv4Tail(address) {
-  const dotted = /(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address)?.[1];
-  if (!dotted)
-    return address;
-  const parts = dotted.split(".").map((part) => Number.parseInt(part, 10));
-  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
-    return;
-  const high = (parts[0] ?? 0) << 8 | (parts[1] ?? 0);
-  const low = (parts[2] ?? 0) << 8 | (parts[3] ?? 0);
-  return `${address.slice(0, -dotted.length)}${high.toString(16)}:${low.toString(16)}`;
-}
-function ipv6WordsFromPart(part) {
-  if (!part)
-    return [];
-  const words = part.split(":").map((segment) => {
-    if (!/^[0-9a-f]{1,4}$/i.test(segment))
-      return Number.NaN;
-    return Number.parseInt(segment, 16);
-  });
-  return words.every((word) => Number.isInteger(word) && word >= 0 && word <= 65535) ? words : undefined;
-}
-function normalizeGeminiModelId(value) {
-  const trimmed = value.trim();
-  return trimmed.startsWith("models/") ? trimmed.slice("models/".length) : trimmed;
-}
-function normalizeLocalSourceEmbeddingBaseUrl(value) {
-  let url;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new OperationError("config_error", "Local source embedding base URL must be a valid loopback HTTP(S) URL.");
-  }
-  const hostname = url.hostname.toLowerCase();
-  const localHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
-  if (!localHost) {
-    throw new OperationError("config_error", "secure_local source embeddings must use a local/private loopback endpoint.", "Use a loopback endpoint such as http://127.0.0.1:8000/v1 behind the approved local runtime path.");
-  }
-  return value.replace(/\/+$/, "");
-}
-function normalizeVeniceSourceEmbeddingBaseUrl(value) {
-  let url;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new OperationError("config_error", "Venice source embedding base URL must be a valid HTTPS URL.");
-  }
-  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "api.venice.ai" || url.port || url.username || url.password || url.search || url.hash || url.pathname.replace(/\/+$/, "") !== "/api/v1") {
-    throw new OperationError("config_error", "Venice source embeddings must use the approved Venice HTTPS endpoint.", "Use https://api.venice.ai/api/v1.");
-  }
-  return `${url.origin}/api/v1`;
-}
-function normalizeOutputDimensionality(value) {
-  if (value === undefined)
-    return;
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new OperationError("config_error", "Gemini embedding output dimensionality must be a positive integer.");
+    throw new Error(`${label} must be an object.`);
   }
   return value;
+}
+function stringValue(value) {
+  return typeof value === "string" ? value : "";
+}
+function optionalStringProp(record, key) {
+  const value = stringValue(record[key]).trim();
+  return value ? { [key]: value } : {};
+}
+function safeProviderDetail(value) {
+  return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString(value) {
   return createHash4("sha256").update(value).digest("hex");
 }
-var SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
-var init_embeddings = __esm(() => {
-  init_operation_error();
-  init_local_model_policy();
-  init_model_transport();
-  init_zkapi_consult_settings();
-  init_embedding_identity();
-  SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
-    failedIndexes;
-    reason;
-    disposition;
-    constructor(failedIndexes, reason, disposition = "failed") {
-      super(`${failedIndexes.length} embedding input(s) could not be embedded: ${reason}.`);
-      this.name = "SourceEmbeddingInputsFailedError";
-      this.failedIndexes = failedIndexes;
-      this.reason = reason;
-      this.disposition = disposition;
+var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+var init_gmail = __esm(() => {
+  init_olympus_layout();
+  init_mail_source_scope();
+  init_sender_rules();
+  init_credential_broker();
+  init_ingest_filter();
+  init_request_budget();
+  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
+});
+
+// src/workers/google-connectors/drive.ts
+import { createHash as createHash5 } from "node:crypto";
+
+class GoogleDriveSourceConnector {
+  id = GOOGLE_DRIVE_PROVIDER;
+  family = "file";
+  credentialBroker;
+  credentialHandle;
+  account;
+  fetchImpl;
+  apiBaseUrl;
+  defaultMaxFiles;
+  maxContentFiles;
+  maxTextBytes;
+  query;
+  requestBudget;
+  provenance;
+  maxRetries;
+  sleepImpl;
+  injectedClient;
+  client;
+  contentReads = 0;
+  contentReadFailures = 0;
+  itemsByLocalId = new Map;
+  exclusions;
+  scope;
+  ancestry;
+  constructor(options = {}) {
+    const env = options.env ?? process.env;
+    this.fetchImpl = options.fetch ?? fetch;
+    this.credentialBroker = options.credentialBroker ?? createEnvCredentialBroker({
+      env,
+      fetch: this.fetchImpl
+    });
+    this.credentialHandle = options.credentialHandle?.trim() || env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE?.trim() || "google_drive.personal";
+    this.account = options.account?.trim() || accountFromGoogleHandle(this.credentialHandle);
+    this.apiBaseUrl = options.apiBaseUrl?.replace(/\/+$/, "") || GOOGLE_DRIVE_API_BASE_URL;
+    this.defaultMaxFiles = normalizeDriveMaxFiles(options.maxFiles);
+    this.maxContentFiles = normalizeDriveMaxFiles(options.maxContentFiles ?? DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES);
+    this.maxTextBytes = normalizeMaxTextBytes(options.maxTextBytes);
+    this.query = options.query?.trim() || env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_QUERY?.trim() || undefined;
+    this.requestBudget = options.requestBudget;
+    this.provenance = sourceInvocationProvenance(options.provenance);
+    this.maxRetries = options.maxRetries;
+    this.sleepImpl = options.sleep;
+    this.injectedClient = options.apiClient;
+    this.exclusions = options.exclusions;
+    this.scope = options.scope;
+  }
+  async authenticate() {
+    await this.clientForRequest();
+  }
+  async* listItems(options = {}) {
+    const client = await this.clientForRequest();
+    let remaining = normalizeDriveMaxFiles(options.limit ?? this.defaultMaxFiles);
+    const resume = decodeDriveCursor(options.cursor);
+    const watermark = resume.watermark;
+    const query = this.queryForWatermark(watermark);
+    let highWater = resume.highWater;
+    let deferredFloor = resume.deferredFloor;
+    let pageToken = resume.pageToken;
+    const requestedPageTokens = new Set;
+    while (remaining > 0) {
+      const contentBudget = this.maxContentFiles - this.contentReads;
+      if (contentBudget <= 0)
+        break;
+      if (pageToken)
+        assertNewProviderPage2(requestedPageTokens, pageToken);
+      const page = await client.listFiles({
+        pageSize: Math.min(DEFAULT_GOOGLE_DRIVE_PAGE_SIZE, remaining, contentBudget),
+        ...pageToken ? { pageToken } : {},
+        query
+      });
+      const files = page.files.filter((file) => file.id);
+      const items = [];
+      let processedFiles = 0;
+      for (const file of files) {
+        if (items.length >= remaining)
+          break;
+        processedFiles += 1;
+        const read = await this.rawItemFromDriveFile(file);
+        if (read) {
+          this.itemsByLocalId.set(read.item.identity.localItemId, read.item);
+          items.push(read.item);
+        }
+        if (file.modifiedTime) {
+          if (!highWater || file.modifiedTime.localeCompare(highWater) > 0) {
+            highWater = file.modifiedTime;
+          }
+          if (read?.contentDeferred && (!deferredFloor || file.modifiedTime.localeCompare(deferredFloor) < 0)) {
+            deferredFloor = file.modifiedTime;
+          }
+        }
+      }
+      remaining -= items.length;
+      pageToken = page.nextPageToken;
+      const pageTruncated = processedFiles < files.length;
+      const done = !pageToken && !pageTruncated;
+      const promoted = promotedDriveWatermark(highWater ?? watermark, deferredFloor, watermark);
+      const nextCursor = done ? encodeDriveCursor(promoted ? { watermark: promoted } : {}) : encodeDriveCursor({
+        ...watermark ? { watermark } : {},
+        ...highWater ? { highWater } : {},
+        ...deferredFloor ? { deferredFloor } : {},
+        ...pageToken ? { pageToken } : {}
+      });
+      yield {
+        items,
+        ...nextCursor ? { nextCursor } : {},
+        done
+      };
+      if (done || !pageToken || items.length === 0)
+        break;
+    }
+  }
+  async fetchItem(localItemId) {
+    const item = this.itemsByLocalId.get(localItemId);
+    if (!item) {
+      throw new Error(`Google Drive connector cannot fetch unknown item ${hashString2(localItemId).slice(0, 16)}.`);
+    }
+    return item;
+  }
+  apiClientForTooling() {
+    return this.clientForRequest();
+  }
+  traversalStatus() {
+    return {
+      contentReads: this.contentReads,
+      contentReadCap: this.maxContentFiles,
+      contentReadFailures: this.contentReadFailures
+    };
+  }
+  requestBudgetStatus() {
+    return this.requestBudget?.status();
+  }
+  classificationSignals(item) {
+    const title = metadataString(item.metadata, "title") ?? metadataString(item.metadata, "name");
+    const path = metadataString(item.metadata, "pathDisplay");
+    const folderKeys = metadataStringArray(item.metadata, "folderAncestorIds");
+    return {
+      ...title ? { title } : {},
+      ...path ? { path } : {},
+      ...folderKeys.length > 0 ? { folderKeys } : {}
+    };
+  }
+  async rawItemFromDriveFile(file) {
+    const title = file.name ?? file.id;
+    const folderAncestorIds = await this.resolveFolderAncestry(file);
+    const metadata = Object.freeze({
+      title,
+      name: title,
+      mimeType: file.mimeType ?? "application/octet-stream",
+      ...file.webViewLink ? { locatorUri: file.webViewLink, url: file.webViewLink } : {},
+      ...file.size !== undefined && Number.isFinite(Number(file.size)) ? { sizeBytes: Number(file.size) } : {},
+      ...file.modifiedTime ?? file.createdTime ? { authoredAt: file.modifiedTime ?? file.createdTime } : {},
+      ...file.createdTime ? { createdAt: file.createdTime } : {},
+      ...file.modifiedTime ? { updatedAt: file.modifiedTime, serverModifiedAt: file.modifiedTime } : {},
+      ...file.driveId ? { driveId: file.driveId } : {},
+      ...file.parents ? { parents: file.parents } : {},
+      ...folderAncestorIds ? { folderAncestorIds } : {},
+      ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {}
+    });
+    if (!folderAncestorIds && this.scope)
+      return;
+    if (this.scope && !this.scope.allowsMetadata(folderAncestorIds ?? []))
+      return;
+    const excluded = this.exclusions?.evaluateMetadata(metadata).excluded === true;
+    const contentAllowed = !this.scope || this.scope.allowsContent(folderAncestorIds ?? []);
+    const read = excluded || !contentAllowed ? {} : this.contentReads >= this.maxContentFiles ? { deferred: true } : await this.tryReadText(file);
+    const text2 = read.text;
+    if (text2 !== undefined)
+      this.contentReads += 1;
+    return {
+      contentDeferred: read.deferred === true,
+      item: {
+        identity: {
+          family: "file",
+          provider: GOOGLE_DRIVE_PROVIDER,
+          accountScope: this.account,
+          providerItemId: file.id,
+          providerFileId: file.id,
+          localItemId: `${this.account}:${file.id}`,
+          ...file.version ? { sourceVersion: file.version } : {}
+        },
+        mimeType: file.mimeType ?? "application/octet-stream",
+        content: text2?.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
+        metadata: Object.freeze({
+          ...metadata,
+          ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString2(`${file.version ?? ""}:${text2 ?? title}`) }
+        }),
+        fetchedAt: new Date().toISOString()
+      }
+    };
+  }
+  async resolveFolderAncestry(file) {
+    if (this.exclusions?.identityActive !== true && !this.scope)
+      return;
+    const client = await this.clientForRequest();
+    this.ancestry ??= new GoogleDriveFolderAncestry(client);
+    return this.ancestry.resolve(file);
+  }
+  async tryReadText(file) {
+    const client = await this.clientForRequest();
+    try {
+      if (file.mimeType === GOOGLE_DOC_MIME_TYPE) {
+        return { text: await client.exportGoogleDocText(file.id, this.maxTextBytes) };
+      }
+      if (isDownloadableTextMime(file.mimeType, file.name) && withinTextByteCap(file.size, this.maxTextBytes)) {
+        return { text: await client.downloadTextFile(file.id, this.maxTextBytes) };
+      }
+    } catch (error) {
+      if (error instanceof GoogleRequestBudgetError)
+        throw error;
+      this.contentReadFailures += 1;
+      return { deferred: isRetryableDriveContentError(error) };
+    }
+    return {};
+  }
+  async clientForRequest() {
+    if (this.client)
+      return this.client;
+    if (this.injectedClient) {
+      this.client = this.requestBudget ? budgetedDriveApiClient(this.injectedClient, this.requestBudget, this.provenance) : this.injectedClient;
+      return this.client;
+    }
+    this.client = await this.restClient();
+    return this.client;
+  }
+  async restClient() {
+    const session = requireBearerTokenCredentialSession(await this.credentialBroker.issueSession({
+      handle: this.credentialHandle,
+      provider: GOOGLE_DRIVE_PROVIDER,
+      capability: "google_drive.docs.sync",
+      trustDomain: "internal"
+    }), this.credentialHandle);
+    return new RestGoogleDriveApiClient({
+      token: session.token,
+      fetch: this.fetchImpl,
+      baseUrl: this.apiBaseUrl,
+      ...this.requestBudget ? { requestBudget: this.requestBudget } : {},
+      provenance: this.provenance,
+      ...this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {},
+      ...this.sleepImpl ? { sleep: this.sleepImpl } : {}
+    });
+  }
+  queryForWatermark(watermark) {
+    const base = this.query ?? "trashed = false";
+    return watermark ? `modifiedTime > '${watermark}' and (${base})` : base;
+  }
+}
+function budgetedDriveApiClient(inner, budget, provenance) {
+  const runProvenance = sourceInvocationProvenance(provenance);
+  return {
+    listFiles(request) {
+      budget.reserve(runProvenance);
+      return inner.listFiles(request);
+    },
+    exportGoogleDocText(fileId, maxBytes) {
+      budget.reserve(runProvenance);
+      return inner.exportGoogleDocText(fileId, maxBytes);
+    },
+    downloadTextFile(fileId, maxBytes) {
+      budget.reserve(runProvenance);
+      return inner.downloadTextFile(fileId, maxBytes);
+    },
+    downloadFileBytes(fileId, maxBytes) {
+      budget.reserve(runProvenance);
+      return inner.downloadFileBytes(fileId, maxBytes);
+    },
+    ...inner.getFolder ? {
+      getFolder(folderId) {
+        budget.reserve(runProvenance);
+        return inner.getFolder(folderId);
+      }
+    } : {}
+  };
+}
+
+class GoogleDriveFolderAncestry {
+  client;
+  parentsByFolderId = new Map;
+  lookups = 0;
+  failures = 0;
+  constructor(client) {
+    this.client = client;
+  }
+  get unresolvedCount() {
+    return this.failures;
+  }
+  async resolve(file) {
+    const seen = new Set;
+    const queue = [...file.parents ?? []];
+    let budget = GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS;
+    while (queue.length > 0) {
+      const folderId = queue.shift();
+      if (!folderId || seen.has(folderId))
+        continue;
+      seen.add(folderId);
+      if (budget <= 0) {
+        this.failures += 1;
+        return;
+      }
+      budget -= 1;
+      const parents = await this.parentsOf(folderId);
+      if (parents === FOLDER_LOOKUP_FAILED) {
+        this.failures += 1;
+        return;
+      }
+      queue.push(...parents);
+    }
+    return [...seen];
+  }
+  async parentsOf(folderId) {
+    if (this.parentsByFolderId.has(folderId)) {
+      const cached = this.parentsByFolderId.get(folderId);
+      return cached ?? FOLDER_LOOKUP_FAILED;
+    }
+    if (!this.client.getFolder) {
+      this.parentsByFolderId.set(folderId, undefined);
+      return FOLDER_LOOKUP_FAILED;
+    }
+    this.lookups += 1;
+    try {
+      const folder = await this.client.getFolder(folderId);
+      const parents = folder.parents ?? [];
+      this.parentsByFolderId.set(folderId, parents);
+      return parents;
+    } catch {
+      this.parentsByFolderId.set(folderId, undefined);
+      return FOLDER_LOOKUP_FAILED;
+    }
+  }
+}
+function encodeDriveCursor(cursor) {
+  if (!cursor.watermark && !cursor.highWater && !cursor.pageToken && !cursor.deferredFloor) {
+    return;
+  }
+  return `${GOOGLE_DRIVE_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
+}
+function promotedDriveWatermark(candidate, deferredFloor, watermark) {
+  if (!candidate || !deferredFloor)
+    return candidate;
+  const floor = new Date(Date.parse(deferredFloor) - 1).toISOString();
+  if (watermark === floor)
+    return candidate;
+  const clamped = floor.localeCompare(candidate) < 0 ? floor : candidate;
+  return watermark && clamped.localeCompare(watermark) < 0 ? watermark : clamped;
+}
+function isRetryableDriveContentError(error) {
+  return error instanceof GoogleDriveApiError && (error.status === 429 || error.status >= 500);
+}
+function decodeDriveCursor(value) {
+  if (!value)
+    return {};
+  if (value.length > MAX_GOOGLE_DRIVE_CURSOR_LENGTH || !value.startsWith(GOOGLE_DRIVE_CURSOR_PREFIX)) {
+    throw new TypeError("Google Drive connector cursor is invalid.");
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(value.slice(GOOGLE_DRIVE_CURSOR_PREFIX.length), "base64url").toString("utf8"));
+    const watermark = decodeCursorTimestamp(parsed.watermark);
+    const highWater = decodeCursorTimestamp(parsed.highWater);
+    const deferredFloor = decodeCursorTimestamp(parsed.deferredFloor);
+    if (parsed.pageToken !== undefined && (typeof parsed.pageToken !== "string" || !parsed.pageToken.trim() || parsed.pageToken.length > MAX_GOOGLE_DRIVE_CURSOR_LENGTH)) {
+      throw new Error("invalid");
+    }
+    return {
+      ...watermark ? { watermark } : {},
+      ...highWater ? { highWater } : {},
+      ...deferredFloor ? { deferredFloor } : {},
+      ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {}
+    };
+  } catch {
+    throw new TypeError("Google Drive connector cursor is invalid.");
+  }
+}
+function decodeCursorTimestamp(value) {
+  if (value === undefined)
+    return;
+  if (typeof value !== "string")
+    throw new Error("invalid");
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed))
+    throw new Error("invalid");
+  return new Date(parsed).toISOString();
+}
+function assertNewProviderPage2(seen, pageToken) {
+  if (seen.has(pageToken))
+    throw new Error("Google Drive connector pagination cursor repeated.");
+  seen.add(pageToken);
+}
+
+class RestGoogleDriveApiClient {
+  token;
+  fetchImpl;
+  baseUrl;
+  maxRetries;
+  sleep;
+  requestBudget;
+  provenance;
+  constructor(options) {
+    this.token = options.token;
+    this.fetchImpl = options.fetch;
+    this.baseUrl = options.baseUrl;
+    this.requestBudget = options.requestBudget;
+    this.provenance = sourceInvocationProvenance(options.provenance);
+    this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
+  }
+  async listFiles(request) {
+    const params = new URLSearchParams({
+      pageSize: String(request.pageSize),
+      fields: "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,version,driveId,parents,owners(emailAddress),webViewLink,size,md5Checksum)",
+      includeItemsFromAllDrives: "true",
+      supportsAllDrives: "true",
+      q: request.query ?? "trashed = false"
+    });
+    if (request.pageToken)
+      params.set("pageToken", request.pageToken);
+    const json = await this.getJson(`files?${params.toString()}`);
+    const record = asRecord7(json, "Google Drive files list response");
+    return {
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord7(item, "Google Drive file"))).filter((file) => file.id) : [],
+      ...optionalStringProp2(record, "nextPageToken")
+    };
+  }
+  async getFolder(folderId) {
+    const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
+    const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
+    const record = asRecord7(json, "Google Drive folder");
+    const id = typeof record.id === "string" ? record.id : folderId;
+    return {
+      id,
+      ...optionalStringProp2(record, "name"),
+      ...Array.isArray(record.parents) ? { parents: record.parents.filter((entry) => typeof entry === "string") } : {}
+    };
+  }
+  async exportGoogleDocText(fileId, maxBytes) {
+    const params = new URLSearchParams({ mimeType: "text/plain" });
+    return this.getText(`files/${encodeURIComponent(fileId)}/export?${params.toString()}`, maxBytes);
+  }
+  async downloadTextFile(fileId, maxBytes) {
+    return this.getText(`files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, maxBytes);
+  }
+  async downloadFileBytes(fileId, maxBytes) {
+    const response = await this.send(`files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, "application/octet-stream", "Google Drive content request");
+    const declared = Number.parseInt(response.headers.get("content-length") ?? "", 10);
+    if (maxBytes !== undefined && Number.isSafeInteger(declared) && declared > maxBytes) {
+      throw new GoogleDriveContentTooLargeError;
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
+      throw new GoogleDriveContentTooLargeError;
+    }
+    const mimeType = response.headers.get("content-type") ?? undefined;
+    return {
+      bytes,
+      ...mimeType ? { mimeType } : {},
+      sizeBytes: bytes.byteLength
+    };
+  }
+  async getJson(path) {
+    const text2 = await this.get(path, "application/json", "Google Drive API request");
+    return text2 ? JSON.parse(text2) : {};
+  }
+  async getText(path, maxBytes) {
+    const text2 = await this.get(path, "text/plain,application/octet-stream", "Google Drive content request");
+    return text2.slice(0, maxBytes);
+  }
+  async get(path, accept, context) {
+    return (await this.send(path, accept, context)).text();
+  }
+  async send(path, accept, context) {
+    let attempt = 0;
+    while (true) {
+      this.requestBudget?.reserve(this.provenance);
+      const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
+        headers: {
+          Accept: accept,
+          Authorization: `Bearer ${this.token}`
+        }
+      });
+      if (response.ok)
+        return response;
+      const detail = await response.text().catch(() => "");
+      if (isRetryableDriveStatus(response.status) && attempt < this.maxRetries) {
+        attempt += 1;
+        await this.sleep(driveRetryDelayMs(response, attempt));
+        continue;
+      }
+      throw new GoogleDriveApiError(`${context} failed (${response.status}): ${safeProviderDetail2(detail)}`, response.status);
+    }
+  }
+}
+function isRetryableDriveStatus(status) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+function driveRetryDelayMs(response, attempt) {
+  const retryAfter = response.headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    const seconds = Number.parseFloat(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS);
+    }
+    const dateMs = Date.parse(retryAfter);
+    if (Number.isFinite(dateMs)) {
+      return Math.max(0, Math.min(dateMs - Date.now(), MAX_GOOGLE_DRIVE_RETRY_DELAY_MS));
+    }
+  }
+  return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
+}
+function normalizeDriveFile(record) {
+  return {
+    id: stringValue2(record.id),
+    ...optionalStringProp2(record, "name"),
+    ...optionalStringProp2(record, "mimeType"),
+    ...optionalStringProp2(record, "createdTime"),
+    ...optionalStringProp2(record, "modifiedTime"),
+    ...optionalStringProp2(record, "version"),
+    ...optionalStringProp2(record, "driveId"),
+    ...optionalStringProp2(record, "webViewLink"),
+    ...optionalStringProp2(record, "size"),
+    ...optionalStringProp2(record, "md5Checksum"),
+    ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord7(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+  };
+}
+function isDownloadableTextMime(mimeType, name) {
+  const mime = mimeType?.toLowerCase() ?? "";
+  if (mime.startsWith("text/"))
+    return true;
+  if (["application/json", "application/xml", "application/csv", "text/csv"].includes(mime))
+    return true;
+  const lower = name?.toLowerCase() ?? "";
+  return [".md", ".txt", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml"].some((suffix) => lower.endsWith(suffix));
+}
+function withinTextByteCap(size, maxBytes) {
+  if (!size)
+    return true;
+  const parsed = Number.parseInt(size, 10);
+  return Number.isFinite(parsed) && parsed <= maxBytes;
+}
+function normalizeDriveMaxFiles(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES;
+  return Math.max(1, Math.min(Math.floor(value), MAX_GOOGLE_DRIVE_SYNC_FILES));
+}
+function normalizeMaxTextBytes(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
+  return Math.max(1000, Math.min(Math.floor(value), 512000));
+}
+function asRecord7(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  return value;
+}
+function stringValue2(value) {
+  return typeof value === "string" ? value : "";
+}
+function optionalStringProp2(record, key) {
+  const value = stringValue2(record[key]).trim();
+  return value ? { [key]: value } : {};
+}
+function safeProviderDetail2(value) {
+  return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
+}
+function hashString2(value) {
+  return createHash5("sha256").update(value).digest("hex");
+}
+var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
+var init_drive = __esm(() => {
+  init_olympus_layout();
+  init_source_ingestion_exclusions();
+  init_credential_broker();
+  init_request_budget();
+  GoogleDriveContentTooLargeError = class GoogleDriveContentTooLargeError extends Error {
+    constructor() {
+      super("Google Drive file exceeds the configured byte ceiling.");
+      this.name = "GoogleDriveContentTooLargeError";
     }
   };
-  SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
-  MEDIA_FETCH_HEADERS = {
-    Accept: "image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1",
-    "User-Agent": "Mozilla/5.0 (compatible; OlympusSourceIndex/0.1)"
-  };
-  TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
-  TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1000];
-  TransientSourceEmbeddingError = class TransientSourceEmbeddingError extends OperationError {
-    reason;
-    constructor(provider, reason, attempts, budgetMs = 0) {
-      const { message: message2, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
-      super("source_index_error", message2, suggestion);
-      this.name = "TransientSourceEmbeddingError";
-      this.reason = reason;
+  GoogleDriveApiError = class GoogleDriveApiError extends Error {
+    status;
+    constructor(message2, status) {
+      super(message2);
+      this.name = "GoogleDriveApiError";
+      this.status = status;
     }
   };
+  FOLDER_LOOKUP_FAILED = Symbol("google-drive-folder-lookup-failed");
+});
+
+// src/workers/google-connectors/corpora.ts
+var init_corpora = __esm(() => {
+  init_privacy_language();
+  init_corpus();
+  init_gmail();
+  init_drive();
+});
+
+// src/workers/readwise/api.ts
+var init_api = () => {};
+
+// src/workers/readwise/corpus-adapter.ts
+var init_corpus_adapter = __esm(() => {
+  init_corpus();
+  init_source_corpus_registry();
 });
 
 // node_modules/entities/dist/esm/decode-codepoint.js
@@ -10998,7 +12352,7 @@ var init_secret_patterns = __esm(() => {
 });
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text2 = input.text?.trim() ?? "";
   if (!text2) {
@@ -11067,7 +12421,7 @@ function dedupeFindings(findings) {
   return unique;
 }
 function hashFinding(type, matchedText) {
-  return createHash5("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash6("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-10-13", REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -11513,147 +12867,6 @@ var init_engine = __esm(() => {
   WORK_COORDINATION_PATTERN = /\b(?:project update|status update|roadmap|milestone|pull request|pr review|design review|launch plan|offsite agenda|meeting recap|action items|next steps)\b/i;
 });
 
-// src/core/sender-rules.ts
-function validDomain(raw) {
-  let end = raw.length;
-  while (end > 0 && (raw[end - 1] === "." || raw[end - 1] === "-"))
-    end -= 1;
-  const domain = raw.slice(0, end).toLowerCase();
-  const labels = domain.split(".");
-  if (labels.length < 2 || labels.some((label) => !label || label.startsWith("-") || label.endsWith("-")))
-    return;
-  return domain;
-}
-function scanHeader(value) {
-  let out = "";
-  let depth = 0;
-  let quoted = false;
-  let angleOpens = 0;
-  let comma = false;
-  for (let index = 0;index < value.length; index += 1) {
-    const char = value[index];
-    if (char === "\\" && index + 1 < value.length) {
-      if (depth === 0)
-        out += char + value[index + 1];
-      index += 1;
-      continue;
-    }
-    if (depth === 0 && char === '"')
-      quoted = !quoted;
-    if (!quoted && char === "(") {
-      depth += 1;
-      continue;
-    }
-    if (!quoted && char === ")" && depth > 0) {
-      depth -= 1;
-      continue;
-    }
-    if (depth > 0)
-      continue;
-    if (!quoted && char === "<")
-      angleOpens += 1;
-    if (!quoted && char === ",")
-      comma = true;
-    out += char;
-  }
-  return { text: out, angleOpens, comma };
-}
-function parseAddrSpec(value) {
-  const spec = value.trim();
-  let local;
-  let rest;
-  if (spec.startsWith('"')) {
-    let index = 1;
-    while (index < spec.length && spec[index] !== '"')
-      index += spec[index] === "\\" ? 2 : 1;
-    if (index >= spec.length || spec[index + 1] !== "@")
-      return;
-    local = spec.slice(0, index + 1);
-    rest = spec.slice(index + 2);
-  } else {
-    const at = spec.indexOf("@");
-    if (at <= 0)
-      return;
-    local = spec.slice(0, at);
-    rest = spec.slice(at + 1);
-    for (const char of local)
-      if (!LOCAL_CHAR.test(char))
-        return;
-  }
-  for (const char of rest)
-    if (!DOMAIN_CHAR.test(char))
-      return;
-  const domain = validDomain(rest);
-  if (!domain || domain !== rest.toLowerCase())
-    return;
-  return { address: `${local.toLowerCase()}@${domain}`, domain };
-}
-function senderAddress(from) {
-  if (!from || from.length > MAX_FROM_HEADER_CHARS)
-    return;
-  const scanned = scanHeader(from);
-  if (scanned.angleOpens > 1 || scanned.comma)
-    return;
-  if (scanned.angleOpens === 1) {
-    const open2 = scanned.text.indexOf("<");
-    const close = scanned.text.indexOf(">", open2 + 1);
-    if (close < 0 || scanned.text.slice(close + 1).trim() !== "")
-      return;
-    return parseAddrSpec(scanned.text.slice(open2 + 1, close));
-  }
-  return parseAddrSpec(scanned.text);
-}
-function everyAddressIn(from) {
-  if (!from)
-    return [];
-  const text2 = from.slice(0, MAX_FROM_HEADER_CHARS);
-  const found = [];
-  for (let at = text2.indexOf("@");at >= 0; at = text2.indexOf("@", at + 1)) {
-    let start = at;
-    while (start > 0 && LOCAL_CHAR.test(text2[start - 1]))
-      start -= 1;
-    let end = at + 1;
-    while (end < text2.length && DOMAIN_CHAR.test(text2[end]))
-      end += 1;
-    if (start === at)
-      continue;
-    const domain = validDomain(text2.slice(at + 1, end));
-    if (domain)
-      found.push({ address: `${text2.slice(start, at).toLowerCase()}@${domain}`, domain });
-  }
-  return found;
-}
-function addressMatches(sender, normalizedRule) {
-  if (normalizedRule.startsWith("@")) {
-    const domain = normalizedRule.slice(1);
-    return domain !== "" && (sender.domain === domain || sender.domain.endsWith(`.${domain}`));
-  }
-  return sender.address === normalizedRule;
-}
-function senderMatchesRule(from, rule) {
-  const normalized = rule.trim().toLowerCase();
-  if (!normalized.includes("@"))
-    return false;
-  const sender = senderAddress(from);
-  return sender !== undefined && addressMatches(sender, normalized);
-}
-function ownerSenderRuleMatches(from, value, raises) {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized)
-    return false;
-  if (!normalized.includes("@"))
-    return raises && (from ?? "").slice(0, MAX_FROM_HEADER_CHARS).toLowerCase().includes(normalized);
-  const sender = senderAddress(from);
-  if (sender)
-    return addressMatches(sender, normalized);
-  return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));
-}
-var MAX_FROM_HEADER_CHARS = 4096, LOCAL_CHAR, DOMAIN_CHAR;
-var init_sender_rules = __esm(() => {
-  LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
-  DOMAIN_CHAR = /[a-z0-9.-]/i;
-});
-
 // src/core/location-rules.ts
 function normalizeLocationPath(value) {
   return value.trim().toLowerCase().replace(/\/+$/, "");
@@ -11669,7 +12882,7 @@ function pathPrefixMatches(path, prefix) {
 }
 
 // src/workers/classification/tier-classifier.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 function tierRank(tier) {
   return TIER_RANK[tier];
 }
@@ -11680,7 +12893,7 @@ function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
 }
 function contentDigestReason(text2) {
-  return `content:sha256:${createHash6("sha256").update(text2.trim()).digest("hex")}`;
+  return `content:sha256:${createHash7("sha256").update(text2.trim()).digest("hex")}`;
 }
 function snifferContentMaterial(names, excerpt, parentContext) {
   const trimmed = names.trim();
@@ -11712,7 +12925,7 @@ function splitParentContext(material) {
 }
 function tierSnifferInputHash(pass, signals, text2, parentContext) {
   const context = parentContext?.replace(/\s+/g, " ").trim().slice(0, PARENT_CONTEXT_MAX_CHARS);
-  return createHash6("sha256").update(JSON.stringify([
+  return createHash7("sha256").update(JSON.stringify([
     pass,
     signals.title ?? null,
     signals.path ?? null,
@@ -12260,154 +13473,623 @@ var init_tier_classifier = __esm(() => {
   SLUG = /^[a-z0-9][a-z0-9_.:-]{0,95}$/i;
 });
 
-// src/core/sqlite-migrations.ts
-function currentStoreMigrations() {
+// src/workers/classification/secret-locations.ts
+import { Database } from "bun:sqlite";
+import { createHash as createHash8 } from "node:crypto";
+import { chmodSync as chmodSync2, closeSync as closeSync7, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync7 } from "node:fs";
+import { dirname as dirname14 } from "node:path";
+function screenedSecretLocator(locator) {
+  return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
+}
+
+class SecretLocationsIndex {
+  dbPath;
+  db;
+  now;
+  constructor(options) {
+    this.dbPath = options.dbPath;
+    this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      return;
+    }
+    const onDisk = this.dbPath !== ":memory:";
+    if (onDisk) {
+      mkdirSync9(dirname14(this.dbPath), { recursive: true, mode: 448 });
+      if (!existsSync10(this.dbPath))
+        closeSync7(openSync7(this.dbPath, "a", 384));
+      chmodSync2(this.dbPath, 384);
+    }
+    this.db = new Database(this.dbPath, { create: true });
+    try {
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      runSqliteMigrations(this.db, SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsMigrations());
+    } catch (error) {
+      closeSqliteStore(this.db);
+      throw error;
+    }
+  }
+  close() {
+    closeSqliteStore(this.db);
+  }
+  record(input) {
+    const kinds = [...new Set(input.findingKinds.map((kind) => kind.trim()).filter(Boolean))].sort();
+    if (kinds.length === 0)
+      throw new Error("A secret location needs at least one finding kind.");
+    const namesReleasable = input.namesReleasable === true;
+    const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
+    const locator = screenedSecretLocator(input.locator);
+    const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
+    const contentHash = input.text !== undefined ? createHash8("sha256").update(input.text, "utf8").digest("hex") : null;
+    const existing = this.get(input.identity);
+    if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
+      return false;
+    }
+    this.db.query(`
+      INSERT INTO secret_locations (
+        provider, account_scope, conversation_key, provider_item_id, locator, title, names_releasable,
+        folder_keys_json, scope_generation, scope_revision, finding_kinds_json, content_hash, detected_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
+        locator = excluded.locator, title = excluded.title, names_releasable = excluded.names_releasable,
+        folder_keys_json = excluded.folder_keys_json, scope_generation = excluded.scope_generation,
+        scope_revision = excluded.scope_revision, finding_kinds_json = excluded.finding_kinds_json,
+        content_hash = excluded.content_hash, detected_at = excluded.detected_at
+    `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
+    return true;
+  }
+  remove(identity) {
+    return this.db.query(`
+      DELETE FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId).changes > 0;
+  }
+  removeAccountScope(provider, accountScope) {
+    return this.db.query("DELETE FROM secret_locations WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+  }
+  get(identity) {
+    const row = this.db.query(`
+      SELECT * FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
+    return row ? locationFromRow(row) : undefined;
+  }
+  count() {
+    return this.db.query("SELECT COUNT(*) AS n FROM secret_locations").get().n;
+  }
+  search(query, scope, options = {}) {
+    const terms = secretLocationQueryTerms(query);
+    if (terms.length === 0)
+      return [];
+    const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
+    const rows = this.db.query(`
+      SELECT * FROM secret_locations
+      ${scope.accountScope ? "WHERE account_scope = ?" : ""}
+      ORDER BY detected_at DESC
+    `).all(...scope.accountScope ? [scope.accountScope] : []);
+    const scored = [];
+    for (const row of rows) {
+      const location = locationFromRow(row);
+      if (!secretLocationWithinScope(location, scope))
+        continue;
+      const haystack = [
+        location.namesReleasable ? location.locator ?? "" : "",
+        location.title ?? "",
+        location.findingKinds.join(" ").replaceAll("_", " ")
+      ].join(`
+`).toLowerCase();
+      const score = terms.filter((term) => haystack.includes(term)).length;
+      if (score > 0)
+        scored.push({ location, score });
+    }
+    const identities = scored.map(({ location }) => ({
+      provider: location.source,
+      accountScope: location.accountScope,
+      providerItemId: location.providerItemId,
+      ...location.conversationKey ? { providerConversationId: location.conversationKey } : {}
+    }));
+    let hidden = new Set;
+    if (options.hide && scored.length > 0) {
+      try {
+        hidden = options.hide(identities);
+      } catch {
+        return [];
+      }
+    }
+    return scored.filter((_, index) => !hidden.has(identities[index])).sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
+      source: location.source,
+      ref: secretLocationRef(location),
+      locator: location.namesReleasable ? location.locator : null,
+      title: location.namesReleasable ? location.title : null,
+      findingKinds: location.findingKinds,
+      detectedAt: location.detectedAt
+    }));
+  }
+}
+function secretLocationRef(location) {
+  return `secret:${createHash8("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+}
+function secretLocationWithinScope(location, scope) {
+  if (scope.accountScope && location.accountScope !== scope.accountScope)
+    return false;
+  const filters = scope.filters;
+  if (!filters)
+    return true;
+  if (filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore || (filters.searchTextExactLines?.length ?? 0) > 0) {
+    return false;
+  }
+  if (filters.provider && location.source !== filters.provider)
+    return false;
+  if (filters.conversationId !== undefined && location.conversationKey !== filters.conversationId)
+    return false;
+  if (filters.sourceScopeGeneration !== undefined && location.scopeGeneration !== filters.sourceScopeGeneration)
+    return false;
+  if (filters.sourceScopeRevision !== undefined && location.scopeRevision !== filters.sourceScopeRevision)
+    return false;
+  if (filters.sourceScopeFolderAnyKeys !== undefined && !filters.sourceScopeFolderAnyKeys.some((key) => location.folderKeys.includes(key))) {
+    return false;
+  }
+  if (filters.sourceScopeFolderNoneKeys?.some((key) => location.folderKeys.includes(key)))
+    return false;
+  const pathScopes = [
+    ...filters.locatorPathScope ? [filters.locatorPathScope] : [],
+    ...filters.locatorPathScopes ?? []
+  ];
+  if (pathScopes.length > 0 && !pathScopes.some((scopePath) => locatorWithin(location.locator, scopePath)))
+    return false;
+  if (filters.locatorPathExcludedScopes?.some((scopePath) => locatorWithin(location.locator, scopePath)))
+    return false;
+  return true;
+}
+function locatorWithin(locator, scopePath) {
+  if (!locator)
+    return false;
+  const path = locator.toLowerCase();
+  const root = scopePath.toLowerCase().replace(/\/+$/, "");
+  return path === root || path.startsWith(`${root}/`);
+}
+function secretLocationQueryTerms(query) {
+  return [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
+}
+function locationFromRow(row) {
+  return {
+    source: row.provider,
+    accountScope: row.account_scope,
+    conversationKey: row.conversation_key,
+    providerItemId: row.provider_item_id,
+    locator: row.locator,
+    title: row.title,
+    namesReleasable: row.names_releasable === 1,
+    folderKeys: JSON.parse(row.folder_keys_json),
+    scopeGeneration: row.scope_generation,
+    scopeRevision: row.scope_revision,
+    findingKinds: JSON.parse(row.finding_kinds_json),
+    contentHash: row.content_hash,
+    detectedAt: row.detected_at
+  };
+}
+function secretLocationsMigrations() {
   return [
     {
-      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
-      name: "record_existing_v1_schema",
-      up() {}
+      version: SECRET_LOCATIONS_SCHEMA_VERSION,
+      name: "create_secret_locations",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS secret_locations (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            locator TEXT,
+            title TEXT,
+            names_releasable INTEGER NOT NULL DEFAULT 0 CHECK (names_releasable IN (0, 1)),
+            folder_keys_json TEXT NOT NULL DEFAULT '[]',
+            scope_generation TEXT,
+            scope_revision TEXT,
+            finding_kinds_json TEXT NOT NULL,
+            content_hash TEXT,
+            detected_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      }
     }
   ];
 }
-function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > knownVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-}
-function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
-  const ordered = validateMigrations(migrations);
-  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > targetVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
-  if (options.dryRun === true) {
-    return {
-      storeId,
-      currentVersion,
-      targetVersion,
-      dryRun: true,
-      applied: [],
-      pending
-    };
-  }
-  ensureSchemaVersionTable(db);
-  const applied = [];
-  if (pending.length > 0) {
-    db.transaction(() => {
-      const lockedVersion = readSqliteSchemaVersion(db, storeId);
-      if (lockedVersion > targetVersion) {
-        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-      }
-      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
-        migration.up(db);
-        writeSqliteSchemaVersion(db, storeId, migration.version);
-        applied.push({ version: migration.version, name: migration.name });
-      }
-    }).immediate();
-  }
-  return {
-    storeId,
-    currentVersion,
-    targetVersion,
-    dryRun: false,
-    applied,
-    pending: applied
-  };
-}
-function readSqliteSchemaVersion(db, storeId) {
-  if (!schemaVersionTableExists(db))
-    return 0;
-  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
-  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
-}
-function ensureSchemaVersionTable(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
-      store_id TEXT PRIMARY KEY,
-      version INTEGER NOT NULL,
-      applied_at TEXT NOT NULL
-    );
-  `);
-}
-function writeSqliteSchemaVersion(db, storeId, version) {
-  db.query(`
-    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT(store_id) DO UPDATE SET
-      version = excluded.version,
-      applied_at = excluded.applied_at
-  `).run(storeId, version, new Date().toISOString());
-}
-function schemaVersionTableExists(db) {
-  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
-  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
-}
-function validateMigrations(migrations) {
-  const ordered = [...migrations].sort((left, right) => left.version - right.version);
-  let previous = 0;
-  for (const migration of ordered) {
-    if (!Number.isInteger(migration.version) || migration.version <= 0) {
-      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
-    }
-    if (migration.version === previous) {
-      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
-    }
-    previous = migration.version;
-  }
-  return ordered;
-}
-var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
-var init_sqlite_migrations = __esm(() => {
-  init_operation_error();
+var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  init_tier_classifier();
+  STOP_WORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
 });
 
-// src/core/sqlite-store.ts
-function closeSqliteStore(db, options = {}) {
-  if (options.checkpoint !== false) {
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-    } catch {}
-  }
-  db.close();
+// src/workers/classification/sniffer-store.ts
+import { Database as Database2 } from "bun:sqlite";
+import { createHash as createHash9 } from "node:crypto";
+import { chmodSync as chmodSync3, existsSync as existsSync11, mkdirSync as mkdirSync10 } from "node:fs";
+import { dirname as dirname15 } from "node:path";
+function snifferMaterialHash(pass, material) {
+  return createHash9("sha256").update(`${pass}
+${material}`).digest("hex");
 }
 
-// src/workers/classification/tier-ledger-path.ts
-function tierLedgerPathForStore(storeDbPath) {
-  if (storeDbPath === ":memory:")
-    return ":memory:";
-  const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
-  return `${base}${TIER_LEDGER_FILE_SUFFIX}`;
+class TierSnifferStore {
+  dbPath;
+  db;
+  now;
+  readOnly;
+  constructor(options) {
+    this.dbPath = options.dbPath;
+    this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database2(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      this.readOnly = true;
+      return;
+    }
+    this.readOnly = false;
+    const onDisk = this.dbPath !== ":memory:";
+    if (onDisk)
+      mkdirSync10(dirname15(this.dbPath), { recursive: true, mode: 448 });
+    const previousUmask = onDisk ? process.umask(63) : undefined;
+    let db;
+    try {
+      db = new Database2(this.dbPath, { create: true });
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
+      if (onDisk)
+        restrictFiles(this.dbPath);
+    } catch (error) {
+      if (db)
+        closeSqliteStore(db);
+      throw error;
+    } finally {
+      if (previousUmask !== undefined)
+        process.umask(previousUmask);
+    }
+    this.db = db;
+  }
+  close() {
+    try {
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : undefined);
+    } finally {
+      if (this.dbPath !== ":memory:" && !this.readOnly)
+        restrictFiles(this.dbPath);
+    }
+  }
+  getVerdict(key) {
+    const row = this.db.query(`
+      SELECT tier, category, confidence, fail_safe, decided_at FROM sniffer_verdicts
+      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
+    `).get(key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
+    if (!row)
+      return;
+    return {
+      tier: row.tier,
+      category: row.category,
+      confidence: row.confidence,
+      failSafe: row.fail_safe === 1,
+      decidedAt: row.decided_at
+    };
+  }
+  putVerdict(key, verdict) {
+    this.db.query(`
+      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
+        tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
+        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at
+    `).run(key.materialHash, key.modelId, key.promptVersion, key.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString());
+  }
+  enqueue(question) {
+    const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
+    const priority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
+    return this.db.transaction(() => {
+      if (question.stillAsk && !question.stillAsk())
+        return false;
+      const before = this.db.query(`
+        SELECT priority FROM sniffer_questions
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+      `).get(...subjectParams(question.subject), question.pass);
+      this.db.query(`
+      INSERT INTO sniffer_questions (
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
+        attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
+          AND sniffer_questions.map_revision = excluded.map_revision
+          THEN sniffer_questions.attempts ELSE 0 END,
+        material_hash = excluded.material_hash,
+        map_revision = excluded.map_revision,
+        material = excluded.material,
+        priority = excluded.priority,
+        flags_json = excluded.flags_json
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority);
+      if (priority > 0 && (!before || priority > before.priority)) {
+        this.db.query("DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)").run("all:recent", `${question.pass}:recent`);
+      }
+      return true;
+    }).immediate();
+  }
+  questionFor(subject, pass) {
+    const row = this.db.query(`
+      SELECT * FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).get(...subjectParams(subject), pass);
+    return row ? questionFromRow(row) : undefined;
+  }
+  listQuestions(options = {}) {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
+    const scanLimit = Math.max(64, limit);
+    const accepted = new Map;
+    const eligible = (question) => {
+      if (!accepted.has(question.sequence))
+        accepted.set(question.sequence, options.eligible?.(question) ?? true);
+      return accepted.get(question.sequence);
+    };
+    const read = (oldest2, count) => {
+      const key = `${options.pass ?? "all"}:${oldest2 ? "oldest" : "recent"}`;
+      let cursor = options.eligible && !this.readOnly ? this.db.query("SELECT priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?").get(key) : null;
+      if (oldest2 && cursor?.candidate_pk != null) {
+        const pinned = this.db.query("SELECT * FROM sniffer_questions WHERE question_pk = ?").get(cursor.candidate_pk);
+        if (pinned) {
+          const question = questionFromRow(pinned);
+          if (eligible(question))
+            return [question];
+        }
+        cursor = null;
+        this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key);
+      }
+      const filters = [];
+      const params = [];
+      if (options.pass) {
+        filters.push("pass = ?");
+        params.push(options.pass);
+      }
+      if (cursor) {
+        filters.push(oldest2 ? "(queued_at, question_pk) > (?, ?)" : "(priority, queued_at, question_pk) < (?, ?, ?)");
+        if (!oldest2)
+          params.push(cursor.priority);
+        params.push(cursor.queued_at, cursor.question_pk);
+      }
+      const rows = this.db.query(`SELECT * FROM sniffer_questions
+        ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
+        ORDER BY ${oldest2 ? "queued_at, question_pk" : "priority DESC, queued_at DESC, question_pk DESC"} LIMIT ?`).all(...params, scanLimit);
+      const found = [];
+      for (const row of rows) {
+        const question = questionFromRow(row);
+        if (eligible(question))
+          found.push(question);
+        if (found.length === count)
+          break;
+      }
+      if (options.eligible && !this.readOnly) {
+        const last = rows.at(-1);
+        if (oldest2 && found[0]) {
+          const candidate = found[0];
+          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?)`).run(key, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+        } else if (found.length === 0 && rows.length === scanLimit && last) {
+          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, priority, queued_at, question_pk) VALUES (?, ?, ?, ?)`).run(key, last.priority, last.queued_at, last.question_pk);
+        } else
+          this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key);
+      }
+      return found;
+    };
+    const questions = read(false, limit);
+    const oldest = read(true, 1)[0];
+    if (oldest && !questions.some((question) => question.sequence === oldest.sequence))
+      questions.push(oldest);
+    return questions;
+  }
+  dispatchCount() {
+    const used = this.db.query("SELECT dispatches FROM sniffer_schedule WHERE id = 1").get().dispatches;
+    return used;
+  }
+  recordDispatch() {
+    this.db.exec("UPDATE sniffer_schedule SET dispatches = dispatches + 1 WHERE id = 1");
+  }
+  clockMs() {
+    return this.now().getTime();
+  }
+  deleteQuestion(subject, pass, materialHash) {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+        AND (? IS NULL OR material_hash = ?)
+    `).run(...subjectParams(subject), pass, materialHash ?? null, materialHash ?? null).changes > 0;
+  }
+  deleteItemQuestions(subject) {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...subjectParams(subject)).changes;
+  }
+  deleteAccountScopeQuestions(provider, accountScope) {
+    return this.db.query("DELETE FROM sniffer_questions WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+  }
+  rekey(subject, pass, mapRevision) {
+    this.db.query(`
+      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(mapRevision, ...subjectParams(subject), pass);
+  }
+  recordAttemptFailure(subject, pass) {
+    this.db.query(`
+      UPDATE sniffer_questions SET attempts = attempts + 1
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(...subjectParams(subject), pass);
+    return this.questionFor(subject, pass)?.attempts ?? 0;
+  }
+  counts() {
+    const byPass = { metadata: 0, content: 0 };
+    let questions = 0;
+    for (const row of this.db.query("SELECT pass, COUNT(*) AS n FROM sniffer_questions GROUP BY pass").all()) {
+      byPass[row.pass] = row.n;
+      questions += row.n;
+    }
+    const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
+    const items = this.db.query(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
+      )
+    `).get().n;
+    return { questions, items, byPass, verdicts };
+  }
 }
-function secretLocationsPathForStore(storeDbPath) {
-  if (storeDbPath === ":memory:")
-    return ":memory:";
-  const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
-  return `${base}${SECRET_LOCATIONS_FILE_SUFFIX}`;
+function questionFromRow(row) {
+  return {
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
+    pass: row.pass,
+    materialHash: row.material_hash,
+    mapRevision: row.map_revision,
+    material: row.material,
+    flags: JSON.parse(row.flags_json),
+    attempts: row.attempts,
+    queuedAt: row.queued_at,
+    priority: row.priority ?? 0,
+    sequence: row.question_pk
+  };
 }
-function tierSnifferPathForLedger(ledgerPath) {
-  if (ledgerPath === ":memory:")
-    return ":memory:";
-  const base = ledgerPath.endsWith(TIER_LEDGER_FILE_SUFFIX) ? ledgerPath.slice(0, -TIER_LEDGER_FILE_SUFFIX.length) : ledgerPath;
-  return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
+function subjectParams(subject) {
+  return [subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId];
 }
-function tierSnifferPathForStore(storeDbPath) {
-  if (storeDbPath === ":memory:")
-    return ":memory:";
-  const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
-  return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
+function restrictFiles(dbPath) {
+  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync11(path))
+      chmodSync3(path, 384);
+  }
 }
-var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_SQLITE_STORE_ID = "olympus_secret_locations", SECRET_LOCATIONS_FILE_SUFFIX = ".secret-locations.sqlite", TIER_SNIFFER_SQLITE_STORE_ID = "olympus_tier_sniffer", TIER_SNIFFER_FILE_SUFFIX = ".tier-sniffer.sqlite";
+function snifferMigrations() {
+  return [
+    {
+      version: 1,
+      name: "create_tier_sniffer",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS sniffer_verdicts (
+            material_hash TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            tier TEXT NOT NULL CHECK (tier IN ('personal', 'private')),
+            category TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+            fail_safe INTEGER NOT NULL DEFAULT 0 CHECK (fail_safe IN (0, 1)),
+            decided_at TEXT NOT NULL,
+            PRIMARY KEY (material_hash, model_id, prompt_version, map_revision)
+          );
+          CREATE TABLE IF NOT EXISTS sniffer_questions (
+            question_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            pass TEXT NOT NULL CHECK (pass IN ('metadata', 'content')),
+            material_hash TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            material TEXT NOT NULL,
+            flags_json TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            queued_at TEXT NOT NULL,
+            UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
+          );
+        `);
+      }
+    },
+    {
+      version: 2,
+      name: "priority_and_aging",
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
+          CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
+          INSERT INTO sniffer_schedule VALUES (1, 0);`);
+      }
+    },
+    {
+      version: 3,
+      name: "bounded_queue_scans",
+      up(db) {
+        db.exec(`CREATE INDEX sniffer_oldest ON sniffer_questions(queued_at, question_pk);
+          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, queued_at DESC, question_pk DESC);
+          CREATE INDEX sniffer_pass_oldest ON sniffer_questions(pass, queued_at, question_pk);
+          CREATE TABLE sniffer_scan (
+            scan_key TEXT PRIMARY KEY, priority INTEGER NOT NULL,
+            queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
+          );`);
+      }
+    }
+  ];
+}
+var init_sniffer_store = __esm(() => {
+  init_sqlite_migrations();
+  init_tier_classifier();
+});
 
 // src/workers/classification/tier-ledger.ts
-import { Database } from "bun:sqlite";
-import { chmodSync as chmodSync2, closeSync as closeSync6, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync6, statSync as statSync7 } from "node:fs";
-import { dirname as dirname13 } from "node:path";
+import { Database as Database3 } from "bun:sqlite";
+import { chmodSync as chmodSync4, closeSync as closeSync8, existsSync as existsSync12, mkdirSync as mkdirSync11, openSync as openSync8, statSync as statSync8 } from "node:fs";
+import { dirname as dirname16 } from "node:path";
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
+}
+function writeIntentFromRow(row) {
+  return {
+    identity: {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.conversation_key !== "" ? { providerConversationId: row.conversation_key } : {},
+      ...row.local_item_id !== "" ? { localItemId: row.local_item_id } : {}
+    },
+    ...row.source_version !== null ? { version: row.source_version } : {},
+    kind: row.kind,
+    ...row.location === 1 ? { location: true } : {},
+    ...row.body_version !== null ? { bodyVersion: row.body_version } : {},
+    ...row.item_family !== null ? { itemFamily: row.item_family } : {},
+    connectorId: row.connector_id
+  };
 }
 function idParams(identity) {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
@@ -12422,14 +14104,14 @@ class TierLedger {
     this.now = options.now ?? (() => new Date);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk) {
-      mkdirSync9(dirname13(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync10(this.dbPath))
-        closeSync6(openSync6(this.dbPath, "a", 384));
+      mkdirSync11(dirname16(this.dbPath), { recursive: true, mode: 448 });
+      if (!existsSync12(this.dbPath))
+        closeSync8(openSync8(this.dbPath, "a", 384));
       restrictLedgerFiles(this.dbPath);
     }
     let db;
     try {
-      db = new Database(this.dbPath, { create: true });
+      db = new Database3(this.dbPath, { create: true });
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       settleStaleEmbedHolds(db, this.now().toISOString());
@@ -13269,7 +14951,7 @@ class TierLedger {
     return row.value;
   }
   static readLedgerId(dbPath, options = {}) {
-    if (dbPath === ":memory:" || !existsSync10(dbPath))
+    if (dbPath === ":memory:" || !existsSync12(dbPath))
       return;
     const busyTimeoutMs = Math.max(0, Math.trunc(options.busyTimeoutMs ?? 1e4));
     for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }]) {
@@ -13277,7 +14959,7 @@ class TierLedger {
         return;
       let db;
       try {
-        db = new Database(dbPath, mode);
+        db = new Database3(dbPath, mode);
         db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA query_only = ON;`);
         const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
         return typeof row?.value === "string" && row.value !== "" ? row.value : undefined;
@@ -13423,6 +15105,19 @@ class TierLedger {
             existing.push(copyFromRow(row));
           else
             result.set(key, [copyFromRow(row)]);
+        }
+        const pending = this.db.query(`
+          SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
+          WHERE kind IN ('deletion', 'secret')
+            AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
+        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
+        for (const row of pending) {
+          const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+          if (hidden) {
+            for (const copy of hidden)
+              if (copy.state !== "superseded")
+                copy.state = "superseded";
+          }
         }
       }
     })();
@@ -14155,6 +15850,46 @@ class TierLedger {
       });
     })();
   }
+  withWriteIntent(intent, run, settle) {
+    return this.db.transaction(() => {
+      this.putWriteIntent(intent);
+      const result = run();
+      const final = settle?.(result);
+      if (final)
+        this.putWriteIntent({ ...intent, ...final });
+      return result;
+    })();
+  }
+  putWriteIntent(intent) {
+    this.db.query(`
+      INSERT OR REPLACE INTO tier_write_intents (
+        provider, account_scope, conversation_key, provider_item_id, local_item_id, source_version, kind, location, connector_id, written_at, body_version, item_family
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null);
+  }
+  writeIntent(identity) {
+    const row = this.db.query(`
+      SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
+    return row ? writeIntentFromRow(row) : undefined;
+  }
+  markUnseenDeletion(identity) {
+    this.db.query("INSERT OR IGNORE INTO tier_unseen_deletions (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)").run(...idParams(identity));
+  }
+  isUnseenDeletion(identity) {
+    return this.db.query("SELECT 1 FROM tier_unseen_deletions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?").get(...idParams(identity)) !== null;
+  }
+  writeIntents() {
+    return this.db.query("SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id").all().map(writeIntentFromRow);
+  }
+  clearWriteIntent(identity, written) {
+    this.db.query(`
+      DELETE FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        ${written ? "AND kind = ? AND COALESCE(source_version, '') = ?" : ""}
+    `).run(...idParams(identity), ...written ? [written.kind, written.version ?? ""] : []);
+  }
   removeCopies(identity) {
     let removed = [];
     this.db.transaction(() => {
@@ -14398,10 +16133,10 @@ function isSqliteBusy2(error) {
 }
 function hasUnmergedWrites(dbPath) {
   try {
-    if (statSync7(`${dbPath}-wal`).size > 0)
+    if (statSync8(`${dbPath}-wal`).size > 0)
       return true;
   } catch {}
-  return existsSync10(`${dbPath}-journal`);
+  return existsSync12(`${dbPath}-journal`);
 }
 function proposalFromRow(row) {
   return {
@@ -14647,8 +16382,8 @@ function decisionFlags(decision) {
 }
 function restrictLedgerFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync10(path))
-      chmodSync2(path, 384);
+    if (existsSync12(path))
+      chmodSync4(path, 384);
   }
 }
 function assertTier(tier) {
@@ -14952,7 +16687,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 9,
       name: "secret_redaction_retirement",
       up(db) {
         const item = `provider = NEW.provider AND account_scope = NEW.account_scope
@@ -14997,10 +16732,40 @@ function tierLedgerMigrations() {
           END;
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "tier_write_intents",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_write_intents (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            local_item_id TEXT NOT NULL DEFAULT '',
+            source_version TEXT,
+            kind TEXT NOT NULL CHECK (kind IN ('content', 'names', 'advance', 'deletion', 'secret')),
+            location INTEGER NOT NULL DEFAULT 0,
+            connector_id TEXT NOT NULL DEFAULT '',
+            written_at TEXT NOT NULL,
+            body_version TEXT,
+            item_family TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TABLE IF NOT EXISTS tier_unseen_deletions (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 10, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -15554,164 +17319,6 @@ var init_stemmer = __esm(() => {
 
 // src/core/source-index/keyword-equivalents.json
 var init_keyword_equivalents = () => {};
-
-// src/core/source-model-policy.ts
-var init_source_model_policy = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/venice-models.ts
-function normalizeVeniceAnalystModelId(value) {
-  const trimmed = value.trim();
-  if (!trimmed)
-    return trimmed;
-  const key = trimmed.toLowerCase().replace(/\bvenice\b/g, " ").replace(/\bgl m\b/g, "glm").replace(/\bqwen\s*3\.6\b/g, "qwen-3-6").replace(/\bqwen\s*3\s*vl\b/g, "qwen3-vl").replace(/\bgrok\s*4\.3\b/g, "grok-4-3").replace(/\bgrok\s*4\.5\b/g, "grok-4-5").replace(/\bglm\s*5\.2\b/g, "glm-5-2").replace(/\bglm\s*5\.1\b/g, "glm-5-1").replace(/\be2e\b/g, "e2ee").replace(/\bee2e\b/g, "e2ee").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return VENICE_MODEL_ALIASES[key] ?? trimmed.toLowerCase();
-}
-function venicePrivacyCategoryForModel(value) {
-  return VENICE_MODEL_PRIVACY_CATEGORIES[normalizeVeniceAnalystModelId(value)];
-}
-async function assertVeniceEmbeddingModelAllowed(modelId, resolveCategory, signal) {
-  const resolvedModelId = modelId.trim();
-  if (/e2e{2}|ee2e/i.test(resolvedModelId)) {
-    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" uses a gated E2EE class.`, "Use the approved Venice Private or TEE embedding model; E2EE embedding remains unavailable until local key handling exists.");
-  }
-  const category = await resolveCategory(resolvedModelId, signal);
-  if (category !== "private" && category !== "tee") {
-    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" has privacy category ${category ?? "unknown"}; source embeddings require Venice Private or TEE.`, "Choose a Venice embedding model published with Private or TEE privacy metadata.");
-  }
-}
-var VENICE_MODEL_ALIASES, VENICE_MODEL_PRIVACY_CATEGORIES;
-var init_venice_models = __esm(() => {
-  init_operation_error();
-  VENICE_MODEL_ALIASES = Object.freeze({
-    default: "kimi-k3",
-    strong: "kimi-k3",
-    "strong-reasoning": "kimi-k3",
-    reasoning: "kimi-k3",
-    "secure-reasoning": "kimi-k3",
-    kimi: "kimi-k3",
-    "kimi-3": "kimi-k3",
-    "kimi-k-3": "kimi-k3",
-    "kimi-k3": "kimi-k3",
-    normal: "inkling",
-    "normal-reasoning": "inkling",
-    inkling: "inkling",
-    "most-secure": "e2ee-glm-5-2-p",
-    "slower-most-secure": "e2ee-glm-5-2-p",
-    "slow-most-secure": "e2ee-glm-5-2-p",
-    "glm-5-2-e2ee": "e2ee-glm-5-2-p",
-    "glm-5-2-ee2e": "e2ee-glm-5-2-p",
-    "glm-5-2-private": "zai-org-glm-5-2",
-    "glm-5-2-p": "e2ee-glm-5-2-p",
-    "e2ee-glm-5-2": "e2ee-glm-5-2-p",
-    "ee2e-glm-5-2": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-e2ee": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-ee2e": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-private": "zai-org-glm-5-2",
-    "glm-5-2": "zai-org-glm-5-2",
-    "fast-reasoning": "inkling",
-    "faster-reasoning": "inkling",
-    "acceptable-reasoning": "inkling",
-    "glm-5-2-fast": "zai-org-glm-5-2",
-    "glm-5-2-acceptable": "zai-org-glm-5-2",
-    "glm-5-1-e2ee": "e2ee-glm-5-1",
-    "glm-5-1-ee2e": "e2ee-glm-5-1",
-    "e2ee-glm-5-1": "e2ee-glm-5-1",
-    "ee2e-glm-5-1": "e2ee-glm-5-1",
-    "venice-glm-5-1-e2ee": "e2ee-glm-5-1",
-    "venice-glm-5-1-ee2e": "e2ee-glm-5-1",
-    "glm-5-1": "zai-org-glm-5-1",
-    "qwen-3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    vision: "kimi-k3",
-    "secure-vision": "kimi-k3",
-    "most-secure-vision": "kimi-k3",
-    "qwen-vision": "qwen3-vl-235b-a22b",
-    "qwen3-vl-vision": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-vision": "qwen3-vl-235b-a22b",
-    "qwen3-vl-235b": "qwen3-vl-235b-a22b",
-    "qwen3-vl-235b-a22b": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-235b": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-235b-a22b": "qwen3-vl-235b-a22b",
-    "qwen3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-a3b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-a3b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen-3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen-3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "vision-escalation": "kimi-k3",
-    "private-grok-4-3": "grok-4-3",
-    "grok-4-3-private": "grok-4-3",
-    "grok-4-3-vision": "grok-4-3",
-    multimodal: "kimi-k3",
-    "fast-multimodal": "kimi-k3",
-    "faster-multimodal": "kimi-k3",
-    "acceptable-multimodal": "kimi-k3",
-    "grok-4-3": "grok-4-3",
-    "grok-4-3-multimodal": "grok-4-3",
-    "grok-4-5": "grok-4-5",
-    "grok-4-5-vision": "grok-4-5",
-    "private-grok-4-5": "grok-4-5"
-  });
-  VENICE_MODEL_PRIVACY_CATEGORIES = Object.freeze({
-    "kimi-k3": "private",
-    inkling: "private",
-    "e2ee-glm-5-2-p": "e2ee",
-    "zai-org-glm-5-2": "private",
-    "e2ee-glm-5-1": "e2ee",
-    "zai-org-glm-5-1": "private",
-    "e2ee-qwen3-6-35b-a3b": "e2ee",
-    "grok-4-5": "private",
-    "qwen3-vl-235b-a22b": "private",
-    "e2ee-qwen3-vl-30b-a3b-p": "e2ee",
-    "grok-4-3": "private",
-    "claude-opus-4-7-fast": "anonymized",
-    "qwen3-6-27b": "private",
-    "tee-qwen3-5-122b-a10b": "tee"
-  });
-});
-
-// src/core/sovereignty.ts
-function assertSecureAnalystPoolModelIdAllowed(profileId, rawModelId) {
-  const modelId = normalizeVeniceAnalystModelId(rawModelId);
-  if (modelId.toLowerCase().startsWith("e2ee-")) {
-    throw new SecureAnalystPoolE2EEGateError(profileId, modelId);
-  }
-}
-var BUILT_IN_EMBEDDING_MODEL_ID, SecureAnalystPoolE2EEGateError;
-var init_sovereignty = __esm(() => {
-  init_owner_config_read();
-  init_owner_config_read();
-  init_atomic_file();
-  init_file_lease();
-  init_operation_error();
-  init_local_model_policy();
-  init_config();
-  init_secret_store();
-  init_source_model_policy();
-  init_venice_models();
-  init_manifest();
-  init_zkapi_consult_settings();
-  init_source_model_policy();
-  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
-  SecureAnalystPoolE2EEGateError = class SecureAnalystPoolE2EEGateError extends OperationError {
-    profileId;
-    modelId;
-    constructor(profileId, modelId) {
-      super("source_index_policy_violation", `Secure analyst pool profile "${profileId}" uses gated E2EE model "${modelId}".`, "E2EE secure-pool dispatch remains unavailable until Olympus has local key handling; use a catalog-approved non-E2EE Venice Private/TEE model.");
-      this.name = "SecureAnalystPoolE2EEGateError";
-      this.profileId = profileId;
-      this.modelId = modelId;
-    }
-  };
-});
 
 // src/workers/classification/sniffer-lane.ts
 function assertSnifferProfileAllowed(profileId, profile) {
@@ -16324,467 +17931,9 @@ var init_remote_access = __esm(() => {
   LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
 });
 
-// src/core/archive-formats.ts
-function startsWithFromLine(head) {
-  if (!head || head.length < FROM_LINE.length)
-    return false;
-  return FROM_LINE.every((byte, index) => head[index] === byte);
-}
-function lastNameOf(name) {
-  return name.split("/").pop() ?? name;
-}
-function whatsAppNoiseName(name) {
-  const base = lastNameOf(name);
-  return name.endsWith("/") || name.startsWith("__MACOSX/") || name.includes("/__MACOSX/") || base.startsWith("._") || base === ".DS_Store";
-}
-function whatsAppNamed(name) {
-  return !whatsAppNoiseName(name) && WHATSAPP_TEXT_NAME.test(lastNameOf(name));
-}
-function startsLikeWhatsAppChat(head) {
-  if (!head || head.length < 10 || head.includes(0))
-    return false;
-  for (const raw of new TextDecoder("utf-8").decode(head).split(`
-`).slice(0, 8)) {
-    const line = raw.replace(WHATSAPP_LINE_NOISE, "").replace(WHATSAPP_NARROW_SPACES, " ").replace(/\r$/, "");
-    if (line.trim() === "")
-      continue;
-    return WHATSAPP_FIRST_LINE.test(line);
-  }
-  return false;
-}
-function whatsAppIsExport(entry, needName) {
-  if (entry.kind !== "file")
-    return false;
-  if (entry.members) {
-    return entry.members.some((member) => member.kind === "file" && !whatsAppNoiseName(member.relPath) && member.relPath.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(member.relPath)) && startsLikeWhatsAppChat(member.head));
-  }
-  return entry.name.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(entry.name)) && startsLikeWhatsAppChat(entry.head);
-}
-function archiveHeadText(head) {
-  return head && head.length > 0 ? leniencyDecoder.decode(head) : "";
-}
-function isJunkArchiveMember(name) {
-  const parts = name.split("/").filter((part) => part !== "");
-  return parts.includes("__MACOSX") || (parts[parts.length - 1] ?? "").startsWith(".");
-}
-function reflectDailyNoteDate(fileName) {
-  const match = DAILY_NOTE_FILE.exec(fileName.trim());
-  if (!match)
-    return;
-  const weekday = match[1].slice(0, 3).toLowerCase();
-  const month = MONTHS.indexOf(match[2].slice(0, 3).toLowerCase());
-  const day = Number(match[3]);
-  const year = Number(match[4]);
-  if (!WEEKDAYS.includes(weekday) || month < 0 || day < 1 || day > 31)
-    return;
-  const at = new Date(Date.UTC(year, month, day, 12));
-  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
-}
-function headRecordKeys(head) {
-  const text2 = archiveHeadText(head);
-  const n = text2.length;
-  let i = 0;
-  const isSpace = (char) => char === " " || char === "\t" || char === `
-` || char === "\r";
-  while (i < n && isSpace(text2[i]))
-    i += 1;
-  const stack = [];
-  let shape;
-  let listDepth = 0;
-  let closed = false;
-  let hasElements = false;
-  let objectRoot = false;
-  let notesNotAList = false;
-  if (text2[i] === "[") {
-    shape = "list";
-    listDepth = 1;
-    stack.push("a");
-  } else if (text2[i] === "{") {
-    objectRoot = true;
-    stack.push("o");
-  } else {
-    return;
-  }
-  i += 1;
-  const records = [];
-  let current2;
-  while (i < n) {
-    const char = text2[i];
-    if (listDepth > 0 && stack.length === listDepth && !isSpace(char) && char !== "," && char !== "]")
-      hasElements = true;
-    if (char === '"') {
-      let end = i + 1;
-      while (end < n && text2[end] !== '"')
-        end += text2[end] === "\\" ? 2 : 1;
-      if (end >= n)
-        break;
-      const raw = text2.slice(i + 1, end);
-      let after = end + 1;
-      while (after < n && isSpace(text2[after]))
-        after += 1;
-      if (text2[after] === ":" && stack[stack.length - 1] === "o") {
-        if (listDepth > 0 && stack.length === listDepth + 1) {
-          current2?.add(raw);
-        } else if (shape === undefined && stack.length === 1 && raw === REFLECT_NOTES_LIST_KEY) {
-          let value = after + 1;
-          while (value < n && isSpace(text2[value]))
-            value += 1;
-          if (text2[value] === "[") {
-            shape = "notes";
-            listDepth = 2;
-          } else if (value < n) {
-            notesNotAList = true;
-          }
-        }
-      }
-      i = end + 1;
-      continue;
-    }
-    if (char === "[" || char === "{") {
-      stack.push(char === "[" ? "a" : "o");
-      if (char === "{" && listDepth > 0 && stack.length === listDepth + 1) {
-        current2 = new Set;
-        records.push(current2);
-      }
-    } else if (char === "]" || char === "}") {
-      stack.pop();
-      if (listDepth > 0 && stack.length < listDepth) {
-        closed = true;
-        listDepth = 0;
-      }
-      if (stack.length === 0)
-        break;
-      if (listDepth > 0 && stack.length === listDepth)
-        current2 = undefined;
-    }
-    i += 1;
-  }
-  if (!shape) {
-    if (objectRoot && !notesNotAList && stack.length > 0) {
-      return { shape: "notes", records: [], empty: false, firstRecordCut: true, unreached: true };
-    }
-    return;
-  }
-  const open2 = listDepth > 0;
-  return { shape, records, empty: closed && !hasElements, firstRecordCut: open2 && records.length === 1 && current2 !== undefined, unreached: false };
-}
-function isReflectRecord(keys) {
-  return REFLECT_BODY_KEYS.some((key2) => keys.has(key2)) && REFLECT_NOTE_KEYS.some((key2) => keys.has(key2));
-}
-function isRoamRecord(keys) {
-  return keys.has("title") && (ROAM_TIME_KEYS.some((key2) => keys.has(key2)) || keys.has("children") && keys.has("uid"));
-}
-function recordsFormat(records, shape) {
-  const reflect = records.some(isReflectRecord);
-  const roam = records.some(isRoamRecord);
-  if (reflect === roam)
-    return;
-  if (roam)
-    return shape === "list" ? "roam" : undefined;
-  return "reflect";
-}
-function notesJsonFormat(probe) {
-  const parsed = headRecordKeys(probe.head);
-  if (!parsed)
-    return;
-  const fromHead = recordsFormat(parsed.records, parsed.shape);
-  if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys)
-    return fromHead;
-  let scanned = SCANNED.get(probe);
-  if (!scanned) {
-    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
-    scanned = { keys };
-    SCANNED.set(probe, scanned);
-  }
-  return scanned.keys ? recordsFormat([scanned.keys], parsed.shape) : undefined;
-}
-function detectFile(probe, reads) {
-  if (probe.chosen.kind === "file")
-    return reads(probe.chosen) ? [""] : undefined;
-  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry));
-  return found.length === 1 ? [found[0].relPath] : undefined;
-}
-function zipJsonMembers(entry) {
-  return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
-}
-function readsJsonExport(entry, format) {
-  const other = format === "reflect" ? "roam" : "reflect";
-  if (entry.members) {
-    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
-    return members.includes(format) && !members.includes(other);
-  }
-  return notesJsonFormat(entry) === format;
-}
-function isTelegramJsonHead(head) {
-  if (!head || head.length === 0)
-    return false;
-  const text2 = new TextDecoder("utf-8").decode(head);
-  return TELEGRAM_FULL_HEAD.test(text2) || TELEGRAM_CHAT_HEAD.test(text2);
-}
-function archiveCorpusId(trustDomain, family) {
-  return `${trustDomain}.archive.${family}`;
-}
-function isArchiveCorpusId(corpusId, trustDomain) {
-  return corpusId.startsWith(`${trustDomain}.archive.`);
-}
-function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
-  return [...new Set(formats.map((format) => format.family))];
-}
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
-var init_archive_formats = __esm(() => {
-  FROM_LINE = [70, 114, 111, 109, 32];
-  MBOX_ARCHIVE_FORMAT = Object.freeze({
-    id: "mbox",
-    label: "Mail (mbox)",
-    family: "email",
-    provider: "mbox",
-    chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
-    citationLabel: "Imported mail",
-    detect(probe) {
-      if (probe.chosen.kind === "file")
-        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
-      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
-        return;
-      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
-      return inner ? [inner.relPath] : undefined;
-    }
-  });
-  WHATSAPP_DATE = String.raw`\d{1,4}[./-]\s?\d{1,2}[./-]\s?\d{1,4}`;
-  WHATSAPP_TIME = String.raw`\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s?[ap]\.?\s?m\.?)?`;
-  WHATSAPP_FIRST_LINE = new RegExp(`^(?:\\[\\s?${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s?\\]|${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s[-\\u2013]\\s)`, "i");
-  WHATSAPP_LINE_NOISE = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
-  WHATSAPP_NARROW_SPACES = new RegExp("[\\u00a0\\u202f\\u2007\\u2009]", "g");
-  WHATSAPP_TEXT_NAME = /^(?:_chat|whatsapp chat (?:with|-)\s+\S.*)\.txt$/i;
-  WHATSAPP_ARCHIVE_FORMAT = Object.freeze({
-    id: "whatsapp_chat",
-    label: "WhatsApp chat export",
-    family: "chat",
-    provider: "whatsapp_export",
-    chooseHint: "a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)",
-    citationLabel: "WhatsApp",
-    probeNames: Object.freeze(["*.txt", "*.zip"]),
-    signatureNames: Object.freeze(["_chat.txt", "WhatsApp Chat with *.txt", "WhatsApp Chat - *.txt", "WhatsApp Chat*.zip"]),
-    detect(probe) {
-      if (probe.chosen.kind === "file")
-        return whatsAppIsExport(probe.chosen, false) ? [""] : undefined;
-      const found = probe.children.filter((entry) => whatsAppIsExport(entry, true)).map((entry) => entry.relPath).sort();
-      return found.length > 0 ? found : undefined;
-    },
-    unconfirmed(probe) {
-      if (probe.chosen.kind === "file")
-        return 0;
-      return probe.children.filter((entry) => !whatsAppIsExport(entry, true) && whatsAppIsExport(entry, false)).length;
-    }
-  });
-  leniencyDecoder = new TextDecoder("utf-8");
-  WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
-  MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-  DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?:\.(?:md|markdown))?$/i;
-  REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
-  REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
-  ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
-  SCANNED = new WeakMap;
-  REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
-    id: "reflect-json",
-    label: "Reflect notes (JSON)",
-    family: "note",
-    provider: "reflect",
-    chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
-    citationLabel: "Reflect",
-    probeNames: Object.freeze(["*.json"]),
-    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
-  });
-  REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
-    id: "reflect-markdown",
-    label: "Reflect notes (Markdown zip)",
-    family: "note",
-    provider: "reflect",
-    chooseHint: "a Reflect export as Markdown (the .zip file)",
-    citationLabel: "Reflect",
-    probeNames: Object.freeze(["*, *, ????.md"]),
-    detect: (probe) => detectFile(probe, (entry) => {
-      if (!entry.members || /^roam/i.test(entry.name))
-        return false;
-      const files = entry.members.filter((member) => member.kind === "file" && !isJunkArchiveMember(member.relPath));
-      if (files.some((member) => /\.json$/i.test(member.name)))
-        return false;
-      const notes = files.filter((member) => /\.(?:md|markdown)$/i.test(member.name));
-      if (notes.length === 0)
-        return false;
-      return /reflect/i.test(entry.name) || notes.some((member) => reflectDailyNoteDate(member.name) !== undefined) || notes.some((member) => /reflect\.app\//i.test(archiveHeadText(member.head)));
-    })
-  });
-  ROAM_JSON_ARCHIVE_FORMAT = Object.freeze({
-    id: "roam-json",
-    label: "Roam notes (JSON)",
-    family: "note",
-    provider: "roam",
-    chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
-    citationLabel: "Roam",
-    probeNames: Object.freeze(["*.json"]),
-    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
-  });
-  JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
-  TELEGRAM_EXPORT_SECTIONS = Object.freeze([
-    "personal_information",
-    "profile_pictures",
-    "stories",
-    "profile_music",
-    "contacts",
-    "frequent_contacts",
-    "sessions",
-    "web_sessions",
-    "other_data",
-    "chats",
-    "left_chats"
-  ]);
-  TELEGRAM_FULL_HEAD = new RegExp(String.raw`^\s*\{\s*(?:"about"\s*:\s*${JSON_STRING}\s*,\s*)?"(?:${TELEGRAM_EXPORT_SECTIONS.join("|")})"\s*:\s*[\[{]`);
-  TELEGRAM_CHAT_HEAD = new RegExp(String.raw`^\s*\{\s*(?:"name"\s*:\s*(?:null|${JSON_STRING})\s*,\s*)?"type"\s*:\s*(?:null|${JSON_STRING})\s*,\s*"id"\s*:\s*-?\d+\s*,\s*"messages"\s*:\s*\[`);
-  TELEGRAM_HTML_NAME = /^(?:messages\d*|export_results)\.html?$/i;
-  TELEGRAM_JSON_ARCHIVE_FORMAT = Object.freeze({
-    id: "telegram_json",
-    label: "Telegram Desktop export (JSON)",
-    family: "chat",
-    provider: "telegram_export",
-    chooseHint: "a Telegram Desktop export (its result.json file, or the folder that holds it; export it as Machine-readable JSON)",
-    citationLabel: "Telegram",
-    probeNames: ["result.json", "messages.html", "export_results.html"],
-    unsupportedVariants: Object.freeze([
-      Object.freeze({
-        matches(probe) {
-          if (probe.chosen.kind === "file")
-            return TELEGRAM_HTML_NAME.test(probe.chosen.name);
-          return probe.children.some((entry) => entry.kind === "file" && TELEGRAM_HTML_NAME.test(entry.name));
-        },
-        advice: "This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat's menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it."
-      })
-    ]),
-    detect(probe) {
-      if (probe.chosen.kind === "file")
-        return isTelegramJsonHead(probe.chosen.head) ? [""] : undefined;
-      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name.toLowerCase() === "result.json" && isTelegramJsonHead(entry.head));
-      return inner ? [inner.relPath] : undefined;
-    }
-  });
-  ARCHIVE_FORMATS = Object.freeze([
-    MBOX_ARCHIVE_FORMAT,
-    WHATSAPP_ARCHIVE_FORMAT,
-    REFLECT_JSON_ARCHIVE_FORMAT,
-    REFLECT_MARKDOWN_ARCHIVE_FORMAT,
-    ROAM_JSON_ARCHIVE_FORMAT,
-    TELEGRAM_JSON_ARCHIVE_FORMAT
-  ]);
-  CONNECTOR_FACTORIES = new Map;
-});
-
-// src/core/source-registry.ts
-import { readFileSync as readFileSync14 } from "node:fs";
-function sourceAccountMovePending(account) {
-  return account.migration?.state === "moving" || account.migration?.state === "reverting";
-}
-function sourceRegistryPath(env = process.env) {
-  return olympusDataPath(env, "registry.json");
-}
-function readSourceRegistry(env = process.env) {
-  return readSourceRegistryAt(sourceRegistryPath(env));
-}
-function updateSourceRegistry(env, mutate) {
-  return updateSourceRegistryAt(sourceRegistryPath(env), mutate);
-}
-function updateSourceRegistryAt(path, mutate) {
-  return withFileLeaseSync(path, (lease) => {
-    const current2 = readSourceRegistryAt(path);
-    const next = mutate(current2) ?? current2;
-    next.schema = next.accounts.some(sourceAccountMovePending) ? SOURCE_REGISTRY_MOVING_SCHEMA : next.accounts.some((account) => account.layout === "folder") ? SOURCE_REGISTRY_FOLDER_SCHEMA : SOURCE_REGISTRY_SCHEMA;
-    const text2 = `${JSON.stringify(validateRegistry(next, path), null, 2)}
-`;
-    lease.commit(() => writePrivateFileAtomicSync(path, text2));
-    return next;
-  });
-}
-function findRegistryAccount(registry, sourceId, slot) {
-  return registry.accounts.find((account) => account.source_id === sourceId && account.slot === slot);
-}
-function readSourceRegistryAt(path) {
-  let text2;
-  try {
-    text2 = readFileSync14(path, "utf8");
-  } catch (error) {
-    if (error?.code === "ENOENT")
-      return { schema: SOURCE_REGISTRY_SCHEMA, accounts: [] };
-    throw new SourceRegistryError(path, "cannot be read");
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(text2);
-  } catch {
-    throw new SourceRegistryError(path, "not JSON");
-  }
-  return validateRegistry(parsed, path);
-}
-function validateRegistry(value, path) {
-  if (!isRecord(value))
-    throw new SourceRegistryError(path, "not an object");
-  if (!KNOWN_SCHEMAS.includes(value.schema))
-    throw new SourceRegistryError(path, `unknown schema ${JSON.stringify(value.schema)}`);
-  if (!Array.isArray(value.accounts))
-    throw new SourceRegistryError(path, "accounts is not a list");
-  const seen = new Set;
-  for (const [index, account] of value.accounts.entries()) {
-    if (!isValidAccount(account))
-      throw new SourceRegistryError(path, `account #${index + 1} is malformed`);
-    const key2 = `${account.source_id}\x00${account.slot}`;
-    if (seen.has(key2))
-      throw new SourceRegistryError(path, `${account.source_id} slot ${account.slot} is listed twice`);
-    seen.add(key2);
-  }
-  return value;
-}
-function isValidAccount(value) {
-  return isRecord(value) && nonEmptyString(value.source_id) && nonEmptyString(value.slot) && typeof value.state === "string" && STATES.includes(value.state) && typeof value.layout === "string" && LAYOUTS.includes(value.layout) && Array.isArray(value.corpus_ids) && value.corpus_ids.every(nonEmptyString) && (value.provider_account_hash === undefined || nonEmptyString(value.provider_account_hash)) && nonEmptyString(value.created_at) && (value.migration === undefined || isValidMigration(value.migration));
-}
-function isValidMigration(value) {
-  if (!isRecord(value))
-    return false;
-  const pending = value.state === "moving" || value.state === "reverting";
-  return typeof value.state === "string" && MIGRATION_STATES.includes(value.state) && nonEmptyString(value.at) && (value.reason === undefined || nonEmptyString(value.reason)) && (value.detail === undefined || typeof value.detail === "string") && (value.moves === undefined || Array.isArray(value.moves) && value.moves.every(isValidMove)) && (!pending || Array.isArray(value.moves)) && (value.checked === undefined || Array.isArray(value.checked) && value.checked.every(isValidCheck));
-}
-function isValidMove(value) {
-  return isRecord(value) && typeof value.role === "string" && MOVE_ROLES.includes(value.role) && nonEmptyString(value.from) && nonEmptyString(value.to) && (value.kind === "file" || value.kind === "dir") && (value.db === undefined || value.db === true) && nonEmptyString(value.dev) && nonEmptyString(value.ino) && typeof value.size === "number" && Number.isSafeInteger(value.size) && value.size >= 0;
-}
-function isValidCheck(value) {
-  return isRecord(value) && nonEmptyString(value.file) && (value.result === "ok" || value.result === "damaged" || value.result === "not_checked");
-}
-function nonEmptyString(value) {
-  return typeof value === "string" && value.length > 0;
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-var SOURCE_REGISTRY_SCHEMA = 1, SOURCE_REGISTRY_FOLDER_SCHEMA = 2, SOURCE_REGISTRY_MOVING_SCHEMA = 3, KNOWN_SCHEMAS, DEFAULT_ACCOUNT_SLOT = "1", SourceRegistryError, STATES, LAYOUTS, MIGRATION_STATES, MOVE_ROLES;
-var init_source_registry = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_olympus_layout();
-  KNOWN_SCHEMAS = [SOURCE_REGISTRY_SCHEMA, SOURCE_REGISTRY_FOLDER_SCHEMA, SOURCE_REGISTRY_MOVING_SCHEMA];
-  SourceRegistryError = class SourceRegistryError extends Error {
-    code = "source_registry_unreadable";
-    path;
-    constructor(path, detail) {
-      super(`The source registry at ${path} is unreadable (${detail}); no source store opens until it is repaired.`);
-      this.name = "SourceRegistryError";
-      this.path = path;
-    }
-  };
-  STATES = ["active", "deleting", "deleted"];
-  LAYOUTS = ["legacy", "folder"];
-  MIGRATION_STATES = ["moving", "reverting", "done", "skipped", "failed"];
-  MOVE_ROLES = ["store", "ledger", "secrets", "sniffer", "raw"];
-});
-
 // src/core/store-identity.ts
-import { existsSync as existsSync11, realpathSync as realpathSync3, statSync as statSync8 } from "node:fs";
-import { basename as basename3, dirname as dirname14, isAbsolute as isAbsolute8, join as join15, relative as relative3, resolve as resolve6, sep as sep3 } from "node:path";
+import { existsSync as existsSync13, realpathSync as realpathSync3, statSync as statSync9 } from "node:fs";
+import { basename as basename3, dirname as dirname17, isAbsolute as isAbsolute9, join as join17, relative as relative4, resolve as resolve7, sep as sep4 } from "node:path";
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
     return;
@@ -16798,20 +17947,20 @@ function storePathKey(path) {
   try {
     return realpathSync3(path);
   } catch {}
-  const folder = dirname14(path);
-  let real = resolve6(folder);
+  const folder = dirname17(path);
+  let real = resolve7(folder);
   try {
     real = realpathSync3(folder);
   } catch {}
-  return join15(real, basename3(path));
+  return join17(real, basename3(path));
 }
 function registryKey(env = process.env) {
   const path = sourceRegistryPath(env);
-  let folder = resolve6(dirname14(path));
+  let folder = resolve7(dirname17(path));
   try {
     folder = realpathSync3.native(folder);
   } catch {}
-  return join15(folder, basename3(path));
+  return join17(folder, basename3(path));
 }
 function matchStore(sourceId, slot, dbPath, names, env) {
   const wanted = storePathKey(dbPath);
@@ -16861,13 +18010,13 @@ function storePlacementView(env = process.env) {
       return loaded = { kind: "unreadable" };
     try {
       const read = readSourceRegistry(env);
-      loaded = existsSync11(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
+      loaded = existsSync13(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
     } catch {
       loaded = { kind: "unreadable" };
     }
     return loaded;
   };
-  const absentForSure = (path) => isMissing(path) && !isMissing(dirname14(path));
+  const absentForSure = (path) => isMissing(path) && !isMissing(dirname17(path));
   const verdicts = new Map;
   const storeGone = (identity, seen) => {
     const key2 = JSON.stringify([identity.sourceId, identity.slot, identity.store, identity.incarnation, ...seen]);
@@ -16900,18 +18049,18 @@ function storePlacementView(env = process.env) {
   const folderRoots = () => {
     const roots = new Set;
     try {
-      roots.add(resolve6(accountFoldersRoot(env)));
+      roots.add(resolve7(accountFoldersRoot(env)));
       if (root !== undefined)
-        roots.add(join15(realpathSync3(root), ACCOUNT_FOLDERS_DIR));
+        roots.add(join17(realpathSync3(root), ACCOUNT_FOLDERS_DIR));
     } catch {}
     return [...roots];
   };
   const folderPlace = (path) => {
     for (const folders of folderRoots()) {
-      const inside = relative3(folders, path);
-      if (inside.startsWith("..") || isAbsolute8(inside))
+      const inside = relative4(folders, path);
+      if (inside.startsWith("..") || isAbsolute9(inside))
         continue;
-      const [sourceId, slot, stores, file, ...rest] = inside.split(sep3);
+      const [sourceId, slot, stores, file, ...rest] = inside.split(sep4);
       if (!sourceId || !slot || stores !== "stores" || !file?.endsWith(".sqlite") || rest.length > 0)
         continue;
       return { sourceId, slot, store: file.slice(0, -".sqlite".length) };
@@ -16960,7 +18109,7 @@ function storePlacementView(env = process.env) {
       return "kept";
     try {
       const key2 = storePathKey(path);
-      const inFolder = folderPlace(key2) ?? folderPlace(resolve6(path));
+      const inFolder = folderPlace(key2) ?? folderPlace(resolve7(path));
       if (state.kind === "missing")
         return inFolder !== undefined || legacyPlaced(key2) ? "kept" : "unplaced";
       const identity = placedAt(state.registry).get(key2);
@@ -16993,7 +18142,7 @@ function isEarlier(held, current2) {
 }
 function isMissing(path) {
   try {
-    statSync8(path);
+    statSync9(path);
     return false;
   } catch (error) {
     const code = error?.code;
@@ -17009,28 +18158,28 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash7, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash10, randomUUID as randomUUID4 } from "node:crypto";
 import {
-  chmodSync as chmodSync3,
-  closeSync as closeSync7,
-  existsSync as existsSync12,
+  chmodSync as chmodSync5,
+  closeSync as closeSync9,
+  existsSync as existsSync14,
   fsyncSync as fsyncSync2,
-  mkdirSync as mkdirSync10,
-  lstatSync as lstatSync6,
-  openSync as openSync7,
-  readFileSync as readFileSync15,
+  mkdirSync as mkdirSync12,
+  lstatSync as lstatSync8,
+  openSync as openSync9,
+  readFileSync as readFileSync16,
   readdirSync as readdirSync2,
   realpathSync as realpathSync4,
   renameSync as renameSync4,
   rmSync as rmSync5,
   rmdirSync,
-  statSync as statSync9,
+  statSync as statSync10,
   writeFileSync as writeFileSync4
 } from "node:fs";
-import { basename as basename4, dirname as dirname15, isAbsolute as isAbsolute9, join as join16, resolve as resolve7 } from "node:path";
+import { basename as basename4, dirname as dirname18, isAbsolute as isAbsolute10, join as join18, resolve as resolve8 } from "node:path";
 function mediaCacheDir(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
-  if (configured && !isAbsolute9(configured))
+  if (configured && !isAbsolute10(configured))
     throw new TypeError(`${MEDIA_CACHE_DIR_ENV} must be an absolute path.`);
   if (!configured)
     olympusDataDir(env);
@@ -17046,14 +18195,14 @@ function isSha256(value) {
   return true;
 }
 function isMediaCachePath(path, sha256, dir) {
-  if (!isAbsolute9(path) || !isSha256(sha256) || resolve7(path) !== path)
+  if (!isAbsolute10(path) || !isSha256(sha256) || resolve8(path) !== path)
     return false;
-  if (basename4(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename4(dirname15(path))))
+  if (basename4(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename4(dirname18(path))))
     return false;
-  if (dir !== undefined && dirname15(path) !== resolve7(dir))
+  if (dir !== undefined && dirname18(path) !== resolve8(dir))
     return false;
   try {
-    const stat2 = lstatSync6(path);
+    const stat2 = lstatSync8(path);
     if (!stat2.isFile())
       return false;
   } catch {}
@@ -17065,7 +18214,7 @@ function mediaHolderName(holder) {
   try {
     return realpathSync4(holder);
   } catch {
-    return resolve7(holder);
+    return resolve8(holder);
   }
 }
 function mediaHolderKey(holder) {
@@ -17087,11 +18236,11 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
   try {
     const refs = refsDir(path);
     for (const name of markerNames(holder))
-      rmSync5(join16(refs, name), { force: true });
-    const remaining = existsSync12(refs) ? readdirSync2(refs) : [];
+      rmSync5(join18(refs, name), { force: true });
+    const remaining = existsSync14(refs) ? readdirSync2(refs) : [];
     if (remaining.length > 0)
       return false;
-    if (existsSync12(refs))
+    if (existsSync14(refs))
       rmdirSync(refs);
     rmSync5(path, { force: true });
     return true;
@@ -17105,7 +18254,7 @@ function sweepMediaCache(dir, options = {}) {
   const placement = storePlacementView(options.env ?? process.env);
   const old = (path) => {
     try {
-      return now - statSync9(path).mtimeMs > maxAgeMs;
+      return now - statSync10(path).mtimeMs > maxAgeMs;
     } catch {
       return false;
     }
@@ -17118,7 +18267,7 @@ function sweepMediaCache(dir, options = {}) {
     return 0;
   }
   for (const name of entries) {
-    const path = join16(dir, name);
+    const path = join18(dir, name);
     try {
       if (name.startsWith(".") && name.endsWith(".tmp")) {
         if (old(path))
@@ -17128,9 +18277,9 @@ function sweepMediaCache(dir, options = {}) {
       if (!name.endsWith(".jpg") || !isSha256(name.slice(0, -4)))
         continue;
       const refs = refsDir(path);
-      if (existsSync12(refs)) {
+      if (existsSync14(refs)) {
         for (const marker of readdirSync2(refs)) {
-          const markerPath = join16(refs, marker);
+          const markerPath = join18(refs, marker);
           const gone = marker.startsWith("staging-") || marker.endsWith(".tmp") ? old(markerPath) : marker.startsWith(STORE_MARKER_PREFIX) ? storeHolderGone(markerPath, placement) : holderGone(markerPath, marker, placement);
           if (gone)
             rmSync5(markerPath, { force: true });
@@ -17154,50 +18303,50 @@ function addMarker(path, holder) {
     addStoreMarker(refs, holder);
     return;
   }
-  const marker = join16(refs, holderName(holder));
+  const marker = join18(refs, holderName(holder));
   const name = mediaHolderName(holder);
   if (readMarker(marker) !== name)
     writeFileSync4(marker, name, { mode: 384 });
   const legacy = legacyHolderName(holder);
   if (legacy)
-    rmSync5(join16(refs, legacy), { force: true });
+    rmSync5(join18(refs, legacy), { force: true });
 }
 function addStoreMarker(refs, holder) {
-  const marker = join16(refs, storeMarkerName(holder));
+  const marker = join18(refs, storeMarkerName(holder));
   const text2 = storeMarkerText(holder);
   if (readMarker(marker) !== text2)
     writePrivateFileAtomicSync(marker, text2);
   else
     flushMarker(marker, refs);
   for (const name of pathMarkerNames(holder))
-    rmSync5(join16(refs, name), { force: true });
+    rmSync5(join18(refs, name), { force: true });
 }
 function flushMarker(marker, refs) {
-  const descriptor = openSync7(marker, "r");
+  const descriptor = openSync9(marker, "r");
   try {
     fsyncSync2(descriptor);
   } finally {
-    closeSync7(descriptor);
+    closeSync9(descriptor);
   }
   syncDirectorySync(refs);
 }
 function readMarker(marker) {
   try {
-    return readFileSync15(marker, "utf8");
+    return readFileSync16(marker, "utf8");
   } catch {
     return;
   }
 }
 function holderGone(marker, markerName, placement) {
   const name = readMarker(marker);
-  if (!name || !isAbsolute9(name) || holderDigest(name) !== markerName)
+  if (!name || !isAbsolute10(name) || holderDigest(name) !== markerName)
     return false;
-  if (existsSync12(name))
+  if (existsSync14(name))
     return false;
   const verdict = placement.pathMarker(name);
   if (verdict !== "unplaced")
     return verdict === "gone";
-  return existsSync12(dirname15(name));
+  return existsSync14(dirname18(name));
 }
 function storeHolderGone(marker, placement) {
   const recorded = parseStoreMarker(readMarker(marker));
@@ -17238,10 +18387,10 @@ function parseStoreMarker(text2) {
   }
 }
 function refsDir(path) {
-  return join16(dirname15(path), `${basename4(path)}.refs`);
+  return join18(dirname18(path), `${basename4(path)}.refs`);
 }
 function holderDigest(name) {
-  return createHash7("sha256").update(name).digest("hex").slice(0, 32);
+  return createHash10("sha256").update(name).digest("hex").slice(0, 32);
 }
 function holderName(holder) {
   const digest = holderDigest(mediaHolderName(holder));
@@ -17263,8 +18412,8 @@ function legacyHolderName(holder) {
   return legacy === holderName(holder) ? undefined : legacy;
 }
 function ensureOwnerOnlyDir(dir) {
-  mkdirSync10(dir, { recursive: true, mode: 448 });
-  chmodSync3(dir, 448);
+  mkdirSync12(dir, { recursive: true, mode: 448 });
+  chmodSync5(dir, 448);
 }
 var MEDIA_CACHE_ORPHAN_AGE_MS, MEDIA_CACHE_DIR_NAMES, STORE_MARKER_PREFIX = "store-";
 var init_media_cache = __esm(() => {
@@ -17278,288 +18427,22 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
 
-// src/workers/classification/secret-locations.ts
-import { Database as Database2 } from "bun:sqlite";
-import { createHash as createHash8 } from "node:crypto";
-import { chmodSync as chmodSync4, closeSync as closeSync8, existsSync as existsSync13, mkdirSync as mkdirSync11, openSync as openSync8 } from "node:fs";
-import { dirname as dirname16 } from "node:path";
-function screenedSecretLocator(locator) {
-  return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
-}
-
-class SecretLocationsIndex {
-  dbPath;
-  db;
-  now;
-  constructor(options) {
-    this.dbPath = options.dbPath;
-    this.now = options.now ?? (() => new Date);
-    if (options.readOnly === true) {
-      this.db = new Database2(this.dbPath, { readonly: true, create: false });
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-      return;
-    }
-    const onDisk = this.dbPath !== ":memory:";
-    if (onDisk) {
-      mkdirSync11(dirname16(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync13(this.dbPath))
-        closeSync8(openSync8(this.dbPath, "a", 384));
-      chmodSync4(this.dbPath, 384);
-    }
-    this.db = new Database2(this.dbPath, { create: true });
-    try {
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
-      runSqliteMigrations(this.db, SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsMigrations());
-    } catch (error) {
-      closeSqliteStore(this.db);
-      throw error;
-    }
-  }
-  close() {
-    closeSqliteStore(this.db);
-  }
-  record(input) {
-    const kinds = [...new Set(input.findingKinds.map((kind) => kind.trim()).filter(Boolean))].sort();
-    if (kinds.length === 0)
-      throw new Error("A secret location needs at least one finding kind.");
-    const namesReleasable = input.namesReleasable === true;
-    const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
-    const locator = screenedSecretLocator(input.locator);
-    const folderKeys = [...new Set((input.folderKeys ?? []).map((key2) => key2.trim()).filter(Boolean))].sort();
-    const contentHash = input.text !== undefined ? createHash8("sha256").update(input.text, "utf8").digest("hex") : null;
-    const existing = this.get(input.identity);
-    if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
-      return false;
-    }
-    this.db.query(`
-      INSERT INTO secret_locations (
-        provider, account_scope, conversation_key, provider_item_id, locator, title, names_releasable,
-        folder_keys_json, scope_generation, scope_revision, finding_kinds_json, content_hash, detected_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
-        locator = excluded.locator, title = excluded.title, names_releasable = excluded.names_releasable,
-        folder_keys_json = excluded.folder_keys_json, scope_generation = excluded.scope_generation,
-        scope_revision = excluded.scope_revision, finding_kinds_json = excluded.finding_kinds_json,
-        content_hash = excluded.content_hash, detected_at = excluded.detected_at
-    `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
-    return true;
-  }
-  remove(identity) {
-    return this.db.query(`
-      DELETE FROM secret_locations
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId).changes > 0;
-  }
-  removeAccountScope(provider, accountScope) {
-    return this.db.query("DELETE FROM secret_locations WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
-  }
-  get(identity) {
-    const row = this.db.query(`
-      SELECT * FROM secret_locations
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
-    return row ? locationFromRow(row) : undefined;
-  }
-  count() {
-    return this.db.query("SELECT COUNT(*) AS n FROM secret_locations").get().n;
-  }
-  search(query, scope, options = {}) {
-    const terms = secretLocationQueryTerms(query);
-    if (terms.length === 0)
-      return [];
-    const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
-    const rows = this.db.query(`
-      SELECT * FROM secret_locations
-      ${scope.accountScope ? "WHERE account_scope = ?" : ""}
-      ORDER BY detected_at DESC
-    `).all(...scope.accountScope ? [scope.accountScope] : []);
-    const scored = [];
-    for (const row of rows) {
-      const location = locationFromRow(row);
-      if (!secretLocationWithinScope(location, scope))
-        continue;
-      const haystack = [
-        location.namesReleasable ? location.locator ?? "" : "",
-        location.title ?? "",
-        location.findingKinds.join(" ").replaceAll("_", " ")
-      ].join(`
-`).toLowerCase();
-      const score = terms.filter((term) => haystack.includes(term)).length;
-      if (score > 0)
-        scored.push({ location, score });
-    }
-    const identities = scored.map(({ location }) => ({
-      provider: location.source,
-      accountScope: location.accountScope,
-      providerItemId: location.providerItemId,
-      ...location.conversationKey ? { providerConversationId: location.conversationKey } : {}
-    }));
-    let hidden = new Set;
-    if (options.hide && scored.length > 0) {
-      try {
-        hidden = options.hide(identities);
-      } catch {
-        return [];
-      }
-    }
-    return scored.filter((_, index) => !hidden.has(identities[index])).sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
-      source: location.source,
-      ref: secretLocationRef(location),
-      locator: location.namesReleasable ? location.locator : null,
-      title: location.namesReleasable ? location.title : null,
-      findingKinds: location.findingKinds,
-      detectedAt: location.detectedAt
-    }));
-  }
-}
-function secretLocationRef(location) {
-  return `secret:${createHash8("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
-}
-function secretLocationWithinScope(location, scope) {
-  if (scope.accountScope && location.accountScope !== scope.accountScope)
-    return false;
-  const filters = scope.filters;
-  if (!filters)
-    return true;
-  if (filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore || (filters.searchTextExactLines?.length ?? 0) > 0) {
-    return false;
-  }
-  if (filters.provider && location.source !== filters.provider)
-    return false;
-  if (filters.conversationId !== undefined && location.conversationKey !== filters.conversationId)
-    return false;
-  if (filters.sourceScopeGeneration !== undefined && location.scopeGeneration !== filters.sourceScopeGeneration)
-    return false;
-  if (filters.sourceScopeRevision !== undefined && location.scopeRevision !== filters.sourceScopeRevision)
-    return false;
-  if (filters.sourceScopeFolderAnyKeys !== undefined && !filters.sourceScopeFolderAnyKeys.some((key2) => location.folderKeys.includes(key2))) {
-    return false;
-  }
-  if (filters.sourceScopeFolderNoneKeys?.some((key2) => location.folderKeys.includes(key2)))
-    return false;
-  const pathScopes = [
-    ...filters.locatorPathScope ? [filters.locatorPathScope] : [],
-    ...filters.locatorPathScopes ?? []
-  ];
-  if (pathScopes.length > 0 && !pathScopes.some((scopePath) => locatorWithin(location.locator, scopePath)))
-    return false;
-  if (filters.locatorPathExcludedScopes?.some((scopePath) => locatorWithin(location.locator, scopePath)))
-    return false;
-  return true;
-}
-function locatorWithin(locator, scopePath) {
-  if (!locator)
-    return false;
-  const path = locator.toLowerCase();
-  const root = scopePath.toLowerCase().replace(/\/+$/, "");
-  return path === root || path.startsWith(`${root}/`);
-}
-function secretLocationQueryTerms(query) {
-  return [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
-}
-function locationFromRow(row) {
-  return {
-    source: row.provider,
-    accountScope: row.account_scope,
-    conversationKey: row.conversation_key,
-    providerItemId: row.provider_item_id,
-    locator: row.locator,
-    title: row.title,
-    namesReleasable: row.names_releasable === 1,
-    folderKeys: JSON.parse(row.folder_keys_json),
-    scopeGeneration: row.scope_generation,
-    scopeRevision: row.scope_revision,
-    findingKinds: JSON.parse(row.finding_kinds_json),
-    contentHash: row.content_hash,
-    detectedAt: row.detected_at
-  };
-}
-function secretLocationsMigrations() {
-  return [
-    {
-      version: SECRET_LOCATIONS_SCHEMA_VERSION,
-      name: "create_secret_locations",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS secret_locations (
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            locator TEXT,
-            title TEXT,
-            names_releasable INTEGER NOT NULL DEFAULT 0 CHECK (names_releasable IN (0, 1)),
-            folder_keys_json TEXT NOT NULL DEFAULT '[]',
-            scope_generation TEXT,
-            scope_revision TEXT,
-            finding_kinds_json TEXT NOT NULL,
-            content_hash TEXT,
-            detected_at TEXT NOT NULL,
-            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
-          );
-        `);
-      }
-    }
-  ];
-}
-var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS;
-var init_secret_locations = __esm(() => {
-  init_sqlite_migrations();
-  init_engine();
-  init_tier_classifier();
-  STOP_WORDS = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "did",
-    "do",
-    "does",
-    "find",
-    "for",
-    "have",
-    "i",
-    "in",
-    "is",
-    "it",
-    "kept",
-    "keep",
-    "me",
-    "my",
-    "of",
-    "on",
-    "or",
-    "put",
-    "saved",
-    "show",
-    "stored",
-    "the",
-    "there",
-    "to",
-    "what",
-    "where",
-    "which",
-    "who",
-    "with"
-  ]);
-});
-
 // src/workers/classification/tier-set-binding.ts
-import { existsSync as existsSync14 } from "node:fs";
-import { basename as basename5, dirname as dirname17, join as join17 } from "node:path";
+import { existsSync as existsSync15 } from "node:fs";
+import { basename as basename5, dirname as dirname19, join as join19 } from "node:path";
 function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   const candidates = [recordedLedgerPath];
   if (storeDbPath !== ":memory:" && recordedLedgerPath !== ":memory:") {
     const secure = accountSiblingStorePath(storeDbPath, "secure_local");
     if (secure)
       candidates.push(tierLedgerPathForStore(secure));
-    candidates.push(join17(dirname17(storeDbPath), basename5(recordedLedgerPath)));
+    candidates.push(join19(dirname19(storeDbPath), basename5(recordedLedgerPath)));
   }
   return [...new Set(candidates)];
 }
 function findTierSetLedger(storeDbPath, binding) {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
-    if (candidate === ":memory:" || !existsSync14(candidate))
+    if (candidate === ":memory:" || !existsSync15(candidate))
       continue;
     if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
       return candidate;
@@ -17721,336 +18604,8 @@ var init_delphi_scorer = __esm(() => {
 `);
 });
 
-// src/workers/classification/sniffer-store.ts
-import { Database as Database3 } from "bun:sqlite";
-import { createHash as createHash9 } from "node:crypto";
-import { chmodSync as chmodSync5, existsSync as existsSync15, mkdirSync as mkdirSync12 } from "node:fs";
-import { dirname as dirname18 } from "node:path";
-function snifferMaterialHash(pass, material) {
-  return createHash9("sha256").update(`${pass}
-${material}`).digest("hex");
-}
-
-class TierSnifferStore {
-  dbPath;
-  db;
-  now;
-  readOnly;
-  constructor(options) {
-    this.dbPath = options.dbPath;
-    this.now = options.now ?? (() => new Date);
-    if (options.readOnly === true) {
-      this.db = new Database3(this.dbPath, { readonly: true, create: false });
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-      this.readOnly = true;
-      return;
-    }
-    this.readOnly = false;
-    const onDisk = this.dbPath !== ":memory:";
-    if (onDisk)
-      mkdirSync12(dirname18(this.dbPath), { recursive: true, mode: 448 });
-    const previousUmask = onDisk ? process.umask(63) : undefined;
-    let db;
-    try {
-      db = new Database3(this.dbPath, { create: true });
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
-      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
-      if (onDisk)
-        restrictFiles(this.dbPath);
-    } catch (error) {
-      if (db)
-        closeSqliteStore(db);
-      throw error;
-    } finally {
-      if (previousUmask !== undefined)
-        process.umask(previousUmask);
-    }
-    this.db = db;
-  }
-  close() {
-    try {
-      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : undefined);
-    } finally {
-      if (this.dbPath !== ":memory:" && !this.readOnly)
-        restrictFiles(this.dbPath);
-    }
-  }
-  getVerdict(key2) {
-    const row = this.db.query(`
-      SELECT tier, category, confidence, fail_safe, decided_at FROM sniffer_verdicts
-      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
-    `).get(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision);
-    if (!row)
-      return;
-    return {
-      tier: row.tier,
-      category: row.category,
-      confidence: row.confidence,
-      failSafe: row.fail_safe === 1,
-      decidedAt: row.decided_at
-    };
-  }
-  putVerdict(key2, verdict) {
-    this.db.query(`
-      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
-        tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
-        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at
-    `).run(key2.materialHash, key2.modelId, key2.promptVersion, key2.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString());
-  }
-  enqueue(question) {
-    const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
-    const priority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
-    return this.db.transaction(() => {
-      if (question.stillAsk && !question.stillAsk())
-        return false;
-      const before = this.db.query(`
-        SELECT priority FROM sniffer_questions
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-      `).get(...subjectParams(question.subject), question.pass);
-      this.db.query(`
-      INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
-        attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
-          AND sniffer_questions.map_revision = excluded.map_revision
-          THEN sniffer_questions.attempts ELSE 0 END,
-        material_hash = excluded.material_hash,
-        map_revision = excluded.map_revision,
-        material = excluded.material,
-        priority = excluded.priority,
-        flags_json = excluded.flags_json
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority);
-      if (priority > 0 && (!before || priority > before.priority)) {
-        this.db.query("DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)").run("all:recent", `${question.pass}:recent`);
-      }
-      return true;
-    }).immediate();
-  }
-  questionFor(subject, pass) {
-    const row = this.db.query(`
-      SELECT * FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).get(...subjectParams(subject), pass);
-    return row ? questionFromRow(row) : undefined;
-  }
-  listQuestions(options = {}) {
-    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
-    const scanLimit = Math.max(64, limit);
-    const accepted = new Map;
-    const eligible = (question) => {
-      if (!accepted.has(question.sequence))
-        accepted.set(question.sequence, options.eligible?.(question) ?? true);
-      return accepted.get(question.sequence);
-    };
-    const read = (oldest2, count) => {
-      const key2 = `${options.pass ?? "all"}:${oldest2 ? "oldest" : "recent"}`;
-      let cursor = options.eligible && !this.readOnly ? this.db.query("SELECT priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?").get(key2) : null;
-      if (oldest2 && cursor?.candidate_pk != null) {
-        const pinned = this.db.query("SELECT * FROM sniffer_questions WHERE question_pk = ?").get(cursor.candidate_pk);
-        if (pinned) {
-          const question = questionFromRow(pinned);
-          if (eligible(question))
-            return [question];
-        }
-        cursor = null;
-        this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key2);
-      }
-      const filters = [];
-      const params = [];
-      if (options.pass) {
-        filters.push("pass = ?");
-        params.push(options.pass);
-      }
-      if (cursor) {
-        filters.push(oldest2 ? "(queued_at, question_pk) > (?, ?)" : "(priority, queued_at, question_pk) < (?, ?, ?)");
-        if (!oldest2)
-          params.push(cursor.priority);
-        params.push(cursor.queued_at, cursor.question_pk);
-      }
-      const rows = this.db.query(`SELECT * FROM sniffer_questions
-        ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
-        ORDER BY ${oldest2 ? "queued_at, question_pk" : "priority DESC, queued_at DESC, question_pk DESC"} LIMIT ?`).all(...params, scanLimit);
-      const found = [];
-      for (const row of rows) {
-        const question = questionFromRow(row);
-        if (eligible(question))
-          found.push(question);
-        if (found.length === count)
-          break;
-      }
-      if (options.eligible && !this.readOnly) {
-        const last = rows.at(-1);
-        if (oldest2 && found[0]) {
-          const candidate = found[0];
-          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?)`).run(key2, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
-        } else if (found.length === 0 && rows.length === scanLimit && last) {
-          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, priority, queued_at, question_pk) VALUES (?, ?, ?, ?)`).run(key2, last.priority, last.queued_at, last.question_pk);
-        } else
-          this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key2);
-      }
-      return found;
-    };
-    const questions = read(false, limit);
-    const oldest = read(true, 1)[0];
-    if (oldest && !questions.some((question) => question.sequence === oldest.sequence))
-      questions.push(oldest);
-    return questions;
-  }
-  dispatchCount() {
-    const used = this.db.query("SELECT dispatches FROM sniffer_schedule WHERE id = 1").get().dispatches;
-    return used;
-  }
-  recordDispatch() {
-    this.db.exec("UPDATE sniffer_schedule SET dispatches = dispatches + 1 WHERE id = 1");
-  }
-  clockMs() {
-    return this.now().getTime();
-  }
-  deleteQuestion(subject, pass, materialHash) {
-    return this.db.query(`
-      DELETE FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-        AND (? IS NULL OR material_hash = ?)
-    `).run(...subjectParams(subject), pass, materialHash ?? null, materialHash ?? null).changes > 0;
-  }
-  deleteItemQuestions(subject) {
-    return this.db.query(`
-      DELETE FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(...subjectParams(subject)).changes;
-  }
-  deleteAccountScopeQuestions(provider, accountScope) {
-    return this.db.query("DELETE FROM sniffer_questions WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
-  }
-  rekey(subject, pass, mapRevision) {
-    this.db.query(`
-      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(mapRevision, ...subjectParams(subject), pass);
-  }
-  recordAttemptFailure(subject, pass) {
-    this.db.query(`
-      UPDATE sniffer_questions SET attempts = attempts + 1
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(...subjectParams(subject), pass);
-    return this.questionFor(subject, pass)?.attempts ?? 0;
-  }
-  counts() {
-    const byPass = { metadata: 0, content: 0 };
-    let questions = 0;
-    for (const row of this.db.query("SELECT pass, COUNT(*) AS n FROM sniffer_questions GROUP BY pass").all()) {
-      byPass[row.pass] = row.n;
-      questions += row.n;
-    }
-    const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
-    const items = this.db.query(`
-      SELECT COUNT(*) AS n FROM (
-        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
-      )
-    `).get().n;
-    return { questions, items, byPass, verdicts };
-  }
-}
-function questionFromRow(row) {
-  return {
-    provider: row.provider,
-    accountScope: row.account_scope,
-    providerItemId: row.provider_item_id,
-    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
-    pass: row.pass,
-    materialHash: row.material_hash,
-    mapRevision: row.map_revision,
-    material: row.material,
-    flags: JSON.parse(row.flags_json),
-    attempts: row.attempts,
-    queuedAt: row.queued_at,
-    priority: row.priority ?? 0,
-    sequence: row.question_pk
-  };
-}
-function subjectParams(subject) {
-  return [subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId];
-}
-function restrictFiles(dbPath) {
-  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync15(path))
-      chmodSync5(path, 384);
-  }
-}
-function snifferMigrations() {
-  return [
-    {
-      version: 1,
-      name: "create_tier_sniffer",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS sniffer_verdicts (
-            material_hash TEXT NOT NULL,
-            model_id TEXT NOT NULL,
-            prompt_version TEXT NOT NULL,
-            map_revision TEXT NOT NULL,
-            tier TEXT NOT NULL CHECK (tier IN ('personal', 'private')),
-            category TEXT NOT NULL,
-            confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
-            fail_safe INTEGER NOT NULL DEFAULT 0 CHECK (fail_safe IN (0, 1)),
-            decided_at TEXT NOT NULL,
-            PRIMARY KEY (material_hash, model_id, prompt_version, map_revision)
-          );
-          CREATE TABLE IF NOT EXISTS sniffer_questions (
-            question_pk INTEGER PRIMARY KEY AUTOINCREMENT,
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            pass TEXT NOT NULL CHECK (pass IN ('metadata', 'content')),
-            material_hash TEXT NOT NULL,
-            map_revision TEXT NOT NULL,
-            material TEXT NOT NULL,
-            flags_json TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            queued_at TEXT NOT NULL,
-            UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
-          );
-        `);
-      }
-    },
-    {
-      version: 2,
-      name: "priority_and_aging",
-      up(db) {
-        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
-          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
-          CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
-          INSERT INTO sniffer_schedule VALUES (1, 0);`);
-      }
-    },
-    {
-      version: 3,
-      name: "bounded_queue_scans",
-      up(db) {
-        db.exec(`CREATE INDEX sniffer_oldest ON sniffer_questions(queued_at, question_pk);
-          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, queued_at DESC, question_pk DESC);
-          CREATE INDEX sniffer_pass_oldest ON sniffer_questions(pass, queued_at, question_pk);
-          CREATE TABLE sniffer_scan (
-            scan_key TEXT PRIMARY KEY, priority INTEGER NOT NULL,
-            queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
-          );`);
-      }
-    }
-  ];
-}
-var init_sniffer_store = __esm(() => {
-  init_sqlite_migrations();
-  init_tier_classifier();
-});
-
 // src/workers/classification/sniffer.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 function snifferTierKey(verdict) {
   if (verdict.failSafe || verdict.tier === "private" || recordRequiresPrivate(verdict))
     return "secure";
@@ -18128,7 +18683,7 @@ function snifferCacheModelId(lane) {
   return lane.cacheModelId ?? lane.modelId;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
-  const model = createHash10("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
+  const model = createHash11("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
   return `${lane.kind}:${promptVersion}.m${model}`;
 }
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
@@ -18151,7 +18706,7 @@ function snifferPromptVersions(ownerContext) {
   const context2 = boundedOwnerContext(ownerContext);
   if (!context2)
     return { approval: SNIFFER_PROMPT_VERSION, cache: SNIFFER_PROMPT_VERSION };
-  const digest = createHash10("sha256").update(context2).digest("hex").slice(0, 8);
+  const digest = createHash11("sha256").update(context2).digest("hex").slice(0, 8);
   return { approval: SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, cache: `${SNIFFER_OWNER_CONTEXT_PROMPT_VERSION}.o${digest}` };
 }
 function parseSnifferBatchResponse(text2, expected) {
@@ -18336,8 +18891,8 @@ var init_sniffer = __esm(() => {
     `{"verdicts":[{"i":1,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map((c) => `"${c}"`).join("|")},"ownRecord":true|false,"privateKind":${SNIFFER_PRIVATE_KINDS.map((c) => `"${c}"`).join("|")},"confidence":<number from 0 to 1>}]}`
   ].join(`
 `);
-  SNIFFER_PROMPT_VERSION = `p-${createHash10("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash10("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash11("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash11("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
   SNIFFER_CATEGORY_SYNONYMS = {
     insurance: "financial",
     money: "financial",
@@ -18356,10 +18911,7 @@ var init_sniffer = __esm(() => {
 import { existsSync as existsSync16 } from "node:fs";
 import { Database as Database4 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
-  const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
-  if (override)
-    return override;
-  return olympusDataPath(env, "file-extraction-jobs.sqlite");
+  return sharedDataPath("file-extraction-jobs", env);
 }
 function extractionJobsDbPaths(env = process.env) {
   return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
@@ -18466,7 +19018,7 @@ function claimsTableExists(db) {
 function redactionsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
 }
-var FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", openLedgerPaths;
+var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", openLedgerPaths;
 var init_job_names = __esm(() => {
   init_olympus_layout();
   openLedgerPaths = new Map;
@@ -18966,6 +19518,7 @@ var init_chunk_selection = __esm(() => {
     "your"
   ]);
 });
+
 // src/core/source-index/reactions.ts
 function normalizeSourceReactions(value) {
   if (value === undefined || value === null)
@@ -19128,6 +19681,1000 @@ var init_reactions = __esm(() => {
   };
 });
 
+// src/core/model-transport.ts
+function isModelEndpointRedirectError(error) {
+  return error instanceof ModelEndpointRedirectError;
+}
+async function fetchModelEndpoint(fetchImpl, url, init) {
+  await assertNotZkapiDaemonEndpointResolved(url, "Model endpoint");
+  let response;
+  try {
+    response = await fetchImpl(url, { ...init, redirect: "error" });
+  } catch (error) {
+    if (isFetchRedirectRefusal(error))
+      throw new ModelEndpointRedirectError;
+    throw error;
+  }
+  if (isRedirectResponse(response)) {
+    discardBody(response);
+    throw new ModelEndpointRedirectError(response.status >= 300 && response.status <= 399 ? response.status : undefined);
+  }
+  return response;
+}
+function isRedirectResponse(response) {
+  return response.type === "opaqueredirect" || response.redirected === true || response.status >= 300 && response.status <= 399;
+}
+function discardBody(response) {
+  try {
+    const cancelled = response.body?.cancel();
+    if (cancelled && typeof cancelled.catch === "function") {
+      cancelled.catch(() => {
+        return;
+      });
+    }
+  } catch {}
+}
+function isFetchRedirectRefusal(error) {
+  if (error instanceof ModelEndpointRedirectError)
+    return true;
+  if (!(error instanceof Error))
+    return false;
+  if (error.code === "UnexpectedRedirect")
+    return true;
+  const cause = error.cause;
+  const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
+  return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
+}
+var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus refuses redirects on model transports and did not use the answer.", ModelEndpointRedirectError;
+var init_model_transport = __esm(() => {
+  init_zkapi_consult_settings();
+  ModelEndpointRedirectError = class ModelEndpointRedirectError extends Error {
+    code = "model_endpoint_redirect";
+    status;
+    constructor(status) {
+      super(MODEL_ENDPOINT_REDIRECT_MESSAGE);
+      this.name = "ModelEndpointRedirectError";
+      this.status = status;
+    }
+  };
+});
+
+// src/workers/source-index/embedding-identity.ts
+function embeddingProviderFamily(providerKind) {
+  return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
+}
+function declaredEmbeddingProviderFamily(providerKind) {
+  return EMBEDDING_PROVIDER_FAMILIES.find((family) => family.providerKind === providerKind);
+}
+function buildEmbeddingEpoch(input) {
+  const family = embeddingProviderFamily(input.provider);
+  const dimension = family.dimensionToken === PROVIDER_REPORTED_DIMENSION_TOKEN ? PROVIDER_REPORTED_DIMENSION_TOKEN : declaredDimensionToken(input.dimension);
+  return `${input.backend}:${family.epochProviderToken}:${input.modelId}:${dimension}`;
+}
+function declaredDimensionToken(dimension) {
+  return dimension !== undefined && Number.isSafeInteger(dimension) && dimension >= 1 ? String(dimension) : PROVIDER_REPORTED_DIMENSION_TOKEN;
+}
+function canonicalIdentity(input) {
+  return { ...input, epochId: buildEmbeddingEpoch(input) };
+}
+function canonicalEmbeddingIdentityForModel(modelId) {
+  return CANONICAL_EMBEDDING_IDENTITIES.find((identity) => identity.modelId === modelId);
+}
+function canonicalEmbeddingDimension(modelId) {
+  return canonicalEmbeddingIdentityForModel(modelId)?.dimension;
+}
+function resolveEmbeddingEpoch(input) {
+  const derived = buildEmbeddingEpoch(input);
+  const override = input.epochOverride?.trim();
+  if (!override || override === derived)
+    return derived;
+  if (!declaredEmbeddingProviderFamily(input.provider))
+    return override;
+  const [overrideBackend, , overrideModelId] = override.split(":");
+  if ((overrideBackend === "local" || overrideBackend === "cloud") && overrideBackend !== input.backend) {
+    throw refusedEmbeddingEpoch(override, input, `it names the ${overrideBackend} backend`);
+  }
+  if (overrideModelId !== undefined && overrideModelId !== input.modelId && canonicalEmbeddingIdentityForModel(overrideModelId)) {
+    throw refusedEmbeddingEpoch(override, input, `it names the model ${overrideModelId}`);
+  }
+  const contaminated = contaminatedEmbeddingEpoch(input.modelId, override);
+  if (contaminated) {
+    throw refusedEmbeddingEpoch(override, input, `it is a known contaminated epoch (${contaminated.origin})`);
+  }
+  return override;
+}
+function refusedEmbeddingEpoch(override, input, because) {
+  return new OperationError("config_error", `Embedding epoch "${override}" cannot label ${input.backend} provider ${input.provider} ` + `model ${input.modelId}: ${because}.`, "An epoch names the vectors a specific provider minted. Configure a per-provider epoch " + "instead of sharing one variable across the local and cloud embedding lanes.");
+}
+function contaminatedEmbeddingEpoch(modelId, epochId) {
+  return KNOWN_CONTAMINATED_EMBEDDING_EPOCHS.find((entry) => entry.modelId === modelId && entry.epochId === epochId);
+}
+var PROVIDER_REPORTED_DIMENSION_TOKEN = "provider-reported", EMBEDDING_PROVIDER_FAMILIES, CANONICAL_EMBEDDING_IDENTITIES, KNOWN_CONTAMINATED_EMBEDDING_EPOCHS;
+var init_embedding_identity = __esm(() => {
+  init_operation_error();
+  EMBEDDING_PROVIDER_FAMILIES = [
+    {
+      providerKind: "local-openai-compatible",
+      epochProviderToken: "openai-compatible",
+      dimensionToken: "declared"
+    },
+    {
+      providerKind: "google-gemini",
+      epochProviderToken: "google-gemini",
+      dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN
+    },
+    {
+      providerKind: "venice",
+      epochProviderToken: "venice",
+      dimensionToken: "declared"
+    },
+    {
+      providerKind: "built-in",
+      epochProviderToken: "built-in",
+      dimensionToken: "declared"
+    }
+  ];
+  CANONICAL_EMBEDDING_IDENTITIES = [
+    canonicalIdentity({
+      provider: "local-openai-compatible",
+      modelId: "secure-local-qwen3-embed",
+      backend: "local",
+      dimension: 2560
+    }),
+    canonicalIdentity({
+      provider: "google-gemini",
+      modelId: "gemini-embedding-2",
+      backend: "cloud",
+      dimension: 3072
+    }),
+    canonicalIdentity({
+      provider: "venice",
+      modelId: "text-embedding-qwen3-8b",
+      backend: "cloud",
+      dimension: 4096
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
+      backend: "local",
+      dimension: 768
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "embeddinggemma-2-litert-24d962e",
+      backend: "local",
+      dimension: 768
+    })
+  ];
+  KNOWN_CONTAMINATED_EMBEDDING_EPOCHS = [
+    {
+      modelId: "secure-local-qwen3-embed",
+      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:2560",
+      origin: "code default before the provider token was pinned (dimension configured)"
+    },
+    {
+      modelId: "secure-local-qwen3-embed",
+      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
+      origin: "code default before the provider token was pinned (dimension unconfigured)"
+    },
+    {
+      modelId: "gemini-embedding-2",
+      epochId: "local:openai-compatible:secure-local-qwen3-embed:2560",
+      origin: "provider-blind OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH stamped onto a Gemini provider"
+    },
+    {
+      modelId: "gemini-embedding-2",
+      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
+      origin: "provider-blind local code-default epoch stamped onto a Gemini provider"
+    },
+    {
+      modelId: "gemini-embedding-2",
+      epochId: "cloud:google-gemini:gemini-embedding-2:3072",
+      origin: "derived Gemini epoch drift after output dimensionality became required (2026-08-17)"
+    }
+  ];
+});
+
+// src/workers/source-index/embeddings.ts
+import { Buffer as Buffer2 } from "node:buffer";
+import { createHash as createHash12 } from "node:crypto";
+import { lookup as lookup2 } from "node:dns/promises";
+import { request as httpsRequest } from "node:https";
+import { isIP as isIP2 } from "node:net";
+function isApprovedSecureSourceEmbeddingProvider(provider) {
+  return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
+}
+function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
+  const tries = `${attempts} attempt${attempts === 1 ? "" : "s"}`;
+  if (reason === 429) {
+    return {
+      message: `${provider} source embedding endpoint refused the request with HTTP 429 (rate limit or quota) after ${tries}.`,
+      suggestion: "The provider is throttling this account or its quota may be exhausted. Check the provider quota and billing before retrying; the key and model are not implicated."
+    };
+  }
+  if (reason === "network") {
+    return {
+      message: `${provider} source embedding endpoint could not be reached (network error after ${tries}).`,
+      suggestion: "A connection or DNS failure, not a key or model problem. Retry the same request shortly; if it persists, check the Gateway host network."
+    };
+  }
+  if (reason === "timeout") {
+    return {
+      message: `${provider} source embedding endpoint did not answer within its ${budgetMs}ms budget (${tries}).`,
+      suggestion: "The provider was slow or unavailable, not misconfigured. Retry the same request shortly."
+    };
+  }
+  return {
+    message: `${provider} source embedding endpoint is temporarily unavailable (HTTP ${reason} after ${tries}).`,
+    suggestion: "This is a transient provider outage, not a key or model problem. Retry the same request in a few seconds."
+  };
+}
+function abortableDelay(ms, signal) {
+  return new Promise((resolve9) => {
+    if (signal.aborted)
+      return resolve9();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve9();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+function retryAfterMs(response, nowMs = Date.now()) {
+  const value = response.headers.get("retry-after")?.trim();
+  if (!value)
+    return;
+  if (/^\d+$/.test(value))
+    return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - nowMs);
+}
+async function discardBody2(response) {
+  await response.body?.cancel().catch(() => {
+    return;
+  });
+}
+async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
+  const timedOut = (attempts) => new TransientSourceEmbeddingError(provider, "timeout", attempts, budget.budgetMs);
+  let attempt = 0;
+  for (;; ) {
+    let reason;
+    let waitMs;
+    try {
+      const response = await fetchModelEndpoint(fetchImpl, url, init);
+      attempt += 1;
+      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status))
+        return response;
+      reason = response.status;
+      const backoffMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
+      const requestedMs = retryAfterMs(response);
+      await discardBody2(response);
+      if (backoffMs !== undefined) {
+        waitMs = requestedMs ?? backoffMs;
+        if (Date.now() + waitMs >= budget.deadlineAtMs)
+          waitMs = undefined;
+      }
+    } catch (error) {
+      if (error instanceof TransientSourceEmbeddingError)
+        throw error;
+      if (isZkapiDaemonEndpointRefusal(error))
+        throw error;
+      if (isModelEndpointRedirectError(error)) {
+        throw new OperationError("source_index_error", `${provider} source embedding endpoint answered with a redirect, which is refused.`, error.message);
+      }
+      if (init.signal.aborted)
+        throw timedOut(attempt + 1);
+      attempt += 1;
+      reason = "network";
+      waitMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
+    }
+    if (waitMs === undefined) {
+      throw new TransientSourceEmbeddingError(provider, reason, attempt, budget.budgetMs);
+    }
+    if (init.signal.aborted)
+      throw timedOut(attempt);
+    await abortableDelay(waitMs, init.signal);
+    if (init.signal.aborted)
+      throw timedOut(attempt);
+  }
+}
+
+class GeminiSourceEmbeddingProvider {
+  provider = "google-gemini";
+  modelId;
+  dimension;
+  configHash;
+  epochId;
+  backend = "cloud";
+  lastMediaPartsSkipped = 0;
+  mediaPartsSkipped = 0;
+  apiKey;
+  baseUrl;
+  timeoutMs;
+  fetchImpl;
+  outputDimensionality;
+  maxMediaPerInput;
+  maxMediaBytes;
+  mediaFetchTimeoutMs;
+  lookupIpAddresses;
+  mediaFetchImpl;
+  maxMediaRedirects;
+  constructor(options) {
+    const apiKey = options.apiKey.trim();
+    if (!apiKey) {
+      throw new OperationError("config_error", "Gemini source embedding API key must be configured.");
+    }
+    this.apiKey = apiKey;
+    this.modelId = normalizeGeminiModelId(options.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL);
+    this.baseUrl = (options.baseUrl ?? DEFAULT_GEMINI_API_BASE_URL).replace(/\/+$/, "");
+    this.outputDimensionality = normalizeOutputDimensionality(options.outputDimensionality);
+    this.dimension = this.outputDimensionality ?? 0;
+    this.timeoutMs = options.timeoutMs ?? 30000;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.maxMediaPerInput = normalizeMaxMediaPerInput(options.maxMediaPerInput);
+    this.maxMediaBytes = normalizeMaxMediaBytes(options.maxMediaBytes);
+    this.mediaFetchTimeoutMs = normalizeMediaFetchTimeoutMs(options.mediaFetchTimeoutMs);
+    this.lookupIpAddresses = options.lookupIpAddresses ?? defaultLookupIpAddresses;
+    this.mediaFetchImpl = options.mediaFetchImpl ?? defaultMediaFetch;
+    this.maxMediaRedirects = normalizeMaxMediaRedirects(options.maxMediaRedirects);
+    this.epochId = resolveEmbeddingEpoch({
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.outputDimensionality,
+      backend: this.backend,
+      ...options.epochId ? { epochOverride: options.epochId } : {}
+    });
+    this.configHash = hashString3(JSON.stringify({
+      provider: this.provider,
+      model: this.modelId,
+      baseUrl: this.baseUrl,
+      outputDimensionality: this.outputDimensionality ?? "provider-reported",
+      maxMediaPerInput: this.maxMediaPerInput,
+      maxMediaBytes: this.maxMediaBytes,
+      mediaFetchTimeoutMs: this.mediaFetchTimeoutMs,
+      maxMediaRedirects: this.maxMediaRedirects,
+      backend: this.backend
+    }));
+  }
+  async embed(inputs, options) {
+    if (inputs.length === 0)
+      return [];
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
+    try {
+      const modelPath = `models/${this.modelId}`;
+      let mediaPartsSkipped = 0;
+      const requests = await Promise.all(inputs.map(async (input) => {
+        const contentParts = await this.contentPartsForInput(input);
+        mediaPartsSkipped += contentParts.mediaPartsSkipped;
+        return {
+          model: modelPath,
+          content: {
+            parts: contentParts.parts
+          },
+          taskType: options.taskType,
+          ...options.taskType === "RETRIEVAL_DOCUMENT" && input.title ? { title: input.title } : {},
+          ...this.outputDimensionality !== undefined ? { outputDimensionality: this.outputDimensionality } : {}
+        };
+      }));
+      this.lastMediaPartsSkipped = mediaPartsSkipped;
+      this.mediaPartsSkipped += mediaPartsSkipped;
+      const response = await fetchEmbeddingResponse(this.fetchImpl, "Gemini", `${this.baseUrl}/${modelPath}:batchEmbedContents`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": this.apiKey
+        },
+        body: JSON.stringify({
+          requests
+        }),
+        signal: controller.signal
+      }, budget);
+      if (!response.ok) {
+        throw new OperationError("source_index_error", `Gemini source embedding endpoint returned HTTP ${response.status}.`, "Check the configured Gemini API key, model, and source-index embedding policy.");
+      }
+      const vectors = parseGeminiBatchEmbeddingResponse(await response.json());
+      if (vectors.length !== inputs.length) {
+        throw new OperationError("source_index_error", "Gemini source embedding endpoint returned the wrong number of embeddings.");
+      }
+      if (this.dimension === 0 && vectors[0]) {
+        this.dimension = vectors[0].length;
+      }
+      return vectors;
+    } catch (error) {
+      if (error instanceof OperationError)
+        throw error;
+      if (controller.signal.aborted)
+        throw new TransientSourceEmbeddingError("Gemini", "timeout", 1, this.timeoutMs);
+      throw new OperationError("source_index_error", "Gemini source embedding endpoint failed.", error instanceof Error ? error.message : "Check the configured cloud embedding provider.");
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  async contentPartsForInput(input) {
+    const parts = [{ text: input.text }];
+    const mediaInputs = input.media ?? [];
+    const media = mediaInputs.slice(0, this.maxMediaPerInput);
+    let mediaPartsSkipped = Math.max(0, mediaInputs.length - media.length);
+    for (const item of media) {
+      const part = await this.inlineMediaPart(item);
+      if (part) {
+        parts.push(part);
+      } else {
+        mediaPartsSkipped += 1;
+      }
+    }
+    return { parts, mediaPartsSkipped };
+  }
+  async inlineMediaPart(input) {
+    const url = parseSafeMediaUrl(input.url);
+    if (!url)
+      return;
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.mediaFetchTimeoutMs);
+    try {
+      const response = await this.fetchPublicMedia(url, controller.signal);
+      if (!response)
+        return;
+      if (!response.ok)
+        return;
+      const contentLength = Number(response.headers.get("content-length") ?? 0);
+      if (contentLength > this.maxMediaBytes)
+        return;
+      const mimeType = normalizeImageMimeType(input.mimeType ?? response.headers.get("content-type"));
+      if (!mimeType)
+        return;
+      const bytes = await readCappedMediaBody(response, this.maxMediaBytes);
+      if (!bytes)
+        return;
+      if (bytes.byteLength === 0 || bytes.byteLength > this.maxMediaBytes)
+        return;
+      return {
+        inlineData: {
+          mimeType,
+          data: Buffer2.from(bytes).toString("base64")
+        }
+      };
+    } catch {
+      return;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  async fetchPublicMedia(initialUrl, signal) {
+    let url = initialUrl;
+    for (let redirects = 0;redirects <= this.maxMediaRedirects; redirects += 1) {
+      const validatedAddresses = await publicMediaFetchAddresses(url, this.lookupIpAddresses);
+      if (!validatedAddresses)
+        return;
+      const response = await this.mediaFetchImpl(url, {
+        validatedAddresses,
+        signal
+      });
+      if (!isRedirectStatus(response.status))
+        return response;
+      const location = response.headers.get("location");
+      if (!location)
+        return;
+      const nextUrl = parseSafeMediaUrl(location, url);
+      if (!nextUrl)
+        return;
+      url = nextUrl;
+    }
+    return;
+  }
+}
+
+class OpenAICompatibleSourceEmbeddingProvider {
+  provider;
+  modelId;
+  dimension;
+  configHash;
+  epochId;
+  backend;
+  baseUrl;
+  timeoutMs;
+  fetchImpl;
+  apiKeyProvider;
+  queryInstructionPrefix;
+  sendDimensions;
+  preflight;
+  requireIndexedResponses;
+  requireDimension;
+  constructor(options) {
+    this.provider = options.provider ?? "local-openai-compatible";
+    this.backend = options.backend ?? "local";
+    this.baseUrl = this.backend === "cloud" ? normalizeVeniceSourceEmbeddingBaseUrl(options.baseUrl) : normalizeLocalSourceEmbeddingBaseUrl(options.baseUrl);
+    this.modelId = options.model.trim();
+    if (!this.modelId) {
+      throw new OperationError("config_error", "Local source embedding model must be configured.");
+    }
+    if (this.backend === "local") {
+      assertLocalModelIdNotCloudForwarding("Local source embedding model", this.modelId);
+    }
+    this.dimension = options.dimension ?? 0;
+    this.timeoutMs = options.timeoutMs ?? 30000;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.apiKeyProvider = options.apiKeyProvider;
+    this.queryInstructionPrefix = options.queryInstructionPrefix?.trim() || undefined;
+    this.sendDimensions = options.sendDimensions === true;
+    this.preflight = options.preflight;
+    this.requireIndexedResponses = options.requireIndexedResponses === true;
+    this.requireDimension = options.requireDimension === true;
+    this.epochId = resolveEmbeddingEpoch({
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      backend: this.backend,
+      ...options.epochId ? { epochOverride: options.epochId } : {}
+    });
+    this.configHash = hashString3(JSON.stringify({
+      provider: this.provider,
+      baseUrl: this.baseUrl,
+      model: this.modelId,
+      dimension: this.dimension || "provider-reported",
+      backend: this.backend,
+      ...this.queryInstructionPrefix ? { queryInstructionPrefix: this.queryInstructionPrefix } : {},
+      ...this.sendDimensions ? { sendDimensions: true } : {},
+      ...this.requireIndexedResponses ? { requireIndexedResponses: true } : {},
+      ...this.requireDimension ? { requireDimension: true } : {}
+    }));
+  }
+  async embed(inputs, options) {
+    if (inputs.length === 0)
+      return [];
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
+    try {
+      await this.preflight?.(controller.signal);
+      const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
+        method: "POST",
+        headers: this.requestHeaders(),
+        body: JSON.stringify({
+          model: this.modelId,
+          input: inputs.map((input) => this.formatInput(input, options.taskType)),
+          ...this.sendDimensions ? { dimensions: this.dimension } : {}
+        }),
+        signal: controller.signal
+      }, budget);
+      if (!response.ok) {
+        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned HTTP ${response.status}.`, "Check the configured source-index embedding endpoint, model, and credential.");
+      }
+      const vectors = parseOpenAICompatibleEmbeddingResponse(await response.json(), this.requireIndexedResponses);
+      if (vectors.length !== inputs.length) {
+        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned the wrong number of embeddings.`);
+      }
+      if (this.requireDimension && vectors.some((vector) => vector.length !== this.dimension)) {
+        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned a vector with the wrong dimension.`, `Expected ${this.dimension} finite values for model ${this.modelId}.`);
+      }
+      if (this.dimension === 0 && vectors[0]) {
+        this.dimension = vectors[0].length;
+      }
+      return vectors;
+    } catch (error) {
+      if (error instanceof OperationError)
+        throw error;
+      if (controller.signal.aborted)
+        throw new TransientSourceEmbeddingError(this.provider, "timeout", 1, this.timeoutMs);
+      throw new OperationError("source_index_error", `${this.provider} source embedding endpoint failed.`, error instanceof Error ? error.message : "Check the configured source-index embedding endpoint.");
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  formatInput(input, taskType) {
+    const text2 = [
+      input.title ? `Title: ${input.title}` : undefined,
+      input.text
+    ].filter((part) => Boolean(part)).join(`
+`);
+    return taskType === "RETRIEVAL_QUERY" && this.queryInstructionPrefix ? `${this.queryInstructionPrefix}
+Query:${text2}` : text2;
+  }
+  requestHeaders() {
+    const headers = new Headers({ "Content-Type": "application/json" });
+    const apiKey = this.apiKeyProvider?.()?.trim();
+    if (apiKey)
+      headers.set("Authorization", `Bearer ${apiKey}`);
+    return headers;
+  }
+}
+function cosineSimilarity(left, right) {
+  const length = Math.min(left.length, right.length);
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0;index < length; index += 1) {
+    const l = left[index] ?? 0;
+    const r = right[index] ?? 0;
+    dot += l * r;
+    leftNorm += l * l;
+    rightNorm += r * r;
+  }
+  if (leftNorm === 0 || rightNorm === 0)
+    return 0;
+  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+}
+function encodeEmbedding(vector, expectedDimension) {
+  if (vector.length !== expectedDimension) {
+    throw new OperationError("source_index_error", `Embedding dimension mismatch: expected ${expectedDimension}, received ${vector.length}.`);
+  }
+  const floats = new Float32Array(vector.length);
+  vector.forEach((value, index) => {
+    floats[index] = Number.isFinite(value) ? value : 0;
+  });
+  return new Uint8Array(floats.buffer);
+}
+function decodeEmbedding(value) {
+  let bytes;
+  if (value instanceof Uint8Array) {
+    bytes = value;
+  } else if (value instanceof ArrayBuffer) {
+    bytes = new Uint8Array(value);
+  } else if (ArrayBuffer.isView(value)) {
+    bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  } else {
+    throw new OperationError("source_index_error", "Stored source embedding payload was not a BLOB.");
+  }
+  const usableBytes = bytes.byteLength - bytes.byteLength % 4;
+  if (bytes.byteOffset % 4 !== 0) {
+    return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + usableBytes));
+  }
+  return new Float32Array(bytes.buffer, bytes.byteOffset, usableBytes / 4);
+}
+function parseGeminiBatchEmbeddingResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new OperationError("source_index_error", "Gemini embedding response must be a JSON object.");
+  }
+  const embeddings = value.embeddings;
+  if (!Array.isArray(embeddings)) {
+    throw new OperationError("source_index_error", "Gemini embedding response must include embeddings array.");
+  }
+  return embeddings.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new OperationError("source_index_error", `Gemini embeddings.${index} must be an object.`);
+    }
+    const values = item.values;
+    if (!Array.isArray(values) || !values.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
+      throw new OperationError("source_index_error", `Gemini embeddings.${index}.values must be a number array.`);
+    }
+    return values;
+  });
+}
+function parseOpenAICompatibleEmbeddingResponse(value, requireIndices = false) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new OperationError("source_index_error", "Local source embedding response must be a JSON object.");
+  }
+  const data2 = value.data;
+  if (!Array.isArray(data2)) {
+    throw new OperationError("source_index_error", "Local source embedding response must include data array.");
+  }
+  return data2.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new OperationError("source_index_error", `Local source embedding data.${index} must be an object.`);
+    }
+    if (requireIndices && item.index !== index) {
+      throw new OperationError("source_index_error", `Venice source embedding data.${index}.index was missing or out of order.`);
+    }
+    const embedding = item.embedding;
+    if (!Array.isArray(embedding) || !embedding.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
+      throw new OperationError("source_index_error", `Local source embedding data.${index}.embedding must be a number array.`);
+    }
+    return embedding;
+  });
+}
+function normalizeMaxMediaPerInput(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MAX_MEDIA_PER_INPUT;
+  return Math.max(0, Math.min(Math.floor(value), MAX_MEDIA_PER_INPUT_LIMIT));
+}
+function normalizeMaxMediaBytes(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MAX_MEDIA_BYTES;
+  return Math.max(1, Math.floor(value));
+}
+function normalizeMediaFetchTimeoutMs(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MEDIA_FETCH_TIMEOUT_MS;
+  return Math.max(100, Math.floor(value));
+}
+function normalizeMaxMediaRedirects(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MAX_MEDIA_REDIRECTS;
+  return Math.max(0, Math.min(Math.floor(value), DEFAULT_MAX_MEDIA_REDIRECTS));
+}
+function normalizeImageMimeType(value) {
+  const mimeType = value?.split(";")[0]?.trim().toLowerCase();
+  if (!mimeType || !SUPPORTED_IMAGE_MIME_TYPES.has(mimeType))
+    return;
+  return mimeType;
+}
+function parseSafeMediaUrl(value, base) {
+  let url;
+  try {
+    url = base ? new URL(value, base) : new URL(value);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "https:")
+    return;
+  return url;
+}
+function defaultMediaFetch(url, options) {
+  const address = options.validatedAddresses[0];
+  const family = address ? isIP2(address) : 0;
+  if (!address || !family || isPrivateOrReservedIp(address)) {
+    return Promise.resolve(new Response(null, { status: 403 }));
+  }
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = httpsRequest(url, {
+      method: "GET",
+      headers: MEDIA_FETCH_HEADERS,
+      lookup: (_hostname, _options, callback) => {
+        callback(null, address, family);
+      },
+      signal: options.signal
+    }, (message2) => {
+      resolvePromise(responseFromIncomingMessage(message2));
+    });
+    request.on("error", rejectPromise);
+    request.end();
+  });
+}
+function responseFromIncomingMessage(message2) {
+  const headers = new Headers;
+  for (const [name, value] of Object.entries(message2.headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value)
+        headers.append(name, item);
+    } else if (value !== undefined) {
+      headers.set(name, String(value));
+    }
+  }
+  const status = message2.statusCode && message2.statusCode >= 100 && message2.statusCode <= 599 ? message2.statusCode : 502;
+  const body = status === 204 || status === 304 ? null : readableStreamFromIncomingMessage(message2);
+  return new Response(body, {
+    status,
+    headers,
+    ...message2.statusMessage ? { statusText: message2.statusMessage } : {}
+  });
+}
+async function readCappedMediaBody(response, maxBytes) {
+  if (!response.body) {
+    const bytes2 = new Uint8Array(await response.arrayBuffer());
+    return bytes2.byteLength > maxBytes ? undefined : bytes2;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      if (!value)
+        continue;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return;
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+function readableStreamFromIncomingMessage(message2) {
+  return new ReadableStream({
+    start(controller) {
+      message2.on("data", (chunk) => {
+        if (typeof chunk === "string") {
+          controller.enqueue(new TextEncoder().encode(chunk));
+          return;
+        }
+        controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+      });
+      message2.on("end", () => controller.close());
+      message2.on("error", (error) => controller.error(error));
+    },
+    cancel() {
+      message2.destroy();
+    }
+  });
+}
+async function publicMediaFetchAddresses(url, lookupIpAddresses) {
+  const host = normalizedHostname(url);
+  if (host === "localhost" || host.endsWith(".local")) {
+    return;
+  }
+  if (isIP2(host))
+    return isPrivateOrReservedIp(host) ? undefined : [host];
+  let addresses;
+  try {
+    addresses = await lookupIpAddresses(host);
+  } catch {
+    return;
+  }
+  return addresses.length > 0 && addresses.every((address) => !isPrivateOrReservedIp(address)) ? addresses : undefined;
+}
+async function defaultLookupIpAddresses(hostname) {
+  const records = await lookup2(hostname, { all: true });
+  return records.map((record) => record.address);
+}
+function normalizedHostname(url) {
+  return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
+function isRedirectStatus(status) {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+function isPrivateOrReservedIp(address) {
+  const normalized = address.replace(/^\[|\]$/g, "").toLowerCase();
+  const version = isIP2(normalized);
+  if (version === 4)
+    return isPrivateOrReservedIpv4(normalized);
+  if (version !== 6)
+    return true;
+  const mapped = ipv4FromMappedIpv6(normalized);
+  if (mapped)
+    return isPrivateOrReservedIpv4(mapped);
+  const firstSegment = Number.parseInt(normalized.split(":")[0] || "0", 16);
+  return normalized === "::" || normalized === "::1" || normalized.startsWith("2001:db8:") || firstSegment >= 64512 && firstSegment <= 65023 || firstSegment >= 65152 && firstSegment <= 65215 || firstSegment >= 65280 && firstSegment <= 65535;
+}
+function isPrivateOrReservedIpv4(address) {
+  const parts = address.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
+    return true;
+  const [a = 0, b = 0] = parts;
+  return a === 0 || a === 10 || a === 127 || a === 100 && b >= 64 && b <= 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 0 || a === 192 && b === 168 || a === 198 && (b === 18 || b === 19) || a === 198 && b === 51 || a === 203 && b === 0 || a >= 224;
+}
+function ipv4FromMappedIpv6(address) {
+  const words2 = expandIpv6Words(address);
+  if (!words2 || words2.length !== 8)
+    return;
+  if (words2.slice(0, 5).some((word) => word !== 0) || words2[5] !== 65535) {
+    return;
+  }
+  const [high = 0, low = 0] = words2.slice(6);
+  return [
+    high >> 8 & 255,
+    high & 255,
+    low >> 8 & 255,
+    low & 255
+  ].join(".");
+}
+function expandIpv6Words(address) {
+  const normalized = replaceDottedIpv4Tail(address);
+  if (!normalized)
+    return;
+  const parts = normalized.split("::");
+  if (parts.length > 2)
+    return;
+  const left = ipv6WordsFromPart(parts[0] ?? "");
+  const right = parts.length === 2 ? ipv6WordsFromPart(parts[1] ?? "") : [];
+  if (!left || !right)
+    return;
+  if (parts.length === 1)
+    return left.length === 8 ? left : undefined;
+  const missing = 8 - left.length - right.length;
+  if (missing < 1)
+    return;
+  return [
+    ...left,
+    ...Array.from({ length: missing }, () => 0),
+    ...right
+  ];
+}
+function replaceDottedIpv4Tail(address) {
+  const dotted = /(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address)?.[1];
+  if (!dotted)
+    return address;
+  const parts = dotted.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
+    return;
+  const high = (parts[0] ?? 0) << 8 | (parts[1] ?? 0);
+  const low = (parts[2] ?? 0) << 8 | (parts[3] ?? 0);
+  return `${address.slice(0, -dotted.length)}${high.toString(16)}:${low.toString(16)}`;
+}
+function ipv6WordsFromPart(part) {
+  if (!part)
+    return [];
+  const words2 = part.split(":").map((segment) => {
+    if (!/^[0-9a-f]{1,4}$/i.test(segment))
+      return Number.NaN;
+    return Number.parseInt(segment, 16);
+  });
+  return words2.every((word) => Number.isInteger(word) && word >= 0 && word <= 65535) ? words2 : undefined;
+}
+function normalizeGeminiModelId(value) {
+  const trimmed = value.trim();
+  return trimmed.startsWith("models/") ? trimmed.slice("models/".length) : trimmed;
+}
+function normalizeLocalSourceEmbeddingBaseUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new OperationError("config_error", "Local source embedding base URL must be a valid loopback HTTP(S) URL.");
+  }
+  const hostname = url.hostname.toLowerCase();
+  const localHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+  if (!localHost) {
+    throw new OperationError("config_error", "secure_local source embeddings must use a local/private loopback endpoint.", "Use a loopback endpoint such as http://127.0.0.1:8000/v1 behind the approved local runtime path.");
+  }
+  return value.replace(/\/+$/, "");
+}
+function normalizeVeniceSourceEmbeddingBaseUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new OperationError("config_error", "Venice source embedding base URL must be a valid HTTPS URL.");
+  }
+  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "api.venice.ai" || url.port || url.username || url.password || url.search || url.hash || url.pathname.replace(/\/+$/, "") !== "/api/v1") {
+    throw new OperationError("config_error", "Venice source embeddings must use the approved Venice HTTPS endpoint.", "Use https://api.venice.ai/api/v1.");
+  }
+  return `${url.origin}/api/v1`;
+}
+function normalizeOutputDimensionality(value) {
+  if (value === undefined)
+    return;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new OperationError("config_error", "Gemini embedding output dimensionality must be a positive integer.");
+  }
+  return value;
+}
+function hashString3(value) {
+  return createHash12("sha256").update(value).digest("hex");
+}
+var SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
+var init_embeddings = __esm(() => {
+  init_operation_error();
+  init_local_model_policy();
+  init_model_transport();
+  init_zkapi_consult_settings();
+  init_embedding_identity();
+  SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
+    failedIndexes;
+    reason;
+    disposition;
+    constructor(failedIndexes, reason, disposition = "failed") {
+      super(`${failedIndexes.length} embedding input(s) could not be embedded: ${reason}.`);
+      this.name = "SourceEmbeddingInputsFailedError";
+      this.failedIndexes = failedIndexes;
+      this.reason = reason;
+      this.disposition = disposition;
+    }
+  };
+  SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
+  MEDIA_FETCH_HEADERS = {
+    Accept: "image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1",
+    "User-Agent": "Mozilla/5.0 (compatible; OlympusSourceIndex/0.1)"
+  };
+  TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
+  TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1000];
+  TransientSourceEmbeddingError = class TransientSourceEmbeddingError extends OperationError {
+    reason;
+    constructor(provider, reason, attempts, budgetMs = 0) {
+      const { message: message2, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
+      super("source_index_error", message2, suggestion);
+      this.name = "TransientSourceEmbeddingError";
+      this.reason = reason;
+    }
+  };
+});
+
 // src/workers/source-index/media-judge.ts
 function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
   return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
@@ -19235,9 +20782,9 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash11, randomUUID as randomUUID5 } from "node:crypto";
-import { existsSync as existsSync18, lstatSync as lstatSync7, mkdirSync as mkdirSync13, statSync as statSync10 } from "node:fs";
-import { dirname as dirname19 } from "node:path";
+import { createHash as createHash13, randomUUID as randomUUID5 } from "node:crypto";
+import { existsSync as existsSync18, lstatSync as lstatSync9, mkdirSync as mkdirSync13, statSync as statSync11 } from "node:fs";
+import { dirname as dirname20 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
 function connectorStoreMigrations() {
   return [
@@ -19571,7 +21118,7 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
 function yieldConnectorStoreVectorScan() {
-  return new Promise((resolve8) => setTimeout(resolve8, 0));
+  return new Promise((resolve9) => setTimeout(resolve9, 0));
 }
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
@@ -19618,7 +21165,7 @@ function trustTierRank(tier) {
   return SOURCE_TRUST_TIERS.indexOf(tier);
 }
 function placementSignalsFromRawItem(item) {
-  const sender = metadataString(item.metadata, "sender") ?? metadataString(item.metadata, "from");
+  const sender = metadataString2(item.metadata, "sender") ?? metadataString2(item.metadata, "from");
   const labels = item.metadata["labels"];
   return {
     ...sender ? { sender } : {},
@@ -19626,13 +21173,13 @@ function placementSignalsFromRawItem(item) {
   };
 }
 function classificationInputFromRawItem(item) {
-  const subject = metadataString(item.metadata, "subject");
-  const sender = metadataString(item.metadata, "sender") ?? metadataString(item.metadata, "from");
+  const subject = metadataString2(item.metadata, "subject");
+  const sender = metadataString2(item.metadata, "sender") ?? metadataString2(item.metadata, "from");
   const text2 = textFromRawItem(item);
   const title = itemTitle(item) ?? subject;
-  const labels = metadataStringArray(item.metadata, "labels");
+  const labels = metadataStringArray2(item.metadata, "labels");
   const path = [
-    metadataString(item.metadata, "pathDisplay") ?? metadataString(item.metadata, "locatorUri") ?? metadataString(item.metadata, "url"),
+    metadataString2(item.metadata, "pathDisplay") ?? metadataString2(item.metadata, "locatorUri") ?? metadataString2(item.metadata, "url"),
     title
   ].filter((part) => Boolean(part)).join(`
 `);
@@ -19645,27 +21192,27 @@ function classificationInputFromRawItem(item) {
     text: text2 ?? ""
   };
 }
-function metadataStringArray(metadata, key2) {
+function metadataStringArray2(metadata, key2) {
   const value = metadata[key2];
   if (!Array.isArray(value))
     return [];
   return value.map((entry) => typeof entry === "string" ? entry.trim() : "").filter(Boolean);
 }
 function itemTitle(item) {
-  return metadataString(item.metadata, "name") ?? metadataString(item.metadata, "title") ?? (item.identity.family === "chat" ? metadataString(item.metadata, "chat") : undefined);
+  return metadataString2(item.metadata, "name") ?? metadataString2(item.metadata, "title") ?? (item.identity.family === "chat" ? metadataString2(item.metadata, "chat") : undefined);
 }
 function itemSearchText(item, title, reactionLine) {
-  const explicit = metadataString(item.metadata, "searchText");
+  const explicit = metadataString2(item.metadata, "searchText");
   const parts = explicit ? [explicit, reactionLine] : [
     title,
     ...item.identity.family === "chat" ? [
-      metadataString(item.metadata, "chat"),
-      metadataString(item.metadata, "sender"),
-      metadataString(item.metadata, "from")
+      metadataString2(item.metadata, "chat"),
+      metadataString2(item.metadata, "sender"),
+      metadataString2(item.metadata, "from")
     ] : [],
     ...item.identity.family === "email" ? [
-      metadataString(item.metadata, "from"),
-      metadataString(item.metadata, "to")
+      metadataString2(item.metadata, "from"),
+      metadataString2(item.metadata, "to")
     ] : [],
     ...metadataStringList(item.metadata, "identityAliases"),
     ...metadataStringList(item.metadata, "aliases"),
@@ -19806,7 +21353,7 @@ function parseEmbeddingMaintenanceJournal(value) {
   };
 }
 function connectorStoreEmbeddingWriteAuthorityId(modelId) {
-  return `connector-store-embedding-write-authority:${hashString2(modelId)}`;
+  return `connector-store-embedding-write-authority:${hashString4(modelId)}`;
 }
 function connectorStoreEmbeddingWriteAuthority(provider, providerEpoch, currencyRebuildPending = false) {
   assertConnectorStoreEmbeddingAuthorityProviderDimension(provider);
@@ -19879,10 +21426,10 @@ function connectorStoreEmbeddingWriteAuthorityMatches(authority, provider) {
 }
 function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   const normalized = normalizeEmbedLocalItemIds(localItemIds);
-  return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
+  return hashString4(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash11("sha256");
+  const digest = createHash13("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -19975,7 +21522,10 @@ function namesOnlyKept(db, itemPks) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash11("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash13("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+}
+function carryHold(listed, fetched) {
+  return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
 }
 function textFromRawItem(item) {
   if (item.content.kind === "text")
@@ -20151,8 +21701,8 @@ function sweepMediaCacheThrottled() {
   } catch {}
 }
 function connectorStoreChunkEmbeddingInputHash(embeddingText, mediaSha256) {
-  return mediaSha256 ? hashString2(`${embeddingText}
-\x00image:sha256:${mediaSha256}`) : hashString2(embeddingText);
+  return mediaSha256 ? hashString4(`${embeddingText}
+\x00image:sha256:${mediaSha256}`) : hashString4(embeddingText);
 }
 function buildConnectorStoreEmbeddingText(row) {
   return [
@@ -20656,9 +22206,9 @@ function assertContentFetchFailureBudget(consecutiveFailures) {
   throw new Error(`connector_fetch_failed: ${consecutiveFailures} consecutive connector fetchItem failures; failing sync run instead of committing a content-less batch.`);
 }
 function itemIdHash(item) {
-  return hashString2(item.identity.localItemId).slice(0, 16);
+  return hashString4(item.identity.localItemId).slice(0, 16);
 }
-function metadataString(metadata, key2) {
+function metadataString2(metadata, key2) {
   const value = metadata[key2];
   if (typeof value !== "string")
     return;
@@ -20670,7 +22220,7 @@ function metadataStringList(metadata, key2) {
   if (Array.isArray(value)) {
     return value.flatMap((entry) => typeof entry === "string" && entry.trim() ? [entry.trim()] : []);
   }
-  const single = metadataString(metadata, key2);
+  const single = metadataString2(metadata, key2);
   return single ? [single] : [];
 }
 function metadataBoolean(metadata, key2) {
@@ -20678,8 +22228,8 @@ function metadataBoolean(metadata, key2) {
   return typeof value === "boolean" ? value : undefined;
 }
 function senderMetadataFromRawItem(item) {
-  const senderId = metadataString(item.metadata, "senderId") ?? metadataString(item.metadata, "sender_id");
-  const senderLabel = metadataString(item.metadata, "senderLabel") ?? metadataString(item.metadata, "senderDisplayName") ?? metadataString(item.metadata, "sender") ?? metadataString(item.metadata, "from");
+  const senderId = metadataString2(item.metadata, "senderId") ?? metadataString2(item.metadata, "sender_id");
+  const senderLabel = metadataString2(item.metadata, "senderLabel") ?? metadataString2(item.metadata, "senderDisplayName") ?? metadataString2(item.metadata, "sender") ?? metadataString2(item.metadata, "from");
   const senderIsOwner = metadataBoolean(item.metadata, "senderIsOwner") ?? metadataBoolean(item.metadata, "fromMe");
   return normalizeSenderMetadata({
     ...senderId ? { senderId } : {},
@@ -21217,7 +22767,7 @@ function normalizeLocatorIdentityConvergenceWindows(value) {
   return value;
 }
 function yieldConnectorSyncTurn() {
-  return new Promise((resolve8) => setTimeout(resolve8, 0));
+  return new Promise((resolve9) => setTimeout(resolve9, 0));
 }
 function normalizeRepairCursor(value) {
   if (value === undefined)
@@ -21355,8 +22905,8 @@ function requireNonEmpty(value, label) {
     throw new Error(`${label} is required.`);
   return text2;
 }
-function hashString2(value) {
-  return createHash11("sha256").update(value).digest("hex");
+function hashString4(value) {
+  return createHash13("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -21368,7 +22918,7 @@ function fileIdentity(path) {
   if (path === ":memory:" || path === "")
     return;
   try {
-    const stat2 = statSync10(path);
+    const stat2 = statSync11(path);
     return { dev: stat2.dev, ino: stat2.ino };
   } catch {
     return;
@@ -21534,12 +23084,12 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store read-only mode requires an existing database path.");
       }
       if (options.readOnly === true) {
-        const stat2 = lstatSync7(this.dbPath);
+        const stat2 = lstatSync9(this.dbPath);
         if (!stat2.isFile() || stat2.isSymbolicLink()) {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync13(dirname19(this.dbPath), { recursive: true, mode: 448 });
+        mkdirSync13(dirname20(this.dbPath), { recursive: true, mode: 448 });
       }
       this.db = new Database5(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
@@ -21610,7 +23160,7 @@ var init_local_index = __esm(() => {
         if (!existing)
           return false;
         const override = read.override;
-        const metadataString = (keys) => {
+        const metadataString2 = (keys) => {
           for (const key2 of keys) {
             const value = item.metadata[key2];
             if (typeof value === "string" && value.trim())
@@ -21618,8 +23168,8 @@ var init_local_index = __esm(() => {
           }
           return;
         };
-        const title = metadataString(["title", "name", "subject"]);
-        const path = metadataString(["locatorUri", "pathDisplay"]);
+        const title = metadataString2(["title", "name", "subject"]);
+        const path = metadataString2(["locatorUri", "pathDisplay"]);
         const content = classifyContentTier({
           text: text2,
           metadataTier: existing.metadataTier,
@@ -22181,7 +23731,7 @@ var init_local_index = __esm(() => {
             content: { kind: "metadata_only" },
             metadata: {},
             fetchedAt: startedAt
-          }, options.connectorId, "observed", syncRunId, options.trustTier, true);
+          }, options.connectorId, "observed", syncRunId, options.trustTier, options.insert !== true);
         })();
       } finally {
         if (!this.db.inTransaction)
@@ -22618,7 +24168,7 @@ var init_local_index = __esm(() => {
       const row = this.db.query(`
       SELECT status, cursor, audit_receipt_sha256 FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?
     `).get(connectorStoreEmbeddingWriteAuthorityId(modelId), "connector_store_embedding_write_authority");
-      if (!row || row.status !== "running" || row.audit_receipt_sha256 !== hashString2(row.cursor ?? ""))
+      if (!row || row.status !== "running" || row.audit_receipt_sha256 !== hashString4(row.cursor ?? ""))
         return;
       try {
         const parsed = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
@@ -23655,7 +25205,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash11("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash13("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -23773,7 +25323,7 @@ var init_local_index = __esm(() => {
           counts.chunksWithoutCurrentEmbeddings += 1;
           currentMissingEmbedding = true;
         }
-        if (row.bounded_text === null || hashString2(row.bounded_text) !== row.content_hash) {
+        if (row.bounded_text === null || hashString4(row.bounded_text) !== row.content_hash) {
           currentHashDisagreement = true;
         }
       }
@@ -24223,8 +25773,8 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store trust reconciliation requires two distinct stores.");
       }
       if (this.dbPath !== ":memory:" && options.stricter.dbPath !== ":memory:") {
-        const looserFile = statSync10(this.dbPath);
-        const stricterFile = statSync10(options.stricter.dbPath);
+        const looserFile = statSync11(this.dbPath);
+        const stricterFile = statSync11(options.stricter.dbPath);
         if (looserFile.dev === stricterFile.dev && looserFile.ino === stricterFile.ino) {
           throw new Error("Connector store trust reconciliation refuses one database as both stores.");
         }
@@ -24549,8 +26099,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash11("sha256");
-      const outputDigest = createHash11("sha256");
+      const inputDigest = createHash13("sha256");
+      const outputDigest = createHash13("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -24620,8 +26170,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash11("sha256");
-      const outputDigest = createHash11("sha256");
+      const inputDigest = createHash13("sha256");
+      const outputDigest = createHash13("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -24688,19 +26238,19 @@ var init_local_index = __esm(() => {
               repaired,
               renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json))
             ]);
-            inputDigest.update(`${row.item_pk}:${hashString2(row.search_text ?? "")}:${hashString2(derived ?? "")}
+            inputDigest.update(`${row.item_pk}:${hashString4(row.search_text ?? "")}:${hashString4(derived ?? "")}
 `);
             counts.itemsScanned += 1;
             lastItemPk = row.item_pk;
             if (derived === null) {
               counts.itemsWithoutChunks += 1;
-              outputDigest.update(`${row.item_pk}:${hashString2(row.search_text ?? "")}
+              outputDigest.update(`${row.item_pk}:${hashString4(row.search_text ?? "")}
 `);
               continue;
             }
             if (row.search_text === derived) {
               counts.itemsUnchanged += 1;
-              outputDigest.update(`${row.item_pk}:${hashString2(derived)}
+              outputDigest.update(`${row.item_pk}:${hashString4(derived)}
 `);
               continue;
             }
@@ -24714,7 +26264,7 @@ var init_local_index = __esm(() => {
               updated_at: row.updated_at
             });
             counts.ftsRowsRefreshed += this.refreshFtsForItem(row.item_pk);
-            outputDigest.update(`${row.item_pk}:${hashString2(derived)}
+            outputDigest.update(`${row.item_pk}:${hashString4(derived)}
 `);
           }
         })();
@@ -24754,7 +26304,7 @@ var init_local_index = __esm(() => {
         if (priorJournal && priorJournal.status !== "completed") {
           throw new Error("Connector store facet-refresh journal is not terminal.");
         }
-        if (priorJournal && priorJournal.audit_receipt_sha256 !== hashString2(priorJournal.cursor ?? "")) {
+        if (priorJournal && priorJournal.audit_receipt_sha256 !== hashString4(priorJournal.cursor ?? "")) {
           throw new Error("Connector store facet-refresh journal CAS state is corrupt.");
         }
         const prior = priorJournal ? parseFacetRefreshJournal(priorJournal.cursor) : undefined;
@@ -24843,7 +26393,7 @@ var init_local_index = __esm(() => {
             items_seen, items_indexed, started_at, completed_at,
             audit_receipt_sha256
           ) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
-        `).run(journalId, this.corpusId, "connector_store_owned_search_facet_refresh", cursor, counts.itemsScanned, counts.itemsRefreshed, completedAt, completedAt, hashString2(cursor));
+        `).run(journalId, this.corpusId, "connector_store_owned_search_facet_refresh", cursor, counts.itemsScanned, counts.itemsRefreshed, completedAt, completedAt, hashString4(cursor));
         }
       })();
       return { counts, matchedLocalItemIds, refreshedLocalItemIds };
@@ -25023,7 +26573,7 @@ var init_local_index = __esm(() => {
             let contentFetchFailed = false;
             if (!metadataOnly && !deferMetadataOnlyContent && classification && fetchContent && item.content.kind === "metadata_only") {
               try {
-                itemForStorage = await connector.fetchItem(item.identity.localItemId);
+                itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
                 consecutiveContentFetchFailures = 0;
               } catch {
                 contentFetchFailed = true;
@@ -25270,10 +26820,10 @@ var init_local_index = __esm(() => {
       const meta = item.metadata;
       const title = itemTitle(item);
       const sender = senderMetadataFromRawItem(item);
-      const locatorUri = metadataString(meta, "locatorUri") ?? metadataString(meta, "pathDisplay") ?? metadataString(meta, "url");
-      const authoredAt = metadataString(meta, "authoredAt") ?? metadataString(meta, "sentAt") ?? metadataString(meta, "clientModifiedAt");
-      const updatedAt = metadataString(meta, "updatedAt") ?? metadataString(meta, "serverModifiedAt");
-      const emittedContentHash = metadataString(meta, "contentHash") ?? (item.content.kind === "text" ? hashString2(item.content.text) : undefined);
+      const locatorUri = metadataString2(meta, "locatorUri") ?? metadataString2(meta, "pathDisplay") ?? metadataString2(meta, "url");
+      const authoredAt = metadataString2(meta, "authoredAt") ?? metadataString2(meta, "sentAt") ?? metadataString2(meta, "clientModifiedAt");
+      const updatedAt = metadataString2(meta, "updatedAt") ?? metadataString2(meta, "serverModifiedAt");
+      const emittedContentHash = metadataString2(meta, "contentHash") ?? (item.content.kind === "text" ? hashString4(item.content.text) : undefined);
       const now = nowIso();
       const suppliedReactions = normalizeSourceReactions(meta["reactions"]);
       const existing = this.db.query(`
@@ -25591,7 +27141,7 @@ var init_local_index = __esm(() => {
       if (text2 === undefined && item.content.kind === "metadata_only") {
         let fetched;
         try {
-          fetched = await connector.fetchItem(item.identity.localItemId);
+          fetched = carryHold(item, await connector.fetchItem(item.identity.localItemId));
           onContentFetchSuccess?.();
         } catch {
           gaps.push(contentFetchFailedGap(item));
@@ -25627,8 +27177,8 @@ var init_local_index = __esm(() => {
         title,
         search_text: itemSearchText(item, title ?? undefined) ?? null,
         mime_type: item.mimeType,
-        authored_at: metadataString(item.metadata, "authoredAt") ?? metadataString(item.metadata, "sentAt") ?? metadataString(item.metadata, "clientModifiedAt") ?? null,
-        updated_at: metadataString(item.metadata, "updatedAt") ?? metadataString(item.metadata, "serverModifiedAt") ?? null
+        authored_at: metadataString2(item.metadata, "authoredAt") ?? metadataString2(item.metadata, "sentAt") ?? metadataString2(item.metadata, "clientModifiedAt") ?? null,
+        updated_at: metadataString2(item.metadata, "updatedAt") ?? metadataString2(item.metadata, "serverModifiedAt") ?? null
       };
     }
     indexItemText(item, itemPk, maxChunkChars, text2, media) {
@@ -25668,7 +27218,7 @@ var init_local_index = __esm(() => {
         return {
           index,
           text: chunk,
-          hash: hashString2(chunk),
+          hash: hashString4(chunk),
           media: chunkMedia,
           embeddingHash: connectorStoreChunkEmbeddingInputHash(buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk }), chunkMedia?.sha256)
         };
@@ -25988,7 +27538,7 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store embedding journal has an invalid status.");
       }
       const priorCounts = priorJournal ? parseEmbeddingMaintenanceJournal(priorJournal.cursor) : undefined;
-      if (priorJournal && priorJournal.audit_receipt_sha256 !== hashString2(priorJournal.cursor ?? "")) {
+      if (priorJournal && priorJournal.audit_receipt_sha256 !== hashString4(priorJournal.cursor ?? "")) {
         throw new Error("Connector store embedding journal CAS state is corrupt.");
       }
       if (priorCounts && priorCounts.leaseGeneration !== journalLeaseGeneration && journalLeaseGeneration <= priorCounts.leaseGeneration) {
@@ -26035,7 +27585,7 @@ var init_local_index = __esm(() => {
           if (!mustBindLegacyJournal && !mustClaimRunningJournal)
             return;
           const claimedCursor = embeddingMaintenanceJournal(provider, selectionSha256, inputSha256, rows.length, priorCounts.chunksEmbedded, priorJournal.status === "running" ? journalLeaseGeneration : priorCounts.leaseGeneration, providerEpoch, invalidateCurrentModelEmbeddings);
-          const claimedSha256 = hashString2(claimedCursor);
+          const claimedSha256 = hashString4(claimedCursor);
           const claimed = this.db.query(`
           UPDATE sync_runs
           SET cursor = ?, audit_receipt_sha256 = ?
@@ -26055,7 +27605,7 @@ var init_local_index = __esm(() => {
             invalidateOnCreate: invalidateCurrentModelEmbeddings
           });
           const cursor = embeddingMaintenanceJournal(provider, selectionSha256, inputSha256, rows.length, 0, journalLeaseGeneration, providerEpoch, invalidateCurrentModelEmbeddings);
-          const journalSha256 = hashString2(cursor);
+          const journalSha256 = hashString4(cursor);
           activeJournalSha256 = journalSha256;
           this.db.query(`
           INSERT INTO sync_runs (
@@ -26217,7 +27767,7 @@ var init_local_index = __esm(() => {
           if (journalId) {
             const cumulative = embedded + written;
             const cursor = embeddingMaintenanceJournal(provider, selectionSha256, inputSha256, rows.length, cumulative, journalLeaseGeneration, providerEpoch, invalidateCurrentModelEmbeddings);
-            nextJournalSha256 = hashString2(cursor);
+            nextJournalSha256 = hashString4(cursor);
             const updated = this.db.query(`
             UPDATE sync_runs
             SET cursor = ?, items_indexed = ?, audit_receipt_sha256 = ?
@@ -26251,7 +27801,7 @@ var init_local_index = __esm(() => {
       if (journalId) {
         const completedAt = this.now().toISOString();
         const cursor = embeddingMaintenanceJournal(provider, selectionSha256, inputSha256, rows.length, embedded, journalLeaseGeneration, providerEpoch, invalidateCurrentModelEmbeddings);
-        const completedSha256 = hashString2(cursor);
+        const completedSha256 = hashString4(cursor);
         this.db.transaction(() => {
           this.assertEmbeddingWriteAuthority(provider, providerEpoch);
           const completed = this.db.query(`
@@ -26308,10 +27858,10 @@ var init_local_index = __esm(() => {
           items_seen, items_indexed, started_at, completed_at,
           audit_receipt_sha256
         ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, NULL, ?)
-      `).run(authorityId, this.corpusId, "connector_store_embedding_write_authority", cursor2, startedAt, hashString2(cursor2));
+      `).run(authorityId, this.corpusId, "connector_store_embedding_write_authority", cursor2, startedAt, hashString4(cursor2));
         return providerEpoch2;
       }
-      if (existing.status !== "running" || existing.audit_receipt_sha256 !== hashString2(existing.cursor ?? "")) {
+      if (existing.status !== "running" || existing.audit_receipt_sha256 !== hashString4(existing.cursor ?? "")) {
         throw new Error("Connector store embedding write authority is corrupt.");
       }
       let current2;
@@ -26331,7 +27881,7 @@ var init_local_index = __esm(() => {
         SET cursor = ?, audit_receipt_sha256 = ?
         WHERE sync_run_id = ? AND connector_id = ? AND status = 'running'
           AND audit_receipt_sha256 = ?
-      `).run(cursor2, hashString2(cursor2), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
+      `).run(cursor2, hashString4(cursor2), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
         if (rebound2.changes !== 1) {
           throw new Error("Connector store embedding write authority was superseded.");
         }
@@ -26357,7 +27907,7 @@ var init_local_index = __esm(() => {
       SET cursor = ?, audit_receipt_sha256 = ?
       WHERE sync_run_id = ? AND connector_id = ? AND status = 'running'
         AND audit_receipt_sha256 = ?
-    `).run(cursor, hashString2(cursor), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
+    `).run(cursor, hashString4(cursor), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
       if (rebound.changes !== 1) {
         throw new Error("Connector store embedding write authority was superseded.");
       }
@@ -26373,7 +27923,7 @@ var init_local_index = __esm(() => {
     `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
       if (!authority)
         throw new Error("Connector store embedding write authority is missing.");
-      if (authority.status !== "running" || authority.audit_receipt_sha256 !== hashString2(authority.cursor ?? "")) {
+      if (authority.status !== "running" || authority.audit_receipt_sha256 !== hashString4(authority.cursor ?? "")) {
         throw new Error("Connector store embedding write authority is corrupt.");
       }
       const current2 = parseConnectorStoreEmbeddingWriteAuthority(authority.cursor);
@@ -26393,7 +27943,7 @@ var init_local_index = __esm(() => {
     `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
       if (!existing)
         return false;
-      if (existing.status !== "running" || existing.audit_receipt_sha256 !== hashString2(existing.cursor ?? "")) {
+      if (existing.status !== "running" || existing.audit_receipt_sha256 !== hashString4(existing.cursor ?? "")) {
         return false;
       }
       let current2;
@@ -26427,7 +27977,7 @@ var init_local_index = __esm(() => {
         SET cursor = ?, audit_receipt_sha256 = ?
         WHERE sync_run_id = ? AND connector_id = ? AND status = 'running'
           AND audit_receipt_sha256 = ?
-      `).run(cursor, hashString2(cursor), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
+      `).run(cursor, hashString4(cursor), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
         if (cleared.changes !== 1) {
           throw new Error("Connector store embedding write authority was superseded.");
         }
@@ -26632,7 +28182,7 @@ var init_local_index = __esm(() => {
     `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
       if (!row)
         return { token: "no_embedding_write_authority" };
-      if (row.status !== "running" || row.audit_receipt_sha256 !== hashString2(row.cursor ?? "")) {
+      if (row.status !== "running" || row.audit_receipt_sha256 !== hashString4(row.cursor ?? "")) {
         return { token: "corrupt", skippedReason: "embedding_authority_corrupt" };
       }
       let record;
@@ -26772,7 +28322,7 @@ var init_local_index = __esm(() => {
       ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
       LIMIT ?
     `).all(terms, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, ...selectedFtsScope.params, fetchLimit);
-      const required2 = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
+      const required = Math.min(MAX_REQUIRED_CONCEPTS, groups.length);
       let selected = rows;
       const matchedGroups = new Map;
       const matchedGroupIndexes = new Map;
@@ -26793,7 +28343,7 @@ var init_local_index = __esm(() => {
             matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
           }
         }
-        const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required2;
+        const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
         const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
         selected = rows.filter((row) => {
           if (enough(row))
@@ -27543,6 +29093,234 @@ var init_local_index = __esm(() => {
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
 
+// src/core/provider-account-identity.ts
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+  };
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+});
+
+// src/core/source-storage.ts
+function openConnectorStore(account, options, env = process.env) {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  let registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, slot);
+  if (adoptionEnabled && options.readOnly !== true) {
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    if (!entry?.corpus_ids.includes(options.corpusId)) {
+      adopt(env, account.sourceId, slot, options.dbPath, options.corpusId);
+      registry = readSourceRegistry(env);
+    }
+  }
+  const mediaHolder = placedStoreHolder({ sourceId: account.sourceId, slot }, options, env, registry);
+  return new LocalConnectorStore(mediaHolder ? { ...options, mediaHolder } : options);
+}
+function recordAccountPlacement(account, path, env = process.env) {
+  if (!adoptionEnabled)
+    return;
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeBeforeFirstFile(env, registry, account, path);
+}
+function placeBeforeFirstFile(env, registry, account, path) {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  if (!adoptionEnabled || path === ":memory:")
+    return;
+  if (findRegistryAccount(registry, account.sourceId, slot))
+    return;
+  adopt(env, account.sourceId, slot, path);
+}
+function unavailableStateReason(state) {
+  if (state === "moving")
+    return "its files are being moved into its folder";
+  return state === "deleting" ? "its data is being deleted" : "its data was deleted";
+}
+function unavailableState(entry) {
+  if (entry === undefined)
+    return;
+  if (entry.state !== "active")
+    return entry.state;
+  return sourceAccountMovePending(entry) ? "moving" : undefined;
+}
+function assertOpenable(registry, sourceId, slot) {
+  const state = unavailableState(findRegistryAccount(registry, sourceId, slot));
+  if (state !== undefined)
+    throw new SourceStorageUnavailableError(sourceId, slot, state);
+}
+function adopt(env, sourceId, slot, dbPath, corpusId) {
+  updateSourceRegistry(env, (registry) => {
+    assertOpenable(registry, sourceId, slot);
+    const entry = findRegistryAccount(registry, sourceId, slot);
+    if (!entry) {
+      registry.accounts.push({
+        source_id: sourceId,
+        slot,
+        state: "active",
+        layout: adoptedLayout(env, sourceId, slot, dbPath),
+        corpus_ids: corpusId === undefined ? [] : [corpusId],
+        created_at: new Date().toISOString()
+      });
+    } else if (corpusId !== undefined && !entry.corpus_ids.includes(corpusId)) {
+      entry.corpus_ids.push(corpusId);
+    }
+  });
+}
+function adoptedLayout(env, sourceId, slot, dbPath) {
+  if (decideAccountLayout(sourceId, env).layout !== "folder")
+    return "legacy";
+  return isInsideAccountFolder(dbPath, { source_id: sourceId, slot }, env) ? "folder" : "legacy";
+}
+var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, CAPTURE_CLAIM_RECLAIM_AGE_MS;
+var init_source_storage = __esm(() => {
+  init_secret_locations();
+  init_sniffer_store();
+  init_tier_ledger();
+  init_local_index();
+  init_olympus_layout();
+  init_data_owner_lock();
+  init_file_lease();
+  init_source_placement();
+  init_provider_account_identity();
+  init_store_identity();
+  init_source_registry();
+  DEFAULT_STORAGE_SLOT = DEFAULT_ACCOUNT_SLOT;
+  SourceStorageUnavailableError = class SourceStorageUnavailableError extends Error {
+    code = "source_storage_unavailable";
+    sourceId;
+    slot;
+    state;
+    constructor(sourceId, slot, state) {
+      const account = slot === DEFAULT_STORAGE_SLOT ? sourceId : `${sourceId} (account ${slot})`;
+      super(`${account} is not available: ${unavailableStateReason(state)}.`);
+      this.name = "SourceStorageUnavailableError";
+      this.sourceId = sourceId;
+      this.slot = slot;
+      this.state = state;
+    }
+  };
+  CAPTURE_CLAIM_RECLAIM_AGE_MS = 60 * 60000;
+});
+
+// src/workers/readwise/connector.ts
+var READWISE_STORE_PLACEMENT;
+var init_connector = __esm(() => {
+  init_olympus_layout();
+  init_source_placement();
+  init_atomic_file();
+  init_credential_broker();
+  init_source_storage();
+  init_api();
+  init_corpus_adapter();
+  READWISE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S1",
+    trustDomain: "internal"
+  });
+});
+
+// src/workers/readwise/live-control.ts
+var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, READWISE_DAILY_REQUEST_GUARD_REASON = "readwise_daily_api_request_guard";
+var init_live_control = __esm(() => {
+  READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
+  READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
+  READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
+  READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+});
+
+// src/workers/connector-store/principal.ts
+function isCanonicalConnectorStoreProvider(provider) {
+  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
+}
+function isCanonicalConnectorStoreAccountScope(accountScope) {
+  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
+}
+var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
+var init_principal = __esm(() => {
+  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
+  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
+});
+
+// src/workers/connector-store/filter-capabilities.ts
+function connectorStoreFilterCapabilityRegistry(entries) {
+  const familyEntries = new Map;
+  const providerEntries = new Map;
+  for (const [scope, capabilities] of entries) {
+    const provider = "provider" in scope ? scope.provider : undefined;
+    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
+      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
+    }
+    const registry = provider === undefined ? familyEntries : providerEntries;
+    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
+    if (registry.has(key2)) {
+      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
+      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
+    }
+    registry.set(key2, Object.freeze({ ...capabilities }));
+  }
+  return Object.freeze({
+    resolve(identity) {
+      const familyCapabilities = familyEntries.get(identity.family);
+      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
+      if (!familyCapabilities)
+        return providerCapabilities;
+      if (!providerCapabilities)
+        return familyCapabilities;
+      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
+    }
+  });
+}
+function providerScopeKey(family, provider) {
+  return `${family}\x00${provider}`;
+}
+var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
+var init_filter_capabilities = __esm(() => {
+  init_principal();
+  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
+    "corpus_id",
+    "query",
+    "retrieval_mode",
+    "max_results",
+    "account",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "authored_after",
+    "authored_before",
+    "after",
+    "before",
+    "trust_domain",
+    "all_tiers"
+  ];
+  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
+    "approved_scope_key",
+    "chat_scope",
+    "participant_id",
+    "include_deleted",
+    "attachment_type",
+    "include_locators",
+    "chat_title",
+    "chat_title_hint",
+    "folder_id",
+    "folder_name"
+  ];
+  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
+    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
+    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
+  ]);
+});
+
+// src/workers/connector-store/index.ts
+var init_connector_store = __esm(() => {
+  init_local_index();
+  init_filter_capabilities();
+});
+
 // src/workers/connector-store/tier-set-registry.ts
 function tierSetForLedger(ledgerPath) {
   return tierSets?.get(ledgerPath);
@@ -27719,11 +29497,11 @@ var init_tier_names_only_settle = __esm(() => {
 
 // src/workers/embedding-ledger.ts
 import { mkdir as mkdir3, open as open2, readFile as readFile2 } from "node:fs/promises";
-import { dirname as dirname20 } from "node:path";
+import { dirname as dirname21 } from "node:path";
 async function appendEmbeddingLedgerEntry(path, entry) {
   const line = `${JSON.stringify(entry)}
 `;
-  await mkdir3(dirname20(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname21(path), { recursive: true, mode: 448 });
   const handle = await open2(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -27983,7 +29761,7 @@ var init_embedding_ledger = __esm(() => {
 });
 
 // src/workers/connector-store/tier-move.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 function rowRehomeReceiptId(ledger, identity, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
 }
@@ -28277,7 +30055,7 @@ function readVerifiedMove(ledger, identity) {
   return receipt;
 }
 function copyFingerprint(copy, layers) {
-  return createHash12("sha256").update(JSON.stringify({
+  return createHash14("sha256").update(JSON.stringify({
     identity: copy.identity,
     columns: copy.columns,
     chunks: layers === "metadata" ? [] : copy.chunks
@@ -28457,9 +30235,9 @@ var init_tier_content_purge = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync19, statSync as statSync11 } from "node:fs";
-import { homedir as homedir9 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname21, isAbsolute as isAbsolute10, join as join19 } from "node:path";
+import { existsSync as existsSync19, statSync as statSync12 } from "node:fs";
+import { homedir as homedir10 } from "node:os";
+import { delimiter as delimiter2, dirname as dirname22, isAbsolute as isAbsolute11, join as join21 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 function helperEnvironment() {
@@ -28471,7 +30249,7 @@ function helperEnvironment() {
       env[name] = value;
     }
   }
-  env.HOME ??= homedir9();
+  env.HOME ??= homedir10();
   return env;
 }
 
@@ -28517,7 +30295,7 @@ class HelperProcess {
       helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
       child.kill("SIGKILL");
     });
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       let started = false;
       const timer = setTimeout(() => {
         if (started)
@@ -28541,7 +30319,7 @@ class HelperProcess {
             clearTimeout(timer);
             helper.device = message2.device === "gpu" ? "gpu" : "cpu";
             helper.vision = message2.vision === true;
-            resolve8(helper);
+            resolve9(helper);
           } else if (message2.fatal) {
             started = true;
             clearTimeout(timer);
@@ -28578,13 +30356,13 @@ class HelperProcess {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       const timer = setTimeout(() => {
         this.child.kill("SIGKILL");
         this.exited = true;
         this.failAll(new Error("The built-in search model stopped responding and was restarted."));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve: resolve8, reject, count: items.length, timer });
+      this.pending.set(id, { resolve: resolve9, reject, count: items.length, timer });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
       this.child.stdin.write(`${JSON.stringify(request)}
 `);
@@ -28625,7 +30403,7 @@ class HelperProcess {
   async stop() {
     if (this.exited)
       return;
-    const exited = new Promise((resolve8) => this.child.once("close", () => resolve8()));
+    const exited = new Promise((resolve9) => this.child.once("close", () => resolve9()));
     this.child.stdin.end();
     const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
     await exited;
@@ -28673,9 +30451,9 @@ async function startLiteRtEmbedder(options) {
   };
 }
 function helperPath() {
-  const here = dirname21(fileURLToPath(import.meta.url));
+  const here = dirname22(fileURLToPath(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join19(here, name);
+    const candidate = join21(here, name);
     if (existsSync19(candidate))
       return candidate;
   }
@@ -28685,15 +30463,15 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join19(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join19(directory, bunName)),
-    join19(homedir9(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join21(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join21(directory, bunName)),
+    join21(homedir10(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute10(candidate))
+    if (!candidate || !isAbsolute11(candidate))
       continue;
     try {
-      if (statSync11(candidate).isFile())
+      if (statSync12(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -28720,11 +30498,11 @@ var init_litert_runtime = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire4 } from "node:module";
-import { join as join20 } from "node:path";
+import { join as join22 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire4(join20(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire4(join22(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -28906,10 +30684,10 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash13 } from "node:crypto";
-import { readFileSync as readFileSync16 } from "node:fs";
+import { createHash as createHash15 } from "node:crypto";
+import { readFileSync as readFileSync17 } from "node:fs";
 import { availableParallelism } from "node:os";
-import { dirname as dirname22, join as join21 } from "node:path";
+import { dirname as dirname23, join as join23 } from "node:path";
 
 class BuiltInSourceEmbeddingProvider {
   provider;
@@ -28955,7 +30733,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash13("sha256").update(JSON.stringify({
+    this.configHash = createHash15("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -29082,7 +30860,7 @@ class BuiltInSourceEmbeddingProvider {
         const embedder = await this.liteRtFactory({
           library: installed.libraryPath,
           model: installed.modelPath,
-          cacheDir: join21(dirname22(installed.modelPath), "cache"),
+          cacheDir: join23(dirname23(installed.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -29108,7 +30886,7 @@ class BuiltInSourceEmbeddingProvider {
   }
   async withSlot(taskType, run) {
     if (this.slotBusy) {
-      await new Promise((resolve8) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve8));
+      await new Promise((resolve9) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve9));
     } else {
       this.slotBusy = true;
     }
@@ -29318,7 +31096,7 @@ class BuiltInSourceEmbeddingProvider {
   }
 }
 function loadTokenizer(path) {
-  const tokenizer = new WordPieceTokenizer(readFileSync16(path, "utf8"));
+  const tokenizer = new WordPieceTokenizer(readFileSync17(path, "utf8"));
   return {
     tokenize: (text2) => tokenizer.tokenize(text2),
     startId: tokenizer.clsId,
@@ -29843,7 +31621,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -29983,7 +31761,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash14("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash16("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function readState(raw) {
   if (!raw)
@@ -30224,727 +32002,22 @@ var init_tiered_store_set = __esm(() => {
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 
-// src/core/messaging-capture-grant-file.ts
-import { closeSync as closeSync9, constants as constants2, fstatSync, lstatSync as lstatSync8, openSync as openSync9, readFileSync as readFileSync17 } from "node:fs";
-import { homedir as homedir10 } from "node:os";
-import { dirname as dirname23, join as join22 } from "node:path";
-function captureGrantPathBeside(source, handleRegistryPath) {
-  return join22(dirname23(handleRegistryPath), `messaging-capture.${source}.json`);
-}
-function captureGrantPathFromEnv(source, env) {
-  const configured = env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim();
-  return captureGrantPathBeside(source, configured || join22(env.HOME?.trim() || homedir10(), ".config", "olympus", "handles.json"));
-}
-function readCaptureGrantFile(path) {
-  try {
-    lstatSync8(path);
-  } catch (error) {
-    const code = error?.code;
-    return code === "ENOENT" || code === "ENOTDIR" ? { kind: "missing" } : { kind: "invalid" };
-  }
-  let descriptor;
-  try {
-    descriptor = openSync9(path, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0));
-    const info = fstatSync(descriptor);
-    const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
-    if (!info.isFile() || (info.mode & 18) !== 0 || currentUid !== undefined && info.uid !== currentUid) {
-      return { kind: "invalid" };
-    }
-    const value = JSON.parse(readFileSync17(descriptor, "utf8"));
-    if (value.version !== 1 || !["telegram", "whatsapp"].includes(value.source) || !value.handle)
-      return { kind: "invalid" };
-    if (value.sessionPath !== undefined && (typeof value.sessionPath !== "string" || value.sessionPath === ""))
-      return { kind: "invalid" };
-    if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment))
-      return { kind: "invalid" };
-    return { kind: "valid", grant: value };
-  } catch {
-    return { kind: "invalid" };
-  } finally {
-    if (descriptor !== undefined)
-      closeSync9(descriptor);
-  }
-}
-function captureGrantSessionEvidence(source, grantPath) {
-  const read = readCaptureGrantFile(grantPath);
-  if (read.kind === "missing")
-    return { kind: "none" };
-  if (read.kind === "invalid" || read.grant.source !== source)
-    return { kind: "unreadable" };
-  return read.grant.sessionPath === undefined ? { kind: "none" } : { kind: "path", sessionPath: read.grant.sessionPath };
-}
-var init_messaging_capture_grant_file = () => {};
-
-// src/core/source-placement.ts
-import { accessSync as accessSync2, constants as constants3, lstatSync as lstatSync9, statSync as statSync12 } from "node:fs";
-import { isAbsolute as isAbsolute11, join as join23, relative as relative4, resolve as resolve8, sep as sep4 } from "node:path";
-function hasFolderLayout(sourceId) {
-  return FOLDER_LAYOUT_SOURCES.includes(sourceId);
-}
-function decideAccountLayout(sourceId, env = process.env) {
-  if (!hasFolderLayout(sourceId))
-    return { layout: "legacy", why: "its source has no folder layout" };
-  const pin = pinnedLegacyBy(sourceId, env);
-  if (pin)
-    return { layout: "legacy", why: `${pin} pins its files` };
-  const root = dataRootState(env);
-  if (root === "unreadable")
-    return { layout: "legacy", why: "the data folder cannot be looked at" };
-  const existing = legacyFilesState(sourceId, env);
-  if (existing === "present")
-    return { layout: "legacy", why: "its files are already at the legacy paths" };
-  if (existing === "unreadable")
-    return { layout: "legacy", why: "a legacy path cannot be looked at" };
-  return { layout: "folder", why: root === "absent" ? "nothing is stored yet" : "new account with no legacy files" };
-}
-function placedAccount(sourceId, env = process.env, slot = DEFAULT_ACCOUNT_SLOT) {
-  if (!hasFolderLayout(sourceId))
-    return { source_id: sourceId, slot, layout: "legacy" };
-  let entry;
-  try {
-    entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
-  } catch (error) {
-    if (error instanceof SourceRegistryError)
-      return { source_id: sourceId, slot, layout: hasAccountFolderOnDisk(sourceId, slot, env) ? "folder" : "legacy" };
-    return { source_id: sourceId, slot, layout: "legacy" };
-  }
-  return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
-}
-function accountMovePending(sourceId, env = process.env, slot = DEFAULT_ACCOUNT_SLOT) {
-  try {
-    const entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
-    return entry !== undefined && sourceAccountMovePending(entry);
-  } catch {
-    return false;
-  }
-}
-function resolvedStorePath(sourceId, name, env = process.env) {
-  return accountStorePath(placedAccount(sourceId, env), name, env);
-}
-function hasAccountFolderOnDisk(sourceId, slot, env) {
-  try {
-    lstatSync9(accountFolder({ source_id: sourceId, slot }, env));
-    return true;
-  } catch {
-    return false;
-  }
-}
-function isInsideAccountFolder(dbPath, account, env = process.env) {
-  return resolve8(dbPath).startsWith(`${resolve8(accountFolder(account, env))}${sep4}`);
-}
-function storageAccountForCorpus(corpus, registered2 = []) {
-  const known = [...registered2, ...defaultSourceCorpusRegistryConfig().corpora].find((entry) => entry.corpusId === corpus.corpusId);
-  if (known)
-    return { sourceId: known.sourceId };
-  if (isArchiveCorpusId(corpus.corpusId, corpus.trustDomain))
-    return { sourceId: ARCHIVE_IMPORTS_SOURCE_ID };
-  const prefix = `${corpus.trustDomain}.`;
-  const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : "";
-  return { sourceId: unprefixed || corpus.corpusId };
-}
-function declaredConnectorStoreMounts(env = process.env) {
-  const mounts = env[MOUNTS_ENV]?.trim();
-  if (!mounts)
-    return [];
-  let declared;
-  try {
-    declared = JSON.parse(mounts);
-  } catch {
-    return "unreadable";
-  }
-  if (!Array.isArray(declared))
-    return "unreadable";
-  const found = [];
-  for (const entry of declared) {
-    const record = entry && typeof entry === "object" ? entry : {};
-    if (typeof record.corpusId !== "string")
-      continue;
-    const corpusId = record.corpusId.trim();
-    const owner = storageAccountForCorpus({
-      corpusId,
-      trustDomain: typeof record.trustDomain === "string" ? record.trustDomain.trim() : ""
-    });
-    const dbPath = typeof record.dbPath === "string" && record.dbPath.trim() ? record.dbPath.trim() : undefined;
-    found.push({ sourceId: owner.sourceId, corpusId, ...dbPath ? { dbPath } : {} });
-  }
-  return found;
-}
-function pinnedLegacyBy(sourceId, env, withGrant = true) {
-  for (const name of legacyOverrideEnvNames(sourceId)) {
-    if (env[name]?.trim())
-      return name;
-  }
-  const native = nativeCaptureOwnerPin(sourceId, env);
-  if (native)
-    return native;
-  const grant = withGrant ? captureGrantPin(sourceId, env) : undefined;
-  if (grant)
-    return grant;
-  const mounts = declaredConnectorStoreMounts(env);
-  if (mounts === "unreadable")
-    return `${MOUNTS_ENV} (unreadable)`;
-  const mount = mounts.find((candidate) => candidate.sourceId === sourceId);
-  return mount ? `${MOUNTS_ENV} (${mount.corpusId})` : undefined;
-}
-function captureGrantPin(sourceId, env) {
-  const source = sourceId === TELEGRAM_SOURCE_ID ? "telegram" : sourceId === WHATSAPP_SOURCE_ID ? "whatsapp" : undefined;
-  if (!source)
-    return;
-  const evidence = captureGrantSessionEvidence(source, captureGrantPathFromEnv(source, env));
-  if (evidence.kind === "path")
-    return "its capture grant (names the session path)";
-  return evidence.kind === "unreadable" ? "its capture grant (cannot be read)" : undefined;
-}
-function dataRootState(env) {
-  let root;
-  try {
-    root = olympusDataRoot(env);
-  } catch {
-    return "unreadable";
-  }
-  try {
-    const link = lstatSync9(root);
-    const target = link.isSymbolicLink() ? statSync12(root) : link;
-    if (!target.isDirectory())
-      return "unreadable";
-    accessSync2(root, constants3.R_OK | constants3.X_OK);
-    return "present";
-  } catch (error) {
-    return error?.code === "ENOENT" && !isDanglingLink(root) ? "absent" : "unreadable";
-  }
-}
-function isDanglingLink(path) {
-  try {
-    return lstatSync9(path).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-function legacyFilesState(sourceId, env) {
-  const { stores, raw } = legacyAccountPaths(sourceId, env, archiveImportFamilies());
-  const candidates = [
-    ...raw.flatMap(withSqliteFiles),
-    ...stores.flatMap((store) => [
-      store,
-      tierLedgerPathForStore(store),
-      secretLocationsPathForStore(store),
-      tierSnifferPathForStore(store)
-    ].flatMap(withSqliteFiles))
-  ];
-  let unreadable = false;
-  for (const path of candidates) {
-    try {
-      lstatSync9(path);
-      return "present";
-    } catch (error) {
-      if (error?.code !== "ENOENT")
-        unreadable = true;
-    }
-  }
-  return unreadable ? "unreadable" : "none";
-}
-function withSqliteFiles(path) {
-  return [path, `${path}-wal`, `${path}-shm`];
-}
-var ARCHIVE_IMPORTS_SOURCE_ID = "archive.imports", MOUNTS_ENV = "OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON";
-var init_source_placement = __esm(() => {
-  init_archive_formats();
-  init_olympus_layout();
-  init_messaging_capture_grant_file();
-  init_source_corpus_registry();
-  init_source_registry();
-});
-
-// src/workers/connector-store/file-ingestion-matcher.ts
-var POLICY_ADMITTED;
-var init_file_ingestion_matcher = __esm(() => {
-  init_source_ingestion_exclusions();
-  init_still_image_readiness();
-  init_source_ingestion_policy();
-  POLICY_ADMITTED = Object.freeze({
-    excluded: false,
-    disposition: "admit",
-    outcome: "admitted"
-  });
-});
-
-// src/core/provider-account-identity.ts
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
-var init_provider_account_identity = __esm(() => {
-  init_http_timeout();
-  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-    x: "https://api.x.com/2/users/me",
-    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-  };
-  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-});
-
-// src/core/source-storage.ts
-function openConnectorStore(account, options, env = process.env) {
-  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
-  let registry = readSourceRegistry(env);
-  assertOpenable(registry, account.sourceId, slot);
-  if (adoptionEnabled && options.readOnly !== true) {
-    const entry = findRegistryAccount(registry, account.sourceId, slot);
-    if (!entry?.corpus_ids.includes(options.corpusId)) {
-      adopt(env, account.sourceId, slot, options.dbPath, options.corpusId);
-      registry = readSourceRegistry(env);
-    }
-  }
-  const mediaHolder = placedStoreHolder({ sourceId: account.sourceId, slot }, options, env, registry);
-  return new LocalConnectorStore(mediaHolder ? { ...options, mediaHolder } : options);
-}
-function recordAccountPlacement(account, path, env = process.env) {
-  if (!adoptionEnabled)
-    return;
-  const registry = readSourceRegistry(env);
-  assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
-  placeBeforeFirstFile(env, registry, account, path);
-}
-function placeBeforeFirstFile(env, registry, account, path) {
-  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
-  if (!adoptionEnabled || path === ":memory:")
-    return;
-  if (findRegistryAccount(registry, account.sourceId, slot))
-    return;
-  adopt(env, account.sourceId, slot, path);
-}
-function unavailableStateReason(state) {
-  if (state === "moving")
-    return "its files are being moved into its folder";
-  return state === "deleting" ? "its data is being deleted" : "its data was deleted";
-}
-function unavailableState(entry) {
-  if (entry === undefined)
-    return;
-  if (entry.state !== "active")
-    return entry.state;
-  return sourceAccountMovePending(entry) ? "moving" : undefined;
-}
-function assertOpenable(registry, sourceId, slot) {
-  const state = unavailableState(findRegistryAccount(registry, sourceId, slot));
-  if (state !== undefined)
-    throw new SourceStorageUnavailableError(sourceId, slot, state);
-}
-function adopt(env, sourceId, slot, dbPath, corpusId) {
-  updateSourceRegistry(env, (registry) => {
-    assertOpenable(registry, sourceId, slot);
-    const entry = findRegistryAccount(registry, sourceId, slot);
-    if (!entry) {
-      registry.accounts.push({
-        source_id: sourceId,
-        slot,
-        state: "active",
-        layout: adoptedLayout(env, sourceId, slot, dbPath),
-        corpus_ids: corpusId === undefined ? [] : [corpusId],
-        created_at: new Date().toISOString()
-      });
-    } else if (corpusId !== undefined && !entry.corpus_ids.includes(corpusId)) {
-      entry.corpus_ids.push(corpusId);
-    }
-  });
-}
-function adoptedLayout(env, sourceId, slot, dbPath) {
-  if (decideAccountLayout(sourceId, env).layout !== "folder")
-    return "legacy";
-  return isInsideAccountFolder(dbPath, { source_id: sourceId, slot }, env) ? "folder" : "legacy";
-}
-var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, CAPTURE_CLAIM_RECLAIM_AGE_MS;
-var init_source_storage = __esm(() => {
-  init_secret_locations();
-  init_sniffer_store();
-  init_tier_ledger();
-  init_local_index();
-  init_olympus_layout();
-  init_data_owner_lock();
-  init_file_lease();
-  init_source_placement();
-  init_provider_account_identity();
-  init_store_identity();
-  init_source_registry();
-  DEFAULT_STORAGE_SLOT = DEFAULT_ACCOUNT_SLOT;
-  SourceStorageUnavailableError = class SourceStorageUnavailableError extends Error {
-    code = "source_storage_unavailable";
-    sourceId;
-    slot;
-    state;
-    constructor(sourceId, slot, state) {
-      const account = slot === DEFAULT_STORAGE_SLOT ? sourceId : `${sourceId} (account ${slot})`;
-      super(`${account} is not available: ${unavailableStateReason(state)}.`);
-      this.name = "SourceStorageUnavailableError";
-      this.sourceId = sourceId;
-      this.slot = slot;
-      this.state = state;
-    }
-  };
-  CAPTURE_CLAIM_RECLAIM_AGE_MS = 60 * 60000;
-});
-
-// src/workers/dropbox-files/corpus-adapter.ts
-var DROPBOX_FILES_CORPUS_ID = "secure_local.dropbox.files", DROPBOX_FILES_SOURCE_ID = "dropbox.files";
-var init_corpus_adapter = __esm(() => {
-  init_corpus();
-});
-
-// src/workers/dropbox-files/connector-store.ts
-function defaultDropboxConnectorStoreDbPath(env = process.env) {
-  return resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "secure_local", env);
-}
-var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT;
-var init_connector_store = __esm(() => {
-  init_source_placement();
-  init_source_ingestion_exclusions();
-  init_source_ingestion_policy();
-  init_file_ingestion_matcher();
-  init_source_storage();
-  init_corpus_adapter();
-  DROPBOX_TIER_CORPUS_IDS = Object.freeze({
-    public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
-    internal: DROPBOX_INTERNAL_FILES_CORPUS_ID,
-    secure_local: DROPBOX_FILES_CORPUS_ID
-  });
-  DROPBOX_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S4",
-    trustDomain: "secure_local",
-    secretsInContent: true
-  });
-});
-
-// src/workers/dropbox-files/provider-store-sync.ts
-var init_provider_store_sync = __esm(() => {
-  init_embeddings();
-  init_tiered_store_set();
+// src/workers/readwise/live-sync.ts
+var init_live_sync = __esm(() => {
   init_connector_store();
+  init_tiered_store_set();
+  init_api();
   init_connector();
-  init_provider_client();
+  init_live_control();
 });
 
-// src/workers/connector-store/locator-path-scope-codec.ts
-function locatorPathApprovedScopeCodec(sourceLabel) {
-  const invalid = (expectedPrefix) => ({
-    kind: "invalid",
-    message: `"approved_scope_key" must exactly match "${expectedPrefix}:<rooted path>" with no surrounding whitespace.`
-  });
-  return Object.freeze({
-    resolveLocatorPath(value, principal) {
-      const expectedPrefix = `${principal.provider}.${principal.accountScope}`;
-      const separator = value.indexOf(":");
-      const prefix = separator < 0 ? undefined : value.slice(0, separator);
-      const scopedValue = separator < 0 ? undefined : value.slice(separator + 1);
-      if (value.length === 0 || value.length > MAX_APPROVED_SCOPE_KEY_LENGTH || value !== value.trim() || UNSAFE_SCOPE_CHARACTERS.test(value) || prefix !== expectedPrefix || scopedValue === undefined || scopedValue.length === 0) {
-        return invalid(expectedPrefix);
-      }
-      if (scopedValue.startsWith("folder_id:")) {
-        return {
-          kind: "invalid",
-          message: `The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form ${sourceLabel} scope.`
-        };
-      }
-      if (!scopedValue.startsWith("/") || scopedValue !== scopedValue.trim() || scopedValue !== "/" && scopedValue.endsWith("/")) {
-        return invalid(expectedPrefix);
-      }
-      return { kind: "path", accountScope: principal.accountScope, locatorPath: scopedValue };
-    }
-  });
-}
-var MAX_APPROVED_SCOPE_KEY_LENGTH = 4096, UNSAFE_SCOPE_CHARACTERS;
-var init_locator_path_scope_codec = __esm(() => {
-  UNSAFE_SCOPE_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
-});
-
-// src/workers/dropbox-files/approved-scope-filter.ts
-var DROPBOX_APPROVED_SCOPE_FILTER_CODEC;
-var init_approved_scope_filter = __esm(() => {
-  init_locator_path_scope_codec();
-  DROPBOX_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("Dropbox");
-});
-
-// src/workers/dropbox-files/local-file-resolver.ts
-function parseDropboxLocalFileRootsFromEnv(env = process.env) {
-  const raw = env.OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON;
-  if (!raw?.trim())
-    return [];
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON must be a JSON array.");
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error("OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON must be a JSON array.");
-  }
-  return parsed.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new Error(`Dropbox local root ${index} must be an object.`);
-    }
-    const record = item;
-    const rootPath = optionalString2(record.rootPath) ?? optionalString2(record.root_path);
-    if (!rootPath) {
-      throw new Error(`Dropbox local root ${index} requires rootPath.`);
-    }
-    const account = optionalString2(record.account);
-    const approvedScopeKey = optionalString2(record.approvedScopeKey) ?? optionalString2(record.approved_scope_key);
-    const dropboxPathPrefix = normalizeDropboxPath(optionalString2(record.dropboxPathPrefix) ?? optionalString2(record.dropbox_path_prefix));
-    const rootId = optionalString2(record.rootId) ?? optionalString2(record.root_id);
-    const root = { rootPath };
-    if (account)
-      root.account = account;
-    if (approvedScopeKey)
-      root.approvedScopeKey = approvedScopeKey;
-    if (dropboxPathPrefix)
-      root.dropboxPathPrefix = dropboxPathPrefix;
-    if (rootId)
-      root.rootId = rootId;
-    return root;
-  });
-}
-function normalizeDropboxPath(path) {
-  const trimmed = path?.trim().replace(/\\/g, "/").replace(/\/+/g, "/");
-  if (!trimmed)
-    return;
-  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-}
-function optionalString2(value) {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-// src/workers/dropbox-files/locator-result-projector.ts
-import { join as join24 } from "node:path";
-import { pathToFileURL } from "node:url";
-function locatorFromRootedDropboxPath(value, localMapping) {
-  const displayPath = normalizeRootedDropboxDisplayPath(value);
-  if (!displayPath)
-    return;
-  const segments = dropboxPathSegments(displayPath);
-  if (segments.length === 0)
-    return;
-  const parentDisplayPath = segments.length === 1 ? "/" : `/${segments.slice(0, -1).join("/")}`;
-  const locator = {
-    display_path: displayPath,
-    parent_display_path: parentDisplayPath,
-    dropbox_web_url: dropboxHomeUrlForSegments(segments),
-    parent_dropbox_web_url: dropboxHomeUrlForSegments(segments.slice(0, -1))
-  };
-  if (localMapping) {
-    const finderUrl = finderUrlForDropboxPath(localMapping, displayPath);
-    if (finderUrl)
-      locator.finder_url = finderUrl;
-    const parentFinderUrl = finderUrlForDropboxPath(localMapping, parentDisplayPath);
-    if (parentFinderUrl)
-      locator.parent_finder_url = parentFinderUrl;
-  }
-  return locator;
-}
-function normalizeRootedDropboxDisplayPath(value) {
-  if (!value)
-    return;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === "/" || !trimmed.startsWith("/"))
-    return;
-  return trimmed;
-}
-function dropboxPathSegments(displayPath) {
-  return displayPath.split("/").map((segment) => segment.trim()).filter((segment) => segment.length > 0 && segment !== "." && segment !== "..");
-}
-function dropboxHomeUrlForSegments(segments) {
-  if (segments.length === 0)
-    return "https://www.dropbox.com/home";
-  return `https://www.dropbox.com/home/${segments.map(encodeURIComponent).join("/")}`;
-}
-function finderUrlForDropboxPath(mapping, displayPath) {
-  const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
-  if (!relativeSegments)
-    return;
-  return pathToFileURL(join24(mapping.rootPath, ...relativeSegments)).href;
-}
-function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
-  const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
-  if (!normalizedPrefix)
-    return dropboxPathSegments(displayPath);
-  if (displayPath === normalizedPrefix)
-    return [];
-  if (!displayPath.startsWith(`${normalizedPrefix}/`))
-    return;
-  return dropboxPathSegments(displayPath.slice(normalizedPrefix.length));
-}
-function normalizeOptionalDropboxPrefix(value) {
-  if (!value)
-    return;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === "/")
-    return;
-  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-}
-function configuredStrictLocalMapping(input) {
-  const explicitRoot = optionalEnvironmentString(process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_LOCATOR_LOCAL_ROOT);
-  if (explicitRoot)
-    return { rootPath: explicitRoot };
-  const legacyRoot = optionalEnvironmentString(process.env.DROPBOX_LOCAL_ROOT);
-  if (legacyRoot)
-    return { rootPath: legacyRoot };
-  try {
-    return parseDropboxLocalFileRootsFromEnv().find((root) => (root.account === undefined || root.account === input.accountScope) && (root.approvedScopeKey === undefined || input.approvedScopeKey !== undefined && root.approvedScopeKey === input.approvedScopeKey));
-  } catch {
-    return;
-  }
-}
-function optionalEnvironmentString(value) {
-  if (!value)
-    return;
-  const trimmed = value.trim();
-  return trimmed || undefined;
-}
-var DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC;
-var init_locator_result_projector = __esm(() => {
-  DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
-    create(input) {
-      const localMapping = configuredStrictLocalMapping({
-        accountScope: input.principal.accountScope,
-        ...input.approvedScopeKey !== undefined ? { approvedScopeKey: input.approvedScopeKey } : {}
-      });
-      return Object.freeze({
-        project(candidate) {
-          if (input.principal.provider !== "dropbox" || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope) {
-            return;
-          }
-          const locator = locatorFromRootedDropboxPath(candidate.readLocatorUri(), localMapping);
-          return locator ? { locator } : undefined;
-        }
-      });
-    }
-  });
-});
-
-// src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash15 } from "node:crypto";
-function computeDropboxContentHash(bytes) {
-  const blockDigests = [];
-  for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
-    const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash15("sha256").update(block).digest());
-  }
-  return createHash15("sha256").update(Buffer.concat(blockDigests)).digest("hex");
-}
-var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
-var init_dropbox_content_hash = __esm(() => {
-  DROPBOX_CONTENT_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
-});
-
-// src/workers/source-export/dropbox.ts
-var init_dropbox = __esm(() => {
-  init_credential_broker();
+// src/workers/readwise/index.ts
+var init_readwise = __esm(() => {
+  init_api();
   init_corpus_adapter();
-});
-
-// src/workers/file-extraction/extractors/command-runner.ts
-var resolvedCommands;
-var init_command_runner = __esm(() => {
-  resolvedCommands = new Map;
-});
-
-// src/workers/file-extraction/extractors/pdf-render.ts
-var init_pdf_render = __esm(() => {
-  init_command_runner();
-});
-
-// src/workers/source-eval-shard/dropbox.ts
-var init_dropbox2 = __esm(() => {
-  init_corpus_adapter();
-  init_provider_client();
-  init_pdf_render();
-  init_credential_broker();
-  init_approved_scope_filter();
-});
-
-// src/workers/connector-store/principal.ts
-function isCanonicalConnectorStoreProvider(provider) {
-  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
-}
-function isCanonicalConnectorStoreAccountScope(accountScope) {
-  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
-}
-var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
-var init_principal = __esm(() => {
-  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
-  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
-});
-
-// src/workers/connector-store/filter-capabilities.ts
-function connectorStoreFilterCapabilityRegistry(entries) {
-  const familyEntries = new Map;
-  const providerEntries = new Map;
-  for (const [scope, capabilities] of entries) {
-    const provider = "provider" in scope ? scope.provider : undefined;
-    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
-      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
-    }
-    const registry = provider === undefined ? familyEntries : providerEntries;
-    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
-    if (registry.has(key2)) {
-      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
-      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
-    }
-    registry.set(key2, Object.freeze({ ...capabilities }));
-  }
-  return Object.freeze({
-    resolve(identity) {
-      const familyCapabilities = familyEntries.get(identity.family);
-      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
-      if (!familyCapabilities)
-        return providerCapabilities;
-      if (!providerCapabilities)
-        return familyCapabilities;
-      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
-    }
-  });
-}
-function providerScopeKey(family, provider) {
-  return `${family}\x00${provider}`;
-}
-var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
-var init_filter_capabilities = __esm(() => {
-  init_principal();
-  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
-    "corpus_id",
-    "query",
-    "retrieval_mode",
-    "max_results",
-    "account",
-    "conversation_id",
-    "sender_id",
-    "sender_label",
-    "authored_after",
-    "authored_before",
-    "after",
-    "before",
-    "trust_domain",
-    "all_tiers"
-  ];
-  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
-    "approved_scope_key",
-    "chat_scope",
-    "participant_id",
-    "include_deleted",
-    "attachment_type",
-    "include_locators",
-    "chat_title",
-    "chat_title_hint",
-    "folder_id",
-    "folder_name"
-  ];
-  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
-    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
-    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
-  ]);
-});
-
-// src/workers/connector-store/index.ts
-var init_connector_store2 = __esm(() => {
-  init_local_index();
-  init_filter_capabilities();
+  init_connector();
+  init_live_control();
+  init_live_sync();
 });
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS;
@@ -31439,1638 +32512,17 @@ var init_analyst_answer = __esm(() => {
   CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 1e4;
 });
 
-// src/workers/dropbox-files/qualification.ts
-var init_qualification = __esm(() => {
-  init_corpus();
-  init_connector_store2();
-  init_analyst_answer();
-  init_corpus_adapter();
-});
-
-// src/workers/dropbox-files/tier-set.ts
-var init_tier_set = __esm(() => {
-  init_source_storage();
-  init_tiered_store_set();
-  init_connector_store();
-  init_corpus_adapter();
-});
-
-// src/workers/dropbox-files/index.ts
-var init_dropbox_files = __esm(() => {
-  init_connector();
-  init_provider_client();
-  init_provider_store_sync();
-  init_approved_scope_filter();
-  init_locator_result_projector();
-  init_content_policy();
-  init_dropbox_content_hash();
-  init_dropbox();
-  init_dropbox2();
-  init_corpus_adapter();
-  init_qualification();
-  init_tier_set();
-  init_connector_store();
-});
-
-// src/core/google-handle-compatibility.ts
-var init_google_handle_compatibility = () => {};
-
-// src/core/privacy-language.ts
-var SENSITIVITY_TIER_LABELS;
-var init_privacy_language = __esm(() => {
-  SENSITIVITY_TIER_LABELS = {
-    public: "Public",
-    private: "Personal",
-    secure: "Private",
-    secrets: "Secrets"
-  };
-});
-
-// src/core/ingestion-throughput.ts
-var init_ingestion_throughput = __esm(() => {
-  init_operation_error();
-});
-// src/workers/dashboard/scheduler-markers.ts
-var OPERATOR_PAUSED_SCHEDULER_MARKERS;
-var init_scheduler_markers = __esm(() => {
-  OPERATOR_PAUSED_SCHEDULER_MARKERS = new Set([
-    "daily_api_request_guard",
-    "daily_resource_read_guard",
-    "daily_cost_guard",
-    "readwise_daily_api_request_guard",
-    "gmail_daily_api_request_guard",
-    "google_drive_daily_api_request_guard",
-    "head_api_request_reserve_guard",
-    "head_resource_read_reserve_guard",
-    "head_cost_reserve_guard",
-    "provider_rate_limit"
-  ]);
-});
-
-// src/workers/dashboard/source-failure.ts
-var SOURCE_FAILURE_KINDS, KIND_SET;
-var init_source_failure = __esm(() => {
-  init_scheduler_markers();
-  SOURCE_FAILURE_KINDS = [
-    "sign_in",
-    "network",
-    "timeout",
-    "rate_limited",
-    "provider_busy",
-    "provider_refused",
-    "daily_limit",
-    "search_model_unavailable",
-    "reader_unavailable",
-    "busy_here",
-    "setup",
-    "not_started",
-    "unknown"
-  ];
-  KIND_SET = new Set(SOURCE_FAILURE_KINDS);
-});
-
-// src/workers/dashboard/answer-ready-coverage.ts
-var init_answer_ready_coverage = () => {};
-
-// src/workers/connector-store/capture-freshness.ts
-var init_capture_freshness = () => {};
-
-// src/workers/dashboard/phases.ts
-var init_phases = __esm(() => {
-  init_source_dashboard();
-  init_vocabulary();
-  init_vocabulary();
-});
-
-// src/workers/credential-health.ts
-var ROTATING_PROVIDERS, PASSIVE_EVIDENCE_MAX_AGE_MS, CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS, CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS, CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS;
-var init_credential_health = __esm(() => {
-  init_olympus_layout();
-  init_atomic_file();
-  init_connected_handles();
-  init_credential_broker();
-  ROTATING_PROVIDERS = new Set(["x"]);
-  PASSIVE_EVIDENCE_MAX_AGE_MS = 72 * 60 * 60 * 1000;
-  CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS = 28 * 60 * 60 * 1000;
-  CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS = 10 * 60 * 1000;
-  CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
-});
-
-// src/core/embedding-cost-estimates.ts
-var init_embedding_cost_estimates = () => {};
-
-// src/core/invocation-provenance.ts
-function sourceInvocationProvenance(value) {
-  return value === "operator" ? "operator" : "scheduled";
-}
-
-// src/core/file-scope-sources.ts
-function registerFileScopeSource(definition) {
-  const { sourceId, provider } = definition;
-  if (!sourceId || !provider)
-    throw new Error("A file-scope source needs a source id and a provider.");
-  if (definition.account === "provider_account" && !definition.credentialCapability) {
-    throw new Error(`File-scope source ${sourceId} binds to a provider account and needs a credential capability.`);
-  }
-  if (definition.account === "this_computer" && definition.credentialCapability) {
-    throw new Error(`File-scope source ${sourceId} binds to this computer and must not name a credential capability.`);
-  }
-  if (definitions.has(sourceId))
-    throw new Error(`File-scope source ${sourceId} is already registered.`);
-  for (const other of definitions.values()) {
-    if (other.provider === provider) {
-      throw new Error(`File-scope provider ${provider} is already registered by ${other.sourceId}.`);
-    }
-  }
-  definitions.set(sourceId, definition);
-}
-function registerBuiltIn(definition) {
-  registerFileScopeSource(definition);
-  builtInIds.add(definition.sourceId);
-}
-var definitions, builtInIds;
-var init_file_scope_sources = __esm(() => {
-  definitions = new Map;
-  builtInIds = new Set;
-  registerBuiltIn({
-    sourceId: "google_drive.docs",
-    provider: "google_drive",
-    account: "provider_account",
-    credentialCapability: "google_drive.docs.sync",
-    pinEnvName: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
-    corpusIdsToInvalidate: ["internal.drive.docs", "secure_local.drive.docs"],
-    filterFamily: "folder_id",
-    normalizeKey: (key2) => key2.trim(),
-    rootKeys: ["/", "root"],
-    label: "Google Drive",
-    dispositionSourceId: "google_drive.personal"
-  });
-  registerBuiltIn({
-    sourceId: "dropbox.files",
-    provider: "dropbox",
-    account: "provider_account",
-    credentialCapability: "dropbox.files.sync",
-    pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
-    corpusIdsToInvalidate: ["secure_local.dropbox.files"],
-    filterFamily: "locator_path",
-    normalizeKey: (key2) => key2.trim().toLowerCase(),
-    rootKeys: ["/"],
-    label: "Dropbox",
-    dispositionSourceId: "dropbox.personal"
-  });
-  registerBuiltIn({
-    sourceId: "local.files",
-    provider: "local_files",
-    account: "this_computer",
-    corpusIdsToInvalidate: ["secure_local.local.files"],
-    filterFamily: "locator_path",
-    normalizeKey: (key2) => {
-      const trimmed = key2.trim().normalize("NFC");
-      return trimmed.length > 1 ? trimmed.replace(/\/+$/, "") : trimmed;
-    },
-    rootKeys: ["/"],
-    label: "Files on this computer",
-    dispositionSourceId: "local.files",
-    wholeScopeWords: {
-      row: "Everything on this computer",
-      prompt: "Olympus will read every folder on this computer, now and later, except folders you set to Names only or Skip.",
-      confirm: "Yes, use the whole computer",
-      summary: "Everything else on this computer: fully indexed, including folders added later.",
-      onlyFull: "The whole computer is all or nothing. Set Names only or Skip on folders instead.",
-      needConfirm: "Confirm the whole computer first."
-    }
-  });
-});
-
-// src/core/source-scope-approval.ts
-var init_source_scope_approval = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_file_scope_sources();
-  init_operation_error();
-});
-
-// src/core/mail-source-scope.ts
-function gmailAfterBound(input) {
-  const cutoffSeconds = input.contentAfterMs !== undefined ? Math.floor(input.contentAfterMs / 1000) - 1 : undefined;
-  const watermarkSeconds = input.watermarkMs !== undefined ? Math.floor(input.watermarkMs / 1000) : undefined;
-  const seconds = cutoffSeconds === undefined ? watermarkSeconds : watermarkSeconds === undefined ? cutoffSeconds : Math.max(cutoffSeconds, watermarkSeconds);
-  return seconds !== undefined && seconds > 0 ? `after:${seconds}` : undefined;
-}
-function gmailBeforeBound(contentAfterMs) {
-  return `before:${Math.floor(contentAfterMs / 1000)}`;
-}
-var GMAIL_SCOPE_SENDER_SAMPLE = 100, GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
-var init_mail_source_scope = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_operation_error();
-  init_source_scope_approval();
-  GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
-});
-
-// src/workers/email-source/ingest-filter.ts
-function classifyEmailIngestSkip(candidate, options = {}) {
-  const skipOtp = options.skipOtp ?? true;
-  if (skipOtp && isOtpMail(candidate))
-    return "otp";
-  const skipCategories = options.skipCategories ?? DEFAULT_SKIP_CATEGORIES;
-  if (skipCategories.length > 0 && candidate.labels) {
-    const skip = new Set(skipCategories.map((label) => label.trim().toUpperCase()).filter(Boolean));
-    for (const label of candidate.labels) {
-      if (skip.has(label.toUpperCase())) {
-        return `category:${label.toUpperCase()}`;
-      }
-    }
-  }
-  return;
-}
-function isOtpMail(candidate) {
-  if (candidate.subject && OTP_SUBJECT.test(candidate.subject))
-    return true;
-  const body = candidate.body?.trim();
-  if (body && body.length > 0 && body.length <= OTP_BODY_MAX_CHARS && OTP_BODY_CODE.test(body) && OTP_BODY_HINT.test(body)) {
-    return true;
-  }
-  return false;
-}
-function parseEmailIngestFilterOptionsFromEnv(env = process.env) {
-  const categoriesRaw = env.OLYMPUS_EMAIL_INGEST_SKIP_CATEGORIES;
-  const skipOtpRaw = env.OLYMPUS_EMAIL_INGEST_SKIP_OTP;
-  return {
-    ...categoriesRaw !== undefined ? { skipCategories: categoriesRaw.split(",").map((label) => label.trim()).filter(Boolean) } : {},
-    ...skipOtpRaw !== undefined ? { skipOtp: skipOtpRaw === "true" } : {}
-  };
-}
-var DEFAULT_SKIP_CATEGORIES, OTP_SUBJECT, OTP_BODY_CODE, OTP_BODY_HINT, OTP_BODY_MAX_CHARS = 900;
-var init_ingest_filter = __esm(() => {
-  DEFAULT_SKIP_CATEGORIES = ["CATEGORY_PROMOTIONS"];
-  OTP_SUBJECT = new RegExp([
-    "verification code",
-    "security code",
-    "one[- ]?time (pass)?(word|code)",
-    "login code",
-    "sign[- ]?in code",
-    "access code",
-    "confirmation code",
-    "your (\\w+ )?code is",
-    "\\botp\\b",
-    "2fa code"
-  ].join("|"), "i");
-  OTP_BODY_CODE = /\b\d{4,8}\b/;
-  OTP_BODY_HINT = /\b(code|verification|expires? in|valid for)\b/i;
-});
-
-// src/workers/google-connectors/classification.ts
-function accountFromGoogleHandle(handle, fallback = "personal") {
-  const trimmed = handle?.trim();
-  if (!trimmed)
-    return fallback;
-  const match = /^[a-z_]+\.([a-z0-9_-]+)(?:\.|$)/i.exec(trimmed);
-  return match?.[1] ?? fallback;
-}
-function metadataString2(metadata, key2) {
-  const value = metadata[key2];
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-function metadataStringArray2(metadata, key2) {
-  const value = metadata[key2];
-  if (!Array.isArray(value))
-    return [];
-  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
-}
-
-// src/workers/google-connectors/request-budget.ts
-var GoogleRequestBudgetError;
-var init_request_budget = __esm(() => {
-  GoogleRequestBudgetError = class GoogleRequestBudgetError extends Error {
-    retryAt;
-    provider;
-    reason;
-    observedFutureUtcDay;
-    constructor(provider, retryAt, reason = "daily_api_request_guard", options = {}) {
-      super(reason === "future_utc_day" ? `${provider} request budget clock regression: persisted future UTC day ` + `${options.observedFutureUtcDay ?? "future"} is later than current UTC day ` + `${options.currentUtcDay ?? "current"}; recover with ` + "`olympus source request-budget recover-future` using the observed day." : reason === "ledger_busy" ? `${provider} request budget ledger remained busy; the provider request was refused before dispatch.` : `${provider} request deferred by daily_api_request_guard.`);
-      this.name = "GoogleRequestBudgetError";
-      this.provider = provider;
-      this.retryAt = retryAt;
-      this.reason = reason;
-      this.observedFutureUtcDay = options.observedFutureUtcDay;
-    }
-  };
-});
-
-// src/workers/google-connectors/gmail.ts
-import { createHash as createHash16 } from "node:crypto";
-
-class GoogleGmailSourceConnector {
-  id = GMAIL_PROVIDER;
-  family = "email";
-  credentialBroker;
-  credentialHandle;
-  account;
-  fetchImpl;
-  apiBaseUrl;
-  defaultMaxMessages;
-  query;
-  scope;
-  now;
-  requestBudget;
-  provenance;
-  maxRetries;
-  sleepImpl;
-  injectedClient;
-  client;
-  providerRequests = 0;
-  fetchItemCacheHits = 0;
-  attachmentsDeclared = 0;
-  attachmentBytesDeclared = 0;
-  attachmentsNotIngested = 0;
-  itemsSkippedOtp = 0;
-  itemsSkippedCategory = 0;
-  itemsSkippedStored = 0;
-  ingestFilterOptions;
-  itemsByLocalId = new Map;
-  constructor(options = {}) {
-    const env = options.env ?? process.env;
-    this.fetchImpl = options.fetch ?? fetch;
-    this.credentialBroker = options.credentialBroker ?? createEnvCredentialBroker({
-      env,
-      fetch: this.fetchImpl
-    });
-    this.credentialHandle = options.credentialHandle?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE?.trim() || "gmail.personal";
-    this.account = options.account?.trim() || accountFromGoogleHandle(this.credentialHandle);
-    this.apiBaseUrl = options.apiBaseUrl?.replace(/\/+$/, "") || GMAIL_API_BASE_URL;
-    this.defaultMaxMessages = normalizeGmailMaxMessages(options.maxMessages);
-    this.query = options.query?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim() || undefined;
-    this.requestBudget = options.requestBudget;
-    this.provenance = sourceInvocationProvenance(options.provenance);
-    this.maxRetries = options.maxRetries;
-    this.sleepImpl = options.sleep;
-    this.injectedClient = options.apiClient;
-    this.scope = options.scope;
-    this.now = options.now ?? (() => Date.now());
-    const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
-    this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
-    if (this.scope?.skippedLabelIds?.length) {
-      this.ingestFilterOptions = {
-        ...this.ingestFilterOptions,
-        skipCategories: [
-          ...this.ingestFilterOptions.skipCategories ?? ["CATEGORY_PROMOTIONS"],
-          ...this.scope.skippedLabelIds
-        ]
-      };
-    }
-  }
-  async authenticate() {
-    await this.clientForRequest();
-  }
-  async* listItems(options = {}) {
-    const client = await this.clientForRequest();
-    let scopeConfirmationsFetched = 0;
-    let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
-    const resume = decodeGmailCursor(options.cursor);
-    const cutoffMs = this.scope?.contentAfterMs;
-    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
-    const staleLeg = resume.phase === "metadata" && !metadataLeg;
-    const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
-    let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
-    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
-    let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
-    const nowMs = this.now();
-    const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
-    let pageToken = staleLeg ? undefined : resume.pageToken;
-    const requestedPageTokens = new Set;
-    let listPages = 0;
-    while (remaining > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
-      if (pageToken)
-        assertNewProviderPage(requestedPageTokens, pageToken);
-      this.providerRequests += 1;
-      listPages += 1;
-      const page = await client.listMessages({
-        maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, remaining),
-        ...pageToken ? { pageToken } : {},
-        ...query ? { query } : {}
-      });
-      const listed = page.messages.filter((message2) => message2.id);
-      const items = [];
-      let messagesExamined = 0;
-      let messagesFetched = 0;
-      for (const message2 of listed) {
-        if (messagesFetched >= remaining)
-          break;
-        messagesExamined += 1;
-        const stored = this.scope?.storedItem?.(message2.id);
-        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
-          continue;
-        if (stored && (metadataLeg || stored.hasContent)) {
-          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
-            scopeConfirmationsFetched += 1;
-            messagesFetched += 1;
-            this.providerRequests += 1;
-            const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
-            const received = internalDateNumber({ internalDate: metadata.internalDate });
-            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
-            const subject2 = metadataString2(item2.metadata, "subject");
-            const from2 = metadataString2(item2.metadata, "from");
-            const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray2(item2.metadata, "labels") }, this.ingestFilterOptions);
-            if (!skipped && (cutoffMs === undefined || received !== undefined && received >= cutoffMs))
-              this.scope.storedItemObserved(item2);
-          }
-          this.itemsSkippedStored += 1;
-          continue;
-        }
-        messagesFetched += 1;
-        this.providerRequests += 1;
-        const fetched = await client.getMessage(message2.id, metadataLeg ? { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS } : undefined);
-        const fetchedDateMs = internalDateNumber({ internalDate: fetched.internalDate });
-        const beforeCutoff = cutoffMs !== undefined && fetchedDateMs !== undefined && fetchedDateMs < cutoffMs;
-        if (metadataLeg && !beforeCutoff)
-          continue;
-        if (beforeCutoff && stored) {
-          this.itemsSkippedStored += 1;
-          continue;
-        }
-        const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
-        this.attachmentsDeclared += metadataCount(item.metadata, "attachmentCount");
-        this.attachmentBytesDeclared += metadataCount(item.metadata, "attachmentBytesDeclared");
-        this.attachmentsNotIngested += metadataCount(item.metadata, "attachmentsNotIngested");
-        const internalDateMs = internalDateNumber(item.metadata);
-        if (!metadataLeg && internalDateMs !== undefined && (highWaterMs === undefined || internalDateMs > highWaterMs)) {
-          highWaterMs = Math.min(internalDateMs, nowMs);
-        }
-        const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
-        const from = metadataString2(item.metadata, "from");
-        if (this.scope?.skipSenders?.some((rule) => senderMatchesRule(from, rule))) {
-          this.itemsSkippedCategory += 1;
-          continue;
-        }
-        const body = item.content.kind === "text" ? item.content.text : metadataString2(item.metadata, "snippet");
-        const skip = classifyEmailIngestSkip({
-          ...subject !== undefined ? { subject } : {},
-          ...from !== undefined ? { from } : {},
-          ...body !== undefined ? { body } : {},
-          labels: metadataStringArray2(item.metadata, "labels")
-        }, this.ingestFilterOptions);
-        if (skip) {
-          if (skip === "otp")
-            this.itemsSkippedOtp += 1;
-          else
-            this.itemsSkippedCategory += 1;
-          continue;
-        }
-        this.itemsByLocalId.set(item.identity.localItemId, item);
-        items.push(item);
-      }
-      remaining -= messagesFetched;
-      pageToken = page.nextPageToken;
-      const pageTruncated = messagesExamined < listed.length;
-      const legDone = !pageToken && !pageTruncated;
-      const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
-      const done = legDone && !enterMetadataLeg;
-      const promoted = promotedWatermark({
-        highWaterMs,
-        watermarkMs,
-        ...this.scope && startedMs !== undefined ? { floorMs: startedMs - TRAVERSAL_START_MARGIN_MS } : {},
-        ...cutoffMs !== undefined ? { cutoffMs } : {},
-        nowMs
-      });
-      const nextCursor = done ? encodeGmailCursor(promoted !== undefined ? { watermarkMs: promoted } : {}) : enterMetadataLeg ? encodeGmailCursor({
-        phase: "metadata",
-        ...highWaterMs !== undefined ? { highWaterMs } : {},
-        ...startedMs !== undefined ? { startedMs } : {}
-      }) : encodeGmailCursor({
-        ...watermarkMs !== undefined ? { watermarkMs } : {},
-        ...highWaterMs !== undefined ? { highWaterMs } : {},
-        ...pageToken ? { pageToken } : {},
-        ...metadataLeg ? { phase: "metadata" } : {},
-        ...startedMs !== undefined ? { startedMs } : {}
-      });
-      yield {
-        items,
-        ...nextCursor ? { nextCursor } : {},
-        done
-      };
-      if (done || pageTruncated)
-        break;
-      if (enterMetadataLeg) {
-        metadataLeg = true;
-        query = this.metadataLegQuery(cutoffMs);
-        requestedPageTokens.clear();
-      } else if (!pageToken)
-        break;
-    }
-  }
-  async fetchItem(localItemId) {
-    const item = this.itemsByLocalId.get(localItemId) ?? this.itemsByLocalId.get(`${this.account}:${localItemId}`);
-    if (!item) {
-      throw new Error(`Gmail connector cannot fetch unknown item ${hashString3(localItemId).slice(0, 16)}.`);
-    }
-    this.fetchItemCacheHits += 1;
-    return item;
-  }
-  traversalStatus() {
-    return {
-      providerRequests: this.providerRequests,
-      fetchItemCacheHits: this.fetchItemCacheHits,
-      attachmentsDeclared: this.attachmentsDeclared,
-      attachmentBytesDeclared: this.attachmentBytesDeclared,
-      attachmentsNotIngested: this.attachmentsNotIngested,
-      itemsSkippedOtp: this.itemsSkippedOtp,
-      itemsSkippedCategory: this.itemsSkippedCategory,
-      itemsSkippedStored: this.itemsSkippedStored
-    };
-  }
-  requestBudgetStatus() {
-    return this.requestBudget?.status();
-  }
-  async apiClientForTooling() {
-    return this.clientForRequest();
-  }
-  classificationSignals(item) {
-    const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
-    const sender = metadataString2(item.metadata, "from");
-    const labels = metadataStringArray2(item.metadata, "labels");
-    return {
-      ...subject ? { title: subject } : {},
-      ...sender ? { sender } : {},
-      ...labels.length > 0 ? { labels } : {}
-    };
-  }
-  async clientForRequest() {
-    if (this.client)
-      return this.client;
-    if (this.injectedClient) {
-      this.client = this.requestBudget ? budgetedGmailApiClient(this.injectedClient, this.requestBudget, this.provenance) : this.injectedClient;
-      return this.client;
-    }
-    this.client = await this.restClient();
-    return this.client;
-  }
-  async restClient() {
-    const session = requireBearerTokenCredentialSession(await this.credentialBroker.issueSession({
-      handle: this.credentialHandle,
-      provider: GMAIL_PROVIDER,
-      capability: "gmail.email.sync",
-      trustDomain: "secure_local"
-    }), this.credentialHandle);
-    return new RestGmailApiClient({
-      token: session.token,
-      fetch: this.fetchImpl,
-      baseUrl: this.apiBaseUrl,
-      ...this.requestBudget ? { requestBudget: this.requestBudget } : {},
-      provenance: this.provenance,
-      ...this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {},
-      ...this.sleepImpl ? { sleep: this.sleepImpl } : {}
-    });
-  }
-  queryForWatermark(watermarkMs) {
-    if (this.scope) {
-      return this.scopedQuery(gmailAfterBound({ contentAfterMs: this.scope.contentAfterMs, watermarkMs }));
-    }
-    if (watermarkMs === undefined)
-      return this.query;
-    const after = `after:${Math.floor(watermarkMs / 1000)}`;
-    return this.query ? `${after} (${this.query})` : after;
-  }
-  metadataLegQuery(cutoffMs) {
-    return this.scopedQuery(gmailBeforeBound(cutoffMs));
-  }
-  scopedQuery(bound) {
-    const parts = [bound, this.scope?.baseQuery, this.query ? `(${this.query})` : undefined].filter((part) => Boolean(part?.trim()));
-    return parts.length > 0 ? parts.join(" ") : undefined;
-  }
-}
-function budgetedGmailApiClient(inner, budget, provenance) {
-  return {
-    listMessages(request) {
-      budget.reserve(provenance);
-      return inner.listMessages(request);
-    },
-    getMessage(id, options) {
-      budget.reserve(provenance);
-      return inner.getMessage(id, options);
-    },
-    ...inner.listLabels ? {
-      listLabels() {
-        budget.reserve(provenance);
-        return inner.listLabels();
-      }
-    } : {},
-    ...inner.getLabel ? {
-      getLabel(id) {
-        budget.reserve(provenance);
-        return inner.getLabel(id);
-      }
-    } : {}
-  };
-}
-function promotedWatermark(input) {
-  const candidates = [
-    input.highWaterMs,
-    input.watermarkMs,
-    input.floorMs,
-    input.cutoffMs !== undefined ? input.cutoffMs - 1000 : undefined
-  ].filter((value) => value !== undefined && Number.isFinite(value));
-  if (candidates.length === 0)
-    return;
-  return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
-}
-function encodeGmailCursor(cursor) {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
-    return;
-  }
-  return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
-}
-function decodeGmailCursor(value) {
-  if (!value)
-    return {};
-  if (value.length > MAX_GMAIL_CURSOR_LENGTH || !value.startsWith(GMAIL_CURSOR_PREFIX)) {
-    throw new TypeError("Gmail connector cursor is invalid.");
-  }
-  try {
-    const parsed = JSON.parse(Buffer.from(value.slice(GMAIL_CURSOR_PREFIX.length), "base64url").toString("utf8"));
-    const watermarkMs = decodeCursorEpochMs(parsed.watermarkMs);
-    const highWaterMs = decodeCursorEpochMs(parsed.highWaterMs);
-    const startedMs = decodeCursorEpochMs(parsed.startedMs);
-    if (parsed.pageToken !== undefined && (typeof parsed.pageToken !== "string" || !parsed.pageToken.trim() || parsed.pageToken.length > MAX_GMAIL_CURSOR_LENGTH)) {
-      throw new Error("invalid");
-    }
-    if (parsed.phase !== undefined && parsed.phase !== "metadata")
-      throw new Error("invalid");
-    return {
-      ...watermarkMs !== undefined ? { watermarkMs } : {},
-      ...highWaterMs !== undefined ? { highWaterMs } : {},
-      ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {},
-      ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
-      ...startedMs !== undefined ? { startedMs } : {}
-    };
-  } catch {
-    throw new TypeError("Gmail connector cursor is invalid.");
-  }
-}
-function decodeCursorEpochMs(value) {
-  if (value === undefined)
-    return;
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error("invalid");
-  }
-  return value;
-}
-function assertNewProviderPage(seen, pageToken) {
-  if (seen.has(pageToken))
-    throw new Error("Gmail connector pagination cursor repeated.");
-  seen.add(pageToken);
-}
-function internalDateNumber(metadata) {
-  const value = metadata["internalDate"];
-  if (typeof value !== "string" || !/^\d+$/.test(value))
-    return;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
-}
-function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
-  return resolvedStorePath(GMAIL_SOURCE_ID, "secure_local", env);
-}
-
-class RestGmailApiClient {
-  token;
-  fetchImpl;
-  baseUrl;
-  maxRetries;
-  sleep;
-  requestBudget;
-  provenance;
-  constructor(options) {
-    this.token = options.token;
-    this.fetchImpl = options.fetch;
-    this.baseUrl = options.baseUrl;
-    this.requestBudget = options.requestBudget;
-    this.provenance = sourceInvocationProvenance(options.provenance);
-    this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
-  }
-  async listMessages(request) {
-    const params = new URLSearchParams({
-      maxResults: String(request.maxResults),
-      includeSpamTrash: request.includeSpamTrash === true ? "true" : "false"
-    });
-    if (request.pageToken)
-      params.set("pageToken", request.pageToken);
-    if (request.query)
-      params.set("q", request.query);
-    for (const labelId of request.labelIds ?? [])
-      params.append("labelIds", labelId);
-    const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord6(json, "Gmail messages list response");
-    return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord6(item, "Gmail message list item")).map((item) => ({
-        id: stringValue2(item.id),
-        threadId: stringValue2(item.threadId)
-      })).filter((item) => item.id) : [],
-      ...optionalStringProp(record, "nextPageToken"),
-      ...typeof record.resultSizeEstimate === "number" && Number.isFinite(record.resultSizeEstimate) ? { resultSizeEstimate: Math.max(0, Math.floor(record.resultSizeEstimate)) } : {}
-    };
-  }
-  async getMessage(id, options = {}) {
-    const params = new URLSearchParams({ format: options.format ?? "full" });
-    if (options.format === "metadata") {
-      for (const header of options.metadataHeaders ?? [])
-        params.append("metadataHeaders", header);
-    }
-    const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
-    return json;
-  }
-  async listLabels() {
-    const record = asRecord6(await this.getJson("users/me/labels"), "Gmail labels list response");
-    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord6(item, "Gmail label"))).filter((label) => label.id) : [];
-  }
-  async getLabel(id) {
-    return gmailLabelFromJson(asRecord6(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
-  }
-  async getJson(path) {
-    let attempt = 0;
-    for (;; ) {
-      this.requestBudget?.reserve(this.provenance);
-      const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${this.token}`
-        }
-      });
-      const text2 = await response.text();
-      if (response.ok)
-        return text2 ? JSON.parse(text2) : {};
-      if (isRetryableGmailStatus(response.status) && attempt < this.maxRetries) {
-        attempt += 1;
-        await this.sleep(gmailRetryDelayMs(response, attempt));
-        continue;
-      }
-      throw new Error(`Gmail API request failed (${response.status}): ${safeProviderDetail(text2)}`);
-    }
-  }
-}
-function isRetryableGmailStatus(status) {
-  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
-}
-function gmailRetryDelayMs(response, attempt) {
-  const retryAfter = response.headers.get("retry-after")?.trim();
-  if (retryAfter) {
-    const seconds = Number.parseFloat(retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0) {
-      return Math.min(seconds * 1000, MAX_GMAIL_RETRY_DELAY_MS);
-    }
-    const dateMs = Date.parse(retryAfter);
-    if (Number.isFinite(dateMs)) {
-      return Math.max(0, Math.min(dateMs - Date.now(), MAX_GMAIL_RETRY_DELAY_MS));
-    }
-  }
-  return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
-}
-function gmailLabelFromJson(record) {
-  const type = record.type === "system" || record.type === "user" ? record.type : undefined;
-  return {
-    id: stringValue2(record.id),
-    name: stringValue2(record.name),
-    ...type ? { type } : {},
-    ...typeof record.messagesTotal === "number" && Number.isFinite(record.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record.messagesTotal)) } : {}
-  };
-}
-function rawItemFromGmailMessage(message2, account, options = {}) {
-  const headers = headersFromPart(message2.payload);
-  const subject = headers.get("subject") ?? "(no subject)";
-  const rawFrom = headers.get("from") ?? "";
-  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
-  const date = parsedDate(headers.get("date")) ?? internalDateIso(message2.internalDate);
-  const metadataOnly = options.metadataOnly === true;
-  const attachments = gmailAttachmentInventory(message2.payload);
-  const text2 = metadataOnly ? "" : extractMessageText(message2) || (attachments.lines.length > 0 ? attachments.lines.join(`
-`) : `Subject: ${subject}`);
-  const fetchedAt = new Date().toISOString();
-  return {
-    identity: {
-      family: "email",
-      provider: "gmail",
-      accountScope: account,
-      providerItemId: message2.id,
-      ...message2.threadId ? { providerThreadId: message2.threadId } : {},
-      localItemId: `${account}:${message2.id}`,
-      ...message2.historyId ? { sourceVersion: message2.historyId } : {}
-    },
-    mimeType: "message/rfc822",
-    content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
-    metadata: Object.freeze({
-      title: subject,
-      subject,
-      from,
-      ...date ? { authoredAt: date } : {},
-      ...message2.internalDate ? { internalDate: message2.internalDate } : {},
-      ...message2.historyId ? { historyId: message2.historyId } : {},
-      ...message2.snippet && !metadataOnly ? { snippet: message2.snippet } : {},
-      ...metadataOnly ? namesOnlyContentScopeMetadata() : {},
-      labels: message2.labelIds ?? [],
-      attachmentCount: attachments.count,
-      attachmentBytesDeclared: attachments.bytes,
-      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
-      attachmentsNotIngested: attachments.count,
-      locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message2.id)}`,
-      contentHash: hashString3(`${message2.historyId ?? ""}:${metadataOnly ? "metadata_only" : text2}`)
-    }),
-    fetchedAt
-  };
-}
-function gmailAttachmentInventory(part) {
-  if (!part)
-    return { count: 0, bytes: 0, lines: [] };
-  const filename = part.filename?.trim();
-  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
-  let count = filename ? 1 : 0;
-  let bytes = size ?? 0;
-  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
-  for (const child of part.parts ?? []) {
-    const nested = gmailAttachmentInventory(child);
-    count += nested.count;
-    bytes += nested.bytes;
-    lines.push(...nested.lines);
-  }
-  return { count, bytes, lines };
-}
-function gmailAttachmentLine(filename, part, size) {
-  const details = [
-    part.mimeType?.trim() || undefined,
-    size !== undefined ? `${size} bytes` : undefined,
-    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined
-  ].filter((value) => Boolean(value));
-  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
-}
-function metadataCount(metadata, key2) {
-  const value = metadata[key2];
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
-function extractMessageText(message2) {
-  const plain = [];
-  const html2 = [];
-  collectPartText(message2.payload, plain, html2);
-  const selected = plain.length > 0 ? plain.join(`
-
-`) : html2.map(stripHtml).join(`
-
-`);
-  return [headersSummary(message2.payload), message2.snippet, selected].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
-
-`);
-}
-function collectPartText(part, plain, html2) {
-  if (!part)
-    return;
-  if (part.filename?.trim())
-    return;
-  const decoded = part.body?.data ? decodeBase64Url(part.body.data) : undefined;
-  if (decoded && part.mimeType === "text/plain")
-    plain.push(decoded);
-  if (decoded && part.mimeType === "text/html")
-    html2.push(decoded);
-  for (const child of part.parts ?? [])
-    collectPartText(child, plain, html2);
-}
-function headersFromPart(part) {
-  const headers = new Map;
-  for (const header of part?.headers ?? []) {
-    const name = header.name?.trim().toLowerCase();
-    const value = header.value?.trim();
-    if (name && value)
-      headers.set(name, value);
-  }
-  return headers;
-}
-function headersSummary(part) {
-  const headers = headersFromPart(part);
-  return [
-    headers.get("subject") ? `Subject: ${headers.get("subject")}` : undefined,
-    headers.get("from") ? `From: ${headers.get("from")}` : undefined,
-    headers.get("to") ? `To: ${headers.get("to")}` : undefined,
-    headers.get("date") ? `Date: ${headers.get("date")}` : undefined
-  ].filter(Boolean).join(`
-`);
-}
-function decodeBase64Url(value) {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  return Buffer.from(normalized, "base64").toString("utf8");
-}
-function stripHtml(value) {
-  return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-}
-function parsedDate(value) {
-  if (!value)
-    return;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-}
-function internalDateIso(value) {
-  if (!value)
-    return;
-  const ms = Number.parseInt(value, 10);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-}
-function normalizeGmailMaxMessages(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
-  return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
-}
-function asRecord6(value, label) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object.`);
-  }
-  return value;
-}
-function stringValue2(value) {
-  return typeof value === "string" ? value : "";
-}
-function optionalStringProp(record, key2) {
-  const value = stringValue2(record[key2]).trim();
-  return value ? { [key2]: value } : {};
-}
-function safeProviderDetail(value) {
-  return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
-}
-function hashString3(value) {
-  return createHash16("sha256").update(value).digest("hex");
-}
-var GMAIL_SOURCE_ID = "gmail.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
-var init_gmail = __esm(() => {
-  init_olympus_layout();
-  init_source_placement();
-  init_mail_source_scope();
-  init_sender_rules();
-  init_credential_broker();
-  init_ingest_filter();
-  init_request_budget();
-  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
-});
-
-// src/workers/google-connectors/drive.ts
-import { createHash as createHash17 } from "node:crypto";
-
-class GoogleDriveSourceConnector {
-  id = GOOGLE_DRIVE_PROVIDER;
-  family = "file";
-  credentialBroker;
-  credentialHandle;
-  account;
-  fetchImpl;
-  apiBaseUrl;
-  defaultMaxFiles;
-  maxContentFiles;
-  maxTextBytes;
-  query;
-  requestBudget;
-  provenance;
-  maxRetries;
-  sleepImpl;
-  injectedClient;
-  client;
-  contentReads = 0;
-  contentReadFailures = 0;
-  itemsByLocalId = new Map;
-  exclusions;
-  scope;
-  ancestry;
-  constructor(options = {}) {
-    const env = options.env ?? process.env;
-    this.fetchImpl = options.fetch ?? fetch;
-    this.credentialBroker = options.credentialBroker ?? createEnvCredentialBroker({
-      env,
-      fetch: this.fetchImpl
-    });
-    this.credentialHandle = options.credentialHandle?.trim() || env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE?.trim() || "google_drive.personal";
-    this.account = options.account?.trim() || accountFromGoogleHandle(this.credentialHandle);
-    this.apiBaseUrl = options.apiBaseUrl?.replace(/\/+$/, "") || GOOGLE_DRIVE_API_BASE_URL;
-    this.defaultMaxFiles = normalizeDriveMaxFiles(options.maxFiles);
-    this.maxContentFiles = normalizeDriveMaxFiles(options.maxContentFiles ?? DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES);
-    this.maxTextBytes = normalizeMaxTextBytes(options.maxTextBytes);
-    this.query = options.query?.trim() || env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_QUERY?.trim() || undefined;
-    this.requestBudget = options.requestBudget;
-    this.provenance = sourceInvocationProvenance(options.provenance);
-    this.maxRetries = options.maxRetries;
-    this.sleepImpl = options.sleep;
-    this.injectedClient = options.apiClient;
-    this.exclusions = options.exclusions;
-    this.scope = options.scope;
-  }
-  async authenticate() {
-    await this.clientForRequest();
-  }
-  async* listItems(options = {}) {
-    const client = await this.clientForRequest();
-    let remaining = normalizeDriveMaxFiles(options.limit ?? this.defaultMaxFiles);
-    const resume = decodeDriveCursor(options.cursor);
-    const watermark = resume.watermark;
-    const query = this.queryForWatermark(watermark);
-    let highWater = resume.highWater;
-    let deferredFloor = resume.deferredFloor;
-    let pageToken = resume.pageToken;
-    const requestedPageTokens = new Set;
-    while (remaining > 0) {
-      const contentBudget = this.maxContentFiles - this.contentReads;
-      if (contentBudget <= 0)
-        break;
-      if (pageToken)
-        assertNewProviderPage2(requestedPageTokens, pageToken);
-      const page = await client.listFiles({
-        pageSize: Math.min(DEFAULT_GOOGLE_DRIVE_PAGE_SIZE, remaining, contentBudget),
-        ...pageToken ? { pageToken } : {},
-        query
-      });
-      const files = page.files.filter((file) => file.id);
-      const items = [];
-      let processedFiles = 0;
-      for (const file of files) {
-        if (items.length >= remaining)
-          break;
-        processedFiles += 1;
-        const read = await this.rawItemFromDriveFile(file);
-        if (read) {
-          this.itemsByLocalId.set(read.item.identity.localItemId, read.item);
-          items.push(read.item);
-        }
-        if (file.modifiedTime) {
-          if (!highWater || file.modifiedTime.localeCompare(highWater) > 0) {
-            highWater = file.modifiedTime;
-          }
-          if (read?.contentDeferred && (!deferredFloor || file.modifiedTime.localeCompare(deferredFloor) < 0)) {
-            deferredFloor = file.modifiedTime;
-          }
-        }
-      }
-      remaining -= items.length;
-      pageToken = page.nextPageToken;
-      const pageTruncated = processedFiles < files.length;
-      const done = !pageToken && !pageTruncated;
-      const promoted = promotedDriveWatermark(highWater ?? watermark, deferredFloor, watermark);
-      const nextCursor = done ? encodeDriveCursor(promoted ? { watermark: promoted } : {}) : encodeDriveCursor({
-        ...watermark ? { watermark } : {},
-        ...highWater ? { highWater } : {},
-        ...deferredFloor ? { deferredFloor } : {},
-        ...pageToken ? { pageToken } : {}
-      });
-      yield {
-        items,
-        ...nextCursor ? { nextCursor } : {},
-        done
-      };
-      if (done || !pageToken || items.length === 0)
-        break;
-    }
-  }
-  async fetchItem(localItemId) {
-    const item = this.itemsByLocalId.get(localItemId);
-    if (!item) {
-      throw new Error(`Google Drive connector cannot fetch unknown item ${hashString4(localItemId).slice(0, 16)}.`);
-    }
-    return item;
-  }
-  apiClientForTooling() {
-    return this.clientForRequest();
-  }
-  traversalStatus() {
-    return {
-      contentReads: this.contentReads,
-      contentReadCap: this.maxContentFiles,
-      contentReadFailures: this.contentReadFailures
-    };
-  }
-  requestBudgetStatus() {
-    return this.requestBudget?.status();
-  }
-  classificationSignals(item) {
-    const title = metadataString2(item.metadata, "title") ?? metadataString2(item.metadata, "name");
-    const path = metadataString2(item.metadata, "pathDisplay");
-    const folderKeys = metadataStringArray2(item.metadata, "folderAncestorIds");
-    return {
-      ...title ? { title } : {},
-      ...path ? { path } : {},
-      ...folderKeys.length > 0 ? { folderKeys } : {}
-    };
-  }
-  async rawItemFromDriveFile(file) {
-    const title = file.name ?? file.id;
-    const folderAncestorIds = await this.resolveFolderAncestry(file);
-    const metadata = Object.freeze({
-      title,
-      name: title,
-      mimeType: file.mimeType ?? "application/octet-stream",
-      ...file.webViewLink ? { locatorUri: file.webViewLink, url: file.webViewLink } : {},
-      ...file.size !== undefined && Number.isFinite(Number(file.size)) ? { sizeBytes: Number(file.size) } : {},
-      ...file.modifiedTime ?? file.createdTime ? { authoredAt: file.modifiedTime ?? file.createdTime } : {},
-      ...file.createdTime ? { createdAt: file.createdTime } : {},
-      ...file.modifiedTime ? { updatedAt: file.modifiedTime, serverModifiedAt: file.modifiedTime } : {},
-      ...file.driveId ? { driveId: file.driveId } : {},
-      ...file.parents ? { parents: file.parents } : {},
-      ...folderAncestorIds ? { folderAncestorIds } : {},
-      ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {}
-    });
-    if (!folderAncestorIds && this.scope)
-      return;
-    if (this.scope && !this.scope.allowsMetadata(folderAncestorIds ?? []))
-      return;
-    const excluded = this.exclusions?.evaluateMetadata(metadata).excluded === true;
-    const contentAllowed = !this.scope || this.scope.allowsContent(folderAncestorIds ?? []);
-    const read = excluded || !contentAllowed ? {} : this.contentReads >= this.maxContentFiles ? { deferred: true } : await this.tryReadText(file);
-    const text2 = read.text;
-    if (text2 !== undefined)
-      this.contentReads += 1;
-    return {
-      contentDeferred: read.deferred === true,
-      item: {
-        identity: {
-          family: "file",
-          provider: GOOGLE_DRIVE_PROVIDER,
-          accountScope: this.account,
-          providerItemId: file.id,
-          providerFileId: file.id,
-          localItemId: `${this.account}:${file.id}`,
-          ...file.version ? { sourceVersion: file.version } : {}
-        },
-        mimeType: file.mimeType ?? "application/octet-stream",
-        content: text2?.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
-        metadata: Object.freeze({
-          ...metadata,
-          ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString4(`${file.version ?? ""}:${text2 ?? title}`) }
-        }),
-        fetchedAt: new Date().toISOString()
-      }
-    };
-  }
-  async resolveFolderAncestry(file) {
-    if (this.exclusions?.identityActive !== true && !this.scope)
-      return;
-    const client = await this.clientForRequest();
-    this.ancestry ??= new GoogleDriveFolderAncestry(client);
-    return this.ancestry.resolve(file);
-  }
-  async tryReadText(file) {
-    const client = await this.clientForRequest();
-    try {
-      if (file.mimeType === GOOGLE_DOC_MIME_TYPE) {
-        return { text: await client.exportGoogleDocText(file.id, this.maxTextBytes) };
-      }
-      if (isDownloadableTextMime(file.mimeType, file.name) && withinTextByteCap(file.size, this.maxTextBytes)) {
-        return { text: await client.downloadTextFile(file.id, this.maxTextBytes) };
-      }
-    } catch (error) {
-      if (error instanceof GoogleRequestBudgetError)
-        throw error;
-      this.contentReadFailures += 1;
-      return { deferred: isRetryableDriveContentError(error) };
-    }
-    return {};
-  }
-  async clientForRequest() {
-    if (this.client)
-      return this.client;
-    if (this.injectedClient) {
-      this.client = this.requestBudget ? budgetedDriveApiClient(this.injectedClient, this.requestBudget, this.provenance) : this.injectedClient;
-      return this.client;
-    }
-    this.client = await this.restClient();
-    return this.client;
-  }
-  async restClient() {
-    const session = requireBearerTokenCredentialSession(await this.credentialBroker.issueSession({
-      handle: this.credentialHandle,
-      provider: GOOGLE_DRIVE_PROVIDER,
-      capability: "google_drive.docs.sync",
-      trustDomain: "internal"
-    }), this.credentialHandle);
-    return new RestGoogleDriveApiClient({
-      token: session.token,
-      fetch: this.fetchImpl,
-      baseUrl: this.apiBaseUrl,
-      ...this.requestBudget ? { requestBudget: this.requestBudget } : {},
-      provenance: this.provenance,
-      ...this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {},
-      ...this.sleepImpl ? { sleep: this.sleepImpl } : {}
-    });
-  }
-  queryForWatermark(watermark) {
-    const base = this.query ?? "trashed = false";
-    return watermark ? `modifiedTime > '${watermark}' and (${base})` : base;
-  }
-}
-function budgetedDriveApiClient(inner, budget, provenance) {
-  const runProvenance = sourceInvocationProvenance(provenance);
-  return {
-    listFiles(request) {
-      budget.reserve(runProvenance);
-      return inner.listFiles(request);
-    },
-    exportGoogleDocText(fileId, maxBytes) {
-      budget.reserve(runProvenance);
-      return inner.exportGoogleDocText(fileId, maxBytes);
-    },
-    downloadTextFile(fileId, maxBytes) {
-      budget.reserve(runProvenance);
-      return inner.downloadTextFile(fileId, maxBytes);
-    },
-    downloadFileBytes(fileId, maxBytes) {
-      budget.reserve(runProvenance);
-      return inner.downloadFileBytes(fileId, maxBytes);
-    },
-    ...inner.getFolder ? {
-      getFolder(folderId) {
-        budget.reserve(runProvenance);
-        return inner.getFolder(folderId);
-      }
-    } : {}
-  };
-}
-
-class GoogleDriveFolderAncestry {
-  client;
-  parentsByFolderId = new Map;
-  lookups = 0;
-  failures = 0;
-  constructor(client) {
-    this.client = client;
-  }
-  get unresolvedCount() {
-    return this.failures;
-  }
-  async resolve(file) {
-    const seen = new Set;
-    const queue = [...file.parents ?? []];
-    let budget = GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS;
-    while (queue.length > 0) {
-      const folderId = queue.shift();
-      if (!folderId || seen.has(folderId))
-        continue;
-      seen.add(folderId);
-      if (budget <= 0) {
-        this.failures += 1;
-        return;
-      }
-      budget -= 1;
-      const parents = await this.parentsOf(folderId);
-      if (parents === FOLDER_LOOKUP_FAILED) {
-        this.failures += 1;
-        return;
-      }
-      queue.push(...parents);
-    }
-    return [...seen];
-  }
-  async parentsOf(folderId) {
-    if (this.parentsByFolderId.has(folderId)) {
-      const cached2 = this.parentsByFolderId.get(folderId);
-      return cached2 ?? FOLDER_LOOKUP_FAILED;
-    }
-    if (!this.client.getFolder) {
-      this.parentsByFolderId.set(folderId, undefined);
-      return FOLDER_LOOKUP_FAILED;
-    }
-    this.lookups += 1;
-    try {
-      const folder = await this.client.getFolder(folderId);
-      const parents = folder.parents ?? [];
-      this.parentsByFolderId.set(folderId, parents);
-      return parents;
-    } catch {
-      this.parentsByFolderId.set(folderId, undefined);
-      return FOLDER_LOOKUP_FAILED;
-    }
-  }
-}
-function encodeDriveCursor(cursor) {
-  if (!cursor.watermark && !cursor.highWater && !cursor.pageToken && !cursor.deferredFloor) {
-    return;
-  }
-  return `${GOOGLE_DRIVE_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
-}
-function promotedDriveWatermark(candidate, deferredFloor, watermark) {
-  if (!candidate || !deferredFloor)
-    return candidate;
-  const floor = new Date(Date.parse(deferredFloor) - 1).toISOString();
-  if (watermark === floor)
-    return candidate;
-  const clamped = floor.localeCompare(candidate) < 0 ? floor : candidate;
-  return watermark && clamped.localeCompare(watermark) < 0 ? watermark : clamped;
-}
-function isRetryableDriveContentError(error) {
-  return error instanceof GoogleDriveApiError && (error.status === 429 || error.status >= 500);
-}
-function decodeDriveCursor(value) {
-  if (!value)
-    return {};
-  if (value.length > MAX_GOOGLE_DRIVE_CURSOR_LENGTH || !value.startsWith(GOOGLE_DRIVE_CURSOR_PREFIX)) {
-    throw new TypeError("Google Drive connector cursor is invalid.");
-  }
-  try {
-    const parsed = JSON.parse(Buffer.from(value.slice(GOOGLE_DRIVE_CURSOR_PREFIX.length), "base64url").toString("utf8"));
-    const watermark = decodeCursorTimestamp(parsed.watermark);
-    const highWater = decodeCursorTimestamp(parsed.highWater);
-    const deferredFloor = decodeCursorTimestamp(parsed.deferredFloor);
-    if (parsed.pageToken !== undefined && (typeof parsed.pageToken !== "string" || !parsed.pageToken.trim() || parsed.pageToken.length > MAX_GOOGLE_DRIVE_CURSOR_LENGTH)) {
-      throw new Error("invalid");
-    }
-    return {
-      ...watermark ? { watermark } : {},
-      ...highWater ? { highWater } : {},
-      ...deferredFloor ? { deferredFloor } : {},
-      ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {}
-    };
-  } catch {
-    throw new TypeError("Google Drive connector cursor is invalid.");
-  }
-}
-function decodeCursorTimestamp(value) {
-  if (value === undefined)
-    return;
-  if (typeof value !== "string")
-    throw new Error("invalid");
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed))
-    throw new Error("invalid");
-  return new Date(parsed).toISOString();
-}
-function assertNewProviderPage2(seen, pageToken) {
-  if (seen.has(pageToken))
-    throw new Error("Google Drive connector pagination cursor repeated.");
-  seen.add(pageToken);
-}
-
-class RestGoogleDriveApiClient {
-  token;
-  fetchImpl;
-  baseUrl;
-  maxRetries;
-  sleep;
-  requestBudget;
-  provenance;
-  constructor(options) {
-    this.token = options.token;
-    this.fetchImpl = options.fetch;
-    this.baseUrl = options.baseUrl;
-    this.requestBudget = options.requestBudget;
-    this.provenance = sourceInvocationProvenance(options.provenance);
-    this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
-  }
-  async listFiles(request) {
-    const params = new URLSearchParams({
-      pageSize: String(request.pageSize),
-      fields: "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,version,driveId,parents,owners(emailAddress),webViewLink,size,md5Checksum)",
-      includeItemsFromAllDrives: "true",
-      supportsAllDrives: "true",
-      q: request.query ?? "trashed = false"
-    });
-    if (request.pageToken)
-      params.set("pageToken", request.pageToken);
-    const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord7(json, "Google Drive files list response");
-    return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord7(item, "Google Drive file"))).filter((file) => file.id) : [],
-      ...optionalStringProp2(record, "nextPageToken")
-    };
-  }
-  async getFolder(folderId) {
-    const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
-    const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord7(json, "Google Drive folder");
-    const id = typeof record.id === "string" ? record.id : folderId;
-    return {
-      id,
-      ...optionalStringProp2(record, "name"),
-      ...Array.isArray(record.parents) ? { parents: record.parents.filter((entry) => typeof entry === "string") } : {}
-    };
-  }
-  async exportGoogleDocText(fileId, maxBytes) {
-    const params = new URLSearchParams({ mimeType: "text/plain" });
-    return this.getText(`files/${encodeURIComponent(fileId)}/export?${params.toString()}`, maxBytes);
-  }
-  async downloadTextFile(fileId, maxBytes) {
-    return this.getText(`files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, maxBytes);
-  }
-  async downloadFileBytes(fileId, maxBytes) {
-    const response = await this.send(`files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, "application/octet-stream", "Google Drive content request");
-    const declared = Number.parseInt(response.headers.get("content-length") ?? "", 10);
-    if (maxBytes !== undefined && Number.isSafeInteger(declared) && declared > maxBytes) {
-      throw new GoogleDriveContentTooLargeError;
-    }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
-      throw new GoogleDriveContentTooLargeError;
-    }
-    const mimeType = response.headers.get("content-type") ?? undefined;
-    return {
-      bytes,
-      ...mimeType ? { mimeType } : {},
-      sizeBytes: bytes.byteLength
-    };
-  }
-  async getJson(path) {
-    const text2 = await this.get(path, "application/json", "Google Drive API request");
-    return text2 ? JSON.parse(text2) : {};
-  }
-  async getText(path, maxBytes) {
-    const text2 = await this.get(path, "text/plain,application/octet-stream", "Google Drive content request");
-    return text2.slice(0, maxBytes);
-  }
-  async get(path, accept, context2) {
-    return (await this.send(path, accept, context2)).text();
-  }
-  async send(path, accept, context2) {
-    let attempt = 0;
-    while (true) {
-      this.requestBudget?.reserve(this.provenance);
-      const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
-        headers: {
-          Accept: accept,
-          Authorization: `Bearer ${this.token}`
-        }
-      });
-      if (response.ok)
-        return response;
-      const detail = await response.text().catch(() => "");
-      if (isRetryableDriveStatus(response.status) && attempt < this.maxRetries) {
-        attempt += 1;
-        await this.sleep(driveRetryDelayMs(response, attempt));
-        continue;
-      }
-      throw new GoogleDriveApiError(`${context2} failed (${response.status}): ${safeProviderDetail2(detail)}`, response.status);
-    }
-  }
-}
-function isRetryableDriveStatus(status) {
-  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
-}
-function driveRetryDelayMs(response, attempt) {
-  const retryAfter = response.headers.get("retry-after")?.trim();
-  if (retryAfter) {
-    const seconds = Number.parseFloat(retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0) {
-      return Math.min(seconds * 1000, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS);
-    }
-    const dateMs = Date.parse(retryAfter);
-    if (Number.isFinite(dateMs)) {
-      return Math.max(0, Math.min(dateMs - Date.now(), MAX_GOOGLE_DRIVE_RETRY_DELAY_MS));
-    }
-  }
-  return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
-}
-function normalizeDriveFile(record) {
-  return {
-    id: stringValue3(record.id),
-    ...optionalStringProp2(record, "name"),
-    ...optionalStringProp2(record, "mimeType"),
-    ...optionalStringProp2(record, "createdTime"),
-    ...optionalStringProp2(record, "modifiedTime"),
-    ...optionalStringProp2(record, "version"),
-    ...optionalStringProp2(record, "driveId"),
-    ...optionalStringProp2(record, "webViewLink"),
-    ...optionalStringProp2(record, "size"),
-    ...optionalStringProp2(record, "md5Checksum"),
-    ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue3).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord7(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
-  };
-}
-function isDownloadableTextMime(mimeType, name) {
-  const mime = mimeType?.toLowerCase() ?? "";
-  if (mime.startsWith("text/"))
-    return true;
-  if (["application/json", "application/xml", "application/csv", "text/csv"].includes(mime))
-    return true;
-  const lower = name?.toLowerCase() ?? "";
-  return [".md", ".txt", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml"].some((suffix) => lower.endsWith(suffix));
-}
-function withinTextByteCap(size, maxBytes) {
-  if (!size)
-    return true;
-  const parsed = Number.parseInt(size, 10);
-  return Number.isFinite(parsed) && parsed <= maxBytes;
-}
-function normalizeDriveMaxFiles(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES;
-  return Math.max(1, Math.min(Math.floor(value), MAX_GOOGLE_DRIVE_SYNC_FILES));
-}
-function normalizeMaxTextBytes(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
-  return Math.max(1000, Math.min(Math.floor(value), 512000));
-}
-function asRecord7(value, label) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object.`);
-  }
-  return value;
-}
-function stringValue3(value) {
-  return typeof value === "string" ? value : "";
-}
-function optionalStringProp2(record, key2) {
-  const value = stringValue3(record[key2]).trim();
-  return value ? { [key2]: value } : {};
-}
-function safeProviderDetail2(value) {
-  return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
-}
-function hashString4(value) {
-  return createHash17("sha256").update(value).digest("hex");
-}
-var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
-var init_drive = __esm(() => {
-  init_olympus_layout();
-  init_source_placement();
-  init_source_ingestion_exclusions();
-  init_credential_broker();
-  init_request_budget();
-  GoogleDriveContentTooLargeError = class GoogleDriveContentTooLargeError extends Error {
-    constructor() {
-      super("Google Drive file exceeds the configured byte ceiling.");
-      this.name = "GoogleDriveContentTooLargeError";
-    }
-  };
-  GoogleDriveApiError = class GoogleDriveApiError extends Error {
-    status;
-    constructor(message2, status) {
-      super(message2);
-      this.name = "GoogleDriveApiError";
-      this.status = status;
-    }
-  };
-  FOLDER_LOOKUP_FAILED = Symbol("google-drive-folder-lookup-failed");
-});
-
-// src/workers/google-connectors/corpora.ts
-var init_corpora = __esm(() => {
-  init_privacy_language();
-  init_corpus();
-  init_gmail();
-  init_drive();
-});
-
-// src/workers/readwise/api.ts
-var init_api = () => {};
-
-// src/workers/readwise/corpus-adapter.ts
-var init_corpus_adapter2 = __esm(() => {
-  init_corpus();
-  init_source_corpus_registry();
-});
-
-// src/workers/readwise/connector.ts
-var READWISE_STORE_PLACEMENT;
-var init_connector2 = __esm(() => {
-  init_olympus_layout();
-  init_source_placement();
-  init_atomic_file();
-  init_credential_broker();
-  init_source_storage();
-  init_api();
-  init_corpus_adapter2();
-  READWISE_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S1",
-    trustDomain: "internal"
-  });
-});
-
-// src/workers/readwise/live-control.ts
-var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, READWISE_DAILY_REQUEST_GUARD_REASON = "readwise_daily_api_request_guard";
-var init_live_control = __esm(() => {
-  READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
-  READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
-  READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
-  READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-});
-
-// src/workers/readwise/live-sync.ts
-var init_live_sync = __esm(() => {
-  init_connector_store2();
-  init_tiered_store_set();
-  init_api();
-  init_connector2();
-  init_live_control();
-});
-
-// src/workers/readwise/index.ts
-var init_readwise = __esm(() => {
-  init_api();
-  init_corpus_adapter2();
-  init_connector2();
-  init_live_control();
-  init_live_sync();
-});
-
 // src/workers/x-bookmarks/corpus-adapter.ts
-var init_corpus_adapter3 = __esm(() => {
+var init_corpus_adapter2 = __esm(() => {
   init_corpus();
 });
 
 // src/workers/x-bookmarks/qualification.ts
-var init_qualification2 = __esm(() => {
+var init_qualification = __esm(() => {
   init_corpus();
-  init_connector_store2();
+  init_connector_store();
   init_analyst_answer();
-  init_corpus_adapter3();
+  init_corpus_adapter2();
 });
 
 // src/workers/x-bookmarks/api.ts
@@ -33122,10 +32574,10 @@ var init_folder_facets = __esm(() => {
 
 // src/workers/x-bookmarks/connector.ts
 var X_BOOKMARKS_STORE_PLACEMENT;
-var init_connector3 = __esm(() => {
+var init_connector2 = __esm(() => {
   init_source_placement();
   init_source_storage();
-  init_corpus_adapter3();
+  init_corpus_adapter2();
   init_folder_facets();
   X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
     trustTier: "S1",
@@ -33144,7 +32596,7 @@ var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, 
 var init_live_control2 = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
-  init_connector3();
+  init_connector2();
   X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 5 * 60000;
   X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
@@ -33159,7 +32611,7 @@ var X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION = 2, FOLDER_FACET_REFRESH_LEAS
 var init_reconcile_state = __esm(() => {
   init_source_placement();
   init_source_storage();
-  init_connector3();
+  init_connector2();
   init_sqlite_migrations();
   FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
 });
@@ -33167,10 +32619,11 @@ var init_reconcile_state = __esm(() => {
 // src/workers/x-bookmarks/api-connector.ts
 var X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
 var init_api_connector = __esm(() => {
+  init_source_placement();
   init_credential_broker();
   init_grant_fence();
   init_api2();
-  init_connector3();
+  init_connector2();
   init_live_control2();
   init_reconcile_state();
   init_grant_fence();
@@ -33192,12 +32645,12 @@ var init_window_diagnostic = __esm(() => {
 
 // src/workers/x-bookmarks/live-sync.ts
 var init_live_sync2 = __esm(() => {
-  init_connector_store2();
+  init_connector_store();
   init_tiered_store_set();
   init_api_connector();
   init_live_control2();
   init_reconcile_state();
-  init_connector3();
+  init_connector2();
   init_window_diagnostic();
   init_api_connector();
 });
@@ -33205,10 +32658,10 @@ var init_live_sync2 = __esm(() => {
 // src/workers/x-bookmarks/content-recovery.ts
 var init_content_recovery = __esm(() => {
   init_types();
-  init_connector_store2();
+  init_connector_store();
   init_credential_broker();
   init_api2();
-  init_connector3();
+  init_connector2();
   init_folder_facets();
   init_live_control2();
   init_grant_fence();
@@ -33216,10 +32669,10 @@ var init_content_recovery = __esm(() => {
 
 // src/workers/x-bookmarks/index.ts
 var init_x_bookmarks = __esm(() => {
-  init_qualification2();
+  init_qualification();
   init_api2();
-  init_corpus_adapter3();
-  init_connector3();
+  init_corpus_adapter2();
+  init_connector2();
   init_folder_facets();
   init_api_connector();
   init_live_sync2();
@@ -33227,6 +32680,598 @@ var init_x_bookmarks = __esm(() => {
   init_content_recovery();
   init_live_control2();
   init_reconcile_state();
+});
+// src/workers/dropbox-files/provider-client.ts
+class DropboxApiMetadataClient {
+  supportsNativeRecursive = true;
+  token;
+  fetchImpl;
+  baseUrl;
+  maxRetries;
+  sleep;
+  requestTimeoutMs;
+  constructor(options) {
+    this.token = required(options.token, "Dropbox metadata token");
+    this.fetchImpl = options.fetch ?? fetch;
+    this.baseUrl = options.baseUrl?.replace(/\/+$/, "") || "https://api.dropboxapi.com/2";
+    this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_DROPBOX_MAX_RETRIES));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DROPBOX_METADATA_REQUEST_TIMEOUT_MS;
+  }
+  async listFolder(request) {
+    return this.postMetadataPage("/files/list_folder", {
+      path: request.path,
+      recursive: request.recursive,
+      limit: request.limit,
+      include_deleted: request.includeDeleted === true,
+      include_has_explicit_shared_members: false
+    });
+  }
+  async listFolderContinue(request) {
+    return this.postMetadataPage("/files/list_folder/continue", { cursor: request.cursor });
+  }
+  async postMetadataPage(path, body) {
+    const response = await this.send(path, body);
+    const text2 = await response.text();
+    return metadataPageFromDropboxJson(parseJsonObject2(text2, "Dropbox metadata API"));
+  }
+  async send(path, body) {
+    let attempt = 0;
+    while (true) {
+      const response = await fetchWithBodyDeadline(this.fetchImpl, `${this.baseUrl}${path}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
+      }, this.requestTimeoutMs);
+      if (response.ok)
+        return response;
+      const detail = await response.text().catch(() => "");
+      const error = dropboxMetadataError(response, detail);
+      if (isRetryableDropboxError(error) && attempt < this.maxRetries) {
+        attempt += 1;
+        await this.sleep(dropboxRetryDelayMs(error, attempt));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+function dropboxMetadataError(response, detail) {
+  const tag = dropboxErrorTag(detail);
+  if (response.status === 409 && tag === "path") {
+    let parsed;
+    try {
+      parsed = JSON.parse(detail);
+    } catch {}
+    if (parsed?.error?.[".tag"] === "path" && parsed.error.path?.[".tag"] === "not_found") {
+      return new DropboxPathNotFoundError;
+    }
+  }
+  if (tag === "reset" && response.status >= 400 && response.status < 500) {
+    return new DropboxCursorResetError(response.status);
+  }
+  if (response.status === 429) {
+    const retryAfterMs2 = dropboxRetryAfterMs(response);
+    return new DropboxRateLimitError({
+      status: response.status,
+      ...retryAfterMs2 !== undefined ? { retryAfterMs: retryAfterMs2 } : {},
+      ...tag ? { tag } : {}
+    });
+  }
+  return new DropboxApiError(`Dropbox metadata API request failed (${response.status}${tag ? `/${tag}` : ""}).`, response.status, tag);
+}
+function isRetryableDropboxError(error) {
+  return error.status === 429 || error.status >= 500 && error.status < 600;
+}
+function dropboxRetryDelayMs(error, attempt) {
+  const declared = error instanceof DropboxRateLimitError ? error.retryAfterMs : undefined;
+  if (declared !== undefined)
+    return Math.min(declared, MAX_DROPBOX_RETRY_DELAY_MS);
+  return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
+}
+function dropboxRetryAfterMs(response) {
+  const retryAfter = response.headers.get("retry-after")?.trim();
+  if (!retryAfter)
+    return;
+  const seconds = Number.parseFloat(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0)
+    return seconds * 1000;
+  const dateMs = Date.parse(retryAfter);
+  if (Number.isFinite(dateMs))
+    return Math.max(0, dateMs - Date.now());
+  return;
+}
+function dropboxErrorTag(detail) {
+  let parsed;
+  try {
+    parsed = JSON.parse(detail);
+  } catch {
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return;
+  const record = parsed;
+  const error = record.error;
+  const nested = error && typeof error === "object" && !Array.isArray(error) ? error[".tag"] : undefined;
+  const summary = typeof record.error_summary === "string" ? record.error_summary.split("/")[0] : undefined;
+  return boundedErrorTag(nested) ?? boundedErrorTag(summary);
+}
+function boundedErrorTag(value) {
+  return typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : undefined;
+}
+function metadataPageFromDropboxJson(payload2) {
+  if (!Array.isArray(payload2.entries)) {
+    throw new Error("Dropbox metadata API page did not include entries.");
+  }
+  return {
+    entries: payload2.entries.map(metadataEntryFromDropboxJson).filter((entry) => entry !== undefined),
+    ...typeof payload2.cursor === "string" && payload2.cursor.trim() ? { cursor: payload2.cursor.trim() } : {},
+    hasMore: payload2.has_more === true
+  };
+}
+function metadataEntryFromDropboxJson(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return;
+  const record = value;
+  const tag = normalizedTag(stringValue3(record[".tag"]) ?? stringValue3(record.tag));
+  const name = stringValue3(record.name) ?? "";
+  const pathDisplay = stringValue3(record.path_display) ?? stringValue3(record.pathDisplay);
+  const pathLower = stringValue3(record.path_lower) ?? stringValue3(record.pathLower);
+  if (tag === "deleted") {
+    const id2 = stringValue3(record.id);
+    return {
+      tag,
+      name,
+      ...pathDisplay ? { pathDisplay } : {},
+      ...pathLower ? { pathLower } : {},
+      ...id2 ? { id: id2 } : {}
+    };
+  }
+  const id = stringValue3(record.id);
+  if (!id || tag !== "file" && tag !== "folder")
+    return;
+  const sharingInfo = sharingInfoFromDropboxJson(record);
+  if (tag === "folder") {
+    return {
+      tag,
+      id,
+      name,
+      ...pathDisplay ? { pathDisplay } : {},
+      ...pathLower ? { pathLower } : {},
+      ...sharingInfo ? { sharingInfo } : {}
+    };
+  }
+  const size = numberValue(record.size);
+  const rev = stringValue3(record.rev);
+  const contentHash = stringValue3(record.content_hash) ?? stringValue3(record.contentHash);
+  const clientModified = stringValue3(record.client_modified) ?? stringValue3(record.clientModified);
+  const serverModified = stringValue3(record.server_modified) ?? stringValue3(record.serverModified);
+  const mimeType = stringValue3(record.mime_type) ?? stringValue3(record.mimeType);
+  return {
+    tag,
+    id,
+    name,
+    ...pathDisplay ? { pathDisplay } : {},
+    ...pathLower ? { pathLower } : {},
+    ...rev ? { rev } : {},
+    ...contentHash ? { contentHash } : {},
+    ...size !== undefined ? { size } : {},
+    ...clientModified ? { clientModified } : {},
+    ...serverModified ? { serverModified } : {},
+    ...mimeType ? { mimeType } : {},
+    ...sharingInfo ? { sharingInfo } : {}
+  };
+}
+function sharingInfoFromDropboxJson(record) {
+  const value = record.sharing_info ?? record.sharingInfo;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return;
+  const sharing = value;
+  const sharedFolderId = stringValue3(sharing.shared_folder_id) ?? stringValue3(sharing.sharedFolderId);
+  const parentSharedFolderId = stringValue3(sharing.parent_shared_folder_id) ?? stringValue3(sharing.parentSharedFolderId);
+  const namespaceId = stringValue3(sharing.namespace_id) ?? stringValue3(sharing.namespaceId);
+  if (Object.keys(sharing).length === 0)
+    return;
+  return {
+    ...sharedFolderId ? { sharedFolderId } : {},
+    ...parentSharedFolderId ? { parentSharedFolderId } : {},
+    ...namespaceId ? { namespaceId } : {}
+  };
+}
+function normalizedTag(value) {
+  return value === "file" || value === "folder" || value === "deleted" ? value : undefined;
+}
+function stringValue3(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function numberValue(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+function parseJsonObject2(text2, label) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text2);
+  } catch {
+    throw new Error(`${label} returned invalid JSON.`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${label} returned a non-object JSON payload.`);
+  }
+  return parsed;
+}
+function required(value, label) {
+  const normalized = value.trim();
+  if (!normalized)
+    throw new Error(`${label} is required.`);
+  return normalized;
+}
+var DEFAULT_DROPBOX_MAX_RETRIES = 3, MAX_DROPBOX_RETRY_DELAY_MS = 30000, DROPBOX_METADATA_REQUEST_TIMEOUT_MS = 60000, DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS, DropboxApiError, DropboxPathNotFoundError, DropboxCursorResetError, DropboxRateLimitError;
+var init_provider_client = __esm(() => {
+  init_http_timeout();
+  DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
+  DropboxApiError = class DropboxApiError extends Error {
+    status;
+    tag;
+    constructor(message2, status, tag) {
+      super(message2);
+      this.name = "DropboxApiError";
+      this.status = status;
+      this.tag = tag;
+    }
+  };
+  DropboxPathNotFoundError = class DropboxPathNotFoundError extends DropboxApiError {
+    kind = "dropbox_path_not_found";
+    constructor() {
+      super("Dropbox metadata path was not found (409/path/not_found).", 409, "path");
+      this.name = "DropboxPathNotFoundError";
+    }
+  };
+  DropboxCursorResetError = class DropboxCursorResetError extends DropboxApiError {
+    kind = "dropbox_cursor_reset";
+    constructor(status = 409) {
+      super(`Dropbox metadata cursor was reset by the provider (${status}/reset); the traversal must restart.`, status, "reset");
+      this.name = "DropboxCursorResetError";
+    }
+  };
+  DropboxRateLimitError = class DropboxRateLimitError extends DropboxApiError {
+    kind = "dropbox_rate_limited";
+    retryAfterMs;
+    constructor(options = {}) {
+      const status = options.status ?? 429;
+      super(`Dropbox metadata API rate limited (${status})` + (options.retryAfterMs !== undefined ? `; retry after ${Math.ceil(options.retryAfterMs / 1000)}s.` : "."), status, options.tag);
+      this.name = "DropboxRateLimitError";
+      this.retryAfterMs = options.retryAfterMs;
+    }
+  };
+});
+
+// src/workers/dropbox-files/connector.ts
+var init_connector3 = __esm(() => {
+  init_credential_broker();
+  init_provider_client();
+});
+
+// src/workers/connector-store/file-ingestion-matcher.ts
+var POLICY_ADMITTED;
+var init_file_ingestion_matcher = __esm(() => {
+  init_source_ingestion_exclusions();
+  init_still_image_readiness();
+  init_source_ingestion_policy();
+  POLICY_ADMITTED = Object.freeze({
+    excluded: false,
+    disposition: "admit",
+    outcome: "admitted"
+  });
+});
+
+// src/workers/dropbox-files/corpus-adapter.ts
+var DROPBOX_FILES_CORPUS_ID = "secure_local.dropbox.files", DROPBOX_FILES_SOURCE_ID = "dropbox.files";
+var init_corpus_adapter3 = __esm(() => {
+  init_corpus();
+});
+
+// src/workers/dropbox-files/connector-store.ts
+var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_STORE_PLACEMENT;
+var init_connector_store2 = __esm(() => {
+  init_source_placement();
+  init_source_ingestion_exclusions();
+  init_source_ingestion_policy();
+  init_file_ingestion_matcher();
+  init_source_storage();
+  init_corpus_adapter3();
+  DROPBOX_TIER_CORPUS_IDS = Object.freeze({
+    public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
+    internal: DROPBOX_INTERNAL_FILES_CORPUS_ID,
+    secure_local: DROPBOX_FILES_CORPUS_ID
+  });
+  DROPBOX_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
+// src/workers/dropbox-files/provider-store-sync.ts
+var init_provider_store_sync = __esm(() => {
+  init_embeddings();
+  init_tiered_store_set();
+  init_connector_store2();
+  init_connector3();
+  init_provider_client();
+});
+
+// src/workers/connector-store/locator-path-scope-codec.ts
+function locatorPathApprovedScopeCodec(sourceLabel) {
+  const invalid = (expectedPrefix) => ({
+    kind: "invalid",
+    message: `"approved_scope_key" must exactly match "${expectedPrefix}:<rooted path>" with no surrounding whitespace.`
+  });
+  return Object.freeze({
+    resolveLocatorPath(value, principal) {
+      const expectedPrefix = `${principal.provider}.${principal.accountScope}`;
+      const separator = value.indexOf(":");
+      const prefix = separator < 0 ? undefined : value.slice(0, separator);
+      const scopedValue = separator < 0 ? undefined : value.slice(separator + 1);
+      if (value.length === 0 || value.length > MAX_APPROVED_SCOPE_KEY_LENGTH || value !== value.trim() || UNSAFE_SCOPE_CHARACTERS.test(value) || prefix !== expectedPrefix || scopedValue === undefined || scopedValue.length === 0) {
+        return invalid(expectedPrefix);
+      }
+      if (scopedValue.startsWith("folder_id:")) {
+        return {
+          kind: "invalid",
+          message: `The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form ${sourceLabel} scope.`
+        };
+      }
+      if (!scopedValue.startsWith("/") || scopedValue !== scopedValue.trim() || scopedValue !== "/" && scopedValue.endsWith("/")) {
+        return invalid(expectedPrefix);
+      }
+      return { kind: "path", accountScope: principal.accountScope, locatorPath: scopedValue };
+    }
+  });
+}
+var MAX_APPROVED_SCOPE_KEY_LENGTH = 4096, UNSAFE_SCOPE_CHARACTERS;
+var init_locator_path_scope_codec = __esm(() => {
+  UNSAFE_SCOPE_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
+});
+
+// src/workers/dropbox-files/approved-scope-filter.ts
+var DROPBOX_APPROVED_SCOPE_FILTER_CODEC;
+var init_approved_scope_filter = __esm(() => {
+  init_locator_path_scope_codec();
+  DROPBOX_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("Dropbox");
+});
+
+// src/workers/dropbox-files/local-file-resolver.ts
+function parseDropboxLocalFileRootsFromEnv(env = process.env) {
+  const raw = env.OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON;
+  if (!raw?.trim())
+    return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON must be a JSON array.");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error("OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON must be a JSON array.");
+  }
+  return parsed.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`Dropbox local root ${index} must be an object.`);
+    }
+    const record = item;
+    const rootPath = optionalString2(record.rootPath) ?? optionalString2(record.root_path);
+    if (!rootPath) {
+      throw new Error(`Dropbox local root ${index} requires rootPath.`);
+    }
+    const account = optionalString2(record.account);
+    const approvedScopeKey = optionalString2(record.approvedScopeKey) ?? optionalString2(record.approved_scope_key);
+    const dropboxPathPrefix = normalizeDropboxPath(optionalString2(record.dropboxPathPrefix) ?? optionalString2(record.dropbox_path_prefix));
+    const rootId = optionalString2(record.rootId) ?? optionalString2(record.root_id);
+    const root = { rootPath };
+    if (account)
+      root.account = account;
+    if (approvedScopeKey)
+      root.approvedScopeKey = approvedScopeKey;
+    if (dropboxPathPrefix)
+      root.dropboxPathPrefix = dropboxPathPrefix;
+    if (rootId)
+      root.rootId = rootId;
+    return root;
+  });
+}
+function normalizeDropboxPath(path) {
+  const trimmed = path?.trim().replace(/\\/g, "/").replace(/\/+/g, "/");
+  if (!trimmed)
+    return;
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+function optionalString2(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+// src/workers/dropbox-files/locator-result-projector.ts
+import { join as join24 } from "node:path";
+import { pathToFileURL } from "node:url";
+function locatorFromRootedDropboxPath(value, localMapping) {
+  const displayPath = normalizeRootedDropboxDisplayPath(value);
+  if (!displayPath)
+    return;
+  const segments = dropboxPathSegments(displayPath);
+  if (segments.length === 0)
+    return;
+  const parentDisplayPath = segments.length === 1 ? "/" : `/${segments.slice(0, -1).join("/")}`;
+  const locator = {
+    display_path: displayPath,
+    parent_display_path: parentDisplayPath,
+    dropbox_web_url: dropboxHomeUrlForSegments(segments),
+    parent_dropbox_web_url: dropboxHomeUrlForSegments(segments.slice(0, -1))
+  };
+  if (localMapping) {
+    const finderUrl = finderUrlForDropboxPath(localMapping, displayPath);
+    if (finderUrl)
+      locator.finder_url = finderUrl;
+    const parentFinderUrl = finderUrlForDropboxPath(localMapping, parentDisplayPath);
+    if (parentFinderUrl)
+      locator.parent_finder_url = parentFinderUrl;
+  }
+  return locator;
+}
+function normalizeRootedDropboxDisplayPath(value) {
+  if (!value)
+    return;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "/" || !trimmed.startsWith("/"))
+    return;
+  return trimmed;
+}
+function dropboxPathSegments(displayPath) {
+  return displayPath.split("/").map((segment) => segment.trim()).filter((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+function dropboxHomeUrlForSegments(segments) {
+  if (segments.length === 0)
+    return "https://www.dropbox.com/home";
+  return `https://www.dropbox.com/home/${segments.map(encodeURIComponent).join("/")}`;
+}
+function finderUrlForDropboxPath(mapping, displayPath) {
+  const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
+  if (!relativeSegments)
+    return;
+  return pathToFileURL(join24(mapping.rootPath, ...relativeSegments)).href;
+}
+function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
+  const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
+  if (!normalizedPrefix)
+    return dropboxPathSegments(displayPath);
+  if (displayPath === normalizedPrefix)
+    return [];
+  if (!displayPath.startsWith(`${normalizedPrefix}/`))
+    return;
+  return dropboxPathSegments(displayPath.slice(normalizedPrefix.length));
+}
+function normalizeOptionalDropboxPrefix(value) {
+  if (!value)
+    return;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "/")
+    return;
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+function configuredStrictLocalMapping(input) {
+  const explicitRoot = optionalEnvironmentString(process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_LOCATOR_LOCAL_ROOT);
+  if (explicitRoot)
+    return { rootPath: explicitRoot };
+  const legacyRoot = optionalEnvironmentString(process.env.DROPBOX_LOCAL_ROOT);
+  if (legacyRoot)
+    return { rootPath: legacyRoot };
+  try {
+    return parseDropboxLocalFileRootsFromEnv().find((root) => (root.account === undefined || root.account === input.accountScope) && (root.approvedScopeKey === undefined || input.approvedScopeKey !== undefined && root.approvedScopeKey === input.approvedScopeKey));
+  } catch {
+    return;
+  }
+}
+function optionalEnvironmentString(value) {
+  if (!value)
+    return;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+var DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC;
+var init_locator_result_projector = __esm(() => {
+  DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
+    create(input) {
+      const localMapping = configuredStrictLocalMapping({
+        accountScope: input.principal.accountScope,
+        ...input.approvedScopeKey !== undefined ? { approvedScopeKey: input.approvedScopeKey } : {}
+      });
+      return Object.freeze({
+        project(candidate) {
+          if (input.principal.provider !== "dropbox" || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope) {
+            return;
+          }
+          const locator = locatorFromRootedDropboxPath(candidate.readLocatorUri(), localMapping);
+          return locator ? { locator } : undefined;
+        }
+      });
+    }
+  });
+});
+
+// src/workers/dropbox-files/dropbox-content-hash.ts
+import { createHash as createHash17 } from "node:crypto";
+function computeDropboxContentHash(bytes) {
+  const blockDigests = [];
+  for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
+    const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
+    blockDigests.push(createHash17("sha256").update(block).digest());
+  }
+  return createHash17("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+}
+var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
+var init_dropbox_content_hash = __esm(() => {
+  DROPBOX_CONTENT_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
+});
+
+// src/workers/source-export/dropbox.ts
+var init_dropbox = __esm(() => {
+  init_credential_broker();
+  init_corpus_adapter3();
+});
+
+// src/workers/file-extraction/extractors/command-runner.ts
+var resolvedCommands;
+var init_command_runner = __esm(() => {
+  resolvedCommands = new Map;
+});
+
+// src/workers/file-extraction/extractors/pdf-render.ts
+var init_pdf_render = __esm(() => {
+  init_command_runner();
+});
+
+// src/workers/source-eval-shard/dropbox.ts
+var init_dropbox2 = __esm(() => {
+  init_corpus_adapter3();
+  init_provider_client();
+  init_pdf_render();
+  init_credential_broker();
+  init_approved_scope_filter();
+});
+
+// src/workers/dropbox-files/qualification.ts
+var init_qualification2 = __esm(() => {
+  init_corpus();
+  init_connector_store();
+  init_analyst_answer();
+  init_corpus_adapter3();
+});
+
+// src/workers/dropbox-files/tier-set.ts
+var init_tier_set = __esm(() => {
+  init_source_placement();
+  init_source_storage();
+  init_tiered_store_set();
+  init_connector_store2();
+  init_corpus_adapter3();
+});
+
+// src/workers/dropbox-files/index.ts
+var init_dropbox_files = __esm(() => {
+  init_connector3();
+  init_provider_client();
+  init_provider_store_sync();
+  init_approved_scope_filter();
+  init_locator_result_projector();
+  init_content_policy();
+  init_dropbox_content_hash();
+  init_dropbox();
+  init_dropbox2();
+  init_corpus_adapter3();
+  init_qualification2();
+  init_tier_set();
+  init_connector_store2();
 });
 
 // src/workers/local-files/paths.ts
@@ -33520,8 +33565,6 @@ var init_store = __esm(() => {
 
 // src/workers/telegram-messages/corpus-adapter.ts
 var init_corpus_adapter4 = __esm(() => {
-  init_olympus_layout();
-  init_source_placement();
   init_source_corpus_registry();
   init_corpus();
 });
@@ -33549,6 +33592,7 @@ var init_capture_spool_connector = __esm(() => {
 // src/workers/telegram-messages/store-sync.ts
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var init_store_sync = __esm(() => {
+  init_source_placement();
   init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
@@ -34723,6 +34767,7 @@ var init_vocabulary = __esm(() => {
 var WAITING_QUESTION_LIMITS;
 var init_waiting_private_questions = __esm(() => {
   init_sqlite_migrations();
+  init_olympus_layout();
   WAITING_QUESTION_LIMITS = Object.freeze({
     questionBytes: 2048,
     localQuestionBytes: 8 * 1024,
@@ -41685,6 +41730,7 @@ var init_media_bindings = __esm(() => {
   init_source_placement();
   init_source_storage();
   init_state();
+  init_olympus_layout();
 });
 
 // src/core/account-files.ts
@@ -42618,6 +42664,7 @@ var init_requests = __esm(() => {
   init_source_storage();
   init_manifest3();
   init_state();
+  init_olympus_layout();
   STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
 });
 
@@ -42799,6 +42846,7 @@ var init_source_forget_registry = __esm(() => {
 });
 
 // src/data-lifecycle.ts
+var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
   init_source_placement();
@@ -42821,27 +42869,13 @@ var init_data_lifecycle = __esm(() => {
   init_worker_service();
   init_media_cache();
   init_store_identity();
-});
-
-// src/workers/readwise/tier-set.ts
-var init_tier_set2 = __esm(() => {
-  init_source_placement();
-  init_source_storage();
-  init_tiered_store_set();
-  init_connector2();
-});
-
-// src/workers/x-bookmarks/tier-set.ts
-var init_tier_set3 = __esm(() => {
-  init_source_placement();
-  init_source_storage();
-  init_tiered_store_set();
-  init_connector3();
+  backgroundTrashRemovals = new Set;
 });
 
 // src/workers/source-ingestion-ledger.ts
 var SOURCE_DEFINITIONS, SAMPLE_RETENTION_MS2, corpusPopulations;
 var init_source_ingestion_ledger = __esm(() => {
+  init_source_placement();
   init_config();
   init_source_corpus_registry();
   init_source_ingestion_exclusions();
@@ -42851,13 +42885,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_google_connectors();
   init_source_storage();
   init_data_lifecycle();
-  init_readwise();
-  init_tier_set2();
-  init_x_bookmarks();
-  init_tier_set3();
-  init_store_sync2();
   init_dropbox_files();
-  init_telegram_messages();
   init_store();
   init_archive_formats();
   init_store2();
@@ -43447,6 +43475,22 @@ var init_lane = __esm(() => {
 // src/core/engine-helper-names.ts
 var ENGINE_HELPER_APP_NAME = "Olympus Engine.app";
 
+// src/workers/readwise/tier-set.ts
+var init_tier_set2 = __esm(() => {
+  init_source_placement();
+  init_source_storage();
+  init_tiered_store_set();
+  init_connector();
+});
+
+// src/workers/x-bookmarks/tier-set.ts
+var init_tier_set3 = __esm(() => {
+  init_source_placement();
+  init_source_storage();
+  init_tiered_store_set();
+  init_connector2();
+});
+
 // src/workers/credential-degradation.ts
 class WorkerBootSecretResolver {
   failures = new Map;
@@ -43667,18 +43711,19 @@ var init_tier_migration = __esm(() => {
 });
 
 // scripts/source-embedding-drain.ts
+init_source_placement();
 init_file_lease();
 init_atomic_file();
 init_config();
 init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
-init_dropbox_files();
 import { createHash as createHash25 } from "node:crypto";
 import { existsSync as existsSync28, lstatSync as lstatSync14, mkdirSync as mkdirSync18, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname33, isAbsolute as isAbsolute14 } from "node:path";
 
 // src/workers/email-source/server.ts
+init_source_placement();
 init_vocabulary();
 init_local_private_answers();
 
@@ -44185,6 +44230,7 @@ init_manifest();
 init_assets();
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
+init_olympus_layout();
 init_install();
 init_manifest2();
 
@@ -44416,10 +44462,10 @@ function whatsappStateDirOf(grant, account, env) {
 }
 function sessionExists(grant, account, env) {
   if (account.layout === "folder") {
-    return grant.source === "telegram" ? existsSync21(`${accountSessionPath(account, env)}.session`) : existsSync21(join29(accountRawPath(account, "whatsapp", env), "session.db"));
+    return grant.source === "telegram" ? existsSync21(`${accountSessionPath(account, env)}.session`) : existsSync21(join29(accountRawPath(account, "whatsapp", env), WHATSAPP_SESSION_FILE));
   }
   const sessionPath = grant.sessionPath ?? "";
-  return grant.source === "telegram" ? existsSync21(`${sessionPath.replace(/\.session$/, "")}.session`) : existsSync21(join29(sessionPath, "session.db"));
+  return grant.source === "telegram" ? existsSync21(`${sessionPath.replace(/\.session$/, "")}.session`) : existsSync21(join29(sessionPath, WHATSAPP_SESSION_FILE));
 }
 function spawnCapture(input) {
   const child = Bun.spawn([input.executable, ...input.args], {
@@ -44531,7 +44577,7 @@ init_media_cache();
 init_olympus_layout();
 init_source_placement();
 init_spool();
-init_connector_store();
+init_connector_store2();
 
 // src/workers/dropbox-files/extraction-source.ts
 init_dropbox_content_hash();
@@ -45048,7 +45094,7 @@ init_engine();
 init_tier_classifier();
 init_secrets_disposition();
 init_source_ingestion_exclusions();
-init_connector_store2();
+init_connector_store();
 var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing";
 var EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible";
 var EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere";
@@ -46108,7 +46154,7 @@ init_source_ingestion_exclusions();
 init_source_ingestion_ledger();
 init_connected_handles();
 init_credential_broker();
-init_connector_store2();
+init_connector_store();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
@@ -46718,7 +46764,7 @@ init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
 import { createHash as createHash23 } from "node:crypto";
-init_connector_store2();
+init_connector_store();
 init_google_connectors();
 init_readwise();
 init_embeddings();
@@ -49243,12 +49289,12 @@ registerFileScopeBrowserFactory(LOCAL_FILES_SOURCE_ID, (_context) => createLocal
 // src/workers/email-source/server.ts
 init_source_ingestion_exclusions();
 init_telegram_messages();
-init_connector_store2();
+init_connector_store();
 init_principal();
 
 // src/workers/email-source/source-answer-lanes.ts
 init_embeddings();
-init_connector_store2();
+init_connector_store();
 
 // src/workers/email-source/gmail-status-scope.ts
 init_google_connectors();
@@ -51075,8 +51121,6 @@ function optionsFromEnv(env = process.env, fetchImpl) {
   const rosterEnabled = [
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_ENABLED",
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_ENABLED",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_DB_PATH",
-    DROPBOX_CONNECTOR_STORE_DB_PATH_ENV,
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_WHATSAPP_ENABLED",
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_X_BOOKMARKS_ENABLED",
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_INTERNAL_TELEGRAM_ENABLED",
@@ -51117,13 +51161,13 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   const configs = [
     {
       corpusId: DROPBOX_CORPUS_ID,
-      dbPath: env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_DB_PATH?.trim() || defaultDropboxConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath("dropbox.files", "secure_local", env),
       family: "file",
       trustDomain: "secure_local"
     },
     ...env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_ENABLED === "false" ? [] : [{
       corpusId: EMAIL_CORPUS_ID,
-      dbPath: env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_DB_PATH?.trim() || defaultGmailSecureConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath("gmail.email", "secure_local", env),
       family: "email",
       trustDomain: "secure_local"
     }]

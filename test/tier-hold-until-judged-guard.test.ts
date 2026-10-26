@@ -37,6 +37,11 @@ const LANE_OPTION_SHARED: ReadonlyArray<{ path: string; snippet: string; why: st
     snippet: 'explicit.holdContentUntilJudged === true ? { holdContentUntilJudged: true as const } : {}',
     why: 'resolveStoreTierClassification carries the lane\'s own option through the merged inputs',
   },
+  {
+    path: 'src/workers/connector-store/local-index.ts',
+    snippet: "listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;",
+    why: 'a fetched replacement of a listed item keeps the listed item\'s hold',
+  },
 ];
 
 const CLASSIFIER_INPUT = 'holdUntilJudged';

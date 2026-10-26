@@ -1,4 +1,4 @@
-import { olympusDataPath } from '../core/olympus-layout.ts';
+import { sharedDataPath } from '../core/olympus-layout.ts';
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
@@ -1995,7 +1995,7 @@ const VENICE_ANSWER_LANE: DashboardSupportedSourceDefinition = {
 };
 
 export function defaultSourceDashboardHistoryDbPath(env: Record<string, string | undefined> = process.env): string {
-  return olympusDataPath(env, 'source-dashboard.sqlite');
+  return sharedDataPath('source-dashboard', env);
 }
 
 /**

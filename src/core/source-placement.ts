@@ -15,10 +15,11 @@
  *
  * - its source has a folder layout at all (not Reflect or Roam, whose mounts
  *   name their paths);
- * - no env override or connector-store mount pins a path for it, and, for
- *   messaging, the Gateway-run service does not own its capture (that
- *   service reads its paths, plugin config included, and the account stays
- *   where they are);
+ * - for messaging, no capture path env pins it and the Gateway-run service
+ *   does not own its capture (that service reads its paths, plugin config
+ *   included, and the account stays where they are). No per-store path
+ *   override exists any more, and a connector-store mount of a source with a
+ *   folder layout names no path (delivery step 6);
  * - no file of the source exists at any legacy location (stores, tier
  *   sidecars, `-wal`/`-shm`, raw state, and for messaging the capture
  *   session, spool and state; lock files do not count);
@@ -38,9 +39,11 @@ import {
 import { archiveImportFamilies, isArchiveCorpusId } from './archive-formats.ts';
 import {
   FOLDER_LAYOUT_SOURCES,
+  hasLegacyLayout,
   accountExtractionSpoolRoot,
   accountFolder,
   accountRawPath,
+  accountStoreNames,
   accountStorePath,
   legacyAccountPaths,
   legacyWhatsAppDefaultStateDir,
@@ -56,7 +59,7 @@ import {
   type LayoutEnv,
 } from './olympus-layout.ts';
 import { captureGrantPathFromEnv, captureGrantSessionEvidence } from './messaging-capture-grant-file.ts';
-import { defaultSourceCorpusRegistryConfig } from './source-corpus-registry.ts';
+import { defaultSourceCorpusRegistryConfig, type SourceCorpusConfig } from './source-corpus-registry.ts';
 import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, sourceAccountMovePending, SourceRegistryError } from './source-registry.ts';
 
 const ARCHIVE_IMPORTS_SOURCE_ID = 'archive.imports';
@@ -80,6 +83,7 @@ export interface AccountLayoutDecision {
  */
 export function decideAccountLayout(sourceId: string, env: LayoutEnv = process.env): AccountLayoutDecision {
   if (!hasFolderLayout(sourceId)) return { layout: 'legacy', why: 'its source has no folder layout' };
+  if (!hasLegacyLayout(sourceId)) return { layout: 'folder', why: 'its source never had legacy paths' };
   const pin = pinnedLegacyBy(sourceId, env);
   if (pin) return { layout: 'legacy', why: `${pin} pins its files` };
   const root = dataRootState(env);
@@ -109,10 +113,12 @@ export function placedAccount(
   try {
     entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
   } catch (error) {
-    if (error instanceof SourceRegistryError) return { source_id: sourceId, slot, layout: hasAccountFolderOnDisk(sourceId, slot, env) ? 'folder' : 'legacy' };
+    if (error instanceof SourceRegistryError) {
+      return { source_id: sourceId, slot, layout: !hasLegacyLayout(sourceId) || hasAccountFolderOnDisk(sourceId, slot, env) ? 'folder' : 'legacy' };
+    }
     // The data folder itself cannot be worked out (a Linux layout that refuses this environment, say):
     // nothing is placed, and the legacy resolvers then fail exactly where they always did.
-    return { source_id: sourceId, slot, layout: 'legacy' };
+    return { source_id: sourceId, slot, layout: hasLegacyLayout(sourceId) ? 'legacy' : 'folder' };
   }
   return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
 }
@@ -202,6 +208,30 @@ export function resolvedStorePath(sourceId: string, name: string, env: LayoutEnv
   return accountStorePath(placedAccount(sourceId, env), name, env);
 }
 
+/**
+ * Every store the shipped corpus roster gives a source with a folder layout,
+ * one per corpus, at the path its account's layout puts it: what a reader of
+ * every account's stores (the ingestion ledger, a status count) opens, so it
+ * names no source. Imported archives' stores are listed by their families
+ * elsewhere (their corpora are not shipped defaults).
+ */
+export function placedRosterStores(env: LayoutEnv = process.env): Array<{
+  corpusId: string;
+  dbPath: string;
+  family: SourceCorpusConfig['family'];
+  trustDomain: SourceCorpusConfig['trustDomain'];
+}> {
+  return defaultSourceCorpusRegistryConfig().corpora.flatMap((corpus) => {
+    if (!hasFolderLayout(corpus.sourceId) || !accountStoreNames(corpus.sourceId).includes(corpus.trustDomain)) return [];
+    return [{
+      corpusId: corpus.corpusId,
+      dbPath: resolvedStorePath(corpus.sourceId, corpus.trustDomain, env),
+      family: corpus.family,
+      trustDomain: corpus.trustDomain,
+    }];
+  });
+}
+
 /** One of an account's raw files or folders, resolved the same way. */
 export function resolvedRawPath(
   sourceId: string,
@@ -254,7 +284,13 @@ export function storageAccountForCorpus(
   return { sourceId: unprefixed || corpus.corpusId };
 }
 
-/** One store the connector-store mount list declares: the source that owns it, and its path when the entry names one. */
+/**
+ * One store the connector-store mount list declares: the source that owns it,
+ * and its path when the entry names one that counts. A source with a folder
+ * layout names none (its stores are placed here, and the worker ignores the
+ * field), so only a mount of a source without one (Reflect, Roam, an
+ * operator's own) carries a path.
+ */
 export interface DeclaredConnectorStoreMount {
   sourceId: string;
   corpusId: string;
@@ -285,17 +321,77 @@ export function declaredConnectorStoreMounts(env: LayoutEnv = process.env): Decl
       corpusId,
       trustDomain: typeof record.trustDomain === 'string' ? record.trustDomain.trim() : '',
     });
-    const dbPath = typeof record.dbPath === 'string' && record.dbPath.trim() ? record.dbPath.trim() : undefined;
+    const dbPath = typeof record.dbPath === 'string' && record.dbPath.trim() && !hasFolderLayout(owner.sourceId)
+      ? record.dbPath.trim()
+      : undefined;
     found.push({ sourceId: owner.sourceId, corpusId, ...(dbPath ? { dbPath } : {}) });
   }
   return found;
 }
 
+// The per-store path settings delivery step 6 retired (owner decision 3), by
+// pattern: every `OLYMPUS_*_DB_PATH` (but the live ingestion dashboard
+// script's remote-host input, which names no store of this install), and the
+// archive record's own.
+const RETIRED_PATH_SETTING = /^(?!OLYMPUS_SOURCE_INGESTION_REMOTE_)OLYMPUS_\w+_DB_PATH$|^OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH$/;
+
+/**
+ * The retired path settings this environment still sets, in words: an
+ * `OLYMPUS_*_DB_PATH` (or the archive record's path), and a connector-store
+ * mount that names a path for a source whose stores Olympus places, other
+ * than the one it places them at or their usual legacy place. Nothing reads them any more, so a worker
+ * started with one would open an empty store where the files are not, and the
+ * account's data would look gone: the worker refuses to start instead, naming
+ * each one, until the files are moved to where Olympus keeps them (or the
+ * setting is removed).
+ */
+export function retiredPathSettings(env: LayoutEnv = process.env): string[] {
+  const found = Object.keys(env)
+    .filter((name) => RETIRED_PATH_SETTING.test(name) && env[name]?.trim())
+    .sort()
+    .map((name) => `${name}=${env[name]!.trim()}`);
+  // A list the worker cannot read cannot be shown to name no placed store.
+  if (declaredConnectorStoreMounts(env) === 'unreadable') found.push(`${MOUNTS_ENV} (cannot be read)`);
+  const mounts = declaredConnectorStoreMountPaths(env);
+  for (const mount of mounts) {
+    if (!hasFolderLayout(mount.sourceId) || !accountStoreNames(mount.sourceId).includes(mount.trustDomain)) continue;
+    const placed = resolvedStorePath(mount.sourceId, mount.trustDomain, env);
+    // The usual legacy place is fine too: it is where the account's files were
+    // before the boot migration moved them, and the lane ignores the path.
+    const usual = hasLegacyLayout(mount.sourceId)
+      ? [placed, accountStorePath({ source_id: mount.sourceId, slot: DEFAULT_ACCOUNT_SLOT, layout: 'legacy' }, mount.trustDomain, env)]
+      : [placed];
+    if (!usual.some((path) => resolve(path) === resolve(mount.dbPath))) {
+      found.push(`${MOUNTS_ENV} ${mount.corpusId} dbPath=${mount.dbPath} (Olympus keeps it at ${placed})`);
+    }
+  }
+  return found;
+}
+
+/** Every mount entry that names a path, with its owner: the raw declarations, before a folder layout drops the path. */
+function declaredConnectorStoreMountPaths(env: LayoutEnv): Array<{ sourceId: string; corpusId: string; trustDomain: string; dbPath: string }> {
+  let declared: unknown;
+  try {
+    declared = JSON.parse(env[MOUNTS_ENV]?.trim() || '[]');
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(declared)) return [];
+  return declared.flatMap((entry) => {
+    const record = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
+    const corpusId = typeof record.corpusId === 'string' ? record.corpusId.trim() : '';
+    const trustDomain = typeof record.trustDomain === 'string' ? record.trustDomain.trim() : '';
+    const dbPath = typeof record.dbPath === 'string' ? record.dbPath.trim() : '';
+    if (!corpusId || !dbPath) return [];
+    return [{ sourceId: storageAccountForCorpus({ corpusId, trustDomain }).sourceId, corpusId, trustDomain, dbPath }];
+  });
+}
+
 /**
  * What pins this source's files to their legacy paths, in words, when
- * something does: an env override, a connector-store mount (and, for
- * messaging, native capture ownership or a capture grant that names its
- * session). The boot migration leaves such an account where it is. It weighs
+ * something does: for messaging, a capture path env, native capture
+ * ownership or a capture grant that names its session. The boot migration
+ * leaves such an account where it is. It weighs
  * a messaging account's capture grant itself (`captureGrant: false`): a grant
  * that names the default legacy session is what every legacy pairing wrote, and
  * the move rewrites it (core/messaging-account-move.ts).
@@ -304,20 +400,14 @@ export function legacyPinFor(sourceId: string, env: LayoutEnv = process.env, opt
   return pinnedLegacyBy(sourceId, env, options.captureGrant !== false);
 }
 
-/** The override or mount that pins this source to the legacy layout, if any. */
+/** The capture env, native ownership or capture grant that pins this source to the legacy layout, if any. */
 function pinnedLegacyBy(sourceId: string, env: LayoutEnv, withGrant = true): string | undefined {
   for (const name of legacyOverrideEnvNames(sourceId)) {
     if (env[name]?.trim()) return name;
   }
   const native = nativeCaptureOwnerPin(sourceId, env);
   if (native) return native;
-  const grant = withGrant ? captureGrantPin(sourceId, env) : undefined;
-  if (grant) return grant;
-  const mounts = declaredConnectorStoreMounts(env);
-  // The worker refuses a list it cannot read; until it is fixed nothing may move.
-  if (mounts === 'unreadable') return `${MOUNTS_ENV} (unreadable)`;
-  const mount = mounts.find((candidate) => candidate.sourceId === sourceId);
-  return mount ? `${MOUNTS_ENV} (${mount.corpusId})` : undefined;
+  return withGrant ? captureGrantPin(sourceId, env) : undefined;
 }
 
 /**

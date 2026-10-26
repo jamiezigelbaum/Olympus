@@ -30,12 +30,12 @@ import {
   ACCOUNT_FOLDERS_DIR,
   ACCOUNT_TRASH_DIR,
   accountFoldersRoot,
+  accountTrashEntry,
   accountTrashRoot,
-  olympusDataPath,
   olympusDataRoot,
   type LayoutEnv,
 } from './core/olympus-layout.ts';
-import { declaredConnectorStoreMounts } from './core/source-placement.ts';
+import { declaredConnectorStoreMounts, retiredPathSettings } from './core/source-placement.ts';
 import { dataOwnerLockPath, isDataOwnerLockName } from './core/data-owner-lock.ts';
 import { Database } from 'bun:sqlite';
 import { DEFAULT_STORAGE_SLOT, storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
@@ -298,6 +298,7 @@ export function exportOlympusData(options: {
   sourceId?: string;
 } & LifecyclePathContext): DataExportResult {
   const destination = requirePath(options.destination, '--output');
+  refuseRetiredPathSettings(options, 'export');
   const selected = selectExportAccounts(options.sourceId, options);
   refuseExportDuringMove(selected, options);
   // Computed BEFORE anything is created: once mkdir -p has run, the directories
@@ -477,6 +478,7 @@ export function deleteOlympusData(options: {
   if (options.all !== true && !options.sourceId) {
     throw new OperationError('invalid_params', 'Data delete requires --all or --source <id>.');
   }
+  if (options.dryRun !== true) refuseRetiredPathSettings(options, 'delete');
   if (options.all === true) return deleteAllOlympusData(options);
 
   const account = requireAccount(options.sourceId, options);
@@ -768,7 +770,7 @@ function moveAccountFolderToTrash(folder: string, env: LayoutEnv, options: { bac
     mkdirSync(trash, { recursive: true, mode: 0o700 });
     const dataRoot = olympusDataRoot(env);
     if (lstatSync(trash).isDirectory() && canonicalPath(trash) === join(canonicalPath(dataRoot), relative(resolve(dataRoot), resolve(trash)))) {
-      renameSync(folder, join(trash, randomUUID()));
+      renameSync(folder, accountTrashEntry(randomUUID(), env));
       moved = true;
     }
   } catch {
@@ -779,6 +781,18 @@ function moveAccountFolderToTrash(folder: string, env: LayoutEnv, options: { bac
     return;
   }
   emptyAccountTrash(env, options);
+}
+
+/** The background trash removals a boot started and that have not finished yet. */
+const backgroundTrashRemovals = new Set<Promise<void>>();
+
+/**
+ * Resolves once every background trash removal started so far has finished
+ * (removed, or left for the next boot). The boot never waits for it; a caller
+ * that must see the trash empty (a test, a shutdown) awaits it.
+ */
+export async function accountTrashRemovalsSettled(): Promise<void> {
+  while (backgroundTrashRemovals.size > 0) await Promise.allSettled([...backgroundTrashRemovals]);
 }
 
 /** Empties `<data>/.trash`: what a delete renamed there, and leftovers of one a crash stopped. */
@@ -801,10 +815,12 @@ function emptyAccountTrash(env: LayoutEnv, options: { background: boolean }): vo
     }
   };
   if (options.background) {
-    void Promise.allSettled(names.map((name) => rm(join(trash, name), { recursive: true, force: true }))).then(removeEmptyTrash);
+    const emptied = Promise.allSettled(names.map((name) => rm(accountTrashEntry(name, env), { recursive: true, force: true }))).then(removeEmptyTrash);
+    backgroundTrashRemovals.add(emptied);
+    void emptied.finally(() => backgroundTrashRemovals.delete(emptied));
     return;
   }
-  for (const name of names) rmSync(join(trash, name), { recursive: true, force: true });
+  for (const name of names) rmSync(accountTrashEntry(name, env), { recursive: true, force: true });
   removeEmptyTrash();
 }
 
@@ -938,7 +954,24 @@ export function deleteOlympusDataWithCustody(options: {
   )();
 }
 
+/**
+ * A retired per-store path setting (core/source-placement.ts) means an
+ * account's files may sit where nothing resolves them any more: an export or a
+ * delete run now would miss them and report success. Refused, naming each,
+ * as the worker refuses to start.
+ */
+function refuseRetiredPathSettings(context: LifecyclePathContext, action: 'export' | 'delete'): void {
+  const retired = retiredPathSettings(envForContext(context));
+  if (retired.length === 0) return;
+  throw new OperationError(
+    'invalid_params',
+    `Refusing to ${action} local data while these path settings, which are no longer read, are set: ${retired.join('; ')}.`,
+    'Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then try again. Nothing was changed.',
+  );
+}
+
 function deleteUnderCustody(options: Parameters<typeof deleteOlympusDataWithCustody>[0]): DataDeleteWithCustodyResult {
+  if (options.dryRun !== true) refuseRetiredPathSettings(options, 'delete');
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
     throw new OperationError(
@@ -946,7 +979,7 @@ function deleteUnderCustody(options: Parameters<typeof deleteOlympusDataWithCust
       custody.requirement === 'source_disconnected'
         // Unpair or Disconnect by what the SOURCE is (a paired session), never
         // by what custody happened to observe: an unreadable registry on a
-        // Dropbox delete is still a Disconnect source.
+        // delete of a broker-connected source is still a Disconnect source.
         ? requireAccount(options.sourceId, options).files.pairing
           ? `Unpair ${options.sourceId} cleanly before deleting its local data (${custody.observed.replace(/_/g, ' ')}).`
           : `Disconnect ${options.sourceId} before deleting its local data.`
@@ -1034,7 +1067,7 @@ export function dataDeleteCustody(options: {
         next_action: held.nextAction,
       };
     }
-    // A paired-session source (Telegram, WhatsApp) has no handle to disconnect
+    // A paired-session source (a messaging account) has no handle to disconnect
     // and its card infers a live session from sync evidence, so "no handle" is
     // not "disconnected". Only a CLEAN Unpair is: the unpaired record says
     // `unpaired` and no pairing artifact is left on disk. Anything else is a
@@ -1138,9 +1171,8 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     // The registry: every account it lists is being deleted.
     ...registryDeleteTargets(context),
     // Approved remote-agent connections. Removing the database revokes every
-    // connection token at once. Named on its own because an explicit
-    // OLYMPUS_REMOTE_CONNECTIONS_DB_PATH or XDG_DATA_HOME can put it outside
-    // the known roots below.
+    // connection token at once. Named on its own because XDG_DATA_HOME can put
+    // it outside the known roots below.
     ...remoteConnectionsDeleteTargets(context),
     // Prepared photo copies (docs/design/photo-embeddings.md). Named on its
     // own because OLYMPUS_MEDIA_CACHE_DIR or XDG_DATA_HOME can put it outside
@@ -1324,8 +1356,8 @@ function sourceDeleteTargets(source: LifecycleAccount, context: LifecyclePathCon
     ...files.stores.flatMap((storePath) => [
       ...sqliteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID),
       // Each store's four-tier ledger is co-located with it (tier-ledger-path.ts),
-      // so it is found wherever the store is — a *_DB_PATH override, XDG, the
-      // WhatsApp state directory — and deleting a source takes its ledger rows.
+      // so it is found wherever the store is — an account folder, XDG, a capture
+      // state directory — and deleting a source takes its ledger rows.
       ...(storePath === ':memory:'
         ? []
         : sqliteTargets(tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID)),
@@ -1935,7 +1967,7 @@ function assertVerifiedExternalSqliteStore(path: string, storeId: string | undef
     throw new OperationError(
       'invalid_params',
       `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`,
-      'Check the configured OLYMPUS_*_DB_PATH value before retrying data deletion.',
+      'Check the store paths a connector-store mount or a capture setting names before retrying data deletion.',
     );
   }
   try {
@@ -1946,7 +1978,7 @@ function assertVerifiedExternalSqliteStore(path: string, storeId: string | undef
       throw new OperationError(
         'invalid_params',
         `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`,
-        'Check the configured OLYMPUS_*_DB_PATH value before retrying data deletion.',
+        'Check the store paths a connector-store mount or a capture setting names before retrying data deletion.',
       );
     }
     if (schemaVersion <= 0) {
@@ -1987,7 +2019,7 @@ function isStrictlyInside(path: string, root: string): boolean {
  * gateway state: whatever an env override or a default names).
  *
  * 1. Strictly inside an Olympus root, never equal to one and never above one: an
- *    override such as OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR=~/.local/share/olympus
+ *    override such as a capture state folder set to ~/.local/share/olympus
  *    would otherwise turn one source's delete into every source's.
  * 2. No symlink anywhere between the root and the target, the target itself
  *    included: the real path must equal the lexical path under the root's real
@@ -2062,8 +2094,8 @@ function assertRawStateTargetsContained(
       );
     }
   }
-  // A store the connector-store mount list places by path (Reflect, Roam, an
-  // operator's own) may sit anywhere, an account folder included: another
+  // A store the connector-store mount list places by path (a source with no
+  // folder layout, or an operator's own) may sit anywhere, an account folder included: another
   // source's mounted store and its sidecars are protected where they really are.
   const mounts = declaredConnectorStoreMounts(envForContext(context));
   if (mounts === 'unreadable' && overlapTargets.some((target) => target.kind === 'account_folder')) {
@@ -2099,8 +2131,8 @@ function assertRawStateTargetsContained(
           // A target legitimately inside its OWN source's other path is not
           // reachable here: own paths are not in the protected set.
           if (target.kind === 'account_folder') {
-            // Typically another source's retained path override (a legacy
-            // account pinned by OLYMPUS_*_DB_PATH) pointing into this folder.
+            // Typically another source's capture path or a mounted store
+            // pointing into this folder.
             throw new OperationError(
               'invalid_params',
               `Refusing to delete the account folder because it overlaps another source's or shared Olympus data (${protectedPath}): ${target.path}`,

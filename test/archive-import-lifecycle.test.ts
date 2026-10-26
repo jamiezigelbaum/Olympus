@@ -10,11 +10,11 @@ import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { archiveFamilyProvider, archiveImportFamilies, type ArchiveConnectorFactory } from '../src/core/archive-formats.ts';
 import { defaultConfig } from '../src/core/config.ts';
-import { REMOTE_CONNECTIONS_DB_PATH_ENV } from '../src/core/remote-connections.ts';
+import { resolveRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
 import {
   openWaitingPrivateQuestionStore,
   waitingPrivateQuestionsDbPath,
@@ -545,8 +545,9 @@ describe('deleting another source', () => {
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const homeDir = join(dir, 'home');
     mkdirSync(homeDir);
-    const env = { [REMOTE_CONNECTIONS_DB_PATH_ENV]: join(dir, 'remote-connections.sqlite') };
-    const inboxPath = waitingPrivateQuestionsDbPath(env[REMOTE_CONNECTIONS_DB_PATH_ENV]);
+    const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'data') };
+    const inboxPath = waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
+    mkdirSync(dirname(inboxPath), { recursive: true });
     const inbox = openWaitingPrivateQuestionStore(inboxPath);
     const ask = (question: string, provider: string, accountScope: string, corpusId: string) => {
       const ref = inbox.record(inbox.ticket('synthetic-agent'), { question, state: 'waiting', surface: 'remote' })!;

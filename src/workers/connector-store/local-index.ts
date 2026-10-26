@@ -3645,11 +3645,12 @@ export class LocalConnectorStore {
   /**
    * Tombstone this store's copy of an item outside a sync: Secrets found on a
    * routed item, or a provider deletion of one. Chunks, FTS rows and vectors
-   * go, as for any tombstone; the identity row stays.
+   * go, as for any tombstone; the identity row stays. With `insert` an item this store never saw gets a
+   * tombstone row of its own (a Secret's location, or a deletion's version).
    */
   tombstoneCopy(
     identity: SourceItemIdentity,
-    options: { connectorId: string; trustTier?: SourceTrustTier },
+    options: { connectorId: string; trustTier?: SourceTrustTier; insert?: true },
   ): boolean {
     const syncRunId = `connector-tier-copy-${randomUUID()}`;
     const startedAt = nowIso();
@@ -3673,7 +3674,7 @@ export class LocalConnectorStore {
           'observed',
           syncRunId,
           options.trustTier,
-          true,
+          options.insert !== true,
         );
       })();
     } finally {
@@ -8082,7 +8083,8 @@ export class LocalConnectorStore {
             && item.content.kind === 'metadata_only'
           ) {
             try {
-              itemForStorage = await connector.fetchItem(item.identity.localItemId);
+              // The hold belongs to the listed item for its input, not to the object: a fetched replacement keeps it.
+              itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
               consecutiveContentFetchFailures = 0;
             } catch {
               contentFetchFailed = true;
@@ -9174,7 +9176,7 @@ export class LocalConnectorStore {
     if (text === undefined && item.content.kind === 'metadata_only') {
       let fetched: RawItem;
       try {
-        fetched = await connector.fetchItem(item.identity.localItemId);
+        fetched = carryHold(item, await connector.fetchItem(item.identity.localItemId));
         onContentFetchSuccess?.();
       } catch {
         gaps.push(contentFetchFailedGap(item));
@@ -14019,6 +14021,11 @@ function migrationFingerprint(contentHash: string | null, chunkHashes: readonly 
     .update('\u0000')
     .update(chunkHashes.join('\u0000'))
     .digest('hex');
+}
+
+/** An item fetched in place of a listed one keeps the listed item's hold until the private model has judged it. */
+function carryHold(listed: RawItem, fetched: RawItem): RawItem {
+  return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
 }
 
 /** The text the store would chunk for an item, exactly as the store reads it. */

@@ -90,7 +90,7 @@ describe('WhatsApp: owner chat rules from tier-rules.json', () => {
     // No lane rules at all: the owner's rules come only from the installed file.
     const lane = createWhatsAppTierLane({
       store,
-      env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'whatsapp-internal.db') },
+      env: { HOME: join(root, 'home') },
     });
     closers.push(() => lane.newStores.internal?.current()?.close());
     return {
@@ -140,8 +140,8 @@ describe('an edited rules file applies at the next pass, without a restart', () 
     const root = workspace();
     const rulesPath = join(root, 'tier-rules.json');
     const env = {
-      OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
-      OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-public.sqlite'),
+      // The tier stores go where the layout puts them, under this test's own home.
+      HOME: join(root, 'home'),
       OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(root, 'no-exclusions.json'),
     };
     configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: rulesPath } });

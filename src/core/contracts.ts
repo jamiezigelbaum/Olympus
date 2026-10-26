@@ -86,14 +86,17 @@ export interface RawItem {
 //
 // `incomplete` says the item is not whole at its newest version: an older or
 // unversioned row is still active beside it, or a leg that should hold it has
-// no active row. A record of that version or a newer one completes it; an
-// older one never applies. `tombstoned` says the rows at the newest version
+// no active row, or a body is still owed to a leg. A record of that version or a
+// newer one completes it; an older one never applies, except the record whose
+// body is owed (`owedBodyVersion`, older than `version` when a newer names-only
+// record took an older record's body): replaying it finishes the write. `tombstoned` says the rows at the newest version
 // are all tombstones (deleted, or a Secret kept as a location): only a newer
 // record, or live's own word at the same version, brings the item back.
 export interface StoredItemState {
   version?: string;
   hasContent: boolean;
   incomplete?: true;
+  owedBodyVersion?: string;
   tombstoned?: true;
 }
 

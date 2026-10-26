@@ -91,6 +91,7 @@ import {
   storePaths as fixtureStorePaths,
   tempDir,
 } from './helpers/tier-fixtures.ts';
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 
 // Built at runtime: the repository refuses literal credential patterns.
 const FAKE_AWS_KEY = ['AKIA', 'QRSTUVWXYZ234567'].join('');
@@ -112,8 +113,8 @@ const closers: Array<() => void> = [];
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'olympus-tier-fixes-'));
   env = {
-    OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
-    OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-public.sqlite'),
+    // The tier stores go where the layout puts them, under this test's own home.
+    HOME: join(root, 'home'),
     OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(root, 'no-exclusions.json'),
     OLYMPUS_TIER_RULES_PATH: join(root, 'olympus', 'tier-rules.json'),
     OLYMPUS_PRIVACY_PROFILE_PATH: join(root, 'olympus', 'privacy.json'),
@@ -624,7 +625,7 @@ describe('10. olympus_search is not an answer on the private pool', () => {
 
 describe('12. a per-item owner override applies to an item already stored (no file change)', () => {
   const bank = identity('id:bank');
-  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), env.OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH!];
+  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), resolvedStorePath('dropbox.files', 'internal', env)];
   const currentCopies = (install: Install, id: ReturnType<typeof identity>) =>
     install.lane.ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId);
   /** How many evidence items the search returns for one title (a duplicate across stores would be two). */
@@ -716,7 +717,7 @@ describe('12. a per-item owner override applies to an item already stored (no fi
 describe('12b. owner overrides under interleaving (review of PR #255)', () => {
   const bank = identity('id:bank');
   const bankItem = { ...bank, family: 'file' as const, localItemId: 'personal:id:bank' };
-  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), env.OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH!];
+  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), resolvedStorePath('dropbox.files', 'internal', env)];
   const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
     ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId);
 
@@ -849,7 +850,7 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
 
 describe('12c. owner overrides under interleaving, round 2 (review of PR #255)', () => {
   const bank = identity('id:bank');
-  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), env.OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH!];
+  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), resolvedStorePath('dropbox.files', 'internal', env)];
   const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
     ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId).sort();
   const verdicts = (tier: string, category: string, confidence: number) =>

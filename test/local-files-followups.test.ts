@@ -28,7 +28,7 @@ import {
   LOCAL_FILES_POLICY_SOURCE,
   type LocalFilesContentScope,
 } from '../src/workers/local-files/scope.ts';
-import { createLocalFilesConnectorStore, LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV } from '../src/workers/local-files/store.ts';
+import { createLocalFilesConnectorStore } from '../src/workers/local-files/store.ts';
 import { VolumeResolver, probeIgnoresCaseIn } from '../src/workers/local-files/volume-identity.ts';
 import {
   WatchHub, watchIgnoreGlobs, watchWouldIgnore, type ParcelWatcherModule, type WatchEvent,
@@ -340,7 +340,8 @@ describe('files directly under the whole computer\'s top', () => {
   test('the store lists exactly the items directly under `/`, active ones only', async () => {
     const base = scratch();
     const store = createLocalFilesConnectorStore({
-      [LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV]: join(base, 'store.sqlite'),
+      // The store goes where its layout puts it, under a home of its own.
+      HOME: join(base, 'olympus-home'),
       [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: join(base, 'none.json'),
     }, { policy: defaultLocalFilesIngestionPolicy({ stillImagesRead: false }) });
     cleanups.push(() => store.close());
