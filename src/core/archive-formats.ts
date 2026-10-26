@@ -1005,6 +1005,8 @@ export const ARCHIVE_COMMON_FINDINGS = {
   fileDamaged: 'file_damaged',
   /** Skipped: items the listing produced that the archive's stores already held from an earlier file, so they were imported once. */
   itemRepeated: 'item_repeated',
+  /** Items the stores refused to take, failing closed (the tier they would have been stored in is not the store's), so they were not imported. */
+  itemRefused: 'item_refused',
   /** Skipped: files in a chosen folder or zip the first look did not reach, so any export among them was not imported. */
   filesNotLookedAt: 'files_not_looked_at',
   /** Skipped: files in a chosen folder that look like exports but were not taken, because their names do not say so. */

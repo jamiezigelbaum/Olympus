@@ -284,7 +284,8 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
               thisPass.set(item.identity.localItemId, {
                 ...(item.identity.sourceVersion !== undefined ? { version: item.identity.sourceVersion } : {}),
                 hasContent: hasContent(item) || (!deleted && before?.hasContent === true && before.tombstoned !== true),
-                ...(deleted ? { tombstoned: true as const } : {}),
+                // Names alone do not bring a deleted item or a Secret back: it stays one, at the newer version.
+                ...(deleted || (before?.tombstoned === true && !hasContent(item)) ? { tombstoned: true as const } : {}),
               });
               units.push({ record: offset + position, entry: index, item });
             });
@@ -311,11 +312,19 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
             for (const [id, at] of winner) {
               const won = units[at]!;
               if (isDeleted(won) || hasContent(won.item)) continue;
+              // Only content from after the item's last deletion in this page: nothing of a deleted state comes back.
               let older: PageUnit | undefined;
+              let deletion: PageUnit | undefined;
               units.forEach((unit, from) => {
-                if (from !== at && unit.item.identity.localItemId === id && !isDeleted(unit) && hasContent(unit.item)) older = unit;
+                if (unit.item.identity.localItemId !== id || from >= at) return;
+                if (isDeleted(unit)) { older = undefined; deletion = unit; }
+                else if (hasContent(unit.item)) { older = unit; deletion = undefined; }
               });
-              if (older) units[at] = { ...won, item: { ...won.item, content: older.item.content } };
+              // The merged item resumes from the record that brought its content: a pass cut before it reads that
+              // record again, so the content is never lost to the cut.
+              if (older) units[at] = { record: older.record, entry: older.entry, item: { ...won.item, content: older.item.content } };
+              // Names alone never revive a deleted item: after a deletion in this page it stays a deletion, at the newer version.
+              else if (deletion) units[at] = { record: deletion.record, entry: deletion.entry, item: { ...deletion.item, identity: { ...deletion.item.identity, ...(won.item.identity.sourceVersion !== undefined ? { sourceVersion: won.item.identity.sourceVersion } : {}) } } };
             }
             const kept = new Set(winner.values());
             for (const [at, unit] of units.entries()) {
