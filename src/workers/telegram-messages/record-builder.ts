@@ -17,22 +17,43 @@ import type { TelegramMessagesCorpusTrustDomain } from './corpus-adapter.ts';
 // The time a Telegram version ends with: the edit time, else the sent time,
 // then (optionally) a digest of the reactions it saw.
 const VERSION_TIME = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))(?::r[0-9a-f]{1,64})?$/;
+// Where in the spool a live capture was written: `<day file>:<line>`, both in sort order.
+const CAPTURE_MARK = '~at:';
+
+/**
+ * A live capture's version: the helper's version and where in the spool the
+ * capture sits, which only ever grows (the spool is append-only, and a
+ * Secrets rewrite keeps every record in its place). Two captures of one
+ * message at the same edit time (its reactions changed) are then ordered, and
+ * a capture read again after its cursor was reset is never newer than the
+ * one the store took after it.
+ */
+export function telegramCaptureVersion(version: string, file: string, line: number): string {
+  return `${version}${CAPTURE_MARK}${file}:${String(line).padStart(10, '0')}`;
+}
 
 /**
  * The source's own order of two versions of one message: by the edit (else
- * sent) time a version carries. Versions of the same time are the same
- * version, whatever reactions each saw: no input can tell which reaction count
- * is the newer, so on a tie live's word is kept (core/source-inputs.ts). A
- * version with no time (an entry of the account export, an old record) orders
- * as a tie too.
+ * sent) time a version carries, then, at the same time, by where in the spool
+ * each was captured. A version with no capture mark (an export's, a row
+ * stored before captures were marked) is older than a marked one at the same
+ * time, so a tie between an export and live keeps live's copy. A version with
+ * no time (an entry of the account export, an old record) orders as a tie.
  */
 export function compareTelegramVersions(a: string, b: string): number {
   if (a === b) return 0;
-  const left = VERSION_TIME.exec(a);
-  const right = VERSION_TIME.exec(b);
+  const [leftVersion = '', leftMark] = a.split(CAPTURE_MARK);
+  const [rightVersion = '', rightMark] = b.split(CAPTURE_MARK);
+  const left = VERSION_TIME.exec(leftVersion);
+  const right = VERSION_TIME.exec(rightVersion);
   if (!left || !right) return 0;
   const difference = Date.parse(left[1]!) - Date.parse(right[1]!);
-  return Number.isFinite(difference) ? Math.sign(difference) : 0;
+  if (!Number.isFinite(difference)) return 0;
+  if (difference !== 0) return Math.sign(difference);
+  if (leftMark === rightMark) return 0;
+  if (leftMark === undefined) return -1;
+  if (rightMark === undefined) return 1;
+  return leftMark < rightMark ? -1 : 1;
 }
 
 /**
@@ -91,14 +112,6 @@ export interface TelegramRecordItems {
 
 export function telegramRecordBuilder(options: {
   trustDomain?: TelegramMessagesCorpusTrustDomain;
-  /**
-   * The live capture's builder: a live record of a message's current version
-   * always says something the store should hear (its reactions and other
-   * metadata change without moving the edit time), so on a version tie it is
-   * applied as one carrying content, as live's word wins a tie. An export's
-   * record at the same version adds only content the stored item lacks.
-   */
-  live?: boolean;
   fetchItem(localItemId: string, options?: SourceConnectorFetchOptions): Promise<RawItem>;
   authenticate?(): Promise<void>;
 }): SourceRecordBuilder<TelegramRecordItems> {
@@ -109,7 +122,7 @@ export function telegramRecordBuilder(options: {
       const authoredAt = index === 0 ? item.metadata['sentAt'] : undefined;
       return {
         identity: item.identity,
-        bringsContent: options.live === true || item.content.kind !== 'metadata_only',
+        bringsContent: item.content.kind !== 'metadata_only',
         ...(typeof authoredAt === 'string' ? { authoredAt } : {}),
       };
     }),
