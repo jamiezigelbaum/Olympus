@@ -5,7 +5,8 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { V0_4_PUBLIC_PACKAGE_FILES } from '../src/core/public-surface.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnectorListPage } from '../src/core/contracts.ts';
@@ -203,6 +204,15 @@ describe('reactions aggregate from a persistent index', () => {
     }
     expect(budgetPasses).toBeGreaterThan(1);
     expect((reEmitted?.metadata['reactions'] as Array<{ key: string }>).map((entry) => entry.key)).toEqual(['👍']);
+  });
+});
+
+describe('the packaged bridge', () => {
+  test('every source file the bridge is built from ships in the release package', () => {
+    const bridge = join(import.meta.dir, '..', 'tools', 'whatsapp-bridge');
+    const sources = readdirSync(bridge).filter((name) => name.endsWith('.go') && !name.endsWith('_test.go'));
+    expect(sources).toContain('capture_status.go');
+    for (const name of sources) expect(V0_4_PUBLIC_PACKAGE_FILES).toContain(`tools/whatsapp-bridge/${name}`);
   });
 });
 
