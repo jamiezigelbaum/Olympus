@@ -60539,8 +60539,19 @@ class TieredStoreSet {
     }
     const pending = this.ledger.writeIntent(identity2);
     const hidden = (pending?.kind === "deletion" || pending?.kind === "secret") && pending.version !== undefined ? pending.version : undefined;
-    if (found.length === 0)
-      return hidden === undefined ? undefined : { version: hidden, hasContent: false, tombstoned: true };
+    if (found.length === 0) {
+      if (pending?.version === undefined)
+        return;
+      if (hidden !== undefined)
+        return { version: hidden, hasContent: false, tombstoned: true };
+      const owesBody = pending.kind === "content" || pending.kind === "names";
+      return {
+        version: pending.version,
+        hasContent: false,
+        incomplete: true,
+        ...owesBody && pending.bodyVersion !== undefined ? { owedBodyVersion: pending.bodyVersion } : {}
+      };
+    }
     const newest = found.reduce((best, leg) => leg.version !== undefined && (best === undefined || compareVersions(leg.version, best) > 0) ? leg.version : best, undefined);
     const top = newest === undefined ? found : found.filter((leg) => leg.version !== undefined && compareVersions(leg.version, newest) === 0);
     const below = found.filter((leg) => !top.includes(leg));
@@ -60551,7 +60562,8 @@ class TieredStoreSet {
     const owedBody = (owed?.kind === "content" || owed?.kind === "names") && owed.version !== undefined && !tombstoned;
     const incomplete = owedBody;
     const owedBodyVersion = owedBody ? owed?.bodyVersion : undefined;
-    const version = intentLeads ? hidden : owedBody && (newest === undefined || compareVersions(owed.version, newest) > 0) ? owed.version : newest;
+    const moving = pending?.kind === "advance" && pending.version !== undefined && (newest === undefined || compareVersions(pending.version, newest) > 0) ? pending.version : undefined;
+    const version = intentLeads ? hidden : moving !== undefined ? moving : owedBody && (newest === undefined || compareVersions(owed.version, newest) > 0) ? owed.version : newest;
     return {
       ...version !== undefined ? { version } : {},
       hasContent: !intentLeads && topActive.some((leg) => leg.chunkCount > 0),
