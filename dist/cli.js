@@ -52203,6 +52203,7 @@ var init_vocabulary = __esm(() => {
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
       system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
       message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
+      match_near_miss: { one: "1 message may also be in the live chat, shown differently there (a renamed contact, an edited caption), so it was kept as its own", many: "{n} messages may also be in the live chat, shown differently there (a renamed contact, an edited caption), so each was kept as its own" },
       status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
       note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
       note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
@@ -52255,6 +52256,7 @@ var init_vocabulary = __esm(() => {
       message_content_unsupported: "not_imported",
       system_message: "how_read",
       message_empty: "how_read",
+      match_near_miss: "how_read",
       message_without_text: "how_read",
       status_updates: "not_imported",
       service_message: "not_imported",
@@ -74953,7 +74955,7 @@ function createWhatsAppLiveSourceConnector(options) {
     for (const file of listSpoolFiles(spoolDir)) {
       for (const line of spoolFileLines(join63(spoolDir, file))) {
         const message2 = parseSpoolLine(line);
-        if (message2 === undefined || isWhatsAppStatusBroadcast(message2.chatJid))
+        if (message2 === undefined)
           continue;
         if (message2.reactionTargetId === providerItemId)
           reactionIndex.add(message2);
@@ -75007,23 +75009,82 @@ function compareWhatsAppVersions(a, b) {
     return Math.sign(left - right);
   return a < b ? -1 : a > b ? 1 : 0;
 }
-function createRecordBuilder(account, fetchItem, authenticate) {
+function createRecordBuilder(account, fetchItem, authenticate, readChild) {
   return {
     family: "chat",
-    entriesOf: (record) => [{
-      identity: recordIdentity(record, account),
-      bringsContent: recordBringsContent(record) || record.reactions !== undefined,
-      authoredAt: record.timestamp
-    }],
+    entriesOf: (record) => {
+      const own3 = recordIdentity(record, account);
+      return [
+        {
+          identity: own3,
+          bringsContent: recordBringsContent(record) || record.reactions !== undefined,
+          authoredAt: record.timestamp
+        },
+        ...(record.children ?? []).map((child) => ({ identity: childIdentity(own3, child), bringsContent: false }))
+      ];
+    },
     compareVersions: compareWhatsAppVersions,
     build: (record, wanted) => {
-      const item = rawItemFromSpoolMessage(record, account, nowIso3(), record.reactions);
-      return wanted.has(item.identity.localItemId) ? [item] : [];
+      const fetchedAt = nowIso3();
+      const items = [];
+      const own3 = rawItemFromSpoolMessage(record, account, fetchedAt, record.reactions);
+      if (wanted.has(own3.identity.localItemId))
+        items.push(own3);
+      for (const child of record.children ?? []) {
+        const item = rawItemFromChild(record, child, account, fetchedAt);
+        if (wanted.has(item.identity.localItemId))
+          items.push(item);
+      }
+      return items;
     },
-    fetchItem: (localItemId) => fetchItem(localItemId),
+    async fetchItem(localItemId, fetchOptions) {
+      const locator = fetchOptions?.deferredBytes?.locator;
+      if (locator === undefined || !localItemId.includes("#child:"))
+        return fetchItem(localItemId);
+      if (!readChild)
+        throw new Error("This WhatsApp account cannot read imported media yet.");
+      const bytes = readChild(locator, {});
+      return {
+        identity: childIdentityFromLocalId(localItemId, account),
+        mimeType: "application/octet-stream",
+        content: { kind: "bytes", mimeType: "application/octet-stream", bytes },
+        metadata: Object.freeze({}),
+        fetchedAt: nowIso3()
+      };
+    },
     classificationSignals: whatsAppClassificationSignals,
     authenticate
   };
+}
+function createWhatsAppRecordBuilder(options) {
+  const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty4(options.account, "WhatsApp account");
+  const live = createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account });
+  return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), () => live.authenticate(), options.readChild);
+}
+function childIdentity(parent, child) {
+  return {
+    ...parent,
+    providerItemId: `${parent.providerItemId}#child:${child.key}`,
+    localItemId: `${parent.localItemId}#child:${child.key}`,
+    parent: { providerItemId: parent.providerItemId, localItemId: parent.localItemId }
+  };
+}
+function childIdentityFromLocalId(localItemId, account) {
+  const { chatJid, providerItemId } = localItemIdParts(localItemId, account);
+  const parentId = providerItemId.slice(0, providerItemId.indexOf("#child:"));
+  const parentLocal = localItemId.slice(0, localItemId.indexOf("#child:"));
+  return {
+    family: "chat",
+    provider: PROVIDER,
+    accountScope: account,
+    providerItemId,
+    ...chatJid ? { providerConversationId: chatJid } : {},
+    localItemId,
+    parent: { providerItemId: parentId, localItemId: parentLocal }
+  };
+}
+function parseWhatsAppSpoolRecord(line) {
+  return parseSpoolLine(line);
 }
 function readMessageAt(spoolDir, file, offset, budget) {
   const own3 = { bytesLeft: WHATSAPP_SPOOL_MAX_RECORD_BYTES + TARGET_READ_CHUNK_BYTES };
@@ -75153,7 +75214,7 @@ function noteLine(index, line, place) {
   if (line.trim() === "")
     return;
   const message2 = parseSpoolLine(line);
-  if (message2 === undefined || isWhatsAppStatusBroadcast(message2.chatJid))
+  if (message2 === undefined)
     return;
   if (isWhatsAppReactionLine(message2)) {
     const reaction = whatsAppReactionEntryOf(message2);
@@ -75222,8 +75283,6 @@ function readSpoolPage(spoolDir, start, limit, pass) {
         }
         if (index && !index.covers(place))
           noteLine(index, line, place);
-        if (isWhatsAppStatusBroadcast(message2.chatJid))
-          continue;
         if (isWhatsAppReactionLine(message2)) {
           reactions.push(message2);
           const targetId = message2.reactionTargetId;
@@ -75345,6 +75404,7 @@ function parseSpoolLine(line) {
     chatName: optionalString8(record["chat_name"]),
     senderJid: optionalString8(record["sender_jid"]),
     senderName: optionalString8(record["sender_name"]),
+    ...nonEmptyString2(record["sender_contact_name"]) === undefined ? {} : { senderContactName: nonEmptyString2(record["sender_contact_name"]) },
     fromMe,
     timestamp: timestamp2,
     text: text2,
@@ -75417,18 +75477,21 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
   const redacted = message2.secretRedacted === true;
   const text2 = spoolMessageText(message2);
   const hasPreviewEnrichment = text2 !== resolveMentionText(message2.text, message2.mentions);
+  const status = isWhatsAppStatusBroadcast(message2.chatJid);
+  const senderName = message2.senderContactName || message2.senderName;
   return {
     identity: identity2,
     mimeType: isMedia ? message2.mediaMime ?? "application/octet-stream" : TEXT_MIME_TYPE,
     content: isMedia || redacted ? { kind: "metadata_only" } : { kind: "text", text: text2 },
     metadata: Object.freeze({
-      chat: message2.chatName || message2.chatJid,
-      sender: message2.senderName || message2.senderJid,
+      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || message2.chatJid,
+      sender: senderName || message2.senderJid,
       senderId: message2.senderJid || undefined,
-      senderLabel: message2.senderName || message2.senderJid || undefined,
+      senderLabel: senderName || message2.senderJid || undefined,
       senderIsOwner: message2.fromMe,
       fromMe: message2.fromMe,
       sentAt: message2.timestamp,
+      ...status ? { recordKind: "status" } : {},
       ...reactions === undefined ? {} : { reactions },
       ...hasPreviewEnrichment && !redacted ? { searchText: text2 } : {},
       ...redacted ? { secretRedacted: true } : {},
@@ -75437,6 +75500,33 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
       ...mediaMetadata(message2)
     }),
     fetchedAt
+  };
+}
+function rawItemFromChild(message2, child, account, fetchedAt) {
+  const parent = recordIdentity(message2, account);
+  const status = isWhatsAppStatusBroadcast(message2.chatJid);
+  const senderName = message2.senderContactName || message2.senderName;
+  return {
+    identity: childIdentity(parent, child),
+    mimeType: child.mimeType,
+    content: { kind: "metadata_only" },
+    metadata: Object.freeze({
+      name: child.name,
+      title: child.name,
+      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || message2.chatJid,
+      sender: senderName || message2.senderJid,
+      senderLabel: senderName || message2.senderJid || undefined,
+      senderIsOwner: message2.fromMe,
+      fromMe: message2.fromMe,
+      sentAt: message2.timestamp,
+      ...message2.mediaType === undefined ? {} : { mediaType: message2.mediaType }
+    }),
+    fetchedAt,
+    deferredBytes: {
+      locator: child.locator ?? "",
+      available: child.available && child.locator !== undefined,
+      ...child.sizeBytes !== undefined ? { sizeBytes: child.sizeBytes } : {}
+    }
   };
 }
 function spoolMessageText(message2) {
@@ -75475,7 +75565,7 @@ function redactWhatsAppLiveSpoolSecrets(options) {
     ...through ? { through } : {},
     redact: (line) => {
       const message2 = parseSpoolLine(line);
-      if (message2 === undefined || isWhatsAppStatusBroadcast(message2.chatJid))
+      if (message2 === undefined)
         return;
       if (isWhatsAppReactionLine(message2))
         return;
@@ -75650,7 +75740,7 @@ function optionalStringRecord(value) {
 function nowIso3() {
   return new Date().toISOString();
 }
-var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CURSOR2, LEGACY_CURSOR;
+var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, WHATSAPP_STATUS_CHAT_LABEL = "Status updates", CURSOR2, LEGACY_CURSOR;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
@@ -77488,10 +77578,10 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "whatsapp.personal.messages",
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "optional exports", "exclude Status broadcasts"],
+      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once; WhatsApp notices left out)", "Status posts as their own kind"],
       dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
-      supported_formats: ["message text", "link previews", "reactions", "media metadata", "voice-note transcript sidecars"],
+      supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],
       doctor_lane: {
         provider: "whatsapp_personal",
         capability: "whatsapp.personal.messages.sync"
@@ -162178,7 +162268,11 @@ function createWhatsAppArchiveConnector(input) {
         ...authoredAt ? { authoredAt } : {},
         contentHash: textHash,
         sourceFile: unit.file.relPath,
-        ...unit.entry ? { sourceMember: unit.entry.name } : {}
+        ...unit.entry ? { sourceMember: unit.entry.name } : {},
+        sourceFileIndex: unit.fileIndex,
+        writtenAt: header.sentAt,
+        timePrecision: header.style.at(-2) === "s" ? "second" : "minute",
+        occurrence: apart
       }),
       fetchedAt: new Date().toISOString()
     };
@@ -167074,6 +167168,11 @@ function bindInputToFiles(input, manifestSha256) {
     }
   };
 }
+function withInputs(connector, builder) {
+  const withMethod = Object.create(connector);
+  withMethod.forInput = (input) => inputConnector(builder, input);
+  return withMethod;
+}
 function observingIntake(input, observe) {
   return { inputId: input.inputId, kind: input.kind, records: (options) => input.records(options), observeIntake: observe };
 }
@@ -169886,6 +169985,767 @@ var init_source_account_migration = __esm(() => {
   };
 });
 
+// src/workers/archive-import/input-media.ts
+function archiveInputMediaLocator(ref) {
+  if (!ARCHIVE_ID.test(ref.archiveId) || !BINDING_ID.test(ref.bindingId))
+    throw new Error("An archive media locator needs a plain archive and binding id.");
+  return `${PREFIX2}${ref.archiveId}:b:${ref.bindingId}`;
+}
+function archiveInputZipMediaLocator(ref) {
+  if (!ARCHIVE_ID.test(ref.archiveId) || !Number.isSafeInteger(ref.fileIndex) || ref.fileIndex < 0 || !Number.isSafeInteger(ref.memberIndex) || ref.memberIndex < 0) {
+    throw new Error("An archive zip media locator needs a plain archive id and two places.");
+  }
+  return `${PREFIX2}${ref.archiveId}:z:${ref.fileIndex}:${ref.memberIndex}`;
+}
+function parseArchiveInputMedia(locator) {
+  if (!locator.startsWith(PREFIX2))
+    return;
+  const parts = locator.slice(PREFIX2.length).split(":");
+  const [archiveId, kind] = parts;
+  if (archiveId === undefined || !ARCHIVE_ID.test(archiveId))
+    return;
+  if (kind === "b" && parts.length === 3 && BINDING_ID.test(parts[2]))
+    return { kind: "binding", archiveId, bindingId: parts[2] };
+  if (kind === "z" && parts.length === 4 && /^\d{1,9}$/u.test(parts[2]) && /^\d{1,9}$/u.test(parts[3])) {
+    return { kind: "zip", archiveId, fileIndex: Number(parts[2]), memberIndex: Number(parts[3]) };
+  }
+  return;
+}
+function servedRecord(state, archiveId) {
+  let record5;
+  try {
+    record5 = state.get(archiveId);
+  } catch {
+    return;
+  }
+  if (!record5 || record5.status === "removing" || record5.target === undefined)
+    return;
+  return record5;
+}
+function readArchiveInputMedia(locator, deps, options = {}) {
+  const parsed = parseArchiveInputMedia(locator);
+  if (!parsed)
+    throw new FileExtractionSourceError("source_item_not_found");
+  const record5 = servedRecord(deps.state, parsed.archiveId);
+  if (!record5)
+    throw new FileExtractionSourceError("source_item_not_found");
+  const maxBytes = options.maxBytes ?? ARCHIVE_MEDIA_DEFAULT_READ_BYTES;
+  let root;
+  try {
+    root = ScopeRoot.open(record5.root_path);
+  } catch {
+    throw new FileExtractionSourceError("source_version_gone");
+  }
+  try {
+    return parsed.kind === "binding" ? readBinding(deps, record5, root, parsed.bindingId, maxBytes) : readZipMember(record5, root, parsed, maxBytes);
+  } catch (error2) {
+    if (error2 instanceof FileExtractionSourceError)
+      throw error2;
+    if (error2 instanceof ScopeSafeError) {
+      if (error2.code === "too_large")
+        throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_version_gone");
+    }
+    if (error2 instanceof ZipMemberError || error2 instanceof ZipFormatError) {
+      throw new FileExtractionSourceError("source_content_unavailable");
+    }
+    throw error2;
+  } finally {
+    root.close();
+  }
+}
+function readBinding(deps, record5, root, bindingId, maxBytes) {
+  if (!deps.bindings)
+    throw new FileExtractionSourceError("source_item_not_found");
+  const access = archiveMediaAccess({ bindings: deps.bindings, archiveId: record5.archive_id, root, chosenRelPath: record5.chosen_rel_path });
+  return access.read(bindingId, { maxBytes });
+}
+function readZipMember(record5, root, ref, maxBytes) {
+  const file = record5.files[ref.fileIndex];
+  if (!file)
+    throw new FileExtractionSourceError("source_item_not_found");
+  let reader;
+  try {
+    reader = root.openFile(file.rel_path, {
+      expected: { dev: file.dev, ino: file.ino, size: file.size, mtimeMs: file.mtime_ms }
+    });
+    const zip = ZipArchive.open(reader);
+    if (file.members) {
+      const table = zip.memberTable();
+      if (table.count !== file.members.count || table.sha256 !== file.members.sha256) {
+        throw new FileExtractionSourceError("source_version_gone");
+      }
+    }
+    let entry;
+    for (const candidate of zip.entries()) {
+      if (candidate.index === ref.memberIndex) {
+        entry = candidate;
+        break;
+      }
+    }
+    if (!entry || entry.isDirectory)
+      throw new FileExtractionSourceError("source_item_not_found");
+    if (entry.uncompressedSize > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
+    const member = ZipMemberReader.open(zip, entry);
+    try {
+      const out = new Uint8Array(entry.uncompressedSize);
+      let at = 0;
+      for (let chunk = member.next();chunk !== undefined; chunk = member.next()) {
+        if (at + chunk.length > out.length)
+          throw new FileExtractionSourceError("source_content_unavailable");
+        out.set(chunk, at);
+        at += chunk.length;
+      }
+      const end = member.end;
+      if (at !== out.length || !end || !end.sizeOk || end.crcOk === false) {
+        throw new FileExtractionSourceError("source_content_unavailable");
+      }
+      reader.assertCurrent?.();
+      return out;
+    } finally {
+      member.close();
+    }
+  } finally {
+    reader?.close();
+  }
+}
+var PREFIX2 = "archive-input-media:v1:", ARCHIVE_ID, BINDING_ID;
+var init_input_media = __esm(() => {
+  init_file_extraction_source();
+  init_scope_safe_fs();
+  init_media_bindings();
+  init_zip_reader();
+  ARCHIVE_ID = /^[A-Za-z0-9_-]{1,128}$/u;
+  BINDING_ID = /^[A-Za-z0-9_-]{1,128}$/u;
+});
+
+// src/workers/whatsapp/export-match.ts
+import { createHash as createHash87 } from "node:crypto";
+import { join as join119 } from "node:path";
+import { readdirSync as readdirSync25 } from "node:fs";
+function nameKey(name) {
+  return name.normalize("NFKC").replace(/[‎‏‪-‮⁦-⁩]/gu, "").replace(/\s+/gu, " ").trim().toLowerCase();
+}
+function textKey(text4) {
+  return text4.normalize("NFC").replace(/\r\n?/gu, `
+`).replace(/[‎‏‪-‮⁦-⁩]/gu, "").replace(/[ \t]+/gu, " ").replace(/ ?\n ?/gu, `
+`).trim();
+}
+function digest4(...parts) {
+  return createHash87("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
+}
+function timeSlot(ms, precision) {
+  return precision === "second" ? Math.floor(ms / 1000) : Math.floor(ms / 60000);
+}
+function matchKey(chatJid, slot, sender, text4) {
+  return digest4(normalizeWhatsAppJid(chatJid), slot, sender, text4);
+}
+function slotKey(ms, precision) {
+  return `${precision[0]}${timeSlot(ms, precision)}`;
+}
+function liveSenderKey(record5) {
+  if (record5.fromMe)
+    return OWNER_SENDER;
+  return nameKey(record5.senderContactName || record5.senderName || "");
+}
+function buildLiveIndex(spoolDir, options = {}) {
+  const index = {
+    byKey: new Map,
+    unchatted: new Map,
+    unsent: new Map,
+    chatsByName: new Map,
+    perMinute: new Map,
+    days: new Set,
+    messages: 0
+  };
+  let files = [];
+  try {
+    files = readdirSync25(spoolDir).filter((name) => name.toLowerCase().endsWith(".jsonl")).sort();
+  } catch {
+    return index;
+  }
+  const seen = new Set;
+  for (const file of files) {
+    if (options.fromDay && file.slice(0, 10) < options.fromDay && /^\d{4}-\d{2}-\d{2}/u.test(file))
+      continue;
+    for (const line2 of spoolFileLines(join119(spoolDir, file))) {
+      const record5 = parseWhatsAppSpoolRecord(line2);
+      if (!record5 || isWhatsAppReactionLine(record5) || record5.secretRedacted === true)
+        continue;
+      const time3 = Date.parse(record5.timestamp);
+      if (!Number.isFinite(time3))
+        continue;
+      const chat = normalizeWhatsAppJid(record5.chatJid);
+      const own3 = `${chat}\x00${record5.id}`;
+      if (seen.has(own3))
+        continue;
+      seen.add(own3);
+      index.messages += 1;
+      index.days.add(new Date(time3).toISOString().slice(0, 10));
+      if (record5.chatName) {
+        const names = index.chatsByName.get(nameKey(record5.chatName)) ?? new Set;
+        names.add(chat);
+        index.chatsByName.set(nameKey(record5.chatName), names);
+      }
+      const ref = {
+        id: record5.id,
+        chatJid: record5.chatJid,
+        timestamp: record5.timestamp,
+        fromMe: record5.fromMe,
+        ...record5.mediaType !== undefined ? { mediaType: record5.mediaType } : {},
+        mediaSaved: record5.mediaPath !== undefined
+      };
+      const sender = liveSenderKey(record5);
+      const text4 = textKey(record5.text);
+      for (const precision of ["minute", "second"]) {
+        const slot = slotKey(time3, precision);
+        const key2 = matchKey(chat, slot, sender, text4);
+        const list = index.byKey.get(key2) ?? [];
+        list.push(ref);
+        index.byKey.set(key2, list);
+        const loose = digest4(slot, sender, text4);
+        index.unchatted.set(loose, (index.unchatted.get(loose) ?? 0) + 1);
+        const unsent = digest4(chat, slot, text4);
+        const others = index.unsent.get(unsent) ?? [];
+        others.push(ref);
+        index.unsent.set(unsent, others);
+      }
+      const minute = `${chat}\x00${timeSlot(time3, "minute")}`;
+      index.perMinute.set(minute, (index.perMinute.get(minute) ?? 0) + 1);
+    }
+  }
+  return index;
+}
+function unchattedKey(ms, precision, sender, text4) {
+  return digest4(slotKey(ms, precision), sender, text4);
+}
+function unsentKey(chatJid, ms, precision, text4) {
+  return digest4(normalizeWhatsAppJid(chatJid), slotKey(ms, precision), text4);
+}
+function exactKey(chatJid, ms, precision, sender, text4) {
+  return matchKey(chatJid, slotKey(ms, precision), sender, text4);
+}
+function liveNearby(index, chatJid, ms) {
+  const chat = normalizeWhatsAppJid(chatJid);
+  const minute = timeSlot(ms, "minute");
+  for (const at of [minute - 1, minute, minute + 1]) {
+    if ((index.perMinute.get(`${chat}\x00${at}`) ?? 0) > 0)
+      return true;
+  }
+  return false;
+}
+function exportMessageId(chatJid, ms, precision, sender, text4, occurrence) {
+  return `wx${digest4(normalizeWhatsAppJid(chatJid), slotKey(ms, precision), sender, text4, occurrence).slice(0, 30)}`;
+}
+var OWNER_SENDER = "\x00me";
+var init_export_match = __esm(() => {
+  init_reaction_index();
+  init_live_connector();
+  init_spool_reader();
+});
+
+// src/workers/whatsapp/export-zone.ts
+function formatterFor(zone) {
+  let formatter = formatters.get(zone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: zone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+    formatters.set(zone, formatter);
+  }
+  return formatter;
+}
+function isKnownTimeZone(zone) {
+  try {
+    formatterFor(zone);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function localTimeZone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+function candidateTimeZones() {
+  const local = localTimeZone();
+  let all = [];
+  try {
+    all = Intl.supportedValuesOf("timeZone");
+  } catch {
+    all = [];
+  }
+  return [local, ...all.filter((zone) => zone !== local), ...all.includes("UTC") || local === "UTC" ? [] : ["UTC"]];
+}
+function zoneOffsetMs(zone, utcMs) {
+  const parts = {};
+  for (const part of formatterFor(zone).formatToParts(new Date(utcMs))) {
+    if (part.type !== "literal")
+      parts[part.type] = Number(part.value);
+  }
+  const asUtc = Date.UTC(parts["year"], parts["month"] - 1, parts["day"], parts["hour"] % 24, parts["minute"], parts["second"]);
+  const whole = utcMs - (utcMs % 1000 + 1000) % 1000;
+  return asUtc - whole;
+}
+function wallTimeToUtcMs(wall, zone) {
+  const found = WALL.exec(wall);
+  if (!found)
+    return;
+  const naive = Date.UTC(Number(found[1]), Number(found[2]) - 1, Number(found[3]), Number(found[4]), Number(found[5]), Number(found[6]));
+  if (!Number.isFinite(naive))
+    return;
+  const before = naive - zoneOffsetMs(zone, naive - 12 * 3600000);
+  const after = naive - zoneOffsetMs(zone, naive + 12 * 3600000);
+  for (const candidate of [Math.min(before, after), Math.max(before, after)]) {
+    if (candidate + zoneOffsetMs(zone, candidate) === naive)
+      return candidate;
+  }
+  return before;
+}
+function zoneSignature(zone, days) {
+  return days.map((day) => zoneOffsetMs(zone, Date.parse(`${day}T12:00:00Z`))).join(",");
+}
+function chooseExportTimeZone(days, score, zones = candidateTimeZones()) {
+  const local = zones[0] ?? localTimeZone();
+  let best = { zone: local, matches: score(local) };
+  const tried = new Set([zoneSignature(local, days)]);
+  for (const zone of zones.slice(1)) {
+    let signature;
+    try {
+      signature = zoneSignature(zone, days);
+    } catch {
+      continue;
+    }
+    if (tried.has(signature))
+      continue;
+    tried.add(signature);
+    const matches2 = score(zone);
+    if (matches2 > best.matches)
+      best = { zone, matches: matches2 };
+  }
+  return { ...best, assumed: best.matches === 0 };
+}
+var formatters, WALL;
+var init_export_zone = __esm(() => {
+  formatters = new Map;
+  WALL = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/u;
+});
+
+// src/workers/whatsapp/archive-input.ts
+import { createHash as createHash88 } from "node:crypto";
+import { posix as posix7 } from "node:path";
+function hash2(value2) {
+  return createHash88("sha256").update(value2).digest("hex").slice(0, 24);
+}
+function encodeCursor4(state, inner) {
+  return `${CURSOR_PREFIX}${Buffer.from(JSON.stringify(state)).toString("base64url")}~${inner ?? ""}`;
+}
+function decodeCursor3(cursor) {
+  if (cursor === undefined)
+    return {};
+  const invalid4 = new ArchiveImportStoppedError("resume_point_invalid", "This import's resume point is not one this build reads.");
+  if (!cursor.startsWith(CURSOR_PREFIX))
+    throw invalid4;
+  const rest = cursor.slice(CURSOR_PREFIX.length);
+  const split = rest.indexOf("~");
+  if (split < 0)
+    throw invalid4;
+  let state;
+  try {
+    state = JSON.parse(Buffer.from(rest.slice(0, split), "base64url").toString("utf8"));
+  } catch {
+    throw invalid4;
+  }
+  if (typeof state.z !== "string" || !isKnownTimeZone(state.z) || typeof state.j !== "object" || state.j === null)
+    throw invalid4;
+  const inner = rest.slice(split + 1);
+  return { state, ...inner ? { inner } : {} };
+}
+function exportMessageOf(item) {
+  const md = item.metadata;
+  const text4 = item.content.kind === "text" ? item.content.text : undefined;
+  const wall = md["writtenAt"];
+  if (typeof text4 !== "string" || typeof wall !== "string" || typeof md["chat"] !== "string" || typeof md["sender"] !== "string")
+    return;
+  return {
+    chat: md["chat"],
+    sender: md["sender"],
+    wall,
+    precision: md["timePrecision"] === "second" ? "second" : "minute",
+    occurrence: typeof md["occurrence"] === "string" ? md["occurrence"] : "",
+    text: text4,
+    sourceFile: typeof md["sourceFile"] === "string" ? md["sourceFile"] : "",
+    sourceFileIndex: typeof md["sourceFileIndex"] === "number" ? md["sourceFileIndex"] : 0,
+    ...typeof md["sourceMember"] === "string" ? { sourceMember: md["sourceMember"] } : {}
+  };
+}
+function splitMedia(text4) {
+  if (isWhatsAppMediaOmitted(text4))
+    return { caption: "", files: [], omitted: true };
+  const files = [];
+  const kept = [];
+  for (const line2 of text4.split(`
+`)) {
+    const name = line2.length <= 400 ? whatsAppAttachedFileName(line2) : undefined;
+    if (name !== undefined)
+      files.push(name);
+    else
+      kept.push(line2);
+  }
+  return { caption: kept.join(`
+`).trim(), files, omitted: false };
+}
+function whatsAppMediaMime(name) {
+  const extension = name.toLowerCase().split(".").pop() ?? "";
+  return EXTENSION_MIME[extension] ?? "application/octet-stream";
+}
+function whatsAppMediaTypeOf(name) {
+  const upper = name.toUpperCase();
+  if (/(^|-)STICKER|^STK-/u.test(upper))
+    return "sticker";
+  if (/^PTT-|(^|-)AUDIO/u.test(upper) || upper.startsWith("AUD-"))
+    return "audio";
+  const mime2 = whatsAppMediaMime(name);
+  if (mime2.startsWith("image/"))
+    return mime2 === "image/webp" ? "sticker" : "image";
+  if (mime2.startsWith("video/"))
+    return "video";
+  if (mime2.startsWith("audio/"))
+    return "audio";
+  return "document";
+}
+function createWhatsAppExportInput(options) {
+  const { archive } = options;
+  return {
+    inputId: archiveConnectorId(archive.archiveId),
+    kind: "archive",
+    records(listing = {}) {
+      return async function* () {
+        const decoded2 = decodeCursor3(listing.cursor);
+        const live = buildLiveIndex(options.spoolDir);
+        let decided;
+        if (decoded2.state) {
+          decided = decoded2.state;
+        } else {
+          const { assumed, ...chosen } = decide2(await sampleExport(archive), live, options.zones);
+          if (assumed)
+            archive.report({ kind: ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, class: "gap", fileIndex: 0, offset: 0 });
+          decided = chosen;
+        }
+        const media = createMediaLocator(archive);
+        let positions = [];
+        const reader = createWhatsAppArchiveConnector({
+          ...archive,
+          report: (finding) => {
+            if (finding.kind === ARCHIVE_COMMON_FINDINGS.timeZoneAssumed || finding.kind === ARCHIVE_COMMON_FINDINGS.mediaNotImported)
+              return;
+            archive.report(finding);
+          },
+          reportItemPositions: (told) => {
+            positions = told;
+            archive.reportItemPositions?.(told);
+          }
+        });
+        for await (const page2 of reader.listItems({
+          ...decoded2.inner !== undefined ? { cursor: decoded2.inner } : {},
+          ...listing.limit !== undefined ? { limit: listing.limit } : {}
+        })) {
+          const records = [];
+          page2.items.forEach((item, at) => {
+            const message2 = exportMessageOf(item);
+            if (!message2)
+              return;
+            const place = positions[at] ?? { fileIndex: message2.sourceFileIndex, offset: 0 };
+            records.push(recordOf(message2, decided, live, media, (finding) => archive.report({ ...finding, fileIndex: place.fileIndex, offset: place.offset })));
+          });
+          positions = [];
+          const nextCursor = page2.nextCursor !== undefined ? encodeCursor4(decided, page2.nextCursor) : undefined;
+          yield page2.truncated === true ? { records, ...nextCursor ? { nextCursor } : {}, done: false, truncated: true } : { records, ...nextCursor ? { nextCursor } : {}, done: page2.done };
+        }
+      }();
+    }
+  };
+}
+async function sampleExport(archive) {
+  const quiet = createWhatsAppArchiveConnector({
+    ...archive,
+    report: () => {
+      return;
+    },
+    reportPosition: () => {
+      return;
+    },
+    reportItemPositions: () => {
+      return;
+    },
+    maxBytesPerListing: SAMPLE_BYTES,
+    pageSize: 500
+  });
+  const sample = [];
+  for await (const page2 of quiet.listItems({ limit: SAMPLE_MESSAGES })) {
+    for (const item of page2.items) {
+      const message2 = exportMessageOf(item);
+      if (message2)
+        sample.push(message2);
+    }
+    if (sample.length >= SAMPLE_MESSAGES)
+      break;
+  }
+  return sample;
+}
+function chatOf(state, live, chat) {
+  const key2 = hash2(nameKey(chat));
+  const known = state.j[key2];
+  if (known !== undefined)
+    return known === "" ? `${key2}@${WHATSAPP_EXPORT_CHAT_SERVER}` : known;
+  let joined = "";
+  if (nameKey(chat) === WHATSAPP_STATUS_JID)
+    joined = WHATSAPP_STATUS_JID;
+  else {
+    const named = live.chatsByName.get(nameKey(chat));
+    if (named && named.size === 1)
+      joined = [...named][0];
+  }
+  state.j[key2] = joined;
+  return joined === "" ? `${key2}@${WHATSAPP_EXPORT_CHAT_SERVER}` : joined;
+}
+function decide2(sample, live, zones) {
+  const state = { z: "", j: {} };
+  const days = [...new Set(sample.map((message2) => message2.wall.slice(0, 10)))].slice(0, 64);
+  const keyed = sample.map((message2) => ({ message: message2, caption: textKey(splitMedia(message2.text).caption) }));
+  const chosen = chooseExportTimeZone(days.length > 0 ? days : ["2020-01-01"], (zone) => {
+    let matches2 = 0;
+    for (const { message: message2, caption } of keyed) {
+      const ms = wallTimeToUtcMs(message2.wall, zone);
+      if (ms === undefined)
+        continue;
+      if (live.unchatted.has(unchattedKey(ms, message2.precision, nameKey(message2.sender), caption)) || live.unchatted.has(unchattedKey(ms, message2.precision, OWNER_SENDER, caption)))
+        matches2 += 1;
+    }
+    return matches2;
+  }, zones);
+  state.z = chosen.zone;
+  const votes = new Map;
+  for (const { message: message2, caption } of keyed) {
+    const ms = wallTimeToUtcMs(message2.wall, state.z);
+    if (ms === undefined)
+      continue;
+    const chat = chatOf(state, live, message2.chat);
+    const others = live.unsent.get(unsentKey(chat, ms, message2.precision, caption)) ?? [];
+    if (others.some((ref) => ref.fromMe)) {
+      const name = hash2(nameKey(message2.sender));
+      votes.set(name, (votes.get(name) ?? 0) + 1);
+    }
+  }
+  const ranked = [...votes].sort((a, b) => b[1] - a[1]);
+  if (ranked[0] && (ranked[1] === undefined || ranked[0][1] > ranked[1][1]))
+    state.m = ranked[0][0];
+  return { ...state, assumed: chosen.assumed };
+}
+function createMediaLocator(archive) {
+  const zipMembers = new Map;
+  const membersOf = (fileIndex) => {
+    let members = zipMembers.get(fileIndex);
+    if (members)
+      return members;
+    members = new Map;
+    const file = archive.files[fileIndex];
+    if (file) {
+      let reader;
+      try {
+        reader = archive.root.openFile(file.relPath, { expected: file.version });
+        const zip = ZipArchive.open(reader);
+        for (const entry of zip.entries()) {
+          if (!entry.isDirectory)
+            members.set(entry.name, { index: entry.index, size: entry.uncompressedSize });
+        }
+      } catch {} finally {
+        reader?.close();
+      }
+    }
+    zipMembers.set(fileIndex, members);
+    return members;
+  };
+  return {
+    child(message2, name) {
+      if (message2.sourceMember !== undefined) {
+        const members = membersOf(message2.sourceFileIndex);
+        const folder2 = posix7.dirname(message2.sourceMember);
+        const member = members.get(folder2 === "." ? name : `${folder2}/${name}`) ?? members.get(name);
+        if (!member)
+          return { name, available: false };
+        return {
+          name,
+          available: true,
+          locator: archiveInputZipMediaLocator({ archiveId: archive.archiveId, fileIndex: message2.sourceFileIndex, memberIndex: member.index }),
+          sizeBytes: member.size
+        };
+      }
+      if (!archive.media)
+        return { name, available: false };
+      const folder = posix7.dirname(message2.sourceFile);
+      const bound = archive.media.bind(folder === "." ? name : `${folder}/${name}`);
+      if (!bound.ok)
+        return { name, available: false };
+      return {
+        name,
+        available: true,
+        locator: archiveInputMediaLocator({ archiveId: archive.archiveId, bindingId: bound.bindingId }),
+        sizeBytes: bound.sizeBytes
+      };
+    }
+  };
+}
+function childKey(name) {
+  return name.replace(/[\u0000-\u001f]/gu, "").slice(0, MAX_CHILD_KEY_CHARS);
+}
+function recordOf(message2, state, live, media, report) {
+  const ms = wallTimeToUtcMs(message2.wall, state.z) ?? Date.parse(`${message2.wall}Z`);
+  const chatJid = chatOf(state, live, message2.chat);
+  const owner = state.m !== undefined && hash2(nameKey(message2.sender)) === state.m;
+  const sender = owner ? OWNER_SENDER : nameKey(message2.sender);
+  const { caption, files, omitted } = splitMedia(message2.text);
+  const text4 = textKey(caption);
+  const ordinal = /^#(\d+)$/u.exec(message2.occurrence);
+  const candidates2 = ordinal ? live.byKey.get(exactKey(chatJid, ms, message2.precision, sender, text4)) : undefined;
+  const matched = ordinal && candidates2 ? candidates2[Number(ordinal[1])] : undefined;
+  if (!matched && liveNearby(live, chatJid, ms))
+    report({ kind: WHATSAPP_INPUT_FINDINGS.nearMiss, class: "skipped" });
+  const mediaType = matched?.mediaType ?? (files[0] !== undefined ? whatsAppMediaTypeOf(files[0]) : omitted ? "media" : undefined);
+  const children = [];
+  const liveHoldsMedia = matched?.mediaSaved === true;
+  if (!liveHoldsMedia) {
+    const used = new Set;
+    for (const name of files) {
+      const key2 = childKey(name);
+      if (key2 === "" || used.has(key2))
+        continue;
+      used.add(key2);
+      const located = media.child(message2, name);
+      if (!located.available)
+        report({ kind: ARCHIVE_COMMON_FINDINGS.mediaNotImported, class: "gap" });
+      children.push({ key: key2, mimeType: whatsAppMediaMime(name), ...located });
+    }
+    if (omitted) {
+      report({ kind: ARCHIVE_COMMON_FINDINGS.mediaNotImported, class: "gap" });
+      children.push({ key: "media", name: "Media left out of the export", mimeType: "application/octet-stream", available: false });
+    }
+  }
+  return {
+    id: matched?.id ?? exportMessageId(chatJid, ms, message2.precision, sender, text4, message2.occurrence),
+    chatJid: matched?.chatJid ?? chatJid,
+    chatName: message2.chat,
+    senderJid: "",
+    senderName: owner ? "" : message2.sender,
+    ...owner ? {} : { senderContactName: message2.sender },
+    fromMe: matched?.fromMe ?? owner,
+    timestamp: matched?.timestamp ?? new Date(ms).toISOString(),
+    text: caption,
+    ...mediaType !== undefined ? { mediaType } : {},
+    ...children.length > 0 ? { children } : {}
+  };
+}
+var WHATSAPP_STATUS_JID = "status@broadcast", WHATSAPP_EXPORT_CHAT_SERVER = "export.whatsapp", CURSOR_PREFIX = "wa1~", SAMPLE_MESSAGES = 2000, SAMPLE_BYTES, MAX_CHILD_KEY_CHARS = 200, WHATSAPP_INPUT_FINDINGS, EXTENSION_MIME;
+var init_archive_input = __esm(() => {
+  init_archive_formats();
+  init_state();
+  init_input_media();
+  init_connector6();
+  init_grammar();
+  init_zip_reader();
+  init_export_match();
+  init_export_zone();
+  SAMPLE_BYTES = 32 * 1024 * 1024;
+  WHATSAPP_INPUT_FINDINGS = {
+    nearMiss: "match_near_miss"
+  };
+  EXTENSION_MIME = {
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    heic: "image/heic",
+    mp4: "video/mp4",
+    mov: "video/quicktime",
+    "3gp": "video/3gpp",
+    opus: "audio/ogg",
+    ogg: "audio/ogg",
+    m4a: "audio/mp4",
+    mp3: "audio/mpeg",
+    aac: "audio/aac",
+    wav: "audio/wav",
+    pdf: "application/pdf",
+    txt: "text/plain",
+    vcf: "text/vcard",
+    doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  };
+});
+
+// src/workers/whatsapp/archive-target.ts
+function whatsAppConnectorWithInputs(options) {
+  const live = {
+    ...createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE }),
+    id: WHATSAPP_PRODUCT_CONNECTOR_ID
+  };
+  const builder = createWhatsAppRecordBuilder({
+    spoolDir: options.spoolDir,
+    account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
+    ...options.readChild ? { readChild: options.readChild } : {}
+  });
+  const connector = withInputs(live, builder);
+  connector.fetchItem = (localItemId, fetchOptions) => builder.fetchItem(localItemId, fetchOptions);
+  return connector;
+}
+function createWhatsAppArchiveTarget(options) {
+  return {
+    sourceId: WHATSAPP_SOURCE_ID,
+    label: "WhatsApp",
+    formats: [WHATSAPP_ARCHIVE_FORMAT_ID],
+    concurrencyKey: WHATSAPP_LIVE_CORPUS_ID,
+    identify: () => ({ kind: "none" }),
+    input: (archive) => createWhatsAppExportInput({
+      archive,
+      spoolDir: defaultWhatsAppSpoolDir(options.env),
+      ...options.zones ? { zones: options.zones } : {}
+    }),
+    lane(account, env) {
+      return {
+        set: options.set(account, env),
+        sync: WHATSAPP_LANE_SYNC,
+        connector: whatsAppConnectorWithInputs({
+          spoolDir: defaultWhatsAppSpoolDir(env),
+          ...options.readChild ? { readChild: options.readChild } : {}
+        })
+      };
+    }
+  };
+}
+var WHATSAPP_LANE_SYNC;
+var init_archive_target = __esm(() => {
+  init_olympus_layout();
+  init_source_input();
+  init_connector6();
+  init_archive_input();
+  init_live_connector();
+  init_store_sync2();
+  WHATSAPP_LANE_SYNC = Object.freeze({
+    placement: WHATSAPP_STORE_PLACEMENT,
+    fetchContent: true,
+    deferMetadataOnlyContent: true
+  });
+});
+
 // src/workers/source-scope-runtime.ts
 function isMailSourceScopePolicyRef(ref) {
   return ref.sourceId === "gmail.email";
@@ -170199,12 +171059,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname87, join as join119 } from "node:path";
+import { dirname as dirname87, join as join120 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join119(dirname87(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join120(dirname87(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -170286,7 +171146,7 @@ var init_gmail_scope_browser = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash87 } from "node:crypto";
+import { createHash as createHash89 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -170319,7 +171179,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash87("sha256").update(`${accessToken}
+    const key2 = createHash89("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -170377,7 +171237,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash87("sha256").update(session.token).digest("hex");
+    const key2 = createHash89("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -170421,7 +171281,7 @@ ${folderIds.join(",")}`).digest("hex");
     }
     const token = await tokenAccountId();
     const history = historyAccountId();
-    const decide2 = (binding) => decideSourceAccountAction({
+    const decide3 = (binding) => decideSourceAccountAction({
       binding: binding?.provider_account_id || !history ? binding : { ...binding, provider_account_id: history },
       grantAccountId: handle.providerAccountId,
       grantConnectedAt: handle.connectedAt,
@@ -170432,7 +171292,7 @@ ${folderIds.join(",")}`).digest("hex");
     const read = readSourceAccountBindings(bindingsPath);
     if (read.kind === "malformed")
       throw new SourceAccountBindingsUnreadableError(bindingsPath);
-    let decision = decide2(read.bindings.sources[options.sourceId]);
+    let decision = decide3(read.bindings.sources[options.sourceId]);
     const current2 = read.bindings.sources[options.sourceId];
     if (decision.action === "purge" && decision.reason === "previous_account_unknown" && token && lastAccessToken && current2?.previous_account_folders?.length && await evidenceOpens(lastAccessToken, current2.previous_account_folders) === true) {
       let bound = false;
@@ -170461,7 +171321,7 @@ ${folderIds.join(",")}`).digest("hex");
       return;
     if (decision.action !== "refuse") {
       updateSourceAccountBinding(bindingsPath, options.sourceId, (current3) => {
-        decision = decide2(current3);
+        decision = decide3(current3);
         if (decision.action === "proceed") {
           return decision.write === undefined ? current3 : decision.write ?? undefined;
         }
@@ -186191,7 +187051,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash88, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash90, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -186242,9 +187102,9 @@ function createRemoteOAuthHandler(options) {
     for (const [id, entry] of completed)
       if (entry.expiresAt <= at)
         completed.delete(id);
-    for (const [hash2, entry] of codes)
+    for (const [hash3, entry] of codes)
       if (entry.expiresAt <= at)
-        codes.delete(hash2);
+        codes.delete(hash3);
   };
   const admitPending = () => {
     if (pending.size < MAX_PENDING_CONSENTS)
@@ -186542,25 +187402,25 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash2 = sha25611(code);
-      const issued = codes.get(hash2);
+      const hash3 = sha25611(code);
+      const issued = codes.get(hash3);
       if (!issued || issued.expiresAt <= now()) {
-        codes.delete(hash2);
+        codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code is invalid or expired.");
       }
       if (issued.connectionId !== undefined) {
-        codes.delete(hash2);
+        codes.delete(hash3);
         store.oauth.revokeGrant(issued.connectionId);
         if (issued.receipt)
           completed.delete(issued.receipt);
         return oauthError(400, "invalid_grant", "The authorization code was already used.");
       }
       if (issued.clientId !== clientId || issued.redirectUri !== redirectUri) {
-        codes.delete(hash2);
+        codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash88("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
-        codes.delete(hash2);
+      if (!constantTimeEqual(createHash90("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+        codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
       if (resource !== undefined && resource !== issued.resource) {
@@ -186826,7 +187686,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
 function sha25611(value2) {
-  return createHash88("sha256").update(value2).digest("hex");
+  return createHash90("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -188941,7 +189801,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash89 } from "node:crypto";
+import { createHash as createHash91 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -188958,7 +189818,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash89("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash91("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -189334,7 +190194,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash90 } from "node:crypto";
+import { createHash as createHash92 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -189358,8 +190218,8 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest4 = createHash90("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
-  return `prv1.${digest4.slice(0, 32)}`;
+  const digest5 = createHash92("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  return `prv1.${digest5.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
@@ -190821,7 +191681,7 @@ __export(exports_server2, {
 });
 import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync91 } from "node:fs";
-import { dirname as dirname91, isAbsolute as isAbsolute36, join as join120 } from "node:path";
+import { dirname as dirname91, isAbsolute as isAbsolute36, join as join121 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -192458,6 +193318,28 @@ async function main() {
   if (whatsappTierSet && whatsappConnectorStore) {
     reportRehomedChatOverrides("whatsapp", rehomeChatLaneOverrides(whatsappTierSet.ledger, "whatsapp", [whatsappConnectorStore]));
   }
+  let whatsappImportTierSet = whatsappTierSet;
+  archiveSourceTargets.register(createWhatsAppArchiveTarget({
+    env: process.env,
+    set: () => {
+      if (whatsappImportTierSet)
+        return whatsappImportTierSet;
+      const store = createWhatsAppConnectorStore(process.env);
+      const secrets = openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, store.dbPath, WHATSAPP_LIVE_CORPUS_ID);
+      registerTierLegStore(store, WHATSAPP_LIVE_CORPUS_ID, tierSecureEmbeddingProvider ?? null);
+      whatsappImportTierSet = existingStoreTierSet(createWhatsAppTierLane({
+        store,
+        env: process.env,
+        ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {},
+        ...secrets ? { secretLocations: secrets } : {},
+        onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
+      }), { store, ...secrets ? { secrets } : {} });
+      if (tierSecureEmbeddingProvider)
+        whatsappImportTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
+      return whatsappImportTierSet;
+    },
+    readChild: (locator, options) => readArchiveInputMedia(locator, { state: archiveImports.state, bindings: archiveImports.media }, options)
+  }));
   const whatsappConnectorStoreSync = whatsappConnectorStore ? createWhatsAppConnectorStoreSyncHandler({
     ...whatsappTierSet ? { tierSet: whatsappTierSet } : {},
     store: whatsappConnectorStore,
@@ -194729,7 +195611,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join120(dirname91(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join121(dirname91(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -195451,6 +196333,9 @@ var init_server5 = __esm(async () => {
   init_source_watch();
   init_source_watch_runtime();
   init_whatsapp();
+  init_archive_target();
+  init_source_targets();
+  init_input_media();
   init_source_dashboard();
   init_embedding_runtime();
   init_source_ingestion_ledger();

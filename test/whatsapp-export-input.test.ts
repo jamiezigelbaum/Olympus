@@ -24,6 +24,8 @@ import { WHATSAPP_LANE_SYNC, whatsAppConnectorWithInputs } from '../src/workers/
 import { chooseExportTimeZone, wallTimeToUtcMs } from '../src/workers/whatsapp/export-zone.ts';
 import { WHATSAPP_LIVE_CORPUS_ID, createWhatsAppTierLane } from '../src/workers/whatsapp/store-sync.ts';
 import { chatText, notice, type SyntheticMessage } from './support/archive-fixtures-whatsapp.ts';
+import { WHATSAPP_FIXTURES } from '../scripts/release-check/archive-fixtures.ts';
+import { WHATSAPP_BESIDE_CHAT, WHATSAPP_BESIDE_SHARED } from '../scripts/release-check/archive-live-seed-whatsapp.ts';
 
 const roots: string[] = [];
 const closers: Array<() => void> = [];
@@ -90,7 +92,7 @@ async function pullLive(target: Lane): Promise<void> {
 }
 
 /** Imports an export file through the connector's archive input, as the archive layer does, to its end. */
-async function importExport(target: Lane, name: string, text: string, findings: ArchiveImportFinding[] = [], extra: Record<string, string> = {}) {
+async function importExport(target: Lane, name: string, text: string | Uint8Array, findings: ArchiveImportFinding[] = [], extra: Record<string, string> = {}) {
   mkdirSync(join(target.exportDir, name, '..'), { recursive: true });
   writeFileSync(join(target.exportDir, name), text);
   for (const [file, body] of Object.entries(extra)) writeFileSync(join(target.exportDir, file), body);
@@ -266,6 +268,34 @@ describe('a WhatsApp export beside live capture', () => {
     const own = rows(target).filter((row) => row.tombstoned === 0 && row.id.startsWith('wx') && !row.id.includes('#child:'));
     expect(own.length).toBeGreaterThan(0);
     for (const row of own) expect(row.conversation).toEndWith('@export.whatsapp');
+  });
+});
+
+describe('the release check\'s beside-live fixture', () => {
+  test('the WhatsApp fixture joins the seeded chat: four messages read, two of them already there', async () => {
+    const target = lane();
+    // The seed hook's spool, as archive-live-seed-whatsapp.ts writes it (the instants are the wall times in UTC).
+    writeFileSync(join(target.spoolDir, '2024-04-14.jsonl'), WHATSAPP_BESIDE_SHARED.map(([at, sender, text], index) => spoolLine({
+      id: `RCSEED${index}`,
+      chat_jid: '15550100001@s.whatsapp.net',
+      chat_name: WHATSAPP_BESIDE_CHAT,
+      sender_jid: sender === undefined ? '' : '15550100001@s.whatsapp.net',
+      sender_name: sender === undefined ? '' : 'sam',
+      sender_contact_name: sender,
+      from_me: sender === undefined,
+      timestamp: `${at}Z`,
+      text,
+    })).join(''));
+    await pullLive(target);
+    const fixture = WHATSAPP_FIXTURES.besideLive!.small('rcarchtoken0123');
+    expect(fixture.expect).toMatchObject({ read: 4, alreadyThere: 2 });
+    const findings = await importExport(target, 'rc-beside-whatsapp_chat.zip', fixture.bytes);
+    const active = rows(target).filter((row) => row.tombstoned === 0 && !row.id.includes('#child:'));
+    expect(active.filter((row) => row.id.startsWith('RCSEED'))).toHaveLength(2);
+    const own = active.filter((row) => row.id.startsWith('wx'));
+    expect(own).toHaveLength(2);
+    expect(new Set(own.map((row) => row.conversation))).toEqual(new Set(['15550100001@s.whatsapp.net']));
+    expect(findings.some((finding) => finding.kind === 'time_zone_assumed')).toBe(false);
   });
 });
 
