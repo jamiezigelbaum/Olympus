@@ -100041,8 +100041,248 @@ class WhatsAppSpoolResets {
 var WHATSAPP_SPOOL_RESET_FILE = "spool-reset.sqlite";
 var init_spool_resets = () => {};
 
-// src/workers/whatsapp/match-keys.ts
+// src/core/file-extraction-source.ts
 import { createHash as createHash64 } from "node:crypto";
+function isFileExtractionSourceError(value2) {
+  if (!value2 || typeof value2 !== "object")
+    return false;
+  const candidate = value2;
+  return typeof candidate.errorKind === "string" && typeof candidate.settleAs === "string" && typeof candidate.retryable === "boolean" && Object.hasOwn(FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, candidate.errorKind);
+}
+function splitScopedLocalItemId(localItemId) {
+  const separator = localItemId.indexOf(":");
+  if (separator <= 0 || separator === localItemId.length - 1)
+    return;
+  return {
+    accountScope: localItemId.slice(0, separator),
+    providerItemId: localItemId.slice(separator + 1)
+  };
+}
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, ERROR_HASH_CHARS = 32, FileExtractionSourceError;
+var init_file_extraction_source = __esm(() => {
+  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+    source_item_not_found: "failed_terminal",
+    source_permission_denied: "failed_terminal",
+    source_version_gone: "failed_terminal",
+    source_content_unavailable: "skipped_unsupported",
+    source_request_rejected: "failed_terminal",
+    source_too_large: "skipped_too_large",
+    source_rate_limited: "failed_retryable",
+    source_unavailable: "failed_retryable",
+    source_auth_expired: "failed_retryable",
+    source_budget_exhausted: "failed_retryable",
+    network_unreachable: "failed_retryable",
+    network_socket_closed: "failed_retryable"
+  });
+  FileExtractionSourceError = class FileExtractionSourceError extends Error {
+    errorKind;
+    settleAs;
+    retryable;
+    errorHash;
+    constructor(errorKind, options = {}) {
+      super(errorKind);
+      this.name = "FileExtractionSourceError";
+      this.errorKind = errorKind;
+      this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
+      this.retryable = this.settleAs === "failed_retryable";
+      const errorHash = options.detailForHash === undefined ? undefined : createHash64("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      if (errorHash)
+        this.errorHash = errorHash;
+    }
+  };
+});
+
+// src/workers/archive-import/input-media.ts
+function archiveInputMediaLocator(ref) {
+  if (!ARCHIVE_ID.test(ref.archiveId) || !BINDING_ID.test(ref.bindingId))
+    throw new Error("An archive media locator needs a plain archive and binding id.");
+  return `${PREFIX2}${ref.archiveId}:b:${ref.bindingId}`;
+}
+function archiveInputZipMediaLocator(ref) {
+  if (!ARCHIVE_ID.test(ref.archiveId) || !Number.isSafeInteger(ref.fileIndex) || ref.fileIndex < 0 || !Number.isSafeInteger(ref.memberIndex) || ref.memberIndex < 0) {
+    throw new Error("An archive zip media locator needs a plain archive id and two places.");
+  }
+  return `${PREFIX2}${ref.archiveId}:z:${ref.fileIndex}:${ref.memberIndex}`;
+}
+function parseArchiveInputMedia(locator) {
+  if (!locator.startsWith(PREFIX2))
+    return;
+  const parts = locator.slice(PREFIX2.length).split(":");
+  const [archiveId, kind] = parts;
+  if (archiveId === undefined || !ARCHIVE_ID.test(archiveId))
+    return;
+  if (kind === "b" && parts.length === 3 && BINDING_ID.test(parts[2]))
+    return { kind: "binding", archiveId, bindingId: parts[2] };
+  if (kind === "z" && parts.length === 4 && /^\d{1,9}$/u.test(parts[2]) && /^\d{1,9}$/u.test(parts[3])) {
+    return { kind: "zip", archiveId, fileIndex: Number(parts[2]), memberIndex: Number(parts[3]) };
+  }
+  return;
+}
+function servedRecord(state, archiveId) {
+  let record2;
+  try {
+    record2 = state.get(archiveId);
+  } catch {
+    return;
+  }
+  if (!record2 || record2.status === "removing" || record2.target === undefined)
+    return;
+  return record2;
+}
+function readArchiveInputMedia(locator, deps, options = {}) {
+  const parsed = parseArchiveInputMedia(locator);
+  if (!parsed)
+    throw new FileExtractionSourceError("source_item_not_found");
+  const record2 = servedRecord(deps.state, parsed.archiveId);
+  if (!record2)
+    throw new FileExtractionSourceError("source_item_not_found");
+  const maxBytes = options.maxBytes ?? ARCHIVE_MEDIA_DEFAULT_READ_BYTES;
+  let root;
+  try {
+    root = ScopeRoot.open(record2.root_path);
+  } catch {
+    throw new FileExtractionSourceError("source_version_gone");
+  }
+  try {
+    return parsed.kind === "binding" ? readBinding(deps, record2, root, parsed.bindingId, maxBytes) : readZipMember(record2, root, parsed, maxBytes);
+  } catch (error) {
+    if (error instanceof FileExtractionSourceError)
+      throw error;
+    if (error instanceof ScopeSafeError) {
+      if (error.code === "too_large")
+        throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_version_gone");
+    }
+    if (error instanceof ZipMemberError || error instanceof ZipFormatError) {
+      throw new FileExtractionSourceError("source_content_unavailable");
+    }
+    throw error;
+  } finally {
+    root.close();
+  }
+}
+function readBinding(deps, record2, root, bindingId, maxBytes) {
+  if (!deps.bindings)
+    throw new FileExtractionSourceError("source_item_not_found");
+  const access = archiveMediaAccess({ bindings: deps.bindings, archiveId: record2.archive_id, root, chosenRelPath: record2.chosen_rel_path });
+  return access.read(bindingId, { maxBytes });
+}
+function readZipMember(record2, root, ref, maxBytes) {
+  const file = record2.files[ref.fileIndex];
+  if (!file)
+    throw new FileExtractionSourceError("source_item_not_found");
+  let reader;
+  try {
+    reader = root.openFile(file.rel_path, {
+      expected: { dev: file.dev, ino: file.ino, size: file.size, mtimeMs: file.mtime_ms }
+    });
+    const zip = ZipArchive.open(reader);
+    if (file.members) {
+      const table = zip.memberTable();
+      if (table.count !== file.members.count || table.sha256 !== file.members.sha256) {
+        throw new FileExtractionSourceError("source_version_gone");
+      }
+    }
+    let entry;
+    for (const candidate of zip.entries()) {
+      if (candidate.index === ref.memberIndex) {
+        entry = candidate;
+        break;
+      }
+    }
+    if (!entry || entry.isDirectory)
+      throw new FileExtractionSourceError("source_item_not_found");
+    if (entry.uncompressedSize > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
+    const member = ZipMemberReader.open(zip, entry);
+    try {
+      const out = new Uint8Array(entry.uncompressedSize);
+      let at = 0;
+      for (let chunk = member.next();chunk !== undefined; chunk = member.next()) {
+        if (at + chunk.length > out.length)
+          throw new FileExtractionSourceError("source_content_unavailable");
+        out.set(chunk, at);
+        at += chunk.length;
+      }
+      const end = member.end;
+      if (at !== out.length || !end || !end.sizeOk || end.crcOk === false) {
+        throw new FileExtractionSourceError("source_content_unavailable");
+      }
+      reader.assertCurrent?.();
+      return out;
+    } finally {
+      member.close();
+    }
+  } finally {
+    reader?.close();
+  }
+}
+var PREFIX2 = "archive-input-media:v1:", ARCHIVE_ID, BINDING_ID;
+var init_input_media = __esm(() => {
+  init_file_extraction_source();
+  init_scope_safe_fs();
+  init_media_bindings();
+  init_zip_reader();
+  ARCHIVE_ID = /^[A-Za-z0-9_-]{1,128}$/u;
+  BINDING_ID = /^[A-Za-z0-9_-]{1,128}$/u;
+});
+
+// src/workers/whatsapp/child-media.ts
+import { readFileSync as readFileSync57, realpathSync as realpathSync17, statSync as statSync31 } from "node:fs";
+import { isAbsolute as isAbsolute27, relative as relative10, resolve as resolve17 } from "node:path";
+function whatsAppMediaFileLocator(path) {
+  return `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`;
+}
+function createWhatsAppChildReader(options) {
+  const relocate = options.relocate ?? ((path) => path);
+  return (locator, read) => {
+    const maxBytes = read.maxBytes ?? DEFAULT_MAX_BYTES;
+    if (parseArchiveInputMedia(locator)) {
+      const deps = options.archive?.();
+      if (!deps)
+        throw new FileExtractionSourceError("source_item_not_found");
+      return readArchiveInputMedia(locator, deps, { maxBytes });
+    }
+    if (!locator.startsWith(WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX))
+      throw new FileExtractionSourceError("source_item_not_found");
+    const path = locator.slice(WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX.length);
+    if (!isAbsolute27(path))
+      throw new FileExtractionSourceError("source_permission_denied");
+    let real;
+    try {
+      real = realpathSync17(relocate(path));
+    } catch {
+      throw new FileExtractionSourceError("source_item_not_found");
+    }
+    const inside = options.mediaRoots.some((root) => {
+      let base;
+      try {
+        base = realpathSync17(resolve17(root));
+      } catch {
+        return false;
+      }
+      const from = relative10(base, real);
+      return from !== "" && !from.startsWith("..") && !isAbsolute27(from);
+    });
+    if (!inside)
+      throw new FileExtractionSourceError("source_permission_denied");
+    const stats = statSync31(real);
+    if (!stats.isFile())
+      throw new FileExtractionSourceError("source_content_unavailable");
+    if (stats.size > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
+    return readFileSync57(real);
+  };
+}
+var WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX = "whatsapp-media-file:v1:", DEFAULT_MAX_BYTES;
+var init_child_media = __esm(() => {
+  init_file_extraction_source();
+  init_input_media();
+  DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/whatsapp/match-keys.ts
+import { createHash as createHash65 } from "node:crypto";
 function nameKey(name) {
   return name.normalize("NFKC").replace(/[‎‏‪-‮⁦-⁩]/gu, "").replace(/\s+/gu, " ").trim().toLowerCase();
 }
@@ -100052,7 +100292,7 @@ function textKey(text2) {
 `).trim();
 }
 function keyDigest(...parts) {
-  return createHash64("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
+  return createHash65("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
 }
 function timeSlot(ms, precision) {
   return precision === "second" ? `s${Math.floor(ms / 1000)}` : `m${Math.floor(ms / 60000)}`;
@@ -100090,7 +100330,7 @@ var init_match_keys = __esm(() => {
 });
 
 // src/workers/whatsapp/spool-reader.ts
-import { closeSync as closeSync22, openSync as openSync21, readFileSync as readFileSync57, readSync as readSync7, statSync as statSync31 } from "node:fs";
+import { closeSync as closeSync22, openSync as openSync21, readFileSync as readFileSync58, readSync as readSync7, statSync as statSync32 } from "node:fs";
 import { join as join86 } from "node:path";
 function pauseAt(offset, skipping, continued) {
   if (!skipping)
@@ -100319,9 +100559,9 @@ function readWhatsAppCaptureStatus(spoolDir) {
   const path = join86(spoolDir, WHATSAPP_CAPTURE_STATUS_FILE);
   let parsed;
   try {
-    if (statSync31(path).size > CAPTURE_STATUS_MAX_BYTES)
+    if (statSync32(path).size > CAPTURE_STATUS_MAX_BYTES)
       return;
-    parsed = JSON.parse(readFileSync57(path, "utf8"));
+    parsed = JSON.parse(readFileSync58(path, "utf8"));
   } catch {
     return;
   }
@@ -100356,8 +100596,8 @@ var init_spool_reader = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-import { existsSync as existsSync71, readdirSync as readdirSync18, realpathSync as realpathSync17, rmSync as rmSync20, statSync as statSync32 } from "node:fs";
-import { isAbsolute as isAbsolute27, join as join87, relative as relative10 } from "node:path";
+import { existsSync as existsSync71, readdirSync as readdirSync18, realpathSync as realpathSync18, rmSync as rmSync20, statSync as statSync33 } from "node:fs";
+import { basename as basename15, isAbsolute as isAbsolute28, join as join87, relative as relative11 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
   return {
     malformedLines: 0,
@@ -100375,7 +100615,7 @@ function createWhatsAppLiveSourceConnector(options) {
   const passByteBudget = normalizePositiveInteger2(options.passByteBudget, DEFAULT_PASS_BYTE_BUDGET, Number.MAX_SAFE_INTEGER);
   const maxRecordBytes = normalizePositiveInteger2(options.maxRecordBytes, WHATSAPP_SPOOL_MAX_RECORD_BYTES, Number.MAX_SAFE_INTEGER);
   const authenticate2 = async () => {
-    if (!existsSync71(spoolDir) || !statSync32(spoolDir).isDirectory()) {
+    if (!existsSync71(spoolDir) || !statSync33(spoolDir).isDirectory()) {
       throw new Error(`WhatsApp live spool directory ${spoolDir} does not exist. ` + "Start the olympus-whatsapp-bridge daemon (tools/whatsapp-bridge) first.");
     }
   };
@@ -100412,7 +100652,7 @@ function createWhatsAppLiveSourceConnector(options) {
     const reactions = boundedReactionsForTarget(reactionIndex.build().entriesFor(providerItemId), match.chatJid);
     return rawItemFromSpoolMessage(match, account, nowIso3(), reactions);
   };
-  const builder = createRecordBuilder(account, fetchItem, authenticate2);
+  const builder = createRecordBuilder(account, fetchItem, authenticate2, options.readChild);
   const input = {
     inputId: CONNECTOR_ID2,
     kind: "live",
@@ -100430,7 +100670,7 @@ function createWhatsAppLiveSourceConnector(options) {
     family: "chat",
     authenticate: authenticate2,
     listItems: (listOptions) => connector.listItems(listOptions),
-    fetchItem,
+    fetchItem: (localItemId, fetchOptions) => builder.fetchItem(localItemId, fetchOptions),
     classificationSignals: whatsAppClassificationSignals
   };
 }
@@ -100461,7 +100701,7 @@ function createRecordBuilder(account, fetchItem, authenticate2, readChild) {
           bringsContent: recordBringsContent(record2) || record2.reactions !== undefined,
           authoredAt: record2.timestamp
         },
-        ...(record2.children ?? []).map((child) => ({ identity: childIdentity(own3, child), bringsContent: child.available && child.locator !== undefined }))
+        ...childrenOf(record2).map((child) => ({ identity: childIdentity(own3, child), bringsContent: child.available && child.locator !== undefined }))
       ];
     },
     compareVersions: compareWhatsAppVersions,
@@ -100471,7 +100711,7 @@ function createRecordBuilder(account, fetchItem, authenticate2, readChild) {
       const own3 = rawItemFromSpoolMessage(record2, account, fetchedAt, record2.reactions);
       if (wanted.has(own3.identity.localItemId))
         items.push(own3);
-      for (const child of record2.children ?? []) {
+      for (const child of childrenOf(record2)) {
         const item = rawItemFromChild(record2, child, account, fetchedAt);
         if (wanted.has(item.identity.localItemId))
           items.push(item);
@@ -100483,12 +100723,13 @@ function createRecordBuilder(account, fetchItem, authenticate2, readChild) {
       if (locator === undefined || !localItemId.includes(CHILD_ITEM_ID_SEPARATOR))
         return fetchItem(localItemId);
       if (!readChild)
-        throw new Error("This WhatsApp account cannot read imported media yet.");
+        throw new Error("This WhatsApp account cannot read its media here.");
       const bytes = readChild(locator, {});
+      const mimeType = "application/octet-stream";
       return {
         identity: childIdentityFromLocalId(localItemId, account),
-        mimeType: "application/octet-stream",
-        content: { kind: "bytes", mimeType: "application/octet-stream", bytes },
+        mimeType,
+        content: { kind: "bytes", mimeType, bytes },
         metadata: Object.freeze({}),
         fetchedAt: nowIso3()
       };
@@ -100501,6 +100742,24 @@ function createWhatsAppRecordBuilder(options) {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty4(options.account, "WhatsApp account");
   const live = createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account });
   return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), () => live.authenticate(), options.readChild);
+}
+function childrenOf(record2) {
+  if (record2.children)
+    return record2.children;
+  if (record2.secretRedacted === true || record2.mediaType === undefined || !CHILD_MEDIA_TYPES.has(record2.mediaType))
+    return [];
+  const mimeType = record2.mediaMime ?? "application/octet-stream";
+  if (record2.mediaPath !== undefined) {
+    return [{
+      key: "media",
+      name: basename15(record2.mediaPath),
+      mimeType,
+      locator: whatsAppMediaFileLocator(record2.mediaPath),
+      available: record2.downloadStatus === undefined || record2.downloadStatus === "ok",
+      ...record2.mediaSizeBytes !== undefined ? { sizeBytes: record2.mediaSizeBytes } : {}
+    }];
+  }
+  return record2.downloadStatus !== undefined ? [{ key: "media", name: "media", mimeType, available: false }] : [];
 }
 function childIdentity(parent, child) {
   return {
@@ -100992,7 +101251,8 @@ function recordBringsContent(message2) {
 }
 function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
   const identity2 = recordIdentity(message2, account);
-  const isMedia = message2.mediaType !== undefined && message2.text === "";
+  const mediaIsChild = message2.mediaType !== undefined && CHILD_MEDIA_TYPES.has(message2.mediaType);
+  const isMedia = message2.mediaType !== undefined && message2.text === "" && !mediaIsChild;
   const redacted = message2.secretRedacted === true;
   const text2 = spoolMessageText(message2);
   const hasPreviewEnrichment = text2 !== resolveMentionText(message2.text, message2.mentions);
@@ -101001,7 +101261,7 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
   return {
     identity: identity2,
     mimeType: isMedia ? message2.mediaMime ?? "application/octet-stream" : TEXT_MIME_TYPE,
-    content: isMedia || redacted ? { kind: "metadata_only" } : { kind: "text", text: text2 },
+    content: isMedia || redacted || mediaIsChild && message2.text === "" ? { kind: "metadata_only" } : { kind: "text", text: text2 },
     metadata: Object.freeze({
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || message2.chatJid,
       sender: senderName || message2.senderJid,
@@ -101016,7 +101276,7 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
       ...redacted ? { secretRedacted: true } : {},
       ...message2.mentions === undefined ? {} : { mentions: message2.mentions },
       ...message2.mediaType === undefined ? {} : { mediaType: message2.mediaType },
-      ...mediaMetadata(message2)
+      ...mediaIsChild ? {} : mediaMetadata(message2)
     }),
     fetchedAt
   };
@@ -101055,11 +101315,11 @@ function redactWhatsAppLiveSpoolSecrets(options) {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty4(options.account, "WhatsApp account");
   const from = positionFromCursor(options.from);
   const through = positionFromCursor(options.through);
-  const mediaRoot = options.mediaDir ? existingRealPath(options.mediaDir) : undefined;
+  const mediaRoots = [...options.mediaDir ? [options.mediaDir] : [], ...options.mediaDirs ?? []].map((dir) => existingRealPath(dir)).filter((dir) => dir !== undefined);
   const relocate = options.relocateMediaPath ?? ((path) => path);
   let owners;
   const deleteOwnedMedia = (message2) => {
-    if (!message2.mediaPath || !mediaRoot)
+    if (!message2.mediaPath || mediaRoots.length === 0)
       return;
     owners ??= mediaPathOwners(options.spoolDir, relocate);
     const real = existingRealPath(relocate(message2.mediaPath));
@@ -101068,7 +101328,7 @@ function redactWhatsAppLiveSpoolSecrets(options) {
     const self = chatScopedKey(message2.chatJid, message2.id);
     if ([...owners.get(real) ?? []].some((owner) => owner !== self))
       return;
-    deleteSavedMedia(real, mediaRoot);
+    deleteSavedMedia(real, mediaRoots);
   };
   const releaseMedia = (message2) => {
     if (!message2.mediaPath || !owners)
@@ -101152,21 +101412,24 @@ function mediaPathOwners(spoolDir, relocate) {
 }
 function existingRealPath(path) {
   try {
-    return realpathSync17(path);
+    return realpathSync18(path);
   } catch {
     return;
   }
 }
-function deleteSavedMedia(mediaPath, mediaRoot) {
-  if (!mediaPath || !mediaRoot)
+function deleteSavedMedia(mediaPath, mediaRoots) {
+  if (!mediaPath || mediaRoots.length === 0)
     return;
   const real = existingRealPath(mediaPath);
   if (!real)
     return;
-  const inside = relative10(mediaRoot, real);
-  if (!inside || inside.startsWith("..") || isAbsolute27(inside))
+  const inside = mediaRoots.some((root) => {
+    const from = relative11(root, real);
+    return from !== "" && !from.startsWith("..") && !isAbsolute28(from);
+  });
+  if (!inside)
     return;
-  if (!statSync32(real).isFile())
+  if (!statSync33(real).isFile())
     return;
   rmSync20(real, { force: true });
 }
@@ -101261,18 +101524,20 @@ function optionalStringRecord(value2) {
 function nowIso3() {
   return new Date().toISOString();
 }
-var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, WHATSAPP_STATUS_CHAT_LABEL = "Status updates", CURSOR2, LEGACY_CURSOR;
+var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, WHATSAPP_STATUS_CHAT_LABEL = "Status updates", CURSOR2, LEGACY_CURSOR;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
   init_reaction_index();
   init_spool_index();
   init_spool_resets();
+  init_child_media();
   init_match_keys();
   init_spool_reader();
   CONNECTOR_ID2 = WHATSAPP_LIVE_CONNECTOR_ID;
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
   TARGET_READ_CHUNK_BYTES = 4 * 1024;
+  CHILD_MEDIA_TYPES = new Set(["image", "video", "video_note"]);
   CURSOR2 = /^(.+):(\d+)@(\d+)(s?)(?:~r([0-9a-f.]+))?$/u;
   LEGACY_CURSOR = /^(.+):(\d+)$/u;
 });
@@ -101280,6 +101545,9 @@ var init_live_connector = __esm(() => {
 // src/workers/whatsapp/store-sync.ts
 import { readdirSync as readdirSync19 } from "node:fs";
 import { join as join88 } from "node:path";
+function defaultWhatsAppStateDir(env = process.env) {
+  return resolvedRawPath(WHATSAPP_SOURCE_ID, "whatsapp", env);
+}
 function defaultWhatsAppSpoolDir(env = process.env) {
   return resolvedRawPath(WHATSAPP_SOURCE_ID, "whatsapp-spool", env);
 }
@@ -101287,7 +101555,12 @@ function defaultWhatsAppMediaDir(env = process.env) {
   return resolvedRawPath(WHATSAPP_SOURCE_ID, "whatsapp-media", env);
 }
 function defaultWhatsAppMediaRoots(env = process.env) {
-  return [resolvedRawPath(WHATSAPP_SOURCE_ID, "whatsapp-media-root", env)];
+  const state = defaultWhatsAppStateDir(env);
+  return [...new Set([
+    resolvedRawPath(WHATSAPP_SOURCE_ID, "whatsapp-media-root", env),
+    join88(state, "media", "images"),
+    join88(state, "media", "video")
+  ])];
 }
 function sanitizeWhatsAppLiveCursor(cursor) {
   if (cursor === undefined)
@@ -101353,8 +101626,10 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
   const spoolDir = options.spoolDir?.trim() || defaultWhatsAppSpoolDir(env);
   const account = options.account?.trim() || WHATSAPP_PERSONAL_ACCOUNT_SCOPE;
   const mediaDir = options.mediaDir?.trim() || defaultWhatsAppMediaDir(env);
+  const mediaDirs = [mediaDir, ...defaultWhatsAppMediaRoots(env)];
+  const readChild = options.readChild ?? createWhatsAppChildReader({ mediaRoots: defaultWhatsAppMediaRoots(env), relocate: whatsappMovedPathMapper(env) });
   const connectorFor = (findings) => ({
-    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings }),
+    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings, readChild }),
     id: WHATSAPP_PRODUCT_CONNECTOR_ID
   });
   const staleThresholdSeconds = whatsappCaptureStaleThresholdSeconds(options.spoolStaleThresholdSeconds, env);
@@ -101390,6 +101665,7 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
             spoolDir,
             account,
             mediaDir,
+            mediaDirs,
             relocateMediaPath: whatsappMovedPathMapper(env),
             ledger: tierSet.ledger,
             through: lineCursorOf(committed),
@@ -101414,6 +101690,7 @@ function clearWhatsAppSpoolSecrets(options) {
     spoolDir: options.spoolDir,
     account: options.account,
     ...options.mediaDir ? { mediaDir: options.mediaDir } : {},
+    ...options.mediaDirs ? { mediaDirs: options.mediaDirs } : {},
     ...options.relocateMediaPath ? { relocateMediaPath: options.relocateMediaPath } : {},
     ...window2,
     judge: judge3
@@ -101638,6 +101915,7 @@ var init_store_sync2 = __esm(() => {
   init_spool_reader();
   init_spool_file_identity();
   init_spool_index();
+  init_child_media();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local"
@@ -101986,7 +102264,7 @@ __export(exports_tier_migration_cli, {
   runTierMigrateCommand: () => runTierMigrateCommand,
   TIER_MIGRATE_USAGE: () => TIER_MIGRATE_USAGE
 });
-import { createHash as createHash65 } from "node:crypto";
+import { createHash as createHash66 } from "node:crypto";
 async function runTierMigrateCommand(args, context2 = {}) {
   const [command, ...rest] = args;
   const flags = parseFlags(rest);
@@ -102155,7 +102433,7 @@ async function withLanes(context2, env, mode, inputs, run) {
 }
 async function installedInputs(env, options) {
   const rules = loadOwnerTierRules({ env, allowMissing: true });
-  const rulesDigest = createHash65("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
+  const rulesDigest = createHash66("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
   const revision = `map:${TIER_MAP_REVISION};rules:${rules.length > 0 ? rulesDigest : "none"}`;
   const base = {
     ...rules.length > 0 ? { rules } : {},
@@ -102805,7 +103083,7 @@ var init_tier_cli = __esm(() => {
 });
 
 // src/core/engine-brief.ts
-import { existsSync as existsSync74, readFileSync as readFileSync58 } from "node:fs";
+import { existsSync as existsSync74, readFileSync as readFileSync59 } from "node:fs";
 import { homedir as homedir35 } from "node:os";
 function engineBriefFromViewModel(view3) {
   const items = Array.isArray(view3.needsYou) ? view3.needsYou : [];
@@ -102918,7 +103196,7 @@ function startingGraceOver(path, agentPid, now) {
   try {
     if (!existsSync74(path))
       return false;
-    const status = JSON.parse(readFileSync58(path, "utf8"));
+    const status = JSON.parse(readFileSync59(path, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || typeof status.started_at !== "string")
       return false;
     if (agentPid !== null && status.pid !== agentPid)
@@ -103553,20 +103831,20 @@ function isCleanExit(child) {
 async function waitForChildExit(child, timeoutMs) {
   if (childExited(child))
     return;
-  await new Promise((resolve17) => {
+  await new Promise((resolve18) => {
     const timeout = setTimeout(done, timeoutMs);
     timeout.unref?.();
     child.once("exit", done);
     function done() {
       clearTimeout(timeout);
       child.removeListener("exit", done);
-      resolve17();
+      resolve18();
     }
   });
 }
 function delay(ms) {
-  return new Promise((resolve17) => {
-    const timeout = setTimeout(resolve17, ms);
+  return new Promise((resolve18) => {
+    const timeout = setTimeout(resolve18, ms);
     timeout.unref?.();
   });
 }
@@ -103587,7 +103865,7 @@ var init_native_process_service = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync47, readFileSync as readFileSync59, rmSync as rmSync21, writeFileSync as writeFileSync17 } from "node:fs";
+import { mkdirSync as mkdirSync47, readFileSync as readFileSync60, rmSync as rmSync21, writeFileSync as writeFileSync17 } from "node:fs";
 import { dirname as dirname72, join as join90 } from "node:path";
 import { homedir as homedir36 } from "node:os";
 function guardStateDir(env) {
@@ -103615,7 +103893,7 @@ function resolveEmbeddingDrainReportPath(env = process.env) {
 function readEmbeddingOperatorOverride(path) {
   let raw;
   try {
-    raw = readFileSync59(path, "utf8");
+    raw = readFileSync60(path, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT")
       return "none";
@@ -103654,7 +103932,7 @@ function fresh(at, now, maxAgeMs) {
 }
 function readJsonFile(path) {
   try {
-    return asRecord14(JSON.parse(readFileSync59(path, "utf8")));
+    return asRecord14(JSON.parse(readFileSync60(path, "utf8")));
   } catch {
     return;
   }
@@ -103844,8 +104122,8 @@ var init_embedding_runtime = __esm(() => {
 
 // src/core/native-embedding-drain-service.ts
 import { randomUUID as randomUUID24 } from "node:crypto";
-import { readFileSync as readFileSync60, statSync as statSync33 } from "node:fs";
-import { delimiter as delimiter6, dirname as dirname73, isAbsolute as isAbsolute28, join as join91 } from "node:path";
+import { readFileSync as readFileSync61, statSync as statSync34 } from "node:fs";
+import { delimiter as delimiter6, dirname as dirname73, isAbsolute as isAbsolute29, join as join91 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
 function createNativeEmbeddingDrainService(options) {
   return createNativeProcessService({
@@ -103890,7 +104168,7 @@ async function prepareEmbeddingDrainStart(input, options) {
   const runtimePath = resolveBunRuntimePath(drain.runtimePath, env);
   const executablePath = assertUsableFile(fileURLToPath9(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
   const reportPath = drain.reportPath ?? resolveEmbeddingDrainReportPath(env);
-  if (!isAbsolute28(reportPath)) {
+  if (!isAbsolute29(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join91(dirname73(reportPath), READINESS_FILE);
@@ -103940,33 +104218,33 @@ function resolveBunRuntimePath(configured, env) {
     ...(env.PATH ?? "").split(delimiter6).filter(Boolean).map((dir) => join91(dir, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute28(candidate))
+    if (!candidate || !isAbsolute29(candidate))
       continue;
     if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
       continue;
     try {
-      if (statSync33(candidate).isFile())
+      if (statSync34(candidate).isFile())
         return candidate;
     } catch {}
   }
   throw new NativeProcessConfigurationError("Olympus source embedding drain could not resolve an absolute Bun runtime path.");
 }
 function assertUsableFile(path, label) {
-  if (!isAbsolute28(path)) {
+  if (!isAbsolute29(path)) {
     throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
   }
   try {
-    if (statSync33(path).isFile())
+    if (statSync34(path).isFile())
       return path;
   } catch {}
   throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} file is missing.`);
 }
 async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
   try {
-    const stat3 = statSync33(readinessPath);
+    const stat3 = statSync34(readinessPath);
     if (!stat3.isFile() || stat3.size > 16 * 1024)
       return false;
-    const receipt = JSON.parse(readFileSync60(readinessPath, "utf8"));
+    const receipt = JSON.parse(readFileSync61(readinessPath, "utf8"));
     return receipt.kind === "source_embedding_drain_service_readiness" && receipt.schema_version === 1 && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.options_validated === true && receipt.content_free === true;
   } catch {
     return false;
@@ -104049,8 +104327,8 @@ var init_native_embedding_drain_service = __esm(() => {
 
 // src/core/native-worker-service.ts
 import { randomUUID as randomUUID25 } from "node:crypto";
-import { statSync as statSync34 } from "node:fs";
-import { basename as basename15, delimiter as delimiter7, isAbsolute as isAbsolute29, join as join92 } from "node:path";
+import { statSync as statSync35 } from "node:fs";
+import { basename as basename16, delimiter as delimiter7, isAbsolute as isAbsolute30, join as join92 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
 function createNativeWorkerService(options) {
   let readyChild;
@@ -104246,10 +104524,10 @@ function resolveBunRuntimePath2(configured, env) {
     ...(env.PATH ?? "").split(delimiter7).filter(Boolean).map((directory) => join92(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
-    if (!isAbsolute29(candidate) || !isBunExecutableName2(candidate))
+    if (!isAbsolute30(candidate) || !isBunExecutableName2(candidate))
       continue;
     try {
-      if (statSync34(candidate).isFile())
+      if (statSync35(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -104260,16 +104538,16 @@ function resolveWorkerExecutablePath(configured, moduleUrl) {
   return assertExecutableFile(candidate, "worker executable");
 }
 function assertExecutableFile(path, label) {
-  if (!isAbsolute29(path))
+  if (!isAbsolute30(path))
     throw new Error(`Olympus ${label} path must be absolute.`);
   try {
-    if (statSync34(path).isFile())
+    if (statSync35(path).isFile())
       return path;
   } catch {}
   throw new Error(`Olympus ${label} is unavailable.`);
 }
 function isBunExecutableName2(path) {
-  const name = basename15(path).toLowerCase();
+  const name = basename16(path).toLowerCase();
   return name === "bun" || name === "bun.exe";
 }
 async function authenticatedReadinessProbe(fetchWorker, url, authToken, instanceId, timeoutMs) {
@@ -104711,7 +104989,7 @@ async function startEngineHost(options) {
       status.state = "stopping";
       writeStatus();
       log("engine: stopping.");
-      const deadline = new Promise((resolve17) => setTimeout(resolve17, STOP_DEADLINE_MS).unref?.());
+      const deadline = new Promise((resolve18) => setTimeout(resolve18, STOP_DEADLINE_MS).unref?.());
       await Promise.race([
         Promise.allSettled([...services].reverse().map((service) => service.stop())),
         deadline
@@ -105048,7 +105326,7 @@ function createLlamaServerHandle(launch, options = {}) {
       if (Date.now() > deadline) {
         fail(new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`));
       }
-      await new Promise((resolve18) => setTimeout(resolve18, HEALTH_POLL_MS));
+      await new Promise((resolve19) => setTimeout(resolve19, HEALTH_POLL_MS));
     }
     if (current2 !== spawned || spawned.exited) {
       throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
@@ -105159,11 +105437,11 @@ function trackServerProcess(child, tokenDir, onExit) {
     waitExit(timeoutMs) {
       if (exited)
         return Promise.resolve(true);
-      return new Promise((resolve18) => {
+      return new Promise((resolve19) => {
         const settle = (value2) => {
           clearTimeout(timer);
           exitWaiters.delete(onExited);
-          resolve18(value2);
+          resolve19(value2);
         };
         const onExited = () => settle(true);
         const timer = setTimeout(() => settle(false), timeoutMs);
@@ -105206,12 +105484,12 @@ function abortable(promise, signal) {
     return promise;
   if (signal.aborted)
     return Promise.reject(signal.reason);
-  return new Promise((resolve18, reject) => {
+  return new Promise((resolve19, reject) => {
     const onAbort = () => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then((value2) => {
       signal.removeEventListener("abort", onAbort);
-      resolve18(value2);
+      resolve19(value2);
     }, (error) => {
       signal.removeEventListener("abort", onAbort);
       reject(error);
@@ -105248,14 +105526,14 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
   }
 }
 function freeLoopbackPort() {
-  return new Promise((resolve18, reject) => {
+  return new Promise((resolve19, reject) => {
     const server = createServer4();
     server.unref();
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : 0;
-      server.close(() => port > 0 ? resolve18(port) : reject(new LlamaServerStartError("No free loopback port.")));
+      server.close(() => port > 0 ? resolve19(port) : reject(new LlamaServerStartError("No free loopback port.")));
     });
   });
 }
@@ -105312,7 +105590,7 @@ __export(exports_consult_writer, {
   CONSULT_STANDARD_REPLY_FORMAT: () => CONSULT_STANDARD_REPLY_FORMAT
 });
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync62 } from "node:fs";
+import { readFileSync as readFileSync63 } from "node:fs";
 import { freemem, platform as osPlatform5, totalmem } from "node:os";
 function consultWriterSystem(level, options = {}) {
   if (level === "unnamed")
@@ -105482,7 +105760,7 @@ function meminfoBytes(meminfo, field) {
 }
 function defaultConsultMemoryProbe(deps = {}) {
   const exec = deps.exec ?? ((file, args) => execFileSync3(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
-  const readFile7 = deps.readFile ?? ((path) => readFileSync62(path, "utf8"));
+  const readFile7 = deps.readFile ?? ((path) => readFileSync63(path, "utf8"));
   const platform2 = deps.platform ?? osPlatform5();
   const readOptional = (path) => {
     try {
@@ -112941,7 +113219,7 @@ class Protocol {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1000;
-        await new Promise((resolve18) => setTimeout(resolve18, pollInterval));
+        await new Promise((resolve19) => setTimeout(resolve19, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -112953,7 +113231,7 @@ class Protocol {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve18, reject) => {
+    return new Promise((resolve19, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -113031,7 +113309,7 @@ class Protocol {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve18(parseResult.data);
+            resolve19(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -113222,12 +113500,12 @@ class Protocol {
         interval = task.pollInterval;
       }
     } catch {}
-    return new Promise((resolve18, reject) => {
+    return new Promise((resolve19, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve18, interval);
+      const timeoutId = setTimeout(resolve19, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -116212,7 +116490,7 @@ var require_compile = __commonJS((exports) => {
     const schOrFunc = root.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve18.call(this, root, ref);
+    let _sch = resolve19.call(this, root, ref);
     if (_sch === undefined) {
       const schema = (_a5 = root.localRefs) === null || _a5 === undefined ? undefined : _a5[ref];
       const { schemaId } = this.opts;
@@ -116239,7 +116517,7 @@ var require_compile = __commonJS((exports) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve18(root, ref) {
+  function resolve19(root, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -116769,55 +117047,55 @@ var require_fast_uri = __commonJS((exports, module) => {
     }
     return uri;
   }
-  function resolve18(baseURI, relativeURI, options) {
+  function resolve19(baseURI, relativeURI, options) {
     const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
     const resolved = resolveComponent(parse7(baseURI, schemelessOptions), parse7(relativeURI, schemelessOptions), schemelessOptions, true);
     schemelessOptions.skipEscape = true;
     return serialize(resolved, schemelessOptions);
   }
-  function resolveComponent(base, relative11, options, skipNormalization) {
+  function resolveComponent(base, relative12, options, skipNormalization) {
     const target = {};
     if (!skipNormalization) {
       base = parse7(serialize(base, options), options);
-      relative11 = parse7(serialize(relative11, options), options);
+      relative12 = parse7(serialize(relative12, options), options);
     }
     options = options || {};
-    if (!options.tolerant && relative11.scheme) {
-      target.scheme = relative11.scheme;
-      target.userinfo = relative11.userinfo;
-      target.host = relative11.host;
-      target.port = relative11.port;
-      target.path = removeDotSegments(relative11.path || "");
-      target.query = relative11.query;
+    if (!options.tolerant && relative12.scheme) {
+      target.scheme = relative12.scheme;
+      target.userinfo = relative12.userinfo;
+      target.host = relative12.host;
+      target.port = relative12.port;
+      target.path = removeDotSegments(relative12.path || "");
+      target.query = relative12.query;
     } else {
-      if (relative11.userinfo !== undefined || relative11.host !== undefined || relative11.port !== undefined) {
-        target.userinfo = relative11.userinfo;
-        target.host = relative11.host;
-        target.port = relative11.port;
-        target.path = removeDotSegments(relative11.path || "");
-        target.query = relative11.query;
+      if (relative12.userinfo !== undefined || relative12.host !== undefined || relative12.port !== undefined) {
+        target.userinfo = relative12.userinfo;
+        target.host = relative12.host;
+        target.port = relative12.port;
+        target.path = removeDotSegments(relative12.path || "");
+        target.query = relative12.query;
       } else {
-        if (!relative11.path) {
+        if (!relative12.path) {
           target.path = base.path;
-          if (relative11.query !== undefined) {
-            target.query = relative11.query;
+          if (relative12.query !== undefined) {
+            target.query = relative12.query;
           } else {
             target.query = base.query;
           }
         } else {
-          if (relative11.path[0] === "/") {
-            target.path = removeDotSegments(relative11.path);
+          if (relative12.path[0] === "/") {
+            target.path = removeDotSegments(relative12.path);
           } else {
             if ((base.userinfo !== undefined || base.host !== undefined || base.port !== undefined) && !base.path) {
-              target.path = "/" + relative11.path;
+              target.path = "/" + relative12.path;
             } else if (!base.path) {
-              target.path = relative11.path;
+              target.path = relative12.path;
             } else {
-              target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative11.path;
+              target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative12.path;
             }
             target.path = removeDotSegments(target.path);
           }
-          target.query = relative11.query;
+          target.query = relative12.query;
         }
         target.userinfo = base.userinfo;
         target.host = base.host;
@@ -116825,7 +117103,7 @@ var require_fast_uri = __commonJS((exports, module) => {
       }
       target.scheme = base.scheme;
     }
-    target.fragment = relative11.fragment;
+    target.fragment = relative12.fragment;
     return target;
   }
   function equal2(uriA, uriB, options) {
@@ -116997,7 +117275,7 @@ var require_fast_uri = __commonJS((exports, module) => {
   var fastUri = {
     SCHEMES,
     normalize: normalize5,
-    resolve: resolve18,
+    resolve: resolve19,
     resolveComponent,
     equal: equal2,
     serialize,
@@ -120380,12 +120658,12 @@ class StdioServerTransport {
     this.onclose?.();
   }
   send(message2) {
-    return new Promise((resolve18) => {
+    return new Promise((resolve19) => {
       const json = serializeMessage(message2);
       if (this._stdout.write(json)) {
-        resolve18();
+        resolve19();
       } else {
-        this._stdout.once("drain", resolve18);
+        this._stdout.once("drain", resolve19);
       }
     });
   }
@@ -121145,7 +121423,7 @@ __export(exports_source_answer_jobs, {
   SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
   SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS: () => SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS
 });
-import { createHash as createHash66, randomBytes as randomBytes20, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash67, randomBytes as randomBytes20, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
   limits;
@@ -121211,8 +121489,8 @@ class SourceAnswerJobRegistry {
     }
     const outcome = pending.then((value2) => ({ ok: true, value: value2 }), (error2) => ({ ok: false, error: error2 }));
     let timer;
-    const handoff = new Promise((resolve18) => {
-      timer = setTimeout(() => resolve18("handoff"), this.limits.handoffMs);
+    const handoff = new Promise((resolve19) => {
+      timer = setTimeout(() => resolve19("handoff"), this.limits.handoffMs);
     });
     const first = await Promise.race([outcome, handoff]);
     clearTimeout(timer);
@@ -121231,8 +121509,8 @@ class SourceAnswerJobRegistry {
       id: newJobId(),
       owner: scope.owner,
       startedAt,
-      done: new Promise((resolve18) => {
-        wake = resolve18;
+      done: new Promise((resolve19) => {
+        wake = resolve19;
       }),
       finish: (result) => {
         if (job.outcome)
@@ -121264,12 +121542,12 @@ class SourceAnswerJobRegistry {
     if (!job.outcome && this.limits.resultWaitMs > 0) {
       let timer;
       let onAbort;
-      const stop = new Promise((resolve18) => {
-        timer = setTimeout(resolve18, this.limits.resultWaitMs);
+      const stop = new Promise((resolve19) => {
+        timer = setTimeout(resolve19, this.limits.resultWaitMs);
         if (signal) {
-          onAbort = () => resolve18();
+          onAbort = () => resolve19();
           if (signal.aborted)
-            resolve18();
+            resolve19();
           else
             signal.addEventListener("abort", onAbort, { once: true });
         }
@@ -121375,10 +121653,10 @@ class SourceAnswerJobRegistry {
     }
     let state = "queued";
     let detached = false;
-    let resolve18;
+    let resolve19;
     let reject;
     const ready = new Promise((ok, fail) => {
-      resolve18 = ok;
+      resolve19 = ok;
       reject = fail;
     });
     ready.catch(() => {
@@ -121413,7 +121691,7 @@ class SourceAnswerJobRegistry {
         this.runningTotal += 1;
         priority.lastGrant = kind;
         this.unqueue(waiter);
-        resolve18();
+        resolve19();
       },
       cancel: (reason, wake = true) => {
         if (state !== "queued")
@@ -121649,8 +121927,8 @@ class SourceAnswerJobRegistry {
   }
 }
 function sameOwner(a, b) {
-  const left = createHash66("sha256").update(a).digest();
-  const right = createHash66("sha256").update(b).digest();
+  const left = createHash67("sha256").update(a).digest();
+  const right = createHash67("sha256").update(b).digest();
   return timingSafeEqual6(left, right);
 }
 function callerAbortError(message2) {
@@ -121921,7 +122199,7 @@ var init_server4 = __esm(() => {
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash67, createPublicKey, randomBytes as randomBytes21, sign, verify } from "node:crypto";
+import { createHash as createHash68, createPublicKey, randomBytes as randomBytes21, sign, verify } from "node:crypto";
 function parseSurfacesMessage(message2) {
   if (message2.type !== "surfaces" || message2.v !== 1 || !Array.isArray(message2.entries))
     return;
@@ -121973,7 +122251,7 @@ function base32(data2) {
   return out;
 }
 function installIdForPublicKey(spkiDer) {
-  return base32(createHash67("sha256").update(spkiDer).digest().subarray(0, 20));
+  return base32(createHash68("sha256").update(spkiDer).digest().subarray(0, 20));
 }
 function spkiOf(key2) {
   return key2.export({ format: "der", type: "spki" });
@@ -121987,7 +122265,7 @@ function signInstallMessage(privateKey, kind, nonce, installId, relayHost, schem
   return base64url2(sign(null, signedPayload(kind, nonce, installId, relayHost, scheme), privateKey));
 }
 function powDigest(nonce, installId, relayHost, counter) {
-  return createHash67("sha256").update(`${POW_DOMAIN}
+  return createHash68("sha256").update(`${POW_DOMAIN}
 ${nonce}
 ${installId}
 ${relayHost.toLowerCase()}
@@ -122010,7 +122288,7 @@ async function solveRegistrationPow(bits2, nonce, installId, relayHost, signal) 
   for (let counter = 0;; counter += 1) {
     if (counter % 4096 === 0) {
       if (counter > 0)
-        await new Promise((resolve18) => setTimeout(resolve18, 0));
+        await new Promise((resolve19) => setTimeout(resolve19, 0));
       if (signal?.aborted)
         throw new PowCancelledError;
     }
@@ -122089,7 +122367,7 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync29, existsSync as existsSync77, lstatSync as lstatSync38, mkdirSync as mkdirSync50, readFileSync as readFileSync63, renameSync as renameSync17, writeFileSync as writeFileSync19 } from "node:fs";
+import { chmodSync as chmodSync29, existsSync as existsSync77, lstatSync as lstatSync38, mkdirSync as mkdirSync50, readFileSync as readFileSync64, renameSync as renameSync17, writeFileSync as writeFileSync19 } from "node:fs";
 import { join as join97 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync50(stateDir, { recursive: true, mode: 448 });
@@ -122112,7 +122390,7 @@ function loadOrCreateIdentity(stateDir) {
   const path = join97(ensureStateDir(stateDir), "install-key.pem");
   let privateKey;
   if (existsSync77(path)) {
-    privateKey = createPrivateKey(readFileSync63(path));
+    privateKey = createPrivateKey(readFileSync64(path));
   } else {
     privateKey = generateKeyPairSync("ed25519").privateKey;
     writePrivateFile(path, privateKey.export({ format: "pem", type: "pkcs8" }));
@@ -122679,7 +122957,7 @@ class RelayClient {
   }
   async drained() {
     while (this.socket && this.socket.readyState === WebSocket.OPEN && this.socket.bufferedAmount > SEND_HIGH_WATER_BYTES) {
-      await new Promise((resolve18) => setTimeout(resolve18, 10));
+      await new Promise((resolve19) => setTimeout(resolve19, 10));
     }
   }
 }
@@ -122801,9 +123079,9 @@ async function startRelayRuntime(options) {
 }
 async function runRelayRuntimeProcess(instanceId, overrides = {}) {
   const runtime = await startRelayRuntime({ ...overrides, env: process.env, instanceId });
-  await new Promise((resolve18) => {
+  await new Promise((resolve19) => {
     const shutdown = () => {
-      runtime.stop().finally(resolve18);
+      runtime.stop().finally(resolve19);
     };
     process.once("SIGTERM", shutdown);
     process.once("SIGINT", shutdown);
@@ -122948,23 +123226,23 @@ var init_manifest3 = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/install.ts
 import { spawnSync as spawnSync18 } from "node:child_process";
-import { createHash as createHash68, randomUUID as randomUUID26 } from "node:crypto";
+import { createHash as createHash69, randomUUID as randomUUID26 } from "node:crypto";
 import {
   closeSync as closeSync23,
   createReadStream as createReadStream3,
   existsSync as existsSync78,
   mkdirSync as mkdirSync51,
   openSync as openSync22,
-  readFileSync as readFileSync64,
+  readFileSync as readFileSync65,
   readdirSync as readdirSync20,
   renameSync as renameSync18,
   rmSync as rmSync24,
-  statSync as statSync35,
+  statSync as statSync36,
   statfsSync,
   writeFileSync as writeFileSync20,
   writeSync as writeSync5
 } from "node:fs";
-import { dirname as dirname76, isAbsolute as isAbsolute30, join as join98 } from "node:path";
+import { dirname as dirname76, isAbsolute as isAbsolute31, join as join98 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = builtInReasoningRoot(env);
   return {
@@ -122978,7 +123256,7 @@ function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_
 }
 function builtInReasoningRoot(env) {
   const root = env[BUILT_IN_REASONING_DIR_ENV]?.trim() || sharedDataPath("built-in-reasoning", env);
-  if (!isAbsolute30(root))
+  if (!isAbsolute31(root))
     throw new TypeError("The built-in reasoning directory must be an absolute path.");
   return root;
 }
@@ -123005,7 +123283,7 @@ function readPinnedModelStatus(statusPath, modelId, noun) {
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync64(statusPath, "utf8"));
+    const parsed = JSON.parse(readFileSync65(statusPath, "utf8"));
     return parsed && typeof parsed === "object" && parsed.modelId === modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -123133,7 +123411,7 @@ function volumeFreeBytes(path) {
 }
 function fileSize(path) {
   try {
-    return statSync35(path).size;
+    return statSync36(path).size;
   } catch {
     return 0;
   }
@@ -123190,7 +123468,7 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
   verifiedThisProcess2 ??= new Set;
   if (verifiedThisProcess2.has(key2))
     return;
-  const size = statSync35(path).size;
+  const size = statSync36(path).size;
   const label = `Checking the ${noun}`;
   reporter.verifying(label, 0, file.bytes);
   const digest4 = size === file.bytes ? await sha256File3(path, timeoutMs, (done) => reporter.verifying(label, done, file.bytes)) : undefined;
@@ -123202,7 +123480,7 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
 }
 function readRuntimeMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync64(join98(runtimeDir, RUNTIME_MARKER2), "utf8"));
+    return JSON.parse(readFileSync65(join98(runtimeDir, RUNTIME_MARKER2), "utf8"));
   } catch {
     return;
   }
@@ -123260,10 +123538,10 @@ function locateFile(root, name, depth2 = 0, prefix = "") {
     return;
   }
   if (entries.includes(name)) {
-    const relative11 = prefix ? `${prefix}/${name}` : name;
+    const relative12 = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync35(join98(root, relative11)).isFile())
-        return relative11;
+      if (statSync36(join98(root, relative12)).isFile())
+        return relative12;
     } catch {}
   }
   if (depth2 >= 2)
@@ -123271,7 +123549,7 @@ function locateFile(root, name, depth2 = 0, prefix = "") {
   for (const entry of entries) {
     const child = prefix ? `${prefix}/${entry}` : entry;
     try {
-      if (!statSync35(join98(root, child)).isDirectory())
+      if (!statSync36(join98(root, child)).isDirectory())
         continue;
     } catch {
       continue;
@@ -123304,7 +123582,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
   });
 }
 function hashInto(path, hash, timeoutMs, onProgress) {
-  return new Promise((resolve18, reject) => {
+  return new Promise((resolve19, reject) => {
     let done = 0;
     let settled = false;
     const stream = createReadStream3(path);
@@ -123317,7 +123595,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         stream.destroy();
         reject(error2);
       } else {
-        resolve18();
+        resolve19();
       }
     };
     const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -123329,7 +123607,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
   });
 }
 async function sha256File3(path, timeoutMs, onProgress) {
-  const hash = createHash68("sha256");
+  const hash = createHash69("sha256");
   await hashInto(path, hash, timeoutMs, onProgress);
   return hash.digest("hex");
 }
@@ -123342,7 +123620,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run2) {
     if (Date.now() > deadline) {
       throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
     }
-    await new Promise((resolve18) => setTimeout(resolve18, LOCK_POLL_MS2));
+    await new Promise((resolve19) => setTimeout(resolve19, LOCK_POLL_MS2));
   }
   const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
   refresh.unref?.();
@@ -123356,7 +123634,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run2) {
 }
 function lockHolder(lockPath) {
   try {
-    return JSON.parse(readFileSync64(lockPath, "utf8"));
+    return JSON.parse(readFileSync65(lockPath, "utf8"));
   } catch {
     return;
   }
@@ -123386,7 +123664,7 @@ function tryAcquireLock2(lockPath, token) {
 }
 function lockIsStale2(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync64(lockPath, "utf8"));
+    const holder = JSON.parse(readFileSync65(lockPath, "utf8"));
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
       try {
         process.kill(holder.pid, 0);
@@ -123398,7 +123676,7 @@ function lockIsStale2(lockPath) {
     return typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS2;
   } catch {
     try {
-      return Date.now() - statSync35(lockPath).mtimeMs > STALE_LOCK_MS2;
+      return Date.now() - statSync36(lockPath).mtimeMs > STALE_LOCK_MS2;
     } catch {
       return true;
     }
@@ -125443,7 +125721,7 @@ function installWorkerShutdownSignals(options) {
 var init_worker_shutdown = () => {};
 
 // src/core/update-check.ts
-import { readFileSync as readFileSync65 } from "node:fs";
+import { readFileSync as readFileSync66 } from "node:fs";
 import { join as join99 } from "node:path";
 function installerForPlatform(platform2) {
   if (platform2 === "darwin")
@@ -125498,7 +125776,7 @@ function newerVersion(remote, running) {
 }
 function runningOlympusVersion() {
   try {
-    const value2 = JSON.parse(readFileSync65(join99(olympusPackageRoot(), "package.json"), "utf8")).version;
+    const value2 = JSON.parse(readFileSync66(join99(olympusPackageRoot(), "package.json"), "utf8")).version;
     return typeof value2 === "string" ? value2 : "unknown";
   } catch {
     return "unknown";
@@ -125611,11 +125889,11 @@ var init_update_check = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
-import { accessSync as accessSync10, constants as constants11, readFileSync as readFileSync66 } from "node:fs";
-import { delimiter as delimiter8, isAbsolute as isAbsolute31, join as join100 } from "node:path";
+import { accessSync as accessSync10, constants as constants11, readFileSync as readFileSync67 } from "node:fs";
+import { delimiter as delimiter8, isAbsolute as isAbsolute32, join as join100 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || sharedDataPath("built-in-transcription", env);
-  if (!isAbsolute31(root))
+  if (!isAbsolute32(root))
     throw new TypeError("The built-in transcription directory must be an absolute path.");
   return {
     root,
@@ -125654,7 +125932,7 @@ function readBuiltInTranscriptionStatusFile(env = process.env, model = QWEN3_ASR
   const status = readBuiltInTranscriptionStatus(env, model);
   let raw;
   try {
-    raw = readFileSync66(builtInTranscriptionLayout(model, env).statusPath, "utf8");
+    raw = readFileSync67(builtInTranscriptionLayout(model, env).statusPath, "utf8");
   } catch (error2) {
     return { file: error2.code === "ENOENT" ? "missing" : "unreadable", status };
   }
@@ -125695,7 +125973,7 @@ function audioDecoderPresent(platform2 = currentPlatform2(), env = process.env) 
   };
   if (platform2.startsWith("darwin-"))
     return executable("/usr/bin/afconvert");
-  return (env.PATH ?? "").split(delimiter8).some((dir) => dir.length > 0 && isAbsolute31(dir) && executable(join100(dir, "ffmpeg")));
+  return (env.PATH ?? "").split(delimiter8).some((dir) => dir.length > 0 && isAbsolute32(dir) && executable(join100(dir, "ffmpeg")));
 }
 function modelLoadFailedReason(message2) {
   const text2 = message2 ?? "";
@@ -126132,7 +126410,7 @@ var init_model_setup = __esm(() => {
 
 // src/core/dashboard-session-secret.ts
 import { randomBytes as randomBytes24 } from "node:crypto";
-import { chmodSync as chmodSync30, lstatSync as lstatSync40, mkdirSync as mkdirSync52, readFileSync as readFileSync67 } from "node:fs";
+import { chmodSync as chmodSync30, lstatSync as lstatSync40, mkdirSync as mkdirSync52, readFileSync as readFileSync68 } from "node:fs";
 import { dirname as dirname77, join as join101 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
   return join101(dirname77(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
@@ -126157,7 +126435,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
     else if ((stats.mode & 63) !== 0)
       existing = "invalid";
     else {
-      const text2 = readFileSync67(path, "utf8").trim();
+      const text2 = readFileSync68(path, "utf8").trim();
       if (SECRET_PATTERN.test(text2))
         return { secret: text2, source: "file", path };
       existing = "invalid";
@@ -126183,60 +126461,9 @@ var init_dashboard_session_secret = __esm(() => {
   SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 });
 
-// src/core/file-extraction-source.ts
-import { createHash as createHash69 } from "node:crypto";
-function isFileExtractionSourceError(value2) {
-  if (!value2 || typeof value2 !== "object")
-    return false;
-  const candidate = value2;
-  return typeof candidate.errorKind === "string" && typeof candidate.settleAs === "string" && typeof candidate.retryable === "boolean" && Object.hasOwn(FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, candidate.errorKind);
-}
-function splitScopedLocalItemId(localItemId) {
-  const separator = localItemId.indexOf(":");
-  if (separator <= 0 || separator === localItemId.length - 1)
-    return;
-  return {
-    accountScope: localItemId.slice(0, separator),
-    providerItemId: localItemId.slice(separator + 1)
-  };
-}
-var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, ERROR_HASH_CHARS = 32, FileExtractionSourceError;
-var init_file_extraction_source = __esm(() => {
-  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
-    source_item_not_found: "failed_terminal",
-    source_permission_denied: "failed_terminal",
-    source_version_gone: "failed_terminal",
-    source_content_unavailable: "skipped_unsupported",
-    source_request_rejected: "failed_terminal",
-    source_too_large: "skipped_too_large",
-    source_rate_limited: "failed_retryable",
-    source_unavailable: "failed_retryable",
-    source_auth_expired: "failed_retryable",
-    source_budget_exhausted: "failed_retryable",
-    network_unreachable: "failed_retryable",
-    network_socket_closed: "failed_retryable"
-  });
-  FileExtractionSourceError = class FileExtractionSourceError extends Error {
-    errorKind;
-    settleAs;
-    retryable;
-    errorHash;
-    constructor(errorKind, options = {}) {
-      super(errorKind);
-      this.name = "FileExtractionSourceError";
-      this.errorKind = errorKind;
-      this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
-      this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash69("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
-      if (errorHash)
-        this.errorHash = errorHash;
-    }
-  };
-});
-
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile7, realpath, stat as stat3 } from "node:fs/promises";
-import { relative as relative11, resolve as resolve18, sep as sep13 } from "node:path";
+import { relative as relative12, resolve as resolve19, sep as sep13 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -126378,8 +126605,8 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve18(rootRealPath, relativePath);
-    const relativeToRoot = relative11(rootRealPath, candidatePath);
+    const candidatePath = resolve19(rootRealPath, relativePath);
+    const relativeToRoot = relative12(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep13}`)) {
       return;
     }
@@ -126722,9 +126949,263 @@ var init_drive_extraction_source = __esm(() => {
   ]);
 });
 
+// src/workers/connector-store/extraction-candidate-reader.ts
+function connectorStoreExtractionCandidateReader(store, filters) {
+  return {
+    extractionCandidates(options) {
+      const page2 = store.extractionCandidates({ ...options, ...filters ? { filters } : {} });
+      return {
+        candidates: page2.candidates.map((candidate) => ({
+          localItemId: candidate.identity.localItemId,
+          providerItemId: candidate.identity.providerItemId,
+          accountScope: candidate.identity.accountScope,
+          provider: candidate.identity.provider,
+          ...candidate.identity.sourceVersion !== undefined ? { sourceVersion: candidate.identity.sourceVersion } : {},
+          ...candidate.mimeType !== undefined ? { mimeType: candidate.mimeType } : {},
+          ...candidate.locatorUri !== undefined ? { locatorUri: candidate.locatorUri } : {},
+          ...candidate.contentHash !== undefined ? { contentHash: candidate.contentHash } : {},
+          ...candidate.name !== undefined ? { name: candidate.name } : {},
+          ...candidate.sizeBytes !== undefined ? { sizeBytes: candidate.sizeBytes } : {}
+        })),
+        ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
+        done: page2.done
+      };
+    }
+  };
+}
+
+// src/workers/file-extraction/connector-source.ts
+import { rmSync as rmSync25, writeFileSync as writeFileSync21 } from "node:fs";
+import { basename as basename17, join as join102, resolve as resolve20, sep as sep14 } from "node:path";
+function isBoundedFetchConnector(connector) {
+  return typeof connector.fetchItemWithin === "function";
+}
+function isFileFetchConnector(connector) {
+  return typeof connector.fetchItemToFile === "function";
+}
+async function readItemWithin(connector, localItemId, options) {
+  const deferred2 = options.deferredBytes ? { deferredBytes: options.deferredBytes } : {};
+  if (isBoundedFetchConnector(connector)) {
+    return connector.fetchItemWithin(localItemId, {
+      ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {},
+      ...options.expectedVersion ? { expectedVersion: options.expectedVersion } : {},
+      ...deferred2
+    });
+  }
+  return connector.fetchItem(localItemId, options.deferredBytes ? deferred2 : undefined);
+}
+async function readItemToFile(connector, localItemId, options) {
+  if (isFileFetchConnector(connector))
+    return connector.fetchItemToFile(localItemId, options);
+  const item = await readItemWithin(connector, localItemId, options);
+  const content = item.content;
+  if (content.kind === "metadata_only")
+    throw refusalFor(item);
+  const bytes = content.kind === "bytes" ? content.bytes : new TextEncoder().encode(content.text);
+  if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
+    throw new FileExtractionSourceError("source_too_large");
+  }
+  const path = join102(options.spoolDir, extractionSpoolFileName());
+  const served = () => options.stillServed?.() ?? true;
+  const refuseGone = () => {
+    discardExtractionSpoolFile(path, options.spoolDir);
+    throw new FileExtractionSourceError("source_item_not_found");
+  };
+  for (let attempt = 0;; attempt += 1) {
+    try {
+      if (!served())
+        refuseGone();
+      makeExtractionSpoolOwnerDir(options.spoolDir, options.spoolAnchor);
+      writeFileSync21(path, bytes, { mode: 384 });
+      break;
+    } catch (error2) {
+      if (attempt >= 3 || error2.code !== "ENOENT")
+        throw error2;
+    }
+  }
+  if (!served())
+    refuseGone();
+  return { item, path, spooled: true };
+}
+function deferredBytesAnswerFor(stored) {
+  switch (stored.state) {
+    case "none":
+      return;
+    case "gone":
+      return { refusal: "source_item_not_found" };
+    case "unavailable":
+      return { refusal: "source_content_unavailable" };
+    case "version_changed":
+      return { refusal: "source_version_gone" };
+    case "ready":
+      return { locator: stored.locator, ...stored.sizeBytes !== undefined ? { sizeBytes: stored.sizeBytes } : {} };
+  }
+}
+function refusalFor(item) {
+  if (item.metadata["contentTooLarge"] === true)
+    return new FileExtractionSourceError("source_too_large");
+  if (item.metadata["scopeContentDenied"] === true)
+    return new FileExtractionSourceError("source_permission_denied");
+  return new FileExtractionSourceError("source_content_unavailable");
+}
+function createConnectorFileExtractionSource(options) {
+  const { lanes } = options;
+  const connectorFor = (accountScope) => typeof options.connector === "function" ? options.connector(accountScope) : options.connector;
+  const requireText = (value2, label) => {
+    const text2 = value2?.trim();
+    if (!text2)
+      throw new Error(`${label} is required.`);
+    return text2;
+  };
+  const id = requireText(options.id, "Connector extraction source id");
+  const corpusId = requireText(options.corpusId, "Connector extraction source corpus id");
+  const provider = requireText(options.provider, "Connector extraction source provider");
+  const laneFor = (row) => lanes.find((lane) => lane.matches === undefined || lane.matches(row));
+  const refFromRow = (row, lane) => {
+    const split = splitScopedLocalItemId(row.localItemId);
+    const accountScope = row.accountScope ?? split?.accountScope;
+    const providerItemId = row.providerItemId ?? split?.providerItemId;
+    if (!accountScope || !providerItemId)
+      return;
+    const name = row.name ?? row.title;
+    return {
+      corpusId,
+      provider: row.provider ?? provider,
+      accountScope,
+      approvedScopeKey: lane.approvedScopeKey,
+      providerItemId,
+      localItemId: row.localItemId,
+      ...row.sourceVersion ? { sourceVersion: row.sourceVersion } : {},
+      ...row.contentHash ? { contentHash: row.contentHash } : {},
+      ...name ? { name } : {},
+      ...row.mimeType ? { mimeType: row.mimeType } : {},
+      ...row.sizeBytes !== undefined ? { sizeBytes: row.sizeBytes } : {}
+    };
+  };
+  return {
+    id,
+    corpusId,
+    provider,
+    async listCandidates(listOptions) {
+      const wanted = listOptions.approvedScopeKeys;
+      const active = wanted ? lanes.filter((lane) => wanted.includes(lane.approvedScopeKey)) : lanes;
+      if (active.length === 0)
+        return { candidates: [], done: true };
+      const readerOptions = {
+        limit: listOptions.limit,
+        withoutChunksOnly: true,
+        includeStaleChunks: true
+      };
+      if (listOptions.cursor !== undefined)
+        readerOptions.cursor = listOptions.cursor;
+      const mimeTypes = listOptions.mimeTypes ?? options.mimeTypes;
+      if (mimeTypes)
+        readerOptions.mimeTypes = mimeTypes;
+      const page2 = await options.candidates.extractionCandidates(readerOptions);
+      const candidates = [];
+      for (const row of page2.candidates) {
+        const lane = laneFor(row);
+        if (!lane || !active.includes(lane))
+          continue;
+        const ref = refFromRow(row, lane);
+        if (ref)
+          candidates.push(ref);
+      }
+      return {
+        candidates,
+        ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
+        done: page2.done
+      };
+    },
+    async fetch(ref, fetchOptions) {
+      const item = await readItem(ref, fetchOptions);
+      const content = item.content;
+      if (content.kind === "metadata_only")
+        throw refusalFor(item);
+      const bytes = content.kind === "bytes" ? content.bytes : new TextEncoder().encode(content.text);
+      const mimeType = content.kind === "bytes" ? content.mimeType : item.mimeType;
+      if (fetchOptions.maxBytes !== undefined && bytes.byteLength > fetchOptions.maxBytes) {
+        throw new FileExtractionSourceError("source_too_large");
+      }
+      return { bytes, ...mimeType ? { mimeType } : {}, sizeBytes: bytes.byteLength };
+    },
+    async fetchFile(ref, fileOptions) {
+      const { connector, deferred: deferred2 } = resolve_(ref, fileOptions.maxBytes);
+      const owner = { corpusId, accountScope: ref.accountScope };
+      const spoolDir = extractionSpoolOwnerDir(fileOptions.spoolDir, owner);
+      let handed;
+      try {
+        handed = await readItemToFile(connector, ref.localItemId, {
+          ...fileOptions.maxBytes !== undefined ? { maxBytes: fileOptions.maxBytes } : {},
+          ...ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {},
+          ...deferred2 ? { deferredBytes: { locator: deferred2.locator } } : {},
+          spoolDir,
+          ...fileOptions.spoolAnchor !== undefined ? { spoolAnchor: fileOptions.spoolAnchor } : {}
+        });
+      } catch (error2) {
+        throw asSourceError(error2);
+      }
+      const content = handed.item.content;
+      const mimeType = content.kind === "bytes" ? content.mimeType : handed.item.mimeType;
+      return {
+        path: handed.path,
+        ...mimeType ? { mimeType } : {},
+        ...deferred2?.sizeBytes !== undefined ? { sizeBytes: deferred2.sizeBytes } : {},
+        dispose: fileHandOver(handed.path, handed.spooled, spoolDir, () => pruneExtractionSpoolOwner(fileOptions.spoolDir, owner)).dispose
+      };
+    }
+  };
+  function resolve_(ref, maxBytes) {
+    const connector = connectorFor(ref.accountScope);
+    if (!connector)
+      throw new FileExtractionSourceError("source_item_not_found");
+    const answer = options.deferredBytes?.(ref);
+    if (answer && "refusal" in answer)
+      throw new FileExtractionSourceError(answer.refusal);
+    const stated = answer?.sizeBytes ?? ref.sizeBytes;
+    if (maxBytes !== undefined && stated !== undefined && stated > maxBytes) {
+      throw new FileExtractionSourceError("source_too_large");
+    }
+    return { connector, ...answer ? { deferred: answer } : {} };
+  }
+  async function readItem(ref, fetchOptions) {
+    const { connector, deferred: deferred2 } = resolve_(ref, fetchOptions.maxBytes);
+    try {
+      return await readItemWithin(connector, ref.localItemId, {
+        ...fetchOptions.maxBytes !== undefined ? { maxBytes: fetchOptions.maxBytes } : {},
+        ...ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {},
+        ...deferred2 ? { deferredBytes: { locator: deferred2.locator } } : {}
+      });
+    } catch (error2) {
+      throw asSourceError(error2);
+    }
+  }
+}
+function asSourceError(error2) {
+  return isFileExtractionSourceError(error2) ? error2 : new FileExtractionSourceError("source_unavailable");
+}
+function fileHandOver(path, spooled, spoolDir, tidy) {
+  return {
+    async dispose() {
+      if (!spooled)
+        return;
+      const root = resolve20(spoolDir) + sep14;
+      const target = resolve20(path);
+      if (!target.startsWith(root) || basename17(target) === "")
+        return;
+      rmSync25(target, { force: true });
+      tidy();
+    }
+  };
+}
+var init_connector_source = __esm(() => {
+  init_spool();
+  init_file_extraction_source();
+});
+
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile8, realpath as realpath2, stat as stat4 } from "node:fs/promises";
-import { basename as basename16, relative as relative12, resolve as resolve19, sep as sep14 } from "node:path";
+import { basename as basename18, relative as relative13, resolve as resolve21, sep as sep15 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -126736,7 +127217,11 @@ class WhatsAppExtractionSource {
   locators;
   mediaRoots;
   relocateLocator;
+  deferredBytes;
+  readChild;
   constructor(options) {
+    this.deferredBytes = options.deferredBytes;
+    this.readChild = options.readChild;
     this.relocateLocator = options.relocateLocator ?? ((path) => path);
     this.id = requireNonEmpty7(options.id, "WhatsApp extraction source id");
     this.corpusId = requireNonEmpty7(options.corpusId, "WhatsApp extraction corpus id");
@@ -126745,7 +127230,7 @@ class WhatsAppExtractionSource {
     this.approvedScopeKey = requireNonEmpty7(options.approvedScopeKey, "WhatsApp extraction scope key");
     this.candidates = options.candidates;
     this.locators = options.locators;
-    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve19(root));
+    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve21(root));
     if (this.mediaRoots.length === 0) {
       throw new Error("WhatsApp extraction needs at least one local media root.");
     }
@@ -126767,6 +127252,8 @@ class WhatsAppExtractionSource {
     };
   }
   async fetch(ref, options) {
+    if (ref.providerItemId.includes(CHILD_ITEM_ID_SEPARATOR))
+      return this.fetchChild(ref, options);
     const located = await this.locators.localContent(ref.localItemId, 1);
     const locator = located?.locatorUri?.trim();
     if (!locator)
@@ -126799,8 +127286,23 @@ class WhatsAppExtractionSource {
       throw new FileExtractionSourceError("source_unavailable");
     }
   }
+  fetchChild(ref, options) {
+    if (!this.deferredBytes || !this.readChild)
+      throw new FileExtractionSourceError("source_item_not_found");
+    const answer = this.deferredBytes(ref);
+    if (answer === undefined)
+      throw new FileExtractionSourceError("source_item_not_found");
+    if ("refusal" in answer)
+      throw new FileExtractionSourceError(answer.refusal);
+    if (options.maxBytes !== undefined && answer.sizeBytes !== undefined && answer.sizeBytes > options.maxBytes) {
+      throw new FileExtractionSourceError("source_too_large");
+    }
+    const bytes = this.readChild(answer.locator, { ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {} });
+    return { bytes, ...ref.mimeType ? { mimeType: ref.mimeType } : {}, sizeBytes: bytes.byteLength };
+  }
   refFromRow(row) {
-    if (row.provider !== this.provider || row.accountScope !== this.accountScope || !row.providerItemId || !row.locatorUri)
+    const child = row.providerItemId?.includes(CHILD_ITEM_ID_SEPARATOR) === true;
+    if (row.provider !== this.provider || row.accountScope !== this.accountScope || !row.providerItemId || (child ? !this.readChild || !this.deferredBytes : !row.locatorUri))
       return;
     return {
       corpusId: this.corpusId,
@@ -126811,7 +127313,7 @@ class WhatsAppExtractionSource {
       localItemId: row.localItemId,
       ...row.sourceVersion ? { sourceVersion: row.sourceVersion } : {},
       ...row.mimeType ? { mimeType: row.mimeType } : {},
-      name: basename16(row.locatorUri)
+      name: row.locatorUri ? basename18(row.locatorUri) : row.name ?? "media"
     };
   }
   async pathIsInsideMediaRoot(path) {
@@ -126822,8 +127324,8 @@ class WhatsAppExtractionSource {
       } catch {
         continue;
       }
-      const fromRoot = relative12(root, path);
-      if (fromRoot === "" || !fromRoot.startsWith(`..${sep14}`) && fromRoot !== "..")
+      const fromRoot = relative13(root, path);
+      if (fromRoot === "" || !fromRoot.startsWith(`..${sep15}`) && fromRoot !== "..")
         return true;
     }
     return false;
@@ -126844,7 +127346,42 @@ function nodeErrorCode(error2) {
 var MEDIA_MIME_FILTERS;
 var init_extraction_source2 = __esm(() => {
   init_file_extraction_source();
-  MEDIA_MIME_FILTERS = ["audio/*", "video/*"];
+  MEDIA_MIME_FILTERS = ["audio/*", "video/*", "image/*", "application/pdf"];
+});
+
+// src/workers/whatsapp/extraction-factory.ts
+function whatsAppChildReader(env, archive) {
+  return createWhatsAppChildReader({
+    mediaRoots: defaultWhatsAppMediaRoots(env),
+    relocate: whatsappMovedPathMapper(env),
+    ...archive ? { archive } : {}
+  });
+}
+function whatsAppExtractionSourceFactory(env, archive) {
+  const readChild = whatsAppChildReader(env, archive);
+  return (input) => {
+    const reader = input.view ?? input.store;
+    return new WhatsAppExtractionSource({
+      id: `${input.config.corpusId}:extraction`,
+      corpusId: input.config.corpusId,
+      provider: input.config.provider,
+      accountScope: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
+      approvedScopeKey: input.config.scopes[0],
+      candidates: connectorStoreExtractionCandidateReader(input.store),
+      locators: input.store,
+      mediaRoots: defaultWhatsAppMediaRoots(env),
+      relocateLocator: whatsappMovedPathMapper(env),
+      deferredBytes: (ref) => deferredBytesAnswerFor(reader.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
+      readChild
+    });
+  };
+}
+var init_extraction_factory = __esm(() => {
+  init_source_placement();
+  init_connector_source();
+  init_child_media();
+  init_extraction_source2();
+  init_store_sync2();
 });
 
 // src/workers/file-extraction/job-store.ts
@@ -129062,7 +129599,7 @@ var init_input_limits = __esm(() => {
 // src/workers/file-extraction/extractors/image-prepare.ts
 import { mkdtemp as mkdtemp3, rm as rm5, writeFile as writeFile3 } from "node:fs/promises";
 import { tmpdir as tmpdir8 } from "node:os";
-import { join as join102 } from "node:path";
+import { join as join103 } from "node:path";
 function imageDecoderUnavailableWarning(format) {
   return `image_decoder_unavailable_${format}`;
 }
@@ -129101,9 +129638,9 @@ function createImagePreparation(options) {
     if (declared && Math.min(declared.width, declared.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE) {
       return { kind: "too_small" };
     }
-    const tempDir = await mkdtemp3(join102(tmpdir8(), TEMP_DIR_PREFIX2));
+    const tempDir = await mkdtemp3(join103(tmpdir8(), TEMP_DIR_PREFIX2));
     try {
-      const inputPath = join102(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+      const inputPath = join103(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
       await writeFile3(inputPath, input.bytes, { mode: 384 });
       let prepared;
       try {
@@ -129171,7 +129708,7 @@ var init_image_prepare = __esm(() => {
 // src/workers/file-extraction/extractors/text.ts
 import { mkdtemp as mkdtemp4, rm as rm6, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir9 } from "node:os";
-import { dirname as dirname79, join as join103 } from "node:path";
+import { dirname as dirname79, join as join104 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version2 = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -129530,9 +130067,9 @@ function pdfTextLooksUndecoded(text2) {
   return total > 0 && unreadable / total > 0.1;
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp4(join103(tmpdir9(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp4(join104(tmpdir9(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join103(tempDir, "input.pdf");
+    const inputPath = join104(tempDir, "input.pdf");
     await writeFile4(inputPath, input.context.bytes);
     const result = await input.commandRunner({
       command: input.command,
@@ -129793,7 +130330,7 @@ var init_text = __esm(() => {
 // src/workers/file-extraction/extractors/pdf-raster-ocr.ts
 import { mkdtemp as mkdtemp5, readdir as readdir3, rm as rm7 } from "node:fs/promises";
 import { tmpdir as tmpdir10 } from "node:os";
-import { join as join104 } from "node:path";
+import { join as join105 } from "node:path";
 function parseSizePoints(text2) {
   const [first, second] = text2.split("x");
   const width = Number.parseFloat(first ?? "");
@@ -129877,7 +130414,7 @@ async function rasterPdfOcr(input, options) {
   const now = options.now ?? Date.now;
   const deadline = now() + (options.fileDeadlineMs ?? DEFAULT_APPLE_VISION_FILE_DEADLINE_MS);
   const info = await readPdfInfo({ inputPath: input.inputPath, maxPages, options });
-  const tempDir = await mkdtemp5(join104(tmpdir10(), RASTER_TEMP_PREFIX));
+  const tempDir = await mkdtemp5(join105(tmpdir10(), RASTER_TEMP_PREFIX));
   const pages = [];
   let attempted = 0;
   let failed = 0;
@@ -129918,7 +130455,7 @@ async function rasterPdfOcr(input, options) {
                 "-gray",
                 "-png",
                 input.inputPath,
-                join104(tempDir, RASTER_PAGE_PREFIX)
+                join105(tempDir, RASTER_PAGE_PREFIX)
               ],
               timeoutMs: Math.min(options.timeoutMs, renderLeftMs)
             });
@@ -129951,7 +130488,7 @@ async function rasterPdfOcr(input, options) {
             break rangeLoop;
           }
           attempted += 1;
-          const path = join104(tempDir, file.name);
+          const path = join105(tempDir, file.name);
           try {
             const { stdout } = await options.commandRunner({
               command: TESSERACT_COMMAND,
@@ -130069,7 +130606,7 @@ var init_pdf_raster_ocr = __esm(() => {
 // src/workers/file-extraction/extractors/ocr.ts
 import { mkdtemp as mkdtemp6, readFile as readFile9, rm as rm8, writeFile as writeFile5 } from "node:fs/promises";
 import { tmpdir as tmpdir11 } from "node:os";
-import { join as join105 } from "node:path";
+import { join as join106 } from "node:path";
 function createOcrEngine(input) {
   const options = input.options ?? {};
   let vision;
@@ -130322,9 +130859,9 @@ async function visionImage(input, vision) {
   }, vision));
 }
 async function withTempInput(bytes, extension, read) {
-  const tempDir = await mkdtemp6(join105(tmpdir11(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join106(tmpdir11(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join105(tempDir, `input${extension}`);
+    const inputPath = join106(tempDir, `input${extension}`);
     await writeFile5(inputPath, bytes);
     return await read(inputPath);
   } finally {
@@ -130344,11 +130881,11 @@ async function runOcrLane(run2) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp6(join105(tmpdir11(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join106(tmpdir11(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join105(tempDir, "input.pdf");
-    const outputPath = join105(tempDir, "output.pdf");
-    const sidecarPath = join105(tempDir, "sidecar.txt");
+    const inputPath = join106(tempDir, "input.pdf");
+    const outputPath = join106(tempDir, "output.pdf");
+    const sidecarPath = join106(tempDir, "sidecar.txt");
     await writeFile5(inputPath, input.bytes);
     try {
       await input.commandRunner({
@@ -130390,9 +130927,9 @@ async function extractPdfOcr(input) {
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp6(join105(tmpdir11(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join106(tmpdir11(), TEMP_DIR_PREFIX4));
   try {
-    const inputPath = join105(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    const inputPath = join106(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
     await writeFile5(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
@@ -130849,7 +131386,7 @@ var init_audio_wav = __esm(() => {
 import { existsSync as existsSync79 } from "node:fs";
 import { mkdtemp as mkdtemp7, readFile as readFile10, rm as rm9 } from "node:fs/promises";
 import { tmpdir as tmpdir12, totalmem as totalmem3 } from "node:os";
-import { join as join106 } from "node:path";
+import { join as join107 } from "node:path";
 function defaultAudioConverter(platform2, runner = runExtractionCommand, timeoutMs = DEFAULT_CONVERT_TIMEOUT_MS) {
   const darwin = platform2.startsWith("darwin-");
   return async (inputPath, outputPath) => {
@@ -130914,7 +131451,7 @@ function createBuiltInTranscriber(options = {}) {
   const filesOnDisk = options.filesOnDisk ?? (() => {
     try {
       const layout = builtInTranscriptionLayout(model, env, options.installOptions?.runtime, platform2);
-      return model.files.every((file) => existsSync79(join106(layout.modelDir, file.name)));
+      return model.files.every((file) => existsSync79(join107(layout.modelDir, file.name)));
     } catch {
       return false;
     }
@@ -131024,7 +131561,7 @@ function createBuiltInTranscriber(options = {}) {
       if (state === "pending" && installing && filesOnDisk()) {
         const pending = installing;
         const waitMs = Math.max(0, Math.min(verifyWaitMs, deadline - now()));
-        await Promise.race([pending, new Promise((resolve20) => setTimeout(resolve20, waitMs).unref?.())]);
+        await Promise.race([pending, new Promise((resolve22) => setTimeout(resolve22, waitMs).unref?.())]);
         state = prepare();
       }
       if (state === "unavailable")
@@ -131033,9 +131570,9 @@ function createBuiltInTranscriber(options = {}) {
         throw new TranscriberPendingError("The built-in transcription model is still being set up.");
       }
       const paths = installed;
-      const tempDir = await mkdtemp7(join106(tmpdir12(), TEMP_DIR_PREFIX5));
+      const tempDir = await mkdtemp7(join107(tmpdir12(), TEMP_DIR_PREFIX5));
       try {
-        const wavPath = join106(tempDir, "audio.wav");
+        const wavPath = join107(tempDir, "audio.wav");
         try {
           await convert(input.inputPath, wavPath);
         } catch (error2) {
@@ -131188,7 +131725,7 @@ var init_built_in_transcriber = __esm(() => {
 // src/workers/file-extraction/extractors/transcription.ts
 import { mkdtemp as mkdtemp8, readFile as readFile11, rm as rm10, writeFile as writeFile6 } from "node:fs/promises";
 import { tmpdir as tmpdir13 } from "node:os";
-import { extname as extname3, join as join107 } from "node:path";
+import { extname as extname3, join as join108 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
   const argv = command.trim().split(/\s+/).filter(Boolean);
   if (argv.length === 0) {
@@ -131267,8 +131804,8 @@ function createTranscriptionExtractor(options = {}) {
       try {
         let inputPath = input.localPath;
         if (!inputPath) {
-          tempDir = await mkdtemp8(join107(tmpdir13(), tempDirPrefix));
-          inputPath = join107(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
+          tempDir = await mkdtemp8(join108(tmpdir13(), tempDirPrefix));
+          inputPath = join108(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile6(inputPath, bytes);
         }
         const deadlineAt = transcriptionDeadlineFromLease(input.job.leaseExpiresAt);
@@ -131591,7 +132128,7 @@ function createVlmPdfExtractor(options = {}) {
             lastError = error2;
           }
           if (attempt < pageRetries && pageRetryDelayMs > 0) {
-            await new Promise((resolve20) => setTimeout(resolve20, pageRetryDelayMs));
+            await new Promise((resolve22) => setTimeout(resolve22, pageRetryDelayMs));
           }
         }
         if (!pageText) {
@@ -133512,31 +134049,6 @@ var init_tiered_store_sink = __esm(() => {
   init_store_sink();
 });
 
-// src/workers/connector-store/extraction-candidate-reader.ts
-function connectorStoreExtractionCandidateReader(store, filters) {
-  return {
-    extractionCandidates(options) {
-      const page2 = store.extractionCandidates({ ...options, ...filters ? { filters } : {} });
-      return {
-        candidates: page2.candidates.map((candidate) => ({
-          localItemId: candidate.identity.localItemId,
-          providerItemId: candidate.identity.providerItemId,
-          accountScope: candidate.identity.accountScope,
-          provider: candidate.identity.provider,
-          ...candidate.identity.sourceVersion !== undefined ? { sourceVersion: candidate.identity.sourceVersion } : {},
-          ...candidate.mimeType !== undefined ? { mimeType: candidate.mimeType } : {},
-          ...candidate.locatorUri !== undefined ? { locatorUri: candidate.locatorUri } : {},
-          ...candidate.contentHash !== undefined ? { contentHash: candidate.contentHash } : {},
-          ...candidate.name !== undefined ? { name: candidate.name } : {},
-          ...candidate.sizeBytes !== undefined ? { sizeBytes: candidate.sizeBytes } : {}
-        })),
-        ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
-        done: page2.done
-      };
-    }
-  };
-}
-
 // src/workers/connector-store/tiered-extraction.ts
 function tieredExtractionView(set2, options = {}) {
   const legacyDomains = () => TIER_DOMAIN_ORDER.filter((domain) => set2.legSpec(domain)?.legacy === true);
@@ -134076,19 +134588,7 @@ function defaultSourceFactories(env, deps = {}) {
         })
       });
     }],
-    ["whatsapp", (input) => {
-      return new WhatsAppExtractionSource({
-        id: `${input.config.corpusId}:extraction`,
-        corpusId: input.config.corpusId,
-        provider: input.config.provider,
-        accountScope: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
-        approvedScopeKey: input.config.scopes[0],
-        candidates: connectorStoreExtractionCandidateReader(input.store),
-        locators: input.store,
-        mediaRoots: defaultWhatsAppMediaRoots(env),
-        relocateLocator: whatsappMovedPathMapper(env)
-      });
-    }]
+    ["whatsapp", whatsAppExtractionSourceFactory(env)]
   ]);
   return factories;
 }
@@ -134143,7 +134643,7 @@ var init_file_extraction_runtime = __esm(() => {
   init_store2();
   init_drive();
   init_drive_extraction_source();
-  init_extraction_source2();
+  init_extraction_factory();
   init_store_sync2();
   init_job_store();
   init_registry();
@@ -134622,18 +135122,18 @@ var init_analyst_openai = __esm(() => {
 import {
   existsSync as existsSync81,
   mkdirSync as mkdirSync54,
-  readFileSync as readFileSync68,
+  readFileSync as readFileSync69,
   renameSync as renameSync19,
-  rmSync as rmSync25,
-  writeFileSync as writeFileSync21
+  rmSync as rmSync26,
+  writeFileSync as writeFileSync22
 } from "node:fs";
 import { randomUUID as randomUUID28 } from "node:crypto";
 import { homedir as homedir39 } from "node:os";
-import { dirname as dirname81, isAbsolute as isAbsolute32, join as join108 } from "node:path";
+import { dirname as dirname81, isAbsolute as isAbsolute33, join as join109 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir39(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute32(configuredRoot) ? configuredRoot : join108(homeDir, ".cache");
-  return join108(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute33(configuredRoot) ? configuredRoot : join109(homeDir, ".cache");
+  return join109(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -134807,7 +135307,7 @@ function readCatalogCache(path, type) {
     return;
   let payload2;
   try {
-    payload2 = JSON.parse(readFileSync68(path, "utf8"));
+    payload2 = JSON.parse(readFileSync69(path, "utf8"));
   } catch {
     return;
   }
@@ -134841,7 +135341,7 @@ function writeCatalogCache(path, catalog) {
   try {
     mkdirSync54(dirname81(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync21(tempPath, `${JSON.stringify({
+    writeFileSync22(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
       catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
@@ -134850,7 +135350,7 @@ function writeCatalogCache(path, catalog) {
 `, { mode: 384 });
     renameSync19(tempPath, path);
   } catch {} finally {
-    rmSync25(tempPath, { force: true });
+    rmSync26(tempPath, { force: true });
   }
 }
 function parsePrivacyCategory(value2) {
@@ -135577,18 +136077,18 @@ function packagedGooglePilotClientId() {
 var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "604346037984-oukrdn4ouh8n2fctggracadt0fdd2lps.apps.googleusercontent.com", PACKAGED_GOOGLE_PILOT_CLIENT_ID = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__", GOOGLE_PILOT_CLIENT_ID_SENTINEL = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__";
 
 // src/core/messaging-account-move.ts
-import { readFileSync as readFileSync69 } from "node:fs";
+import { readFileSync as readFileSync70 } from "node:fs";
 import { homedir as homedir40 } from "node:os";
-import { join as join109, resolve as resolve20 } from "node:path";
+import { join as join110, resolve as resolve22 } from "node:path";
 function namesDefaultLegacySession(source, value2, env) {
   const trimmed2 = value2.trim();
   if (trimmed2 === "")
     return false;
   if (source === "telegram") {
     const base = trimmed2.endsWith(".session") ? trimmed2.slice(0, -".session".length) : trimmed2;
-    return resolve20(base) === resolve20(legacyTelegramSessionBase(env));
+    return resolve22(base) === resolve22(legacyTelegramSessionBase(env));
   }
-  return resolve20(whatsappStateDirFromValue(trimmed2)) === resolve20(legacyWhatsAppDefaultStateDir(env));
+  return resolve22(whatsappStateDirFromValue(trimmed2)) === resolve22(legacyWhatsAppDefaultStateDir(env));
 }
 function movedSessionValue(source, value2, env) {
   try {
@@ -135605,7 +136105,7 @@ function folderSessionValue(source, env) {
   return source === "telegram" ? accountSessionPath(account, env) : accountRawPath(account, "whatsapp", env);
 }
 function handleRegistryPath(env) {
-  return env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join109(env.HOME?.trim() || homedir40(), ".config", "olympus", "handles.json");
+  return env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join110(env.HOME?.trim() || homedir40(), ".config", "olympus", "handles.json");
 }
 async function sessionPathKeys(source, secretStore) {
   const keys = new Set([source === "telegram" ? "telegram.personal.session_path" : "whatsapp.personal_local.session_path"]);
@@ -135696,7 +136196,7 @@ function repointGrant(env, source, sessionEnv) {
   const path = captureGrantPathFromEnv(source, env);
   let before;
   try {
-    before = readFileSync69(path, "utf8");
+    before = readFileSync70(path, "utf8");
   } catch {
     return false;
   }
@@ -135710,7 +136210,7 @@ function repointGrant(env, source, sessionEnv) {
   const producerEnv = { ...read.grant.producer.env ?? {} };
   delete producerEnv[sessionEnv];
   const grant = { ...rest, producer: { ...read.grant.producer, env: producerEnv } };
-  if (readFileSync69(path, "utf8") !== before)
+  if (readFileSync70(path, "utf8") !== before)
     return false;
   writePrivateFileAtomicSync(path, `${JSON.stringify(grant, null, 2)}
 `);
@@ -136058,7 +136558,7 @@ var init_locator_result_projector2 = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash74 } from "node:crypto";
-import { readFileSync as readFileSync70 } from "node:fs";
+import { readFileSync as readFileSync71 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir41 } from "node:os";
 import { resolve as resolvePath3 } from "node:path";
@@ -136225,7 +136725,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync70(trustPath, "utf8");
+        this.caPem = readFileSync71(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -136328,7 +136828,7 @@ async function postOpenClawGatewayPluginRoute(input) {
   const url = `${connection.baseUrl}${input.path}`;
   const timeoutMs = input.timeoutMs ?? 30000;
   if (connection.certificatePath) {
-    return requestVerifiedHttps(url, init, timeoutMs, readFileSync70(connection.certificatePath, "utf8"));
+    return requestVerifiedHttps(url, init, timeoutMs, readFileSync71(connection.certificatePath, "utf8"));
   }
   return fetchWithTimeout(input.fetchImpl ?? fetch, url, init, timeoutMs);
 }
@@ -136624,7 +137124,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
   }
-  return new Promise((resolve21, reject) => {
+  return new Promise((resolve23, reject) => {
     let settled = false;
     let timer;
     let removeAbortListener;
@@ -136647,7 +137147,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         return;
       settled = true;
       cleanup();
-      resolve21(response);
+      resolve23(response);
     };
     const abort = () => {
       const error2 = new Error("Source watch HTTPS request aborted.");
@@ -139355,12 +139855,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId++;
     post2({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve21, reject) => {
+    return new Promise((resolve23, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve21, reject, timer };
+      pending[id] = { resolve: resolve23, reject, timer };
     });
   }
   function notify(method, params) {
@@ -147940,7 +148440,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync32, copyFileSync as copyFileSync2, existsSync as existsSync82, lstatSync as lstatSync41, mkdirSync as mkdirSync55, readFileSync as readFileSync71 } from "node:fs";
+import { chmodSync as chmodSync32, copyFileSync as copyFileSync2, existsSync as existsSync82, lstatSync as lstatSync41, mkdirSync as mkdirSync55, readFileSync as readFileSync72 } from "node:fs";
 import { dirname as dirname83 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
@@ -147954,7 +148454,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text3 = readFileSync71(path, "utf8");
+  const text3 = readFileSync72(path, "utf8");
   const raw = JSON.parse(text3);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -148165,7 +148665,7 @@ var init_chat_scope_filter = __esm(() => {
 });
 
 // src/workers/cli-operations.ts
-import { isAbsolute as isAbsolute33 } from "node:path";
+import { isAbsolute as isAbsolute34 } from "node:path";
 function cliDataRootMismatch(body, context2) {
   const owned = canonicalDataRoot(lifecycleDataRoot(context2));
   const asked = typeof body.data_root === "string" && body.data_root ? canonicalDataRoot(body.data_root) : undefined;
@@ -148201,7 +148701,7 @@ function ingestionStatusForCli() {
 }
 function exportForCli(body) {
   const output = typeof body.output === "string" ? body.output : "";
-  if (!isAbsolute33(output))
+  if (!isAbsolute34(output))
     throw new OperationError("invalid_params", "The export folder must be an absolute path.");
   const sourceId = typeof body.source_id === "string" && body.source_id.trim() ? body.source_id : undefined;
   try {
@@ -148329,12 +148829,12 @@ class SpawnCommandRunner {
     try {
       return await Promise.race([
         completed,
-        new Promise((resolve21) => {
+        new Promise((resolve23) => {
           termTimer = setTimeout(() => {
             child.kill();
             killTimer = setTimeout(() => {
               child.kill("SIGKILL");
-              resolve21({
+              resolve23({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -148359,9 +148859,9 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
 import { createHash as createHash78, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
-import { readFileSync as readFileSync72, statSync as statSync36 } from "node:fs";
+import { readFileSync as readFileSync73, statSync as statSync37 } from "node:fs";
 import { homedir as homedir42 } from "node:os";
-import { join as join111, resolve as resolve21 } from "node:path";
+import { join as join112, resolve as resolve23 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -150374,8 +150874,8 @@ function createEmailSourceWorker(options = {}) {
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
     let release;
-    dashboardGrantMutationTail = new Promise((resolve22) => {
-      release = resolve22;
+    dashboardGrantMutationTail = new Promise((resolve24) => {
+      release = resolve24;
     });
     await previous;
     try {
@@ -150691,7 +151191,7 @@ function isSqliteBusyError(error2) {
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep4(ms) {
-  return new Promise((resolve22) => setTimeout(resolve22, ms));
+  return new Promise((resolve24) => setTimeout(resolve24, ms));
 }
 async function parseConsultAskRequest(request) {
   const record5 = await parseObjectBody(request);
@@ -151724,10 +152224,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve21(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve23(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve21(path)))].sort();
+  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve23(path)))].sort();
   const a = normalize5(left);
   const b = normalize5(right);
   return a.length === b.length && a.every((value2, index) => value2 === b[index]);
@@ -151920,7 +152420,7 @@ function assertDashboardSourceMayRead(source, sourceDashboard, disconnected) {
 }
 function dashboardRegistryStamp(registryPath) {
   try {
-    const stat6 = statSync36(registryPath);
+    const stat6 = statSync37(registryPath);
     return `${stat6.mtimeMs}:${stat6.size}`;
   } catch {
     return "absent";
@@ -152088,7 +152588,7 @@ function dashboardStorageNotices() {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync72(join111(homedir42(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync73(join112(homedir42(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -153063,8 +153563,8 @@ var init_locations = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire7 } from "node:module";
-import { existsSync as existsSync83, readFileSync as readFileSync73 } from "node:fs";
-import { dirname as dirname84, join as join112 } from "node:path";
+import { existsSync as existsSync83, readFileSync as readFileSync74 } from "node:fs";
+import { dirname as dirname84, join as join113 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
   const home2 = context2.home;
   const globs = IGNORE_SEGMENTS.map((segment) => `**/${segment}`);
@@ -153263,7 +153763,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value2 = Number.parseInt(readFileSync73("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value2 = Number.parseInt(readFileSync74("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value2) && value2 > 0 ? value2 : undefined;
   } catch {
     return;
@@ -153279,11 +153779,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join112(dir, "node_modules");
-    if (!existsSync83(join112(candidate, "@parcel", "watcher")))
+    const candidate = join113(dir, "node_modules");
+    if (!existsSync83(join113(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire7(join112(dirname84(candidate), "package.json"));
+      const requireFrom = createRequire7(join113(dirname84(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error2) {
       failures.push(error2 instanceof Error ? error2.message : String(error2));
@@ -153323,8 +153823,8 @@ var init_watch_hub = __esm(() => {
 
 // src/workers/local-files/connector.ts
 import { createHash as createHash79, randomUUID as randomUUID29 } from "node:crypto";
-import { realpathSync as realpathSync18, rmSync as rmSync26, readdirSync as readdirSync21 } from "node:fs";
-import { join as join113, posix as posix3 } from "node:path";
+import { realpathSync as realpathSync19, rmSync as rmSync27, readdirSync as readdirSync21 } from "node:fs";
+import { join as join114, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
   for (const part of rel.split("/")) {
@@ -153401,7 +153901,7 @@ function createLocalFilesSourceConnector(options) {
       throw new LocalFilesRootMissingError(root);
     let real;
     try {
-      real = realpathSync18.native(configured);
+      real = realpathSync19.native(configured);
     } catch {
       throw new LocalFilesRootMissingError(root);
     }
@@ -153615,7 +154115,7 @@ function createLocalFilesSourceConnector(options) {
       }
     }
   }
-  const snapshotFile = (gen) => join113(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
+  const snapshotFile = (gen) => join114(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
   const pruneSnapshots = (keep) => {
     if (!options.watch)
       return;
@@ -153623,7 +154123,7 @@ function createLocalFilesSourceConnector(options) {
     try {
       for (const name of readdirSync21(options.watch.snapshotDir)) {
         if (name.startsWith(`${options.connectorId}.`) && name.endsWith(".snap") && !keepNames.has(name)) {
-          rmSync26(join113(options.watch.snapshotDir, name), { force: true });
+          rmSync27(join114(options.watch.snapshotDir, name), { force: true });
         }
       }
     } catch {}
@@ -153801,7 +154301,7 @@ function createLocalFilesSourceConnector(options) {
         throw new FileExtractionSourceError("source_unavailable");
       let scopeRoot;
       try {
-        scopeRoot = ScopeRoot.open(realpathSync18.native(rootReal));
+        scopeRoot = ScopeRoot.open(realpathSync19.native(rootReal));
       } catch {
         throw new FileExtractionSourceError("source_unavailable");
       }
@@ -154205,8 +154705,8 @@ function createLocalFilesOwnRootsCleanup(options) {
           walk.done = true;
         else
           walk.after = page2.next;
-        await new Promise((resolve22) => {
-          setImmediate(resolve22);
+        await new Promise((resolve24) => {
+          setImmediate(resolve24);
         });
       }
     }
@@ -154233,8 +154733,8 @@ function createLocalFilesOwnRootsCleanup(options) {
       });
       const work = running;
       let timer;
-      const bound = new Promise((resolve22) => {
-        timer = setTimeout(() => resolve22({ removed: removedNow, complete: false }), maxMs);
+      const bound = new Promise((resolve24) => {
+        timer = setTimeout(() => resolve24({ removed: removedNow, complete: false }), maxMs);
         timer.unref?.();
       });
       return Promise.race([work, bound]).finally(() => {
@@ -154347,7 +154847,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve22) => setTimeout(resolve22, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve24) => setTimeout(resolve24, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -156126,9 +156626,9 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync84, mkdirSync as mkdirSync56, opendirSync, readFileSync as readFileSync74 } from "node:fs";
+import { existsSync as existsSync84, mkdirSync as mkdirSync56, opendirSync, readFileSync as readFileSync75 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname85, join as join114 } from "node:path";
+import { dirname as dirname85, join as join115 } from "node:path";
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -156211,10 +156711,10 @@ class MacPermissions {
     if (!this.active)
       return;
     const tops = [
-      ["desktop", join114(this.home, "Desktop")],
-      ["documents", join114(this.home, "Documents")],
-      ["downloads", join114(this.home, "Downloads")],
-      ["icloud", join114(this.home, "Library", "Mobile Documents")]
+      ["desktop", join115(this.home, "Desktop")],
+      ["documents", join115(this.home, "Documents")],
+      ["downloads", join115(this.home, "Downloads")],
+      ["icloud", join115(this.home, "Library", "Mobile Documents")]
     ];
     for (const [kind, root] of tops) {
       if (isWithinScopePath(realPath, root))
@@ -156232,7 +156732,7 @@ class MacPermissions {
       return true;
     if (realPath === "/" || realPath === "/Volumes")
       return true;
-    return [join114(this.home, "Desktop"), join114(this.home, "Documents"), join114(this.home, "Downloads"), join114(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+    return [join115(this.home, "Desktop"), join115(this.home, "Documents"), join115(this.home, "Downloads"), join115(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
   }
   nodeAccess(guard) {
     if (this.recall(guard) === "granted")
@@ -156267,7 +156767,7 @@ class MacPermissions {
     return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
   hasFullDiskAccess() {
-    for (const path of [join114(this.home, "Library", "Safari"), join114(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+    for (const path of [join115(this.home, "Library", "Safari"), join115(this.home, "Library", "Application Support", "com.apple.TCC")]) {
       try {
         this.listProtected(path);
         return true;
@@ -156298,8 +156798,8 @@ class MacPermissions {
       });
       this.inFlight.set(guard.root, pending);
     }
-    const waiting = new Promise((resolve22) => {
-      const timer = setTimeout(() => resolve22("waiting"), this.askTimeoutMs);
+    const waiting = new Promise((resolve24) => {
+      const timer = setTimeout(() => resolve24("waiting"), this.askTimeoutMs);
       timer.unref?.();
       pending.finally(() => clearTimeout(timer)).catch(() => {
         return;
@@ -156332,7 +156832,7 @@ class MacPermissions {
     let loaded = {};
     if (this.memoryPath && existsSync84(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync74(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync75(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -156378,7 +156878,7 @@ var init_mac_permissions = __esm(() => {
 });
 
 // src/workers/local-files/scheduler-source.ts
-import { realpathSync as realpathSync19 } from "node:fs";
+import { realpathSync as realpathSync20 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 function retryTomorrow(context2, reason, afterMs = DAY_MS3) {
   const attempted = Date.parse(context2?.attemptedAt ?? new Date().toISOString());
@@ -156392,7 +156892,7 @@ function createLocalFilesSchedulerSource(input) {
   }
   const roots = input.policy.roots;
   const tasks = [];
-  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync19(homedir43()) });
+  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync20(homedir43()) });
   const volumeResolver = input.volumes ?? input.watch?.volumes;
   const needsHelper = (scopePath) => {
     if (!macPermissions.active || macPermissions.hasHelper())
@@ -156697,9 +157197,9 @@ async function blobToArrayBuffer(blob) {
     return await blob.arrayBuffer();
   }
   const fr = new FileReader;
-  return new Promise((resolve22, reject) => {
+  return new Promise((resolve24, reject) => {
     fr.onload = () => {
-      resolve22(fr.result);
+      resolve24(fr.result);
     };
     fr.onerror = () => {
       reject(fr.error);
@@ -157556,16 +158056,16 @@ class MimeNode {
     for (let parts of foldedLines) {
       let rawLine = parts.join(`
 `);
-      let sep15 = rawLine.indexOf(":");
-      let rawKey = sep15 < 0 ? rawLine : rawLine.slice(0, sep15);
+      let sep16 = rawLine.indexOf(":");
+      let rawKey = sep16 < 0 ? rawLine : rawLine.slice(0, sep16);
       this.rawHeaderLines.push({
         key: rawKey.toLowerCase(),
         line: rawLine
       });
       let unfoldedLine = parts.join("");
-      sep15 = unfoldedLine.indexOf(":");
-      let key2 = sep15 < 0 ? unfoldedLine : unfoldedLine.slice(0, sep15);
-      let value2 = sep15 < 0 ? "" : trimWsp(foldLineBreaks(unfoldedLine.slice(sep15 + 1)));
+      sep16 = unfoldedLine.indexOf(":");
+      let key2 = sep16 < 0 ? unfoldedLine : unfoldedLine.slice(0, sep16);
+      let value2 = sep16 < 0 ? "" : trimWsp(foldLineBreaks(unfoldedLine.slice(sep16 + 1)));
       this.headers.push({ key: key2.toLowerCase(), originalKey: key2, value: value2 });
       const lowerKey = key2.toLowerCase();
       if (CONTENT_HEADERS.has(lowerKey) && !seenContentHeaders.has(lowerKey)) {
@@ -165823,7 +166323,7 @@ var init_source_targets = __esm(() => {
 });
 
 // src/workers/archive-import/start.ts
-import { lstatSync as lstatSync42, realpathSync as realpathSync20 } from "node:fs";
+import { lstatSync as lstatSync42, realpathSync as realpathSync21 } from "node:fs";
 import { posix as posix4 } from "node:path";
 function prepareArchiveImport(input) {
   const path = input.path;
@@ -165831,7 +166331,7 @@ function prepareArchiveImport(input) {
     return { kind: "unreadable", code: "escape" };
   let kind;
   try {
-    if (realpathSync20.native(path) !== path)
+    if (realpathSync21.native(path) !== path)
       return { kind: "unreadable", code: "escape" };
     const stat6 = lstatSync42(path);
     if (stat6.isFile())
@@ -165925,7 +166425,7 @@ async function resolveArchiveTarget(prepared, options) {
   if (source.evidence.kind === "archives")
     return { kind: "apart", reason: "not_this_source" };
   const importAccountId = source.evidence.kind === "account" ? source.evidence.importAccountId : undefined;
-  const resolve22 = () => {
+  const resolve24 = () => {
     const resolution = resolveImportAccount(source.sourceId, importAccountId, {
       env: options.env,
       ...options.ownerConfirmed === true ? { ownerConfirmed: true } : {}
@@ -165934,7 +166434,7 @@ async function resolveArchiveTarget(prepared, options) {
     const identity3 = (options.ownerConfirmed === true || created) && resolution.account ? importAccountIdentity(source.sourceId, options.env) : undefined;
     return { resolution, identity: identity3 };
   };
-  const { resolution: resolved, identity: identity2 } = target.exclusive ? await target.exclusive(async () => resolve22()) : resolve22();
+  const { resolution: resolved, identity: identity2 } = target.exclusive ? await target.exclusive(async () => resolve24()) : resolve24();
   if (resolved.match === "different")
     return { kind: "apart", reason: "different_account" };
   if (resolved.match === "unproven" || !resolved.account)
@@ -166586,7 +167086,7 @@ function createArchiveImportDashboard(options) {
     env: state.env,
     ...options.now ? { now: options.now } : {}
   });
-  const pause = options.pause ?? (() => new Promise((resolve22) => setImmediate(resolve22)));
+  const pause = options.pause ?? (() => new Promise((resolve24) => setImmediate(resolve24)));
   const home2 = options.home ?? homedir44();
   let closed = false;
   let checks4 = Promise.resolve();
@@ -167280,235 +167780,6 @@ var init_dashboard2 = __esm(() => {
   };
 });
 
-// src/workers/file-extraction/connector-source.ts
-import { rmSync as rmSync27, writeFileSync as writeFileSync22 } from "node:fs";
-import { basename as basename17, join as join115, resolve as resolve22, sep as sep15 } from "node:path";
-function isBoundedFetchConnector(connector) {
-  return typeof connector.fetchItemWithin === "function";
-}
-function isFileFetchConnector(connector) {
-  return typeof connector.fetchItemToFile === "function";
-}
-async function readItemWithin(connector, localItemId, options) {
-  const deferred2 = options.deferredBytes ? { deferredBytes: options.deferredBytes } : {};
-  if (isBoundedFetchConnector(connector)) {
-    return connector.fetchItemWithin(localItemId, {
-      ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {},
-      ...options.expectedVersion ? { expectedVersion: options.expectedVersion } : {},
-      ...deferred2
-    });
-  }
-  return connector.fetchItem(localItemId, options.deferredBytes ? deferred2 : undefined);
-}
-async function readItemToFile(connector, localItemId, options) {
-  if (isFileFetchConnector(connector))
-    return connector.fetchItemToFile(localItemId, options);
-  const item = await readItemWithin(connector, localItemId, options);
-  const content = item.content;
-  if (content.kind === "metadata_only")
-    throw refusalFor(item);
-  const bytes = content.kind === "bytes" ? content.bytes : new TextEncoder().encode(content.text);
-  if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
-  }
-  const path = join115(options.spoolDir, extractionSpoolFileName());
-  const served = () => options.stillServed?.() ?? true;
-  const refuseGone = () => {
-    discardExtractionSpoolFile(path, options.spoolDir);
-    throw new FileExtractionSourceError("source_item_not_found");
-  };
-  for (let attempt = 0;; attempt += 1) {
-    try {
-      if (!served())
-        refuseGone();
-      makeExtractionSpoolOwnerDir(options.spoolDir, options.spoolAnchor);
-      writeFileSync22(path, bytes, { mode: 384 });
-      break;
-    } catch (error2) {
-      if (attempt >= 3 || error2.code !== "ENOENT")
-        throw error2;
-    }
-  }
-  if (!served())
-    refuseGone();
-  return { item, path, spooled: true };
-}
-function deferredBytesAnswerFor(stored) {
-  switch (stored.state) {
-    case "none":
-      return;
-    case "gone":
-      return { refusal: "source_item_not_found" };
-    case "unavailable":
-      return { refusal: "source_content_unavailable" };
-    case "version_changed":
-      return { refusal: "source_version_gone" };
-    case "ready":
-      return { locator: stored.locator, ...stored.sizeBytes !== undefined ? { sizeBytes: stored.sizeBytes } : {} };
-  }
-}
-function refusalFor(item) {
-  if (item.metadata["contentTooLarge"] === true)
-    return new FileExtractionSourceError("source_too_large");
-  if (item.metadata["scopeContentDenied"] === true)
-    return new FileExtractionSourceError("source_permission_denied");
-  return new FileExtractionSourceError("source_content_unavailable");
-}
-function createConnectorFileExtractionSource(options) {
-  const { lanes } = options;
-  const connectorFor = (accountScope) => typeof options.connector === "function" ? options.connector(accountScope) : options.connector;
-  const requireText = (value2, label) => {
-    const text4 = value2?.trim();
-    if (!text4)
-      throw new Error(`${label} is required.`);
-    return text4;
-  };
-  const id = requireText(options.id, "Connector extraction source id");
-  const corpusId = requireText(options.corpusId, "Connector extraction source corpus id");
-  const provider = requireText(options.provider, "Connector extraction source provider");
-  const laneFor = (row) => lanes.find((lane) => lane.matches === undefined || lane.matches(row));
-  const refFromRow2 = (row, lane) => {
-    const split = splitScopedLocalItemId(row.localItemId);
-    const accountScope = row.accountScope ?? split?.accountScope;
-    const providerItemId = row.providerItemId ?? split?.providerItemId;
-    if (!accountScope || !providerItemId)
-      return;
-    const name = row.name ?? row.title;
-    return {
-      corpusId,
-      provider: row.provider ?? provider,
-      accountScope,
-      approvedScopeKey: lane.approvedScopeKey,
-      providerItemId,
-      localItemId: row.localItemId,
-      ...row.sourceVersion ? { sourceVersion: row.sourceVersion } : {},
-      ...row.contentHash ? { contentHash: row.contentHash } : {},
-      ...name ? { name } : {},
-      ...row.mimeType ? { mimeType: row.mimeType } : {},
-      ...row.sizeBytes !== undefined ? { sizeBytes: row.sizeBytes } : {}
-    };
-  };
-  return {
-    id,
-    corpusId,
-    provider,
-    async listCandidates(listOptions) {
-      const wanted = listOptions.approvedScopeKeys;
-      const active = wanted ? lanes.filter((lane) => wanted.includes(lane.approvedScopeKey)) : lanes;
-      if (active.length === 0)
-        return { candidates: [], done: true };
-      const readerOptions = {
-        limit: listOptions.limit,
-        withoutChunksOnly: true,
-        includeStaleChunks: true
-      };
-      if (listOptions.cursor !== undefined)
-        readerOptions.cursor = listOptions.cursor;
-      const mimeTypes = listOptions.mimeTypes ?? options.mimeTypes;
-      if (mimeTypes)
-        readerOptions.mimeTypes = mimeTypes;
-      const page2 = await options.candidates.extractionCandidates(readerOptions);
-      const candidates = [];
-      for (const row of page2.candidates) {
-        const lane = laneFor(row);
-        if (!lane || !active.includes(lane))
-          continue;
-        const ref = refFromRow2(row, lane);
-        if (ref)
-          candidates.push(ref);
-      }
-      return {
-        candidates,
-        ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
-        done: page2.done
-      };
-    },
-    async fetch(ref, fetchOptions) {
-      const item = await readItem(ref, fetchOptions);
-      const content = item.content;
-      if (content.kind === "metadata_only")
-        throw refusalFor(item);
-      const bytes = content.kind === "bytes" ? content.bytes : new TextEncoder().encode(content.text);
-      const mimeType = content.kind === "bytes" ? content.mimeType : item.mimeType;
-      if (fetchOptions.maxBytes !== undefined && bytes.byteLength > fetchOptions.maxBytes) {
-        throw new FileExtractionSourceError("source_too_large");
-      }
-      return { bytes, ...mimeType ? { mimeType } : {}, sizeBytes: bytes.byteLength };
-    },
-    async fetchFile(ref, fileOptions) {
-      const { connector, deferred: deferred2 } = resolve_(ref, fileOptions.maxBytes);
-      const owner = { corpusId, accountScope: ref.accountScope };
-      const spoolDir = extractionSpoolOwnerDir(fileOptions.spoolDir, owner);
-      let handed;
-      try {
-        handed = await readItemToFile(connector, ref.localItemId, {
-          ...fileOptions.maxBytes !== undefined ? { maxBytes: fileOptions.maxBytes } : {},
-          ...ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {},
-          ...deferred2 ? { deferredBytes: { locator: deferred2.locator } } : {},
-          spoolDir,
-          ...fileOptions.spoolAnchor !== undefined ? { spoolAnchor: fileOptions.spoolAnchor } : {}
-        });
-      } catch (error2) {
-        throw asSourceError(error2);
-      }
-      const content = handed.item.content;
-      const mimeType = content.kind === "bytes" ? content.mimeType : handed.item.mimeType;
-      return {
-        path: handed.path,
-        ...mimeType ? { mimeType } : {},
-        ...deferred2?.sizeBytes !== undefined ? { sizeBytes: deferred2.sizeBytes } : {},
-        dispose: fileHandOver(handed.path, handed.spooled, spoolDir, () => pruneExtractionSpoolOwner(fileOptions.spoolDir, owner)).dispose
-      };
-    }
-  };
-  function resolve_(ref, maxBytes) {
-    const connector = connectorFor(ref.accountScope);
-    if (!connector)
-      throw new FileExtractionSourceError("source_item_not_found");
-    const answer = options.deferredBytes?.(ref);
-    if (answer && "refusal" in answer)
-      throw new FileExtractionSourceError(answer.refusal);
-    const stated = answer?.sizeBytes ?? ref.sizeBytes;
-    if (maxBytes !== undefined && stated !== undefined && stated > maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
-    }
-    return { connector, ...answer ? { deferred: answer } : {} };
-  }
-  async function readItem(ref, fetchOptions) {
-    const { connector, deferred: deferred2 } = resolve_(ref, fetchOptions.maxBytes);
-    try {
-      return await readItemWithin(connector, ref.localItemId, {
-        ...fetchOptions.maxBytes !== undefined ? { maxBytes: fetchOptions.maxBytes } : {},
-        ...ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {},
-        ...deferred2 ? { deferredBytes: { locator: deferred2.locator } } : {}
-      });
-    } catch (error2) {
-      throw asSourceError(error2);
-    }
-  }
-}
-function asSourceError(error2) {
-  return isFileExtractionSourceError(error2) ? error2 : new FileExtractionSourceError("source_unavailable");
-}
-function fileHandOver(path, spooled, spoolDir, tidy) {
-  return {
-    async dispose() {
-      if (!spooled)
-        return;
-      const root = resolve22(spoolDir) + sep15;
-      const target = resolve22(path);
-      if (!target.startsWith(root) || basename17(target) === "")
-        return;
-      rmSync27(target, { force: true });
-      tidy();
-    }
-  };
-}
-var init_connector_source = __esm(() => {
-  init_spool();
-  init_file_extraction_source();
-});
-
 // src/workers/archive-import/extraction-source.ts
 function archiveServed(state, archiveId, family) {
   let record5;
@@ -167852,7 +168123,7 @@ async function digestArchiveFiles(root, files, shouldContinue) {
           steps.return("");
           return;
         }
-        await new Promise((resolve23) => setImmediate(resolve23));
+        await new Promise((resolve24) => setImmediate(resolve24));
       }
     } catch (error2) {
       throw fileStop(error2, file.rel_path);
@@ -168390,7 +168661,7 @@ var init_scheduler_source2 = __esm(() => {
 });
 
 // src/workers/local-files/open-target.ts
-import { realpathSync as realpathSync21, statSync as statSync37 } from "node:fs";
+import { realpathSync as realpathSync22, statSync as statSync38 } from "node:fs";
 function localFilesOpenRoots(volumes, approvedScopePaths) {
   const roots = [];
   for (const scopePath of approvedScopePaths()) {
@@ -168398,8 +168669,8 @@ function localFilesOpenRoots(volumes, approvedScopePaths) {
     if (!resolved)
       continue;
     try {
-      const real = realpathSync21.native(resolved);
-      if (statSync37(real).isDirectory() && !roots.includes(real))
+      const real = realpathSync22.native(resolved);
+      if (statSync38(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
   }
@@ -168420,8 +168691,8 @@ function createLocalFilesOpenTargets(options) {
     if (!resolved)
       return;
     try {
-      const real = realpathSync21.native(resolved);
-      return statSync37(real).isFile() ? { localPath: real } : undefined;
+      const real = realpathSync22.native(resolved);
+      return statSync38(real).isFile() ? { localPath: real } : undefined;
     } catch {
       return;
     }
@@ -168435,7 +168706,7 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash87 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { existsSync as existsSync87, lstatSync as lstatSync43, readFileSync as readFileSync75, readdirSync as readdirSync22, realpathSync as realpathSync22 } from "node:fs";
+import { existsSync as existsSync87, lstatSync as lstatSync43, readFileSync as readFileSync76, readdirSync as readdirSync22, realpathSync as realpathSync23 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 
 class VolumeResolver {
@@ -168605,7 +168876,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform2) {
   if (platform2 === "darwin")
     return execFileSync4("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync75("/proc/self/mountinfo", "utf8");
+  return readFileSync76("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -168626,7 +168897,7 @@ function defaultUuidsByDevice() {
       return result;
     for (const name of readdirSync22(dir)) {
       try {
-        result.set(realpathSync22(`${dir}/${name}`), name);
+        result.set(realpathSync23(`${dir}/${name}`), name);
       } catch {}
     }
   } catch {}
@@ -168969,12 +169240,12 @@ var init_mac_settings = __esm(() => {
 });
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync44, readdirSync as readdirSync23, realpathSync as realpathSync23 } from "node:fs";
+import { lstatSync as lstatSync44, readdirSync as readdirSync23, realpathSync as realpathSync24 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
 import { join as join117 } from "node:path";
 function safeRealpath(path) {
   try {
-    return realpathSync23.native(path);
+    return realpathSync24.native(path);
   } catch {
     return path;
   }
@@ -169163,7 +169434,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         }
         if (!isFolder)
           throw new Error("A selected folder could not be verified. It may have moved.");
-        const canonical2 = realpathSync23.native(real);
+        const canonical2 = realpathSync24.native(real);
         if (canonical2 !== real) {
           if (canonical2.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
             throw new Error("A selected folder is reached through a link. Choose the folder itself.");
@@ -169224,7 +169495,7 @@ function createLocalFilesArchiveBrowser(options = {}) {
         return refuse3("not_regular", ARCHIVE_PATH_COPY.not_regular);
       let canonical2;
       try {
-        canonical2 = realpathSync23.native(real);
+        canonical2 = realpathSync24.native(real);
       } catch {
         return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
       }
@@ -169481,8 +169752,8 @@ function resolveOne(request, stores, scopes) {
     ...names.authoredAt ? { authoredAt: names.authoredAt } : {}
   };
 }
-function unreadableParentOf(resolve23, request) {
-  const [names] = resolve23([request]);
+function unreadableParentOf(resolve24, request) {
+  const [names] = resolve24([request]);
   if (!names)
     return;
   const label = parentLabelText(names);
@@ -169665,8 +169936,8 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync4, lstatSync as lstatSync45, mkdirSync as mkdirSync57, readdirSync as readdirSync24, realpathSync as realpathSync24, renameSync as renameSync20, rmdirSync as rmdirSync8, statSync as statSync38, unlinkSync as unlinkSync4 } from "node:fs";
-import { basename as basename18, dirname as dirname86, isAbsolute as isAbsolute34, join as join118, relative as relative13, resolve as resolve23, sep as sep16 } from "node:path";
+import { linkSync as linkSync4, lstatSync as lstatSync45, mkdirSync as mkdirSync57, readdirSync as readdirSync24, realpathSync as realpathSync25, renameSync as renameSync20, rmdirSync as rmdirSync8, statSync as statSync39, unlinkSync as unlinkSync4 } from "node:fs";
+import { basename as basename19, dirname as dirname86, isAbsolute as isAbsolute35, join as join118, relative as relative14, resolve as resolve24, sep as sep16 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   return env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim() === "1";
 }
@@ -169694,7 +169965,7 @@ function candidates(sourceId, slot, env) {
   if (sourceId === TELEGRAM_SOURCE_ID) {
     const legacyDir = dirname86(legacyTelegramSessionBase(env));
     const folderDir = dirname86(accountSessionPath(account, env));
-    const own3 = basename18(legacyTelegramSessionBase(env));
+    const own3 = basename19(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames(legacyDir))
       if (folderNameOfStagedTelegramLogin(name, env))
@@ -169737,8 +170008,8 @@ function lookAt(path) {
 }
 function rootOf(ctx, path) {
   for (const { tag, root } of ctx.roots) {
-    const below = relative13(root, path);
-    if (below === ".." || below.startsWith(`..${sep16}`) || isAbsolute34(below))
+    const below = relative14(root, path);
+    if (below === ".." || below.startsWith(`..${sep16}`) || isAbsolute35(below))
       continue;
     return { tag, root, below };
   }
@@ -169803,18 +170074,18 @@ function storeNameForCorpus(sourceId, corpusId) {
 }
 function nearRealPath(path) {
   try {
-    return realpathSync24(path);
+    return realpathSync25(path);
   } catch {}
   const rest = [];
-  let near = resolve23(path);
+  let near = resolve24(path);
   for (;; ) {
-    rest.unshift(basename18(near));
+    rest.unshift(basename19(near));
     const up = dirname86(near);
     if (up === near)
-      return resolve23(path);
+      return resolve24(path);
     near = up;
     try {
-      return join118(realpathSync24(near), ...rest);
+      return join118(realpathSync25(near), ...rest);
     } catch {}
   }
 }
@@ -169826,10 +170097,10 @@ function destinationIsOurs(ctx, destination) {
   return nearRealPath(parent) === join118(nearRealPath(at.root), at.below);
 }
 function nearestExisting(path) {
-  let near = resolve23(path);
+  let near = resolve24(path);
   for (;; ) {
     try {
-      statSync38(near);
+      statSync39(near);
       return near;
     } catch {
       const up = dirname86(near);
@@ -169852,9 +170123,9 @@ function pinFor(ctx, sourceId) {
   if (facts?.pin)
     return skip("pinned", facts.pin);
   if (sourceId === WHATSAPP_SOURCE_ID) {
-    const moving = resolve23(legacyWhatsAppDefaultStateDir(env));
+    const moving = resolve24(legacyWhatsAppDefaultStateDir(env));
     for (const other of [legacyWhatsAppServiceStateDir(env), legacyWhatsAppLiveSyncStateDir(env, env.HOME?.trim() || undefined)]) {
-      if (resolve23(other) === moving)
+      if (resolve24(other) === moving)
         continue;
       const found = look(other);
       if (found.kind === "absent")
@@ -169876,7 +170147,7 @@ function inspect(ctx, sourceId, slot, entry) {
     const found = look(candidate.from);
     if (found.kind === "absent")
       continue;
-    const name = basename18(candidate.from);
+    const name = basename19(candidate.from);
     if (found.kind === "unreadable")
       return skip("unreadable", `${name} cannot be looked at.`);
     if (found.kind === "link" || found.kind === "other" || found.kind !== candidate.kind) {
@@ -169889,12 +170160,12 @@ function inspect(ctx, sourceId, slot, entry) {
   }
   let folderDevice;
   try {
-    folderDevice = statSync38(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
+    folderDevice = statSync39(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
   } catch {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
   for (const { candidate, found } of present) {
-    const name = basename18(candidate.from);
+    const name = basename19(candidate.from);
     if (!destinationIsOurs(ctx, candidate.to))
       return skip("unexpected_file", `A folder on the way to ${name}'s place in the account folder is a link.`);
     const destination = look(candidate.to);
@@ -169943,7 +170214,7 @@ function checkDatabases(ctx, moves) {
     const path = absPath(ctx, move.from);
     const reads = storeFileReads(path, waitMs(ctx));
     if (reads === "busy")
-      return { busy: `${basename18(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename19(move.from)} is in use by another program, so the account stays where it is for now.` };
     if (reads === "damaged") {
       checked.push({ file: move.to, result: "damaged" });
       continue;
@@ -169959,7 +170230,7 @@ function checkDatabases(ctx, moves) {
     ctx.quickCheckSpentMs += ctx.now() - started;
     ctx.quickCheckBytes += bytes;
     if (result === "busy")
-      return { busy: `${basename18(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename19(move.from)} is in use by another program, so the account stays where it is for now.` };
     checked.push({ file: move.to, result });
   }
   return { checked };
@@ -169989,7 +170260,7 @@ function syncFolderChains(ctx, folders) {
     const at = rootOf(ctx, folder);
     if (!at)
       throw Object.assign(new Error("outside every root"), { code: "EINVAL" });
-    let current2 = realpathSync24(at.root);
+    let current2 = realpathSync25(at.root);
     chain.add(current2);
     for (const part of at.below.split(sep16).filter(Boolean)) {
       current2 = join118(current2, part);
@@ -170003,7 +170274,7 @@ function syncFolderChains(ctx, folders) {
 }
 function makeFolders(ctx, moves) {
   try {
-    const real = realpathSync24(ctx.root);
+    const real = realpathSync25(ctx.root);
     const destinations = new Set;
     for (const move of moves) {
       const destination = dirname86(absPath(ctx, move.to));
@@ -170011,7 +170282,7 @@ function makeFolders(ctx, moves) {
         throw Object.assign(new Error("link"), { code: "ELOOP" });
       destinations.add(destination);
       let current2 = real;
-      for (const part of relative13(ctx.root, destination).split(sep16).filter(Boolean)) {
+      for (const part of relative14(ctx.root, destination).split(sep16).filter(Boolean)) {
         current2 = join118(current2, part);
         const found = lookAt(current2);
         if (found.kind === "dir")
@@ -170063,7 +170334,7 @@ function moveOne(ctx, move, direction) {
   const [from, to] = direction === "forward" ? [absPath(ctx, move.from), absPath(ctx, move.to)] : [absPath(ctx, move.to), absPath(ctx, move.from)];
   const source = look(from);
   const target = look(to);
-  const name = basename18(move.from);
+  const name = basename19(move.from);
   if (source.kind === "absent") {
     if (target.kind !== "absent")
       return "there";
@@ -170112,13 +170383,13 @@ function verifyIdentity(ctx, moves) {
     if (found.kind === "absent" && isDisposable(move))
       continue;
     if (found.kind !== "file" && found.kind !== "dir" || found.kind !== move.kind) {
-      throw new MoveFault("failed", "verify_failed", `${basename18(move.from)} is not there after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename19(move.from)} is not there after the move.`);
     }
     if (String(found.dev) !== move.dev || String(found.ino) !== move.ino) {
-      throw new MoveFault("failed", "verify_failed", `${basename18(move.from)} is not the same file after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename19(move.from)} is not the same file after the move.`);
     }
     if (move.kind === "file" && !move.from.endsWith("-shm") && Number(found.size) !== move.size) {
-      throw new MoveFault("failed", "verify_failed", `${basename18(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
+      throw new MoveFault("failed", "verify_failed", `${basename19(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
     }
   }
 }
@@ -170126,12 +170397,12 @@ function verifyRestored(ctx, moves) {
   for (const move of moves) {
     const back = look(absPath(ctx, move.from));
     if (isPlanned(look(absPath(ctx, move.to)), move)) {
-      throw new MoveFault("failed", "move_failed", `${basename18(move.from)} is still in the account folder.`);
+      throw new MoveFault("failed", "move_failed", `${basename19(move.from)} is still in the account folder.`);
     }
     if (back.kind === "absent" && isDisposable(move))
       continue;
     if (back.kind !== "file" && back.kind !== "dir" || back.kind !== move.kind) {
-      throw new MoveFault("failed", "move_failed", `${basename18(move.from)} is not back at its old place.`);
+      throw new MoveFault("failed", "move_failed", `${basename19(move.from)} is not back at its old place.`);
     }
   }
 }
@@ -170143,7 +170414,7 @@ function forward(ctx, sourceId, slot, migration) {
   makeFolders(ctx, moves);
   moves.forEach((move, index) => {
     if (moveOne(ctx, move, "forward") === "lost") {
-      throw new MoveFault("failed", "move_failed", `${basename18(move.from)} is in neither place.`);
+      throw new MoveFault("failed", "move_failed", `${basename19(move.from)} is in neither place.`);
     }
     checkpoint(`rename:${index}`);
   });
@@ -170154,9 +170425,9 @@ function forward(ctx, sourceId, slot, migration) {
       continue;
     const reads = storeFileReads(absPath(ctx, move.to), waitMs(ctx));
     if (reads === "busy")
-      throw new MoveFault("skipped", "busy", `${basename18(move.from)} is in use by another program, so the account stays where it is for now.`);
+      throw new MoveFault("skipped", "busy", `${basename19(move.from)} is in use by another program, so the account stays where it is for now.`);
     if (reads !== "reads") {
-      throw new MoveFault("failed", "verify_failed", `${basename18(move.from)} does not open after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename19(move.from)} does not open after the move.`);
     }
   }
   checkpoint("verified");
@@ -170194,7 +170465,7 @@ function revert(ctx, sourceId, slot, migration, fault) {
   const lost = [];
   back.forEach((move, index) => {
     if (moveOne(ctx, move, "back") === "lost")
-      lost.push(basename18(move.from));
+      lost.push(basename19(move.from));
     checkpoint(`unrename:${index}`);
   });
   for (const move of moves) {
@@ -170297,12 +170568,12 @@ function foldLogs(ctx, moves) {
       const logs = moves.filter((other) => other.from === `${move.from}-wal` || other.from === `${move.from}-journal`);
       if (logs.every((log) => log.size === 0))
         continue;
-      return notFolded(`${basename18(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
+      return notFolded(`${basename19(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
     }
     if (result === "busy") {
-      return { kind: "skip", reason: "busy", detail: `${basename18(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
+      return { kind: "skip", reason: "busy", detail: `${basename19(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
     }
-    return notFolded(`${basename18(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
+    return notFolded(`${basename19(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
   }
   return;
 }
@@ -170339,11 +170610,11 @@ function holdCaptureLocks(ctx, sourceId, slot) {
 function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
   if (!isMessaging(sourceId))
     return;
-  const rootFolders = new Set(ctx.roots.map(({ root }) => resolve23(root)));
+  const rootFolders = new Set(ctx.roots.map(({ root }) => resolve24(root)));
   const folders = new Set;
   try {
     for (const candidate of candidates(sourceId, slot, ctx.env)) {
-      const folder = resolve23(dirname86(candidate.from));
+      const folder = resolve24(dirname86(candidate.from));
       if (!rootFolders.has(folder) && rootOf(ctx, folder))
         folders.add(folder);
     }
@@ -170429,13 +170700,13 @@ function context2(env, options) {
   } catch {
     return;
   }
-  if (!isAbsolute34(root))
+  if (!isAbsolute35(root))
     return;
   const now = __accountMigrationTestHooks.now ?? Date.now;
   return {
     env,
     root,
-    roots: roots.filter((candidate) => isAbsolute34(candidate.root)),
+    roots: roots.filter((candidate) => isAbsolute35(candidate.root)),
     messaging: options.messaging,
     now,
     deadline: Number.POSITIVE_INFINITY,
@@ -170568,141 +170839,6 @@ var init_source_account_migration = __esm(() => {
   };
   EntryChanged = class EntryChanged extends Error {
   };
-});
-
-// src/workers/archive-import/input-media.ts
-function archiveInputMediaLocator(ref) {
-  if (!ARCHIVE_ID.test(ref.archiveId) || !BINDING_ID.test(ref.bindingId))
-    throw new Error("An archive media locator needs a plain archive and binding id.");
-  return `${PREFIX2}${ref.archiveId}:b:${ref.bindingId}`;
-}
-function archiveInputZipMediaLocator(ref) {
-  if (!ARCHIVE_ID.test(ref.archiveId) || !Number.isSafeInteger(ref.fileIndex) || ref.fileIndex < 0 || !Number.isSafeInteger(ref.memberIndex) || ref.memberIndex < 0) {
-    throw new Error("An archive zip media locator needs a plain archive id and two places.");
-  }
-  return `${PREFIX2}${ref.archiveId}:z:${ref.fileIndex}:${ref.memberIndex}`;
-}
-function parseArchiveInputMedia(locator) {
-  if (!locator.startsWith(PREFIX2))
-    return;
-  const parts = locator.slice(PREFIX2.length).split(":");
-  const [archiveId, kind] = parts;
-  if (archiveId === undefined || !ARCHIVE_ID.test(archiveId))
-    return;
-  if (kind === "b" && parts.length === 3 && BINDING_ID.test(parts[2]))
-    return { kind: "binding", archiveId, bindingId: parts[2] };
-  if (kind === "z" && parts.length === 4 && /^\d{1,9}$/u.test(parts[2]) && /^\d{1,9}$/u.test(parts[3])) {
-    return { kind: "zip", archiveId, fileIndex: Number(parts[2]), memberIndex: Number(parts[3]) };
-  }
-  return;
-}
-function servedRecord(state, archiveId) {
-  let record5;
-  try {
-    record5 = state.get(archiveId);
-  } catch {
-    return;
-  }
-  if (!record5 || record5.status === "removing" || record5.target === undefined)
-    return;
-  return record5;
-}
-function readArchiveInputMedia(locator, deps, options = {}) {
-  const parsed = parseArchiveInputMedia(locator);
-  if (!parsed)
-    throw new FileExtractionSourceError("source_item_not_found");
-  const record5 = servedRecord(deps.state, parsed.archiveId);
-  if (!record5)
-    throw new FileExtractionSourceError("source_item_not_found");
-  const maxBytes = options.maxBytes ?? ARCHIVE_MEDIA_DEFAULT_READ_BYTES;
-  let root;
-  try {
-    root = ScopeRoot.open(record5.root_path);
-  } catch {
-    throw new FileExtractionSourceError("source_version_gone");
-  }
-  try {
-    return parsed.kind === "binding" ? readBinding(deps, record5, root, parsed.bindingId, maxBytes) : readZipMember(record5, root, parsed, maxBytes);
-  } catch (error2) {
-    if (error2 instanceof FileExtractionSourceError)
-      throw error2;
-    if (error2 instanceof ScopeSafeError) {
-      if (error2.code === "too_large")
-        throw new FileExtractionSourceError("source_too_large");
-      throw new FileExtractionSourceError("source_version_gone");
-    }
-    if (error2 instanceof ZipMemberError || error2 instanceof ZipFormatError) {
-      throw new FileExtractionSourceError("source_content_unavailable");
-    }
-    throw error2;
-  } finally {
-    root.close();
-  }
-}
-function readBinding(deps, record5, root, bindingId, maxBytes) {
-  if (!deps.bindings)
-    throw new FileExtractionSourceError("source_item_not_found");
-  const access = archiveMediaAccess({ bindings: deps.bindings, archiveId: record5.archive_id, root, chosenRelPath: record5.chosen_rel_path });
-  return access.read(bindingId, { maxBytes });
-}
-function readZipMember(record5, root, ref, maxBytes) {
-  const file = record5.files[ref.fileIndex];
-  if (!file)
-    throw new FileExtractionSourceError("source_item_not_found");
-  let reader;
-  try {
-    reader = root.openFile(file.rel_path, {
-      expected: { dev: file.dev, ino: file.ino, size: file.size, mtimeMs: file.mtime_ms }
-    });
-    const zip = ZipArchive.open(reader);
-    if (file.members) {
-      const table = zip.memberTable();
-      if (table.count !== file.members.count || table.sha256 !== file.members.sha256) {
-        throw new FileExtractionSourceError("source_version_gone");
-      }
-    }
-    let entry;
-    for (const candidate of zip.entries()) {
-      if (candidate.index === ref.memberIndex) {
-        entry = candidate;
-        break;
-      }
-    }
-    if (!entry || entry.isDirectory)
-      throw new FileExtractionSourceError("source_item_not_found");
-    if (entry.uncompressedSize > maxBytes)
-      throw new FileExtractionSourceError("source_too_large");
-    const member = ZipMemberReader.open(zip, entry);
-    try {
-      const out = new Uint8Array(entry.uncompressedSize);
-      let at = 0;
-      for (let chunk = member.next();chunk !== undefined; chunk = member.next()) {
-        if (at + chunk.length > out.length)
-          throw new FileExtractionSourceError("source_content_unavailable");
-        out.set(chunk, at);
-        at += chunk.length;
-      }
-      const end = member.end;
-      if (at !== out.length || !end || !end.sizeOk || end.crcOk === false) {
-        throw new FileExtractionSourceError("source_content_unavailable");
-      }
-      reader.assertCurrent?.();
-      return out;
-    } finally {
-      member.close();
-    }
-  } finally {
-    reader?.close();
-  }
-}
-var PREFIX2 = "archive-input-media:v1:", ARCHIVE_ID, BINDING_ID;
-var init_input_media = __esm(() => {
-  init_file_extraction_source();
-  init_scope_safe_fs();
-  init_media_bindings();
-  init_zip_reader();
-  ARCHIVE_ID = /^[A-Za-z0-9_-]{1,128}$/u;
-  BINDING_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 });
 
 // src/workers/whatsapp/export-zone.ts
@@ -172027,7 +172163,7 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync58, readFileSync as readFileSync76 } from "node:fs";
+import { mkdirSync as mkdirSync58, readFileSync as readFileSync77 } from "node:fs";
 import { dirname as dirname88 } from "node:path";
 
 class SnifferCallBudget {
@@ -172042,7 +172178,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync76(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync77(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -173655,9 +173791,9 @@ data:
       const initRequest = messages.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve24) => {
+        return new Promise((resolve25) => {
           this._streamMapping.set(streamId2, {
-            resolveJson: resolve24,
+            resolveJson: resolve25,
             cleanup: () => {
               this._streamMapping.delete(streamId2);
             }
@@ -175013,7 +175149,7 @@ function chatgptPrivateAnswerProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve24) => {
+    return new Promise((resolve25) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -175024,7 +175160,7 @@ function chatgptPrivateAnswerProgram(config2) {
           return;
         }
         settled = true;
-        resolve24(db);
+        resolve25(db);
       };
       try {
         const factory = window.indexedDB;
@@ -175051,7 +175187,7 @@ function chatgptPrivateAnswerProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve24) => {
+    return new Promise((resolve25) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -175060,7 +175196,7 @@ function chatgptPrivateAnswerProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve24(value2);
+        resolve25(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -175195,10 +175331,10 @@ function chatgptPrivateAnswerProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve24) => setTimeout(resolve24, ms));
+    return new Promise((resolve25) => setTimeout(resolve25, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve24, reject) => {
+    return new Promise((resolve25, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -175208,7 +175344,7 @@ function chatgptPrivateAnswerProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve24(value2);
+        resolve25(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -176423,7 +176559,7 @@ function chatgptPrivateQuestionProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve24) => {
+    return new Promise((resolve25) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -176434,7 +176570,7 @@ function chatgptPrivateQuestionProgram(config2) {
           return;
         }
         settled = true;
-        resolve24(db);
+        resolve25(db);
       };
       try {
         const factory = window.indexedDB;
@@ -176461,7 +176597,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve24) => {
+    return new Promise((resolve25) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -176470,7 +176606,7 @@ function chatgptPrivateQuestionProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve24(value2);
+        resolve25(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -176534,10 +176670,10 @@ function chatgptPrivateQuestionProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve24) => setTimeout(resolve24, ms));
+    return new Promise((resolve25) => setTimeout(resolve25, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve24, reject) => {
+    return new Promise((resolve25, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -176547,7 +176683,7 @@ function chatgptPrivateQuestionProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve24(value2);
+        resolve25(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -179261,10 +179397,10 @@ function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
   let timer;
-  const timeout = new Promise((resolve24) => {
+  const timeout = new Promise((resolve25) => {
     timer = setTimeout(() => {
       log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
-      resolve24(false);
+      resolve25(false);
     }, timeoutMs);
     timer.unref?.();
   });
@@ -179335,8 +179471,8 @@ async function defaultPrivateMatchProbe(question, ctx) {
   if (corpora.length === 0)
     return none2;
   const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
-  const timeout = new Promise((resolve24) => {
-    const timer = setTimeout(() => resolve24(none2), PROBE_TIMEOUT_MS2);
+  const timeout = new Promise((resolve25) => {
+    const timer = setTimeout(() => resolve25(none2), PROBE_TIMEOUT_MS2);
     timer.unref?.();
   });
   return Promise.race([
@@ -187660,7 +187796,7 @@ function createRemoteOAuthHandler(options) {
   const pending = new Map;
   const codes = new Map;
   const completed = new Map;
-  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve24) => setTimeout(resolve24, ms))));
+  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve25) => setTimeout(resolve25, ms))));
   const sweep = () => {
     const at = now();
     for (const [id, entry] of pending)
@@ -188830,8 +188966,8 @@ class PrivateAnswerJobs {
       const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
       if (holdMs > 0) {
         let timer;
-        await Promise.race([settled, new Promise((resolve24) => {
-          timer = setTimeout(resolve24, holdMs);
+        await Promise.race([settled, new Promise((resolve25) => {
+          timer = setTimeout(resolve25, holdMs);
           timer.unref?.();
         })]);
         clearTimeout(timer);
@@ -188991,8 +189127,8 @@ class PrivateAnswerJobs {
     let settle = () => {
       return;
     };
-    const settled = new Promise((resolve24) => {
-      settle = resolve24;
+    const settled = new Promise((resolve25) => {
+      settle = resolve25;
     });
     const analysis = {
       key: key2,
@@ -189188,10 +189324,10 @@ class PrivateAnswerJobs {
     work.catch(() => {
       return;
     });
-    const stopped = new Promise((resolve24) => {
+    const stopped = new Promise((resolve25) => {
       if (abort.signal.aborted)
-        resolve24();
-      abort.signal.addEventListener("abort", () => resolve24(), { once: true });
+        resolve25();
+      abort.signal.addEventListener("abort", () => resolve25(), { once: true });
     });
     try {
       const done = await Promise.race([work, stopped]);
@@ -189218,8 +189354,8 @@ class PrivateAnswerJobs {
     let claimSettled = () => {
       return;
     };
-    const done = new Promise((resolve24) => {
-      claimSettled = resolve24;
+    const done = new Promise((resolve25) => {
+      claimSettled = resolve25;
     });
     const abort = new AbortController;
     job.claimAbort = abort;
@@ -189258,10 +189394,10 @@ class PrivateAnswerJobs {
     }, this.timeoutFor(job.detail));
     deadlineTimer.unref?.();
     abort.signal.addEventListener("abort", () => settle({ kind: "failed" }, "aborted"), { once: true });
-    const stopped = new Promise((resolve24) => {
+    const stopped = new Promise((resolve25) => {
       if (abort.signal.aborted)
-        resolve24();
-      abort.signal.addEventListener("abort", () => resolve24(), { once: true });
+        resolve25();
+      abort.signal.addEventListener("abort", () => resolve25(), { once: true });
     });
     const record5 = (analysis) => {
       timing.recheckMs = analysis.stats.recheckMs;
@@ -189392,8 +189528,8 @@ class PrivateAnswerJobs {
       return;
     }
     let timer;
-    const timeout = new Promise((resolve24) => {
-      timer = setTimeout(resolve24, this.resetTimeoutMs);
+    const timeout = new Promise((resolve25) => {
+      timer = setTimeout(resolve25, this.resetTimeoutMs);
       timer.unref?.();
     });
     const settled = Promise.race([reset.then(() => {
@@ -190018,10 +190154,10 @@ function untilCancelled(pending, signal) {
     return pending;
   if (signal.aborted)
     return Promise.resolve(undefined);
-  return new Promise((resolve24, reject) => {
-    const onAbort = () => resolve24(undefined);
+  return new Promise((resolve25, reject) => {
+    const onAbort = () => resolve25(undefined);
     signal.addEventListener("abort", onAbort, { once: true });
-    pending.then(resolve24, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    pending.then(resolve25, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
 }
 function asRecord21(value2) {
@@ -190093,8 +190229,8 @@ function createRemotePrivateParts(options) {
     try {
       return await Promise.race([
         options.probe(request, timeoutMs),
-        new Promise((resolve24) => {
-          timer = setTimeout(() => resolve24("unknown"), timeoutMs);
+        new Promise((resolve25) => {
+          timer = setTimeout(() => resolve25("unknown"), timeoutMs);
           timer.unref?.();
         })
       ]);
@@ -190980,8 +191116,8 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync33, lstatSync as lstatSync47, mkdirSync as mkdirSync59, statSync as statSync39 } from "node:fs";
-import { dirname as dirname89, isAbsolute as isAbsolute35 } from "node:path";
+import { chmodSync as chmodSync33, lstatSync as lstatSync47, mkdirSync as mkdirSync59, statSync as statSync40 } from "node:fs";
+import { dirname as dirname89, isAbsolute as isAbsolute36 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
   try {
@@ -190989,7 +191125,7 @@ function writeConsultSettings(input, location = {}) {
   } catch {
     return { ok: false, reason: "directory_unavailable" };
   }
-  if (path === undefined || !isAbsolute35(path))
+  if (path === undefined || !isAbsolute36(path))
     return { ok: false, reason: "no_home" };
   const nextRevision = input.expectedRevision + 1;
   const candidate = parseConsultSettings({
@@ -191066,7 +191202,7 @@ function ensureSettingsDirectory(directory) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync39(dirname89(directory));
+      statSync40(dirname89(directory));
     } catch {
       return "home_missing";
     }
@@ -192248,7 +192384,7 @@ __export(exports_server2, {
 });
 import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync92 } from "node:fs";
-import { dirname as dirname91, isAbsolute as isAbsolute36, join as join120 } from "node:path";
+import { dirname as dirname91, isAbsolute as isAbsolute37, join as join120 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -193862,13 +193998,13 @@ async function main() {
     }
     if (!await eligible())
       throw new Error("open refused");
-    await new Promise((resolve24, reject) => {
+    await new Promise((resolve25, reject) => {
       const args = localOpenArguments(path, roots);
       if (!args) {
         reject(new Error("open refused"));
         return;
       }
-      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve24());
+      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve25());
     });
   };
   const whatsappConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: WHATSAPP_PERSONAL_SOURCE_ID });
@@ -193890,6 +194026,9 @@ async function main() {
     reportRehomedChatOverrides("whatsapp", rehomeChatLaneOverrides(whatsappTierSet.ledger, "whatsapp", [whatsappConnectorStore]));
   }
   let whatsappImportTierSet = whatsappTierSet;
+  const whatsappArchiveMedia = () => ({ state: archiveImports.state, bindings: archiveImports.media });
+  const whatsappReadChild = whatsAppChildReader(process.env, whatsappArchiveMedia);
+  const whatsappExtraction = whatsAppExtractionSourceFactory(process.env, whatsappArchiveMedia);
   archiveSourceTargets.register(createWhatsAppArchiveTarget({
     env: process.env,
     set: () => {
@@ -193909,13 +194048,14 @@ async function main() {
         whatsappImportTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
       return whatsappImportTierSet;
     },
-    readChild: (locator, options) => readArchiveInputMedia(locator, { state: archiveImports.state, bindings: archiveImports.media }, options)
+    readChild: whatsappReadChild
   }));
   const whatsappConnectorStoreSync = whatsappConnectorStore ? createWhatsAppConnectorStoreSyncHandler({
     ...whatsappTierSet ? { tierSet: whatsappTierSet } : {},
     store: whatsappConnectorStore,
     account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
-    env: process.env
+    env: process.env,
+    readChild: whatsappReadChild
   }) : undefined;
   const whatsappLiveMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_WHATSAPP_LIVE_DRAIN_MAX_ITEMS, "OLYMPUS_WHATSAPP_LIVE_DRAIN_MAX_ITEMS");
   const telegramConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED", sourceIndexReadEnabled), { sourceId: TELEGRAM_MESSAGES_SOURCE_ID });
@@ -194135,7 +194275,8 @@ async function main() {
             matches: (row) => row.locatorUri !== undefined && scopePathIsWithin(row.locatorUri, approvedScopeKey.slice(LOCAL_FILES_POLICY_SOURCE.length + 1), localFilesExclusionContext)
           }))
         });
-      }]
+      }],
+      ["whatsapp", ({ config: config2, store, view: view3 }) => whatsappExtraction({ config: config2, store, ...view3 ? { view: view3 } : {} })]
     ]),
     ...fileExtractionTierSets.size > 0 ? { tierSets: fileExtractionTierSets } : {},
     scopeGuard: {
@@ -195663,7 +195804,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         openUrl: async (url, eligible) => {
           if (!await eligible())
             throw new Error("open refused");
-          await new Promise((resolve24, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve24()));
+          await new Promise((resolve25, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve25()));
         }
       } : {}
     });
@@ -196746,7 +196887,7 @@ function validateConnectorStoreMountDeclaration(entry) {
   if (!corpusId || !family || !trustDomain) {
     throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
   }
-  if (dbPath && !isAbsolute36(dbPath)) {
+  if (dbPath && !isAbsolute37(dbPath)) {
     throw new Error("Connector store dbPath must be absolute.");
   }
   if (!isDeclarableSourceFamily(family)) {
@@ -196922,7 +197063,7 @@ var init_server5 = __esm(async () => {
   init_whatsapp();
   init_archive_target();
   init_source_targets();
-  init_input_media();
+  init_extraction_factory();
   init_source_dashboard();
   init_embedding_runtime();
   init_source_ingestion_ledger();
@@ -197413,10 +197554,10 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes32 } from "node:crypto";
-import { existsSync as existsSync93, readFileSync as readFileSync77, openSync as openSync23, closeSync as closeSync24, writeSync as writeSync6 } from "node:fs";
+import { existsSync as existsSync93, readFileSync as readFileSync78, openSync as openSync23, closeSync as closeSync24, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve24 } from "node:path";
+import { resolve as resolve25 } from "node:path";
 
 // src/core/open-handler.ts
 init_open_targets();
@@ -199304,7 +199445,7 @@ init_engine_host();
 init_engine_service();
 import { spawn as spawn6 } from "node:child_process";
 import { createInterface as createInterface2 } from "node:readline";
-import { existsSync as existsSync76, readFileSync as readFileSync61 } from "node:fs";
+import { existsSync as existsSync76, readFileSync as readFileSync62 } from "node:fs";
 import { homedir as homedir38 } from "node:os";
 import { dirname as dirname75, join as join95 } from "node:path";
 
@@ -199315,7 +199456,7 @@ init_package_root();
 import { spawnSync as spawnSync17 } from "node:child_process";
 import { existsSync as existsSync75, lstatSync as lstatSync37, mkdirSync as mkdirSync49, mkdtempSync as mkdtempSync4, renameSync as renameSync16, rmSync as rmSync22 } from "node:fs";
 import { homedir as homedir37 } from "node:os";
-import { join as join94, resolve as resolve17 } from "node:path";
+import { join as join94, resolve as resolve18 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
 var MACOS_HELPER_TEAM_ENV = "OLYMPUS_MACOS_HELPER_TEAM_ID";
 function run(exec, command, args, env) {
@@ -199340,7 +199481,7 @@ function installEngineHelper(options = {}) {
     throw new OperationError("invalid_params", "The Olympus helper app is for macOS. Linux does not need one.");
   }
   const env = options.env ?? process.env;
-  const homeDir = resolve17(options.homeDir ?? homedir37());
+  const homeDir = resolve18(options.homeDir ?? homedir37());
   const paths = enginePaths(homeDir);
   const target = paths.helperAppPath;
   mkdirSync49(paths.appSupportDir, { recursive: true, mode: 448 });
@@ -199349,7 +199490,7 @@ function installEngineHelper(options = {}) {
     let built = false;
     let candidate;
     if (options.from !== undefined) {
-      candidate = resolve17(options.from);
+      candidate = resolve18(options.from);
       if (!existsSync75(join94(candidate, "Contents", "Info.plist"))) {
         throw new OperationError("invalid_params", `${candidate} is not an app bundle.`);
       }
@@ -199679,7 +199820,7 @@ async function engineStatusReport(deps = {}) {
 }
 function readEngineStatusFile(env) {
   try {
-    const parsed = JSON.parse(readFileSync61(engineStatusPath(env), "utf8"));
+    const parsed = JSON.parse(readFileSync62(engineStatusPath(env), "utf8"));
     return parsed?.schema === "olympus.engine.status.v1" ? parsed : undefined;
   } catch {
     return;
@@ -199708,7 +199849,7 @@ async function followEngineLogs(deps, lines) {
   const child = spawn6("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
   const reader = createInterface2({ input: child.stdout });
   reader.on("line", (line2) => console.log(redactLogLine(line2)));
-  await new Promise((resolve18) => child.once("exit", () => resolve18()));
+  await new Promise((resolve19) => child.once("exit", () => resolve19()));
 }
 function parseNowArg(command, args) {
   if (args.length === 0)
@@ -199817,7 +199958,7 @@ function expectNoArgs(command, args) {
 init_engine_service();
 init_remote_access();
 function olympusCommandHint2(input2 = {}) {
-  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve24(olympusPackageRoot(), "bin", "olympus") });
+  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve25(olympusPackageRoot(), "bin", "olympus") });
 }
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var ZKAPI_TEST_WRITER_USAGE = "olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]";
@@ -200418,7 +200559,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync77("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync78("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -200723,7 +200864,7 @@ function parseEvalShardExportArgs(args) {
     account,
     approved_scope_key: approvedScopeKey,
     count: count2,
-    out_dir: resolve24(out),
+    out_dir: resolve25(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
   };
@@ -200773,7 +200914,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync77(resolve24(input2), "utf8");
+    raw = readFileSync78(resolve25(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -201080,7 +201221,7 @@ function parseXReconcileRecoveryArgs(args) {
   }
   return {
     account,
-    ...stateDbPath ? { stateDbPath: resolve24(stateDbPath) } : {},
+    ...stateDbPath ? { stateDbPath: resolve25(stateDbPath) } : {},
     execute,
     ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
   };
@@ -201974,7 +202115,7 @@ async function runDataCommand(args) {
     const options = parseDataOptions(args.slice(1));
     if (!options.output.trim())
       throw new OperationError("invalid_params", "--output must be provided.");
-    const destination = resolve24(options.output.trim());
+    const destination = resolve25(options.output.trim());
     return runLocallyOrThroughWorker(() => exportOlympusData({
       destination,
       ...options.sourceId ? { sourceId: options.sourceId } : {}

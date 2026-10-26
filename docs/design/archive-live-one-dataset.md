@@ -309,7 +309,8 @@ ownership and the delete paths do not change.
    input. After storage's account-identity step.
 7. Reflect, Roam, Evernote: their own sources, assets as children.
 8. Live Telegram media and live WhatsApp images and video, so both
-   inputs bring the same media.
+   inputs bring the same media. WhatsApp part built (see "Built, step 8:
+   WhatsApp").
 
 Each step is proved on fresh Mac and Linux installs by the release check's
 archive leg, which gains an import-beside-live case per source with a
@@ -667,12 +668,13 @@ The WhatsApp chat export is an input of the WhatsApp connector
 - **Notices** from WhatsApp itself stay left out (owner).
 - **Media** become children (section 5), keyed `media` as live capture keys
   its own, so a picture both inputs bring is one child; a child that can be
-  read brings content, so a later export (or live capture) with the bytes
-  fills one an earlier export left out. Reading them is the shared reader
-  of an input's media (`archive-import/input-media.ts`: a folder binding or a
-  zip member by its place, served only while the import is an input of a
-  source and not being removed); wiring it into WhatsApp's extraction is
-  step 8's.
+  read brings content, so a later record of the same message with the bytes
+  fills one that could not be read. A file one export left out is never
+  guessed to be one a later export has (they are different messages by
+  content). Reading them is the shared reader of an input's media
+  (`archive-import/input-media.ts`: a folder binding or a zip member by its
+  place, served only while the import is an input of a source and not being
+  removed), wired into WhatsApp's extraction in step 8.
 - **Account.** An export names no account: it joins the source's account at
   the owner's confirmation in the import sheet, or creates it, or stays
   under Archives by the owner's choice. WhatsApp has no exclusive runner:
@@ -680,6 +682,37 @@ The WhatsApp chat export is an input of the WhatsApp connector
 - **Release check.** `ARCHIVE_FORMATS.whatsapp_chat` has an import beside a
   seeded live input (`archive-live-seed-whatsapp.ts`): the account question
   is answered Add, and the Archives case answers Keep apart.
+
+## Built, step 8: WhatsApp
+
+Live WhatsApp pictures and videos are children of their message, as an
+export's media are (section 5).
+
+- **The bridge saves them** (`tools/whatsapp-bridge`): pictures in
+  `media/images` (25 MiB a file, 5 GiB in all) and videos and video notes
+  in `media/video` (100 MiB a file, 10 GiB in all) of its state folder, beside
+  the voice notes, each kind within its own bounds; a file past a bound is
+  left unsaved and its line says so (`download_status`).
+- **The connector lists them** (`live-connector.ts`, `childrenOf`): a
+  picture, video or video note line is its message (its caption, or its
+  names alone) with the file as a child keyed `media`, located by
+  `whatsapp-media-file:v1:<path>`. The saved file is the child's to read,
+  never the message's metadata. A file the bridge could not save is a child
+  that cannot be read, so a later line with the bytes fills it. Voice notes
+  keep their one row and transcript.
+- **One child reader** (`child-media.ts`): a saved file is read only when
+  it really lives under one of the account's media folders (a spool line is
+  data and must never name another file); an export's file only while its
+  import serves it. The connector's `fetchItem`, the live pull and the
+  extraction source (`extraction-factory.ts`, built by the runtime and, with
+  the archive imports, by the engine) read children through it, by the
+  locator the store keeps at the child's version.
+- **Media folders** (`defaultWhatsAppMediaRoots`): the account's media
+  folder (or, in the older layout, the audio folder) and the bridge's
+  picture and video folders beside it.
+- **Secrets.** A Secret message's saved picture or video is deleted as its
+  audio is: Secrets clearing deletes a file under any of the media folders,
+  when no other message names it.
 
 ## To verify before step 4
 
