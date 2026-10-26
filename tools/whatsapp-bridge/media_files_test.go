@@ -247,6 +247,9 @@ func TestMediaFileStemMatchesOlympus(t *testing.T) {
 	}
 }
 
+// keepalives counts the bare newlines the last `ask` read before its answer.
+var keepalives int
+
 // serving starts the download call on a fresh state folder; `ask` sends one request and reads its answer.
 func serving(t *testing.T, stateDir string, downloader mediaDownloader) (*audioMediaStore, func(downloadRequest) (downloadAnswer, []byte)) {
 	t.Helper()
@@ -274,6 +277,7 @@ func serving(t *testing.T, stateDir string, downloader mediaDownloader) (*audioM
 	}
 	ask := func(request downloadRequest) (downloadAnswer, []byte) {
 		t.Helper()
+		keepalives = 0
 		raw, err := os.ReadFile(pointer)
 		if err != nil {
 			t.Fatal(err)
@@ -294,9 +298,15 @@ func serving(t *testing.T, stateDir string, downloader mediaDownloader) (*audioM
 			t.Fatal(err)
 		}
 		reader := bufio.NewReader(conn)
-		head, err := reader.ReadBytes('\n')
-		if err != nil {
-			t.Fatal(err)
+		// Bare newlines say a download is still running; the head is the first line that is not one.
+		var head []byte
+		for len(bytes.TrimSpace(head)) == 0 {
+			if head, err = reader.ReadBytes('\n'); err != nil {
+				t.Fatal(err)
+			}
+			if len(bytes.TrimSpace(head)) == 0 {
+				keepalives++
+			}
 		}
 		var answer downloadAnswer
 		if err := json.Unmarshal(head, &answer); err != nil {
@@ -448,5 +458,62 @@ func TestALongStateFolderPutsTheSocketInAPrivateTempFolder(t *testing.T) {
 	}
 	if answer, body := ask(pictureRequest("long-1")); answer.Status != "ok" || string(body) != "picture" {
 		t.Fatalf("answer = %#v", answer)
+	}
+}
+
+// slowDownloader writes one byte every `every`, `times` times; blockingDownloader writes nothing until its context ends.
+type slowDownloader struct {
+	every time.Duration
+	times int
+}
+
+func (d *slowDownloader) DownloadMediaWithPathToFile(ctx context.Context, _ string, _, _, _ []byte, _ whatsmeow.MediaType, _ string, _ bool, file whatsmeow.File) error {
+	for i := 0; i < d.times; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d.every):
+		}
+		if _, err := file.Write([]byte{'x'}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type blockingDownloader struct{}
+
+func (blockingDownloader) DownloadMediaWithPathToFile(ctx context.Context, _ string, _, _, _ []byte, _ whatsmeow.MediaType, _ string, _ bool, _ whatsmeow.File) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestALongDownloadSaysItIsAliveAndIsNeverCutForItsLength(t *testing.T) {
+	savedEvery, savedStall := mediaKeepaliveEvery, mediaDownloadStall
+	mediaKeepaliveEvery, mediaDownloadStall = 10*time.Millisecond, 200*time.Millisecond
+	defer func() { mediaKeepaliveEvery, mediaDownloadStall = savedEvery, savedStall }()
+	// Longer in all than the stall allows, but writing all along: it runs to the end.
+	_, ask := serving(t, t.TempDir(), &slowDownloader{every: 20 * time.Millisecond, times: 20})
+	answer, body := ask(pictureRequest("long-run-1"))
+	if answer.Status != "ok" || len(body) != 20 {
+		t.Fatalf("answer = %#v, %d bytes", answer, len(body))
+	}
+	if keepalives == 0 {
+		t.Fatalf("no keepalive while the download ran")
+	}
+}
+
+func TestADownloadThatWritesNothingIsGivenUpAsAPassingFailure(t *testing.T) {
+	savedEvery, savedStall := mediaKeepaliveEvery, mediaDownloadStall
+	mediaKeepaliveEvery, mediaDownloadStall = 10*time.Millisecond, 100*time.Millisecond
+	defer func() { mediaKeepaliveEvery, mediaDownloadStall = savedEvery, savedStall }()
+	stateDir := t.TempDir()
+	_, ask := serving(t, stateDir, blockingDownloader{})
+	answer, _ := ask(pictureRequest("stalled-1"))
+	if answer.Status != "failed" || answer.Permanent {
+		t.Fatalf("answer = %#v", answer)
+	}
+	if files := everyFile(t, stateDir); len(files) != 0 {
+		t.Fatalf("files left: %v", files)
 	}
 }

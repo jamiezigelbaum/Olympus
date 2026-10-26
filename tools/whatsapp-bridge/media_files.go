@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -68,6 +69,8 @@ type floorFile struct {
 	floor     *mediaFloor
 	dir       string
 	unchecked int64
+	// When set, told the time of every write: a download's progress.
+	progress *atomic.Int64
 }
 
 func (f *floorFile) Read(p []byte) (int, error)                   { return f.file.Read(p) }
@@ -93,6 +96,7 @@ func (f *floorFile) Write(p []byte) (int, error) {
 	if err := f.room(len(p)); err != nil {
 		return 0, err
 	}
+	f.wrote()
 	return f.file.Write(p)
 }
 
@@ -100,7 +104,14 @@ func (f *floorFile) WriteAt(p []byte, off int64) (int, error) {
 	if err := f.room(len(p)); err != nil {
 		return 0, err
 	}
+	f.wrote()
 	return f.file.WriteAt(p, off)
+}
+
+func (f *floorFile) wrote() {
+	if f.progress != nil {
+		f.progress.Store(time.Now().UnixNano())
+	}
 }
 
 // ReadFrom copies through Write, so io.Copy into this file is checked too.

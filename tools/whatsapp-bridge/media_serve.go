@@ -14,7 +14,10 @@ package main
 //   - A request names the message and its version, and carries the fields
 //     its spool line carried (where the media is, its keys and hashes, its
 //     type). The answer is one JSON line, then, when it is "ok", exactly
-//     `size` bytes of the media.
+//     `size` bytes of the media. While the download runs, a bare newline is
+//     sent every mediaKeepaliveEvery, so the caller tells a long download
+//     from a stalled one. There is no limit on how long a download takes;
+//     only one that writes nothing for mediaDownloadStall is given up.
 //   - The bridge keeps no state and writes no file for it: the download is
 //     decrypted in an unnamed temp (created and unlinked at once, so a crash
 //     leaves nothing), through the same floor-checking writer as a capture.
@@ -31,6 +34,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,9 +47,14 @@ const (
 	// A request is a few hundred bytes; anything far larger is not Olympus's.
 	mediaRequestMaxBytes = 64 * 1024
 	mediaRequestTimeout  = 30 * time.Second
-	// How long one download may take, and how long one write of its answer may stall.
-	mediaDownloadTimeout = 30 * time.Minute
-	mediaAnswerStall     = 2 * time.Minute
+	// How long one write of the answer may stall.
+	mediaAnswerStall = 2 * time.Minute
+)
+
+var (
+	// How often a running download says it is alive, and how long it may write nothing before it is given up.
+	mediaKeepaliveEvery = 30 * time.Second
+	mediaDownloadStall  = 5 * time.Minute
 )
 
 // downloadRequest is Olympus's request for one message version's media.
@@ -152,9 +162,35 @@ func (store *audioMediaStore) answerDownload(ctx context.Context, conn net.Conn)
 		reply(downloadAnswer{Status: "failed", Permanent: true, Reason: "unknown_media_type"})
 		return
 	}
-	downloadCtx, cancel := context.WithTimeout(ctx, mediaDownloadTimeout)
+	downloadCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Alive while it runs: a newline now and then, which also finds a caller that went away.
+	var writing sync.Mutex
+	stopKeepalive := make(chan struct{})
+	keepaliveDone := make(chan struct{})
+	go func() {
+		defer close(keepaliveDone)
+		ticker := time.NewTicker(mediaKeepaliveEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopKeepalive:
+				return
+			case <-ticker.C:
+				writing.Lock()
+				_ = conn.SetWriteDeadline(time.Now().Add(mediaAnswerStall))
+				_, err := conn.Write([]byte{'\n'})
+				writing.Unlock()
+				if err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 	file, size, err := kind.downloadUnnamed(downloadCtx, request)
+	close(stopKeepalive)
+	<-keepaliveDone
 	switch {
 	case errors.Is(err, errWaitingForDisk):
 		store.floor.noteWaiting()
@@ -221,7 +257,29 @@ func (store *audioMediaStore) downloadUnnamed(ctx context.Context, request downl
 		return nil, 0, err
 	}
 	media := downloadRequestOf(request)
-	file := &floorFile{file: tmp, floor: store.floor, dir: store.dir}
+	// A download that writes nothing for mediaDownloadStall is given up; one that keeps writing runs as long as it takes.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var progress atomic.Int64
+	progress.Store(time.Now().UnixNano())
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		ticker := time.NewTicker(mediaDownloadStall / 10)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopWatch:
+				return
+			case <-ticker.C:
+				if time.Since(time.Unix(0, progress.Load())) >= mediaDownloadStall {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	file := &floorFile{file: tmp, floor: store.floor, dir: store.dir, progress: &progress}
 	if err := store.downloader.DownloadMediaWithPathToFile(ctx, media.directPath, media.encSHA256, media.fileSHA256, media.mediaKey, media.mediaType, "", false, file); err != nil {
 		tmp.Close()
 		return nil, 0, err

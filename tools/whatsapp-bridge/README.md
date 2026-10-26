@@ -90,6 +90,8 @@ nothing else. Olympus fetches the media itself once it has judged that
 message version not Secret. It calls the bridge's one local socket (named in
 `media-download.json` in the state dir), which answers the bytes, decrypted
 in an unnamed temp: the bridge writes no file and keeps no state for it.
+While a download runs, it sends a bare newline every 30 seconds. A download
+is never cut for its length, only after 5 minutes without writing.
 `capture-status.json` says `"media_waiting_for_disk": true` while media waits
 below the floor. A saved file's line carries `media_path`, `media_mime` and
 `download_status`. Olympus reads a saved picture or video as its message's

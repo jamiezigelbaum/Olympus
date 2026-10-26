@@ -758,8 +758,8 @@ export's media are (section 5).
   - **Each message, in the pull after the clearing:**
     1. The message is stored at the row's version. Neither it nor its
        media child is Secret there: each is stored at that version, not
-       hidden, and not judged Secret since. Its names are settled, and the
-       disk has room. An uncaptioned picture qualifies.
+       hidden, and not judged Secret since. The names of both are settled,
+       and the disk has room. An uncaptioned picture qualifies.
     2. Olympus asks the bridge for that version's media and receives the
        bytes into `<stem>~<version digest><ext>.part` in its own folder
        (`media/olympus`), fsynced.
@@ -771,15 +771,29 @@ export's media are (section 5).
        nothing else: no caption goes out this way. Extraction and judgment
        follow as for any media.
 
-    A row is done only once the stores are seen to hold the file at that
-    version, so a fill a sync did not land is filled again. A replayed
-    line of a done version asks nothing again.
+    Each fill is fenced, one item at a time, under the ledger's write hold
+    (`TierLedger.holdingWrites`): step 1 is checked, the fill is synced, and
+    step 1 is checked again. A decision another process makes waits for
+    the hold. One this process makes meanwhile is seen by the last check,
+    which takes the fill back at once. A row is done only once the stores
+    are seen to hold the file at that version, so a fill a sync did not land
+    is filled again. A line read again (a replay, or a recovered spool)
+    gives the row its new place; a done version asks nothing again. The
+    bridge sends a bare newline while a download runs: Olympus gives up
+    only on a call that stalls, and never on one for its length.
   - **Take-back, every pass.** A row whose message is now Secret (the
-    message or its media), stored at another version, or gone loses its
-    file, done rows included. The folder is fsynced before the row is
-    forgotten. A file no row names is deleted. The clearing deletes a
-    fetched copy whose media is judged Secret too, and every Secret
-    deletion fsyncs its folder.
+    message or its media) is taken back, done rows included. A filled
+    picture's or video's child is made Secret through the one Secrets path
+    (`settleRoutedSecrets`, or `settleLegacySecrets` for a row the set
+    never routed). Its copies, chunks and embeddings go, and the side
+    stores forget it. Its file is deleted and the folder fsynced before the
+    row is forgotten. A row stored at another version loses its file but is
+    kept, so a later Secret still takes its child back; one whose message
+    is gone is forgotten. A file no row names is deleted. The clearing
+    deletes a fetched copy whose media is judged Secret too, and every
+    Secret deletion fsyncs its folder. Fetched media is stricter than saved
+    media: a Secret caption keeps a live-saved picture but takes a fetched
+    one back.
 - **Reading large media.** Keeping every file does not mean reading every
   file into memory: the extraction source hands a file reader the media as
   a file (`fetchFile`), copied a chunk at a time from the descriptor the

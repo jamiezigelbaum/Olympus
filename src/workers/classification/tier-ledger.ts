@@ -1665,6 +1665,24 @@ export class TierLedger {
     return undefined;
   }
 
+  /**
+   * Runs `work` while every other writer of this ledger is held off: a check
+   * of a decision and a write that depends on it, with no decision landing
+   * between them. Another connection waits for the hold, as for any write
+   * (its busy timeout); this connection's own writes inside `work` nest in it.
+   * What `work` wrote stays written whether it returns or throws, as it would
+   * without the hold. Keep `work` short: every other writer waits for it.
+   */
+  async holdingWrites<T>(work: () => Promise<T>): Promise<T> {
+    if (this.db.inTransaction) return work();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      return await work();
+    } finally {
+      this.db.exec('COMMIT');
+    }
+  }
+
   /** A small named value kept beside the ledger (a background pass's resume point); never item content. */
   readMeta(key: string): string | undefined {
     if (key === 'ledger_id') return undefined;

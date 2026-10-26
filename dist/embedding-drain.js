@@ -14973,6 +14973,16 @@ class TierLedger {
     }
     return;
   }
+  async holdingWrites(work) {
+    if (this.db.inTransaction)
+      return work();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      return await work();
+    } finally {
+      this.db.exec("COMMIT");
+    }
+  }
   readMeta(key) {
     if (key === "ledger_id")
       return;
@@ -36883,6 +36893,8 @@ var init_live_connector = __esm(() => {
 var DISK_FLOOR_MIN_BYTES, ANSWER_HEAD_MAX_BYTES;
 var init_media_fetch = __esm(() => {
   init_source_inputs();
+  init_secrets_disposition();
+  init_tier_rejudge();
   init_child_media();
   init_live_connector();
   init_spool_reader();

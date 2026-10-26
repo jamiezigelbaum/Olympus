@@ -36,6 +36,8 @@ import {
   type WhatsAppMediaRequest,
 } from '../src/workers/whatsapp/media-fetch.ts';
 import { createServer, type Server } from 'node:net';
+import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
+import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import { createHash } from 'node:crypto';
 import { whatsAppExtractionSourceFactory } from '../src/workers/whatsapp/extraction-factory.ts';
 import type { RawItem } from '../src/core/contracts.ts';
@@ -838,6 +840,148 @@ describe('review round 9 on #558: Olympus asks the bridge for the exact version,
     expect(existsSync(fetchedPath(target, '3EB0.42'))).toBe(true);
   });
 
+  describe('review round 10: a fill is fenced, and a Secret takes back what it made searchable', () => {
+    const childIdentity = (id: string) => ({ provider: 'whatsapp', accountScope: 'personal', providerItemId: `${id}#child:media`, providerConversationId: CHAT });
+    const childLocal = (id: string) => `personal:${CHAT}:${id}#child:media`;
+    // What extraction lands for a filled picture: its text, judged and indexed as any child's.
+    const extract = async (target: ReturnType<typeof lane>, id: string, text: string) => {
+      const sink = createTieredStoreExtractionSink({ set: target.set, syncConnectorId: 'extraction', ownerConnectorId: 'whatsapp-live', ownershipKind: 'observed' });
+      return sink.accept({
+        ref: {
+          corpusId: WHATSAPP_LIVE_CORPUS_ID, provider: 'whatsapp', accountScope: 'personal', approvedScopeKey: 'whatsapp.personal.messages',
+          providerItemId: `${id}#child:media`, localItemId: childLocal(id), sourceVersion: '2026-07-01T13:00:00Z',
+        },
+        text, extractorKind: 'local_text', extractorVersion: 'test', fetchedAt: '2026-07-01T14:00:00.000Z',
+      });
+    };
+    const searchable = (target: ReturnType<typeof lane>, marker: string) => target.set.openStores().flatMap((store) => [
+      ...store.searchItems(marker, 10).map((row) => row.sourceItem.providerItemId),
+      ...((store.localContent(childLocal('A1'))?.chunks ?? []).filter((chunk) => chunk.includes(marker)).map(() => 'chunk')),
+    ]);
+
+    test('a Secret landing for one picture while another downloads: the first is never published, the second is', async () => {
+      const target = lane();
+      append(target, waitingLine('A1', { text: 'see you at eight' }));
+      append(target, waitingLine('B1', { text: 'the harbour' }));
+      await target.pull();
+      let calls = 0;
+      const call = async (request: WhatsAppMediaRequest, part: string): Promise<WhatsAppMediaAnswer> => {
+        calls += 1;
+        // A's bytes came and were checked; while B's come, A's message is judged Secret.
+        if (request.id === 'B1') judgeSecret(target, 'A1');
+        writeFileSync(part, 'jpeg bytes');
+        return { status: 'ok', size: 10 };
+      };
+      // Every fill synced, by the message it fills: A's must never reach the stores.
+      const synced: string[] = [];
+      const counting = new Proxy(target.set, {
+        get: (set, key) => (key === 'sync'
+          ? async (connector: Parameters<typeof set.sync>[0], options: Parameters<typeof set.sync>[1]) => {
+            for await (const page of connector.listItems()) synced.push(...page.items.map((item) => item.identity.providerItemId));
+            return set.sync(connector, options);
+          }
+          : Reflect.get(set, key, set)),
+      });
+      await pass(target, call, { set: counting });
+      expect(calls).toBe(2);
+      expect(synced).toEqual(['B1#child:media']);
+      expect(childLocator(target, 'A1')).toBe('');
+      expect(existsSync(fetchedPath(target, 'A1'))).toBe(false);
+      expect(childLocator(target, 'B1')).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${fetchedPath(target, 'B1')}`);
+    });
+
+    test('a decision this process makes while a fill commits is seen before the hold ends, and the fill taken back at once', async () => {
+      const target = lane();
+      append(target, waitingLine('A1', { text: 'see you at eight' }));
+      await target.pull();
+      const racing = new Proxy(target.set, {
+        get: (set, key) => (key === 'sync'
+          ? async (...args: Parameters<typeof set.sync>) => {
+            const run = await set.sync(...args);
+            judgeSecret(target, 'A1');
+            return run;
+          }
+          : Reflect.get(set, key, set)),
+      });
+      expect((await pass(target, bridge().call, { set: racing })).filled).toBe(0);
+      expect(target.ledger.getCurrent(childIdentity('A1'))?.contentTier).toBe('secrets');
+      expect(childLocator(target, 'A1')).toBe('');
+      expect(existsSync(fetchedPath(target, 'A1'))).toBe(false);
+    });
+
+    test('while a fill commits, another process cannot write a decision: it waits for the hold', async () => {
+      const target = lane();
+      append(target, waitingLine('A1', { text: 'see you at eight' }));
+      await target.pull();
+      let blocked = false;
+      const watched = new Proxy(target.set, {
+        get: (set, key) => (key === 'sync'
+          ? async (...args: Parameters<typeof set.sync>) => {
+            const other = new Database(tieredStoreSetLedgerPath(join(target.root, 'whatsapp.db')));
+            try {
+              other.exec('PRAGMA busy_timeout = 50');
+              other.exec('BEGIN IMMEDIATE');
+              other.exec('ROLLBACK');
+            } catch {
+              blocked = true;
+            } finally {
+              other.close();
+            }
+            return set.sync(...args);
+          }
+          : Reflect.get(set, key, set)),
+      });
+      expect((await pass(target, bridge().call, { set: watched })).filled).toBe(1);
+      expect(blocked).toBe(true);
+    });
+
+    test('a Secret decision after a fill leaves no searchable chunk: the child goes through the one Secrets path', async () => {
+      const target = lane();
+      append(target, waitingLine('A1', { text: 'see you at eight' }));
+      await target.pull();
+      expect((await pass(target)).filled).toBe(1);
+      expect((await extract(target, 'A1', 'Lighthousemarker on the quay')).accepted).toBe(true);
+      expect(searchable(target, 'Lighthousemarker').length).toBeGreaterThan(0);
+      judgeSecret(target, 'A1');
+      await pass(target);
+      expect(searchable(target, 'Lighthousemarker')).toEqual([]);
+      expect(target.ledger.getCurrent(childIdentity('A1'))?.contentTier).toBe('secrets');
+      expect(existsSync(fetchedPath(target, 'A1'))).toBe(false);
+    });
+
+    test('a picture whose own names are still being judged waits', async () => {
+      const target = lane();
+      append(target, waitingLine('M1'));
+      await target.pull();
+      const pendingNames = new Proxy(target.set, {
+        get: (set, key) => (key === 'ledger'
+          ? new Proxy(set.ledger, {
+            get: (ledger, member) => (member === 'getCurrent'
+              ? (identity: { providerItemId: string }) => {
+                const record = ledger.getCurrent(identity as never);
+                return identity.providerItemId === 'M1#child:media' && record ? { ...record, metadataPending: true } : record;
+              }
+              : Reflect.get(ledger, member, ledger)),
+          })
+          : Reflect.get(set, key, set)),
+      });
+      const { asked, call } = bridge();
+      await pass(target, call, { set: pendingNames });
+      expect(asked).toEqual([]);
+    });
+
+    test('a spool recovered with the waiting line elsewhere: the line read again gives its new place, and the fill finds it', async () => {
+      const target = lane();
+      append(target, waitingLine('O1', { text: 'the harbour' }));
+      await target.pull();
+      await pass(target, bridge({ answer: { status: 'failed', permanent: false, reason: 'network' } }).call);
+      // The spool comes back with another line before it: every offset moved.
+      const day = join(target.spoolDir, DAY);
+      writeFileSync(day, spoolLine({ id: 'O0', text: 'a line before it' }) + readFileSync(day, 'utf8'));
+      expect((await pass(target)).filled).toBe(1);
+    });
+  });
+
   describe('the bridge\'s call, over its socket', () => {
     const servers: Server[] = [];
     afterEach(() => {
@@ -864,9 +1008,9 @@ describe('review round 9 on #558: Olympus asks the bridge for the exact version,
     };
     const request: WhatsAppMediaRequest = { chat_jid: CHAT, id: 'K1', version: 'v', media_type: 'image', media_direct_path: '/mms/image/K1' };
 
-    test('the bytes after an ok answer are written to the part, whole', async () => {
+    test('the bytes after an ok answer are written to the part, whole; the newlines a running download sends before it are skipped', async () => {
       const bytes = Buffer.alloc(200_000, 7);
-      const { stateDir, part } = await serve(() => Buffer.concat([Buffer.from(`${JSON.stringify({ status: 'ok', size: bytes.length })}\n`), bytes]));
+      const { stateDir, part } = await serve(() => Buffer.concat([Buffer.from(`\n\n${JSON.stringify({ status: 'ok', size: bytes.length })}\n`), bytes]));
       expect(await bridgeMediaCall(stateDir)(request, part, () => true)).toEqual({ status: 'ok', size: bytes.length });
       expect(readFileSync(part).equals(bytes)).toBe(true);
     });

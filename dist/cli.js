@@ -20495,6 +20495,16 @@ class TierLedger {
     }
     return;
   }
+  async holdingWrites(work) {
+    if (this.db.inTransaction)
+      return work();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      return await work();
+    } finally {
+      this.db.exec("COMMIT");
+    }
+  }
   readMeta(key) {
     if (key === "ledger_id")
       return;
@@ -101919,10 +101929,25 @@ async function runWhatsAppMediaFetch(options) {
   for (const name of listNames(folder))
     if (name.endsWith(PART_SUFFIX))
       removeDurably(join88(folder, name));
+  const removeFiles = (row) => {
+    let had = false;
+    for (const name of listNames(folder)) {
+      if (!name.startsWith(row.filePrefix))
+        continue;
+      had = true;
+      removeDurably(join88(folder, name));
+    }
+    return had;
+  };
+  const takeBack = (row) => {
+    const hadFile = removeFiles(row);
+    if (row.done || hadFile)
+      settleFetchedChild(options, row);
+    state.forget(row.key);
+    result.dropped += 1;
+  };
   const forget = (row) => {
-    for (const name of listNames(folder))
-      if (name.startsWith(row.filePrefix))
-        removeDurably(join88(folder, name));
+    removeFiles(row);
     state.forget(row.key);
     result.dropped += 1;
   };
@@ -101930,8 +101955,15 @@ async function runWhatsAppMediaFetch(options) {
   let bridgeReachable = true;
   for (const row of state.all()) {
     const verdict = judge2(options, row);
-    if (verdict === "secret" || verdict === "gone") {
-      forget(row);
+    if (verdict === "secret") {
+      takeBack(row);
+      continue;
+    }
+    if (verdict === "gone") {
+      if (row.done && options.tierSet.storedItem(parentOf(options, row), compareWhatsAppVersions))
+        removeFiles(row);
+      else
+        forget(row);
       continue;
     }
     if (row.done)
@@ -101969,7 +102001,9 @@ async function runWhatsAppMediaFetch(options) {
     const again = judge2(options, row);
     if (again !== "clear") {
       removeDurably(part);
-      if (again === "secret" || again === "gone")
+      if (again === "secret")
+        takeBack(row);
+      else if (again === "gone")
         forget(row);
       continue;
     }
@@ -101979,28 +102013,31 @@ async function runWhatsAppMediaFetch(options) {
     toFill.push({ row, path: finalPath });
   }
   if (toFill.length > 0) {
-    const fills = toFill.flatMap(({ row, path }) => {
-      const record2 = fillRecord(options.spoolDir, row, path);
-      return record2 ? [{ row, path, record: record2 }] : [];
+    const builder = createWhatsAppRecordBuilder({
+      spoolDir: options.spoolDir,
+      account: options.account,
+      ...options.readChild ? { readChild: options.readChild } : {}
     });
-    if (fills.length > 0) {
-      const builder = createWhatsAppRecordBuilder({
-        spoolDir: options.spoolDir,
-        account: options.account,
-        ...options.readChild ? { readChild: options.readChild } : {}
+    for (const { row, path } of toFill) {
+      const record2 = fillRecord(options.spoolDir, row, path);
+      if (!record2)
+        continue;
+      const outcome = await options.tierSet.ledger.holdingWrites(async () => {
+        const before = judge2(options, row);
+        if (before !== "clear")
+          return before;
+        await options.tierSet.sync(inputConnector(builder, fillInput(record2)), options.sync);
+        return judge2(options, row);
       });
-      const records = fills.map((fill2) => fill2.record);
-      const input = {
-        inputId: WHATSAPP_MEDIA_FETCH_INPUT_ID,
-        kind: "live",
-        records: () => async function* () {
-          yield { records, done: true };
-        }()
-      };
-      await options.tierSet.sync(inputConnector(builder, input), options.sync);
-      for (const { row, path } of fills) {
-        if (!filledAt(options, row, path))
-          continue;
+      if (outcome === "secret") {
+        takeBack(row);
+        continue;
+      }
+      if (outcome === "gone") {
+        forget(row);
+        continue;
+      }
+      if (outcome === "clear" && filledAt(options, row, path)) {
         state.finish(row.key);
         result.filled += 1;
       }
@@ -102014,6 +102051,55 @@ async function runWhatsAppMediaFetch(options) {
   if (!hasRoom(folder, space, 0) && state.waitingCount() > 0)
     result.waitingForDisk = true;
   return result;
+}
+function fillInput(record2) {
+  return {
+    inputId: WHATSAPP_MEDIA_FETCH_INPUT_ID,
+    kind: "live",
+    records: () => async function* () {
+      yield { records: [record2], done: true };
+    }()
+  };
+}
+function parentOf(options, row) {
+  return { provider: "whatsapp", accountScope: options.account, providerItemId: row.id, providerConversationId: row.chatJid };
+}
+function settleFetchedChild(options, row) {
+  if (!isWhatsAppChildMediaType(row.media.mediaType))
+    return;
+  const { tierSet } = options;
+  const child = { ...parentOf(options, row), providerItemId: childProviderItemId(row.id, "media") };
+  const record2 = tierSet.ledger.getCurrent(child);
+  if (!record2 || isSecret(record2))
+    return;
+  const exported = tierSet.openStores().map((store) => store.exportItemCopy(child)).find((copy) => copy !== undefined);
+  if (!exported)
+    return;
+  const decision = {
+    ...record2,
+    metadataTier: "secrets",
+    contentTier: "secrets",
+    decidedBy: "secret_detector",
+    reasons: ["content:secret:fetched_media_parent_secret"],
+    snifferId: "undecided",
+    state: "current",
+    contentRead: true,
+    metadataPending: false,
+    contentPending: false
+  };
+  const finding = { findingKinds: ["fetched_media_parent_secret"] };
+  const locations = tierSet.secrets();
+  if (record2.routed) {
+    settleRoutedSecrets(tierSet, child, decision, exported, finding);
+  } else if (locations) {
+    settleLegacySecrets({ ledger: tierSet.ledger, stores: tierSet.openStores(), locations, identity: child, decision });
+  } else {
+    for (const store of tierSet.openStores())
+      if (store.exportItemCopy(child))
+        store.tombstoneCopy(exported.identity, { connectorId: WHATSAPP_MEDIA_FETCH_INPUT_ID, trustTier: "S5" });
+    tierSet.ledger.recordDecision(child, decision);
+  }
+  forgetSecretInSideStores({ ledger: tierSet.ledger, identity: { ...child, localItemId: exported.identity.localItemId } });
 }
 
 class WhatsAppMediaFetchState {
@@ -102037,7 +102123,8 @@ class WhatsAppMediaFetchState {
   }
   note(media) {
     const stem = whatsAppMediaFileStem(media.chatJid, media.id);
-    this.db.query("INSERT OR IGNORE INTO media (key, stem, version, media_json) VALUES (?, ?, ?, ?)").run(rowKey(stem, media.version), stem, media.version, JSON.stringify(media));
+    this.db.query(`INSERT INTO media (key, stem, version, media_json) VALUES (?, ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET media_json = excluded.media_json WHERE media.done = 0`).run(rowKey(stem, media.version), stem, media.version, JSON.stringify(media));
   }
   saved(chatJid, id, version) {
     const stem = whatsAppMediaFileStem(chatJid, id);
@@ -102087,8 +102174,8 @@ function toRow(row) {
   };
 }
 function judge2(options, row) {
-  const { tierSet, account } = options;
-  const parent = { provider: "whatsapp", accountScope: account, providerItemId: row.id, providerConversationId: row.chatJid };
+  const { tierSet } = options;
+  const parent = parentOf(options, row);
   const child = isWhatsAppChildMediaType(row.media.mediaType) ? { ...parent, providerItemId: childProviderItemId(row.id, "media") } : undefined;
   const parentRecord = tierSet.ledger.getCurrent(parent);
   const childRecord = child ? tierSet.ledger.getCurrent(child) : undefined;
@@ -102107,6 +102194,8 @@ function judge2(options, row) {
   if (storedParent.incomplete === true || storedChild?.incomplete === true)
     return "wait";
   if (!parentRecord || parentRecord.metadataPending)
+    return "wait";
+  if (child && (!childRecord || childRecord.metadataPending))
     return "wait";
   return "clear";
 }
@@ -102220,6 +102309,10 @@ function bridgeMediaCall(stateDir) {
         return;
       }
       head = Buffer.concat([head, data2]);
+      let start = 0;
+      while (start < head.length && head[start] === 10)
+        start += 1;
+      head = head.subarray(start);
       const newline = head.indexOf(10);
       if (newline === -1) {
         if (head.length > ANSWER_HEAD_MAX_BYTES)
@@ -102300,6 +102393,8 @@ function removeDurably(path) {
 var WHATSAPP_MEDIA_FETCH_STATE_FILE = "media-fetch.sqlite", WHATSAPP_MEDIA_FETCH_INPUT_ID = "whatsapp-media-fetch", WHATSAPP_MEDIA_SOCKET_POINTER = "media-download.json", PART_SUFFIX = ".part", DISK_FLOOR_MIN_BYTES, DISK_FLOOR_SHARE = 20, CALL_STALL_MS = 120000, ANSWER_HEAD_MAX_BYTES, EXTENSIONS2;
 var init_media_fetch = __esm(() => {
   init_source_inputs();
+  init_secrets_disposition();
+  init_tier_rejudge();
   init_child_media();
   init_live_connector();
   init_spool_reader();
@@ -134804,7 +134899,7 @@ function createTieredStoreExtractionSink(options) {
       }
       const anchorScope = anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope;
       if (contentStore !== anchorStore && !contentStore.activeLocalItemRow(ref.localItemId)) {
-        const parent = parentOf(set2, anchorStore, identity2);
+        const parent = parentOf2(set2, anchorStore, identity2);
         await contentStore.syncFromConnector(singleItemConnector(contentStore, {
           ...plan.item,
           ...parent ? { identity: { ...plan.item.identity, parent } } : {},
@@ -134904,7 +134999,7 @@ function singleItemConnector(store, item) {
     }
   };
 }
-function parentOf(set2, anchorStore, child) {
+function parentOf2(set2, anchorStore, child) {
   const localItemId = anchorStore.parentLocalItemIdOf(child);
   if (!localItemId)
     return;
@@ -135717,7 +135812,7 @@ function createUnreadableFiles(options) {
     }
     return UNNAMED;
   }
-  function parentOf2(item) {
+  function parentOf3(item) {
     let parent;
     try {
       parent = options.parentOf?.(item.ref);
@@ -135816,7 +135911,7 @@ function createUnreadableFiles(options) {
       const opener = list.opener;
       const files = shown.map((item) => {
         const name = displayName(item);
-        const parent = parentOf2(item);
+        const parent = parentOf3(item);
         const base = opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
         return parent ? { ...base, parent } : base;
       });
