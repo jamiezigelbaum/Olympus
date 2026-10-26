@@ -9,6 +9,7 @@
 // child of the message, listed by name and read later.
 
 import { dirname } from 'node:path';
+import { childProviderItemId } from '../../core/child-item-id.ts';
 import { ARCHIVE_COMMON_FINDINGS, type ArchiveConnectorInput } from '../../core/archive-formats.ts';
 import type { RawItem, SourceConnectorInput, SourceRecordPage } from '../../core/contracts.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
@@ -20,6 +21,7 @@ import {
   type TelegramExportRecordContext,
 } from './export-records.ts';
 import type { TelegramRecordItems } from './record-builder.ts';
+import { telegramExportFacts } from './export-facts.ts';
 
 /** The locator of a media file an archive input bound, in the shared shape (archive-import/input-media.ts, WhatsApp lane). */
 export function telegramExportMediaLocator(archiveId: string, bindingId: string): string {
@@ -27,17 +29,15 @@ export function telegramExportMediaLocator(archiveId: string, bindingId: string)
 }
 
 // The child's key within its message (docs/design/child-items.md): Telegram's `media`, one per message, which
-// live capture computes too, whatever the export's path or whether the file is in the export. The child id is
-// `<parent>#child:<key>`, the rule of src/core/child-item-id.ts (#550), written out here until that lands.
+// live capture computes too, whatever the export's path or whether the file is in the export.
 const TELEGRAM_CHILD_KEY = 'media';
-const CHILD_ITEM_ID_SEPARATOR = '#child:';
 
 function child(
   parent: RawItem,
   media: TelegramExportMedia,
   deferredBytes: RawItem['deferredBytes'],
 ): RawItem {
-  const providerItemId = `${parent.identity.providerItemId}${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
+  const providerItemId = childProviderItemId(parent.identity.providerItemId, TELEGRAM_CHILD_KEY);
   const identity: SourceItemIdentity = {
     family: parent.identity.family,
     provider: parent.identity.provider,
@@ -142,7 +142,12 @@ export function telegramExportInput(
           };
         },
         account(section, ordinal, value) {
-          const built = telegramAccountEntryRecord(context, section, ordinal, value, { exportedAt: new Date(file.version.mtimeMs).toISOString() });
+          const facts = telegramExportFacts(archive.root, file);
+          const occurrence = facts.contactOccurrences.get(`${section.name}:${ordinal}`);
+          const built = telegramAccountEntryRecord(context, section, ordinal, value, {
+            ...(facts.contentTime ? { contentTime: facts.contentTime } : {}),
+            ...(occurrence ? { occurrence } : {}),
+          });
           return { unit: { record: built.record }, mediaFiles: built.mediaFiles };
         },
       });

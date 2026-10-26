@@ -561,9 +561,16 @@ Telegram connector (`src/workers/telegram-messages/`: `export-records.ts`,
   records of their own kinds, one per entry, in a conversation per part
   (`account:contacts`, ...), keyed by what says who the entry is (a
   contact's user id, else its phone and name; a session's device, app and
-  start). An entry's version is when the export was made (its file's
-  modification time), so a later export's snapshot replaces an earlier one
-  and an older export never does. A message with nothing to read (empty, or
+  start). A contact is its user id, else its number (digits only), else its
+  names and the date it was added; contacts of one export that still share
+  that key are told apart by their place among them, never merged by name.
+  Without a user id, a contact whose number changed between two exports is
+  two rows: a visible duplicate, accepted over a wrong merge. An entry's
+  version is the export's content time, the newest `*_unixtime` the export
+  holds (`export-facts.ts`; never a file's modification time, which copying
+  or restoring changes), so a later export's snapshot replaces an earlier one
+  and an older export never does; two snapshots at the same content time, or
+  one with no time at all, are a tie, and a tie keeps what is stored. A message with nothing to read (empty, or
   a kind this reader cannot read) is still an item, by its names, and is
   counted (review, #553).
 - **Account.** The export's `personal_information.user_id`, hashed as

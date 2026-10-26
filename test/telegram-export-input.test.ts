@@ -300,29 +300,62 @@ describe('review fixes (Astra, #553)', () => {
     expect(children[0]!.locator).toMatch(/^archive-input-media:v1:/);
   });
 
-  test('a later export\'s snapshot of an account entry replaces the earlier one, and an older export never does', async () => {
+  test('account snapshots are ordered by what the export holds, never by its file\'s modification time', async () => {
     const h = telegramOneDatasetHarness(cleanups);
     h.pairLive('1001');
-    const withContact = (name: string) => {
-      const value = telegramFullExport({ chats: [], contacts: 1 });
-      ((value.contacts as { list: Array<Record<string, unknown>> }).list[0]!).first_name = name;
+    // An export whose newest message is on `day`, holding one contact named `name`.
+    const snapshot = (name: string, day: string) => {
+      const value = telegramFullExport({
+        chats: [telegramChat({ id: GROUP_ID, messages: [telegramText(0, `a message on ${day}`, { extra: { date: `${day}T12:00:00`, date_unixtime: String(Date.parse(`${day}T12:00:00Z`) / 1000) } })] })],
+        contacts: 1,
+      });
+      const contact = (value.contacts as { list: Array<Record<string, unknown>> }).list[0]!;
+      contact.last_name = name;
       return value;
     };
-    const first = h.writeExport('Old export', withContact('Robin'));
-    utimesSync(join(first, 'result.json'), new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
-    const second = h.writeExport('New export', withContact('Robyn'));
-    utimesSync(join(second, 'result.json'), new Date('2026-06-01T00:00:00Z'), new Date('2026-06-01T00:00:00Z'));
+    const at = (dir: string, when: string) => utimesSync(join(dir, 'result.json'), new Date(when), new Date(when));
+    const june = h.writeExport('June export', snapshot('June', '2026-06-01'));
+    at(june, '2026-06-02T00:00:00Z');
+    // A January snapshot copied in October: a newer mtime, older contents.
+    const january = h.writeExport('January export', snapshot('January', '2026-01-01'));
+    at(january, '2026-10-20T00:00:00Z');
+    // An October snapshot whose January mtime was preserved: an older mtime, newer contents.
+    const october = h.writeExport('October export', snapshot('October', '2026-10-01'));
+    at(october, '2026-01-02T00:00:00Z');
     const contactText = () => h.rows().filter((row) => row.conversation === 'account:contacts').map((row) => h.textOf(row.conversation, row.id)).join('\n');
     const run = async (path: string) => {
       const started = await h.startImport(path);
       if (!started.ok || started.status !== 'started') throw new Error(JSON.stringify(started));
       await h.importAll(started.archive_id);
     };
-    await run(second);
-    expect(contactText()).toContain('Robyn');
-    // The older export, imported after: its snapshot is older, and the stored one stays.
-    await run(first);
-    expect(contactText()).toContain('Robyn');
-    expect(contactText()).not.toContain('Robin');
+    await run(june);
+    expect(contactText()).toContain('June');
+    await run(january);
+    expect(contactText()).toContain('June');
+    expect(contactText()).not.toContain('January');
+    await run(october);
+    expect(contactText()).toContain('October');
+    expect(contactText()).not.toContain('June');
+  });
+
+  test('contacts with no number and the same name are never merged', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    const value = telegramFullExport({ chats: [], contacts: 4 });
+    const list = (value.contacts as { list: Array<Record<string, unknown>> }).list;
+    for (const contact of list) {
+      delete contact.phone_number;
+      contact.first_name = 'Alex';
+      contact.last_name = 'Same';
+    }
+    // Two added on one day (the same key: told apart by their place), two on others.
+    list[0]!.date_unixtime = '1420362000';
+    list[1]!.date_unixtime = '1420362000';
+    list[2]!.date_unixtime = '1420448400';
+    list[3]!.date_unixtime = '1420534800';
+    const started = await h.startImport(h.writeExport('Telegram Desktop', value));
+    if (!started.ok || started.status !== 'started') throw new Error(JSON.stringify(started));
+    await h.importAll(started.archive_id);
+    expect(h.rows().filter((row) => row.conversation === 'account:contacts')).toHaveLength(4);
   });
 });

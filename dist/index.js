@@ -17299,7 +17299,6 @@ var init_secrets_disposition = __esm(() => {
   init_sniffer_store();
   init_job_names();
 });
-
 // src/workers/connector-store/child-visibility.ts
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
@@ -19669,12 +19668,23 @@ var init_connector4 = __esm(() => {
   SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
   LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
 });
+// src/workers/telegram-messages/export-facts.ts
+var SCAN_CHUNK_BYTES, remembered;
+var init_export_facts = __esm(() => {
+  init_byte_source();
+  init_json_stream();
+  init_message();
+  SCAN_CHUNK_BYTES = 1 << 20;
+  remembered = new Map;
+});
+
 // src/workers/telegram-messages/export-records.ts
 var init_export_records = __esm(() => {
   init_message();
   init_account();
   init_corpus_adapter4();
   init_capture_spool_connector();
+  init_export_facts();
 });
 
 // src/workers/telegram-messages/export-input.ts
@@ -19682,6 +19692,7 @@ var init_export_input = __esm(() => {
   init_archive_formats();
   init_connector4();
   init_export_records();
+  init_export_facts();
 });
 
 // src/workers/telegram-messages/archive-target.ts
