@@ -5,7 +5,7 @@
  * report reads the spool in chunks and passes a damaged record instead of
  * failing. Stand-in Telethon objects only; no network.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -111,4 +111,41 @@ print(json.dumps({"report": report, "heartbeat": heartbeat}))
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+describe('Telethon helper: the capture sequence survives a kill at any step', () => {
+  for (const step of ['after_temp_write', 'after_temp_fsync', 'after_rename']) {
+    pythonTest(`killed ${step}: the counter is whole, and the next numbers come after every number handed out`, async () => {
+      const root = mkdtempSync(join(tmpdir(), 'olympus-telegram-seq-'));
+      try {
+        const spoolDir = join(root, 'spool');
+        mkdirSync(spoolDir);
+        writeFileSync(join(spoolDir, '.capture-seq'), '5');
+        const allocate = (count: number, env: Record<string, string> = {}) => Bun.spawn([PYTHON ?? 'python3', '-I', '-c', `
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("reader", ${JSON.stringify(SCRIPT)})
+reader = importlib.util.module_from_spec(spec)
+sys.modules["reader"] = reader
+spec.loader.exec_module(reader)
+print(json.dumps(reader.allocate_capture_seq(Path(${JSON.stringify(spoolDir)}), ${count})))
+`], { stdout: 'pipe', stderr: 'pipe', env: { PATH: process.env.PATH ?? '', ...env } });
+        const killed = allocate(3, { OLYMPUS_TELEGRAM_TEST_SEQ_CRASH: step });
+        expect(await killed.exited).toBe(9);
+        const counter = readFileSync(join(spoolDir, '.capture-seq'), 'utf8');
+        expect(counter).toMatch(/^\d+$/);
+        // The old value or the new one, never torn: 5 before the rename, 8 after it.
+        expect(counter).toBe(step === 'after_rename' ? '8' : '5');
+        const next = allocate(2);
+        const first = Number((await new Response(next.stdout).text()).trim());
+        expect(await next.exited).toBe(0);
+        expect(first).toBe(Number(counter) + 1);
+        expect(readFileSync(join(spoolDir, '.capture-seq'), 'utf8')).toBe(String(Number(counter) + 2));
+        // What the killed writer left behind is cleared.
+        expect(readdirSync(spoolDir).filter((name) => name.includes('.tmp.'))).toEqual([]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
 });

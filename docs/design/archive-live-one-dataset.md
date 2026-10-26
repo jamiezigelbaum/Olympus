@@ -431,16 +431,26 @@ message beyond its search context (`src/workers/telegram-messages/`,
   count; an export's version has no capture mark, so ties go to live.
 - **Protected claims.** A protected lane's claim applies to the message,
   whatever the version (`protection-claims.ts`). Before either lane writes,
-  each claimed message the ordinary lane still serves leaves it: its newest
-  version is carried from the spool into the protected lane and the ordinary
-  copy given up, or, when the spool no longer has that version, the stored
-  copy moves with the tier move (hidden first, content copied up;
-  `trust_claims_moved`), or is given up if it cannot move. The claim is then
-  kept in the set's ledger, so a later ordinary record is never admitted to
-  the ordinary lane. Any step that fails stops the pull before either cursor
-  passes the claim, so it runs again. The protected lane judges a claimed
-  record against what it alone holds, so a claimed record newer than its
-  own copy always lands there.
+  each claimed message the ordinary lane still serves moves into the
+  protected lane with one tier move (the lower copy superseded first, so
+  every read hides it, its content copied up, purged only once the protected
+  copy is verified; a pre-tier row has its placement adopted first). When the
+  spool holds a newer version, that version is then listed in the protected
+  lane and replaces the moved copy. Nothing is deleted on the way, and a
+  move a crash left unfinished is finished by the next pull. The claim is
+  then kept in the set's ledger, so a later ordinary record is never
+  admitted to the ordinary lane. Any step that fails stops the pull before
+  either cursor passes the claim. The protected lane judges a claimed record
+  against what it alone holds, so a claimed record newer than its own copy
+  always lands there. (The spine's persisted write intent, #540, will take
+  this move over; it already goes through the tiered set's move API.)
+- **A cursor knows its file.** Each lane cursor is bound to the identity its
+  day file had (`connector-store/spool-file-identity.ts`, shared with
+  WhatsApp: device, inode, birth time and a digest of the first line, kept
+  in the set's ledger); a file removed and written again under the same name
+  is read from its start. The helper's capture-sequence counter is replaced
+  whole (a temporary file, synced, renamed, the folder synced) under a lock
+  file of its own, so a kill at any step leaves the old value or the new one.
 - **Quiet is not stale.** After every finished cycle (it read every approved
   chat) the helper writes `.capture-heartbeat.json` beside the spool. The
   receipt's age is from the newer of the newest record and the heartbeat,
