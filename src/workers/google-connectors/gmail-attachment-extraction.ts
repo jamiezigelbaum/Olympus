@@ -1,0 +1,181 @@
+/**
+ * Reading Gmail's attachment children (docs/design/child-items.md, "Reading
+ * later"; archive-live-one-dataset.md, step 6): one extraction roster entry
+ * over the Gmail stores, whose one reader takes a child's bytes from wherever
+ * its locator says they are, whichever input listed it:
+ *
+ * - `gmail-part1:<message>:<part>`: live Gmail, through the Gmail lane's
+ *   connector (the message once, then the part inline or by its attachment
+ *   id), only while live Gmail is connected and its mail approval current;
+ * - `mbox-part1:<import>:<file>:<offset>:<part>`: an imported mbox, from the
+ *   import's own approved files (archive-import/mbox/part-reader.ts).
+ *
+ * A readable attachment brings its text through the shared extraction runner,
+ * held, judged and stored like any other file, each child on its own; one
+ * over the readers' byte limits keeps its names and is listed as a file Olympus
+ * could not read. Only children are candidates: a message is read with its
+ * listing, never here.
+ */
+import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
+import type { RawItem, SourceConnector, SourceConnectorFetchOptions, SourceConnectorListPage } from '../../core/contracts.ts';
+import { FileExtractionSourceError, type ExtractionCandidateReader } from '../../core/file-extraction-source.ts';
+import { readMboxPart } from '../archive-import/mbox/part-reader.ts';
+import type { ArchiveImportStateStore } from '../archive-import/state.ts';
+import { connectorStoreExtractionCandidateReader } from '../connector-store/extraction-candidate-reader.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
+import type { TieredExtractionView } from '../connector-store/tiered-extraction.ts';
+import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import {
+  createConnectorFileExtractionSource,
+  deferredBytesAnswerFor,
+  type BoundedFetchConnector,
+} from '../file-extraction/connector-source.ts';
+import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
+import { createFileExtractionRuntime, type FileExtractionRuntime } from '../email-source/file-extraction-runtime.ts';
+import { GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, GMAIL_SECURE_CONNECTOR_CORPUS_ID, gmailPartLocatorPrefix } from './gmail.ts';
+import { GMAIL_ARCHIVE_SOURCE_ID } from './gmail-archive-target.ts';
+import { MBOX_PART_LOCATOR_PREFIX } from '../archive-import/mbox/gmail-input.ts';
+
+/** The roster's key for Gmail's attachments (its corpus is the Gmail Private store, which lists the other stores). */
+export const GMAIL_ATTACHMENT_EXTRACTION_PROVIDER = 'gmail.attachments';
+export const GMAIL_ATTACHMENT_EXTRACTION_SCOPE_KEY = 'gmail.attachments:extraction';
+export const GMAIL_ATTACHMENT_EXTRACTION_PLAN_LIMIT = 200;
+/**
+ * The corpora the entry reads: each of the Gmail lane's two legacy stores is
+ * a home of its own (a child's names may rest in the Personal store or the
+ * Private one), and the Private one also lists the routed Public store.
+ */
+export const GMAIL_ATTACHMENT_CORPUS_IDS: readonly string[] = [GMAIL_SECURE_CONNECTOR_CORPUS_ID, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID];
+
+/**
+ * The extraction lanes of Gmail's attachments for an account scope: one per
+ * corpus, keyed by the rows' own provider (jobs are), as an archive lane is.
+ */
+export function gmailAttachmentLanes(accountScope: string): Array<{ corpusId: string; provider: string; accountScope: string; approvedScopeKey: string }> {
+  return GMAIL_ATTACHMENT_CORPUS_IDS.map((corpusId) => ({
+    corpusId,
+    provider: 'gmail',
+    accountScope,
+    approvedScopeKey: GMAIL_ATTACHMENT_EXTRACTION_SCOPE_KEY,
+  }));
+}
+export const GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE = 10;
+
+/** What a read of one part's bytes needs from live Gmail: the lane's connector, which reads a part by its locator. */
+export type GmailLiveAttachmentReader = Pick<SourceConnector, 'fetchItem'>;
+
+function childIdentity(account: string, localItemId: string) {
+  const providerItemId = localItemId.startsWith(`${account}:`) ? localItemId.slice(account.length + 1) : localItemId;
+  return { family: 'email' as const, provider: 'gmail', accountScope: account, providerItemId, localItemId };
+}
+
+/**
+ * The one reader of Gmail's attachments: by the locator the child's row keeps.
+ * `live` is undefined while live Gmail is not connected or its approval is not
+ * current: a live part then waits (it is asked again later).
+ */
+export function gmailAttachmentConnector(input: {
+  account: string;
+  live: () => GmailLiveAttachmentReader | undefined;
+  imports?: ArchiveImportStateStore;
+}): BoundedFetchConnector {
+  const read = async (localItemId: string, options: { maxBytes?: number; deferredBytes?: { locator: string } }): Promise<RawItem> => {
+    const locator = options.deferredBytes?.locator;
+    // Only children are read here; a message is read with its listing.
+    if (!locator) throw new FileExtractionSourceError('source_content_unavailable');
+    if (locator.startsWith(gmailPartLocatorPrefix())) {
+      const live = input.live();
+      if (!live) throw new FileExtractionSourceError('source_unavailable');
+      const item = await live.fetchItem(localItemId, { deferredBytes: { locator } });
+      if (item.content.kind === 'bytes' && options.maxBytes !== undefined && item.content.bytes.byteLength > options.maxBytes) {
+        throw new FileExtractionSourceError('source_too_large');
+      }
+      return item;
+    }
+    if (locator.startsWith(MBOX_PART_LOCATOR_PREFIX)) {
+      if (!input.imports) throw new FileExtractionSourceError('source_item_not_found');
+      const part = readMboxPart({
+        state: input.imports,
+        sourceId: GMAIL_ARCHIVE_SOURCE_ID,
+        locator,
+        ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
+      });
+      return {
+        identity: childIdentity(input.account, localItemId),
+        mimeType: part.mimeType,
+        content: { kind: 'bytes', mimeType: part.mimeType, bytes: part.bytes },
+        metadata: {},
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+    throw new FileExtractionSourceError('source_content_unavailable');
+  };
+  return {
+    id: GMAIL_ATTACHMENT_EXTRACTION_PROVIDER,
+    family: 'email',
+    async authenticate(): Promise<void> {},
+    // Extraction never lists: the inputs did.
+    async *listItems(): AsyncIterable<SourceConnectorListPage> {},
+    fetchItem: (localItemId: string, options?: SourceConnectorFetchOptions) => read(localItemId, options?.deferredBytes ? { deferredBytes: options.deferredBytes } : {}),
+    fetchItemWithin: (localItemId, options) => read(localItemId, options),
+    classificationSignals: () => ({}),
+  };
+}
+
+/** Only attachment children are candidates (their ids carry the child separator). */
+export function gmailAttachmentCandidates(reader: ExtractionCandidateReader): ExtractionCandidateReader {
+  return {
+    async extractionCandidates(options) {
+      const page = await reader.extractionCandidates(options);
+      return { ...page, candidates: page.candidates.filter((row) => (row.providerItemId ?? row.localItemId).includes(CHILD_ITEM_ID_SEPARATOR)) };
+    },
+  };
+}
+
+/**
+ * The Gmail attachments' extraction runtime: the shared factory over the Gmail
+ * stores, with this module's one reader, the Gmail tier set to place what is
+ * read, and the product's extractors and jobs file.
+ */
+export function createGmailAttachmentExtractionRuntime(input: {
+  stores: readonly LocalConnectorStore[];
+  set: TieredStoreSet;
+  accountScope: () => string;
+  connector: (accountScope: string) => BoundedFetchConnector | undefined;
+  extractors?: ExtractorRegistryConfig;
+  env?: Record<string, string | undefined>;
+  jobsDbPath?: string;
+  warn?: (message: string) => void;
+}): FileExtractionRuntime | undefined {
+  return createFileExtractionRuntime({
+    ...(input.env ? { env: input.env } : {}),
+    enabled: true,
+    connectorStores: [...input.stores],
+    corpora: GMAIL_ATTACHMENT_CORPUS_IDS.map((corpusId) => ({
+      corpusId,
+      provider: GMAIL_ATTACHMENT_EXTRACTION_PROVIDER,
+      scopes: [GMAIL_ATTACHMENT_EXTRACTION_SCOPE_KEY],
+      ownerConnectorId: GMAIL_ATTACHMENT_EXTRACTION_PROVIDER,
+      resolveAccountScope: input.accountScope,
+    })),
+    extraSourceFactories: new Map([[
+      GMAIL_ATTACHMENT_EXTRACTION_PROVIDER,
+      ({ config, store, view }: { config: { corpusId: string; provider: string }; store: LocalConnectorStore; view?: TieredExtractionView }) => {
+        const reader = view ?? store;
+        return createConnectorFileExtractionSource({
+          id: `${config.corpusId}:attachments`,
+          corpusId: config.corpusId,
+          provider: config.provider,
+          connector: input.connector,
+          deferredBytes: (ref) => deferredBytesAnswerFor(reader.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
+          candidates: gmailAttachmentCandidates(connectorStoreExtractionCandidateReader(reader)),
+          lanes: [{ approvedScopeKey: GMAIL_ATTACHMENT_EXTRACTION_SCOPE_KEY }],
+        });
+      },
+    ]]),
+    tierSets: new Map(GMAIL_ATTACHMENT_CORPUS_IDS.map((corpusId) => [corpusId, input.set] as const)),
+    ...(input.extractors ? { extractors: input.extractors } : {}),
+    ...(input.jobsDbPath ? { jobsDbPath: input.jobsDbPath } : {}),
+    ...(input.warn ? { warn: input.warn } : {}),
+  });
+}

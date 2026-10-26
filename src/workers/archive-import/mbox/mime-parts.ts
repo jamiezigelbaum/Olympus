@@ -182,6 +182,67 @@ function multipartBodies(text: string, from: number, to: number, boundary: strin
   return bodies;
 }
 
+/** One part's bytes could not be given within the bound asked. */
+export class MimePartTooLargeError extends Error {
+  constructor() {
+    super('The part is larger than this read may take.');
+    this.name = 'MimePartTooLargeError';
+  }
+}
+
+function decodeBody(body: string, encoding: string): Uint8Array {
+  if (encoding === 'base64') return new Uint8Array(Buffer.from(body.replace(/[^A-Za-z0-9+/=]/g, ''), 'base64'));
+  if (encoding === 'quoted-printable') {
+    const joined = body.replace(/=\r?\n/g, '');
+    const bytes: number[] = [];
+    for (let index = 0; index < joined.length; index += 1) {
+      const hex = joined.slice(index + 1, index + 3);
+      if (joined[index] === '=' && /^[0-9A-Fa-f]{2}$/.test(hex)) {
+        bytes.push(Number.parseInt(hex, 16));
+        index += 2;
+      } else {
+        bytes.push(joined.charCodeAt(index) & 0xff);
+      }
+    }
+    return new Uint8Array(bytes);
+  }
+  return new Uint8Array(Buffer.from(body, 'latin1'));
+}
+
+/**
+ * The decoded bytes of the part a part path names, with its declared type;
+ * undefined when the message has no such part. A part whose decoded size is
+ * over `maxBytes` is refused (MimePartTooLargeError) before it is decoded.
+ */
+export function mimePartBytes(raw: Uint8Array, partId: string, maxBytes = Number.POSITIVE_INFINITY): { bytes: Uint8Array; mimeType: string } | undefined {
+  const text = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString('latin1');
+  let parts = 0;
+  const find = (from: number, to: number, path: string, depth: number): { bytes: Uint8Array; mimeType: string } | undefined => {
+    parts += 1;
+    if (parts > MAX_PARTS) return undefined;
+    const { headersEnd, bodyStart } = headerBlockEnd(text, from, to);
+    const headers = parseHeaders(text.slice(from, headersEnd));
+    const type = splitParams(headers.get('content-type') ?? 'text/plain');
+    const mimeType = type.value.toLowerCase() || 'text/plain';
+    if (path === partId) {
+      const encoding = (headers.get('content-transfer-encoding') ?? '').trim().toLowerCase();
+      const body = text.slice(bodyStart, to);
+      if (decodedSize(body, encoding) > maxBytes) throw new MimePartTooLargeError();
+      return { bytes: decodeBody(body, encoding), mimeType };
+    }
+    const boundary = type.params.get('boundary');
+    if (!mimeType.startsWith('multipart/') || !boundary || depth >= MAX_DEPTH) return undefined;
+    if (path !== '' && !partId.startsWith(`${path}.`)) return undefined;
+    const bodies = multipartBodies(text, bodyStart, to, boundary);
+    for (const [index, body] of bodies.entries()) {
+      const childPath = path === '' ? String(index) : `${path}.${index}`;
+      if (partId === childPath || partId.startsWith(`${childPath}.`)) return find(body.start, body.end, childPath, depth + 1);
+    }
+    return undefined;
+  };
+  return find(0, text.length, '', 0);
+}
+
 /** Every part with a file name in a raw message, in tree order. */
 export function mimeAttachments(raw: Uint8Array): MimeAttachment[] {
   const text = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString('latin1');

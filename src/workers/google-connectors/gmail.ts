@@ -1286,6 +1286,11 @@ export function bareMessageId(value: string | undefined): string | undefined {
 /** The locator of one MIME part of a Gmail message: what a later read of its bytes needs. */
 const GMAIL_PART_LOCATOR_PREFIX = 'gmail-part1:';
 
+/** The prefix every live Gmail part locator starts with. */
+export function gmailPartLocatorPrefix(): string {
+  return GMAIL_PART_LOCATOR_PREFIX;
+}
+
 export function gmailPartLocator(messageId: string, partId: string): string {
   return `${GMAIL_PART_LOCATOR_PREFIX}${messageId}:${partId}`;
 }

@@ -15396,6 +15396,16 @@ function namesOnlyContentScopeMetadata() {
 }
 var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
 
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
 // src/workers/google-connectors/gmail-mail-record.ts
 import { createHash as createHash8 } from "node:crypto";
 function childrenOf(record2, build) {
@@ -15547,7 +15557,7 @@ function gmailClassificationSignals(item) {
     ...labels.length > 0 ? { labels } : {}
   };
 }
-var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => `${messageId}#child:${partId}`, gmailId = (record2) => !record2.id.startsWith(GMAIL_OWN_ID_PREFIX);
+var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record2) => !record2.id.startsWith(GMAIL_OWN_ID_PREFIX);
 var init_gmail_mail_record = __esm(() => {
   init_sender_rules();
 });

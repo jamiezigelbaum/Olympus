@@ -28,7 +28,7 @@ import type { CredentialBroker } from '../../src/workers/credential-broker/index
 import { GoogleGmailSourceConnector, type GmailApiClient, type GmailMessage } from '../../src/workers/google-connectors/gmail.ts';
 import { gmailArchiveTarget, GMAIL_ARCHIVE_SOURCE_ID } from '../../src/workers/google-connectors/gmail-archive-target.ts';
 import type { GmailMailBuild } from '../../src/workers/google-connectors/gmail-mail-record.ts';
-import { gmailLaneSyncOptions } from '../../src/workers/google-connectors/gmail-live-sync.ts';
+import { gmailContentArrivesLater, gmailLaneSyncOptions } from '../../src/workers/google-connectors/gmail-live-sync.ts';
 import type { MboxGmailMatch } from '../../src/workers/archive-import/mbox/gmail-input.ts';
 
 export const ACCOUNT = 'personal';
@@ -47,6 +47,8 @@ export interface GmailArchiveHarness {
   /** The content window of the live lane (mail older is kept by name only). */
   window: { contentAfterMs?: number };
   build: GmailMailBuild;
+  /** The Gmail stores the set writes (internal, Private). */
+  stores: { internal: LocalConnectorStore; secure: LocalConnectorStore };
   match: { current?: MboxGmailMatch };
   /** The account's labels as the lane reads them (lower-cased name to id), or why they cannot be read. */
   labels: { current?: () => Promise<ReadonlyMap<string, string> | { unavailable: string }> };
@@ -112,6 +114,7 @@ export function gmailArchiveHarness(
     ledger,
     secretLocations: secrets,
     tierClassification: { sniffer: options.sniffer ?? WAITING, ...(options.rules ? { rules: options.rules } : {}) },
+    contentArrivesLaterFor: gmailContentArrivesLater,
   });
   const mailbox = { messages: [] as GmailMessage[] };
   const window: { contentAfterMs?: number } = {};
@@ -165,6 +168,7 @@ export function gmailArchiveHarness(
 
   const harness: GmailArchiveHarness = {
     home, env, runtime, targets, dashboard, set, mailbox, window, build, match, labels,
+    stores: { internal: internalStore, secure: secureStore },
     connectLive(providerAccountId) {
       const account = { sourceId: GMAIL_ARCHIVE_SOURCE_ID };
       placeOwnedAccount(account, env);

@@ -367,6 +367,7 @@ import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, builtInEmbeddingModel } from '../
 import {
   createGmailConnectorStoreSchedulerSource,
   createGmailImportedHistorySchedulerSource,
+  fileExtractionSchedulerTask,
   createGoogleDriveConnectorStoreSchedulerSource,
   createCanonicalDropboxSchedulerSource,
   createReadwiseSchedulerSource,
@@ -459,7 +460,14 @@ import {
 } from '../google-connectors/gmail-import-allowance.ts';
 import type { GmailApiClient } from '../google-connectors/gmail.ts';
 import { readSourceRegistry } from '../../core/source-registry.ts';
-import { gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
+import { gmailContentArrivesLater, gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
+import {
+  GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE,
+  GMAIL_ATTACHMENT_EXTRACTION_PLAN_LIMIT,
+  createGmailAttachmentExtractionRuntime,
+  gmailAttachmentConnector,
+  gmailAttachmentLanes,
+} from '../google-connectors/gmail-attachment-extraction.ts';
 import { archiveSourceTargets } from '../archive-import/source-targets.ts';
 import { createLaneTieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import {
@@ -2918,6 +2926,7 @@ export async function main(): Promise<void> {
               tierClassification: { ...(ownerRules.length > 0 ? { rules: [...ownerRules] } : {}) },
               ...(internalEmbedder ? { internalEmbeddingProvider: internalEmbedder } : {}),
               ...(secureEmbedder ? { secureEmbeddingProvider: secureEmbedder } : {}),
+              contentArrivesLaterFor: gmailContentArrivesLater,
             }),
           };
         }
@@ -2926,6 +2935,8 @@ export async function main(): Promise<void> {
           sync: gmailLaneSyncOptions(ownerRules),
           // The account scope live Gmail writes under, so both inputs name one item.
           account: gmailItemScopeFor(handle),
+          // The same children live Gmail lists, so both inputs name one child.
+          build: { children: true },
           // Takeout names user labels; the account's list gives their ids, so an owner rule on a label id applies.
           labelIds: async () => {
             const cacheKey = `${new Date().toISOString().slice(0, 10)}\n${key}`;
@@ -3842,6 +3853,62 @@ export async function main(): Promise<void> {
     env: process.env,
     extractors: fileExtractionExtractors,
   });
+  // Gmail's attachment children, live and imported alike: one extraction roster entry over the Gmail stores whose
+  // one reader takes a part's bytes from where its locator says (gmail-attachment-extraction.ts). Built on first
+  // use, and again once the Public store exists. Live parts are read only while the mail approval is current.
+  let gmailAttachments: { key: string; runtime: ReturnType<typeof createGmailAttachmentExtractionRuntime> } | undefined;
+  const gmailAttachmentRuntime = () => {
+    if (!gmailInternalConnectorStore || !gmailSecureConnectorStore) return undefined;
+    const publicStore = gmailTierLane?.publicStore?.exists() ? gmailTierLane.publicStore.open() : undefined;
+    const key = publicStore ? 'with-public' : 'two-stores';
+    if (gmailAttachments?.key === key) return gmailAttachments.runtime;
+    const previous = gmailAttachments?.runtime;
+    const currentHandle = () => selectedSourceCredentialHandle({
+      env: process.env, pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
+      provider: 'gmail', capability: 'gmail.email.sync', handles: readActiveConnectedHandles(process.env),
+    });
+    const runtime = createGmailAttachmentExtractionRuntime({
+      stores: [gmailInternalConnectorStore, gmailSecureConnectorStore, ...(publicStore ? [publicStore] : [])],
+      set: createLaneTieredStoreSet({
+        setId: GMAIL_SOURCE_ID,
+        internalStore: gmailInternalConnectorStore,
+        secureStore: gmailSecureConnectorStore,
+        ...(gmailTierLane?.publicStore ? { publicLeg: gmailTierLane.publicStore } : {}),
+        ...(gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {}),
+        contentArrivesLaterFor: gmailContentArrivesLater,
+      }),
+      accountScope: () => gmailItemScopeFor(currentHandle()),
+      connector: (accountScope) => gmailAttachmentConnector({
+        account: accountScope,
+        imports: archiveImports.state,
+        live: () => {
+          const handle = currentHandle();
+          const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
+          if (!handle || !scopeRef || !fileSourceScopeAuthority || !gmailRequestBudget) return undefined;
+          try {
+            fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+          } catch {
+            return undefined;
+          }
+          return new GoogleGmailSourceConnector({
+            credentialHandle: handle.handle,
+            account: accountScope,
+            requestBudget: gmailRequestBudget,
+            build: { children: true },
+          });
+        },
+      }),
+      env: process.env,
+      extractors: fileExtractionExtractors,
+    });
+    gmailAttachments = { key, runtime };
+    try {
+      previous?.close();
+    } catch {
+      // Closing an old connection never decides whether the new one serves.
+    }
+    return runtime;
+  };
   // Every constructed canonical store gets its embedding and retrieval lane.
   if (xBookmarksConnectorStore && xBookmarksEmbeddingProvider) {
     registerConnectorStoreEmbeddingLane({
@@ -3939,6 +4006,8 @@ export async function main(): Promise<void> {
         : {}),
       ...(handle?.handle ? { credentialHandle: handle.handle } : {}),
       account: gmailItemScopeFor(handle),
+      // Attachments are children of their message (2.1.0), read later by the attachment extraction lane.
+      build: { children: true },
     })
     : undefined;
   };
@@ -4903,6 +4972,22 @@ export async function main(): Promise<void> {
       && gmailHoldsImportedHistory([gmailInternalConnectorStore, gmailSecureConnectorStore, gmailTierLane?.publicStore?.current()])) {
       gmailImportedHistory = createGmailImportedHistorySchedulerSource({ config: olympusConfig });
       sources.push(gmailImportedHistory);
+    }
+    // Gmail's attachment children are read by its source (live, or the one with no sync of its own).
+    const gmailSourceAt = sources.findIndex((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail);
+    const attachmentRunner = gmailSourceAt >= 0 ? gmailAttachmentRuntime()?.runner : undefined;
+    if (gmailSourceAt >= 0 && attachmentRunner) {
+      const gmailSource = sources[gmailSourceAt]!;
+      sources[gmailSourceAt] = {
+        ...gmailSource,
+        tasks: [...gmailSource.tasks, ...gmailAttachmentLanes(gmailItemScopeFor(currentGmailHandle)).map((lane) => fileExtractionSchedulerTask({
+          id: `gmail.email_attachments.${lane.corpusId}`,
+          runner: attachmentRunner,
+          lane,
+          planLimit: GMAIL_ATTACHMENT_EXTRACTION_PLAN_LIMIT,
+          batchSize: GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE,
+        }))],
+      };
     }
     // One embedding sweep per source that embeds, built once here from the
     // worker's own store registry: every mounted store of the source's corpora

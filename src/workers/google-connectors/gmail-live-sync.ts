@@ -238,6 +238,9 @@ export function gmailLaneSyncOptions(ownerRules: readonly OwnerTierRule[] = []):
   };
 }
 
+/** Gmail's attachment children are listed by name; their bytes are read later (child items, 2.1.0). */
+export const gmailContentArrivesLater = (item: RawItem): boolean => item.deferredBytes !== undefined;
+
 export function createGmailConnectorStoreSyncHandler(
   options: GmailConnectorStoreSyncOptions,
 ): GmailConnectorStoreSyncHandler {
@@ -312,6 +315,8 @@ export function createGmailConnectorStoreSyncHandler(
     tierClassification,
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened!(store) } : {}),
+    // An attachment child's text lands later, read by the extraction factory: its names are placed now.
+    contentArrivesLaterFor: gmailContentArrivesLater,
   });
 
   // An owner's "always Private" (or Secrets) label saved after mail was stored:

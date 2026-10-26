@@ -9977,6 +9977,16 @@ function itemContentKeptNamesOnly(item) {
 }
 var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
 
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
 // src/workers/google-connectors/gmail-mail-record.ts
 import { createHash as createHash4 } from "node:crypto";
 function childrenOf(record, build) {
@@ -10128,7 +10138,7 @@ function gmailClassificationSignals(item) {
     ...labels.length > 0 ? { labels } : {}
   };
 }
-var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => `${messageId}#child:${partId}`, gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX);
+var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX);
 var init_gmail_mail_record = __esm(() => {
   init_sender_rules();
 });
@@ -19510,7 +19520,7 @@ var init_secrets_disposition = __esm(() => {
 
 // src/workers/connector-store/child-visibility.ts
 function parentIdentityOf(child) {
-  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
+  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR2);
   if (cut <= 0)
     return;
   return {
@@ -19646,7 +19656,7 @@ function hiddenChildKeys(lane, probes) {
   }
   return childrenWithHiddenParents(lane, links);
 }
-var CHILD_ITEM_ID_SEPARATOR = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var CHILD_ITEM_ID_SEPARATOR2 = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   HIDDEN = { visible: false, gone: false };
@@ -26835,7 +26845,7 @@ var init_local_index = __esm(() => {
               tallyExclusion(metadataOnlyTally, exclusion);
             let itemForStorage = item;
             let contentFetchFailed = false;
-            if (!metadataOnly && !deferMetadataOnlyContent && classification && fetchContent && item.content.kind === "metadata_only") {
+            if (!metadataOnly && !deferMetadataOnlyContent && item.deferredBytes === undefined && classification && fetchContent && item.content.kind === "metadata_only") {
               try {
                 itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
                 consecutiveContentFetchFailures = 0;
@@ -26932,7 +26942,7 @@ var init_local_index = __esm(() => {
             const sourceScopeObservation = options?.sourceScopeObservation ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) : undefined;
             let upsert;
             try {
-              upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined);
+              upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", false, (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined);
             } catch (error) {
               if (!(error instanceof ConnectorStoreTierWriteRefusedError))
                 throw error;
@@ -26942,7 +26952,7 @@ var init_local_index = __esm(() => {
             itemsIndexed += 1;
             let itemChanged = upsert.contentChanged;
             let ftsContentChanged = false;
-            if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!deferMetadataOnlyContent || itemForStorage.content.kind !== "metadata_only")) {
+            if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== "metadata_only")) {
               const indexed = await this.indexItemContent(connector, (fetched) => routedLayer !== undefined ? sensitivity : classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain), (fetched, fetchedSensitivity) => routedLayer !== undefined ? undefined : this.recordTierDecision(connector, fetched, fetchedSensitivity, tierClassification, tierRun, itemContentKeptNamesOnly(fetched)), itemForStorage, upsert.itemPk, maxChunkChars, gaps, () => {
                 consecutiveContentFetchFailures += 1;
                 assertContentFetchFailureBudget(consecutiveContentFetchFailures);
@@ -49703,6 +49713,14 @@ init_request_budget();
 // src/workers/email-source/server.ts
 init_source_registry();
 init_gmail_live_sync();
+// src/workers/archive-import/mbox/part-reader.ts
+init_scope_safe_fs();
+init_manifest3();
+
+// src/workers/google-connectors/gmail-attachment-extraction.ts
+init_gmail();
+
+// src/workers/email-source/server.ts
 init_tiered_store_set();
 
 // src/workers/source-account-guard.ts

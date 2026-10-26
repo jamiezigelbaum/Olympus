@@ -293,8 +293,8 @@ ownership and the delete paths do not change.
    chat joining); the bridge's records carry the contact's saved name.
 6. Mail: live Gmail requests `Message-ID`, and gains attachments as children;
    mbox of a Gmail account becomes a Gmail input (built, PR #546, see "Built,
-   step 6"; children are built but off until Gmail attachments have a
-   reader).
+   step 6"; attachments are children, read by one extraction lane, in the PR
+   stacked on #546).
 7. Reflect, Roam, Evernote: their own sources, assets as children.
 8. Live Telegram media and live WhatsApp images and video, so both
    inputs bring the same media.
@@ -514,19 +514,34 @@ connector; any other mbox stays under Archives, as before.
   senders and categories, the one-time-code filter, the content window)
   governs what live reads; an import is its own approval, as it was under
   Archives. Spam and Trash are skipped, as before.
-- **Children: built, off.** The child key is the MIME part path, computed by
-  both inputs as Gmail numbers `partId` (`archive-import/mbox/mime-parts.ts`;
-  a `message/rfc822` part is one attachment). Live listing keeps a message
-  and its attachments within the item budget, can resume inside one
-  message's attachments, and resumes a cut-short page after the last message
-  it handled, found by its id (`after`), never by position, whether or not
-  the store would skip it; `fetchItem` with a locator reads a part's bytes
-  (inline, or `attachments.get`). They stay off (`GmailMailBuild.children`)
-  because nothing reads a Gmail child's bytes yet: the Gmail lane has no
-  extraction roster entry, and an imported child's locator points into the
-  export (`mbox-part1:`), which that reader would also need to open. A child
-  nobody reads stays owed reading on the card for ever. Turning them on is
-  the follow-up, with child-items' step 3.
+- **Children** (on, a PR stacked on #546). Every MIME part with a file name
+  is a child item of its message, from both inputs: its id is
+  `<message>#child:<part path>` (`core/child-item-id.ts`; the whole-message
+  part is `root`), the part path both inputs compute alike for one message
+  (Gmail's `partId`; the export's own MIME tree, `archive-import/mbox/mime-parts.ts`),
+  never a file name. A child carries its name, type and size, the parent's
+  sender and date, and its own tier judgment; it follows its parent's
+  deletions (child visibility, as every child does). A `message/rfc822` part
+  is one attachment. Live listing keeps a message and its attachments within
+  the item budget, can resume inside one message's attachments, and resumes a
+  cut-short page after the last message it handled, by id (`after`). A child
+  listed with `deferredBytes` is always deferred to extraction, whatever the
+  lane's sync option, and its tier set places its names now and its text when
+  it lands (`gmailContentArrivesLater`).
+- **Reading attachments** (`google-connectors/gmail-attachment-extraction.ts`).
+  One extraction roster entry over the Gmail stores (a corpus per legacy
+  store, Private and Personal, the Private one listing the Public store too),
+  with one reader for both locators: `gmail-part1:<message>:<part>` through
+  the Gmail lane's connector (the message once, the part inline or by its
+  attachment id, under the lane's day budget, only while the mail approval is
+  current), and `mbox-part1:<import>:<file>:<offset>:<part>` from the import's
+  own approved files (`archive-import/mbox/part-reader.ts`: the folder and
+  every file the versions imported, the part bounded before it is decoded,
+  only for an import joined to Gmail and not being removed). Only children are
+  candidates. A readable attachment's text is read, held, judged and stored
+  like any file's; one over the readers' limits keeps its names and is listed
+  as a file Olympus could not read. The Gmail source (live, or the one with no
+  sync of its own) runs the lanes.
 - **Release check.** The import-beside-live case is
   `GMAIL_TAKEOUT_FIXTURES` in `scripts/release-check/archive-fixtures.ts`
   (`SOURCE_INPUT_FORMATS`), run through the product by

@@ -27,6 +27,7 @@ import type { RawItem, SourceClassificationSignals } from '../../core/contracts.
 import { namesOnlyContentScopeMetadata } from '../../core/classification-signals.ts';
 import { MAX_FROM_HEADER_CHARS } from '../../core/sender-rules.ts';
 import type { SourceRecordEntry } from '../../core/source-inputs.ts';
+import { childProviderItemId } from '../../core/child-item-id.ts';
 import { metadataString, metadataStringArray } from './classification.ts';
 
 export const GMAIL_MAIL_PROVIDER = 'gmail';
@@ -74,7 +75,14 @@ export interface GmailMailRecord {
   sourceVersion?: string;
 }
 
-export const gmailChildProviderId = (messageId: string, partId: string): string => `${messageId}#child:${partId}`;
+/**
+ * An attachment's child id (core/child-item-id.ts): the message's id and the
+ * part's MIME path, which live Gmail (`partId`) and an export's MIME tree give
+ * alike for the same message, so both inputs name one child. The whole-message
+ * part (a message whose body is the file) has the empty path, keyed `root`.
+ * Never the file name: two parts may share one, and a name is the sender's.
+ */
+export const gmailChildProviderId = (messageId: string, partId: string): string => childProviderItemId(messageId, partId || 'root');
 
 const gmailId = (record: GmailMailRecord): boolean => !record.id.startsWith(GMAIL_OWN_ID_PREFIX);
 

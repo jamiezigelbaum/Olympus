@@ -144,12 +144,24 @@ export function gmailLabelIds(names: readonly string[], byName?: ReadonlyMap<str
   return ids;
 }
 
-/** The locator of one MIME part of one message of the archive. */
-export function mboxPartLocator(fileIndex: number, offset: number, partId: string): string {
-  return `${MBOX_PART_LOCATOR_PREFIX}${fileIndex}:${offset}:${partId}`;
+/**
+ * The locator of one MIME part of one message of an import: the import, the
+ * file of its manifest, the message's byte offset there, and the part's path.
+ * A reader opens the import's own approved files by it (mbox/part-reader.ts).
+ */
+export function mboxPartLocator(archiveId: string, fileIndex: number, offset: number, partId: string): string {
+  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${partId}`;
+}
+
+export function parseMboxPartLocator(locator: string): { archiveId: string; fileIndex: number; offset: number; partId: string } | undefined {
+  if (!locator.startsWith(MBOX_PART_LOCATOR_PREFIX)) return undefined;
+  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
+  if (!match) return undefined;
+  return { archiveId: match[1]!, fileIndex: Number(match[2]), offset: Number(match[3]), partId: match[4]! };
 }
 
 function recordOf(
+  archiveId: string,
   parsed: ParsedMboxMessage,
   span: MboxMessageSpan,
   fileIndex: number,
@@ -177,7 +189,7 @@ function recordOf(
       filename: part.filename,
       ...(part.mimeType ? { mimeType: part.mimeType } : {}),
       size: part.size,
-      locator: mboxPartLocator(fileIndex, span.offset, part.partId),
+      locator: mboxPartLocator(archiveId, fileIndex, span.offset, part.partId),
       ...(part.nested ? { nested: true } : {}),
     })),
     sourceVersion: parsed.messageHash.slice(0, 32),
@@ -302,7 +314,7 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
                     }
                     if (matched !== 'none') id = matched.id;
                   }
-                  const record = recordOf(parsed, span, fileIndex, id ?? ownId(parsed), labelsByName);
+                  const record = recordOf(archive.archiveId, parsed, span, fileIndex, id ?? ownId(parsed), labelsByName);
                   page.push(record);
                   positions.push({ fileIndex, offset: span.offset });
                   pending = true;

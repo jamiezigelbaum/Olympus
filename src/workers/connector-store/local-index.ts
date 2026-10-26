@@ -944,7 +944,8 @@ export interface ConnectorStoreSyncOptions {
    * representation when that listing is metadata-only. This is the ownership
    * mode for connectors whose binary bodies are handled by the shared
    * extraction factory: metadata sync observes the item; extraction owns the
-   * derived text.
+   * derived text. A child listed with `deferredBytes` (2.1.0) is always taken
+   * this way, whatever the lane's option: its bytes are the factory's to read.
    */
   deferMetadataOnlyContent?: boolean;
   maxChunkChars?: number;
@@ -8082,7 +8083,7 @@ export class LocalConnectorStore {
           let contentFetchFailed = false;
           if (
             !metadataOnly
-            && !deferMetadataOnlyContent
+            && !deferMetadataOnlyContent && item.deferredBytes === undefined
             && classification
             && fetchContent
             && item.content.kind === 'metadata_only'
@@ -8279,9 +8280,9 @@ export class LocalConnectorStore {
               ownershipKind,
               syncRunId,
               options?.ownerObservation ?? 'provider_listing',
-              deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+              (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === 'metadata_only',
               false,
-              deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+              (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === 'metadata_only',
               sourceScopeObservation,
               routedLayer && routedLayer !== 'metadata' ? 'content' : undefined,
             );
@@ -8299,7 +8300,7 @@ export class LocalConnectorStore {
             && !contentFetchFailed
             && !metadataOnly
             && routedLayer !== 'metadata'
-            && (!deferMetadataOnlyContent || itemForStorage.content.kind !== 'metadata_only')
+            && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== 'metadata_only')
           ) {
             const indexed = await this.indexItemContent(
               connector,
