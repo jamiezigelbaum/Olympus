@@ -1822,8 +1822,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       }
       // A deletion of an item no store ever held still leaves its version: the Private store records a tombstone
       // for it (as it does for a Secret's location), so an older record is refused afterwards.
-      const noActiveRow = !TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity).active === true);
-      const location = !routed && noActiveRow && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined && item.identity.sourceVersion !== undefined;
+      // (Only an item no leg ever held a row for, or one whose tombstone this path made: a lane's own tombstone is not ours.)
+      const location = !routed && (!hasRow || ledger.isUnseenDeletion(identity)) && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined && item.identity.sourceVersion !== undefined;
       if (!routed && !location) {
         this.counts.itemsLegacy += 1;
         return { kind: 'legacy' };
