@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -550,6 +551,58 @@ describe('review round 4 on #558: no Secret left in a waiting line, large media 
     const file = await target.extraction.fetchFile(ref, { spoolDir: join(target.root, 'extraction-spool') });
     expect(readFileSync(file.path, 'utf8')).toBe('ogg bytes');
     await file.dispose();
+  });
+});
+
+describe('review round 5 on #558: the waiting folder is fenced, and swept on every clearing', () => {
+  const waitingLine = (target: ReturnType<typeof lane>, id: string, text: string) => {
+    const waitingDir = join(target.root, 'media', 'waiting');
+    mkdirSync(waitingDir, { recursive: true });
+    const record = JSON.parse(spoolLine({ id, media_type: 'image', media_mime: 'image/jpeg', download_status: 'waiting_for_disk', text })) as Record<string, unknown>;
+    const entry = join(waitingDir, `${whatsAppMediaFileStem(CHAT, id)}.json`);
+    writeFileSync(entry, JSON.stringify(record));
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), `${JSON.stringify(record)}\n`);
+    return { waitingDir, entry };
+  };
+  const clear = (target: ReturnType<typeof lane>, waitingDir: string, secretId?: string) => redactWhatsAppLiveSpoolSecrets({
+    spoolDir: target.spoolDir,
+    account: 'personal',
+    judge: (identity) => (identity.providerItemId === secretId ? 'content' : undefined),
+    mediaDirs: [target.images, target.video, target.audio],
+    mediaWaitingDir: waitingDir,
+  });
+
+  test('an old unfinished waiting temp is swept on a clearing with nothing Secret in it', () => {
+    const target = lane();
+    const { waitingDir } = waitingLine(target, 'S1', 'an ordinary caption');
+    const old = join(waitingDir, `.${whatsAppMediaFileStem(CHAT, 'gone')}.json.tmp999`);
+    writeFileSync(old, '{"text":"the door code is 4411"}');
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(old, hourAgo, hourAgo);
+    clear(target, waitingDir);
+    expect(existsSync(old)).toBe(false);
+  });
+
+  test('a lock left by a holder that is gone is taken over, and the entry cleared', () => {
+    const target = lane();
+    const { waitingDir, entry } = waitingLine(target, 'S2', 'the door code is 4411');
+    writeFileSync(join(waitingDir, '.olympus-waiting.lock'), `4194305 ${whatsAppBootNonce()}\n`);
+    clear(target, waitingDir, 'S2');
+    expect(readFileSync(entry, 'utf8')).not.toContain('door code');
+    expect(existsSync(join(waitingDir, '.olympus-waiting.lock'))).toBe(false);
+  });
+
+  test('while the bridge holds the lock, the clearing waits for it, then clears', () => {
+    const target = lane();
+    const { waitingDir, entry } = waitingLine(target, 'S3', 'the door code is 4411');
+    const lock = join(waitingDir, '.olympus-waiting.lock');
+    // The bridge (a live process of this boot) holds the lock, and lets it go a moment later.
+    const holder = spawn('sh', ['-c', `sleep 0.4; rm -f '${lock}'`], { detached: true, stdio: 'ignore' });
+    writeFileSync(lock, `${holder.pid} ${whatsAppBootNonce()}\n`);
+    const started = Date.now();
+    clear(target, waitingDir, 'S3');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+    expect(readFileSync(entry, 'utf8')).not.toContain('door code');
   });
 });
 

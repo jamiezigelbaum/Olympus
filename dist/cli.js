@@ -101408,6 +101408,8 @@ function redactWhatsAppLiveSpoolSecrets(options) {
   const mediaRoots = [...options.mediaDir ? [options.mediaDir] : [], ...options.mediaDirs ?? []].map((dir) => existingRealPath(dir)).filter((dir) => dir !== undefined);
   const relocate = options.relocateMediaPath ?? ((path) => path);
   sweepOrphanMediaTemps(mediaRoots);
+  if (options.mediaWaitingDir)
+    sweepWaitingTemps(options.mediaWaitingDir);
   let owners;
   const deleteOwnedMedia = (message2) => {
     if (!message2.mediaPath || mediaRoots.length === 0)
@@ -101568,29 +101570,79 @@ function mediaTempFiles(roots, strict) {
     walk(root, 0);
   return found;
 }
-function clearWaitingEntry(dir, message2, how) {
-  const stem = whatsAppMediaFileStem(message2.chatJid, message2.id);
+function withWaitingLock(dir, use) {
+  const path = join87(dir, WAITING_LOCK_NAME);
+  const deadline = Date.now() + WAITING_LOCK_WAIT_MS;
+  for (;; ) {
+    try {
+      writeFileSync18(path, `${process.pid} ${whatsAppBootNonce()}
+`, { mode: 384, flag: "wx" });
+      break;
+    } catch (error) {
+      const code = error.code;
+      if (code === "ENOENT")
+        return;
+      if (code !== "EEXIST")
+        throw error;
+    }
+    if (waitingLockHolderGone(path)) {
+      rmSync21(path, { force: true });
+      continue;
+    }
+    if (Date.now() > deadline)
+      throw new Error("The WhatsApp media waiting folder stayed locked.");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  try {
+    return use();
+  } finally {
+    rmSync21(path, { force: true });
+  }
+}
+function waitingLockHolderGone(path) {
+  let fields;
+  try {
+    fields = readFileSync58(path, "utf8").trim().split(/\s+/u);
+  } catch {
+    return false;
+  }
+  if (fields.length !== 2) {
+    try {
+      return Date.now() - lstatSync36(path).mtimeMs > WAITING_LOCK_WAIT_MS;
+    } catch {
+      return false;
+    }
+  }
+  const pid = Number(fields[0]);
+  if (!Number.isSafeInteger(pid) || pid <= 0)
+    return true;
+  return fields[1] !== whatsAppBootNonce() || pid !== process.pid && !processAlive3(pid);
+}
+function sweepWaitingTemps(dir, nowMs = Date.now()) {
   let names;
   try {
     names = readdirSync18(dir);
-  } catch (error) {
-    if (error.code === "ENOENT")
-      return;
-    throw error;
+  } catch {
+    return;
   }
   for (const name of names) {
-    const temp2 = WAITING_TEMP.exec(name);
-    if (!temp2)
+    if (!WAITING_TEMP.test(name))
       continue;
     const path = join87(dir, name);
-    if (temp2[1] === stem) {
-      removeTemp(path);
-      continue;
-    }
     try {
-      if (Date.now() - lstatSync36(path).mtimeMs >= WAITING_TEMP_MAX_AGE_MS)
+      if (nowMs - lstatSync36(path).mtimeMs >= WAITING_TEMP_MAX_AGE_MS)
         rmSync21(path, { force: true });
     } catch {}
+  }
+}
+function clearWaitingEntry(dir, message2, how) {
+  withWaitingLock(dir, () => clearWaitingEntryLocked(dir, message2, how));
+}
+function clearWaitingEntryLocked(dir, message2, how) {
+  const stem = whatsAppMediaFileStem(message2.chatJid, message2.id);
+  for (const name of readdirSync18(dir)) {
+    if (WAITING_TEMP.exec(name)?.[1] === stem)
+      removeTemp(join87(dir, name));
   }
   const entry = join87(dir, `${stem}.json`);
   if (how === "remove") {
@@ -101789,7 +101841,7 @@ function optionalStringRecord(value2) {
 function nowIso3() {
   return new Date().toISOString();
 }
-var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, WHATSAPP_MEDIA_WAITING_STATUS = "waiting_for_disk", CHILD_MEDIA_TYPES, WHATSAPP_STATUS_CHAT_LABEL = "Status updates", CURSOR2, LEGACY_CURSOR, MEDIA_TEMP, OLDER_MEDIA_TEMP, MEDIA_TEMP_MAX_AGE_MS, MEDIA_TEMP_DEPTH = 2, currentBootNonce, WAITING_TEMP, WAITING_TEMP_MAX_AGE_MS;
+var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, WHATSAPP_MEDIA_WAITING_STATUS = "waiting_for_disk", CHILD_MEDIA_TYPES, WHATSAPP_STATUS_CHAT_LABEL = "Status updates", CURSOR2, LEGACY_CURSOR, MEDIA_TEMP, OLDER_MEDIA_TEMP, MEDIA_TEMP_MAX_AGE_MS, MEDIA_TEMP_DEPTH = 2, currentBootNonce, WAITING_TEMP, WAITING_TEMP_MAX_AGE_MS, WAITING_LOCK_NAME = ".olympus-waiting.lock", WAITING_LOCK_WAIT_MS;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
@@ -101810,6 +101862,7 @@ var init_live_connector = __esm(() => {
   MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
   WAITING_TEMP = /^\.(.+)\.json\.tmp[^/]*$/u;
   WAITING_TEMP_MAX_AGE_MS = 60 * 1000;
+  WAITING_LOCK_WAIT_MS = 30 * 1000;
 });
 
 // src/workers/whatsapp/store-sync.ts

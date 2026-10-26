@@ -22,7 +22,15 @@ package main
 //     entry is removed only once its line is written and fsynced.
 //   - A waiting entry is written whole or not at all (a temp renamed into
 //     place); the temp of a write a killed bridge left is swept at start,
-//     and Olympus sweeps the same before Secrets clearing.
+//     and Olympus sweeps the same on every clearing.
+//   - The bridge and Olympus share one lock on the waiting folder
+//     (mediaWaitingLockName: made exclusively, naming its holder's pid and
+//     boot; one whose holder is gone is taken over). Olympus holds it while
+//     it clears or removes an entry; the bridge holds it from reading an
+//     entry again, right before the message is spooled with its media,
+//     until the line is written and the entry removed. So what is spooled is
+//     the entry as it is then (cleared, if Olympus cleared it), and an entry
+//     Olympus removed is never spooled: what was downloaded for it goes.
 //   - The capture status receipt says media is waiting, with no count, for
 //     as long as any entry remains.
 
@@ -31,10 +39,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,11 +53,13 @@ import (
 )
 
 const (
-	mediaWaitingStatus  = "waiting_for_disk"
-	mediaWaitingDirName = "waiting"
-	diskFloorMinBytes   = 5 * 1024 * 1024 * 1024
-	diskFloorShare      = 20 // one twentieth: 5% of the volume
-	mediaRetryInterval  = time.Minute
+	mediaWaitingLockName = ".olympus-waiting.lock"
+	mediaWaitingLockWait = 30 * time.Second
+	mediaWaitingStatus   = "waiting_for_disk"
+	mediaWaitingDirName  = "waiting"
+	diskFloorMinBytes    = 5 * 1024 * 1024 * 1024
+	diskFloorShare       = 20 // one twentieth: 5% of the volume
+	mediaRetryInterval   = time.Minute
 )
 
 // The volume a new queue reads (tests give it one with room).
@@ -182,6 +194,99 @@ func isWaitingTemp(name string) bool {
 	return strings.HasPrefix(name, ".") && strings.Contains(name, ".json.tmp")
 }
 
+// lock takes the waiting folder's lock, shared with Olympus (see the header):
+// made exclusively, naming this pid and boot. A lock whose holder is gone
+// (its pid dead, or of another boot) is taken over.
+func (q *mediaWaitQueue) lock() (func(), error) {
+	path := filepath.Join(q.dir, mediaWaitingLockName)
+	if err := os.MkdirAll(q.dir, 0o700); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(mediaWaitingLockWait)
+	for {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_, werr := fmt.Fprintf(file, "%d %s\n", os.Getpid(), bootNonce)
+			cerr := file.Close()
+			if werr != nil || cerr != nil {
+				_ = os.Remove(path)
+				return nil, errors.Join(werr, cerr)
+			}
+			return func() { _ = os.Remove(path) }, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		if lockHolderGone(path) {
+			_ = os.Remove(path)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.New("the media waiting folder stayed locked")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// lockHolderGone says whether the lock's holder is no longer running: its pid dead, or of another boot.
+func lockHolderGone(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) != 2 {
+		// Being written this moment, or not a lock this build makes: given a moment.
+		info, err := os.Stat(path)
+		return err == nil && time.Since(info.ModTime()) > mediaWaitingLockWait
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return true
+	}
+	return fields[1] != bootNonce || (pid != os.Getpid() && !processAlive(pid))
+}
+
+// publish spools a waiting message with its media, fenced against Olympus's
+// clearing by the shared lock: the entry is read again under it, and what is
+// spooled is the entry as it is now. An entry that is gone is never spooled,
+// and what was downloaded for it is deleted. The entry goes only once the
+// line is written. Says whether it was spooled.
+func (q *mediaWaitQueue) publish(path string, result func(rec *spoolRecord), saved string, spool func(spoolRecord) error) bool {
+	unlock, err := q.lock()
+	if err != nil {
+		log.Printf("olympus-whatsapp-bridge: could not lock the media waiting folder: %v", err)
+		return false
+	}
+	defer unlock()
+	discard := func() {
+		if saved != "" {
+			_ = os.Remove(saved)
+		}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		// Removed meanwhile (its media judged Secrets): the media is never kept.
+		discard()
+		return false
+	}
+	var rec spoolRecord
+	if json.Unmarshal(raw, &rec) != nil {
+		discard()
+		_ = os.Remove(path)
+		return false
+	}
+	result(&rec)
+	if err := spool(rec); err != nil {
+		// Not written: the entry stays, and the next pass makes the line again.
+		log.Printf("olympus-whatsapp-bridge: could not spool a message whose media was waiting: %v", err)
+		discard()
+		return false
+	}
+	_ = os.Remove(path)
+	return true
+}
+
 // run retries the waiting downloads every interval until ctx ends.
 func (q *mediaWaitQueue) run(ctx context.Context, store *audioMediaStore, writer *spoolWriter) {
 	if q == nil {
@@ -259,26 +364,16 @@ func (q *mediaWaitQueue) retry(ctx context.Context, store *audioMediaStore, spoo
 			// A passing failure (the network): it stays waiting for the next pass.
 			continue
 		}
-		if _, gone := os.Stat(path); gone != nil {
-			// Cleared while it downloaded: the media is never kept.
-			if saved != "" {
-				_ = os.Remove(saved)
+		failed := err
+		q.publish(path, func(rec *spoolRecord) {
+			if failed != nil {
+				rec.DownloadStatus = "failed:" + classifyDownloadError(failed)
+				return
 			}
-			continue
-		}
-		if err != nil {
-			rec.DownloadStatus = "failed:" + classifyDownloadError(err)
-		} else {
 			rec.MediaPath = saved
 			rec.MediaSizeBytes = size
 			rec.DownloadStatus = "ok"
-		}
-		if err := spool(rec); err != nil {
-			// Not written: the entry stays, and the next pass makes the line again.
-			log.Printf("olympus-whatsapp-bridge: could not spool a message whose media was waiting: %v", err)
-			continue
-		}
-		_ = os.Remove(path)
+		}, saved, spool)
 	}
 }
 

@@ -1336,6 +1336,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   const relocate = options.relocateMediaPath ?? ((path: string): string => path);
   // A download a killed bridge never finished leaves a temp: those go first (tools/whatsapp-bridge/media_files.go).
   sweepOrphanMediaTemps(mediaRoots);
+  if (options.mediaWaitingDir) sweepWaitingTemps(options.mediaWaitingDir);
   let owners: Map<string, Set<string>> | undefined;
   // Saved audio is deleted only when this message is the only one that names
   // it: the bridge names a file by message id alone, and an id is unique only
@@ -1546,36 +1547,103 @@ const WAITING_TEMP = /^\.(.+)\.json\.tmp[^/]*$/u;
 /** Another message's waiting temp older than this is a leftover (the bridge renames its own at once). */
 const WAITING_TEMP_MAX_AGE_MS = 60 * 1000;
 
+/** The lock the bridge and Olympus share on the waiting folder (media_waiting.go, `mediaWaitingLockName`). */
+const WAITING_LOCK_NAME = '.olympus-waiting.lock';
+const WAITING_LOCK_WAIT_MS = 30 * 1000;
+
 /**
- * Clears one message's waiting entry in the bridge's waiting folder
- * (tools/whatsapp-bridge/media_waiting.go): removed (`remove`), or its text,
- * link preview and mentions (and names, for `names`) cleared and the entry
- * flagged as the spool line is, written whole. The message's own unfinished
- * temps go with it, and any other one past the age. Anything but a file's
- * being gone already fails the clearing.
+ * Runs `use` holding the waiting folder's lock, shared with the bridge: made
+ * exclusively, naming this pid and boot; one whose holder is gone (its pid
+ * dead, or of another boot) is taken over. The bridge holds it from reading
+ * an entry again until that message is spooled, so an entry cleared or
+ * removed here is what the bridge spools, or nothing. Undefined when the
+ * folder is not there (nothing waits).
  */
-function clearWaitingEntry(dir: string, message: SpoolMessage, how: 'remove' | 'content' | 'names'): void {
-  const stem = whatsAppMediaFileStem(message.chatJid, message.id);
+function withWaitingLock<T>(dir: string, use: () => T): T | undefined {
+  const path = join(dir, WAITING_LOCK_NAME);
+  const deadline = Date.now() + WAITING_LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      writeFileSync(path, `${process.pid} ${whatsAppBootNonce()}\n`, { mode: 0o600, flag: 'wx' });
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return undefined;
+      if (code !== 'EEXIST') throw error;
+    }
+    if (waitingLockHolderGone(path)) {
+      rmSync(path, { force: true });
+      continue;
+    }
+    if (Date.now() > deadline) throw new Error('The WhatsApp media waiting folder stayed locked.');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  try {
+    return use();
+  } finally {
+    rmSync(path, { force: true });
+  }
+}
+
+function waitingLockHolderGone(path: string): boolean {
+  let fields: string[];
+  try {
+    fields = readFileSync(path, 'utf8').trim().split(/\s+/u);
+  } catch {
+    return false;
+  }
+  if (fields.length !== 2) {
+    // Being written this moment, or not a lock this build makes: given a moment.
+    try {
+      return Date.now() - lstatSync(path).mtimeMs > WAITING_LOCK_WAIT_MS;
+    } catch {
+      return false;
+    }
+  }
+  const pid = Number(fields[0]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+  return fields[1] !== whatsAppBootNonce() || (pid !== process.pid && !processAlive(pid));
+}
+
+/**
+ * Removes the waiting entries' temps a killed bridge never renamed into place,
+ * once past the age (the bridge renames its own at once): on every clearing,
+ * so one holding a caption never stays.
+ */
+function sweepWaitingTemps(dir: string, nowMs = Date.now()): void {
   let names: string[];
   try {
     names = readdirSync(dir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
+  } catch {
+    return;
   }
   for (const name of names) {
-    const temp = WAITING_TEMP.exec(name);
-    if (!temp) continue;
+    if (!WAITING_TEMP.test(name)) continue;
     const path = join(dir, name);
-    if (temp[1] === stem) {
-      removeTemp(path);
-      continue;
-    }
     try {
-      if (Date.now() - lstatSync(path).mtimeMs >= WAITING_TEMP_MAX_AGE_MS) rmSync(path, { force: true });
+      if (nowMs - lstatSync(path).mtimeMs >= WAITING_TEMP_MAX_AGE_MS) rmSync(path, { force: true });
     } catch {
-      // Another message's leftover: tried again next time.
+      // Gone already, or tried again next time.
     }
+  }
+}
+
+/**
+ * Clears one message's waiting entry in the bridge's waiting folder
+ * (tools/whatsapp-bridge/media_waiting.go), holding the lock it shares with
+ * the bridge: removed (`remove`), or its text, link preview and mentions (and
+ * names, for `names`) cleared and the entry flagged as the spool line is,
+ * written whole. The message's own unfinished temps go with it. Anything but
+ * a file's being gone already fails the clearing.
+ */
+function clearWaitingEntry(dir: string, message: SpoolMessage, how: 'remove' | 'content' | 'names'): void {
+  withWaitingLock(dir, () => clearWaitingEntryLocked(dir, message, how));
+}
+
+function clearWaitingEntryLocked(dir: string, message: SpoolMessage, how: 'remove' | 'content' | 'names'): void {
+  const stem = whatsAppMediaFileStem(message.chatJid, message.id);
+  for (const name of readdirSync(dir)) {
+    if (WAITING_TEMP.exec(name)?.[1] === stem) removeTemp(join(dir, name));
   }
   const entry = join(dir, `${stem}.json`);
   if (how === 'remove') {

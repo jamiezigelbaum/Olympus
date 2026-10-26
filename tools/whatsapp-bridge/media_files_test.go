@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -436,5 +437,78 @@ func TestStartSweepsAWaitingEntryAKilledBridgeNeverRenamed(t *testing.T) {
 	}
 	if _, err := os.Stat(kept); err != nil {
 		t.Fatalf("a waiting entry was swept: %v", err)
+	}
+}
+
+// asOlympus takes the waiting folder's lock as Olympus does (its own pid and this boot), and lets it go after `hold`, running `meanwhile` first.
+func asOlympus(t *testing.T, store *audioMediaStore, hold time.Duration, meanwhile func()) {
+	t.Helper()
+	lock := filepath.Join(store.queue.dir, mediaWaitingLockName)
+	if err := os.WriteFile(lock, []byte(fmt.Sprintf("%d %s\n", os.Getpid(), bootNonce)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(hold)
+		meanwhile()
+		_ = os.Remove(lock)
+	}()
+}
+
+func TestTheLineSpooledIsTheWaitingEntryAsItIsWhenPublished(t *testing.T) {
+	downloader := &streamingDownloader{chunk: []byte("picture"), times: 1}
+	store, _ := waitFor(t, downloader, "scrub-1")
+	entry := store.queue.waiting()[0]
+	// Olympus clears the caption (judged Secrets) while the picture downloads.
+	downloader.during = func() {
+		var rec spoolRecord
+		raw, _ := os.ReadFile(entry)
+		_ = json.Unmarshal(raw, &rec)
+		rec.Text = ""
+		rec.SecretRedacted = true
+		cleared, _ := json.Marshal(rec)
+		_ = os.WriteFile(entry, cleared, 0o600)
+	}
+	var spooled []spoolRecord
+	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
+	if len(spooled) != 1 || spooled[0].Text != "" || !spooled[0].SecretRedacted || spooled[0].DownloadStatus != "ok" {
+		t.Fatalf("spooled = %#v", spooled)
+	}
+}
+
+func TestAnEntryOlympusRemovesWhileHoldingTheLockIsNeverSpooled(t *testing.T) {
+	downloader := &streamingDownloader{chunk: []byte("secret picture"), times: 1}
+	store, _ := waitFor(t, downloader, "fence-1")
+	entry := store.queue.waiting()[0]
+	// Olympus takes the lock while the picture downloads, and removes the entry before letting it go.
+	downloader.during = func() {
+		asOlympus(t, store, 150*time.Millisecond, func() { _ = os.Remove(entry) })
+	}
+	var spooled []spoolRecord
+	store.queue.retry(context.Background(), store, func(rec spoolRecord) error { spooled = append(spooled, rec); return nil })
+	if len(spooled) != 0 {
+		t.Fatalf("spooled a removed entry: %#v", spooled)
+	}
+	entries, _ := os.ReadDir(store.images.dir)
+	for _, each := range entries {
+		t.Fatalf("kept %s for a removed entry", each.Name())
+	}
+}
+
+func TestALockWhoseHolderIsGoneIsTakenOver(t *testing.T) {
+	store := newAudioMediaStore(t.TempDir(), &fakeDownloader{})
+	if err := os.MkdirAll(store.queue.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(store.queue.dir, mediaWaitingLockName)
+	if err := os.WriteFile(lock, []byte("4194305 "+bootNonce+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := store.queue.lock()
+	if err != nil {
+		t.Fatalf("a dead holder's lock was not taken over: %v", err)
+	}
+	unlock()
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Fatalf("the lock stayed after it was let go")
 	}
 }
