@@ -296,7 +296,9 @@ Each source's Import an archive appears as its step registers it.
    part built (see "Built, step 3: Telegram"); WhatsApp's in its own lane.
 4. Telegram: the export becomes an input of the Telegram connector (exact
    ids, account hash), with folder media as children; reusable builder and
-   new record kinds. After storage's account-identity step.
+   new record kinds. After storage's account-identity step. Built (see
+   "Built, step 4: Telegram"); reading the children's bytes waits for the
+   shared archive-input media reader and the Telegram extraction roster.
 5. WhatsApp: the export becomes an input (counted keys, zone alignment,
    chat joining); the bridge's records carry the contact's saved name.
 6. Mail: live Gmail requests `Message-ID`, and gains attachments as children;
@@ -722,6 +724,60 @@ message beyond its search context (`src/workers/telegram-messages/`,
 - **Cost.** An existing item is rewritten only when it is read again, and
   its new search context then re-embeds it once.
 
+## Built, step 4: Telegram
+
+A Telegram Desktop JSON export of the paired account is an input of the
+Telegram connector (`src/workers/telegram-messages/`: `export-records.ts`,
+`export-input.ts`, `archive-target.ts`, `record-builder.ts`; tests
+`test/telegram-export-input.test.ts` with the real-source harness
+`test/support/telegram-one-dataset-harness.ts`).
+
+- **One builder, one intake.** The live spool and the export both yield
+  the spool's own record shape, and one builder turns each into its items.
+  The live lanes and the export run through the intake rule against the
+  set's stored versions, so neither input ever replaces a newer version:
+  Telegram's version order is the edit (else sent) time; versions of the
+  same time are a tie, whatever reactions each saw, and on a tie live's
+  copy is kept.
+- **Exact keys.** A message is keyed by Telethon's marked chat id (a user
+  or bot as is, a basic group `-id`, a supergroup or channel `-100id`, from
+  the export's chat type; checked against the helper, which keys a chat by
+  Telethon's `dialog.id`) and the message id. A chat type this does not know
+  is kept apart (`export:<type>:<id>`) rather than risk joining the wrong
+  live chat. Senders take the same form (`user<id>`, `channel<id>`).
+  History from before a supergroup migration (negative ids) is its own
+  items under the supergroup. A left chat that repeats messages is read
+  once (the intake sees the same version and keeps the first).
+- **Record kinds.** Service messages are their event by the export's names
+  (the builder writes the sentence live capture writes); contacts,
+  sessions, the profile and the other parts of an account export are
+  records of their own kinds, one per entry, in a conversation per part
+  (`account:contacts`, ...), keyed by what says who the entry is (a
+  contact's user id, else its phone and name; a session's device, app and
+  start).
+- **Account.** The export's `personal_information.user_id`, hashed as
+  pairing hashes it (`telegram:` + `sha256(id)[:16]`), is the account's
+  hash. An export without a profile (a single chat, or an account export
+  made without it, as the owner's was) asks the owner. Another account's
+  export stays under Archives. Telegram has no account guard, so its imports
+  run without the exclusive runner, under the Telegram pull's own scheduler
+  key.
+- **Media.** A photo or file a message names in the export's folder is a
+  child of the message (`<message>#child:<field>:<path digest>`), listed by
+  name with a media binding and a locator in the shared
+  `archive-input-media:v1:<archive>:b:<binding>` shape; a file the export
+  left out (or one beside a single chosen `result.json`) is a child that
+  is named and not readable. The bytes are read once the shared reader for
+  archive-input media lands (WhatsApp lane) and Telegram has an extraction
+  roster for its stores.
+- **The trust lanes.** The secure lane's claim on an item is now a row it
+  wrote itself (or a pre-tier row), not any row in the Private store: an
+  item the set placed there (held, or judged Private) keeps taking its live
+  edits through the internal lane, and the set places each version by its
+  own tiers. Before, such an item's later live edits were dropped.
+- **Production.** The worker registers the target when the Telegram store
+  lane is up; without it an export stays under Archives, as before.
+
 ## To verify before step 4
 
 - Telegram Desktop writes bare chat ids, with the type telling the marked
@@ -731,7 +787,8 @@ message beyond its search context (`src/workers/telegram-messages/`,
   - Chat ids are bare positive integers, and the type gives the marked form:
     `private_group` takes `-id` and `private_supergroup` takes `-100id`. The
     export held only groups and supergroups, so direct chats, bots and
-    channels are still unchecked.
+    channels are still unchecked; step 4 maps them by type as Telethon marks
+    peers and keeps an unknown type apart.
   - Senders are `user<id>` or `channel<id>`. Edits carry `edited_unixtime`;
     reactions carry `reactions`.
   - **History from before a group became a supergroup** is listed under the
