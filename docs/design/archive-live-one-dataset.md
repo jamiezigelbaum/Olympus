@@ -651,6 +651,12 @@ Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
   media. Overlapping downloads share the quota: each reserves its room under a
   lock before it starts and may not pass it, and the total is measured from
   disk when the gateway starts.
+- **Full clears when room is made.** Each pull measures the kept files again:
+  the store is full while they reach the quota, or while a refusal stands and
+  nothing was freed since it. Removing media or raising the quota (the
+  gateway restarts and says what is true then) clears the card at the next
+  pull, without waiting for a download. Media already left out stays named
+  only, and the card's count is of media left out since storage last filled.
 - **No copy left behind.** A download is written to `.<name>.tmp.<pid>` and
   renamed into place, and the temporary is removed on any failure, the rename
   included. A stopped process's temporaries are swept when the gateway starts

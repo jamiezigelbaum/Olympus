@@ -189,6 +189,41 @@ print(json.dumps({"measured": measured, "attachment": late["attachments"][0]}))
     expect(out.attachment).toMatchObject({ mediaLeftOut: 'storage_full' });
   });
 
+  pythonTest('fill, free, re-measure: the helper\'s own state clears once room is made, and its count starts again', async () => {
+    const dir = spool();
+    mkdirSync(join(dir, 'media', '-1000001'), { recursive: true });
+    writeFileSync(join(dir, 'media', '-1000001', '9.aaaaaaaaaaaa.jpg'), 'k'.repeat(90));
+    const out = await python(`
+refused = record(30, size=60)
+asyncio.run(reader.capture_message_media(Msg(30, payload=b"p" * 60), refused))
+full = json.load(open(reader.media_dir().parent / ".capture-media.json"))
+os.unlink(reader.media_dir() / "-1000001" / "9.aaaaaaaaaaaa.jpg")
+reader.media_stored_bytes(reader.media_dir(), fresh=True)
+cleared = json.load(open(reader.media_dir().parent / ".capture-media.json"))
+fits = record(31, size=60)
+asyncio.run(reader.capture_message_media(Msg(31, payload=b"q" * 60), fits))
+print(json.dumps({"refused": refused["attachments"][0], "full": full, "cleared": cleared, "fits": fits["attachments"][0]}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '100' });
+    expect(out.refused).toMatchObject({ mediaLeftOut: 'storage_full' });
+    expect(out.full).toMatchObject({ storage_full: true, left_out_items: 1, refused_with_bytes: 90 });
+    expect(out.cleared).toMatchObject({ storage_full: false, left_out_items: 0, stored_bytes: 0 });
+    expect(out.cleared.refused_with_bytes).toBeUndefined();
+    expect(out.fits.mediaFile).toMatch(/^media\/-1000001\/31\./);
+  });
+
+  pythonTest('a gateway start says what is true now: a raised quota clears a full state the last run left', async () => {
+    const dir = spool();
+    mkdirSync(join(dir, 'media', '-1000001'), { recursive: true });
+    writeFileSync(join(dir, 'media', '-1000001', '9.aaaaaaaaaaaa.jpg'), 'k'.repeat(90));
+    writeFileSync(join(dir, '.capture-media.json'), JSON.stringify({ kind: 'telegram_capture_media', schema_version: 1, stored_bytes: 90, quota_bytes: 100, storage_full: true, left_out_items: 4, refused_with_bytes: 90 }));
+    const out = await python(`
+folder = reader.media_dir()
+reader.media_start(folder)
+print(json.dumps(json.load(open(folder.parent / ".capture-media.json"))))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir, OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES: '1000' });
+    expect(out).toMatchObject({ storage_full: false, left_out_items: 0, stored_bytes: 90, quota_bytes: 1000 });
+  });
+
   pythonTest('0 keeps no media and downloads nothing', async () => {
     const dir = spool();
     const out = await python(`

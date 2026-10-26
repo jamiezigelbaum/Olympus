@@ -3,7 +3,7 @@
 // advances two trust-separated stores through the shared connector spine.
 
 import { existsSync, readdirSync, rmSync } from 'node:fs';
-import { readTelegramMediaState, sweepTelegramMediaTemporaries, TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile, type TelegramMediaState } from './media-child.ts';
+import { sweepTelegramMediaTemporaries, telegramMediaStateNow, TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile, type TelegramMediaState } from './media-child.ts';
 import { join } from 'node:path';
 import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
@@ -505,7 +505,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
           now().getTime(),
           staleThresholdSeconds,
         ),
-        readTelegramMediaState(spoolDir),
+        telegramMediaStateNow(spoolDir),
       );
     },
 

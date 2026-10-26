@@ -165,11 +165,41 @@ describe('review fixes (#556)', () => {
     const before = await h.live.pull();
     expect(before.counts.media_storage_full).toBe(0);
     expect(before.counts.media_left_out_storage_full).toBe(0);
-    writeFileSync(join(h.spoolDir, '.capture-media.json'), JSON.stringify({ kind: 'telegram_capture_media', schema_version: 1, stored_bytes: 2000, quota_bytes: 2000, storage_full: true, left_out_items: 7, updated_at: '2026-10-20T09:00:00Z' }));
-    expect(readTelegramMediaState(h.spoolDir)).toEqual({ storedBytes: 2000, quotaBytes: 2000, storageFull: true, leftOutItems: 7 });
+    const folder = join(h.spoolDir, 'media', '-1000001');
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, '900.aaaaaaaaaaaa.jpg'), 'k'.repeat(2000));
+    writeFileSync(join(h.spoolDir, '.capture-media.json'), JSON.stringify({ kind: 'telegram_capture_media', schema_version: 1, stored_bytes: 2000, quota_bytes: 2000, storage_full: true, left_out_items: 7, refused_with_bytes: 2000, updated_at: '2026-10-20T09:00:00Z' }));
+    expect(readTelegramMediaState(h.spoolDir)).toEqual({ storedBytes: 2000, quotaBytes: 2000, storageFull: true, leftOutItems: 7, refusedWithBytes: 2000 });
     const full = await h.live.pull();
     expect(full.counts.media_storage_full).toBe(1);
     expect(full.counts.media_left_out_storage_full).toBe(7);
     expect(full.warnings).toContain('telegram_media_storage_full');
+  });
+
+  test('fill, free, pull: once room is made the full state and its count are gone at the next pull', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    h.capture([{ chat: '-1000001', id: '1000', text: 'hello', sentAt: '2026-10-20T09:00:00Z' }]);
+    const folder = join(h.spoolDir, 'media', '-1000001');
+    mkdirSync(folder, { recursive: true });
+    // 900 of 1000 bytes kept, and a 300-byte photo refused: full on that refusal, though under the quota.
+    writeFileSync(join(folder, '901.aaaaaaaaaaaa.jpg'), 'k'.repeat(600));
+    writeFileSync(join(folder, '902.aaaaaaaaaaaa.jpg'), 'k'.repeat(300));
+    writeFileSync(join(h.spoolDir, '.capture-media.json'), JSON.stringify({ kind: 'telegram_capture_media', schema_version: 1, stored_bytes: 900, quota_bytes: 1000, storage_full: true, left_out_items: 3, refused_with_bytes: 900, updated_at: '2026-10-20T09:00:00Z' }));
+    const full = await h.live.pull();
+    expect(full.counts.media_storage_full).toBe(1);
+    expect(full.counts.media_left_out_storage_full).toBe(3);
+    // The owner frees space; the helper has not downloaded anything since, so its file still says full.
+    rmSync(join(folder, '901.aaaaaaaaaaaa.jpg'));
+    const freed = await h.live.pull();
+    expect(freed.counts.media_storage_full).toBe(0);
+    expect(freed.counts.media_left_out_storage_full).toBe(0);
+    expect(freed.warnings ?? []).not.toContain('telegram_media_storage_full');
+    // Kept media at the quota is full whatever the file says.
+    writeFileSync(join(folder, '903.aaaaaaaaaaaa.jpg'), 'k'.repeat(700));
+    writeFileSync(join(h.spoolDir, '.capture-media.json'), JSON.stringify({ kind: 'telegram_capture_media', schema_version: 1, stored_bytes: 300, quota_bytes: 1000, storage_full: false, left_out_items: 0, updated_at: '2026-10-20T09:00:00Z' }));
+    const atQuota = await h.live.pull();
+    expect(atQuota.counts.media_storage_full).toBe(1);
+    expect(atQuota.counts.media_left_out_storage_full).toBe(0);
   });
 });

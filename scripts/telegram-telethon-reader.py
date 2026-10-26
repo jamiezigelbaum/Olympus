@@ -279,11 +279,7 @@ async def run_gateway(run_once: bool = False) -> None:
     os.chmod(config.state_dir, 0o700)
     os.chmod(config.spool_dir, 0o700)
     with gateway_process_lock(config.state_dir / "gateway.lock"):
-        # Downloads a stopped gateway left half written: no locator names them, so only this sweep removes them.
-        sweep_media_temporaries(media_dir())
-        # What is kept, measured from disk once at start; counted on from here and measured again every few minutes.
-        if media_dir():
-            media_stored_bytes(media_dir(), fresh=True)
+        media_start(media_dir())
         state = read_gateway_state(config.state_path)
         state_lock = asyncio.Lock()
         sender_cache_lock = asyncio.Lock()
@@ -1554,13 +1550,18 @@ def sweep_media_temporaries(folder: Path | None) -> int:
 # What the media folder holds (kept files only, measured from disk), what downloads in flight have reserved of the
 # quota, and how much new media was left out since the store was last not full. Changed only under media_lock, so
 # overlapping downloads cannot each see the same room.
-media_usage: dict[str, Any] = {"bytes": None, "at": 0.0, "reserved": 0, "left_out": 0, "ticket": 0, "refused_at": 0}
+media_usage: dict[str, Any] = {
+    "bytes": None, "at": 0.0, "reserved": 0, "left_out": 0, "ticket": 0, "refused_at": 0,
+    # What was kept and reserved when the last download was refused; fewer bytes kept than this means room was made.
+    "refused_with": None,
+}
 
 
 def media_refused(folder: Path, quota: int, attachment: dict[str, Any]) -> None:
     """New media left out for want of room: the store reads full until a download that started after this one lands."""
     media_usage["ticket"] = int(media_usage["ticket"]) + 1
     media_usage["refused_at"] = media_usage["ticket"]
+    media_usage["refused_with"] = int(media_usage["bytes"] or 0) + int(media_usage["reserved"])
     media_usage["left_out"] = int(media_usage["left_out"]) + 1
     attachment["mediaLeftOut"] = "storage_full"
     write_media_state(folder, quota, True)
@@ -1598,7 +1599,31 @@ def media_stored_bytes(folder: Path, fresh: bool = False) -> int:
     if fresh or media_usage["bytes"] is None or now - float(media_usage["at"]) > MEDIA_USAGE_TTL_SECONDS:
         media_usage["bytes"] = measure_media_bytes(folder)
         media_usage["at"] = now
+        refused_with = media_usage["refused_with"]
+        if refused_with is not None and int(media_usage["bytes"]) < int(refused_with):
+            # Room was made since the last refusal (files removed): the store is not full on that refusal's account.
+            media_cleared(folder, media_quota_bytes())
     return int(media_usage["bytes"])
+
+
+def media_start(folder: Path | None) -> None:
+    """At gateway start: sweep a stopped run's temporaries, measure what is kept, and say what is true now."""
+    # Downloads a stopped gateway left half written: no locator names them, so only this sweep removes them.
+    sweep_media_temporaries(folder)
+    if not folder:
+        return
+    # What is kept, measured from disk once at start; counted on from here and measured again every few minutes.
+    media_stored_bytes(folder, fresh=True)
+    # A new start may have a new quota: the state says what is true now, with no refusal carried over.
+    if media_quota_bytes() > 0 and (folder.parent / MEDIA_STATE_NAME).exists():
+        media_cleared(folder, media_quota_bytes())
+
+
+def media_cleared(folder: Path, quota: int) -> None:
+    """The store is not full: the count of media left out starts again at the next refusal."""
+    media_usage["left_out"] = 0
+    media_usage["refused_with"] = None
+    write_media_state(folder, quota, int(media_usage["bytes"] or 0) >= quota > 0)
 
 
 def write_media_state(folder: Path, quota: int, storage_full: bool) -> None:
@@ -1611,6 +1636,7 @@ def write_media_state(folder: Path, quota: int, storage_full: bool) -> None:
             "quota_bytes": quota,
             "storage_full": storage_full,
             "left_out_items": int(media_usage["left_out"]) if storage_full else 0,
+            **({"refused_with_bytes": int(media_usage["refused_with"])} if storage_full and media_usage["refused_with"] is not None else {}),
             "updated_at": gateway_now_iso(),
         })
     except Exception:
@@ -1732,8 +1758,7 @@ async def capture_message_media(message: Any, normalized: dict[str, Any]) -> Non
                 # Room again only if this download started after the last one refused: one that started before it
                 # says nothing about whether the refused would fit now.
                 if ticket > int(media_usage["refused_at"]):
-                    media_usage["left_out"] = 0
-                    write_media_state(folder, quota, False)
+                    media_cleared(folder, quota)
                 else:
                     write_media_state(folder, quota, True)
         attachment["mediaFile"] = relative

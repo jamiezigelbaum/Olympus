@@ -73764,6 +73764,46 @@ function sweepTelegramMediaTemporaries(spoolDir) {
   }
   return removed;
 }
+function telegramKeptMediaBytes(spoolDir) {
+  const root = join59(spoolDir, "media");
+  let total = 0;
+  let chats;
+  try {
+    chats = readdirSync6(root);
+  } catch {
+    return 0;
+  }
+  for (const chat of chats) {
+    const folder = join59(root, chat);
+    let names;
+    try {
+      if (!lstatSync26(folder).isDirectory())
+        continue;
+      names = readdirSync6(folder);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (name.startsWith(".") && name.includes(TEMPORARY_MARK))
+        continue;
+      try {
+        const stat2 = lstatSync26(join59(folder, name));
+        if (stat2.isFile())
+          total += stat2.size;
+      } catch {}
+    }
+  }
+  return total;
+}
+function telegramMediaStateNow(spoolDir) {
+  const state = readTelegramMediaState(spoolDir);
+  if (!state || state.quotaBytes <= 0)
+    return state;
+  const kept = telegramKeptMediaBytes(spoolDir);
+  const refusalStands = state.storageFull && kept >= (state.refusedWithBytes ?? state.storedBytes);
+  const storageFull = kept >= state.quotaBytes || refusalStands;
+  return { storedBytes: kept, quotaBytes: state.quotaBytes, storageFull, leftOutItems: refusalStands ? state.leftOutItems : 0 };
+}
 function readTelegramMediaState(spoolDir) {
   try {
     const path = join59(spoolDir, MEDIA_STATE_FILE);
@@ -73775,7 +73815,13 @@ function readTelegramMediaState(spoolDir) {
       return;
     const count = (field) => typeof field === "number" && Number.isSafeInteger(field) && field >= 0 ? field : 0;
     const storageFull = value.storage_full === true;
-    return { storedBytes: count(value.stored_bytes), quotaBytes: count(value.quota_bytes), storageFull, leftOutItems: storageFull ? count(value.left_out_items) : 0 };
+    return {
+      storedBytes: count(value.stored_bytes),
+      quotaBytes: count(value.quota_bytes),
+      storageFull,
+      leftOutItems: storageFull ? count(value.left_out_items) : 0,
+      ...storageFull && typeof value.refused_with_bytes === "number" ? { refusedWithBytes: count(value.refused_with_bytes) } : {}
+    };
   } catch {
     return;
   }
@@ -76157,7 +76203,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
       recordBoundary(tierSet, spoolDir, "secure_local", sanitizeTelegramCaptureCursor(options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor));
       if (!redactionFailed)
         recordBoundary(tierSet, spoolDir, "cleared", sanitizeTelegramCaptureCursor(tierSet.ledger.readMeta(TELEGRAM_SPOOL_CLEARED_KEY)));
-      return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed, cursorResets, protection.moved, telegramCaptureLiveness(readTelegramCaptureSpoolNewestCapturedAt(spoolDir), readTelegramCaptureHeartbeat(spoolDir), now().getTime(), staleThresholdSeconds), readTelegramMediaState(spoolDir));
+      return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed, cursorResets, protection.moved, telegramCaptureLiveness(readTelegramCaptureSpoolNewestCapturedAt(spoolDir), readTelegramCaptureHeartbeat(spoolDir), now().getTime(), staleThresholdSeconds), telegramMediaStateNow(spoolDir));
     },
     lastStoreRunCompletedAt() {
       const internal = options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.completedAt;
