@@ -464,21 +464,24 @@ Live WhatsApp capture, with no change to identities or stores
   what a scan reached, fixed before the scan starts (the lines the file held
   then, or the cursor's), never recounted after: a line appended while
   clearing runs is owed to the next pull. A listing reset (a file replaced,
-  or a cursor recovered) is a durable obligation of every reader with its
-  own cursor (the product pull, sender repair; `spool-obligations.ts`, not
-  the disposable index), written before the index forgets the file, carried
-  as `~r<generation>.<epoch>` on the cursors a reader is handed after it,
-  and settled only by that reader's own cursor coming back from after it:
-  one reader never settles another's, and a pass that fails before its
-  cursor commits still owes the read again. The generation is a random id
-  per build of the index, so a cursor of an earlier build settles nothing
-  and its file is read again from its start. Every other durable write that comes before the one
+  cut or rewritten under a cursor, or the disposable index rebuilt, since it
+  then no longer knows what the files held) adds one to a single durable
+  counter beside the spool (`spool-resets.ts`), written before the index
+  forgets anything. Every cursor carries the count as `~r<count>`; a cursor
+  with another count, or none, reads the whole spool again from its start.
+  That is safe because intake is idempotent by identity and version, and a
+  reset is rare enough for a full replay to be cheap. Nothing is owed or
+  settled per reader: a reader is caught up when its cursor carries the
+  current count, so one reader catching up never affects another, and a pass
+  that fails before its cursor commits reads the spool again. A counter that
+  cannot be opened fails the listing before anything is forgotten. Every
+  other durable write that comes before the one
   that depends on it is safe to repeat: a Secrets rewrite before its cleared
   record (redone, the same rewrite), the index's rows before the tier set's
   cursor (read again from the old cursor, the rows already there), the match
   ledger's ids and aliases before the store (the same ids again), and the
   index's refresh after clearing (a missed refresh reads as a replacement,
-  owed and read again).
+  counted and read again).
 - **One builder, the intake rule.** The spool is the WhatsApp connector's
   live input: its records become items through the connector's one record
   builder under the shared intake rule (`core/source-inputs.ts`), versions

@@ -28,6 +28,7 @@ export const CAPTURE_COUNT_KEYS = {
   thresholdSeconds: 'capture_stale_threshold_seconds',
   ageSeconds: 'capture_age_seconds',
   quiet: 'capture_quiet',
+  stopped: 'capture_stopped',
 } as const;
 
 // A type alias, not an interface: scheduler counts are a Record<string, number>,
@@ -38,10 +39,10 @@ export type CaptureFreshnessCounts = {
   capture_unavailable: number;
   capture_stale_threshold_seconds: number;
   capture_age_seconds?: number;
-  /** Present only for a feed whose helper reports that it is running (see captureLiveness). */
-  capture_quiet?: number;
-  /** Present with `capture_quiet`: 1 when the helper says capture has stopped (disconnected past the grace). */
-  capture_stopped?: number;
+  /** 1 when the helper says it is capturing while nothing arrived within the threshold (see captureLiveness); 0 otherwise, and always 0 for a feed with no helper heartbeat. */
+  capture_quiet: 0 | 1;
+  /** 1 when the helper says capture has stopped (disconnected past the grace); 0 otherwise. */
+  capture_stopped: 0 | 1;
 };
 
 /**
@@ -130,7 +131,9 @@ export function captureFreshnessCounts(capture: CaptureFreshness | CaptureLivene
     capture_unavailable: capture.status === 'unavailable' ? 1 : 0,
     capture_stale_threshold_seconds: capture.threshold_seconds,
     ...(capture.age_seconds !== undefined ? { capture_age_seconds: capture.age_seconds } : {}),
-    ...('quiet' in capture ? { capture_quiet: capture.quiet ? 1 : 0, capture_stopped: capture.stopped ? 1 : 0 } : {}),
+    // Always stated: a missing value must never be read as "not quiet" by accident.
+    capture_quiet: 'quiet' in capture && capture.quiet ? 1 : 0,
+    capture_stopped: 'stopped' in capture && capture.stopped ? 1 : 0,
   };
 }
 

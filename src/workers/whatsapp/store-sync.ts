@@ -121,9 +121,9 @@ export interface WhatsAppConnectorStoreSyncReceipt {
     capture_stale_threshold_seconds: number;
     capture_age_seconds?: number;
     /** 1 when the bridge reports capture running and no message arrived within the threshold. */
-    capture_quiet?: number;
+    capture_quiet: 0 | 1;
     /** 1 when the bridge says it is disconnected (past a short grace): capture has stopped. */
-    capture_stopped?: number;
+    capture_stopped: 0 | 1;
     /**
      * Spool lines whose message was judged Secrets and that this pull
      * rewrote without their text (blanked ones included).
@@ -209,7 +209,7 @@ function spoolPositionOf(cursor: string): string | undefined {
 /** The byte offset a committed cursor stands at, when it carries one (not inside an over-long record). */
 function byteOffsetOf(cursor: string | undefined): number | undefined {
   if (cursor === undefined) return undefined;
-  const found = /@(\d+)(?:~r[0-9a-f]+\.\d+)?$/u.exec(spoolPositionOf(cursor) ?? '');
+  const found = /@(\d+)(?:~r[0-9a-f.]+)?$/u.exec(spoolPositionOf(cursor) ?? '');
   return found ? Number(found[1]) : undefined;
 }
 
@@ -308,7 +308,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   const mediaDir = options.mediaDir?.trim() || defaultWhatsAppMediaDir(env);
   // One connector per pull, so each receipt counts what that pull read.
   const connectorFor = (findings: WhatsAppSpoolPassFindings) => ({
-    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings, consumer: WHATSAPP_PRODUCT_CONNECTOR_ID }),
+    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings }),
     // The private drain retains WHATSAPP_LIVE_CONNECTOR_ID until it is retired
     // after observed qualification. A distinct product cursor prevents either
     // writer from advancing or regressing the other's traversal meanwhile.

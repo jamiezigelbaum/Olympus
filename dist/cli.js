@@ -53267,7 +53267,8 @@ function captureFreshnessCounts(capture) {
     capture_unavailable: capture.status === "unavailable" ? 1 : 0,
     capture_stale_threshold_seconds: capture.threshold_seconds,
     ...capture.age_seconds !== undefined ? { capture_age_seconds: capture.age_seconds } : {},
-    ..."quiet" in capture ? { capture_quiet: capture.quiet ? 1 : 0, capture_stopped: capture.stopped ? 1 : 0 } : {}
+    capture_quiet: "quiet" in capture && capture.quiet ? 1 : 0,
+    capture_stopped: "stopped" in capture && capture.stopped ? 1 : 0
   };
 }
 function captureFreshnessFromCounts(counts) {
@@ -53299,7 +53300,8 @@ var init_capture_freshness = __esm(() => {
     unavailable: "capture_unavailable",
     thresholdSeconds: "capture_stale_threshold_seconds",
     ageSeconds: "capture_age_seconds",
-    quiet: "capture_quiet"
+    quiet: "capture_quiet",
+    stopped: "capture_stopped"
   };
 });
 
@@ -99689,7 +99691,7 @@ class WhatsAppSpoolIndex {
       return;
     this.db.query("INSERT INTO meta (key, value) VALUES ('high_water', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(JSON.stringify(to));
   }
-  reconcile(spoolDir, owe) {
+  reconcile(spoolDir, reset) {
     const known = this.db.query("SELECT name, identity, indexed_to, boundary FROM files").all();
     const replaced = [];
     const gone = [];
@@ -99705,7 +99707,7 @@ class WhatsAppSpoolIndex {
     }
     replaced.sort();
     if (replaced.length > 0)
-      owe?.(replaced);
+      reset?.(replaced);
     this.db.transaction(() => {
       for (const name of [...gone, ...replaced])
         this.forgetFile(name);
@@ -99794,34 +99796,32 @@ var init_spool_index = __esm(() => {
   init_reaction_index();
 });
 
-// src/workers/whatsapp/spool-obligations.ts
+// src/workers/whatsapp/spool-resets.ts
 import { Database as Database20 } from "bun:sqlite";
-import { chmodSync as chmodSync28, existsSync as existsSync71 } from "node:fs";
+import { chmodSync as chmodSync28 } from "node:fs";
 import { join as join85 } from "node:path";
 
-class WhatsAppSpoolObligations {
+class WhatsAppSpoolResets {
   db;
   constructor(db) {
     this.db = db;
   }
   static open(spoolDir) {
-    if (!existsSync71(spoolDir))
-      return;
-    const path = join85(spoolDir, WHATSAPP_SPOOL_OBLIGATIONS_FILE);
+    const path = join85(spoolDir, WHATSAPP_SPOOL_RESET_FILE);
+    let db;
     try {
-      const db = new Database20(path, { create: true });
+      db = new Database20(path, { create: true });
       chmodSync28(path, 384);
       db.exec(`
         PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;
-        CREATE TABLE IF NOT EXISTS consumers (name TEXT PRIMARY KEY) WITHOUT ROWID;
-        CREATE TABLE IF NOT EXISTS obligations (
-          consumer TEXT PRIMARY KEY, file TEXT NOT NULL, generation TEXT NOT NULL, epoch INTEGER NOT NULL
-        ) WITHOUT ROWID;
-        CREATE TABLE IF NOT EXISTS epochs (generation TEXT PRIMARY KEY, last INTEGER NOT NULL) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
       `);
-      return new WhatsAppSpoolObligations(db);
-    } catch {
-      return;
+      return new WhatsAppSpoolResets(db);
+    } catch (error) {
+      try {
+        db?.close();
+      } catch {}
+      throw new Error(`The WhatsApp spool's reset counter cannot be opened: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   close() {
@@ -99829,43 +99829,39 @@ class WhatsAppSpoolObligations {
       this.db.close();
     } catch {}
   }
-  register(consumer) {
-    this.db.query("INSERT OR IGNORE INTO consumers (name) VALUES (?)").run(consumer);
+  current() {
+    return Number(this.read("resets") ?? 0);
   }
-  oweEveryone(file, generation) {
+  bump() {
     return this.db.transaction(() => {
-      const row = this.db.query("SELECT last FROM epochs WHERE generation = ?").get(generation);
-      const epoch = (row?.last ?? 0) + 1;
-      this.db.query("INSERT INTO epochs (generation, last) VALUES (?, ?) ON CONFLICT (generation) DO UPDATE SET last = excluded.last").run(generation, epoch);
-      const consumers = this.db.query("SELECT name FROM consumers").all();
-      for (const { name } of consumers) {
-        const owed = this.owed(name);
-        const earliest = owed !== undefined && owed.file < file ? owed.file : file;
-        this.db.query(`
-          INSERT INTO obligations (consumer, file, generation, epoch) VALUES (?, ?, ?, ?)
-          ON CONFLICT (consumer) DO UPDATE SET file = excluded.file, generation = excluded.generation, epoch = excluded.epoch
-        `).run(name, earliest, generation, epoch);
-      }
-      return epoch;
+      const next = this.current() + 1;
+      this.write("resets", String(next));
+      return next;
     })();
   }
-  owed(consumer) {
-    const row = this.db.query("SELECT file, generation, epoch FROM obligations WHERE consumer = ?").get(consumer);
-    return row ?? undefined;
+  noteIndexBuild(build) {
+    return this.db.transaction(() => {
+      const seen = this.read("index_build");
+      let count = this.current();
+      if (seen !== build) {
+        if (seen !== undefined)
+          count += 1;
+        this.write("resets", String(count));
+        this.write("index_build", build);
+      }
+      return count;
+    })();
   }
-  settle(consumer, generation, epoch) {
-    const owed = this.owed(consumer);
-    if (owed !== undefined && owed.generation === generation && epoch >= owed.epoch) {
-      this.db.query("DELETE FROM obligations WHERE consumer = ?").run(consumer);
-    }
+  read(key2) {
+    const row = this.db.query("SELECT value FROM meta WHERE key = ?").get(key2);
+    return row?.value;
   }
-  currentEpoch(generation) {
-    const row = this.db.query("SELECT last FROM epochs WHERE generation = ?").get(generation);
-    return row?.last ?? 0;
+  write(key2, value2) {
+    this.db.query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key2, value2);
   }
 }
-var WHATSAPP_SPOOL_OBLIGATIONS_FILE = "spool-obligations.sqlite";
-var init_spool_obligations = () => {};
+var WHATSAPP_SPOOL_RESET_FILE = "spool-reset.sqlite";
+var init_spool_resets = () => {};
 
 // src/workers/whatsapp/spool-reader.ts
 import { closeSync as closeSync22, openSync as openSync21, readFileSync as readFileSync57, readSync as readSync7, statSync as statSync31 } from "node:fs";
@@ -100134,7 +100130,7 @@ var init_spool_reader = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-import { existsSync as existsSync72, readdirSync as readdirSync18, realpathSync as realpathSync17, rmSync as rmSync20, statSync as statSync32 } from "node:fs";
+import { existsSync as existsSync71, readdirSync as readdirSync18, realpathSync as realpathSync17, rmSync as rmSync20, statSync as statSync32 } from "node:fs";
 import { isAbsolute as isAbsolute27, join as join87, relative as relative10 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
   return {
@@ -100153,7 +100149,7 @@ function createWhatsAppLiveSourceConnector(options) {
   const passByteBudget = normalizePositiveInteger2(options.passByteBudget, DEFAULT_PASS_BYTE_BUDGET, Number.MAX_SAFE_INTEGER);
   const maxRecordBytes = normalizePositiveInteger2(options.maxRecordBytes, WHATSAPP_SPOOL_MAX_RECORD_BYTES, Number.MAX_SAFE_INTEGER);
   const authenticate2 = async () => {
-    if (!existsSync72(spoolDir) || !statSync32(spoolDir).isDirectory()) {
+    if (!existsSync71(spoolDir) || !statSync32(spoolDir).isDirectory()) {
       throw new Error(`WhatsApp live spool directory ${spoolDir} does not exist. ` + "Start the olympus-whatsapp-bridge daemon (tools/whatsapp-bridge) first.");
     }
   };
@@ -100199,8 +100195,7 @@ function createWhatsAppLiveSourceConnector(options) {
       ...listOptions.cursor !== undefined ? { cursor: listOptions.cursor } : {},
       passByteBudget,
       maxRecordBytes,
-      findings,
-      consumer: options.consumer ?? CONNECTOR_ID2
+      findings
     })
   };
   const connector = inputConnector(builder, input);
@@ -100270,44 +100265,39 @@ function readWhatsAppLiveCaptureState(spoolDir) {
 }
 async function* liveRecords(spoolDir, options) {
   let position = positionFromCursor(options.cursor);
-  const index = WhatsAppSpoolIndex.open(spoolDir);
-  const obligations = WhatsAppSpoolObligations.open(spoolDir);
+  if (!existsSync71(spoolDir))
+    return;
+  const resets = WhatsAppSpoolResets.open(spoolDir);
+  let index;
+  try {
+    index = WhatsAppSpoolIndex.open(spoolDir);
+  } catch (error) {
+    resets.close();
+    throw error;
+  }
   const pass = {
     budget: { bytesLeft: options.passByteBudget },
     maxRecordBytes: options.maxRecordBytes,
     findings: options.findings,
     index,
-    consumer: options.consumer,
-    obligations
+    resets,
+    reset: resets.current()
   };
   try {
-    obligations?.register(options.consumer);
-    const generation = index?.generation();
-    if (index && generation !== undefined) {
-      index.reconcile(spoolDir, (replaced) => {
-        obligations?.oweEveryone(replaced[0], generation);
+    if (index) {
+      pass.reset = resets.noteIndexBuild(index.generation());
+      index.reconcile(spoolDir, () => {
+        pass.reset = resets.bump();
       });
-      pass.generation = generation;
-      if (position !== undefined && position.generation !== undefined && position.generation !== generation) {
-        pass.findings.cursorsRecovered += 1;
-        position = { file: position.file, line: 0, offset: 0 };
-      } else {
-        const owed = obligations?.owed(options.consumer);
-        if (owed !== undefined) {
-          if (position !== undefined && position.generation === owed.generation && (position.epoch ?? -1) >= owed.epoch) {
-            obligations.settle(options.consumer, owed.generation, position.epoch);
-          } else if (position !== undefined && owed.file <= position.file) {
-            pass.findings.cursorsRecovered += 1;
-            position = { file: owed.file, line: 0, offset: 0 };
-          }
-        }
-      }
-      pass.epoch = obligations?.currentEpoch(generation) ?? 0;
+    }
+    if (position !== undefined && position.reset !== pass.reset) {
+      pass.findings.cursorsRecovered += 1;
+      position = undefined;
     }
     position = resolveStart(spoolDir, position, pass);
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
       options.findings.passBudgetReached += 1;
-      yield { records: [], ...position ? { nextCursor: cursorFromPosition(position, pass.generation, pass.epoch) } : {}, done: false };
+      yield { records: [], ...position ? { nextCursor: cursorFromPosition(position, pass.reset) } : {}, done: false };
       return;
     }
     for (;; ) {
@@ -100315,7 +100305,7 @@ async function* liveRecords(spoolDir, options) {
       position = page2.position;
       yield {
         records: pageRecords(spoolDir, page2, pass),
-        ...position === undefined ? {} : { nextCursor: cursorFromPosition(position, pass.generation, pass.epoch) },
+        ...position === undefined ? {} : { nextCursor: cursorFromPosition(position, pass.reset) },
         done: page2.exhausted
       };
       if (page2.exhausted)
@@ -100327,7 +100317,7 @@ async function* liveRecords(spoolDir, options) {
     }
   } finally {
     index?.close();
-    obligations?.close();
+    resets.close();
   }
 }
 function resolveStart(spoolDir, start, pass) {
@@ -100341,13 +100331,9 @@ function resolveStart(spoolDir, start, pass) {
   }
   const recovered = () => {
     pass.findings.cursorsRecovered += 1;
-    if (pass.index && pass.generation !== undefined) {
-      const epoch = pass.obligations?.oweEveryone(start.file, pass.generation);
-      if (epoch !== undefined)
-        pass.epoch = epoch;
-    }
+    pass.reset = pass.resets.bump();
     pass.index?.forgetFile(start.file);
-    return { file: start.file, line: 0, offset: 0 };
+    return;
   };
   if (start.offset === undefined) {
     const offset = offsetAfterLines(path, start.line);
@@ -100623,11 +100609,10 @@ function parseSpoolLine(line2) {
     ...secretRedacted ? { secretRedacted } : {}
   };
 }
-function cursorFromPosition(position, generation = position.generation, epoch = position.epoch) {
+function cursorFromPosition(position, reset = position.reset) {
   if (position.offset === undefined)
     return `${position.file}:${position.line}`;
-  const replay = generation !== undefined && epoch !== undefined ? `~r${generation}.${epoch}` : "";
-  return `${position.file}:${position.line}@${position.offset}${position.skipping ? "s" : ""}${replay}`;
+  return `${position.file}:${position.line}@${position.offset}${position.skipping ? "s" : ""}${reset !== undefined ? `~r${reset}` : ""}`;
 }
 function positionFromCursor(cursor) {
   const text2 = cursor?.trim();
@@ -100640,7 +100625,7 @@ function positionFromCursor(cursor) {
       line: Number(found[2]),
       offset: Number(found[3]),
       ...found[4] === "s" ? { skipping: true } : {},
-      ...found[5] !== undefined && found[6] !== undefined ? { generation: found[5], epoch: Number(found[6]) } : {}
+      ...found[5] !== undefined && /^\d+$/u.test(found[5]) ? { reset: Number(found[5]) } : {}
     };
   }
   const legacy = LEGACY_CURSOR.exec(text2);
@@ -100916,12 +100901,12 @@ var init_live_connector = __esm(() => {
   init_capture_spool_secrets();
   init_reaction_index();
   init_spool_index();
-  init_spool_obligations();
+  init_spool_resets();
   init_spool_reader();
   CONNECTOR_ID2 = WHATSAPP_LIVE_CONNECTOR_ID;
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
   TARGET_READ_CHUNK_BYTES = 4 * 1024;
-  CURSOR2 = /^(.+):(\d+)@(\d+)(s?)(?:~r([0-9a-f]+)\.(\d+))?$/u;
+  CURSOR2 = /^(.+):(\d+)@(\d+)(s?)(?:~r([0-9a-f.]+))?$/u;
   LEGACY_CURSOR = /^(.+):(\d+)$/u;
 });
 
@@ -100949,7 +100934,7 @@ function spoolPositionOf(cursor) {
 function byteOffsetOf(cursor) {
   if (cursor === undefined)
     return;
-  const found = /@(\d+)(?:~r[0-9a-f]+\.\d+)?$/u.exec(spoolPositionOf(cursor) ?? "");
+  const found = /@(\d+)(?:~r[0-9a-f.]+)?$/u.exec(spoolPositionOf(cursor) ?? "");
   return found ? Number(found[1]) : undefined;
 }
 function lineCursorOf(cursor) {
@@ -101002,7 +100987,7 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
   const account = options.account?.trim() || WHATSAPP_PERSONAL_ACCOUNT_SCOPE;
   const mediaDir = options.mediaDir?.trim() || defaultWhatsAppMediaDir(env);
   const connectorFor = (findings) => ({
-    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings, consumer: WHATSAPP_PRODUCT_CONNECTOR_ID }),
+    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings }),
     id: WHATSAPP_PRODUCT_CONNECTOR_ID
   });
   const staleThresholdSeconds = whatsappCaptureStaleThresholdSeconds(options.spoolStaleThresholdSeconds, env);
@@ -101369,7 +101354,7 @@ var init_lane = __esm(() => {
 });
 
 // src/workers/classification/tier-migration-lanes.ts
-import { existsSync as existsSync73 } from "node:fs";
+import { existsSync as existsSync72 } from "node:fs";
 function installedTierMigrationLaneSpecs(env = process.env) {
   return [
     {
@@ -101500,7 +101485,7 @@ function openTierMigrationLanes(specs, options) {
   try {
     for (const spec of specs) {
       const legs = Object.entries(spec.legs);
-      if (!legs.some(([, leg]) => leg.dbPath !== ":memory:" && existsSync73(leg.dbPath)))
+      if (!legs.some(([, leg]) => leg.dbPath !== ":memory:" && existsSync72(leg.dbPath)))
         continue;
       const secure = spec.legs.secure_local;
       const account = { sourceId: spec.sourceId };
@@ -101917,7 +101902,7 @@ var init_tier_migration_cli = __esm(() => {
 
 // src/workers/classification/tier-cli.ts
 import { Database as Database21 } from "bun:sqlite";
-import { existsSync as existsSync74 } from "node:fs";
+import { existsSync as existsSync73 } from "node:fs";
 function tierCommandOpensStores(args) {
   return args[0] === "set" || args[0] === "explain" || args[0] === "migrate";
 }
@@ -101948,7 +101933,7 @@ async function runTierCommand(args, context2 = {}) {
 }
 function knownStorePaths(context2) {
   const paths = context2.storePaths ?? lifecycleStorePaths(context2);
-  return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync74(path));
+  return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync73(path));
 }
 function matchStore2(dbPath, needle) {
   const db = new Database21(dbPath, { readonly: true });
@@ -102017,12 +102002,12 @@ function locateTierItem(locator, context2 = {}) {
   const ledgerPaths = new Set;
   for (const dbPath of stores) {
     const path = tierLedgerPathForStore(dbPath);
-    if (existsSync74(path))
+    if (existsSync73(path))
       ledgerPaths.add(path);
   }
   const boundIds = new Map;
   for (const match of matches2) {
-    if (!match.bound || !existsSync74(match.bound.path))
+    if (!match.bound || !existsSync73(match.bound.path))
       continue;
     ledgerPaths.add(match.bound.path);
     boundIds.set(match.bound.path, match.bound.id);
@@ -102152,7 +102137,7 @@ function runTierExplain(args, context2 = {}) {
     }), item.boundLedgerId);
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn = [];
-    if (existsSync74(snifferPath)) {
+    if (existsSync73(snifferPath)) {
       const sniffer = new TierSnifferStore({ dbPath: snifferPath });
       try {
         waitingOn = ["metadata", "content"].filter((pass) => sniffer.questionFor(item.identity, pass) !== undefined);
@@ -102211,7 +102196,7 @@ function runTierRules(args, context2 = {}) {
   if (command === "list") {
     const path = resolveTierRulesPath({ env });
     const mailScopeRules = mailScopeTierRules(env);
-    if (!existsSync74(path)) {
+    if (!existsSync73(path)) {
       return { path, rules: [], mailScopeRules, note: "No tier rules file yet; add one with olympus tier rules add." };
     }
     const validation = validateTierRulesFile({ env });
@@ -102412,7 +102397,7 @@ var init_tier_cli = __esm(() => {
 });
 
 // src/core/engine-brief.ts
-import { existsSync as existsSync75, readFileSync as readFileSync58 } from "node:fs";
+import { existsSync as existsSync74, readFileSync as readFileSync58 } from "node:fs";
 import { homedir as homedir35 } from "node:os";
 function engineBriefFromViewModel(view3) {
   const items = Array.isArray(view3.needsYou) ? view3.needsYou : [];
@@ -102523,7 +102508,7 @@ async function readEngineBrief(deps) {
 }
 function startingGraceOver(path, agentPid, now) {
   try {
-    if (!existsSync75(path))
+    if (!existsSync74(path))
       return false;
     const status = JSON.parse(readFileSync58(path, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || typeof status.started_at !== "string")
@@ -121696,7 +121681,7 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync29, existsSync as existsSync78, lstatSync as lstatSync38, mkdirSync as mkdirSync50, readFileSync as readFileSync63, renameSync as renameSync17, writeFileSync as writeFileSync19 } from "node:fs";
+import { chmodSync as chmodSync29, existsSync as existsSync77, lstatSync as lstatSync38, mkdirSync as mkdirSync50, readFileSync as readFileSync63, renameSync as renameSync17, writeFileSync as writeFileSync19 } from "node:fs";
 import { join as join97 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync50(stateDir, { recursive: true, mode: 448 });
@@ -121718,7 +121703,7 @@ function writePrivateFile(path, contents) {
 function loadOrCreateIdentity(stateDir) {
   const path = join97(ensureStateDir(stateDir), "install-key.pem");
   let privateKey;
-  if (existsSync78(path)) {
+  if (existsSync77(path)) {
     privateKey = createPrivateKey(readFileSync63(path));
   } else {
     privateKey = generateKeyPairSync("ed25519").privateKey;
@@ -122559,7 +122544,7 @@ import { createHash as createHash67, randomUUID as randomUUID26 } from "node:cry
 import {
   closeSync as closeSync23,
   createReadStream as createReadStream3,
-  existsSync as existsSync79,
+  existsSync as existsSync78,
   mkdirSync as mkdirSync51,
   openSync as openSync22,
   readFileSync as readFileSync64,
@@ -122636,7 +122621,7 @@ async function installPinnedModel(options) {
   const platform2 = options.platform ?? currentPlatform2();
   const reporter = new ProgressReporter2(paths.statusPath, bundle.modelId, noun, options.now, options.onProgress);
   const files = bundle.files.map((file) => ({ file, path: join98(paths.modelDir, file.name) }));
-  const filesPresent = () => files.every(({ path }) => existsSync79(path));
+  const filesPresent = () => files.every(({ path }) => existsSync78(path));
   const log = options.log ?? ((line2) => console.log(line2));
   const timing = {
     downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS2,
@@ -122699,7 +122684,7 @@ async function installPinnedModel(options) {
       if (filesPresent() && runtimeInstalled2(paths.runtimeDir, archive))
         return;
       const fetchImpl = options.fetchImpl ?? fetch;
-      const missing = files.filter(({ path }) => !existsSync79(path));
+      const missing = files.filter(({ path }) => !existsSync78(path));
       const needRuntime = !runtimeInstalled2(paths.runtimeDir, archive);
       const missingBytes = missing.reduce((total, { file, path }) => total + Math.max(0, file.bytes - fileSize(`${path}.partial`)), 0);
       assertSpaceFor(paths.root, space, missingBytes + (needRuntime ? archive.bytes * RUNTIME_UNPACK_FACTOR : 0));
@@ -122816,7 +122801,7 @@ function readRuntimeMarker(runtimeDir) {
 }
 function runtimeInstalled2(runtimeDir, archive) {
   const marker = readRuntimeMarker(runtimeDir);
-  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync79(join98(runtimeDir, marker.serverPath));
+  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync78(join98(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
   const staging = `${runtimeDir}.staging-${randomUUID26()}`;
@@ -130453,7 +130438,7 @@ var init_audio_wav = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
-import { existsSync as existsSync80 } from "node:fs";
+import { existsSync as existsSync79 } from "node:fs";
 import { mkdtemp as mkdtemp7, readFile as readFile10, rm as rm9 } from "node:fs/promises";
 import { tmpdir as tmpdir12, totalmem as totalmem3 } from "node:os";
 import { join as join106 } from "node:path";
@@ -130521,7 +130506,7 @@ function createBuiltInTranscriber(options = {}) {
   const filesOnDisk = options.filesOnDisk ?? (() => {
     try {
       const layout = builtInTranscriptionLayout(model, env, options.installOptions?.runtime, platform2);
-      return model.files.every((file) => existsSync80(join106(layout.modelDir, file.name)));
+      return model.files.every((file) => existsSync79(join106(layout.modelDir, file.name)));
     } catch {
       return false;
     }
@@ -133336,7 +133321,7 @@ var init_tiered_extraction = __esm(() => {
 });
 
 // src/workers/email-source/file-extraction-runtime.ts
-import { existsSync as existsSync81 } from "node:fs";
+import { existsSync as existsSync80 } from "node:fs";
 function createFileExtractionRuntime(options) {
   const env = options.env ?? process.env;
   if (options.enabled !== true && (env[FILE_EXTRACTION_ENABLED_ENV] ?? "").trim().toLowerCase() !== "true")
@@ -133498,7 +133483,7 @@ function createFileExtractionRuntime(options) {
   const workerId = env[FILE_EXTRACTION_WORKER_ID_ENV]?.trim();
   const reclassificationRules = defaultTerminalReclassificationRules(registry2);
   const sharedSpool = extractionSpoolRoot(env);
-  if (existsSync81(sharedSpool))
+  if (existsSync80(sharedSpool))
     prepareSpool(sharedSpool);
   const runner = createFileExtractionRunner({
     jobs,
@@ -134227,7 +134212,7 @@ var init_analyst_openai = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync82,
+  existsSync as existsSync81,
   mkdirSync as mkdirSync54,
   readFileSync as readFileSync68,
   renameSync as renameSync19,
@@ -134410,7 +134395,7 @@ function parseCatalogModels(payload2) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync82(path))
+  if (!existsSync81(path))
     return;
   let payload2;
   try {
@@ -147547,13 +147532,13 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync32, copyFileSync as copyFileSync2, existsSync as existsSync83, lstatSync as lstatSync41, mkdirSync as mkdirSync55, readFileSync as readFileSync71 } from "node:fs";
+import { chmodSync as chmodSync32, copyFileSync as copyFileSync2, existsSync as existsSync82, lstatSync as lstatSync41, mkdirSync as mkdirSync55, readFileSync as readFileSync71 } from "node:fs";
 import { dirname as dirname83 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync83(path)) {
+  if (!existsSync82(path)) {
     return {
       path,
       present: false,
@@ -147602,7 +147587,7 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync83(path)) {
+  if (existsSync82(path)) {
     const stat6 = lstatSync41(path);
     if (stat6.isSymbolicLink() || !stat6.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
@@ -152670,7 +152655,7 @@ var init_locations = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire7 } from "node:module";
-import { existsSync as existsSync84, readFileSync as readFileSync73 } from "node:fs";
+import { existsSync as existsSync83, readFileSync as readFileSync73 } from "node:fs";
 import { dirname as dirname84, join as join112 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
   const home2 = context2.home;
@@ -152757,7 +152742,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync84(snapshotPath))
+    if (!existsSync83(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -152887,7 +152872,7 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate = join112(dir, "node_modules");
-    if (!existsSync84(join112(candidate, "@parcel", "watcher")))
+    if (!existsSync83(join112(candidate, "@parcel", "watcher")))
       continue;
     try {
       const requireFrom = createRequire7(join112(dirname84(candidate), "package.json"));
@@ -155733,7 +155718,7 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync85, mkdirSync as mkdirSync56, opendirSync, readFileSync as readFileSync74 } from "node:fs";
+import { existsSync as existsSync84, mkdirSync as mkdirSync56, opendirSync, readFileSync as readFileSync74 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname85, join as join114 } from "node:path";
 function permissionHostKind(env) {
@@ -155937,7 +155922,7 @@ class MacPermissions {
     if (this.memory)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync85(this.memoryPath)) {
+    if (this.memoryPath && existsSync84(this.memoryPath)) {
       try {
         const parsed = JSON.parse(readFileSync74(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
@@ -165623,7 +165608,7 @@ var init_start = __esm(() => {
 });
 
 // src/workers/archive-import/runtime.ts
-import { existsSync as existsSync86 } from "node:fs";
+import { existsSync as existsSync85 } from "node:fs";
 function createArchiveImportRuntime(options = {}) {
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
@@ -165669,7 +165654,7 @@ function createArchiveImportRuntime(options = {}) {
     }
   };
   const hasData = (family) => {
-    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync86(path)))
+    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync85(path)))
       return true;
     try {
       return state.list().some((record5) => record5.family === family);
@@ -165686,7 +165671,7 @@ function createArchiveImportRuntime(options = {}) {
     existingLanes: () => families.filter(hasData).map((family) => lane(family)),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
-      return existsSync86(path) ? openWaitingPrivateQuestionStore(path) : undefined;
+      return existsSync85(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
     start: (path) => startArchiveImport({ state, path }),
     subscribeWork: (wake) => {
@@ -166038,7 +166023,7 @@ var init_agent = __esm(() => {
 });
 
 // src/workers/archive-import/removal.ts
-import { existsSync as existsSync87 } from "node:fs";
+import { existsSync as existsSync86 } from "node:fs";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
   return state.update(archiveId, (record5) => {
     if (record5.status === "removing" || record5.target)
@@ -166072,7 +166057,7 @@ function deleteWaitingAnswers(options, input) {
 }
 function deleteJudgeQuestions(lane, provider, accountScope) {
   const path = tierSnifferPathForLedger(lane.ledger.dbPath);
-  if (path !== ":memory:" && !existsSync87(path))
+  if (path !== ":memory:" && !existsSync86(path))
     return 0;
   const sniffer = openTierSniffer({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, { dbPath: path });
   try {
@@ -168033,7 +168018,7 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash86 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { existsSync as existsSync88, lstatSync as lstatSync43, readFileSync as readFileSync75, readdirSync as readdirSync22, realpathSync as realpathSync22 } from "node:fs";
+import { existsSync as existsSync87, lstatSync as lstatSync43, readFileSync as readFileSync75, readdirSync as readdirSync22, realpathSync as realpathSync22 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 
 class VolumeResolver {
@@ -168220,7 +168205,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync88(dir))
+    if (!existsSync87(dir))
       return result;
     for (const name of readdirSync22(dir)) {
       try {
@@ -168547,7 +168532,7 @@ var init_source_scope_browser = __esm(() => {
 
 // src/workers/local-files/mac-settings.ts
 import { spawn as spawn9 } from "node:child_process";
-import { existsSync as existsSync89 } from "node:fs";
+import { existsSync as existsSync88 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 import { join as join116 } from "node:path";
 function helperAppPathForHome(home2 = homedir46()) {
@@ -168558,7 +168543,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn9(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync89)(helper))
+  if ((deps.exists ?? existsSync88)(helper))
     run2("/usr/bin/open", ["-R", helper]);
   run2("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -171257,7 +171242,7 @@ var init_sniffer_resolver = __esm(() => {
 
 // src/workers/classification/sniffer-service.ts
 import { Database as Database23 } from "bun:sqlite";
-import { existsSync as existsSync90 } from "node:fs";
+import { existsSync as existsSync89 } from "node:fs";
 
 class TierSnifferService {
   options;
@@ -171342,7 +171327,7 @@ class TierSnifferService {
             continue;
         }
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync90(path);
+        const hasQueue = existsSync89(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -171544,14 +171529,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync90(bound)) {
+        if (bound && bound !== ":memory:" && existsSync89(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync90(own3))
+      if (existsSync89(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -186027,7 +186012,7 @@ __export(exports_remote_mcp, {
   REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
   DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
 });
-import { existsSync as existsSync91 } from "node:fs";
+import { existsSync as existsSync90 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
 }
@@ -186192,7 +186177,7 @@ function lazyRemoteConnectionStore(resolvePath4, open6) {
     if (store)
       return store;
     const dbPath = resolvePath4();
-    if (!options.create && !existsSync91(dbPath))
+    if (!options.create && !existsSync90(dbPath))
       return;
     store = open6(dbPath);
     return store;
@@ -191102,7 +191087,7 @@ __export(exports_server2, {
   accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
 });
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync92 } from "node:fs";
+import { existsSync as existsSync91 } from "node:fs";
 import { dirname as dirname91, isAbsolute as isAbsolute36, join as join120 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
@@ -191535,7 +191520,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync92(store.dbPath))
+        if (!existsSync91(store.dbPath))
           continue;
         const handle = openConnectorStore(definition.account, {
           dbPath: store.dbPath,
@@ -196243,7 +196228,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes32 } from "node:crypto";
-import { existsSync as existsSync93, readFileSync as readFileSync77, openSync as openSync23, closeSync as closeSync24, writeSync as writeSync6 } from "node:fs";
+import { existsSync as existsSync92, readFileSync as readFileSync77, openSync as openSync23, closeSync as closeSync24, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve24 } from "node:path";
@@ -198134,7 +198119,7 @@ init_engine_host();
 init_engine_service();
 import { spawn as spawn6 } from "node:child_process";
 import { createInterface as createInterface2 } from "node:readline";
-import { existsSync as existsSync77, readFileSync as readFileSync61 } from "node:fs";
+import { existsSync as existsSync76, readFileSync as readFileSync61 } from "node:fs";
 import { homedir as homedir38 } from "node:os";
 import { dirname as dirname75, join as join95 } from "node:path";
 
@@ -198143,7 +198128,7 @@ init_engine_service();
 init_operation_error();
 init_package_root();
 import { spawnSync as spawnSync17 } from "node:child_process";
-import { existsSync as existsSync76, lstatSync as lstatSync37, mkdirSync as mkdirSync49, mkdtempSync as mkdtempSync4, renameSync as renameSync16, rmSync as rmSync22 } from "node:fs";
+import { existsSync as existsSync75, lstatSync as lstatSync37, mkdirSync as mkdirSync49, mkdtempSync as mkdtempSync4, renameSync as renameSync16, rmSync as rmSync22 } from "node:fs";
 import { homedir as homedir37 } from "node:os";
 import { join as join94, resolve as resolve17 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
@@ -198180,7 +198165,7 @@ function installEngineHelper(options = {}) {
     let candidate;
     if (options.from !== undefined) {
       candidate = resolve17(options.from);
-      if (!existsSync76(join94(candidate, "Contents", "Info.plist"))) {
+      if (!existsSync75(join94(candidate, "Contents", "Info.plist"))) {
         throw new OperationError("invalid_params", `${candidate} is not an app bundle.`);
       }
     } else {
@@ -198190,7 +198175,7 @@ function installEngineHelper(options = {}) {
       }
       const root = options.packageRoot ?? olympusPackageRoot();
       const script2 = join94(root, "scripts", "build-macos-helper.sh");
-      if (!existsSync76(script2) || !existsSync76(join94(root, "native", "macos-engine-host", "main.c"))) {
+      if (!existsSync75(script2) || !existsSync75(join94(root, "native", "macos-engine-host", "main.c"))) {
         throw new OperationError("config_error", "This install does not include the helper app source.", "Pass --from <signed app>, or build from an Olympus source checkout.");
       }
       const result = run(options.exec, script2, ["--out", staging], { ...process.env, ...env, [MACOS_SIGNING_IDENTITY_ENV]: identity2 });
@@ -198221,10 +198206,10 @@ function installEngineHelper(options = {}) {
       throw new OperationError("config_error", `The helper app is signed by team ${details.teamId ?? "none"}, not the expected team.`);
     }
     const executable = join94(candidate, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE);
-    if (!existsSync76(executable)) {
+    if (!existsSync75(executable)) {
       throw new OperationError("config_error", `The helper app has no ${ENGINE_HELPER_EXECUTABLE} program.`);
     }
-    const replaced = existsSync76(target);
+    const replaced = existsSync75(target);
     if (replaced && lstatSync37(target).isSymbolicLink()) {
       throw new OperationError("config_error", `${target} is a link; remove it and run this again.`);
     }
@@ -198336,7 +198321,7 @@ async function runEngineCommand(args, deps = {}) {
       ...options
     });
     const paths = engineServicePaths({ ...service, homeDir: deps.homeDir ?? homedir38() });
-    if (!existsSync77(paths.plistPath)) {
+    if (!existsSync76(paths.plistPath)) {
       return { ...helper, engine: "not_installed", next: "Run olympus engine install; the engine will start through the Olympus helper app." };
     }
     const current2 = installedProgram(paths.plistPath);
@@ -199917,7 +199902,7 @@ function parseXReconcileRecoveryArgs(args) {
 }
 function runXReconcileRecovery(options) {
   const stateDbPath = options.stateDbPath ?? resolvedRawPath("x.bookmarks", "x-reconcile.sqlite");
-  if (stateDbPath !== ":memory:" && !existsSync93(stateDbPath)) {
+  if (stateDbPath !== ":memory:" && !existsSync92(stateDbPath)) {
     if (!options.execute)
       return xBookmarksRecoveryStatusWithoutState();
     throw new Error("X reconciliation has no staged run to recover.");
