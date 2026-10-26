@@ -435,7 +435,21 @@ Live WhatsApp capture, with no change to identities or stores
   offset its receipt was not taken for: a crash before clearing records its
   new boundary leaves the old record, whose window is checked on the next
   pull. The listing's cursor carries no receipt and is never what decides
-  whether a Secret is cleared; clearing's own record does.
+  whether a Secret is cleared; clearing's own record does. A boundary is
+  what a scan reached, fixed before the scan starts (the lines the file held
+  then, or the cursor's), never recounted after: a line appended while
+  clearing runs is owed to the next pull. A listing reset (a file replaced,
+  or a cursor recovered) is a durable obligation, written in the same step
+  as the invalidation that causes it (`oweReplay`), carried as `~r<epoch>`
+  on every cursor the listing hands out after it, and cleared only when such
+  a cursor comes back, so a pass that fails before its cursor commits still
+  owes the read again. Every other durable write that comes before the one
+  that depends on it is safe to repeat: a Secrets rewrite before its cleared
+  record (redone, the same rewrite), the index's rows before the tier set's
+  cursor (read again from the old cursor, the rows already there), the match
+  ledger's ids and aliases before the store (the same ids again), and the
+  index's refresh after clearing (a missed refresh reads as a replacement,
+  owed and read again).
 - **One builder, the intake rule.** The spool is the WhatsApp connector's
   live input: its records become items through the connector's one record
   builder under the shared intake rule (`core/source-inputs.ts`), versions

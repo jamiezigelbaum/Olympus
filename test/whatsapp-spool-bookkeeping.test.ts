@@ -262,6 +262,61 @@ describe('review round 5', () => {
   });
 });
 
+describe('review round 6', () => {
+  test('a line appended while cleanup scans a file is owed to the next cleanup, never certified unread', async () => {
+    const target = lane();
+    const day1 = join(target.spoolDir, '2026-10-24.jsonl');
+    const day2 = join(target.spoolDir, '2026-10-25.jsonl');
+    const secret = (id: string) => line(id, { text: `prod key ${keyFor(77)}` });
+    writeFileSync(day1, line('a') + secret('s1'));
+    await target.sync.pull();
+    expect(readFileSync(day1, 'utf8')).not.toContain(keyFor(77));
+    writeFileSync(day2, line('b'));
+    // The bridge appends another copy of the Secret while the day's first cleanup is scanning it.
+    const getCurrent = target.ledger.getCurrent.bind(target.ledger);
+    let appended = false;
+    target.ledger.getCurrent = ((identity: Parameters<typeof getCurrent>[0]) => {
+      if (!appended) {
+        appended = true;
+        appendFileSync(day2, secret('s2'));
+      }
+      return getCurrent(identity);
+    }) as typeof target.ledger.getCurrent;
+    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:1' });
+    target.ledger.getCurrent = getCurrent;
+    expect(appended).toBe(true);
+    // Two later cleanups, the cursor past the appended line: it is cleared, not skipped as already certified.
+    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:2' });
+    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:2' });
+    expect(readFileSync(day2, 'utf8')).not.toContain(keyFor(77));
+  });
+
+  test('a listing reset survives a pass that fails before its cursor commits', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-replay-'));
+    roots.push(dir);
+    const day = join(dir, '2026-10-24.jsonl');
+    writeFileSync(day, line('a') + line('b'));
+    const first = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems());
+    const cursor = first.at(-1)!.nextCursor!;
+    // The same length, written again in place: [a, c].
+    writeFileSync(day, line('a') + line('c'));
+    // The replay fails after the invalidation committed (while recording the file).
+    const noteFile = WhatsAppSpoolIndex.prototype.noteFile;
+    WhatsAppSpoolIndex.prototype.noteFile = function failing() { throw new Error('crash during the replay'); };
+    try {
+      await expect(drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor }))).rejects.toThrow('crash during the replay');
+    } finally {
+      WhatsAppSpoolIndex.prototype.noteFile = noteFile;
+    }
+    // Retried from the old cursor (the failed pass committed none): c is read.
+    const retried = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor }));
+    expect(retried.flatMap((page) => page.items.map((item: RawItem) => item.identity.providerItemId))).toContain('c');
+    // Once a cursor handed out after the reset comes back, the obligation is done: nothing is read again.
+    const settled = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor: retried.at(-1)!.nextCursor! }));
+    expect(settled.flatMap((page) => [...page.items])).toEqual([]);
+  });
+});
+
 describe('a file keeps its identity across inode reuse', () => {
   test('a file rewritten in place (the same inode) with other lines of the same length is indexed again', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-inode-'));

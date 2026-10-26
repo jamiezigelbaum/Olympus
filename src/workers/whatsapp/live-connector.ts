@@ -221,6 +221,8 @@ interface SpoolPosition {
   offset?: number;
   /** The place is inside an over-long record whose rest is still to be skipped (it was counted). */
   skipping?: true;
+  /** The read again of a replaced file this cursor was handed out after (spool-index.ts, `replayObligation`). */
+  epoch?: number;
 }
 
 /**
@@ -487,6 +489,8 @@ interface SpoolPassState {
   maxRecordBytes: number;
   findings: WhatsAppSpoolPassFindings;
   index: WhatsAppSpoolIndex | undefined;
+  /** The replay epoch the cursors this listing hands out carry. */
+  epoch?: number;
 }
 
 /**
@@ -505,17 +509,28 @@ async function* liveRecords(
     // The index is trusted only for the files that are there, as they are.
     // A file that broke the spool contract (replaced, cut and written again) is read again from its start, with
     // everything after it: every boundary in it (the index's, the cursor's) is dropped.
-    const replaced = index ? index.reconcile(spoolDir) : [];
-    const earliest = replaced[0];
-    if (position !== undefined && earliest !== undefined && earliest <= position.file) {
-      pass.findings.cursorsRecovered += 1;
-      position = { file: earliest, line: 0, offset: 0 };
+    // The reset is a durable obligation, written with the invalidation (reconcile), so a pass that fails before
+    // its cursor commits owes it still: it is cleared only when a cursor handed out after the reset comes back.
+    if (index) index.reconcile(spoolDir);
+    const owed = index?.replayObligation();
+    let epoch = position?.epoch;
+    if (owed !== undefined) {
+      if (epoch !== undefined && epoch >= owed.epoch) {
+        index!.clearReplay(owed.epoch);
+      } else {
+        if (position !== undefined && owed.file <= position.file) {
+          pass.findings.cursorsRecovered += 1;
+          position = { file: owed.file, line: 0, offset: 0 };
+        }
+        epoch = owed.epoch;
+      }
     }
+    if (epoch !== undefined) pass.epoch = epoch;
     position = resolveStart(spoolDir, position, pass);
     // The index catches up to where this listing starts before any page is aggregated from it.
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
       options.findings.passBudgetReached += 1;
-      yield { records: [], ...(position ? { nextCursor: cursorFromPosition(position) } : {}), done: false };
+      yield { records: [], ...(position ? { nextCursor: cursorFromPosition(position, pass.epoch) } : {}), done: false };
       return;
     }
     for (;;) {
@@ -523,7 +538,7 @@ async function* liveRecords(
       position = page.position;
       yield {
         records: pageRecords(spoolDir, page, pass),
-        ...(position === undefined ? {} : { nextCursor: cursorFromPosition(position) }),
+        ...(position === undefined ? {} : { nextCursor: cursorFromPosition(position, pass.epoch) }),
         done: page.exhausted,
       };
       if (page.exhausted) return;
@@ -557,7 +572,13 @@ function resolveStart(spoolDir: string, start: SpoolPosition | undefined, pass: 
   }
   const recovered = (): SpoolPosition => {
     pass.findings.cursorsRecovered += 1;
-    pass.index?.forgetFile(start.file);
+    // Owed durably with the invalidation, as reconcile owes it: a pass that fails before its cursor commits
+    // reads the file again next time, even if by then the file has grown past the old cursor.
+    if (pass.index) {
+      pass.index.oweReplay(start.file);
+      const owed = pass.index.replayObligation();
+      if (owed) pass.epoch = owed.epoch;
+    }
     return { file: start.file, line: 0, offset: 0 };
   };
   if (start.offset === undefined) {
@@ -890,12 +911,12 @@ function parseSpoolLine(line: string): SpoolMessage | undefined {
  * (clearing Secrets) count by. `<file>:<lines>` alone is a cursor written
  * before offsets, still read.
  */
-const CURSOR = /^(.+):(\d+)@(\d+)(s?)$/u;
+const CURSOR = /^(.+):(\d+)@(\d+)(s?)(?:~r(\d+))?$/u;
 const LEGACY_CURSOR = /^(.+):(\d+)$/u;
 
-function cursorFromPosition(position: SpoolPosition): string {
+function cursorFromPosition(position: SpoolPosition, epoch = position.epoch): string {
   if (position.offset === undefined) return `${position.file}:${position.line}`;
-  return `${position.file}:${position.line}@${position.offset}${position.skipping ? 's' : ''}`;
+  return `${position.file}:${position.line}@${position.offset}${position.skipping ? 's' : ''}${epoch !== undefined ? `~r${epoch}` : ''}`;
 }
 
 function positionFromCursor(cursor: string | undefined): SpoolPosition | undefined {
@@ -903,7 +924,13 @@ function positionFromCursor(cursor: string | undefined): SpoolPosition | undefin
   if (text === undefined || text === '') return undefined;
   const found = CURSOR.exec(text);
   if (found) {
-    return { file: found[1]!, line: Number(found[2]), offset: Number(found[3]), ...(found[4] === 's' ? { skipping: true as const } : {}) };
+    return {
+      file: found[1]!,
+      line: Number(found[2]),
+      offset: Number(found[3]),
+      ...(found[4] === 's' ? { skipping: true as const } : {}),
+      ...(found[5] !== undefined ? { epoch: Number(found[5]) } : {}),
+    };
   }
   const legacy = LEGACY_CURSOR.exec(text);
   if (legacy) return { file: legacy[1]!, line: Number(legacy[2]) };
