@@ -70,12 +70,15 @@ describe('olympus layout', () => {
     expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env, { usageDbPath: defaultXBookmarksApiUsageDbPath(env) })).toBe(folderPath);
     // A folder account's reconcile state is in its folder, which a Delete takes whole.
     expect(folderPath.startsWith(`${lifecycleAccountFiles('x.bookmarks', { env }).folder}/`)).toBe(true);
-    // An account an override pins keeps the old rule: beside the usage ledger.
-    const pinned = { HOME: home, OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH: '/pinned/usage.sqlite' };
-    const workerPath = `${defaultXBookmarksApiUsageDbPath(pinned)}.reconcile`;
-    expect(workerPath).toBe('/pinned/usage.sqlite.reconcile');
-    expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', pinned)).toBe(workerPath);
-    expect(lifecycleAccountFiles('x.bookmarks', { env: pinned }).rawDatabases.map((entry) => entry.path)).toContain(workerPath);
+    // The usage and reconcile overrides are gone (step 6): setting them pins nothing and moves nothing.
+    const pinned = {
+      HOME: home,
+      OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH: '/pinned/usage.sqlite',
+      OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH: '/pinned/reconcile.sqlite',
+    };
+    expect(defaultXBookmarksApiUsageDbPath(pinned)).toBe(defaultXBookmarksApiUsageDbPath(env));
+    expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', pinned)).toBe(folderPath);
+    expect(lifecycleAccountFiles('x.bookmarks', { env: pinned }).rawDatabases.map((entry) => entry.path)).toContain(folderPath);
   });
 });
 
@@ -94,7 +97,6 @@ const ALLOWED: Record<string, string> = {
   'src/core/lifecycle.ts': 'the installed plugin versions folder (~/.local/share/olympus/versions), install layout',
   'src/core/lifecycle-artifact.ts': 'the installed plugin versions folder (~/.local/share/olympus/versions), install layout',
   'src/data-lifecycle.ts': 'builds an environment for an explicit home directory',
-  'src/core/pairing-session-paths.ts': 'names every root Olympus owns, for the delete fence',
 };
 // The data root and the legacy capture root, in any quote style, with the
 // segments split across lines or written as one path.

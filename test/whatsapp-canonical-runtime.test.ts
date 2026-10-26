@@ -30,7 +30,7 @@ afterEach(() => {
 });
 
 describe('WhatsApp canonical product runtime', () => {
-  test('keeps the existing state paths and honors explicit product overrides', () => {
+  test('keeps the existing state paths; the dropped store overrides move nothing', () => {
     const stateDir = fixtureRoot();
     const dataHome = join(stateDir, 'xdg-data');
     // An install from before messaging accounts had folders: the registry lists WhatsApp as legacy.
@@ -41,14 +41,12 @@ describe('WhatsApp canonical product runtime', () => {
       .toBe(join(stateDir, 'spool'));
     expect(resolvedStorePath('whatsapp.personal.messages', 'secure_local', { OLYMPUS_WHATSAPP_STATE_DIR: stateDir }))
       .toBe(join(stateDir, 'connector-store.db'));
+    // The per-store overrides are gone (source storage step 6): the store stays in the state folder.
     expect(resolvedStorePath('whatsapp.personal.messages', 'secure_local', {
       OLYMPUS_WHATSAPP_STATE_DIR: stateDir,
       OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH: join(stateDir, 'preserved.db'),
-    })).toBe(join(stateDir, 'preserved.db'));
-    expect(resolvedStorePath('whatsapp.personal.messages', 'secure_local', {
       OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH: join(stateDir, 'legacy.db'),
-      OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH: join(stateDir, 'product.db'),
-    })).toBe(join(stateDir, 'product.db'));
+    })).toBe(join(stateDir, 'connector-store.db'));
   });
 
   test('runs spool to shared store, resumes without duplicates, and reports malformed gaps', async () => {

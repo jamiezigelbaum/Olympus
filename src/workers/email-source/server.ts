@@ -1,4 +1,4 @@
-import { hasFolderLayout, resolvedRawPath, resolvedStorePath } from '../../core/source-placement.ts';
+import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
@@ -2168,6 +2168,15 @@ function lazySecretStore(env: Record<string, string | undefined>): SecretStore {
 }
 
 export async function main(): Promise<void> {
+  // A retired per-store path setting would open empty stores beside the
+  // account's real files: refuse to start, naming each, before anything opens.
+  const retired = retiredPathSettings(process.env);
+  if (retired.length > 0) {
+    throw new Error(
+      `[storage] These path settings are no longer read (source storage step 6): ${retired.join('; ')}. `
+      + 'Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then start again.',
+    );
+  }
   // First, before anything mounts or opens a store: this worker owns the data
   // root. A second worker on it waits a short while (restarts overlap), then
   // exits without mounting anything (core/data-owner-lock.ts).

@@ -83,7 +83,7 @@ source is deleted with that account's data, not on its own (owner,
 [one dataset, one pipeline](design/archive-live-one-dataset.md). It comes
 before archive media, whose children hang off the same ids.
 
-## Source storage (approved 2026-10-24, in delivery)
+## Source storage (approved 2026-10-24, built 2026-10-26)
 
 Every connected account's data moves into one folder owned by the shared
 engine, with one registry of accounts that Export, Delete, uninstall and
@@ -95,8 +95,12 @@ is frozen (owner, 2026-10-24) after eight review rounds traced every finding
 to the unowned, unlisted layout. Owner decisions 1–5 approved 2026-10-24;
 decision 6 (imported history joins the live account and goes only with its
 Delete) 2026-10-25, with step 4e (account identity) added ahead of archive
-ingestion's Telegram and mail steps. Design, migration, tests and delivery steps:
-[source storage](design/source-storage.md).
+ingestion's Telegram and mail steps. Every delivery step is built (step 6,
+connectors stop naming paths: #549). The boot migration of existing accounts
+is still behind `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1`; turning it on by default
+is the last change. Not proven on this project's Linux host: the Mac and
+OpenClaw-hosted runs listed under step 6's residual risk. Design, migration,
+tests and delivery steps: [source storage](design/source-storage.md).
 
 ## File tidy with the private model (owner direction 2026-10-25)
 

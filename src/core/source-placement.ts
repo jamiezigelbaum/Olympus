@@ -329,6 +329,53 @@ export function declaredConnectorStoreMounts(env: LayoutEnv = process.env): Decl
   return found;
 }
 
+// The per-store path settings delivery step 6 retired (owner decision 3), by
+// pattern: every `OLYMPUS_*_DB_PATH`, and the archive record's own.
+const RETIRED_PATH_SETTING = /^OLYMPUS_\w+_DB_PATH$|^OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH$/;
+
+/**
+ * The retired path settings this environment still sets, in words: an
+ * `OLYMPUS_*_DB_PATH` (or the archive record's path), and a connector-store
+ * mount that names a path for a source whose stores Olympus places, other
+ * than the one it places them at. Nothing reads them any more, so a worker
+ * started with one would open an empty store where the files are not, and the
+ * account's data would look gone: the worker refuses to start instead, naming
+ * each one, until the files are moved to where Olympus keeps them (or the
+ * setting is removed).
+ */
+export function retiredPathSettings(env: LayoutEnv = process.env): string[] {
+  const found = Object.keys(env)
+    .filter((name) => RETIRED_PATH_SETTING.test(name) && env[name]?.trim())
+    .sort()
+    .map((name) => `${name}=${env[name]!.trim()}`);
+  const mounts = declaredConnectorStoreMountPaths(env);
+  for (const mount of mounts) {
+    if (!hasFolderLayout(mount.sourceId) || !accountStoreNames(mount.sourceId).includes(mount.trustDomain)) continue;
+    const placed = resolvedStorePath(mount.sourceId, mount.trustDomain, env);
+    if (resolve(mount.dbPath) !== resolve(placed)) found.push(`${MOUNTS_ENV} ${mount.corpusId} dbPath=${mount.dbPath} (Olympus keeps it at ${placed})`);
+  }
+  return found;
+}
+
+/** Every mount entry that names a path, with its owner: the raw declarations, before a folder layout drops the path. */
+function declaredConnectorStoreMountPaths(env: LayoutEnv): Array<{ sourceId: string; corpusId: string; trustDomain: string; dbPath: string }> {
+  let declared: unknown;
+  try {
+    declared = JSON.parse(env[MOUNTS_ENV]?.trim() || '[]');
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(declared)) return [];
+  return declared.flatMap((entry) => {
+    const record = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
+    const corpusId = typeof record.corpusId === 'string' ? record.corpusId.trim() : '';
+    const trustDomain = typeof record.trustDomain === 'string' ? record.trustDomain.trim() : '';
+    const dbPath = typeof record.dbPath === 'string' ? record.dbPath.trim() : '';
+    if (!corpusId || !dbPath) return [];
+    return [{ sourceId: storageAccountForCorpus({ corpusId, trustDomain }).sourceId, corpusId, trustDomain, dbPath }];
+  });
+}
+
 /**
  * What pins this source's files to their legacy paths, in words, when
  * something does: for messaging, a capture path env, native capture
