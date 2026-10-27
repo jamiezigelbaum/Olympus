@@ -81,6 +81,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
    * `refreshNow` still applies to it.
    */
   let awaitingAuthorizationReturn = false;
+  /** That start's wait line and the sheet it shows in: a redraw replaces the form, so it is said again until the owner comes back. */
+  let authorizationWait: { sheetId: string; message: string } | undefined;
   const root = options.root;
   const submittedFormValues = new WeakMap<HTMLFormElement, Record<string, string>>();
   const startedFromSheet = new WeakSet<HTMLFormElement>();
@@ -292,6 +294,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function releaseSubmittedForm(
     form: HTMLFormElement,
     submittedValues: Record<string, string> | undefined,
+    options: { keepSheetOpen?: boolean } = {},
   ): boolean {
     const sheet = form.closest<HTMLElement>('.sheet');
     const unchanged = submittedValues !== undefined && sameFormRecord(form, submittedValues);
@@ -303,7 +306,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     // serialization. Other forms, and their unsaved input, are untouched.
     form.reset();
     const active = activeElement();
-    if (sheet) {
+    if (sheet && !options.keepSheetOpen) {
       sheet.classList.remove('on');
       sheet.setAttribute('aria-hidden', 'true');
       if (sheet.id) {
@@ -449,16 +452,20 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       // report a live connection, so the page states what it is waiting for
       // and reads again when the owner comes back.
       awaitingAuthorizationReturn = true;
-      if (authorizationTab) {
-        authorizationTab.location.href = authorizationUrl;
-        say(form, 'Authorization opened in a new tab. Approve it there, then come back to Olympus — this card updates when the connection completes.');
-        if (releaseSubmittedForm(form, submittedValues)) void refreshNow(false, true);
-      } else if (openAuthorizationExternally(authorizationUrl)) {
-        say(form, 'Authorization opened in your default browser. Approve it there, then come back to Olympus — this card updates when the connection completes.');
-        if (releaseSubmittedForm(form, submittedValues)) void refreshNow(false, true);
-      } else {
+      if (authorizationTab) authorizationTab.location.href = authorizationUrl;
+      else if (!openAuthorizationExternally(authorizationUrl)) {
         say(form, 'Waiting for authorization. Open the page to continue — this card updates when the connection completes.');
         showAuthorizationFallback(form, authorizationUrl);
+        return;
+      }
+      const wait = `Authorization opened in ${authorizationTab ? 'a new tab' : 'your default browser'}. Approve it there, then come back to Olympus — this card updates when the connection completes.`;
+      say(form, wait);
+      // The form's secrets are the backend's now, but its sheet stays open on this line: closing it (and the
+      // redraw that follows replacing the form) left the owner nothing saying the sign-in had started.
+      if (releaseSubmittedForm(form, submittedValues, { keepSheetOpen: true })) {
+        const sheetId = form.closest<HTMLElement>('.sheet')?.id;
+        authorizationWait = sheetId ? { sheetId, message: wait } : undefined;
+        void refreshNow(false, true);
       }
       return;
     }
@@ -747,6 +754,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       sheet?.classList.add('on');
       queryAll<HTMLElement>('[data-sheet-toggle]').filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute('aria-expanded', 'true'));
     }
+    const wait = authorizationWait;
+    const waitingSheet = wait && queryAll<HTMLElement>('.sheet').find((candidate) => candidate.id === wait.sheetId);
+    if (wait && waitingSheet) say(waitingSheet.querySelector('form[data-connect-kind="oauth"]') ?? waitingSheet, wait.message);
     findByFocusKey(focused)?.focus();
     // A part that binds its own controls (the anonymous answers card) marks its
     // scripts to run again: inserted markup leaves them inert, and without them
@@ -1027,6 +1037,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   const refreshOnReturn = (): void => {
     if (disposed || options.signal.aborted || !awaitingAuthorizationReturn) return;
     awaitingAuthorizationReturn = false;
+    authorizationWait = undefined;
     void refreshNow(false, true);
   };
   const onVisibilityReturn = (): void => {

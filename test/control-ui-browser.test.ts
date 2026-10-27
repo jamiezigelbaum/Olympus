@@ -252,7 +252,7 @@ describe('OAuth browser handoff', () => {
     controller.dispose();
   });
 
-  test('refreshes connected state after handoff and releases the submitted sheet and focus', async () => {
+  test('refreshes connected state after handoff and releases the submitted form and focus', async () => {
     const root = document.createElement('div');
     root.innerHTML = '<button type="button" data-sheet-toggle="#connect-gmail" aria-expanded="true">Reauthenticate</button>'
       + '<div class="sheet on" id="connect-gmail" aria-hidden="false">'
@@ -295,6 +295,45 @@ describe('OAuth browser handoff', () => {
     controller.dispose();
   });
 
+  test('a started sign-in keeps its sheet open on the wait line through the redraw, until the owner comes back', async () => {
+    const sheetPage = (state: string) => '<button type="button" data-sheet-toggle="#connect-drive" aria-expanded="true">Connect</button>'
+      + '<div class="sheet on" id="connect-drive" aria-hidden="false">'
+      + '<form data-connect-kind="oauth"><input name="source" type="hidden" value="google-drive">'
+      + `<button type="submit">Connect</button><span data-action-message></span></form><p id="state">${state}</p></div>`;
+    const root = document.createElement('div');
+    root.innerHTML = sheetPage('ready');
+    document.body.append(root);
+    const popup = { opener: {}, location: { href: '' }, close() {} } as unknown as Window;
+    Object.defineProperty(window, 'open', { configurable: true, value: () => popup });
+    let page = 'connecting';
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => oauthResult('https://accounts.google.com/o/oauth2/auth?state=oauth-state') },
+      navigate() {},
+      async refresh() { return result(sheetPage(page), page); },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'ready',
+      pollIntervalMs: 0,
+    });
+
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    // The page was read again (its form replaced), and the sheet still says what happened.
+    expect(root.querySelector('#state')?.textContent).toBe('connecting');
+    expect(root.querySelector('#connect-drive')?.classList.contains('on')).toBe(true);
+    expect(root.querySelector('[data-action-message]')?.textContent).toStartWith('Authorization opened in a new tab.');
+
+    // Coming back reads the server's own answer; the wait line is not said again.
+    page = 'connected';
+    window.dispatchEvent(new Event('focus'));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(root.querySelector('#state')?.textContent).toBe('connected');
+    expect(root.querySelector('[data-action-message]')?.textContent).toBe('');
+    controller.dispose();
+  });
+
   test('resets an accepted password before releasing it without reflecting the secret into HTML', async () => {
     const root = document.createElement('div');
     root.innerHTML = '<button type="button" data-sheet-toggle="#connect-gmail" aria-expanded="true">Reauthenticate</button>'
@@ -324,7 +363,8 @@ describe('OAuth browser handoff', () => {
 
     expect(secret.value).toBe('');
     expect(root.innerHTML).not.toContain('oauth-secret-entered-by-owner');
-    expect(root.querySelector('.sheet.on')).toBeNull();
+    // The sheet stays open on the wait line, its secret already cleared.
+    expect(root.querySelector('[data-action-message]')?.textContent).toStartWith('Authorization opened in a new tab.');
     controller.dispose();
   });
 

@@ -142230,6 +142230,7 @@ function mountDashboardController(options) {
   let deferredSince = 0;
   let presented = options.presented !== false;
   let awaitingAuthorizationReturn = false;
+  let authorizationWait;
   const root = options.root;
   const submittedFormValues = new WeakMap;
   const startedFromSheet = new WeakSet;
@@ -142409,14 +142410,14 @@ function mountDashboardController(options) {
     const keys = new Set([...Object.keys(actual), ...Object.keys(expected)]);
     return [...keys].every((key2) => actual[key2] === expected[key2]);
   }
-  function releaseSubmittedForm(form, submittedValues) {
+  function releaseSubmittedForm(form, submittedValues, options2 = {}) {
     const sheet = form.closest(".sheet");
     const unchanged = submittedValues !== undefined && sameFormRecord(form, submittedValues);
     if (!unchanged)
       return false;
     form.reset();
     const active = activeElement();
-    if (sheet) {
+    if (sheet && !options2.keepSheetOpen) {
       sheet.classList.remove("on");
       sheet.setAttribute("aria-hidden", "true");
       if (sheet.id) {
@@ -142551,18 +142552,19 @@ function mountDashboardController(options) {
     }
     if (typeof authorizationUrl === "string" && authorizationUrl.startsWith("https://")) {
       awaitingAuthorizationReturn = true;
-      if (authorizationTab) {
+      if (authorizationTab)
         authorizationTab.location.href = authorizationUrl;
-        say(form, "Authorization opened in a new tab. Approve it there, then come back to Olympus — this card updates when the connection completes.");
-        if (releaseSubmittedForm(form, submittedValues))
-          refreshNow(false, true);
-      } else if (openAuthorizationExternally(authorizationUrl)) {
-        say(form, "Authorization opened in your default browser. Approve it there, then come back to Olympus — this card updates when the connection completes.");
-        if (releaseSubmittedForm(form, submittedValues))
-          refreshNow(false, true);
-      } else {
+      else if (!openAuthorizationExternally(authorizationUrl)) {
         say(form, "Waiting for authorization. Open the page to continue — this card updates when the connection completes.");
         showAuthorizationFallback(form, authorizationUrl);
+        return;
+      }
+      const wait = `Authorization opened in ${authorizationTab ? "a new tab" : "your default browser"}. Approve it there, then come back to Olympus — this card updates when the connection completes.`;
+      say(form, wait);
+      if (releaseSubmittedForm(form, submittedValues, { keepSheetOpen: true })) {
+        const sheetId = form.closest(".sheet")?.id;
+        authorizationWait = sheetId ? { sheetId, message: wait } : undefined;
+        refreshNow(false, true);
       }
       return;
     }
@@ -142825,6 +142827,10 @@ function mountDashboardController(options) {
       sheet?.classList.add("on");
       queryAll("[data-sheet-toggle]").filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute("aria-expanded", "true"));
     }
+    const wait = authorizationWait;
+    const waitingSheet = wait && queryAll(".sheet").find((candidate) => candidate.id === wait.sheetId);
+    if (wait && waitingSheet)
+      say(waitingSheet.querySelector('form[data-connect-kind="oauth"]') ?? waitingSheet, wait.message);
     findByFocusKey(focused)?.focus();
     queryAll("script[data-dashboard-rerun]").forEach((inert) => {
       const script2 = root.ownerDocument.createElement("script");
@@ -143085,6 +143091,7 @@ function mountDashboardController(options) {
     if (disposed || options.signal.aborted || !awaitingAuthorizationReturn)
       return;
     awaitingAuthorizationReturn = false;
+    authorizationWait = undefined;
     refreshNow(false, true);
   };
   const onVisibilityReturn = () => {
