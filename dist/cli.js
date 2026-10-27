@@ -74207,7 +74207,7 @@ var init_record_builder = __esm(() => {
 
 // src/workers/telegram-messages/capture-spool-connector.ts
 import { createHash as createHash50 } from "node:crypto";
-import { closeSync as closeSync17, existsSync as existsSync49, lstatSync as lstatSync26, openSync as openSync17, readSync as readSync6, readdirSync as readdirSync6 } from "node:fs";
+import { closeSync as closeSync17, existsSync as existsSync49, lstatSync as lstatSync26, openSync as openSync17, readSync as readSync6, readdirSync as readdirSync7 } from "node:fs";
 import { join as join59 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
   return resolvedRawPath(TELEGRAM_SOURCE_ID, "telegram-spool", env);
@@ -80871,7 +80871,7 @@ var init_source_scheduler_state = __esm(() => {
 
 // src/workers/file-extraction/spool.ts
 import { createHash as createHash53 } from "node:crypto";
-import { chmodSync as chmodSync19, existsSync as existsSync55, mkdirSync as mkdirSync37, readdirSync as readdirSync7, rmSync as rmSync13, rmdirSync as rmdirSync5, statSync as statSync23 } from "node:fs";
+import { chmodSync as chmodSync19, existsSync as existsSync55, mkdirSync as mkdirSync37, readdirSync as readdirSync8, rmSync as rmSync13, rmdirSync as rmdirSync5, statSync as statSync23 } from "node:fs";
 import { dirname as dirname55, isAbsolute as isAbsolute21, join as join64, relative as relative7, sep as sep9 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
   return join64(root, corpusFolder(owner.corpusId), accountFolder2(owner.accountScope));
@@ -86683,7 +86683,7 @@ import { execFile as execFile3 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile as readFile4, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash56 } from "node:crypto";
-import { lstatSync as lstatSync29, readFileSync as readFileSync44, readlinkSync as readlinkSync2, readdirSync as readdirSync12, realpathSync as realpathSync14 } from "node:fs";
+import { lstatSync as lstatSync29, readFileSync as readFileSync44, readlinkSync as readlinkSync2, readdirSync as readdirSync13, realpathSync as realpathSync14 } from "node:fs";
 import { dirname as dirname59, join as join70 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -87077,7 +87077,7 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn5, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash57, randomUUID as randomUUID20 } from "node:crypto";
-import { accessSync as accessSync9, chmodSync as chmodSync22, closeSync as closeSync19, constants as constants8, existsSync as existsSync59, mkdirSync as mkdirSync41, mkdtempSync as mkdtempSync2, readdirSync as readdirSync13, readFileSync as readFileSync45, readlinkSync as readlinkSync3, realpathSync as realpathSync15, rmSync as rmSync17, statSync as statSync26, writeFileSync as writeFileSync13 } from "node:fs";
+import { accessSync as accessSync9, chmodSync as chmodSync22, closeSync as closeSync19, constants as constants8, existsSync as existsSync59, mkdirSync as mkdirSync41, mkdtempSync as mkdtempSync2, readdirSync as readdirSync14, readFileSync as readFileSync45, readlinkSync as readlinkSync3, realpathSync as realpathSync15, rmSync as rmSync17, statSync as statSync26, writeFileSync as writeFileSync13 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer3 } from "node:net";
 import { homedir as homedir29, tmpdir as tmpdir4 } from "node:os";
 import { delimiter as delimiter5, dirname as dirname60, isAbsolute as isAbsolute23, join as join71, resolve as resolvePath } from "node:path";
@@ -89327,7 +89327,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 // src/core/engine-service.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
 import { createHash as createHash58, randomBytes as randomBytes14 } from "node:crypto";
-import { existsSync as existsSync60, lstatSync as lstatSync30, readdirSync as readdirSync14, readFileSync as readFileSync46, renameSync as renameSync12, statSync as statSync27 } from "node:fs";
+import { existsSync as existsSync60, lstatSync as lstatSync30, readdirSync as readdirSync15, readFileSync as readFileSync46, renameSync as renameSync12, statSync as statSync27 } from "node:fs";
 import { homedir as homedir30, platform as osPlatform3 } from "node:os";
 import { basename as basename11, dirname as dirname61, isAbsolute as isAbsolute24, join as join72, resolve as resolvePath2 } from "node:path";
 function enginePaths(homeDir) {
@@ -122624,7 +122624,7 @@ __export(exports_source_answer_jobs, {
   SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
   SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS: () => SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS
 });
-import { createHash as createHash67, randomBytes as randomBytes19, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash67, randomBytes as randomBytes20, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
   limits;
@@ -123400,7 +123400,7 @@ var init_server4 = __esm(() => {
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash68, createPublicKey, randomBytes as randomBytes20, sign, verify } from "node:crypto";
+import { createHash as createHash68, createPublicKey, randomBytes as randomBytes21, sign, verify } from "node:crypto";
 function parseSurfacesMessage(message2) {
   if (message2.type !== "surfaces" || message2.v !== 1 || !Array.isArray(message2.entries))
     return;
