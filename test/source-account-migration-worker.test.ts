@@ -125,6 +125,9 @@ const registryOf = (env: Env): { schema: number; accounts: Array<{ source_id: st
 
 const atOldPlaces = (env: Env): string[] => readdirSync(olympusDataRoot(env)).filter((name) => /^dropbox-files/.test(name) && !/-(wal|shm)$/.test(name)).sort();
 
+const OFF_LINE = '[storage] Moving accounts into their folders is off (OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0); a move already under way is still finished or undone.';
+const storageLines = (output: string): string[] => output.split('\n').filter((line) => line.startsWith('[storage]'));
+
 describe('the boot migration, in a real worker', () => {
   test('with the switch off nothing moves, and the worker opens the stores where they are', async () => {
     const env = freshHome();
@@ -133,10 +136,11 @@ describe('the boot migration, in a real worker', () => {
     const before = atOldPlaces(env);
     expect(before.length).toBeGreaterThanOrEqual(2);
 
-    const worker = await boot(env);
+    const worker = await boot(env, { [MIGRATE_ACCOUNT_FOLDERS_ENV]: '0' });
     try {
       expect(worker.output(), `the worker did not listen (exit ${worker.exitCode()}): ${worker.errors().slice(0, 2000)}`).toContain('worker listening');
-      expect(worker.output()).not.toContain('[storage]');
+      // The switch says it is off, and nothing moves.
+      expect(storageLines(worker.output())).toEqual([OFF_LINE]);
     } finally {
       await worker.stop();
     }
@@ -181,10 +185,10 @@ describe('the boot migration, in a real worker', () => {
     expect(registry.accounts.find((account) => account.source_id === 'dropbox.files')).toMatchObject({ layout: 'folder', state: 'active', migration: { state: 'done' } });
 
     // The next boot, with the switch back off: the stores are where the registry says, and no empty ones appear at the old places.
-    const second = await boot(env);
+    const second = await boot(env, { [MIGRATE_ACCOUNT_FOLDERS_ENV]: '0' });
     try {
       expect(second.output(), `the worker did not listen (exit ${second.exitCode()}): ${second.errors().slice(0, 2000)}`).toContain('worker listening');
-      expect(second.output()).not.toContain('[storage]');
+      expect(storageLines(second.output())).toEqual([OFF_LINE]);
     } finally {
       await second.stop();
     }

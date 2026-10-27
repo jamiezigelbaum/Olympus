@@ -260,10 +260,11 @@ function holdApprovals(statePath: string, marker: string, holdMs: number, then: 
 }
 
 describe('the archive picker', () => {
-  test('offers files beside folders, an Apple Mail .mbox folder as one choice, never a link or a hidden file; folder mode is unchanged', async () => {
+  test('offers files beside folders, an Apple Mail .mbox folder as one choice, never a link, a hidden file or a hidden folder; folder mode is unchanged', async () => {
     const f = fixture();
     f.write('Takeout.mbox', mbox([mail(0)]));
     f.write('.hidden.mbox', mbox([mail(1)]));
+    mkdirSync(join(f.exports, '.cache'));
     mkdirSync(join(f.exports, 'Inbox.mbox'));
     f.write('mbox', mbox([mail(2)]), join(f.exports, 'Inbox.mbox'));
     symlinkSync(join(f.exports, 'Takeout.mbox'), join(f.exports, 'link.mbox'));
@@ -277,7 +278,7 @@ describe('the archive picker', () => {
 
     // The folder picker for Files on this computer still lists folders only.
     const folders = await f.folders.browse({ parentKey: f.exports });
-    expect(folders.nodes.map((node) => node.name)).toEqual(['Inbox.mbox']);
+    expect(folders.nodes.map((node) => node.name)).toEqual(['Inbox.mbox', '.cache']);
     expect(folders.nodes.every((node) => node.kind === 'folder')).toBe(true);
 
     // A key that names a link, or nothing, is refused before anything of it is read.

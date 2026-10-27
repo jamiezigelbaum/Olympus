@@ -19593,6 +19593,9 @@ var init_sniffer_store = __esm(() => {
 import { Database as Database3 } from "bun:sqlite";
 import { chmodSync as chmodSync5, closeSync as closeSync12, existsSync as existsSync20, mkdirSync as mkdirSync13, openSync as openSync12, statSync as statSync11 } from "node:fs";
 import { dirname as dirname23 } from "node:path";
+function isFailSafeMissingContentQuestion(reason) {
+  return reason.startsWith("content:sniffer:") && reason.endsWith(":fail_safe:missing_question");
+}
 function tierLedgerConversationKey(identity2) {
   return identity2.providerConversationId ?? "";
 }
@@ -52979,6 +52982,9 @@ var init_vocabulary = __esm(() => {
     deleteAll: "Delete all",
     deleteAllConfirm: "Delete every question and answer in your private inbox?",
     deleted: "That answer was deleted",
+    deleteNotFound: "Olympus could not find this answer, so nothing was deleted. Reload to see your inbox as it is now.",
+    deleteUnavailable: "Private answers cannot be changed right now, so nothing was deleted. Try again in a moment.",
+    nothingDeleted: "Nothing was deleted. Reload to see your inbox as it is now.",
     retrying: "Retrying on this computer…",
     queued: "Queued on this computer. Automatic answers wait for their turn.",
     checkUnavailable: "Couldn't check this answer right now",
@@ -60848,6 +60854,7 @@ class TieredRoutingRun {
   legOptions;
   counts;
   plans;
+  versionPlans;
   copyRemovals;
   intents;
   namesAdvance;
@@ -60864,6 +60871,7 @@ class TieredRoutingRun {
     this.routedDomains = new Set;
     this.legOptions = new Map;
     this.plans = new Map;
+    this.versionPlans = new Map;
     this.copyRemovals = new Map;
     this.pendingWithdrawals = new Map;
     this.intents = new Map;
@@ -60885,7 +60893,7 @@ class TieredRoutingRun {
     return this.owedAlready.has(identityKey(item.identity));
   }
   plannedKind(item) {
-    return this.plans.get(planKey(item))?.plan.kind;
+    return this.plans.get(planKey(item))?.plan.kind ?? this.versionPlans.get(versionKey(item));
   }
   async route(input) {
     const domain = this.set.domainForCorpus(input.store.corpusId);
@@ -60897,6 +60905,7 @@ class TieredRoutingRun {
       entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
       this.plans.set(key2, entry);
     }
+    this.versionPlans.set(versionKey(input.item), entry.plan.kind);
     if (this.mode === "per_leg" && !entry.handedOff) {
       entry.handedOff = true;
       await this.handOff(entry, input, domain);
@@ -61241,6 +61250,9 @@ function planKey(item) {
     item.metadata["deleted"] === true
   ])).digest("hex");
   return `${identityKey(item.identity)}\x00${item.identity.sourceVersion ?? ""}\x00${judged}`;
+}
+function versionKey(item) {
+  return `${identityKey(item.identity)}\x00${item.identity.sourceVersion ?? ""}`;
 }
 function stringMetadata(item, keys) {
   for (const key2 of keys) {
@@ -63381,7 +63393,8 @@ function parentLabelReleaseInputs(dependencies) {
       providerItemId: parent.providerItemId,
       ...parent.providerConversationId ? { providerConversationId: parent.providerConversationId } : {},
       privateAtAnswer: dependency.private,
-      layer: "names"
+      layer: "names",
+      dependency: "parent_label"
     });
   }
   return [...seen.values()];
@@ -65144,6 +65157,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
   };
 }
 function releaseInputs(detail) {
+  const namesOnly = new Set(detail.pack.candidates.flatMap((candidate, index) => candidate.chunks.length === 0 && !candidate.tables?.length && !candidate.facts?.length ? [index] : []));
   const items = detail.pack.candidates.map((candidate, index) => {
     const item = candidate.provenance.sourceItem;
     return {
@@ -65152,7 +65166,8 @@ function releaseInputs(detail) {
       accountScope: item.accountScope ?? "",
       providerItemId: item.providerItemId,
       ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {},
-      privateAtAnswer: isSecureSensitivity(candidate)
+      privateAtAnswer: isSecureSensitivity(candidate),
+      ...namesOnly.has(index) ? { layer: "names" } : {}
     };
   });
   return [...items, ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])];
@@ -119030,7 +119045,7 @@ function recheckRelease(evidence, manifests, check) {
     return { withhold: REMOTE_ANSWER_UNVERIFIED };
   for (const [index, { input, manifest: manifest2 }] of inputs.entries()) {
     const verdict = verdicts[index];
-    if (input.layer === "names" && verdict.gone)
+    if (input.dependency === "parent_label" && verdict.gone)
       return { withhold: REMOTE_ANSWER_UNVERIFIED };
     if (!privateInputReleaseAllowed(input, verdict, manifest2.constraints, postureNow))
       return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
@@ -119048,7 +119063,7 @@ function recheckRelease(evidence, manifests, check) {
   return { dropped };
 }
 function citesInput(entry, input) {
-  return input.layer !== "names" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
+  return input.dependency !== "parent_label" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
 }
 function citationOutput(entry) {
   const title = scannedText(entry.title, MAX_TITLE, "line");
@@ -123756,17 +123771,22 @@ function createLocalPrivateAnswers(options) {
         return { status: 200, body: { ok: true, status: marked ? "read" : "kept" } };
       }
       if (action === "delete" || action === "delete_all") {
+        const answers = store();
+        if (!answers)
+          return refused(503, "unavailable", DASHBOARD_PRIVATE_ANSWERS_COPY.deleteUnavailable);
         try {
-          const removed = action === "delete_all" ? store()?.dismissAll() ?? 0 : typeof body.id === "string" && store()?.dismiss(body.id) ? 1 : 0;
+          const removed = action === "delete_all" ? answers.dismissAll() : typeof body.id === "string" && answers.dismiss(body.id) ? 1 : 0;
           if (action === "delete_all")
             opens.clear();
           else
             for (const [id, entry] of opens)
               if (entry.ref?.id === body.id)
                 opens.delete(id);
+          if (action === "delete" && removed === 0)
+            return refused(410, "not_found", DASHBOARD_PRIVATE_ANSWERS_COPY.deleteNotFound);
           return { status: 200, body: { ok: true, status: "deleted", removed } };
         } catch {
-          return refused(503, "unavailable", "Private answers cannot be changed right now.");
+          return refused(503, "unavailable", DASHBOARD_PRIVATE_ANSWERS_COPY.deleteUnavailable);
         }
       }
       if (action === "open") {
@@ -125921,6 +125941,18 @@ class LocalFileExtractionJobStore {
     const { sql, params } = this.unreadJobsQuery(request);
     return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
   }
+  itemExtractionState(item) {
+    const rows = this.db.query(`
+      SELECT DISTINCT status FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+    `).all(item.provider, item.accountScope, item.providerItemId);
+    if (rows.length === 0)
+      return "none";
+    const statuses = new Set(rows.map((row) => row.status));
+    if (statuses.has("indexed"))
+      return "settled";
+    return statuses.has("queued") || statuses.has("leased") || statuses.has("failed_retryable") ? "active" : "settled";
+  }
   unreadJobsQuery(request) {
     const lane = requireLaneKey(request);
     const extractorKind = requireToken3(request.extractorKind, "extractorKind");
@@ -126485,6 +126517,15 @@ function fileExtractionJobMigrations() {
         );
       `);
     }
+  }, {
+    version: 6,
+    name: "add_extraction_jobs_identity_index",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_identity
+          ON extraction_jobs(provider, account_scope, provider_item_id, status);
+      `);
+    }
   }];
 }
 function nextRetryTimestamp(status, attempts, now) {
@@ -126718,7 +126759,7 @@ function terminalRetryPathSql(alias, paths) {
     return { sql: "0", params };
   return { sql: `(${alias}.status = 'failed_terminal' AND (${clauses.join(" OR ")}))`, params };
 }
-var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 5, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
+var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 6, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
 var init_job_store = __esm(() => {
   init_sqlite_migrations();
   init_job_names();
@@ -131786,7 +131827,8 @@ function createTieredStoreExtractionSink(options) {
       const itemTitle2 = stringMetadata2(plan.item, ["title", "name", "subject"]);
       const itemPath = stringMetadata2(plan.item, ["locatorUri", "pathDisplay"]);
       const imageJudgment = plan.media ? setMediaJudgment(set2, plan.media.sha256) : undefined;
-      const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set2.holdsContentUntilJudged() || heldUntilJudged(record5.reasons);
+      const settledUnread = !record5.contentRead && record5.reasons.some(isFailSafeMissingContentQuestion);
+      const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set2.holdsContentUntilJudged() || heldUntilJudged(record5.reasons) || settledUnread;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set2, identity2) : undefined;
       const content = classifyContentTier({
         text: request.text,
@@ -144914,6 +144956,7 @@ function privateAnswersClientScript(input) {
       delete: DASHBOARD_PRIVATE_ANSWERS_COPY.delete,
       deleteAllConfirm: DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAllConfirm,
       deleted: DASHBOARD_PRIVATE_ANSWERS_COPY.deleted,
+      nothingDeleted: DASHBOARD_PRIVATE_ANSWERS_COPY.nothingDeleted,
       retrying: DASHBOARD_PRIVATE_ANSWERS_COPY.retrying,
       queued: DASHBOARD_PRIVATE_ANSWERS_COPY.queued,
       checkUnavailable: DASHBOARD_PRIVATE_ANSWERS_COPY.checkUnavailable,
@@ -145128,7 +145171,18 @@ function privateAnswersClientScript(input) {
       var id = row.getAttribute('data-pa-question');
       var outcome = await send({ action: 'delete', id: id });
       button.disabled = false;
-      if (!outcome.ok) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
+      // What the server says it removed, for the release check to read (never shown).
+      root.setAttribute('data-pa-removed', String(outcome.ok && typeof outcome.result.removed === 'number' ? outcome.result.removed : 0));
+      // 410: the answer is not there (a retry after a lost reply, or deleted elsewhere), so its row goes quietly.
+      // Any other failure keeps the row and says why.
+      if (!outcome.ok && outcome.status !== 410) { message(row.querySelector('[data-pa-out]'), errorText(outcome), true, row.querySelector('.paq').textContent); return; }
+      if (outcome.ok && outcome.result.removed !== 1) {
+        // Ok with nothing removed (an older worker): the worker's own list decides whether the row stays.
+        await poll();
+        var still = findRow(id);
+        if (still) message(still.querySelector('[data-pa-out]'), config.copy.nothingDeleted, true, still.querySelector('.paq').textContent);
+        return;
+      }
       if (selected === id) { selected = null; ++readVersion; }
       row.remove();
       empty();
@@ -145140,6 +145194,9 @@ function privateAnswersClientScript(input) {
     var all = root.querySelector('[data-pa-delete-all]');
     if (none) none.hidden = count !== 0;
     if (all) all.hidden = count === 0;
+    // "Nothing was deleted" is about rows still listed: an empty inbox has nothing left to say it of.
+    var note = root.querySelector('[data-pa-missing]');
+    if (note && count === 0 && note.textContent === config.copy.nothingDeleted) { note.hidden = true; note.textContent = ''; }
   }
   rows().forEach(bind);
   var all = root.querySelector('[data-pa-delete-all]');
@@ -145148,11 +145205,16 @@ function privateAnswersClientScript(input) {
     all.disabled = true;
     var outcome = await send({ action: 'delete_all' });
     all.disabled = false;
-    if (outcome.ok) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); }
-    else {
-      var note = root.querySelector('[data-pa-missing]');
-      if (note) { note.hidden = false; note.textContent = errorText(outcome); }
-    }
+    var removed = outcome.ok && typeof outcome.result.removed === 'number' ? outcome.result.removed : 0;
+    root.setAttribute('data-pa-removed', String(removed));
+    var note = root.querySelector('[data-pa-missing]');
+    if (outcome.ok && removed > 0) { selected = null; ++readVersion; rows().forEach(function (row) { row.remove(); }); empty(); return; }
+    if (!outcome.ok) { if (note) { note.hidden = false; note.textContent = errorText(outcome); } return; }
+    // None removed: the worker's own list says what is left (the rows may have gone already). Only rows still
+    // listed are "nothing was deleted".
+    await poll();
+    if (note && rows().length > 0) { note.hidden = false; note.textContent = config.copy.nothingDeleted; }
+    empty();
   });
   function openFragment() {
     var id;
@@ -167637,7 +167699,7 @@ function localFilesListing(options, mode) {
       }
       throw new Error("This folder could not be read. It may have moved or its disk may be unmounted.");
     }
-    const offered = (entry) => !entry.isSymbolicLink() && (entry.isDirectory() || mode === "archive" && entry.isFile() && !entry.name.startsWith("."));
+    const offered = (entry) => !entry.isSymbolicLink() && !(mode === "archive" && entry.name.startsWith(".")) && (entry.isDirectory() || mode === "archive" && entry.isFile());
     return entries.filter(offered).map((entry) => {
       const childReal = join113(realPath, entry.name);
       if (!entry.isDirectory())
@@ -168232,13 +168294,13 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault) {
         }
         const lane = childLane(scope);
         if (lane) {
-          const orphaned = hiddenChildKeys(lane, governed.filter(({ index }) => inputs[index].layer !== "names").map(({ identity: identity2 }) => identity2));
+          const orphaned = hiddenChildKeys(lane, governed.filter(({ index }) => inputs[index].dependency !== "parent_label").map(({ identity: identity2 }) => identity2));
           for (const { index, identity: identity2 } of governed) {
-            if (inputs[index].layer !== "names" && orphaned.has(tierLedgerIdentityKey(identity2))) {
+            if (inputs[index].dependency !== "parent_label" && orphaned.has(tierLedgerIdentityKey(identity2))) {
               verdicts[index] = { ...verdicts[index], gone: true, hiddenByParent: true };
             }
           }
-          const named = governed.filter(({ index }) => inputs[index].layer === "names");
+          const named = governed.filter(({ index }) => inputs[index].dependency === "parent_label");
           if (named.length > 0) {
             const standing = itemVerdicts(lane, named.map(({ identity: identity2 }) => identity2));
             for (const { index, identity: identity2 } of named) {
@@ -168261,7 +168323,8 @@ var init_tier_visibility = __esm(() => {
 import { linkSync as linkSync4, lstatSync as lstatSync45, mkdirSync as mkdirSync57, readdirSync as readdirSync22, realpathSync as realpathSync24, renameSync as renameSync20, rmdirSync as rmdirSync8, statSync as statSync36, unlinkSync as unlinkSync4 } from "node:fs";
 import { basename as basename18, dirname as dirname86, isAbsolute as isAbsolute34, join as join114, relative as relative13, resolve as resolve23, sep as sep16 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
-  return env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim() === "1";
+  const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
+  return value2 === "" || MIGRATION_ON.includes(value2);
 }
 function candidates(sourceId, slot, env) {
   const account = { source_id: sourceId, slot, layout: "folder" };
@@ -169096,7 +169159,7 @@ function migrateAccountFolders(env = process.env, options = {}) {
   }
   return report;
 }
-var MIGRATE_ACCOUNT_FOLDERS_ENV = "OLYMPUS_MIGRATE_ACCOUNT_FOLDERS", ASSUMED_BYTES_PER_SECOND, MIGRATION_BUDGET_MS = 45000, QUICK_CHECK_BUDGET_MS = 15000, QUICK_CHECK_STORE_MAX_BYTES, QUICK_CHECK_TOTAL_MAX_BYTES, ACCOUNT_LOG_MAX_BYTES, LOCK_WAIT_CAP_MS = 2000, SKIP_REASONS, AccountMigrationKilled, __accountMigrationTestHooks, MESSAGING_SOURCES, isMessaging = (sourceId) => MESSAGING_SOURCES.includes(sourceId), COMPANION_SUFFIXES, isCompanion = (path) => COMPANION_SUFFIXES.some((suffix) => path.endsWith(suffix)), checkpoint = (at) => __accountMigrationTestHooks.checkpoint?.(at), waitMs = (ctx) => Math.max(0, Math.min(LOCK_WAIT_CAP_MS, ctx.deadline - ctx.now())), limit = (name, fallback) => __accountMigrationTestHooks.limits?.[name] ?? fallback, NO_HARD_LINKS, syncFolder = (path) => (__accountMigrationTestHooks.syncDirectory ?? syncDirectorySync)(path), moveFile = (from, to, kind) => (__accountMigrationTestHooks.rename ?? moveWithoutReplacing)(from, to, kind), MoveFault, EntryChanged, skip = (reason, detail) => ({ kind: "skip", reason, detail }), isDisposable = (move) => move.from.endsWith("-shm") || (move.from.endsWith("-wal") || move.from.endsWith("-journal")) && move.size === 0, isPlanned = (found, move) => (found.kind === "file" || found.kind === "dir") && found.kind === move.kind && String(found.dev) === move.dev && String(found.ino) === move.ino;
+var MIGRATE_ACCOUNT_FOLDERS_ENV = "OLYMPUS_MIGRATE_ACCOUNT_FOLDERS", ASSUMED_BYTES_PER_SECOND, MIGRATION_BUDGET_MS = 45000, QUICK_CHECK_BUDGET_MS = 15000, QUICK_CHECK_STORE_MAX_BYTES, QUICK_CHECK_TOTAL_MAX_BYTES, ACCOUNT_LOG_MAX_BYTES, LOCK_WAIT_CAP_MS = 2000, SKIP_REASONS, AccountMigrationKilled, __accountMigrationTestHooks, MIGRATION_ON, MESSAGING_SOURCES, isMessaging = (sourceId) => MESSAGING_SOURCES.includes(sourceId), COMPANION_SUFFIXES, isCompanion = (path) => COMPANION_SUFFIXES.some((suffix) => path.endsWith(suffix)), checkpoint = (at) => __accountMigrationTestHooks.checkpoint?.(at), waitMs = (ctx) => Math.max(0, Math.min(LOCK_WAIT_CAP_MS, ctx.deadline - ctx.now())), limit = (name, fallback) => __accountMigrationTestHooks.limits?.[name] ?? fallback, NO_HARD_LINKS, syncFolder = (path) => (__accountMigrationTestHooks.syncDirectory ?? syncDirectorySync)(path), moveFile = (from, to, kind) => (__accountMigrationTestHooks.rename ?? moveWithoutReplacing)(from, to, kind), MoveFault, EntryChanged, skip = (reason, detail) => ({ kind: "skip", reason, detail }), isDisposable = (move) => move.from.endsWith("-shm") || (move.from.endsWith("-wal") || move.from.endsWith("-journal")) && move.size === 0, isPlanned = (found, move) => (found.kind === "file" || found.kind === "dir") && found.kind === move.kind && String(found.dev) === move.dev && String(found.ino) === move.ino;
 var init_source_account_migration = __esm(() => {
   init_archive_formats();
   init_atomic_file();
@@ -169144,6 +169207,7 @@ var init_source_account_migration = __esm(() => {
       delete this.limits;
     }
   };
+  MIGRATION_ON = ["1", "true", "on", "yes"];
   MESSAGING_SOURCES = [TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID];
   COMPANION_SUFFIXES = ["-wal", "-shm", "-journal"];
   NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
@@ -170787,6 +170851,9 @@ class TierSnifferService {
               }
               continue;
             }
+            const waitingForText = missingContent && !row.contentRead && row.contentPending && this.waitingForExtraction(ledger, row, identity2);
+            if (waitingForText && !missingMetadata)
+              continue;
             if (!missingMetadata && !missingContent)
               continue;
             const classification = set2?.classification();
@@ -170806,7 +170873,7 @@ class TierSnifferService {
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
               missingMetadata,
-              missingContent,
+              missingContent: missingContent && !waitingForText,
               snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity2, "metadata")) && (!missingContent || !queue.questionFor(identity2, "content")),
               ...planner ? { placementFor: planner } : {}
@@ -170819,6 +170886,23 @@ class TierSnifferService {
         if (settled || retired)
           this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
       } catch {}
+    }
+  }
+  waitingForExtraction(ledger, row, identity2) {
+    try {
+      if (!this.options.extractionState || row.family !== "file" || !row.routed)
+        return false;
+      const copies = ledger.copies(identity2);
+      if (copies.length === 0)
+        return false;
+      if (copies.some((copy) => copy.state === "current" && copy.layers !== "metadata"))
+        return false;
+      const state = this.options.extractionState(identity2);
+      if (state === "active")
+        return true;
+      return state === "none" && this.clockMs() - Date.parse(row.decidedAt) < EXTRACTION_ENQUEUE_GRACE_MS;
+    } catch {
+      return false;
     }
   }
   async drainMoves() {
@@ -171094,7 +171178,7 @@ function positiveInteger7(value2, fallback, minimum) {
   const parsed = Number(value2);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_tier_move();
   init_secret_locations();
@@ -171114,6 +171198,7 @@ var init_sniffer_service = __esm(() => {
   init_tier_media_judgment_sweep();
   init_tier_ledger();
   DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
+  EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
   DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
   DEFAULT_STALE_MOVE_MS = 60 * 60000;
 });
@@ -190104,6 +190189,7 @@ __export(exports_server2, {
   connectorStoreAnswerScope: () => connectorStoreAnswerScope,
   commaSeparatedEnv: () => commaSeparatedEnv,
   applyBuiltInPrivateAnalyst: () => applyBuiltInPrivateAnalyst,
+  analystRouteTrustDomain: () => analystRouteTrustDomain,
   activeCredentialHandle: () => activeCredentialHandle,
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle,
   accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
@@ -190914,10 +191000,10 @@ function analystRouteTrustDomain(pack, localOnly) {
   if (localOnly || pack.candidates.some((candidate) => isSecureSensitivity(candidate))) {
     return "secure_local";
   }
-  if (pack.candidates.some((candidate) => candidate.trustDomain === "internal")) {
-    return "internal";
+  if (pack.candidates.some((candidate) => candidate.trustDomain === "public_safe") && !pack.candidates.some((candidate) => candidate.trustDomain === "internal")) {
+    return "public_safe";
   }
-  return "public_safe";
+  return "internal";
 }
 function parseRequiredTimeoutSeconds(value2, name) {
   return parseOptionalTimeoutSeconds(value2, name) ?? (() => {
@@ -191129,6 +191215,9 @@ function replaceEmptyAccountsAtBoot(env) {
   }
 }
 function migrateAccountFoldersAtBoot(env, options = {}) {
+  if (!accountFolderMigrationEnabled(env)) {
+    console.log(`[storage] Moving accounts into their folders is off (OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=${env.OLYMPUS_MIGRATE_ACCOUNT_FOLDERS?.trim()}); a move already under way is still finished or undone.`);
+  }
   try {
     const report = migrateAccountFolders(env, options);
     for (const sourceId of report.moved)
@@ -194022,6 +194111,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       startModel: () => snifferRuntime.builtIn.startIfIdle?.(),
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
+    ...fileExtractionRuntime ? { extractionState: (identity2) => fileExtractionRuntime.jobs.itemExtractionState(identity2) } : {},
     ownerContext: privacyOwnerWords,
     budgetStatePath: join116(dirname91(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
