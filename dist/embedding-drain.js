@@ -50297,6 +50297,7 @@ import { existsSync as existsSync27 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
+var EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
 var DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
 var DEFAULT_STALE_MOVE_MS = 60 * 60000;
 var BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)";
@@ -50834,6 +50835,9 @@ class TierSnifferService {
               }
               continue;
             }
+            const waitingForText = missingContent && !row.contentRead && row.contentPending && this.waitingForExtraction(ledger, row, identity);
+            if (waitingForText && !missingMetadata)
+              continue;
             if (!missingMetadata && !missingContent)
               continue;
             const classification = set?.classification();
@@ -50853,7 +50857,7 @@ class TierSnifferService {
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
               missingMetadata,
-              missingContent,
+              missingContent: missingContent && !waitingForText,
               snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, "metadata")) && (!missingContent || !queue.questionFor(identity, "content")),
               ...planner ? { placementFor: planner } : {}
@@ -50866,6 +50870,23 @@ class TierSnifferService {
         if (settled || retired)
           this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
       } catch {}
+    }
+  }
+  waitingForExtraction(ledger, row, identity) {
+    try {
+      if (!this.options.extractionState || row.family !== "file" || !row.routed)
+        return false;
+      const copies = ledger.copies(identity);
+      if (copies.length === 0)
+        return false;
+      if (copies.some((copy) => copy.state === "current" && copy.layers !== "metadata"))
+        return false;
+      const state = this.options.extractionState(identity);
+      if (state === "active")
+        return true;
+      return state === "none" && this.clockMs() - Date.parse(row.decidedAt) < EXTRACTION_ENQUEUE_GRACE_MS;
+    } catch {
+      return false;
     }
   }
   async drainMoves() {

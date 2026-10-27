@@ -1763,15 +1763,21 @@ function createTierSnifferModel(input: {
   return undefined;
 }
 
-function analystRouteTrustDomain(pack: { candidates: readonly SecureSensitivityInput[] }, localOnly: boolean): SourceTrustDomain {
+export function analystRouteTrustDomain(pack: { candidates: readonly SecureSensitivityInput[] }, localOnly: boolean): SourceTrustDomain {
   // Secure by domain or by tier selects the secure pool.
   if (localOnly || pack.candidates.some((candidate) => isSecureSensitivity(candidate))) {
     return 'secure_local';
   }
-  if (pack.candidates.some((candidate) => candidate.trustDomain === 'internal')) {
-    return 'internal';
+  // Public only when a Public candidate is actually in the pack. An empty pack
+  // (nothing matched, or every match was Private on a policy with no Private
+  // answer route) takes the Personal route: the Analyst answers it without a
+  // model call, and a policy with no Public tier (every shipped preset) has no
+  // public_safe route to resolve.
+  if (pack.candidates.some((candidate) => candidate.trustDomain === 'public_safe')
+    && !pack.candidates.some((candidate) => candidate.trustDomain === 'internal')) {
+    return 'public_safe';
   }
-  return 'public_safe';
+  return 'internal';
 }
 
 
@@ -2114,12 +2120,15 @@ export function replaceEmptyAccountsAtBoot(env: Record<string, string | undefine
 /**
  * Under the owner lock, after the empty accounts are placed and before
  * adoption is on and anything mounts (core/source-account-migration.ts): moves
- * each existing account's files into its folder when
- * `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1`, and finishes or undoes a move an earlier
+ * each existing account's files into its folder unless
+ * `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0`, and finishes or undoes a move an earlier
  * boot left part way whatever the switch says. A registry that cannot be read
  * leaves every account where it is and the worker boots as it always did.
  */
 export function migrateAccountFoldersAtBoot(env: Record<string, string | undefined>, options: AccountMigrationOptions = {}): AccountMigrationReport | undefined {
+  if (!accountFolderMigrationEnabled(env)) {
+    console.log(`[storage] Moving accounts into their folders is off (OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=${env.OLYMPUS_MIGRATE_ACCOUNT_FOLDERS?.trim()}); a move already under way is still finished or undone.`);
+  }
   try {
     const report = migrateAccountFolders(env, options);
     for (const sourceId of report.moved) console.log(`[storage] ${sourceId} moved into its account folder.`);
@@ -6281,6 +6290,7 @@ export async function main(): Promise<void> {
               modelState: () => workerBuiltInModel?.model.status().state,
             }
           : {}),
+        ...(fileExtractionRuntime ? { extractionState: identity => fileExtractionRuntime.jobs.itemExtractionState(identity) } : {}),
         ownerContext: privacyOwnerWords,
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,

@@ -299,6 +299,13 @@ export const JOURNEYS: readonly Journey[] = [
           secondId: { attrOf: { css: '[data-pa-question]', nth: 1 }, attr: 'data-pa-question' },
         },
         expect: [
+          // What the worker says it removed (the page records it): a delete that removed nothing names itself here,
+          // not at the reload (2026-10-26, a Linux run whose deleted answers all came back).
+          { custom: async ({ count }) => {
+            const one = await count({ css: '[data-pa-removed="1"]' }, 'host');
+            const none = await count({ css: '[data-pa-removed="0"]' }, 'host');
+            return { ok: one === 1, expected: 'the worker says it removed exactly one answer', actual: one === 1 ? 'it removed one' : none === 1 ? 'it removed none' : 'it said nothing about what it removed' };
+          } },
           { countSince: { target: { css: '[data-pa-question]' }, since: 'before', delta: -1 } },
           { custom: async ({ count, vars }) => {
             const gone = await count({ css: `[data-pa-question="${String(vars.firstId)}"]` });
