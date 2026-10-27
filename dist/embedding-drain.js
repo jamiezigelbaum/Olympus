@@ -10079,16 +10079,6 @@ function metadataStringArray(metadata, key) {
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
 
-// src/core/child-item-id.ts
-function childProviderItemId(parentProviderItemId, key) {
-  if (!parentProviderItemId)
-    throw new TypeError("A child needs its parent's id.");
-  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
-    throw new TypeError("A child's key must be plain text.");
-  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
-}
-var CHILD_ITEM_ID_SEPARATOR = "#child:";
-
 // src/core/classification-signals.ts
 function namesOnlyContentScopeMetadata() {
   return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
@@ -49112,6 +49102,7 @@ var LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.
 
 // src/workers/archive-import/evernote/connector.ts
 init_archive_formats();
+init_file_extraction_source();
 init_byte_source();
 init_stop_errors();
 
