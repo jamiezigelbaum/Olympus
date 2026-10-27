@@ -96,11 +96,12 @@ export const turnContains = (turn: string, needle: string): boolean => fold(turn
 
 /**
  * The turn: everything on the page after the question as it was typed (the app's tool chips, the reply, its citations).
- * Fresh chats hold one question, so the last place the question appears is where the turn starts.
+ * Fresh chats hold one question, so the first place the question appears is where the turn starts: a reply that repeats the
+ * question keeps everything it said before the repeat, so nothing it leaked is cut away.
  */
 export function turnText(pageText: string, prompt: string): string {
   const head = prompt.trim().slice(0, 60);
-  const at = pageText.lastIndexOf(head);
+  const at = pageText.indexOf(head);
   if (at === -1) return pageText;
   const after = pageText.slice(at + head.length);
   const rest = prompt.trim().slice(60);
