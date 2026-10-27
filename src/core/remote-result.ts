@@ -390,7 +390,7 @@ function recheckRelease(
     // A parent label's names are a dependency of the answer, never a cited item: the prose may carry
     // the parent's subject and sender, so a dependency that is gone leaves nothing to drop. It
     // withholds the whole answer.
-    if (input.layer === 'names' && verdict.gone) return { withhold: REMOTE_ANSWER_UNVERIFIED };
+    if (input.dependency === 'parent_label' && verdict.gone) return { withhold: REMOTE_ANSWER_UNVERIFIED };
     if (!privateInputReleaseAllowed(input, verdict, manifest.constraints, postureNow)) return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
   }
   const dropped = new Set<number>();
@@ -407,8 +407,8 @@ function recheckRelease(
 
 /** A citation names its corpus, provider, conversation and item, never its account. */
 function citesInput(entry: Record<string, unknown>, input: ReleaseInput): boolean {
-  // A parent label's names-layer input is a dependency of the answer, never the item a citation names.
-  return input.layer !== 'names'
+  // A parent label's input is a dependency of the answer, never the item a citation names.
+  return input.dependency !== 'parent_label'
     && entry.corpus_id === input.corpusId
     && entry.provider === input.provider
     && entry.provider_item_id === input.providerItemId
