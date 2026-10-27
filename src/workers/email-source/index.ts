@@ -2877,6 +2877,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ...(Number.isFinite(declared) && declared > 0 ? { declaredBytes: declared } : {}),
                 offset,
                 final,
+                signal: request.signal,
               });
               return json({ ok: true, bytes: received.bytes });
             } catch (error) {

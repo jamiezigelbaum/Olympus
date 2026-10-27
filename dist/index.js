@@ -26357,7 +26357,8 @@ class LinuxOwnerBridge {
         method: request.method,
         headers,
         ...body !== undefined ? { body, duplex: "half" } : {},
-        redirect: "manual"
+        redirect: "manual",
+        ...typeof body === "object" ? { signal: request.signal } : {}
       }));
     } catch {
       return this.live() ? restarting() : refusal(503);

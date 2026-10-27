@@ -256,6 +256,20 @@ test('a proven upload piece reaches the worker byte for byte, however large; an 
   expect(Buffer.from(received!).equals(Buffer.from(piece))).toBe(true);
 });
 
+test('an upload piece whose sender goes away ends at the worker too', async () => {
+  let forwarded: AbortSignal | undefined;
+  const f = fixture(async r => { forwarded = r.signal; return Response.json({ ok: true }); });
+  const owner = await prove(f);
+  const sender = new AbortController();
+  await f.bridge.handle(f.request('/dashboard/archive-import/upload-file', {
+    method: 'POST', body: new Uint8Array([1, 2, 3]), signal: sender.signal,
+    headers: { Origin: f.bridge.origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/octet-stream', Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof },
+  }));
+  expect(forwarded?.aborted).toBe(false);
+  sender.abort();
+  expect(forwarded?.aborted).toBe(true);
+});
+
 test('bridged pages keep every inline script the worker allowed, and the bootstrap always runs', async () => {
   const pageScript = 'window.controls=1';
   const pageHash = `'sha256-${new Bun.CryptoHasher('sha256').update(pageScript).digest('base64')}'`;

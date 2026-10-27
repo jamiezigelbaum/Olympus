@@ -424,6 +424,8 @@ export class LinuxOwnerBridge {
     let response: Response;
     try { response = await this.options.fetchSocket(new Request(this.entryOrigin + url.pathname + url.search, {
       method: request.method, headers, ...(body !== undefined ? { body, duplex: 'half' } : {}), redirect: 'manual',
+      // A streamed upload's sender going away ends the hop too, so the worker does not wait on a body nobody sends.
+      ...(typeof body === 'object' ? { signal: request.signal } : {}),
     } as RequestInit)); } catch { return this.live() ? restarting() : refusal(503); }
     if (!this.live()) return refusal(503);
     const outgoing = new Headers(response.headers);

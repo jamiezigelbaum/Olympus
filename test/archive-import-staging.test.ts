@@ -384,6 +384,21 @@ describe('the free-disk floor', () => {
     expect(await code(receiving)).toBe('cancelled');
     expect(existsSync(join(f.root, uploadId))).toBe(false);
   });
+
+  test('a sender that goes away while the disk is full ends the wait, and the copy is swept once it is idle', async () => {
+    let clock = 1_000_000;
+    const f = fixture({ freeBytes: () => 0, pause: () => settle(5), now: () => clock });
+    const { uploadId } = f.uploads.begin();
+    const gone = new AbortController();
+    const receiving = f.uploads.receive(uploadId, 'second.bin', liveBody().body, { declaredBytes: 7, signal: gone.signal });
+    await until(() => f.uploads.status(uploadId).state === 'paused_disk_full');
+    gone.abort();
+    expect(await code(receiving)).toBe('cancelled');
+    // Nothing touches it any more: past the idle limit the sweep takes the whole copy.
+    clock += ARCHIVE_UPLOAD_IDLE_MS + 1;
+    f.uploads.sweep(() => false);
+    expect(existsSync(join(f.root, uploadId))).toBe(false);
+  });
 });
 
 describe('cancel and the copies nothing reads', () => {

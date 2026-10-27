@@ -156,8 +156,9 @@ export interface ArchiveUploads {
    * Streams one file, or one piece of it, into the upload. A file sent whole is `offset` 0 and `final` (the defaults);
    * a larger one comes as pieces in order, each at the `offset` the earlier ones ended at, the last one `final`. Resolves with
    * the bytes written once the stream has ended; a file whose piece breaks is deleted whole, and is sent again from its start.
+   * `signal` is the request's: once the sender has gone, a wait for disk space ends instead of keeping the upload alive.
    */
-  receive(uploadId: string, relPath: string, body: ReadableStream<Uint8Array> | null, options?: { modified?: number; declaredBytes?: number; offset?: number; final?: boolean }): Promise<{ bytes: number }>;
+  receive(uploadId: string, relPath: string, body: ReadableStream<Uint8Array> | null, options?: { modified?: number; declaredBytes?: number; offset?: number; final?: boolean; signal?: AbortSignal }): Promise<{ bytes: number }>;
   status(uploadId: string): ArchiveUploadStatus;
   /**
    * Stops what is running and removes the staging copy, unless `keep` says an
@@ -225,12 +226,13 @@ export function createArchiveUploads(options: ArchiveUploadsOptions): ArchiveUpl
     rmSync(found.dir, { recursive: true, force: true });
   };
 
-  // Waits while the disk has less than the headroom beyond `needed`; false when the upload was cancelled meanwhile.
-  const roomFor = async (found: Session, needed: number): Promise<boolean> => {
+  // Waits while the disk has less than the headroom beyond `needed`; false when the upload was cancelled or its sender went
+  // meanwhile. A wait refreshes the upload's last touch, so one nobody can finish any more must end here for the sweep to take it.
+  const roomFor = async (found: Session, needed: number, signal: AbortSignal | undefined): Promise<boolean> => {
     let waited = false;
     try {
       for (;;) {
-        if (found.cancelled || closed) return false;
+        if (found.cancelled || closed || signal?.aborted) return false;
         let free: number;
         try {
           free = freeBytes(found.files);
@@ -292,7 +294,7 @@ export function createArchiveUploads(options: ArchiveUploadsOptions): ArchiveUpl
       }
       target = join(parent, segments[segments.length - 1]!);
       if (!contained(found.files, resolve(target))) throw new ArchiveUploadError('bad_path', ARCHIVE_UPLOAD_COPY.bad_path);
-      if (!(await roomFor(found, declared !== undefined && Number.isFinite(declared) && declared > 0 ? declared : 0))) {
+      if (!(await roomFor(found, declared !== undefined && Number.isFinite(declared) && declared > 0 ? declared : 0, receiveOptions.signal))) {
         throw new ArchiveUploadError('cancelled', ARCHIVE_UPLOAD_COPY.cancelled, 409);
       }
       try {
@@ -326,7 +328,7 @@ export function createArchiveUploads(options: ArchiveUploadsOptions): ArchiveUpl
           sinceCheck += chunk.byteLength;
           if (sinceCheck >= SPACE_CHECK_EVERY_BYTES) {
             sinceCheck = 0;
-            if (!(await roomFor(found, chunk.byteLength))) throw new ArchiveUploadError('cancelled', ARCHIVE_UPLOAD_COPY.cancelled, 409);
+            if (!(await roomFor(found, chunk.byteLength, receiveOptions.signal))) throw new ArchiveUploadError('cancelled', ARCHIVE_UPLOAD_COPY.cancelled, 409);
           }
           try {
             // Awaited, a whole chunk at a time: the sender waits for the disk.

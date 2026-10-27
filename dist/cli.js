@@ -5375,7 +5375,8 @@ class LinuxOwnerBridge {
         method: request.method,
         headers,
         ...body !== undefined ? { body, duplex: "half" } : {},
-        redirect: "manual"
+        redirect: "manual",
+        ...typeof body === "object" ? { signal: request.signal } : {}
       }));
     } catch {
       return this.live() ? restarting() : refusal(503);
@@ -140525,11 +140526,11 @@ function createArchiveUploads(options) {
     sessions.delete(found.id);
     rmSync34(found.dir, { recursive: true, force: true });
   };
-  const roomFor = async (found, needed) => {
+  const roomFor = async (found, needed, signal) => {
     let waited = false;
     try {
       for (;; ) {
-        if (found.cancelled || closed)
+        if (found.cancelled || closed || signal?.aborted)
           return false;
         let free;
         try {
@@ -140600,7 +140601,7 @@ function createArchiveUploads(options) {
       target = join115(parent, segments[segments.length - 1]);
       if (!contained(found.files, resolve23(target)))
         throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
-      if (!await roomFor(found, declared !== undefined && Number.isFinite(declared) && declared > 0 ? declared : 0)) {
+      if (!await roomFor(found, declared !== undefined && Number.isFinite(declared) && declared > 0 ? declared : 0, receiveOptions.signal)) {
         throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
       }
       try {
@@ -140633,7 +140634,7 @@ function createArchiveUploads(options) {
           sinceCheck += chunk.byteLength;
           if (sinceCheck >= SPACE_CHECK_EVERY_BYTES) {
             sinceCheck = 0;
-            if (!await roomFor(found, chunk.byteLength))
+            if (!await roomFor(found, chunk.byteLength, receiveOptions.signal))
               throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
           }
           try {
@@ -155618,7 +155619,8 @@ function createEmailSourceWorker(options = {}) {
                 ...Number.isFinite(modified) && modified > 0 ? { modified } : {},
                 ...Number.isFinite(declared) && declared > 0 ? { declaredBytes: declared } : {},
                 offset,
-                final
+                final,
+                signal: request.signal
               });
               return json({ ok: true, bytes: received.bytes });
             } catch (error2) {
