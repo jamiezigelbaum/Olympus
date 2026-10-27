@@ -44,7 +44,8 @@ import {
 import { configWithEnvironmentOverrides, defaultConfig } from '../src/core/config.ts';
 import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
 import { ScopeFileReader } from '../src/core/scope-safe-fs.ts';
-import { defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
+import { ArchiveImportStateStore, defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
+import { forgetSourceArchiveImports } from '../src/workers/archive-import/forget.ts';
 import { runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath, type ArchiveImportApproval } from '../src/workers/archive-import/requests.ts';
 import { archiveManifestSha256 } from '../src/workers/archive-import/manifest.ts';
@@ -1182,6 +1183,35 @@ describe('a dropped archive', () => {
     const result = deleteOlympusDataWithCustody({ sourceId: 'archive.imports', homeDir: home, env, connectedRegistry: { version: 1, handles: [] } });
     expect(result.removed).toContain(join(olympusDataRoot(env), 'archive-staging'));
     expect(existsSync(copy)).toBe(false);
+  });
+
+  test('deleting the source an import joined takes that import\'s copy, with the worker stopped; another import\'s stays', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'archive-staging-forget-')));
+    cleanups.push(() => rmSync(base, { recursive: true, force: true }));
+    const env = { HOME: join(base, 'home'), XDG_DATA_HOME: join(base, 'xdg') };
+    const statePath = defaultArchiveImportStatePath(env);
+    const state = new ArchiveImportStateStore({ path: statePath, env });
+    const copy = (uploadId: string): string => {
+      const files = join(archiveStateSiblingPath(statePath, 'archive-staging'), uploadId, 'files');
+      mkdirSync(files, { recursive: true });
+      writeFileSync(join(files, 'Takeout.mbox'), mbox([mail(0)]));
+      return files;
+    };
+    const record = (root: string, target?: { source_id: string; slot: string }) => state.create({
+      format: 'mbox', provider: 'google', family: 'mail', label: 'Takeout.mbox', root_path: root,
+      root_identity: { dev: '1', ino: '1' }, chosen_rel_path: 'Takeout.mbox', manifest_sha256: 'x',
+      files: [{ rel_path: 'Takeout.mbox', dev: '1', ino: '2', size: 1, mtime_ms: 0, fingerprint: { head_sha256: 'x', tail_sha256: 'x' } }],
+      ...(target ? { target } : {}),
+    });
+    const joined = copy('upload-joined');
+    const own = copy('upload-own');
+    record(joined, { source_id: 'gmail.mail', slot: '1' });
+    record(own);
+    expect(forgetSourceArchiveImports(env, ['gmail.mail'], { dryRun: true })).toBe(1);
+    expect(existsSync(joined)).toBe(true);
+    expect(forgetSourceArchiveImports(env, ['gmail.mail'])).toBe(1);
+    expect(existsSync(dirname(joined))).toBe(false);
+    expect(existsSync(own)).toBe(true);
   });
 
   test('a folder is imported as one archive from the copy of the whole folder', async () => {

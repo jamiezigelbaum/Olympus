@@ -21645,6 +21645,7 @@ var init_continuation_cache = __esm(() => {
 
 // src/workers/archive-import/forget.ts
 var init_forget = __esm(() => {
+  init_olympus_layout();
   init_continuation_cache();
   init_media_bindings();
   init_state();
