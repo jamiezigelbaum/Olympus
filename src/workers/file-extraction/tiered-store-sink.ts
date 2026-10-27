@@ -30,7 +30,7 @@ import {
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import { classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
-import { copyServingLayer, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
+import { copyServingLayer, isFailSafeMissingContentQuestion, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import { parentNamesContext } from '../connector-store/parent-context.ts';
 import { secretFencedSniffer, type ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
@@ -178,8 +178,15 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       // it was judged. None: the picture is unjudged and its content Private.
       const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
       // The lane's hold, or the one the listing-time decision recorded.
+      // An item settled fail-safe Private for a content question that could not
+      // exist yet (its text had not been read) is still owed a verdict: its
+      // text is judged now and held Private meanwhile, never placed lower on
+      // a Personal-first guess. Held that way (pending, hidden from search and
+      // embedding) it is placed like any held item, so the store accepts it.
+      const settledUnread = !record.contentRead
+        && record.reasons.some(isFailSafeMissingContentQuestion);
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true
-        || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
+        || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
       const content = classifyContentTier(
         {
