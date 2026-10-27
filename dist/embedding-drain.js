@@ -50432,6 +50432,7 @@ init_google_connectors();
 
 // src/workers/google-connectors/gmail-archive-target.ts
 init_provider_account_identity();
+init_source_inputs();
 init_manifest3();
 
 // src/workers/archive-import/mbox/gmail-account.ts
