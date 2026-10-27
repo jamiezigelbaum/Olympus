@@ -534,8 +534,8 @@ describe('review fixes, round 2 (Astra, #545)', () => {
       const sync = createTelegramConnectorStoreSyncHandler({ stores: s, spoolDir: dir, maxItems: 1 });
       const counts: Array<number | undefined> = [];
       const count = () => s.internal.itemReactions(`${ACCOUNT}:chat-1:A`)?.[0]?.count;
-      await sync.pull();
-      await sync.pull();
+      // A one-item budget takes a message and its media child over two passes (the spine resumes inside the record).
+      for (let pull = 0; pull < 4; pull += 1) await sync.pull();
       counts.push(count());
       // The file the cursor stands in is pruned, more capture lands, and the lanes read from the start, again and again.
       for (let day = 22; day <= 25; day += 1) {
@@ -548,7 +548,7 @@ describe('review fixes, round 2 (Astra, #545)', () => {
           counts.push(count());
         }
       }
-      expect(counts.every((value) => value === 2)).toBe(true);
+      expect(counts).toEqual(counts.map(() => 2));
     } finally {
       s.close();
     }

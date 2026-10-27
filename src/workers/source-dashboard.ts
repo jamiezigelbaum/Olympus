@@ -49,6 +49,7 @@ import {
   DASHBOARD_STORAGE_NOTICE_COPY,
   DASHBOARD_CAPTURE_STALE_LABEL,
   DASHBOARD_MANY_UNREADABLE_LABEL,
+  DASHBOARD_MEDIA_STORAGE_COPY,
   dashboardCaptureProblem,
   dashboardNoneReadSentence,
 } from './dashboard/vocabulary.ts';
@@ -868,6 +869,11 @@ export interface DashboardCaptureRuntime {
   paired_at?: string;
 }
 
+export interface DashboardMediaStorage {
+  /** The computer's disk is under the floor where new media downloads pause. No counts (owner ruling, 2026-08-24). */
+  state: 'disk_low';
+}
+
 export interface DashboardSourceCard {
   corpus_id: string;
   source_id: string;
@@ -1147,6 +1153,15 @@ export interface DashboardSourceCard {
    * places. Whatever else the card says, this is a Needs you row.
    */
   storage_notice?: { kind: SourceStorageNoticeKind; next_action: string };
+  /**
+   * The computer's disk is nearly full, so the media this source keeps beside
+   * its captured messages waits to download (owner, 2026-10-26: every message
+   * and every media file is ingested; the one safeguard is a free-disk floor).
+   * Messages still arrive; the waiting media downloads on its own once space is
+   * freed. Read from the last sync's receipt count `media_disk_low`, which any
+   * source that keeps media may publish. Absent when the disk has room.
+   */
+  media_storage?: DashboardMediaStorage;
   /**
    * The metadata-sync phase's own folder-walk evidence, when the corpus
    * publishes it (`metadata_sync_folders_*`).
@@ -2793,6 +2808,7 @@ function sourceCardFromDefinition(
     : baseQueue;
   const refreshFreshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
   const captureFreshness = schedulerCaptureFreshness(schedulers, now, capturePairedAt);
+  const mediaStorage = schedulerMediaStorage(schedulers);
   const freshness = captureFreshness ? { ...refreshFreshness, capture: captureFreshness } : refreshFreshness;
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === 'embedding_lane_disabled');
   const schedule = scheduleFromSchedulers(schedulers);
@@ -2970,6 +2986,7 @@ function sourceCardFromDefinition(
     ...(embeddingLaneDisabled ? { embedding_lane_state: 'embedding_lane_disabled' as const } : {}),
     ...(vlmQueued !== undefined ? { vlm_extraction_queued: vlmQueued } : {}),
     ...(ingestionLedgerRow?.attention.length ? { attention_reasons: [...ingestionLedgerRow.attention] } : {}),
+    ...(mediaStorage ? { media_storage: mediaStorage } : {}),
     ...(metadataSync ? { metadata_sync: metadataSync } : {}),
     ...(definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {}),
     ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
@@ -3106,6 +3123,15 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
         : captureProblem.cause === 'disk'
           ? DASHBOARD_CAPTURE_COPY.nextAction.disk(card.label)
           : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
+      dependencies,
+    };
+  }
+  // The computer's disk is nearly full: messages still arrive, their new photos and files wait to download.
+  if (card.media_storage && card.answer_readiness.state !== 'needs_attention') {
+    return {
+      stage: 'source_health',
+      condition: 'degraded',
+      next_action: DASHBOARD_MEDIA_STORAGE_COPY.nextAction(card.label),
       dependencies,
     };
   }
@@ -5049,6 +5075,21 @@ function schedulerCaptureFreshness(
     }
   }
   return worst && mediaWaiting ? { ...worst, media_waiting_for_disk: true } : worst;
+}
+
+/**
+ * Whether a source's media waits for disk space, from the receipt counts of
+ * each sync task's last successful pull: any task reporting it makes the card
+ * say so.
+ */
+function schedulerMediaStorage(schedulers: readonly SourceSchedulerSourceStatus[]): DashboardMediaStorage | undefined {
+  for (const scheduler of new Set(schedulers)) {
+    for (const task of scheduler.tasks) {
+      const counts = task.last_result?.counts;
+      if (task.kind === 'sync' && counts && task.last_result?.status !== 'failed' && counts.media_disk_low === 1) return { state: 'disk_low' };
+    }
+  }
+  return undefined;
 }
 
 /** A feed's verdict, read against when the current pairing began (see schedulerCaptureFreshness). */
