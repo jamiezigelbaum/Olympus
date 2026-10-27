@@ -410,8 +410,18 @@ describe('WhatsApp live reaction capture', () => {
         + reactionLine({ id: 'react-2', target: 'old-2' }),
     });
 
+    // A limit is the listing's whole item budget: each listing stops at it, and the next goes on from its cursor.
     const pages: SourceConnectorListPage[] = [];
-    for await (const page of connectorFor(dir).listItems({ limit: 2 })) pages.push(page);
+    let cursor: string | undefined;
+    for (let listing = 0; listing < 10; listing += 1) {
+      let last: SourceConnectorListPage | undefined;
+      for await (const page of connectorFor(dir).listItems({ limit: 2, ...(cursor ? { cursor } : {}) })) {
+        pages.push(page);
+        last = page;
+      }
+      if (!last || last.done) break;
+      cursor = last.nextCursor;
+    }
     for (const page of pages) {
       // A page longer than the caller's limit is abandoned mid-page by the
       // store, which pins the cursor and replays the same page forever.

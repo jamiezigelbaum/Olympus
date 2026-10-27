@@ -250,7 +250,7 @@ its own.
 | Stage | Kept | From | Why |
 |---|---|---|---|
 | Reading | chunked streaming, a bound per record and per pass, damage reported as a finding | archive | live Telegram re-reads whole spool files from its cursor each page and fails once the files one read visits pass 768 MB; live WhatsApp scans its whole spool for freshness each pull, with no byte bound; neither prunes |
-| Resume | a cursor bound to its input's version, with named stop codes | archive | a missing Telegram cursor wedges its lane; a WhatsApp cursor whose file vanished silently skips the rest |
+| Resume | a cursor bound to its input's version, with named stop codes | archive | a missing Telegram cursor wedges its lane; a WhatsApp cursor whose file was replaced by a shorter one silently skipped that file's first lines, and one whose file vanished went on with no count (corrected 2026-10-25: the draft said the vanished case skips the rest; it resumes at the next file) |
 | Identity and versions | account, chat and message ids; a version that tracks edits and reactions, with explicit clears | live | archive Telegram ids hash file positions, WhatsApp's hash time, sender, text and occurrence, mbox's the raw message, and versions hash text, so a second export of the same chat would not match |
 | Item text | service messages as items, sender names, forward names, captions | archive (Telegram), new (WhatsApp) | live Telegram's search context left out the chat and sender names the helper records (its explicit search text was the words alone), wrote a service message as an empty item and a forward as a bare flag; the WhatsApp bridge drops captions. Neither Telegram input has a reply's sender name: the export gives only the replied-to message id, as live does (corrected 2026-10-25; this row said "reply names") |
 | Privacy signals | chat id as the folder key, priors, protected floors, owner chat rules | live | archive copies today carry file positions as folder keys, so an owner rule on a chat never reached its imported history |
@@ -292,6 +292,9 @@ Each source's Import an archive appears as its step registers it.
    fixture source that has a live and an archive input (see "Built, step 2").
 3. Live capture fixes from "Best of both", each with its own tests:
    streaming spool reads with bounds, cursor recovery, counted bridge
+   drops, WhatsApp captions, freshness told apart from quiet. WhatsApp part
+   built (see "Built, step 3: WhatsApp").
+
    drops, WhatsApp captions, freshness told apart from quiet. Telegram's
    part built (see "Built, step 3: Telegram"); WhatsApp's in its own lane.
 4. Telegram: the export becomes an input of the Telegram connector (exact
@@ -463,6 +466,152 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   which M were already there"), advanced under the position of the record it
   last read so a replay after a crash counts each record once; the card counts
   each item once.
+
+## Built, step 3: WhatsApp
+
+Live WhatsApp capture, with no change to identities or stores
+(`src/workers/whatsapp/spool-reader.ts`, `spool-index.ts`,
+`live-connector.ts`, `store-sync.ts`,
+`tools/whatsapp-bridge/capture_status.go`; tests in
+`test/whatsapp-live-capture-fixes.test.ts`,
+`test/whatsapp-live-review-fixes.test.ts` and
+`tools/whatsapp-bridge/capture_status_test.go`).
+
+- **The spool contract.** A spool file is append-only for every writer but
+  one: the bridge only appends whole lines, and Olympus's own clearing of
+  Secrets rewrites a line in place at its own length, updating what it
+  keeps of the file (what was cleared, the index's record) in the same step,
+  so its rewrite never reads as a break. Anything else breaks the contract
+  (a file replaced, cut and written again, edited) and is caught cheaply: at
+  every boundary kept in a file (cleared-through, indexed-through) the
+  digest of the 4 KiB ending there is kept too, and is read again before the
+  boundary is trusted (`connector-store/spool-file-identity.ts`). A mismatch
+  is a file read again from its start, keeping none of its old boundaries:
+  cleared again in full from byte 0, its index rows rebuilt, and the
+  listing's cursor moved back to it. Detected: a file replaced, cut shorter
+  than a boundary, or rewritten in the 4 KiB before one. Not detected: a
+  rewrite in place elsewhere in the file by anything but the bridge or
+  Olympus; finding it would mean reading the whole prefix on every pass,
+  which the read bounds forbid, so the contract is held by who can write:
+  the spool folder is the owner's alone (0700, files 0600, the bridge
+  making it so at start), written only by the bridge and by Olympus.
+  Index rows, the files' records and the high-water mark commit in one
+  transaction. A boundary and its receipt (the offset and the digest that ends there)
+  are one record, written in one step, so a boundary is never trusted at an
+  offset its receipt was not taken for: a crash before clearing records its
+  new boundary leaves the old record, whose window is checked on the next
+  pull. The listing's cursor carries no receipt and is never what decides
+  whether a Secret is cleared; clearing's own record does. A boundary is
+  what a scan reached, fixed before the scan starts (the lines the file held
+  then, or the cursor's), never recounted after: a line appended while
+  clearing runs is owed to the next pull. A listing reset (a file replaced,
+  cut or rewritten under a cursor, or the disposable index rebuilt, since it
+  then no longer knows what the files held) adds one to a single durable
+  counter beside the spool (`spool-resets.ts`), written before the index
+  forgets anything. Every cursor carries the count as `~r<count>`; a cursor
+  with another count, or none, reads the whole spool again from its start.
+  That is safe because intake is idempotent by identity and version, and a
+  reset is rare enough for a full replay to be cheap. Nothing is owed or
+  settled per reader: a reader is caught up when its cursor carries the
+  current count, so one reader catching up never affects another, and a pass
+  that fails before its cursor commits reads the spool again. A counter or
+  index that cannot be opened fails the listing before anything is forgotten,
+  and no cursor is handed out; the first index build the counter sees counts
+  as a reset too. Clearing the Secrets already known never waits on a
+  replay: a file past the cursor that was never cleared, or no longer holds
+  what clearing recorded of it, is cleared of them from its start on the
+  next pull, whatever the cursor or item limit (bounded by bytes, one whole
+  file at least), with none of its lines certified for a later judgment. Every
+  other durable write that comes before the one
+  that depends on it is safe to repeat: a Secrets rewrite before its cleared
+  record (redone, the same rewrite), the index's rows before the tier set's
+  cursor (read again from the old cursor, the rows already there), the match
+  ledger's ids and aliases before the store (the same ids again), and the
+  index's refresh after clearing (a missed refresh reads as a replacement,
+  counted and read again).
+- **One builder, the intake rule.** The spool is the WhatsApp connector's
+  live input: its records become items through the connector's one record
+  builder under the shared intake rule (`core/source-inputs.ts`), versions
+  ordered by the message's time. A record read again (a recovered cursor, a
+  redelivery) never replaces a newer version the stores hold. A record that
+  restates a message's reactions applies at the same version, as live's word.
+- **Streaming reads with bounds.** A spool file is read in 256 KiB chunks
+  from the resume point, never whole. The cursor is `<file>:<lines>@<offset>`
+  and a resume seeks to the offset (a cursor from before offsets is resolved
+  by counting its lines once). Every byte read is spent from the pull's
+  budget (64 MiB), and a read pauses once it is spent: between records, or
+  inside an over-long record (over 1 MiB), which is never held, is counted
+  once (`oversized_spool_records`) and is skipped on from the place the
+  cursor names (`…@<offset>s`), never read again. A record within the bound
+  is finished before a pause, so a pull reads at most its budget plus one
+  record's bound. The pull no longer scans the whole spool for its receipt:
+  the newest message time is read back from the end of the spool (4 MiB at
+  most), and malformed lines and unresolved reactions are counted for what
+  this pull read.
+- **Reactions from a persistent index.** `spool-index.sqlite` beside the
+  spool keeps each message's newest line (by position) and each actor's
+  current reaction to each message, built as the listing reads, within its
+  budget; an index started on an existing spool catches up from the spool's
+  start, a budget at a time, before a page is aggregated. A page's reactions
+  are aggregated from a few rows and the reacted-to message is read from its
+  one line; memory does not grow with the spool's history. The index holds
+  ids, positions and reactions, never a message's text, and is a cache:
+  deleting it costs one catch-up. `fetchItem` reads from it too, and scans
+  the spool only for a message the index does not hold. Each indexed file
+  is known by its identity (device, inode, birth time where the platform
+  keeps one, and a digest of its first line, so a replacement on a reused
+  inode is told apart; the time of the last change is left out, since every
+  append changes it) and its size, and every listing
+  reconciles the index with the files that are there before trusting it: a
+  file that is gone loses its rows (its reactions stop counting), and one
+  put in another's place, even of the same length, is indexed again. A
+  reacted-to message is read from its one line in 4 KiB steps, out of the
+  same budget as the rest of the pass, so a page of many reactions pauses
+  like any other.
+- **Cursor recovery.** A cursor's file only grows, so one shorter than its
+  cursor, or where the cursor's offset is not the start of a line, was
+  replaced (the spool folder removed and capture started again the same
+  day): it is read again from its start, its index rows dropped, and
+  counted (`spool_cursor_recovered`); the intake rule keeps what the stores
+  hold newer. A cursor whose file has gone is counted
+  (`spool_cursor_file_missing`) and listing goes on at the next file. Not
+  covered: a replaced file whose bytes at the old offset happen to start a
+  line, and a file named earlier than the cursor's (a clock set back).
+- **Secrets clearing.** The shared rewrite streams its files
+  (`connector-store/capture-spool-secrets.ts`, from the Telegram lane). What
+  was cleared is kept per file, by the file's identity and size, never by a
+  line number alone: a file is owed again from its start whenever its
+  identity changed (a replacement, a cursor reset) or it is shorter than
+  when it was cleared, and an appended file from the line clearing reached.
+  Every pull clears whatever it owes, however little it read, and records a
+  file only once its clearing succeeded; a pull that owes nothing reads no
+  spool file. The whole-spool pass still runs when the set of Secrets
+  changed. A seeded test runs appends, prunes, replacements (same and other
+  length, inodes reused), failed cleanups and cursor resets, and checks that
+  no known Secret survives a pull that succeeded and that no reaction from a
+  file that is gone is emitted (`test/whatsapp-spool-bookkeeping.test.ts`).
+- **Counted bridge drops.** The bridge writes `spool/capture-status.json`
+  every minute and on connect and disconnect: connected, the last time it
+  knew it was connected, and the messages a full queue dropped, carried
+  across restarts. The pull reports the count (`capture_dropped_messages`)
+  and warns while the last drop is within the stale threshold.
+- **Captions.** The bridge keeps the caption of a photo, video, video note
+  or document as the line's text, and spools a document sent with a caption
+  (before, it was taken for protocol noise and not spooled at all). The
+  connector reads a captioned media line as a text item with its media type
+  kept; Secrets are judged and cleared on the caption like any text.
+- **Freshness told apart from quiet, and from stopped.** `captureLiveness`
+  in `connector-store/capture-freshness.ts` ages a feed by the newer of its
+  newest message and the bridge's last connected time, and reports
+  `capture_quiet` when the bridge is connected and no message arrived within
+  the threshold. A bridge that says it is disconnected for more than ten
+  minutes is stale and stopped (`capture_stopped`, warning
+  `whatsapp_capture_disconnected`), never quiet; the stale route on the card
+  is to open WhatsApp on this computer and link it. A bridge that writes no
+  receipt is judged by its newest message, as before. The Telegram lane
+  adopts the same rule.
+  Open: the dashboard's stale wording says "newest message" for an age that
+  can now be the bridge's last connected time.
 
 ## Built, step 3: Telegram
 

@@ -9,7 +9,16 @@
  * boundary a reader records, it keeps the digest of the 4 KiB that end there
  * (`spoolBoundaryDigest`), and before it trusts the boundary it reads that
  * window again and compares. A mismatch is a file to read again from its
- * start.
+ * start, keeping none of its old boundaries.
+ *
+ * What is detected: a file replaced (another inode, or the same inode with
+ * another first line), a file cut shorter than a boundary, and a rewrite that
+ * touches the 4 KiB before a boundary. What is not: a rewrite in place,
+ * elsewhere in the file, by something other than the capture helper or
+ * Olympus's clearing. Finding that would mean reading the whole prefix again
+ * on every pass, which the read bounds forbid; the contract is held instead
+ * by who can write: the spool folder is the owner's alone (0700, files
+ * 0600), written only by the helper and by Olympus.
  *
  * Which file a capture spool's file is: the identity a cursor or an index
  * binds to, so a file removed and put back (a spool folder deleted and
