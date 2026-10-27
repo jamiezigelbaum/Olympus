@@ -36,10 +36,17 @@ export interface ReleaseInput {
   /**
    * Absent: the item itself was read. `names`: only the item's NAMES were in
    * front of a model, as a child citation's parent label (core/parent-label.ts).
-   * Such an input is judged on the item's names tier alone, its content never
-   * limits the answer, and it never stands for a cited item.
+   * Such an input is judged on the item's names tier alone, and its content
+   * never limits the answer. A names-only evidence candidate (a Private file
+   * whose names stay Personal) is one too, and it may be cited.
    */
   layer?: 'names';
+  /**
+   * `parent_label`: the input is a child citation's parent label, a
+   * dependency of the answer that never stands for a cited item (its names
+   * may be in the prose, so its loss withholds the whole answer).
+   */
+  dependency?: 'parent_label';
 }
 
 /** The release rules in force when the answer was written. */

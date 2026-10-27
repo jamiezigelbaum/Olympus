@@ -158,16 +158,16 @@ export function createReleaseTierCheck(
         // copies say, and the answer that drew on it is withheld whole.
         const lane = childLane(scope);
         if (lane) {
-          const orphaned = hiddenChildKeys(lane, governed.filter(({ index }) => inputs[index]!.layer !== 'names').map(({ identity }) => identity));
+          const orphaned = hiddenChildKeys(lane, governed.filter(({ index }) => inputs[index]!.dependency !== 'parent_label').map(({ identity }) => identity));
           for (const { index, identity } of governed) {
-            if (inputs[index]!.layer !== 'names' && orphaned.has(tierLedgerIdentityKey(identity))) {
+            if (inputs[index]!.dependency !== 'parent_label' && orphaned.has(tierLedgerIdentityKey(identity))) {
               verdicts[index] = { ...verdicts[index]!, gone: true, hiddenByParent: true };
             }
           }
           // The parent label's names are the parent's own, so they are judged the way the parent's
           // children are, by what its rows say now and not by its ledger copies alone: a parent
           // tombstoned by an absence reconcile keeps its copy rows until the sync that did it ends.
-          const named = governed.filter(({ index }) => inputs[index]!.layer === 'names');
+          const named = governed.filter(({ index }) => inputs[index]!.dependency === 'parent_label');
           if (named.length > 0) {
             const standing = itemVerdicts(lane, named.map(({ identity }) => identity));
             for (const { index, identity } of named) {
