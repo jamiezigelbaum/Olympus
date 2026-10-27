@@ -360,7 +360,8 @@ describe('multi-source source dashboard', () => {
     });
 
     expect(view.summary).toMatchObject({
-      configured_sources: 9,
+      // Nine sources, and the import-only sources' cards (Reflect, Roam, Evernote).
+      configured_sources: 12,
       connected_sources: 3,
       answer_ready_sources: 1,
       needs_attention_sources: 1,
@@ -377,6 +378,10 @@ describe('multi-source source dashboard', () => {
       'Telegram',
       'WhatsApp',
       'Readwise',
+      // The import-only sources' cards (step 7 of archive-live-one-dataset.md).
+      'Reflect',
+      'Roam',
+      'Evernote',
     ]);
     expect(view.sources.find((source) => source.source_id === 'gmail.email')).toMatchObject({
       connection: { state: 'synced', label: 'synced 1 hour ago' },
@@ -1211,7 +1216,8 @@ describe('multi-source source dashboard', () => {
         now: new Date('2026-07-02T11:00:00.000Z'),
       });
 
-      expect(view.history).toMatchObject({ sample_count: 18, eta_available: true });
+      // One sample per card per snapshot: twelve cards (the import-only sources' among them), two snapshots.
+      expect(view.history).toMatchObject({ sample_count: 24, eta_available: true });
       expect(view.sources[0]?.progress).toEqual({
         indexed_items_per_hour: 30,
         eta_minutes: 60,
@@ -1269,7 +1275,8 @@ describe('multi-source source dashboard', () => {
 
     expect(response.status).toBe(200);
     expect(body.kind).toBe('source_dashboard');
-    expect(body.sources).toHaveLength(9);
+    // Nine sources and the import-only sources' cards (Reflect, Roam, Evernote).
+    expect(body.sources).toHaveLength(12);
     expect(body.sources.some((source: { source_id: string }) => source.source_id === 'venice.api')).toBe(false);
     expect(body.answer_lanes).toEqual([
       expect.objectContaining({
@@ -2817,7 +2824,8 @@ describe('dashboard misreporting where private data lives', () => {
     const ledgerKeys = new Set(ledger.rows.map((row) => row.source_id));
 
     const unmatched = DASHBOARD_SUPPORTED_SOURCES
-      .filter((definition) => !ledgerKeys.has(definition.ingestion_ledger_source_id))
+      // An import-only source's card (Reflect, Roam) owns no corpus and has no ledger row: its connection is its imports.
+      .filter((definition) => definition.public_source_id === undefined && !ledgerKeys.has(definition.ingestion_ledger_source_id))
       .map((definition) => `${definition.source_id} -> ${definition.ingestion_ledger_source_id}`);
 
     expect(unmatched).toEqual([]);

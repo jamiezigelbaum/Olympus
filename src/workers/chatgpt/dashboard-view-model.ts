@@ -19,6 +19,7 @@
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { formatSpaceToFree, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import {
+  OPEN_ARCHIVES_SOURCE_ID,
   OPEN_CONNECT_SOURCES,
   openPageUrl,
   openUnreadableSourceFor,
@@ -236,7 +237,10 @@ export function buildChatGptDashboardViewModel(
     const imports = scrubbed.connection.imports_attention ?? [];
     // A first connect the provider refused has nothing behind it: no progress,
     // exactly as an Off source has none, but it stays in Needs you.
+    // A card that is a view of another source's imports (an import-only source: Reflect, Roam) owns no corpus to
+    // measure: each import's progress is shown with it, in the card's list.
     const measured = connecting || vocabularyStatus === 'Off' || refusedFirstConnect(scrubbed) || imports.length > 0
+      || definition.public_source_id !== undefined
       ? undefined
       : measuredSourceProgress(card, scrubbed, embedding,
         // A sign-in already under way is not a signed-out source: its row keeps
@@ -281,7 +285,9 @@ export function buildChatGptDashboardViewModel(
     .filter(({ status }) => status === 'Needs you' || status === 'Failing')
     .flatMap(({ definition, card, actionKind, connecting, progress, sync }) => (card.connection.imports_attention?.length
       ? card.connection.imports_attention.map(importAttentionItem)
-      : [attentionItem(definition, card, actionKind, degraded, connecting, progress, sync)]));
+      : [attentionItem(definition, card, actionKind, degraded, connecting, progress, sync)]))
+    // The same import can be said by two cards (the list of imports cannot be read): once is enough.
+    .filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index);
 
   // Models are status only in ChatGPT (owner decision 2026-10-01): a
   // configured model's fix is to check again; a built-in install that failed
@@ -462,6 +468,8 @@ function sourceEntry(
         ? scopeFix(definition, card)
         : reconnect ?? (late && captureOnly
           ? captureFix(definition)
+          : late && mediaStorageOnly(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) })
+            ? checkAgainFix()
           // Beside another problem the other problem's fix leads when it has
           // one; a chat source has no Sync now, so Check capture is then the row's fix.
           : late ? sync ?? (capture ? captureFix(definition) : undefined)
@@ -597,6 +605,7 @@ function attentionItem(
   // sentence names both; the fix is the other problem's when it has one
   // (Sync now), with Check capture in the row's menu (sourceEntry).
   const captureOnly = captureProblem(card) && dashboardAttentionParts(card, attentionOptions).reason === '';
+  const mediaOnly = mediaStorageOnly(card, attentionOptions);
   // A late or unresponsive source's fix is Sync now where this worker can
   // sync it: Check again only re-read the page (owner, 2026-10-09).
   const fix = scopePending(card) || missingScope(card)
@@ -605,7 +614,9 @@ function attentionItem(
       ? reconnectFix(definition, card)
       : captureOnly
         ? captureFix(definition)
-        : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
+        : mediaOnly
+          ? checkAgainFix()
+          : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 
@@ -631,6 +642,8 @@ function importAttentionItem(entry: DashboardImportAttention): DashboardItem {
       return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
     case 'scheduler':
       return { id: 'archives:scheduler', sentence, fix: helpLinkFix(words.seeWhy, archives) };
+    case 'waiting':
+      return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
     case 'held':
       return {
         id: 'archives:held',
@@ -650,6 +663,15 @@ function importAttentionItem(entry: DashboardImportAttention): DashboardItem {
  */
 function captureProblem(card: DashboardSourceCard): boolean {
   return dashboardCaptureProblem(card) !== undefined;
+}
+
+/**
+ * The computer's disk is nearly full, so the source's new media waits, and
+ * nothing else is wrong. The row's line says what frees it (space on this
+ * computer); Sync now cannot, so the control checks again once space is freed.
+ */
+function mediaStorageOnly(card: DashboardSourceCard, options: Parameters<typeof dashboardAttentionParts>[1]): boolean {
+  return card.media_storage !== undefined && !captureProblem(card) && dashboardAttentionParts(card, options).reason === '';
 }
 
 function captureFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
@@ -1051,7 +1073,9 @@ function oauthSource(definition: DashboardSupportedSourceDefinition): ChatGptOAu
 function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
   // An archive is chosen on the computer it is on: the dashboard there.
   if (definition.connect_action.kind === 'archive_import') {
-    return helpLinkFix(CHATGPT_SETUP_LABELS.importArchive, openPageUrl({ kind: 'dashboard' }));
+    // Other archives imports any export; an import-only source's card (Reflect, Roam), its own exports.
+    const label = definition.source_id === OPEN_ARCHIVES_SOURCE_ID ? CHATGPT_SETUP_LABELS.importArchive : DASHBOARD_ARCHIVE_COPY.sourceImport.action;
+    return helpLinkFix(label, openPageUrl({ kind: 'dashboard' }));
   }
   const source = oauthSource(definition);
   return source
@@ -1254,6 +1278,9 @@ function importsAttention(input: readonly DashboardImportAttention[] | undefined
       out.push({ kind: 'scheduler', setting: entry.setting });
     } else if (entry.kind === 'unreadable') {
       out.push({ kind: 'unreadable', reason: IMPORT_UNREADABLE_REASONS.has(entry.reason) ? entry.reason : 'other' });
+    } else if (entry.kind === 'waiting' && typeof entry.id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)
+      && typeof entry.reason === 'string' && /^[a-z_]{1,64}$/.test(entry.reason) && finite(entry.minimum) && entry.minimum > 0) {
+      out.push({ kind: 'waiting', id: entry.id, name: name(entry.name), reason: entry.reason, minimum: count(entry.minimum) });
     }
   }
   return out.length > 0 ? { imports_attention: out } : {};
@@ -1345,7 +1372,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       // Instructions, redirect URIs and client ids stay on the Mac. Import an
       // archive carries none of them, and its kind words the row's line.
       action: card.connection.action.kind === 'archive_import'
-        ? { kind: 'archive_import', label: 'Import another archive' }
+        ? { kind: 'archive_import', label: card.connection.action.label === 'Import an archive' ? 'Import an archive' : 'Import another archive' }
         : { kind: 'none' },
       handles: [],
       ...(pending && finite(pending.expires_in_minutes)
@@ -1399,6 +1426,8 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } }
       : {}),
     ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
+    // A state only: the words are vocabulary.ts's.
+    ...(card.media_storage?.state === 'disk_low' ? { media_storage: { state: 'disk_low' as const } } : {}),
     ...(card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at)
       && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome)
       ? {

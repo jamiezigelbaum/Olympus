@@ -540,6 +540,12 @@ export interface ComputerDashboardMeta {
    * through Import another archive, under Other archives.
    */
   archiveSources?: ComputerArchiveSourceMeta[];
+  /**
+   * Each import-only source's card (Reflect, Roam: a format no live connector
+   * reads names its card in the format registry): the imports of its formats,
+   * listed as the Archives row lists its own, with Remove. `sourceId` is the card.
+   */
+  archiveCards?: ComputerArchivesMeta[];
 }
 
 /** One source whose card imports its own exports. */

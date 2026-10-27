@@ -244,6 +244,8 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   // owner's whatever the readiness label says: another problem's label must
   // not be what decides whether this one is seen.
   if (dashboardCaptureProblem(source) !== undefined) return { status: 'Needs you', mappedUnknown: false };
+  // The computer's disk is nearly full: new media waits to download until the owner frees space.
+  if (source.media_storage) return { status: 'Needs you', mappedUnknown: false };
   // A folder source that is connected but has no approved scope has read
   // nothing and will read nothing until the owner chooses folders. Its
   // connection state is `connected`, which alone reads Fresh — a green dot and
@@ -396,15 +398,20 @@ export function dashboardSubLine(
     case 'Failing':
       return dashboardAttentionLine(source, options);
     case 'Working':
-      return workingLine(source);
+      // A card with no corpus of its own whose connection is its imports (an import-only source) says what they do.
+      return source.connection.action.kind === 'archive_import' && source.coverage.indexed_items === 0 && source.connection.label
+        ? source.connection.label
+        : workingLine(source);
     case 'Waiting':
       return waitingLine(source);
     case 'Fresh':
       return freshLine(source, options?.now ?? new Date());
     case 'Off':
       // Not connected with indexed data left: disconnected on purpose, data
-      // kept (owner ruling, 2026-10-23), not a lost sign-in.
+      // kept (owner ruling, 2026-10-23), not a lost sign-in. A card whose
+      // connection is its imports has no account to disconnect: its line is its imports'.
       return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source)
+        && source.connection.action.kind !== 'archive_import'
         && !dashboardUnsettledWithData(source)
         ? DASHBOARD_DISCONNECTED_DATA_KEPT
         : source.connection.label;
@@ -431,14 +438,15 @@ export function dashboardAttentionLine(
   source: DashboardSourceCard,
   options?: DashboardVocabularyOptions,
 ): string {
-  const { reason, capture } = dashboardAttentionParts(source, options);
-  return [reason, capture].filter((part): part is string => !!part).join(' · ');
+  const { reason, capture, media } = dashboardAttentionParts(source, options);
+  return [reason, capture, media].filter((part): part is string => !!part).join(' · ');
 }
 
 /**
- * The attention line in its two independent halves: `reason`, the source's
- * own problem (empty when it has none besides capture), and `capture`, the
- * live feed's problem when there is one. A row states both in its one line;
+ * The attention line in its independent parts: `reason`, the source's
+ * own problem (empty when it has none besides capture), `capture`, the
+ * live feed's problem when there is one, and `media`, when the media it keeps
+ * has filled its storage. A row states both in its one line;
  * the Needs you list gives each its own item and its own route, because the
  * route for a late refresh (Sync now) is not the route for a feed that stopped
  * (open the source on the computer). Neither hides the other.
@@ -446,9 +454,15 @@ export function dashboardAttentionLine(
 export function dashboardAttentionParts(
   source: DashboardSourceCard,
   options?: DashboardVocabularyOptions,
-): { reason: string; capture?: string } {
+): { reason: string; capture?: string; media?: string } {
   const capture = dashboardCaptureAttentionReason(source);
-  const withCapture = (reason: string): { reason: string; capture?: string } => (capture ? { reason, capture } : { reason });
+  // Kept media that filled its storage: a third half, beside whatever else the source has.
+  const media = source.media_storage ? DASHBOARD_MEDIA_STORAGE_COPY.reason : undefined;
+  const withCapture = (reason: string): { reason: string; capture?: string; media?: string } => ({
+    reason,
+    ...(capture ? { capture } : {}),
+    ...(media ? { media } : {}),
+  });
   const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
@@ -562,6 +576,18 @@ export const DASHBOARD_STORAGE_NOTICE_COPY = {
     unreadable: (label: string) => `Olympus cannot open the folder where ${label}'s files are, so it cannot move them. Ask your agent to check that your user account may open Olympus's data folder.`,
     in_the_way: (label: string) => `${label}'s files are where they have always been and in their own folder too, so Olympus moved nothing. Ask your agent to compare the two before anything is moved.`,
   },
+} as const;
+
+/**
+ * The computer's disk is nearly full, so a source's new media waits to
+ * download (DashboardSourceCard `media_storage`; owner, 2026-10-26). `reason`
+ * is the clause after the source's name on its row, with no counts (owner
+ * ruling, 2026-08-24); `nextAction` is the step on its setup sheet.
+ */
+export const DASHBOARD_MEDIA_STORAGE_COPY = {
+  reason: 'the computer\'s disk is nearly full; new media will download once space is freed',
+  nextAction: (label: string) => `This computer's disk is nearly full, so new photos and files from ${label} wait to download. `
+    + 'Messages still arrive. Free space on this computer, and the waiting media downloads on its own.',
 } as const;
 
 /** The view model's readiness labels that name a cause, in the owner's words. */
@@ -2233,8 +2259,19 @@ export const DASHBOARD_ARCHIVE_COPY = {
     // Old records only (a message used to be cut at a million characters; nothing is cut now).
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
+    mail_for_another_account: { one: '1 message delivered to another address left out', many: '{n} messages delivered to another address left out' },
+    // Why an import waits (the record's `waiting`): for a limit too small, {n} is the least it must be.
+    gmail_budget_too_small: {
+      one: 'Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.',
+      many: 'Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.',
+    },
+    gmail_import_allowance_spent: { one: "Waiting until tomorrow: imports have used their share of today's Gmail requests.", many: "Waiting until tomorrow: imports have used their share of today's Gmail requests." },
+    gmail_requests_spent: { one: "Waiting until tomorrow: today's Gmail requests are used up.", many: "Waiting until tomorrow: today's Gmail requests are used up." },
+    gmail_labels_unavailable: { one: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.", many: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now." },
     system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
     message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
+    // WhatsApp export beside live capture (whatsapp/archive-input.ts).
+    match_near_miss: { one: '1 message may also be in the live chat, shown differently there (a renamed contact, an edited caption), so it was kept as its own', many: '{n} messages may also be in the live chat, shown differently there (a renamed contact, an edited caption), so each was kept as its own' },
     // Old records only (the status updates chat used to be left out; it is read like any chat now).
     status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
     // Notes exports (Reflect, Roam): archive-import/notes/note.ts NOTE_FINDINGS.
@@ -2307,10 +2344,16 @@ export const DASHBOARD_ARCHIVE_COPY = {
     attachments_not_read: 'not_imported',
     text_cut: 'not_imported',
     spam_or_trash: 'not_imported',
+    mail_for_another_account: 'not_imported',
+    gmail_budget_too_small: 'not_imported',
+    gmail_import_allowance_spent: 'not_imported',
+    gmail_requests_spent: 'not_imported',
+    gmail_labels_unavailable: 'not_imported',
     // Chats (WhatsApp, Telegram).
     message_content_unsupported: 'not_imported',
     system_message: 'how_read',
     message_empty: 'how_read',
+    match_near_miss: 'how_read',
     message_without_text: 'how_read',
     status_updates: 'not_imported',
     service_message: 'not_imported',
@@ -2381,6 +2424,11 @@ export const DASHBOARD_ARCHIVE_COPY = {
     },
     held: { one: '1 imported item waits for the private model', many: '{n} imported items wait for the private model' },
     unreadable: "Olympus can't read its list of imported archives",
+    /** An import waits for a limit the owner must raise; {n} is the least it must be. */
+    waiting: {
+      gmail_budget_too_small: "An import waits: {name}. The daily limit on Gmail requests is too low; set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more",
+      other: 'An import waits: {name}',
+    },
     seeWhy: 'See why',
     review: 'Review',
     setUp: 'Set up the private model',
@@ -2429,6 +2477,10 @@ export function dashboardImportAttentionSentence(entry: DashboardImportAttention
       return entry.count === 1 ? words.held.one : words.held.many.replace('{n}', dashboardCount(entry.count));
     case 'unreadable':
       return words.unreadable;
+    case 'waiting': {
+      const template = entry.reason === 'gmail_budget_too_small' ? words.waiting.gmail_budget_too_small : words.waiting.other;
+      return template.replace('{name}', () => displayText(entry.name)).replace('{n}', dashboardCount(entry.minimum));
+    }
   }
 }
 

@@ -102,7 +102,7 @@ describe('fixture tokens', () => {
   });
 
   test('a format besides the first has its own token and file under the same role, and the formats the leg adds are exactly the registry\'s other ones', () => {
-    expect(EXTRA_FORMATS).toEqual(['telegram_json', 'whatsapp_chat', 'reflect-json', 'roam-json']);
+    expect(EXTRA_FORMATS).toEqual(['telegram_json', 'whatsapp_chat', 'reflect-json', 'roam-json', 'evernote-enex']);
     expect(EXTRA_FORMATS).toEqual(Object.keys(ARCHIVE_FORMATS).filter((format) => format !== 'mbox'));
     const mail = legFixture('agent', 'seed-1');
     const chat = legFixture('agent', 'seed-1', 'telegram_json');

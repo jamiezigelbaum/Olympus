@@ -23,8 +23,8 @@
  * machine-agent.ts does the pressing, the waiting, the store reading and the egress watch, and hands back the observations below.
  * Nothing here holds message text: a row is the dashboard's own sentences, counts and names, which are the fixture's.
  */
-import { DASHBOARD_ARCHIVE_COPY as A, DASHBOARD_CHATGPT_PAGE_COPY as PANEL, dashboardArchiveNouns } from '../../src/workers/dashboard/vocabulary.ts';
-import { FIXTURE_FOLDER, STRESS_FORMAT, type ArchiveExpectation, type LegFixture } from './archive-fixtures.ts';
+import { DASHBOARD_ARCHIVE_COPY as A, DASHBOARD_CHATGPT_PAGE_COPY as PANEL, DASHBOARD_DISCONNECTED_DATA_KEPT, dashboardArchiveNouns } from '../../src/workers/dashboard/vocabulary.ts';
+import { FIXTURE_FOLDER, STRESS_FORMAT, type ArchiveExpectation, type BesideLiveExpectation, type LegFixture } from './archive-fixtures.ts';
 import { egressVerdict, type EgressView } from './inbox.ts';
 import { journeyChecks, type Journey, type JourneyTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
@@ -156,6 +156,8 @@ export interface RowView {
   /** Whether the See button's box is open; null when the row has none. */
   whyOpen: boolean | null;
   buttons: string[];
+  /** The row is an import inside its source's card (it joined the source), not one under Archives. */
+  sourceImport?: boolean;
 }
 
 export interface PanelArchives {
@@ -186,6 +188,7 @@ export const ARCHIVE_PANEL_PROBE = String.raw`(() => {
       })),
       whyOpen: why ? why.open === true : null,
       buttons: buttonsOf(li),
+      sourceImport: li.getAttribute('data-source-import') === 'true',
     };
   });
   const requests = Array.from(document.querySelectorAll('li.archive.request')).map((li) => ({ kind: li.getAttribute('data-request') || '', text: clean(li.textContent), buttons: buttonsOf(li) }));
@@ -205,6 +208,7 @@ export function panelArchivesOf(raw: unknown): PanelArchives {
       howRead: lists.filter((item) => item.head === A.lists.howRead).flatMap((item) => item.lines),
       headings: lists.map((item) => item.head),
       whyOpen: typeof entry?.whyOpen === 'boolean' ? entry.whyOpen : null, buttons: list(entry?.buttons),
+      ...(entry?.sourceImport === true ? { sourceImport: true } : {}),
     };
   });
   const requests = (Array.isArray(record.requests) ? record.requests : []).map((entry: any) => ({ kind: text(entry?.kind), text: text(entry?.text), buttons: list(entry?.buttons) }));
@@ -386,6 +390,47 @@ export interface ChangedObservation {
   removed?: { gone: boolean; unlisted: boolean; stores: StoreView[] };
 }
 
+/** The live input and account a source's hook set up, before its export is imported beside it. */
+export interface SeedLiveObservation {
+  ok: boolean;
+  detail?: string;
+  format: string;
+  liveItems: number;
+}
+
+/** An import of a source's own account beside its live input, and the source's Delete after it. */
+export interface BesideLiveObservation {
+  ok: boolean;
+  detail?: string;
+  format: string;
+  fileName: string;
+  token: string;
+  start?: StartView;
+  traces: JourneyTrace[];
+  settled: boolean;
+  settleMs: number;
+  /** The import's row, in the source's card. */
+  row?: RowView | undefined;
+  /** The source's own stores once the import settled. */
+  stores: StoreView[];
+  search?: SearchView;
+  /**
+   * The source's Delete, and what is left after it. `unpaired`: the source was unpaired on the dashboard first, as the owner must
+   * (the engine refuses to delete a paired source's data).
+   */
+  deleted?: {
+    ok: boolean;
+    unpaired: boolean;
+    detail?: string;
+    stores: StoreView[];
+    rowGone: boolean;
+    /** The engine came back ready after the restart the Delete asked for (absent: not waited for). */
+    engineBack?: boolean;
+    /** How long the source's stores took to be cleared, from the Delete. */
+    goneMs?: number;
+  };
+}
+
 export interface ModelObservation {
   ok: boolean;
   detail?: string;
@@ -417,9 +462,37 @@ export function approveRequestSteps(fx: LegFixture, fullPath: string, startS = 1
       ],
       timeoutMs: openS * 1_000,
     },
-    {
+    ...(fx.accountQuestion ? accountQuestionSteps(fx, startS) : [{
       name: 'Press Import on the agent\'s request',
-      do: { click: { role: 'button', name: A.approve, within: { css: 'li.archive.request[data-request="pending"]' } }, frame: 'panel' },
+      do: { click: { role: 'button', name: A.approve, within: { css: 'li.archive.request[data-request="pending"]' } }, frame: 'panel' as const },
+      expect: [{ present: rowTarget(fx.fileName), frame: 'panel' as const }],
+      timeoutMs: startS * 1_000,
+    }]),
+  ];
+}
+
+/**
+ * For an export that does not name its account: Import, then the dashboard asks whether it is the connected account's, and the
+ * journey answers: "Add to <source>" (it joins the source) or "Keep it under Archives" (it stays apart). Either way the row follows.
+ */
+function accountQuestionSteps(fx: LegFixture, startS: number): Journey['steps'] {
+  const question = fx.accountQuestion!;
+  const pending = { css: 'li.archive.request[data-request="pending"]' };
+  const [askedBefore = ''] = A.account.line.split('{name}');
+  const answer = question.answer === 'add' ? fill(A.account.add, { source: question.sourceLabel }) : A.account.apart;
+  return [
+    {
+      name: 'Press Import on the agent\'s request: the dashboard asks which account the export is of',
+      do: { click: { role: 'button', name: A.approve, within: pending }, frame: 'panel' },
+      expect: [
+        { text: new RegExp(`${escapeRe(askedBefore)}${escapeRe(fx.fileName)}`), frame: 'panel' },
+        { present: { role: 'button', name: answer, within: pending }, frame: 'panel' },
+      ],
+      timeoutMs: startS * 1_000,
+    },
+    {
+      name: question.answer === 'add' ? `Answer ${answer}: the export joins the source` : `Answer ${answer}: the export stays apart`,
+      do: { click: { role: 'button', name: answer, within: pending }, frame: 'panel' },
       expect: [{ present: rowTarget(fx.fileName), frame: 'panel' }],
       timeoutMs: startS * 1_000,
     },
@@ -524,6 +597,73 @@ export function removeJourney(role: string, fileName: string, removeS: number = 
   };
 }
 
+/**
+ * Unpair, the way the owner ends a pairing before deleting a chat source's data: the source's ⋯ menu, Unpair <source>, the engine's
+ * own confirmation, then the row says it is disconnected with its data kept, and offers Unpair no more.
+ */
+export function unpairJourney(sourceId: string, label: string, bounds: { unpairS?: number; openS?: number } = {}): Journey {
+  const unpair = `Unpair ${label}`;
+  const confirm = fill(PANEL.confirm, { label: unpair.toLowerCase() });
+  return {
+    id: `archive-beside-unpair-${sourceId}`,
+    title: `The owner unpairs ${label} before deleting its data`,
+    source: 'a paired chat source\'s Delete: the engine refuses it until the source is unpaired, so the owner unpairs it first',
+    mutates: true,
+    steps: [
+      { name: 'Open the dashboard: the source has its menu', do: { go: '/dashboard' }, expect: [{ present: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' }], timeoutMs: (bounds.openS ?? OPEN_S) * 1_000 },
+      {
+        name: `Open the source's menu: it offers ${unpair}`,
+        do: { click: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' },
+        expect: [{ present: { role: 'button', name: unpair }, frame: 'panel' }],
+      },
+      {
+        name: `Press ${unpair}: it asks first`,
+        do: { click: { role: 'button', name: unpair }, frame: 'panel' },
+        expect: [{ present: { role: 'button', name: confirm }, frame: 'panel' }],
+      },
+      {
+        name: 'Confirm: the source reads disconnected, its data kept',
+        do: { click: { role: 'button', name: confirm }, frame: 'panel' },
+        expect: [
+          { present: { css: 'li.row.source', text: DASHBOARD_DISCONNECTED_DATA_KEPT, contains: true }, frame: 'panel' },
+          { absent: { role: 'button', name: unpair }, frame: 'panel' },
+        ],
+        timeoutMs: (bounds.unpairS ?? 60) * 1_000,
+      },
+    ],
+  };
+}
+
+/** The words of a settled import's count line in its source's card: "N from this archive, of which M were already there". */
+export function besideLiveLine(expect: BesideLiveExpectation, family: string): string {
+  const S = A.inSource;
+  const already = expect.alreadyThere > 0
+    ? fill(expect.alreadyThere === 1 ? S.alreadyThere.one : S.alreadyThere.many, { n: grouped(expect.alreadyThere) })
+    : '';
+  return fill(S.importedLine, { items: messagesWord(expect.read, family) }) + already;
+}
+
+
+/** An agent asks to import the export, the owner presses Import, and the import settles inside its source's card. */
+export function besideLiveJourney(fx: LegFixture, fullPath: string, bounds: { startS?: number; settleS?: number; openS?: number } = {}): Journey {
+  return {
+    id: `archive-beside-${fx.format}-import`,
+    title: `An export of a source's own account is imported beside its live input and joins the source (${fx.format})`,
+    source: 'archive import beside a live input: the agent path, the owner presses Import, the import is listed in the source\'s card',
+    mutates: true,
+    steps: [
+      ...approveRequestSteps(fx, fullPath, bounds.startS ?? ARCHIVE_BOUNDS.startS, bounds.openS ?? OPEN_S),
+      {
+        name: 'The import settles in its source\'s card: the row says Imported',
+        do: { observe: true },
+        expect: [{ present: { css: 'li.archive[data-source-import="true"][data-archive="imported"]', text: fx.fileName, contains: true }, frame: 'panel' }],
+        timeoutMs: (bounds.settleS ?? ARCHIVE_BOUNDS.settleS) * 1_000,
+      },
+    ],
+  };
+}
+
+
 /** A line the stop must say: the product's sentence with the file's name (or its "a file of this archive" when it names none). */
 export function stoppedSentence(code: 'file_changed', fileName: string): RegExp {
   const words = A.stopped[code];
@@ -599,10 +739,16 @@ export function agentViewProblems(view: AgentArchiveView | undefined, expect: Ar
   return problems;
 }
 
-export function searchChecks(prefix: string, search: SearchView | undefined, fx: LegFixture, mode: 'cited' | 'withheld'): CheckResult[] {
+export function searchChecks(
+  prefix: string,
+  search: SearchView | undefined,
+  fx: LegFixture,
+  mode: 'cited' | 'withheld',
+  withheldBecause = 'while the private model is off',
+): CheckResult[] {
   const title = mode === 'cited'
     ? `A search for the archive's word returns it, cited as "${fx.expect.citationLabel}"`
-    : 'A search for the archive\'s word does not return its contents while the private model is off';
+    : `A search for the archive's word does not return its contents ${withheldBecause}`;
   if (!search) return [check(`${prefix}.search`, title, false, 'the search was not made')];
   if (!search.ok) return [check(`${prefix}.search`, title, false, `the search failed${search.error ? `: ${search.error}` : ''}`)];
   const hits = search.evidence.filter((item) => item.source === fx.expect.citationLabel);
@@ -812,6 +958,83 @@ export function changedChecks(obs: ChangedObservation | undefined): CheckResult[
     }
     out.push(check('archive.changed.removed', 'The stopped archive is removed from its row, with its rows', cleanup.length === 0, cleanup.length === 0 ? 'row gone, unlisted, no rows left in any store' : cleanup.join('; ')));
   }
+  return out;
+}
+
+/** The source's account and live input were set up by its hook. */
+export function seedLiveChecks(obs: SeedLiveObservation | undefined, format: string): CheckResult[] {
+  const id = `archive.beside.${format}.seeded`;
+  const title = `The ${format} source's live input and account were set up on the machine, as pairing leaves them`;
+  if (!obs) return [check(id, title, false, 'no result from the machine')];
+  const ok = obs.ok && obs.liveItems > 0;
+  return [check(id, title, ok, ok ? `${obs.liveItems} live record(s) stored by the source's own pull; ${obs.detail ?? ''}`.trim() : obs.detail ?? `the live input stored ${obs.liveItems} record(s)`)];
+}
+
+/**
+ * An import beside a live input: requested and approved, settled inside the source's card with how much it read and how much the
+ * source already had, no Remove (its records are the source's), found by a search, and gone with the source's Delete.
+ */
+export function besideLiveChecks(obs: BesideLiveObservation | undefined, fx: LegFixture): CheckResult[] {
+  const prefix = `archive.beside.${fx.format}`;
+  const title = `The ${fx.format} export was imported beside its source's live input`;
+  const missing = notRun(prefix, title, obs);
+  if (missing) return [missing];
+  const seen = obs!;
+  const beside = fx.beside;
+  const out: CheckResult[] = [];
+  if (!seen.ok) out.push(check(`${prefix}.ran`, title, false, seen.detail ?? 'the machine reported a problem'));
+  if (!beside) return [...out, check(`${prefix}.fixture`, title, false, 'the fixture has no expectation for an import beside a live input')];
+  const start = seen.start;
+  const requested: string[] = [];
+  if (!start) requested.push('the agent\'s start was not made');
+  else {
+    if (start.code !== 'needs_approval') requested.push(`start answered "${start.code || 'nothing'}", not needs_approval`);
+    if (start.carriesContent) requested.push('start repeated a word of the archive\'s contents');
+  }
+  out.push(check(`${prefix}.requested`, 'The agent\'s start leaves a request for the owner and imports nothing until it is approved', requested.length === 0, requested.length === 0 ? 'needs_approval, with no archive text' : requested.join('; ')));
+  out.push(...journeyChecks(seen.traces));
+  const row = seen.row;
+  const card: string[] = [];
+  if (!seen.settled) card.push('the import did not settle in the source\'s card');
+  if (!row) card.push('no row for the import was on the page');
+  else {
+    if (!row.sourceImport) card.push('the import is listed under Archives, not in its source\'s card');
+    if (row.status !== 'imported') card.push(`the row reads "${row.tag || row.status}", not ${A.status.imported}`);
+    const line = besideLiveLine(beside, fx.expect.family);
+    if (!row.text.includes(line)) card.push(`the row does not say "${line}" (it reads "${row.text.slice(0, 160)}")`);
+    if (row.buttons.includes(A.remove)) card.push('the row offers Remove, but its records are the source\'s and go only with the source\'s Delete');
+  }
+  out.push(check(`${prefix}.in-source`, 'The import joins its source: it is listed in the source\'s card with what it read and how much the source already had, and has no Remove', card.length === 0,
+    card.length === 0 ? `${besideLiveLine(beside, fx.expect.family)}; no Remove` : card.join('; '), seen.settleMs));
+  const held: string[] = [];
+  if (seen.stores.length === 0) held.push('the source\'s stores were not read');
+  for (const store of seen.stores) if (store.error) held.push(`the ${store.tier} store could not be read: ${store.error}`);
+  if (!seen.stores.some((store) => store.tokenRows > 0)) held.push('no store of the source holds the archive\'s content');
+  // A source whose records rest Private keeps the archive's there: none of it in a lower store.
+  const withheld = beside.search === 'withheld';
+  if (withheld) {
+    for (const store of seen.stores) {
+      if (store.tier !== 'private' && store.tokenRows > 0) held.push(`the ${store.tier} store has ${store.tokenRows} row(s) with the word, which the source keeps Private`);
+    }
+  }
+  out.push(check(`${prefix}.stores`, withheld ? 'The archive\'s records are in the source\'s own stores, all in the Private one' : 'The archive\'s records are in the source\'s own stores', held.length === 0,
+    held.length === 0 ? seen.stores.map((store) => `${store.tier}: ${store.tokenRows} row(s) with the word`).join(', ') : held.join('; ')));
+  out.push(...searchChecks(prefix, seen.search, { ...fx, expect: { ...fx.expect, citationLabel: beside.citationLabel } }, withheld ? 'withheld' : 'cited',
+    'once judged: the source keeps its records Private'));
+  const deleted = seen.deleted;
+  const gone: string[] = [];
+  if (!deleted) gone.push('the source\'s Delete was not run');
+  else {
+    if (!deleted.unpaired) gone.push('the source was not unpaired before its Delete (the engine refuses to delete a paired source\'s data)');
+    if (!deleted.ok) gone.push(`the source's Delete failed${deleted.detail ? `: ${deleted.detail}` : ''}`);
+    if (deleted.ok && deleted.engineBack === false) gone.push(deleted.detail ?? 'the engine was not ready after the Delete\'s restart');
+    for (const store of deleted.stores) {
+      if (store.error) gone.push(`the ${store.tier} store could not be read: ${store.error}`);
+      if (store.tokenRows > 0) gone.push(`the ${store.tier} store still holds ${store.tokenRows} row(s) with the archive's content`);
+    }
+    if (!deleted.rowGone) gone.push('the import is still listed in the source\'s card');
+  }
+  out.push(check(`${prefix}.deleted`, 'The imported history goes with the source\'s Delete', gone.length === 0, gone.length === 0 ? 'Delete ran; no store holds the archive\'s content; the import is no longer listed' : gone.join('; ')));
   return out;
 }
 

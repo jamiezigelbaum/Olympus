@@ -169,6 +169,30 @@ export function sameProviderAccount(recorded: string, observed: string): boolean
   return compareProviderAccounts(recorded, observed) === 'same';
 }
 
+/**
+ * Whether an import names its account by an address alone (an mbox's
+ * delivered-to address): something the export's author wrote, and an address
+ * can pass to another account. Such an id never proves an account by itself
+ * (resolveImportAccount).
+ */
+export function namesAccountByAddressOnly(id: string): boolean {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && labels.has('google') && !hasImmutableAccountLabel(id);
+}
+
+/**
+ * How an address-only id (namesAccountByAddressOnly) stands against a record:
+ * `same` when the record carries that address, `different` when it carries
+ * another, `unproven` when it carries none (it is known by immutable labels
+ * only, or by ids that are not made of known labels).
+ */
+export function compareAddressToRecord(recorded: string, address: string): ProviderAccountMatch {
+  const mine = parseProviderAccountId(address)?.get('google');
+  const theirs = parseProviderAccountId(recorded)?.get('google');
+  if (mine === undefined || theirs === undefined) return 'unproven';
+  return mine === theirs ? 'same' : 'different';
+}
+
 /** Whether `id` names its account by something no rename changes. */
 export function hasImmutableAccountLabel(id: string): boolean {
   const labels = parseProviderAccountId(id);

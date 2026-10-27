@@ -41,7 +41,7 @@ describe('source-family posture and packet contracts', () => {
       castorEvidenceForms: ['none'],
     });
     // Shipped as archive imports, so working; their resting tier is Private like every imported archive's.
-    for (const sourceId of ['reflect.archive', 'roam.archive']) {
+    for (const sourceId of ['reflect.archive', 'roam.archive', 'evernote.archive']) {
       expect(sourceFamilyPostureRegistry.require(sourceId)).toMatchObject({
         status: 'working',
         ingestMode: 'archive_import',

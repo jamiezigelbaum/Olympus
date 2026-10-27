@@ -15,11 +15,12 @@ import {
   type FixtureRole, type LegFixture,
 } from './archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed,
+  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed, unpairJourney,
   shownPath, startViewOf, statusViewOf, stoppedJourney,
-  type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
-  type SearchView, type StatusView, type StoreView,
+  type BesideLiveObservation, type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
+  type SearchView, type SeedLiveObservation, type StatusView, type StoreView,
 } from './archive-leg.ts';
+import type { LiveSeedResult } from './archive-live-seeds.ts';
 import { requestsOutsideMachine } from './egress.ts';
 import type { EgressView } from './inbox.ts';
 import { runJourney, type Journey, type JourneyDriver, type JourneyTrace } from './journey.ts';
@@ -56,6 +57,14 @@ export interface ArchiveHost {
   readStores(archive: { family: string; provider: string }, archiveId: string | undefined, token: string): StoreView[];
   /** `olympus engine restart`, then until the engine is ready (models included). */
   restartEngine(timeoutMs: number): Promise<{ ok: boolean; ms: number; detail?: string }>;
+  /** Until the engine is ready (models included), without restarting it: after a restart the engine asked for itself. */
+  awaitEngine?(timeoutMs: number): Promise<{ ok: boolean; ms: number; detail?: string }>;
+  /** Runs a source's live seed hook (archive-live-seeds.ts). Only the import beside a live input needs it. */
+  seedLive?(hook: string): Promise<LiveSeedResult>;
+  /** The source's own stores, read for the archive's word, through its hook. */
+  readSourceStores?(hook: string, token: string): StoreView[];
+  /** `olympus data delete --source <id>`: the same custody-checked delete the dashboard's Delete runs. */
+  deleteSourceData?(sourceId: string): CliAnswer;
 }
 
 const SETTLE_POLL_MS = 2_000;
@@ -182,6 +191,121 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
   return obs;
 }
 
+// ---------------------------------------------------------------------------
+// An export imported beside its source's live input
+
+/** The source's account and live input, set up by its hook before anything is imported for it. */
+export async function seedLiveStage(host: ArchiveHost, args: { format: string }): Promise<SeedLiveObservation> {
+  const obs: SeedLiveObservation = { ok: false, format: args.format, liveItems: 0 };
+  try {
+    const beside = formatSpec(args.format).besideLive;
+    if (!beside) throw new Error(`the "${args.format}" fixtures have no import beside a live input`);
+    if (!host.seedLive) throw new Error('this machine cannot run a live seed hook');
+    const seeded = await host.seedLive(beside.seedHook);
+    obs.liveItems = seeded.liveItems;
+    obs.detail = seeded.detail;
+    obs.ok = seeded.ok;
+    host.say(`seed ${args.format}: ${seeded.ok ? 'ok' : 'FAILED'} (${seeded.liveItems} live record(s))`);
+  } catch (error) {
+    obs.detail = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
+  }
+  return obs;
+}
+
+/**
+ * The export of a seeded source's own account, on the agent path: it must join the source (listed in its card, with what it read and
+ * how much was already there, and no Remove), be found by a search, and go with the source's Delete, which ends the stage.
+ */
+export async function besideLiveStage(host: ArchiveHost, args: { format: string; seed: string; settleS?: number; startS?: number; openS?: number; drainS?: number }): Promise<BesideLiveObservation> {
+  const fx = legFixture('beside', args.seed, args.format);
+  const obs: BesideLiveObservation = { ok: false, format: fx.format, fileName: fx.fileName, token: fx.token, traces: [], settled: false, settleMs: 0, stores: [] };
+  try {
+    const beside = formatSpec(args.format).besideLive;
+    if (!beside) throw new Error(`the "${args.format}" fixtures have no import beside a live input`);
+    if (!host.readSourceStores || !host.deleteSourceData || !host.awaitEngine) throw new Error('this machine cannot read or delete a source\'s stores, or wait for its engine');
+    const path = writeFixture(host.home, fx);
+    await host.withBrowser(async (session) => {
+      const driver = session.driver;
+      const started = host.cli(['start', '--path', path]);
+      obs.start = startViewOf(started.json, fx.token);
+      host.say(`start: ${obs.start.code || `exit ${started.code}`}`);
+      const journey = besideLiveJourney(fx, shownPath(host.home, path), {
+        ...(args.startS !== undefined ? { startS: args.startS } : {}),
+        ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
+        ...(args.openS !== undefined ? { openS: args.openS } : {}),
+      });
+      const trace = await runJourney(driver, journey);
+      obs.traces.push(trace);
+      const settle = stepMs(trace, 'The import settles');
+      obs.settled = settle.ok;
+      obs.settleMs = settle.ms;
+      host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
+      obs.row = await rowNow(host, driver, fx.fileName, 5_000);
+      // An imported record is held Private until the private model has judged it, so the search waits for that, within
+      // the leg's own drain bound for this machine, as the agent path's import does before its search. A source that keeps
+      // its records Private is asked through the whole bound, and any answer carrying the word is the one judged.
+      const cited = { ...fx, expect: { ...fx.expect, citationLabel: fx.beside!.citationLabel } };
+      obs.search = await searchWhenJudged(host, cited, (args.drainS ?? drainBoundS(host.os)) * 1_000, fx.beside!.search ?? 'cited');
+      obs.stores = host.readSourceStores!(beside.seedHook, fx.token);
+      // The history goes only with the source: the owner unpairs it (the engine refuses to delete a paired source's data), then
+      // its Delete, then nothing of the archive in its stores or on the page.
+      const unpair = await runJourney(driver, unpairJourney(beside.sourceId, beside.sourceLabel, {
+        ...(args.openS !== undefined ? { openS: args.openS } : {}),
+      }));
+      obs.traces.push(unpair);
+      host.say(`${unpair.id}: ${unpair.ok ? 'ok' : 'FAILED'} (${Math.round(unpair.ms / 1000)} s)`);
+      const deleted = host.deleteSourceData!(beside.sourceId);
+      const deleteOk = deleted.code === 0 && (deleted.json === undefined || (deleted.json as { ok?: unknown }).ok !== false);
+      obs.deleted = {
+        ok: deleteOk,
+        unpaired: unpair.ok,
+        ...(deleteOk ? {} : { detail: (deleted.stderr || JSON.stringify(deleted.json ?? null)).slice(0, 200) }),
+        stores: [],
+        rowGone: false,
+      };
+    });
+    // The Delete is applied at the engine's restart: the worker marks the account and restarts itself, and its files go at boot,
+    // before anything opens them. So the stores are read once they are gone (or the bound runs out, and the last reading is
+    // judged), the engine is waited for, and the page is read in a fresh browser: the next stage meets a ready engine.
+    if (obs.deleted?.ok) {
+      const after = await afterSourceDelete(host, beside.seedHook, fx.token, ARCHIVE_BOUNDS.engineS * 1_000);
+      obs.deleted.stores = after.stores;
+      obs.deleted.goneMs = after.goneMs;
+      obs.deleted.engineBack = after.engineBack;
+      if (!after.engineBack) obs.deleted.detail = `the engine was not ready after the Delete's restart: ${after.detail ?? 'no answer'}`;
+      if (after.engineBack) {
+        await host.withBrowser(async (session) => {
+          const panel = await until(host, () => readPanel(session.driver), 15_000, 500);
+          obs.deleted!.rowGone = panel !== undefined && rowNamed(panel, fx.fileName) === undefined;
+        });
+      }
+    }
+    obs.ok = true;
+  } catch (error) {
+    obs.detail = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
+  }
+  return obs;
+}
+
+/**
+ * What a source's Delete left, read once it has been applied. The running worker only marks the account and restarts itself; its
+ * files go at the next boot, before anything opens them. So the source's stores are read again until none holds the archive's word
+ * (or the bound runs out, and the last reading is what is judged), and then the engine is waited for, so whatever runs next meets a
+ * ready engine rather than one restarting.
+ */
+export async function afterSourceDelete(host: ArchiveHost, hook: string, token: string, boundMs: number): Promise<{ stores: StoreView[]; goneMs: number; engineBack: boolean; detail?: string }> {
+  const started = host.now();
+  const cleared = (stores: StoreView[]) => stores.every((store) => !store.error && store.tokenRows === 0);
+  let stores = host.readSourceStores!(hook, token);
+  while (!cleared(stores) && host.now() - started < boundMs) {
+    await host.sleep(SETTLE_POLL_MS);
+    stores = host.readSourceStores!(hook, token);
+  }
+  const goneMs = host.now() - started;
+  const engine = await host.awaitEngine!(Math.max(60_000, boundMs - goneMs));
+  return { stores, goneMs, engineBack: engine.ok, ...(engine.detail ? { detail: engine.detail } : {}) };
+}
+
 /** Archives an earlier attempt left on the machine, removed from their rows, so a stage starts from an empty Archives line. */
 async function removeLeftovers(host: ArchiveHost, driver: JourneyDriver, token: string, bounds: ClearBounds = {}): Promise<void> {
   const cleared = await clearArchives(host, driver, token, 'leftover', bounds);
@@ -201,6 +325,28 @@ async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView>
     hasToken: [entry?.excerpt, entry?.title].some((field) => typeof field === 'string' && field.includes(fx.token)),
   }));
   return { ok: answer.ok && !answer.isError, isError: answer.isError, evidence, ...(answer.error ? { error: answer.error } : {}) };
+}
+
+/**
+ * The search for an import inside a source's card, once what it imported has been judged: the source's import is not in the
+ * agent's archive status (its records are the source's), so the wait is on the search itself, asked again every ten seconds until it
+ * is cited with the archive's word or the bound runs out; the last answer is what the check judges. `withheld` (a source that keeps
+ * its records Private): asked through the whole bound, and the first answer carrying the word, if any, is the one judged.
+ */
+export async function searchWhenJudged(host: ArchiveHost, fx: LegFixture, boundMs: number, mode: 'cited' | 'withheld' = 'cited'): Promise<SearchView> {
+  const started = host.now();
+  for (;;) {
+    const search = await searchFor(host, fx);
+    const carries = search.ok && search.evidence.some((item) => item.hasToken);
+    const cited = search.ok && search.evidence.some((item) => item.source === fx.expect.citationLabel && item.hasToken);
+    const done = mode === 'cited' ? cited : carries;
+    if (done || host.now() - started >= boundMs) {
+      const said = mode === 'cited' ? (cited ? 'cited' : 'NOT cited') : (carries ? 'the word LEAKED' : 'withheld');
+      host.say(`search beside live: ${said} after ${Math.round((host.now() - started) / 1000)} s`);
+      return search;
+    }
+    await host.sleep(10_000);
+  }
 }
 
 /** Waits until the archive has no message waiting for the private model, or the bound; reads the dashboard row after. */
@@ -332,7 +478,8 @@ async function listedArchives(host: ArchiveHost, driver: JourneyDriver, token: s
   if (!status) return { unreadable: 'the agent\'s status of the archives could not be read, so what is left is not known' };
   const panel = await until(host, () => readPanel(driver), waitMs, 500);
   if (!panel) return { unreadable: 'the dashboard could not be read, so what is left is not known' };
-  return { names: [...new Set([...status.archives.map((archive) => archive.name), ...panel.rows.map((row) => row.name)])] };
+  // An import inside a source's card has no Remove: it goes with the source's Delete, not from here.
+  return { names: [...new Set([...status.archives.map((archive) => archive.name), ...panel.rows.filter((row) => !row.sourceImport).map((row) => row.name)])] };
 }
 
 /**

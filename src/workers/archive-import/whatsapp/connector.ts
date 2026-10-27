@@ -392,6 +392,12 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
         // The export this copy of the message was read from.
         sourceFile: unit.file.relPath,
         ...(unit.entry ? { sourceMember: unit.entry.name } : {}),
+        // What the WhatsApp connector's archive input matches by (whatsapp/archive-input.ts): the wall time as
+        // written, whether it shows seconds, and the message's place among the identical ones at that time.
+        sourceFileIndex: unit.fileIndex,
+        writtenAt: header.sentAt,
+        timePrecision: header.style.at(-2) === 's' ? 'second' : 'minute',
+        occurrence: apart,
       }),
       fetchedAt: new Date().toISOString(),
     };

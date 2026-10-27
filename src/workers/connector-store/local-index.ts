@@ -1,4 +1,5 @@
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
+import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
@@ -944,7 +945,8 @@ export interface ConnectorStoreSyncOptions {
    * representation when that listing is metadata-only. This is the ownership
    * mode for connectors whose binary bodies are handled by the shared
    * extraction factory: metadata sync observes the item; extraction owns the
-   * derived text.
+   * derived text. A child listed with `deferredBytes` (2.1.0) is always taken
+   * this way, whatever the lane's option: its bytes are the factory's to read.
    */
   deferMetadataOnlyContent?: boolean;
   maxChunkChars?: number;
@@ -2357,6 +2359,12 @@ export interface ConnectorStoreSearchFilters {
   provider?: string;
   /** An actual provider observation under this connector's current scope binding. */
   observedConnectorId?: string;
+  /**
+   * An observation by any connector whose id starts with this prefix (the
+   * source's imported archives, `archive.`, which the owner approved one by
+   * one): beside `observedConnectorId`, or alone when there is no live scope.
+   */
+  observedConnectorIdPrefix?: string;
   /**
    * Rooted locator path matched case-insensitively at a segment boundary.
    * Exact path and descendants match; string-prefix siblings do not.
@@ -8077,7 +8085,7 @@ export class LocalConnectorStore {
           let contentFetchFailed = false;
           if (
             !metadataOnly
-            && !deferMetadataOnlyContent
+            && !deferMetadataOnlyContent && item.deferredBytes === undefined
             && classification
             && fetchContent
             && item.content.kind === 'metadata_only'
@@ -8274,9 +8282,9 @@ export class LocalConnectorStore {
               ownershipKind,
               syncRunId,
               options?.ownerObservation ?? 'provider_listing',
-              deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+              (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === 'metadata_only',
               false,
-              deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+              (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === 'metadata_only',
               sourceScopeObservation,
               routedLayer && routedLayer !== 'metadata' ? 'content' : undefined,
             );
@@ -8294,7 +8302,7 @@ export class LocalConnectorStore {
             && !contentFetchFailed
             && !metadataOnly
             && routedLayer !== 'metadata'
-            && (!deferMetadataOnlyContent || itemForStorage.content.kind !== 'metadata_only')
+            && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== 'metadata_only')
           ) {
             const indexed = await this.indexItemContent(
               connector,
@@ -11698,6 +11706,47 @@ export class LocalConnectorStore {
   }
 
   /**
+   * A provider's messages stored before their attachments were children: a
+   * parent row (no parent, not itself a child) that holds content, whose
+   * search text names an attachment (`needle`: the attachment lines a message
+   * keeps there) and that no child row points to. In `item_pk` order
+   * after `afterPk`, so a walk over them resumes where it stopped.
+   */
+  parentsAwaitingChildren(provider: string, needle: string, afterPk: number, limit: number): Array<{ itemPk: number; providerItemId: string; accountScope: string; localItemId: string }> {
+    if (!this.childItemColumnsPresent) return [];
+    const rows = this.db.query(`
+      SELECT i.item_pk AS itemPk, i.provider_item_id AS providerItemId, i.account_scope AS accountScope, i.local_item_id AS localItemId
+      FROM items i
+      WHERE i.provider = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL AND i.item_pk > ?
+        AND instr(i.provider_item_id, ?) = 0
+        AND instr(COALESCE(i.search_text, ''), ?) > 0
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM items k WHERE k.parent_local_item_id = i.local_item_id)
+      ORDER BY i.item_pk
+      LIMIT ?
+    `).all(provider, afterPk, CHILD_ITEM_ID_SEPARATOR, needle, Math.max(1, Math.floor(limit))) as Array<{ itemPk: number; providerItemId: string; accountScope: string; localItemId: string }>;
+    return rows;
+  }
+
+  /** Whether any row names this item as its parent (tombstones included). */
+  hasChildRowsOf(localItemId: string): boolean {
+    if (!this.childItemColumnsPresent) return false;
+    return this.db.query('SELECT 1 AS present FROM items WHERE parent_local_item_id = ? LIMIT 1').get(localItemId) !== null;
+  }
+
+  /** Whether any live (not tombstoned) row matches these filters. */
+  holdsItemsMatching(filters: ConnectorStoreSearchFilters): boolean {
+    const scoped = connectorStoreFilterSql(filters);
+    return this.db.query(`SELECT 1 AS present FROM items i WHERE i.tombstoned = 0 ${scoped.sql} LIMIT 1`).get(...scoped.params) !== null;
+  }
+
+  /** The account scopes a provider's rows are kept under, at most `limit` of them (tombstones included). */
+  itemAccountScopes(provider: string, limit = 2): string[] {
+    const rows = this.db.query('SELECT DISTINCT account_scope AS scope FROM items WHERE provider = ? LIMIT ?').all(provider, limit) as Array<{ scope: string }>;
+    return rows.map((row) => row.scope);
+  }
+
+  /**
    * Whether the file this store opened has since been removed or replaced on
    * disk (`olympus data delete --source` may run while the worker stays up,
    * once the source is disconnected). The open handle then still reads the
@@ -14543,6 +14592,7 @@ function normalizeOptionalAccountScope(value: string | undefined): string | unde
 interface NormalizedConnectorStoreSearchFilters {
   provider?: string;
   observedConnectorId?: string;
+  observedConnectorIdPrefix?: string;
   locatorPathScope?: string;
   locatorPathScopes?: readonly string[];
   locatorPathExcludedScopes?: readonly string[];
@@ -14592,6 +14642,9 @@ export function normalizeConnectorStoreSearchFilters(
   const normalized = {
     ...(provider ? { provider } : {}),
     ...(value.observedConnectorId ? { observedConnectorId: requireNonEmpty(value.observedConnectorId, 'Observed connector id') } : {}),
+    ...(value.observedConnectorIdPrefix
+      ? { observedConnectorIdPrefix: requireNonEmpty(value.observedConnectorIdPrefix, 'Observed connector id prefix') }
+      : {}),
     ...(locatorPathScope ? { locatorPathScope } : {}),
     ...(locatorPathScopes.length > 0 ? { locatorPathScopes } : {}),
     ...(locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {}),
@@ -14623,9 +14676,15 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     clauses.push('AND i.provider = ?');
     params.push(normalized.provider);
   }
-  if (normalized.observedConnectorId) {
+  if (normalized.observedConnectorId && normalized.observedConnectorIdPrefix) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND (scope_owner.connector_id = ? OR substr(scope_owner.connector_id, 1, length(?)) = ?) AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorId, normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
+  } else if (normalized.observedConnectorId) {
     clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
     params.push(normalized.observedConnectorId);
+  } else if (normalized.observedConnectorIdPrefix) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND substr(scope_owner.connector_id, 1, length(?)) = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push('AND i.source_scope_generation = ?');

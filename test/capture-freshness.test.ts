@@ -44,7 +44,9 @@ describe('capture freshness counts', () => {
     expect(Object.keys(counts).sort()).toEqual([
       CAPTURE_COUNT_KEYS.ageSeconds,
       CAPTURE_COUNT_KEYS.fresh,
+      CAPTURE_COUNT_KEYS.quiet,
       CAPTURE_COUNT_KEYS.stale,
+      CAPTURE_COUNT_KEYS.stopped,
       CAPTURE_COUNT_KEYS.thresholdSeconds,
       CAPTURE_COUNT_KEYS.unavailable,
     ].sort());

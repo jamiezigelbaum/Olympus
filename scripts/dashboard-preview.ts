@@ -74,6 +74,7 @@ import {
   TELEGRAM_JSON_ARCHIVE_FORMAT,
   WHATSAPP_ARCHIVE_FORMAT,
   archiveFamilyProvider,
+  archiveSourceCards,
 } from '../src/core/archive-formats.ts';
 import { archivePickIntro } from '../src/workers/dashboard/vocabulary.ts';
 import type { SourceFamily } from '../src/core/source-index/types.ts';
@@ -734,6 +735,9 @@ function localFilesPreview(state: string) {
  *   archives-empty       an archive that held nothing: read as an empty import, never as a count of nothing
  *   archives-chat-whatsapp  a WhatsApp chat export imported: messages, a snapshot (not updated), and the two lists in plain words
  *   archives-notes-reflect  a Reflect export (a zip of Markdown notes) imported: notes, and what a notes export did not import or only read a certain way
+ *   archives-notes-evernote an Evernote export importing: notes and their attachments, one encrypted passage not read
+ * Reflect, Roam and Evernote are import-only sources (step 7): their imports show in their own card in
+ * Sources, not under Other archives (previewSplitArchives, as archive-import/dashboard.ts cardViews does).
  *   archives-nothing-imported  an archive whose messages were all left out or not read: No messages imported, the reasons under See what was not imported, never an empty archive
  * A stopped import, an agent's request, a check that ended without importing,
  * an archive that cannot be counted, imports that cannot run, and held
@@ -744,7 +748,7 @@ const ARCHIVE_STATES = [
   'archives-remove-request', 'archives-request-hidden',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
   'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty', 'archives-chat',
-  'archives-chat-whatsapp', 'archives-notes-reflect',
+  'archives-chat-whatsapp', 'archives-notes-reflect', 'archives-notes-evernote',
   'archives-nothing-imported',
   'archives-account-confirm', 'archives-account-request', 'archives-account-apart',
 ] as const;
@@ -806,7 +810,9 @@ function archivesPreview(state: string): SourceDashboardViewModel {
     sovereigntyEngine: engine,
     connectedHandleRegistry: registry([]),
     apiKeyAvailability: {},
-    importedArchives: previewImportedArchives(meta),
+    importedArchives: previewImportedArchives(previewSplitArchives(meta).archives),
+    // While the list cannot be read, each card says so too (dashboard.ts presentCards).
+    importedArchivesByCard: Object.fromEntries(previewSplitArchives(meta).cards.map((card) => [card.sourceId, previewImportedArchives(meta.unreadable ? { ...card, unreadable: meta.unreadable } : card)])),
     now: NOW,
   });
 }
@@ -964,6 +970,22 @@ function previewImportedArchives(meta: ComputerArchivesMeta, extra: readonly Das
     importing: !meta.notRunning && waiting,
     ...(attention.length > 0 ? { attention } : {}),
   };
+}
+
+/**
+ * A state's list as the computer sends it: what stays under Other archives, and
+ * each import-only source's card with the imports of its formats (by format label).
+ */
+export function previewSplitArchives(meta: ComputerArchivesMeta): { archives: ComputerArchivesMeta; cards: ComputerArchivesMeta[] } {
+  const cardOfLabel = (label: string) => archiveSourceCards().find((card) => card.formats.some((format) => format.label === label));
+  const cards = archiveSourceCards().map((card): ComputerArchivesMeta => ({
+    sourceId: card.id,
+    privateModel: meta.privateModel,
+    archives: meta.archives.filter((entry) => cardOfLabel(entry.format)?.id === card.id),
+    requests: [],
+    ...(meta.notRunning ? { notRunning: meta.notRunning } : {}),
+  }));
+  return { archives: { ...meta, archives: meta.archives.filter((entry) => !cardOfLabel(entry.format)) }, cards };
 }
 
 /** The Archives row's list for an archives-* state: invented names, never anyone's files. */
@@ -1140,6 +1162,28 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       ],
       skipped: [{ kind: 'note_empty', count: 17 }],
     });
+  } else if (state === 'archives-notes-evernote') {
+    // An invented Evernote export: notes, their pictures and files listed as items of their own, one encrypted passage not read.
+    archives.push({
+      ...takeout,
+      id: '2b4d6f80-1a3c-4e5f-8b9d-0c1e2f3a4b5c',
+      name: 'Field notes.enex',
+      format: 'Evernote export (.enex)',
+      family: 'note',
+      where: '~/Downloads',
+      status: 'importing',
+      percent: 64,
+      items: 2_310,
+      judged: 1_480,
+      held: 830,
+      earliest: '2012-03-19',
+      latest: '2024-08-02',
+      gaps: [
+        { kind: 'note_content_unsupported', count: 1 },
+        { kind: 'media_not_imported', count: 4 },
+      ],
+      skipped: [{ kind: 'note_empty', count: 9 }],
+    });
   } else if (state === 'archives-empty') {
     const { earliest: _earliest, latest: _latest, ...dated } = takeout;
     archives.push({ ...dated, name: 'Empty notes.json', format: 'Reflect notes (JSON)', family: 'note', items: 0, judged: 0, held: 0 });
@@ -1198,15 +1242,74 @@ export const previewArchiveUploads = {
   cancel(id: string): void { this.uploads.delete(id); },
 };
 
+export function previewArchiveBrowse(args: { parent_key?: unknown }) {
+  const parent = typeof args.parent_key === 'string' ? args.parent_key : '';
+  const folder = (name: string, extra: Record<string, unknown> = {}, under = LOCAL_FILES_HOME) => ({
+    key: `${under}/${name}`, ...(under !== LOCAL_FILES_HOME || parent ? { parent_key: under } : {}), name, kind: 'folder', has_children: true, selectable: true, ...extra,
+  });
+  const file = (name: string, size: number, under: string) => ({ key: `${under}/${name}`, parent_key: under, name, kind: 'file', has_children: false, selectable: true, size_bytes: size });
+  let nodes: unknown[];
+  if (!parent) {
+    nodes = [
+      folder('Desktop', { access: { state: 'needs_permission', message: MAC_ACCESS_COPY.needsPermission } }),
+      folder('Documents', { access: { state: 'needs_permission', message: MAC_ACCESS_COPY.needsPermission } }),
+      folder('Downloads', { access: { state: 'needs_permission', message: MAC_ACCESS_COPY.needsPermission } }),
+      folder('Mail exports'),
+      folder('Telegram exports'),
+      folder('Notes exports'),
+      { key: '/@disk-1', name: 'Backup Drive', kind: 'folder', has_children: true, selectable: true, is_disk: true },
+    ];
+  } else if (parent === `${LOCAL_FILES_HOME}/Mail exports`) {
+    nodes = [
+      folder('Inbox.mbox', {}, parent),
+      file('Takeout-2026-10.mbox', 6_420_000_000, parent),
+      file('notes.txt', 2_400, parent),
+    ];
+  } else if (parent === `${LOCAL_FILES_HOME}/Notes exports`) {
+    nodes = [
+      file('Field notes.enex', 48_200_000, parent),
+      file('Reflect export.zip', 12_400_000, parent),
+      file('Roam-Export-1760180000000.zip', 8_900_000, parent),
+    ];
+  } else if (parent === `${LOCAL_FILES_HOME}/Telegram exports`) {
+    nodes = [
+      folder('DataExport_2026-10-20', {}, parent),
+      file('result.json', 1_920_000_000, parent),
+      file('Takeout-2026-10.mbox', 6_420_000_000, parent),
+    ];
+  } else if (parent === `${LOCAL_FILES_HOME}/Mail exports/Inbox.mbox`) {
+    nodes = [file('mbox', 812_000_000, parent), file('Info.plist', 1_200, parent)];
+  } else {
+    nodes = [];
+  }
+  return {
+    content: [{ type: 'text', text: 'Listed.' }],
+    structuredContent: { status: 'listed', count: nodes.length },
+    _meta: { [SCOPE_UI_META_KEY]: { nodes } },
+  };
+}
+
 /**
  * The cards that import their own exports in the preview, as they will once
  * each source's connector reads its archives as inputs (archive-live-one-dataset.md,
  * steps 4 to 7). Invented: no source registers here.
  */
+const PREVIEW_NOTES_FILES: Readonly<Record<string, (name: string) => boolean>> = {
+  'reflect.archive': (name) => /^reflect/i.test(name) && /\.(?:zip|json)$/i.test(name),
+  'roam.archive': (name) => /^roam/i.test(name) && /\.(?:zip|json)$/i.test(name),
+  'evernote.archive': (name) => /\.enex$/i.test(name),
+};
 const PREVIEW_ARCHIVE_SOURCES = [
   { sourceId: 'gmail.email', label: 'Gmail', formats: [MBOX_ARCHIVE_FORMAT], accepts: (name: string) => name.endsWith('.mbox') },
   { sourceId: 'telegram.messages', label: 'Telegram', formats: [TELEGRAM_JSON_ARCHIVE_FORMAT], accepts: (name: string) => name === 'result.json' || name.startsWith('DataExport') },
   { sourceId: 'whatsapp.personal.messages', label: 'WhatsApp', formats: [WHATSAPP_ARCHIVE_FORMAT], accepts: (name: string) => name.startsWith('WhatsApp Chat') || name === '_chat.txt' },
+  // Import-only sources, as the format registry names them (archive-live-one-dataset.md, step 7).
+  ...archiveSourceCards().map((card) => ({
+    sourceId: card.id,
+    label: card.label,
+    formats: [...card.formats],
+    accepts: PREVIEW_NOTES_FILES[card.id] ?? (() => false),
+  })),
 ];
 
 /** The computer meta's archiveSources for an archives or source-import state. */
@@ -1298,6 +1401,9 @@ function previewArchiveRoute(name: string, args: { confirm_account?: unknown; ke
  *   capture-restarting   fresh messages, but WhatsApp's helper has just exited
  *                        and is about to be started again: a quiet row that
  *                        says capture restarting, nothing under Needs you
+ *   capture-disk-low     fresh messages, but the computer's disk is nearly full,
+ *                        so Telegram's new media waits to download: a row that
+ *                        says so and what frees it, with Check again
  */
 function capturePreview(state: string): SourceDashboardViewModel {
   const stale = state === 'capture-stale';
@@ -1307,6 +1413,7 @@ function capturePreview(state: string): SourceDashboardViewModel {
   const helperDown = state === 'capture-helper-down';
   const late = state === 'capture-late';
   const restarting = state === 'capture-restarting';
+  const diskLow = state === 'capture-disk-low';
   const status = emptyStatus();
   status.corpora = [
     corpus('internal.telegram.messages', 'chat', 'internal', 'telegram', 4_200, 4_200, { withText: 4_200, embedded: 4_200 }),
@@ -1314,7 +1421,8 @@ function capturePreview(state: string): SourceDashboardViewModel {
   ];
   const pulledAt = at(5 * 60);
   const threshold = 18 * 3_600;
-  const verdictCounts = (newestAgeSeconds: number | undefined) => ({
+  const verdictCounts = (newestAgeSeconds: number | undefined, extra: Record<string, number> = {}) => ({
+    ...extra,
     items_seen: 40,
     items_indexed: 40,
     items_changed: 0,
@@ -1324,7 +1432,7 @@ function capturePreview(state: string): SourceDashboardViewModel {
       threshold,
     )),
   });
-  const captureSource = (sourceId: string, corpusId: string, taskId: string, newestAgeSeconds: number | undefined, lateRefresh = false) => ({
+  const captureSource = (sourceId: string, corpusId: string, taskId: string, newestAgeSeconds: number | undefined, lateRefresh = false, extra: Record<string, number> = {}) => ({
     ...schedulerSource(sourceId, corpusId, lateRefresh ? 30 : 0.1),
     ...(lateRefresh ? { stale_sync_anomaly: true } : {}),
     tasks: [{
@@ -1334,7 +1442,7 @@ function capturePreview(state: string): SourceDashboardViewModel {
       consecutive_failures: 0,
       last_success_at: pulledAt,
       last_attempt_at: pulledAt,
-      last_result: { status: 'idle' as const, counts: verdictCounts(newestAgeSeconds) },
+      last_result: { status: 'idle' as const, counts: verdictCounts(newestAgeSeconds, extra) },
     }] as unknown as ReturnType<typeof schedulerSource>['tasks'],
   });
   const linkedTenMinutesAgo = new Date(NOW.getTime() - 10 * 60 * 1000).toISOString();
@@ -1370,7 +1478,8 @@ function capturePreview(state: string): SourceDashboardViewModel {
       captureSource('whatsapp.personal.messages', 'secure_local.whatsapp.messages', 'whatsapp.personal.messages_store_pull',
         unavailable ? undefined : stale || awaiting || late ? 3 * 86_400 : 2 * 60, late),
       captureSource('telegram.messages', 'internal.telegram.messages', 'telegram.messages_store_pull',
-        unavailable || awaiting ? undefined : stale ? 20 * 3_600 : 4 * 60),
+        unavailable || awaiting ? undefined : stale ? 20 * 3_600 : 4 * 60, false,
+        diskLow ? { media_disk_low: 1 } : {}),
     ]),
     sovereigntyEngine: engine,
     connectedHandleRegistry: registry([]),
@@ -1570,7 +1679,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'local-files-finding', 'local-files-finding-page', 'local-files-sync-checking', 'local-files-sync-checked',
   'local-files-picker', 'local-files-picker-waiting', 'local-files-picker-denied', 'local-files-picker-helper',
   'delete-data', 'delete-data-done',
-  'capture-stale', 'capture-unavailable', 'capture-blocked', 'capture-awaiting', 'capture-helper-down', 'capture-late', 'capture-restarting',
+  'capture-stale', 'capture-unavailable', 'capture-blocked', 'capture-awaiting', 'capture-helper-down', 'capture-late', 'capture-restarting', 'capture-disk-low',
   ...ARCHIVE_STATES,
   ...SOURCE_IMPORT_STATES,
 ] as const;
@@ -1677,7 +1786,9 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
         indexFaster: { on: indexFasterOn },
         ...(state === 'local-files-needs-permission' ? { permissionSettings: [{ sourceId: 'local.files', url: FILES_AND_FOLDERS_URL }] } : {}),
         ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}),
-        ...(previewArchivesMeta(state) ? { archives: previewArchivesMeta(state) } : {}),
+        ...(previewArchivesMeta(state) ? { archives: previewSplitArchives(previewArchivesMeta(state)!).archives } : {}),
+        ...(previewArchivesMeta(state) && previewSplitArchives(previewArchivesMeta(state)!).cards.some((card) => card.archives.length > 0)
+          ? { archiveCards: previewSplitArchives(previewArchivesMeta(state)!).cards.filter((card) => card.archives.length > 0) } : {}),
         ...(previewSourceImports(state) ? { sourceImports: previewSourceImports(state) } : {}),
         ...(previewArchiveSources(state) ? { archiveSources: previewArchiveSources(state) } : {}),
       },

@@ -5,7 +5,7 @@ import type { ModelSetupView } from '../core/model-setup.ts';
 import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
 import type { SourceStorageNoticeKind } from '../core/source-registry.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
-import { ARCHIVE_NEUTRAL_PROVIDER, isArchiveProvider } from '../core/archive-formats.ts';
+import { ARCHIVE_NEUTRAL_PROVIDER, archiveCorpusId, archiveSourceCards, isArchiveProvider } from '../core/archive-formats.ts';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -49,6 +49,7 @@ import {
   DASHBOARD_STORAGE_NOTICE_COPY,
   DASHBOARD_CAPTURE_STALE_LABEL,
   DASHBOARD_MANY_UNREADABLE_LABEL,
+  DASHBOARD_MEDIA_STORAGE_COPY,
   dashboardCaptureProblem,
   dashboardNoneReadSentence,
 } from './dashboard/vocabulary.ts';
@@ -859,6 +860,11 @@ export interface DashboardCaptureRuntime {
   paired_at?: string;
 }
 
+export interface DashboardMediaStorage {
+  /** The computer's disk is under the floor where new media downloads pause. No counts (owner ruling, 2026-08-24). */
+  state: 'disk_low';
+}
+
 export interface DashboardSourceCard {
   corpus_id: string;
   source_id: string;
@@ -1139,6 +1145,15 @@ export interface DashboardSourceCard {
    */
   storage_notice?: { kind: SourceStorageNoticeKind; next_action: string };
   /**
+   * The computer's disk is nearly full, so the media this source keeps beside
+   * its captured messages waits to download (owner, 2026-10-26: every message
+   * and every media file is ingested; the one safeguard is a free-disk floor).
+   * Messages still arrive; the waiting media downloads on its own once space is
+   * freed. Read from the last sync's receipt count `media_disk_low`, which any
+   * source that keeps media may publish. Absent when the disk has room.
+   */
+  media_storage?: DashboardMediaStorage;
+  /**
    * The metadata-sync phase's own folder-walk evidence, when the corpus
    * publishes it (`metadata_sync_folders_*`).
    *
@@ -1314,7 +1329,8 @@ export type DashboardSourceAction =
     // Imported archives: no account and nothing to sign in to; the person
     // chooses an export on this computer (archive-import/dashboard.ts).
     kind: 'archive_import';
-    label: 'Import another archive';
+    // The Archives card (Other archives) imports any export; an import-only source's card, its own.
+    label: 'Import another archive' | 'Import an archive';
   }
   | {
     kind: 'none';
@@ -1489,6 +1505,11 @@ export interface SourceDashboardBuildOptions {
    * (archive-import/dashboard.ts). Absent: none.
    */
   importedArchives?: DashboardImportedArchives;
+  /**
+   * The same for each import-only source's card (`ArchiveFormatDefinition.sourceCard`),
+   * by card id: the imports of its formats. Absent for a card: none.
+   */
+  importedArchivesByCard?: Readonly<Record<string, DashboardImportedArchives>>;
 }
 
 /** The Archives card's whole connection: there is no account, only imports. */
@@ -1521,6 +1542,8 @@ export type DashboardImportAttention =
   | { kind: 'held'; count: number; model: 'off' | 'waiting' }
   /** An archive is importing or being removed, and the setting named stops it running. */
   | { kind: 'scheduler'; setting: 'disabled' | 'not_selected' }
+  /** An import waits for a limit the owner must raise (`minimum`: the least it must be). */
+  | { kind: 'waiting'; id: string; name: string; reason: string; minimum: number }
   | { kind: 'unreadable'; reason: DashboardImportsUnreadableReason };
 
 /**
@@ -1582,6 +1605,12 @@ export interface DashboardSupportedSourceDefinition {
   // keys rows by its own short source id, which is NOT always the provider —
   // WhatsApp is `whatsapp` there and `whatsapp_personal` here.
   ingestion_ledger_source_id: string;
+  /**
+   * The public source this card is part of, when its id is not one: an
+   * import-only source's card shows imports the public Archives source holds
+   * (`archive.imports`), and states that source's capabilities.
+   */
+  public_source_id?: string;
   label: string;
   provider: string;
   family: string;
@@ -1836,6 +1865,9 @@ export function dashboardSensitivityTiers(sovereigntyEngine: SovereigntyEngine):
   };
 }
 
+/** The Archives card (Other archives): imports no source card claims. */
+const ARCHIVE_IMPORTS_CARD_ID = 'archive.imports';
+
 export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] = [
   {
     source_id: 'gmail.email',
@@ -1977,6 +2009,25 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     content_arrives_extracted: true,
     connect_action: { kind: 'api_key', source: 'readwise' },
   },
+  // Import-only sources (archive-live-one-dataset.md, step 7): a format no live
+  // connector reads names its card in the format registry. Its imports are
+  // stored under Archives, one account scope each, so the card owns no corpus
+  // of its own; its connection is its imports (importedArchivesByCard).
+  ...archiveSourceCards().map((card): DashboardSupportedSourceDefinition => ({
+    source_id: card.id,
+    // No corpus is this card's: the family's store set holds every import-only source's notes, and Other archives owns it.
+    primary_corpus_id: card.id,
+    corpus_source_ids: [],
+    owns_corpus: () => false,
+    ingestion_ledger_source_id: card.id,
+    public_source_id: ARCHIVE_IMPORTS_CARD_ID,
+    label: card.label,
+    provider: card.formats[0]!.provider,
+    family: card.formats[0]!.family,
+    trust_domain: 'secure_local',
+    connect_kind: 'local',
+    connect_action: { kind: 'archive_import' },
+  })),
 ];
 
 const VENICE_ANSWER_LANE: DashboardSupportedSourceDefinition = {
@@ -2450,7 +2501,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       unpairedSources.get(definition.source_id),
       options.fileSourceScopeStatus?.[definition.source_id],
       options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,
-      options.importedArchives,
+      definition.source_id === ARCHIVE_IMPORTS_CARD_ID ? options.importedArchives : options.importedArchivesByCard?.[definition.source_id],
       captureRuntime?.paired_at,
     );
     // Four-tier facts, stamped like sync_now below: counts from the card's own
@@ -2748,6 +2799,7 @@ function sourceCardFromDefinition(
     : baseQueue;
   const refreshFreshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
   const captureFreshness = schedulerCaptureFreshness(schedulers, now, capturePairedAt);
+  const mediaStorage = schedulerMediaStorage(schedulers);
   const freshness = captureFreshness ? { ...refreshFreshness, capture: captureFreshness } : refreshFreshness;
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === 'embedding_lane_disabled');
   const schedule = scheduleFromSchedulers(schedulers);
@@ -2893,7 +2945,7 @@ function sourceCardFromDefinition(
     provider: definition.provider,
     family: definition.family,
     trust_domain: trustDomain,
-    capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id as V04PublicSourceId),
+    capabilities: renderPublicSourceCapabilityForDashboard((definition.public_source_id ?? definition.source_id) as V04PublicSourceId),
     ...(fileSourceScopeStatus !== undefined
       ? {
           scope_selection: {
@@ -2925,6 +2977,7 @@ function sourceCardFromDefinition(
     ...(embeddingLaneDisabled ? { embedding_lane_state: 'embedding_lane_disabled' as const } : {}),
     ...(vlmQueued !== undefined ? { vlm_extraction_queued: vlmQueued } : {}),
     ...(ingestionLedgerRow?.attention.length ? { attention_reasons: [...ingestionLedgerRow.attention] } : {}),
+    ...(mediaStorage ? { media_storage: mediaStorage } : {}),
     ...(metadataSync ? { metadata_sync: metadataSync } : {}),
     ...(definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {}),
     ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
@@ -3010,7 +3063,7 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
         : action.kind === 'needs_setup'
           ? `Open Set up for ${card.label}, register the provider app, then start authorization.`
           : action.kind === 'archive_import'
-            ? 'Import an archive from this page: choose a mail export on this computer.'
+            ? `${action.label} from this page: choose an export on this computer.`
             : `Connect one ${card.label} account from this page.`,
       dependencies,
     };
@@ -3059,6 +3112,15 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       next_action: captureProblem.cause === 'helper'
         ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label)
         : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
+      dependencies,
+    };
+  }
+  // The computer's disk is nearly full: messages still arrive, their new photos and files wait to download.
+  if (card.media_storage && card.answer_readiness.state !== 'needs_attention') {
+    return {
+      stage: 'source_health',
+      condition: 'degraded',
+      next_action: DASHBOARD_MEDIA_STORAGE_COPY.nextAction(card.label),
       dependencies,
     };
   }
@@ -4111,7 +4173,9 @@ function sourceAction(
     return { kind: 'this_computer', source: definition.connect_action.source, label: 'Connect' };
   }
   // Another archive can always be imported.
-  if (definition.connect_action.kind === 'archive_import') return { kind: 'archive_import', label: 'Import another archive' };
+  if (definition.connect_action.kind === 'archive_import') {
+    return { kind: 'archive_import', label: definition.source_id === ARCHIVE_IMPORTS_CARD_ID ? 'Import another archive' : 'Import an archive' };
+  }
   if (definition.connect_action.kind === 'api_key') {
     if (connected && !reauthRequired && !providerRefusing) return { kind: 'none' };
     return {
@@ -4998,6 +5062,21 @@ function schedulerCaptureFreshness(
     }
   }
   return worst;
+}
+
+/**
+ * Whether a source's media waits for disk space, from the receipt counts of
+ * each sync task's last successful pull: any task reporting it makes the card
+ * say so.
+ */
+function schedulerMediaStorage(schedulers: readonly SourceSchedulerSourceStatus[]): DashboardMediaStorage | undefined {
+  for (const scheduler of new Set(schedulers)) {
+    for (const task of scheduler.tasks) {
+      const counts = task.last_result?.counts;
+      if (task.kind === 'sync' && counts && task.last_result?.status !== 'failed' && counts.media_disk_low === 1) return { state: 'disk_low' };
+    }
+  }
+  return undefined;
 }
 
 /** A feed's verdict, read against when the current pairing began (see schedulerCaptureFreshness). */

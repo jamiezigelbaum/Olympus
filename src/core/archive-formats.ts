@@ -122,6 +122,15 @@ export interface ArchiveFormatDefinition {
   /** How an answer's citation names this format's items ("Imported mail"); absent: the family's word. */
   citationLabel?: string;
   /**
+   * The import-only source this format's exports belong to, for a format no
+   * live connector reads (docs/design/archive-live-one-dataset.md, step 7): its
+   * card in Sources lists the format's imports and imports its exports. The
+   * imports stay stored under Archives (`archive.imports`, one account scope
+   * each, with their Remove), as source-storage.md keeps archive-only formats.
+   * Formats that name the same id share one card. Absent: Other archives.
+   */
+  sourceCard?: { id: string; label: string };
+  /**
    * File and zip-member names (`*` and `?` wildcards, case-insensitive) this
    * format recognises itself by. A folder of thousands of files, or a zip of
    * thousands of members, hides the one file that says what it is; the
@@ -585,6 +594,7 @@ export const REFLECT_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freez
   provider: 'reflect',
   chooseHint: 'a Reflect export in JSON (the .json file, or the .zip that holds it)',
   citationLabel: 'Reflect',
+  sourceCard: Object.freeze({ id: 'reflect.archive', label: 'Reflect' }),
   probeNames: Object.freeze(['*.json']),
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, 'reflect')),
 });
@@ -602,6 +612,7 @@ export const REFLECT_MARKDOWN_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.f
   provider: 'reflect',
   chooseHint: 'a Reflect export as Markdown (the .zip file)',
   citationLabel: 'Reflect',
+  sourceCard: Object.freeze({ id: 'reflect.archive', label: 'Reflect' }),
   probeNames: Object.freeze(['*, *, ????.md']),
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => {
     if (!entry.members || /^roam/i.test(entry.name)) return false;
@@ -623,8 +634,47 @@ export const ROAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   provider: 'roam',
   chooseHint: 'a Roam export in JSON (the .json file from Export All, or the .zip that holds it)',
   citationLabel: 'Roam',
+  sourceCard: Object.freeze({ id: 'roam.archive', label: 'Roam' }),
   probeNames: Object.freeze(['*.json']),
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, 'roam')),
+});
+
+// --- Evernote export (.enex) ------------------------------------------------------
+
+/**
+ * Whether a file's first bytes are an Evernote export: XML whose root (or
+ * document type) is `en-export`, after the XML declaration, a byte order mark,
+ * comments and space.
+ */
+export function looksLikeEnex(head: Uint8Array | undefined): boolean {
+  const text = archiveHeadText(head).replace(/^\ufeff/, '');
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text);
+  return start !== null && (start[1] ?? start[2]) === 'en-export';
+}
+
+/**
+ * Evernote's export: one `.enex` file (a notebook, or the notes chosen in
+ * "Export notes"), or a folder of them. Each note's attachments are inside the
+ * file, in base64, and become child items read on their own. A zip holding
+ * .enex files is not read; choosing one says what is.
+ */
+export const EVERNOTE_ENEX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'evernote-enex',
+  label: 'Evernote export (.enex)',
+  family: 'note',
+  provider: 'evernote',
+  chooseHint: 'an Evernote export (the .enex file, or a folder of them)',
+  citationLabel: 'Evernote',
+  sourceCard: Object.freeze({ id: 'evernote.archive', label: 'Evernote' }),
+  probeNames: Object.freeze(['*.enex']),
+  detect(probe: ArchiveProbe): readonly string[] | undefined {
+    if (probe.chosen.kind === 'file') return looksLikeEnex(probe.chosen.head) ? [''] : undefined;
+    const files = probe.children
+      .filter((entry) => entry.kind === 'file' && !isJunkArchiveMember(entry.name) && looksLikeEnex(entry.head))
+      .map((entry) => entry.relPath)
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    return files.length > 0 ? files : undefined;
+  },
 });
 
 // --- Telegram Desktop export -----------------------------------------------------
@@ -695,10 +745,36 @@ export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze
   REFLECT_MARKDOWN_ARCHIVE_FORMAT,
   ROAM_JSON_ARCHIVE_FORMAT,
   TELEGRAM_JSON_ARCHIVE_FORMAT,
+  EVERNOTE_ENEX_ARCHIVE_FORMAT,
 ]);
 
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
+}
+
+/** One import-only source card (`ArchiveFormatDefinition.sourceCard`) and the formats it imports, in registry order. */
+export interface ArchiveSourceCard {
+  id: string;
+  label: string;
+  formats: readonly ArchiveFormatDefinition[];
+}
+
+/** The import-only source cards the registered formats name, in the order their first format is registered. */
+export function archiveSourceCards(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): ArchiveSourceCard[] {
+  const cards = new Map<string, { id: string; label: string; formats: ArchiveFormatDefinition[] }>();
+  for (const format of formats) {
+    if (!format.sourceCard) continue;
+    const card = cards.get(format.sourceCard.id) ?? { id: format.sourceCard.id, label: format.sourceCard.label, formats: [] };
+    card.formats.push(format);
+    cards.set(card.id, card);
+  }
+  return [...cards.values()];
+}
+
+/** The import-only source card a format's exports belong to, if any. */
+export function archiveSourceCardOf(formatId: string, formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): ArchiveSourceCard | undefined {
+  const card = formats.find((format) => format.id === formatId)?.sourceCard;
+  return card ? archiveSourceCards(formats).find((entry) => entry.id === card.id) : undefined;
 }
 
 /** The format whose items carry this provider name, if any. */
@@ -1082,6 +1158,13 @@ export interface ArchiveConnectorInput {
    * connector that does not tell has such items counted by whole pages.
    */
   reportItemPositions?(positions: ReadonlyArray<{ fileIndex: number; offset: number }>): void;
+  /**
+   * The listing stopped early because the source's provider cannot be asked
+   * now (its day budget for imports is spent, say): what came before went
+   * out with its resume point, and the import waits for its next scheduled
+   * pass instead of being run again at once. `reason` is a short code.
+   */
+  waitForProvider?(reason: string, detail?: { minimum?: number }): void;
   /** Bytes read per listing before it pauses with a resume point. */
   maxBytesPerListing?: number;
   pageSize?: number;

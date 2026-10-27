@@ -220,11 +220,33 @@ function readsJsonExport(entry, format) {
   }
   return notesJsonFormat(entry) === format;
 }
+function looksLikeEnex(head) {
+  const text = archiveHeadText(head).replace(/^\ufeff/, "");
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text);
+  return start !== null && (start[1] ?? start[2]) === "en-export";
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
   const text = new TextDecoder("utf-8").decode(head);
   return TELEGRAM_FULL_HEAD.test(text) || TELEGRAM_CHAT_HEAD.test(text);
+}
+function archiveSourceCards(formats = ARCHIVE_FORMATS) {
+  const cards = new Map;
+  for (const format of formats) {
+    if (!format.sourceCard)
+      continue;
+    const card = cards.get(format.sourceCard.id) ?? { id: format.sourceCard.id, label: format.sourceCard.label, formats: [] };
+    card.formats.push(format);
+    cards.set(card.id, card);
+  }
+  return [...cards.values()];
+}
+function archiveFormatForProvider(provider, formats = ARCHIVE_FORMATS) {
+  return formats.find((format) => format.provider === provider);
+}
+function isArchiveProvider(provider, formats = ARCHIVE_FORMATS) {
+  return provider === ARCHIVE_NEUTRAL_PROVIDER || archiveFormatForProvider(provider, formats) !== undefined;
 }
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
@@ -235,7 +257,7 @@ function isArchiveCorpusId(corpusId, trustDomain) {
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -296,6 +318,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
@@ -306,6 +329,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export as Markdown (the .zip file)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*, *, ????.md"]),
     detect: (probe) => detectFile(probe, (entry) => {
       if (!entry.members || /^roam/i.test(entry.name))
@@ -326,8 +350,25 @@ var init_archive_formats = __esm(() => {
     provider: "roam",
     chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
     citationLabel: "Roam",
+    sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
+    id: "evernote-enex",
+    label: "Evernote export (.enex)",
+    family: "note",
+    provider: "evernote",
+    chooseHint: "an Evernote export (the .enex file, or a folder of them)",
+    citationLabel: "Evernote",
+    sourceCard: Object.freeze({ id: "evernote.archive", label: "Evernote" }),
+    probeNames: Object.freeze(["*.enex"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
+      const files = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && looksLikeEnex(entry.head)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      return files.length > 0 ? files : undefined;
+    }
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
@@ -377,7 +418,8 @@ var init_archive_formats = __esm(() => {
     REFLECT_JSON_ARCHIVE_FORMAT,
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
-    TELEGRAM_JSON_ARCHIVE_FORMAT
+    TELEGRAM_JSON_ARCHIVE_FORMAT,
+    EVERNOTE_ENEX_ARCHIVE_FORMAT
   ]);
   CONNECTOR_FACTORIES = new Map;
 });
@@ -7335,6 +7377,10 @@ var init_sovereignty = __esm(() => {
     }
   };
 });
+
+// src/core/whatsapp-notice.ts
+var WHATSAPP_UNOFFICIAL_CLIENT_NOTICE = "WhatsApp connects through an unofficial client. WhatsApp's terms don't allow third-party clients, and accounts have been restricted or banned for using them. Connect only if you accept that risk.";
+
 // src/workers/dashboard/scheduler-markers.ts
 var OPERATOR_PAUSED_SCHEDULER_MARKERS;
 var init_scheduler_markers = __esm(() => {
@@ -8902,7 +8948,8 @@ var init_credential_broker = __esm(() => {
     "whatsapp_business",
     "apple_messages",
     "reflect",
-    "roam"
+    "roam",
+    "evernote"
   ];
   CREDENTIAL_PROVIDERS = [
     ...PUBLIC_CREDENTIAL_PROVIDERS,
@@ -9269,6 +9316,25 @@ var init_credential_broker = __esm(() => {
         backendState: {
           kind: "archive_path",
           archiveRootAlias: "roam_archive",
+          readerWorker: "archive_import_reader",
+          contentBounds: "approved_archive_root",
+          backendLabel: "local_private:archive_import"
+        }
+      },
+      {
+        handle: "evernote.archive",
+        provider: "evernote",
+        sessionKind: "archive_path",
+        accountRole: "archive",
+        trustDomain: "internal",
+        allowedCapabilities: ["evernote.archive.import"],
+        scopes: [],
+        tokenEnvNames: [],
+        statusEnvNames: ["OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY"],
+        expiresInSeconds: 3600,
+        backendState: {
+          kind: "archive_path",
+          archiveRootAlias: "evernote_archive",
           readerWorker: "archive_import_reader",
           contentBounds: "approved_archive_root",
           backendLabel: "local_private:archive_import"
@@ -9646,15 +9712,6 @@ var init_credential_health = __esm(() => {
 
 // src/core/embedding-cost-estimates.ts
 var init_embedding_cost_estimates = () => {};
-// src/core/classification-signals.ts
-function namesOnlyContentScopeMetadata() {
-  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
-}
-function itemContentKeptNamesOnly(item) {
-  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
-}
-var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
-
 // src/core/invocation-provenance.ts
 function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
@@ -9906,6 +9963,51 @@ var init_sender_rules = __esm(() => {
   DOMAIN_CHAR = /[a-z0-9.-]/i;
 });
 
+// src/core/file-extraction-source.ts
+import { createHash as createHash4 } from "node:crypto";
+function splitScopedLocalItemId(localItemId) {
+  const separator = localItemId.indexOf(":");
+  if (separator <= 0 || separator === localItemId.length - 1)
+    return;
+  return {
+    accountScope: localItemId.slice(0, separator),
+    providerItemId: localItemId.slice(separator + 1)
+  };
+}
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, ERROR_HASH_CHARS = 32, FileExtractionSourceError;
+var init_file_extraction_source = __esm(() => {
+  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+    source_item_not_found: "failed_terminal",
+    source_permission_denied: "failed_terminal",
+    source_version_gone: "failed_terminal",
+    source_content_unavailable: "skipped_unsupported",
+    source_request_rejected: "failed_terminal",
+    source_too_large: "skipped_too_large",
+    source_rate_limited: "failed_retryable",
+    source_unavailable: "failed_retryable",
+    source_auth_expired: "failed_retryable",
+    source_budget_exhausted: "failed_retryable",
+    network_unreachable: "failed_retryable",
+    network_socket_closed: "failed_retryable"
+  });
+  FileExtractionSourceError = class FileExtractionSourceError extends Error {
+    errorKind;
+    settleAs;
+    retryable;
+    errorHash;
+    constructor(errorKind, options = {}) {
+      super(errorKind);
+      this.name = "FileExtractionSourceError";
+      this.errorKind = errorKind;
+      this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
+      this.retryable = this.settleAs === "failed_retryable";
+      const errorHash = options.detailForHash === undefined ? undefined : createHash4("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      if (errorHash)
+        this.errorHash = errorHash;
+    }
+  };
+});
+
 // src/workers/email-source/ingest-filter.ts
 function classifyEmailIngestSkip(candidate, options = {}) {
   const skipOtp = options.skipOtp ?? true;
@@ -9977,6 +10079,206 @@ function metadataStringArray(metadata, key) {
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
 
+// src/core/classification-signals.ts
+function namesOnlyContentScopeMetadata() {
+  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
+}
+function itemContentKeptNamesOnly(item) {
+  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
+}
+var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
+
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
+// src/workers/google-connectors/gmail-mail-record.ts
+import { createHash as createHash5 } from "node:crypto";
+function isGmailAttachmentPart(part) {
+  const type = (part.mimeType ?? "").trim().toLowerCase();
+  if (type.startsWith("multipart/"))
+    return false;
+  if (part.filename?.trim())
+    return true;
+  if (type === "message/rfc822")
+    return true;
+  if ((type === "" || type === "text/plain" || type === "text/html") && part.disposition?.trim().toLowerCase() !== "attachment")
+    return false;
+  return true;
+}
+function gmailAttachmentPartName(part) {
+  const filename = part.filename?.trim();
+  if (filename)
+    return filename;
+  const type = (part.mimeType ?? "").trim().toLowerCase() || "application/octet-stream";
+  if (type === "message/rfc822")
+    return `forwarded-message-${part.partId || "root"}.eml`;
+  const contentId = part.contentId?.trim().replace(/^<|>$/g, "").replace(/[^A-Za-z0-9._@-]/g, "_").slice(0, 128);
+  if (contentId)
+    return `cid-${contentId}`;
+  return `${type.replace(/[^a-z0-9.+-]/g, "-")}-part-${part.partId || "root"}`;
+}
+function childrenOf(record, build) {
+  return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.filename.trim() !== "" && (attachment.partId === "" ? 0 : attachment.partId.split(".").length) <= GMAIL_CHILD_MAX_DEPTH);
+}
+function hashString(value) {
+  return createHash5("sha256").update(value).digest("hex");
+}
+function parsedDate(value) {
+  if (!value)
+    return;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function internalDateIso(value) {
+  if (!value)
+    return;
+  const ms = Number.parseInt(value, 10);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function attachmentLine(attachment) {
+  const details = [
+    attachment.mimeType?.trim() || undefined,
+    attachment.size !== undefined ? `${attachment.size} bytes` : undefined,
+    attachment.partId.trim() ? `part ${attachment.partId.trim()}` : undefined
+  ].filter((value) => Boolean(value));
+  return `Attachment: ${attachment.filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
+}
+function headersSummary(headers) {
+  return [
+    headers.subject ? `Subject: ${headers.subject}` : undefined,
+    headers.from ? `From: ${headers.from}` : undefined,
+    headers.to ? `To: ${headers.to}` : undefined,
+    headers.date ? `Date: ${headers.date}` : undefined
+  ].filter(Boolean).join(`
+`);
+}
+function messageText(record) {
+  return [headersSummary(record.headers), record.snippet, record.body].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
+
+`);
+}
+function identityOf(record, account) {
+  return {
+    family: "email",
+    provider: GMAIL_MAIL_PROVIDER,
+    accountScope: account,
+    providerItemId: record.id,
+    ...record.threadId ? { providerThreadId: record.threadId } : {},
+    localItemId: `${account}:${record.id}`,
+    ...record.sourceVersion ? { sourceVersion: record.sourceVersion } : {}
+  };
+}
+function childIdentityOf(record, account, attachment) {
+  const providerItemId = gmailChildProviderId(record.id, attachment.partId);
+  return {
+    family: "email",
+    provider: GMAIL_MAIL_PROVIDER,
+    accountScope: account,
+    providerItemId,
+    ...record.threadId ? { providerThreadId: record.threadId } : {},
+    localItemId: `${account}:${providerItemId}`,
+    ...record.sourceVersion ? { sourceVersion: record.sourceVersion } : {},
+    parent: { providerItemId: record.id, localItemId: `${account}:${record.id}` }
+  };
+}
+function gmailMessageItem(record, account, fetchedAt = new Date().toISOString()) {
+  const subject = record.headers.subject ?? "(no subject)";
+  const rawFrom = record.headers.from ?? "";
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
+  const date = parsedDate(record.headers.date) ?? internalDateIso(record.internalDate);
+  const metadataOnly = record.metadataOnly;
+  const attachments = record.attachments;
+  const lines = attachments.map(attachmentLine);
+  const bytes = attachments.reduce((total, attachment) => total + (attachment.size ?? 0), 0);
+  const text2 = metadataOnly ? "" : messageText(record) || (lines.length > 0 ? lines.join(`
+`) : `Subject: ${subject}`);
+  return {
+    identity: identityOf(record, account),
+    mimeType: "message/rfc822",
+    content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
+    metadata: Object.freeze({
+      title: subject,
+      subject,
+      from,
+      ...record.headers.to ? { to: record.headers.to } : {},
+      ...date ? { authoredAt: date } : {},
+      ...record.internalDate ? { internalDate: record.internalDate } : {},
+      ...record.historyId ? { historyId: record.historyId } : {},
+      ...record.headers.messageId ? { messageId: record.headers.messageId } : {},
+      ...record.snippet && !metadataOnly ? { snippet: record.snippet } : {},
+      ...metadataOnly ? namesOnlyContentScopeMetadata() : {},
+      labels: [...record.labelIds],
+      attachmentCount: attachments.length,
+      attachmentBytesDeclared: bytes,
+      ...lines.length > 0 ? { attachments: lines } : {},
+      attachmentsNotIngested: attachments.length,
+      ...gmailId(record) ? { locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(record.id)}` } : {},
+      contentHash: hashString(`${record.historyId ?? ""}:${metadataOnly ? "metadata_only" : text2}`)
+    }),
+    fetchedAt
+  };
+}
+function gmailChildItem(record, account, attachment, fetchedAt) {
+  const date = parsedDate(record.headers.date) ?? internalDateIso(record.internalDate);
+  const name = attachment.filename.slice(0, MAX_ATTACHMENT_NAME_CHARS);
+  const rawFrom = record.headers.from ?? "";
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
+  return {
+    identity: childIdentityOf(record, account, attachment),
+    mimeType: attachment.mimeType?.trim() || "application/octet-stream",
+    content: { kind: "metadata_only" },
+    metadata: Object.freeze({
+      title: name,
+      name,
+      ...from ? { from } : {},
+      ...date ? { authoredAt: date } : {},
+      ...attachment.size !== undefined ? { sizeBytes: attachment.size } : {},
+      ...gmailId(record) ? { locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(record.id)}` } : {}
+    }),
+    fetchedAt,
+    holdContentUntilJudged: true,
+    deferredBytes: {
+      locator: attachment.locator ?? "",
+      available: attachment.locator !== undefined,
+      ...attachment.size !== undefined ? { sizeBytes: attachment.size } : {}
+    }
+  };
+}
+function gmailMailItems(record, account, build = {}, wanted) {
+  const fetchedAt = new Date().toISOString();
+  const items = [];
+  const parent = gmailMessageItem(record, account, fetchedAt);
+  if (!wanted || wanted.has(parent.identity.localItemId))
+    items.push(parent);
+  for (const attachment of childrenOf(record, build)) {
+    const child = gmailChildItem(record, account, attachment, fetchedAt);
+    if (!wanted || wanted.has(child.identity.localItemId))
+      items.push(child);
+  }
+  return items;
+}
+function gmailClassificationSignals(item) {
+  const subject = metadataString(item.metadata, "subject") ?? metadataString(item.metadata, "title");
+  const sender = metadataString(item.metadata, "from");
+  const labels = metadataStringArray(item.metadata, "labels");
+  return {
+    ...subject ? { title: subject } : {},
+    ...sender ? { sender } : {},
+    ...labels.length > 0 ? { labels } : {}
+  };
+}
+var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX), GMAIL_CHILD_MAX_DEPTH = 8;
+var init_gmail_mail_record = __esm(() => {
+  init_sender_rules();
+});
+
 // src/core/sqlite-store.ts
 function closeSqliteStore(db, options = {}) {
   if (options.checkpoint !== false) {
@@ -10007,7 +10309,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -10037,6 +10339,9 @@ class GoogleGmailSourceConnector {
   itemsSkippedStored = 0;
   ingestFilterOptions;
   itemsByLocalId = new Map;
+  build;
+  beforeEachRequest;
+  messagesById = new Map;
   constructor(options = {}) {
     const env = options.env ?? process.env;
     this.fetchImpl = options.fetch ?? fetch;
@@ -10056,6 +10361,8 @@ class GoogleGmailSourceConnector {
     this.injectedClient = options.apiClient;
     this.scope = options.scope;
     this.now = options.now ?? (() => Date.now());
+    this.build = options.build ?? {};
+    this.beforeEachRequest = options.beforeEachRequest;
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
     if (this.scope?.skippedLabelIds?.length) {
@@ -10086,9 +10393,34 @@ class GoogleGmailSourceConnector {
     const nowMs = this.now();
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
     let pageToken = staleLeg ? undefined : resume.pageToken;
+    let itemRoom = remaining;
+    let pageAfter = staleLeg ? undefined : resume.after;
+    if (resume.childOf && !staleLeg) {
+      const rest = await this.attachmentsFrom(client, resume.childOf, itemRoom);
+      this.providerRequests += 1;
+      remaining -= 1;
+      itemRoom -= rest.items.length;
+      const cursorFields = {
+        ...watermarkMs !== undefined ? { watermarkMs } : {},
+        ...highWaterMs !== undefined ? { highWaterMs } : {},
+        ...pageToken ? { pageToken } : {},
+        ...metadataLeg ? { phase: "metadata" } : {},
+        ...startedMs !== undefined ? { startedMs } : {},
+        ...pageAfter ? { after: pageAfter } : {}
+      };
+      if (rest.next !== undefined) {
+        const nextCursor2 = encodeGmailCursor({ ...cursorFields, childOf: { id: resume.childOf.id, from: rest.next } });
+        yield { items: rest.items, ...nextCursor2 ? { nextCursor: nextCursor2 } : {}, done: false, truncated: true };
+        return;
+      }
+      const nextCursor = encodeGmailCursor(cursorFields);
+      yield { items: rest.items, ...nextCursor ? { nextCursor } : {}, done: false };
+      if (remaining <= 0 || itemRoom <= 0)
+        return;
+    }
     const requestedPageTokens = new Set;
     let listPages = 0;
-    while (remaining > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
+    while (remaining > 0 && itemRoom > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
       if (pageToken)
         assertNewProviderPage(requestedPageTokens, pageToken);
       this.providerRequests += 1;
@@ -10099,13 +10431,19 @@ class GoogleGmailSourceConnector {
         ...query ? { query } : {}
       });
       const listed = page.messages.filter((message2) => message2.id);
+      const resumedAt = pageAfter ? listed.findIndex((message2) => message2.id === pageAfter) : -1;
+      const baseSkip = resumedAt + 1;
+      const examinedIds = resumedAt >= 0 ? [pageAfter] : [];
+      pageAfter = undefined;
       const items = [];
       let messagesExamined = 0;
       let messagesFetched = 0;
-      for (const message2 of listed) {
-        if (messagesFetched >= remaining)
+      let childOf;
+      for (const message2 of listed.slice(baseSkip)) {
+        if (messagesFetched >= remaining || items.length >= itemRoom)
           break;
         messagesExamined += 1;
+        examinedIds.push(message2.id);
         const stored = this.scope?.storedItem?.(message2.id);
         if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
           continue;
@@ -10116,7 +10454,7 @@ class GoogleGmailSourceConnector {
             this.providerRequests += 1;
             const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
             const received = internalDateNumber({ internalDate: metadata.internalDate });
-            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const item2 = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
             const subject2 = metadataString(item2.metadata, "subject");
             const from2 = metadataString(item2.metadata, "from");
             const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray(item2.metadata, "labels") }, this.ingestFilterOptions);
@@ -10137,7 +10475,8 @@ class GoogleGmailSourceConnector {
           this.itemsSkippedStored += 1;
           continue;
         }
-        const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
+        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff, children: this.build.children === true });
+        const [item, ...children] = gmailMailItems(record, this.account, this.build);
         this.attachmentsDeclared += metadataCount(item.metadata, "attachmentCount");
         this.attachmentBytesDeclared += metadataCount(item.metadata, "attachmentBytesDeclared");
         this.attachmentsNotIngested += metadataCount(item.metadata, "attachmentsNotIngested");
@@ -10165,12 +10504,40 @@ class GoogleGmailSourceConnector {
             this.itemsSkippedCategory += 1;
           continue;
         }
-        this.itemsByLocalId.set(item.identity.localItemId, item);
-        items.push(item);
+        if (items.length + 1 + children.length > itemRoom && items.length > 0) {
+          messagesExamined -= 1;
+          examinedIds.pop();
+          break;
+        }
+        const unit = [item, ...children].slice(0, Math.max(1, itemRoom - items.length));
+        if (unit.length < 1 + children.length)
+          childOf = { id: record.id, from: unit.length - 1 };
+        for (const entry of unit)
+          this.itemsByLocalId.set(entry.identity.localItemId, entry);
+        this.messagesById.set(fetched.id, fetched);
+        items.push(...unit);
+        if (childOf)
+          break;
       }
       remaining -= messagesFetched;
-      pageToken = page.nextPageToken;
-      const pageTruncated = messagesExamined < listed.length;
+      itemRoom -= items.length;
+      if (childOf) {
+        const nextCursor2 = encodeGmailCursor({
+          ...watermarkMs !== undefined ? { watermarkMs } : {},
+          ...highWaterMs !== undefined ? { highWaterMs } : {},
+          ...pageToken ? { pageToken } : {},
+          ...metadataLeg ? { phase: "metadata" } : {},
+          ...startedMs !== undefined ? { startedMs } : {},
+          childOf,
+          after: childOf.id
+        });
+        yield { items, ...nextCursor2 ? { nextCursor: nextCursor2 } : {}, done: false, truncated: true };
+        return;
+      }
+      const handled = baseSkip + messagesExamined;
+      const pageTruncated = handled < listed.length;
+      if (!pageTruncated)
+        pageToken = page.nextPageToken;
       const legDone = !pageToken && !pageTruncated;
       const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
       const done = legDone && !enterMetadataLeg;
@@ -10190,7 +10557,8 @@ class GoogleGmailSourceConnector {
         ...highWaterMs !== undefined ? { highWaterMs } : {},
         ...pageToken ? { pageToken } : {},
         ...metadataLeg ? { phase: "metadata" } : {},
-        ...startedMs !== undefined ? { startedMs } : {}
+        ...startedMs !== undefined ? { startedMs } : {},
+        ...pageTruncated && examinedIds.length > 0 ? { after: examinedIds.at(-1) } : {}
       });
       yield {
         items,
@@ -10207,13 +10575,83 @@ class GoogleGmailSourceConnector {
         break;
     }
   }
-  async fetchItem(localItemId) {
+  async fetchItem(localItemId, options) {
+    if (options?.deferredBytes)
+      return this.fetchAttachment(localItemId, options.deferredBytes.locator);
     const item = this.itemsByLocalId.get(localItemId) ?? this.itemsByLocalId.get(`${this.account}:${localItemId}`);
     if (!item) {
-      throw new Error(`Gmail connector cannot fetch unknown item ${hashString(localItemId).slice(0, 16)}.`);
+      throw new Error(`Gmail connector cannot fetch unknown item ${hashString2(localItemId).slice(0, 16)}.`);
     }
     this.fetchItemCacheHits += 1;
     return item;
+  }
+  async fetchItemWithin(localItemId, options) {
+    if (!options.deferredBytes)
+      return this.fetchItem(localItemId);
+    return this.fetchAttachment(localItemId, options.deferredBytes.locator, options.maxBytes);
+  }
+  async fetchAttachment(localItemId, locator, maxBytes) {
+    const where = parseGmailPartLocator(locator);
+    if (!where)
+      throw new FileExtractionSourceError("source_content_unavailable");
+    const wanted = `${this.account}:${gmailChildProviderId(where.messageId, where.partId)}`;
+    if (localItemId !== wanted && `${this.account}:${localItemId}` !== wanted)
+      throw new FileExtractionSourceError("source_content_unavailable");
+    const client = await this.clientForRequest();
+    const gone = (error) => {
+      if (error instanceof Error && /Gmail API request failed \(404\)/.test(error.message))
+        throw new FileExtractionSourceError("source_item_not_found");
+      throw error;
+    };
+    let message2 = this.messagesById.get(where.messageId);
+    if (message2) {
+      this.beforeEachRequest?.();
+      this.providerRequests += 1;
+      const current2 = await client.getMessage(where.messageId, { format: "metadata", metadataHeaders: ["From"] }).catch(gone);
+      if (this.scope && !gmailMessageInScope(current2, this.scope))
+        throw new FileExtractionSourceError("source_permission_denied");
+    } else {
+      this.beforeEachRequest?.();
+      this.providerRequests += 1;
+      message2 = await client.getMessage(where.messageId).catch(gone);
+      this.messagesById.set(where.messageId, message2);
+    }
+    if (this.scope && !gmailMessageInScope(message2, this.scope))
+      throw new FileExtractionSourceError("source_permission_denied");
+    const part = gmailPartAt(message2.payload, where.partId);
+    const record = gmailMailRecordFromMessage(message2, { children: true });
+    const child = gmailMailItems(record, this.account, { children: true }).find((item) => item.identity.localItemId === wanted);
+    if (!part || !child)
+      throw new FileExtractionSourceError("source_version_gone");
+    const declared = part.body?.size;
+    if (maxBytes !== undefined && typeof declared === "number" && declared > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
+    let data = part.body?.data;
+    if (!data && part.body?.attachmentId) {
+      if (!client.getAttachment)
+        throw new FileExtractionSourceError("source_content_unavailable");
+      this.beforeEachRequest?.();
+      this.providerRequests += 1;
+      data = (await client.getAttachment(where.messageId, part.body.attachmentId)).data;
+    }
+    if (data === undefined)
+      throw new FileExtractionSourceError("source_content_unavailable");
+    if (maxBytes !== undefined && Math.floor(data.length * 3 / 4) > maxBytes + 3)
+      throw new FileExtractionSourceError("source_too_large");
+    const bytes = new Uint8Array(Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+    if (maxBytes !== undefined && bytes.byteLength > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
+    return { ...child, content: { kind: "bytes", mimeType: child.mimeType, bytes } };
+  }
+  async attachmentsFrom(client, at, room) {
+    const message2 = await client.getMessage(at.id);
+    this.messagesById.set(at.id, message2);
+    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message2, { children: this.build.children === true }), this.account, this.build);
+    const items = children.slice(at.from, at.from + Math.max(1, room));
+    for (const item of items)
+      this.itemsByLocalId.set(item.identity.localItemId, item);
+    const next = at.from + items.length;
+    return { items, ...next < children.length ? { next } : {} };
   }
   traversalStatus() {
     return {
@@ -10234,14 +10672,7 @@ class GoogleGmailSourceConnector {
     return this.clientForRequest();
   }
   classificationSignals(item) {
-    const subject = metadataString(item.metadata, "subject") ?? metadataString(item.metadata, "title");
-    const sender = metadataString(item.metadata, "from");
-    const labels = metadataStringArray(item.metadata, "labels");
-    return {
-      ...subject ? { title: subject } : {},
-      ...sender ? { sender } : {},
-      ...labels.length > 0 ? { labels } : {}
-    };
+    return gmailClassificationSignals(item);
   }
   async clientForRequest() {
     if (this.client)
@@ -10267,7 +10698,8 @@ class GoogleGmailSourceConnector {
       ...this.requestBudget ? { requestBudget: this.requestBudget } : {},
       provenance: this.provenance,
       ...this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {},
-      ...this.sleepImpl ? { sleep: this.sleepImpl } : {}
+      ...this.sleepImpl ? { sleep: this.sleepImpl } : {},
+      ...this.beforeEachRequest ? { beforeEachAttempt: this.beforeEachRequest } : {}
     });
   }
   queryForWatermark(watermarkMs) {
@@ -10297,6 +10729,18 @@ function budgetedGmailApiClient(inner, budget, provenance) {
       budget.reserve(provenance);
       return inner.getMessage(id, options);
     },
+    ...inner.getProfile ? {
+      getProfile() {
+        budget.reserve(provenance);
+        return inner.getProfile();
+      }
+    } : {},
+    ...inner.getAttachment ? {
+      getAttachment(messageId, attachmentId) {
+        budget.reserve(provenance);
+        return inner.getAttachment(messageId, attachmentId);
+      }
+    } : {},
     ...inner.listLabels ? {
       listLabels() {
         budget.reserve(provenance);
@@ -10323,7 +10767,7 @@ function promotedWatermark(input) {
   return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
 }
 function encodeGmailCursor(cursor) {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf && !cursor.after) {
     return;
   }
   return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
@@ -10344,16 +10788,31 @@ function decodeGmailCursor(value) {
     }
     if (parsed.phase !== undefined && parsed.phase !== "metadata")
       throw new Error("invalid");
+    const childOf = decodeChildOf(parsed.childOf);
+    if (parsed.after !== undefined && (typeof parsed.after !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(parsed.after))) {
+      throw new Error("invalid");
+    }
     return {
       ...watermarkMs !== undefined ? { watermarkMs } : {},
       ...highWaterMs !== undefined ? { highWaterMs } : {},
       ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {},
       ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
-      ...startedMs !== undefined ? { startedMs } : {}
+      ...startedMs !== undefined ? { startedMs } : {},
+      ...childOf ? { childOf } : {},
+      ...typeof parsed.after === "string" ? { after: parsed.after } : {}
     };
   } catch {
     throw new TypeError("Gmail connector cursor is invalid.");
   }
+}
+function decodeChildOf(value) {
+  if (value === undefined)
+    return;
+  const record = value;
+  if (!record || typeof record !== "object" || typeof record.id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(record.id) || typeof record.from !== "number" || !Number.isSafeInteger(record.from) || record.from < 0) {
+    throw new Error("invalid");
+  }
+  return { id: record.id, from: record.from };
 }
 function decodeCursorEpochMs(value) {
   if (value === undefined)
@@ -10384,7 +10843,9 @@ class RestGmailApiClient {
   sleep;
   requestBudget;
   provenance;
+  beforeEachAttempt;
   constructor(options) {
+    this.beforeEachAttempt = options.beforeEachAttempt;
     this.token = options.token;
     this.fetchImpl = options.fetch;
     this.baseUrl = options.baseUrl;
@@ -10424,6 +10885,17 @@ class RestGmailApiClient {
     const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
     return json;
   }
+  async getProfile() {
+    const record = asRecord6(await this.getJson("users/me/profile"), "Gmail profile");
+    return { emailAddress: stringValue(record.emailAddress) };
+  }
+  async getAttachment(messageId, attachmentId) {
+    const record = asRecord6(await this.getJson(`users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`), "Gmail attachment");
+    return {
+      data: stringValue(record.data),
+      ...typeof record.size === "number" && Number.isSafeInteger(record.size) ? { size: record.size } : {}
+    };
+  }
   async listLabels() {
     const record = asRecord6(await this.getJson("users/me/labels"), "Gmail labels list response");
     return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord6(item, "Gmail label"))).filter((label) => label.id) : [];
@@ -10434,6 +10906,7 @@ class RestGmailApiClient {
   async getJson(path) {
     let attempt = 0;
     for (;; ) {
+      this.beforeEachAttempt?.();
       this.requestBudget?.reserve(this.provenance);
       const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
         headers: {
@@ -10479,93 +10952,116 @@ function gmailLabelFromJson(record) {
     ...typeof record.messagesTotal === "number" && Number.isFinite(record.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record.messagesTotal)) } : {}
   };
 }
-function rawItemFromGmailMessage(message2, account, options = {}) {
+function gmailMailRecordFromMessage(message2, options = {}) {
   const headers = headersFromPart(message2.payload);
-  const subject = headers.get("subject") ?? "(no subject)";
-  const rawFrom = headers.get("from") ?? "";
-  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
-  const date = parsedDate(headers.get("date")) ?? internalDateIso(message2.internalDate);
   const metadataOnly = options.metadataOnly === true;
-  const attachments = gmailAttachmentInventory(message2.payload);
-  const text2 = metadataOnly ? "" : extractMessageText(message2) || (attachments.lines.length > 0 ? attachments.lines.join(`
-`) : `Subject: ${subject}`);
-  const fetchedAt = new Date().toISOString();
-  return {
-    identity: {
-      family: "email",
-      provider: "gmail",
-      accountScope: account,
-      providerItemId: message2.id,
-      ...message2.threadId ? { providerThreadId: message2.threadId } : {},
-      localItemId: `${account}:${message2.id}`,
-      ...message2.historyId ? { sourceVersion: message2.historyId } : {}
-    },
-    mimeType: "message/rfc822",
-    content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
-    metadata: Object.freeze({
-      title: subject,
-      subject,
-      from,
-      ...date ? { authoredAt: date } : {},
-      ...message2.internalDate ? { internalDate: message2.internalDate } : {},
-      ...message2.historyId ? { historyId: message2.historyId } : {},
-      ...message2.snippet && !metadataOnly ? { snippet: message2.snippet } : {},
-      ...metadataOnly ? namesOnlyContentScopeMetadata() : {},
-      labels: message2.labelIds ?? [],
-      attachmentCount: attachments.count,
-      attachmentBytesDeclared: attachments.bytes,
-      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
-      attachmentsNotIngested: attachments.count,
-      locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message2.id)}`,
-      contentHash: hashString(`${message2.historyId ?? ""}:${metadataOnly ? "metadata_only" : text2}`)
-    }),
-    fetchedAt
-  };
-}
-function gmailAttachmentInventory(part) {
-  if (!part)
-    return { count: 0, bytes: 0, lines: [] };
-  const filename = part.filename?.trim();
-  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
-  let count = filename ? 1 : 0;
-  let bytes = size ?? 0;
-  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
-  for (const child of part.parts ?? []) {
-    const nested = gmailAttachmentInventory(child);
-    count += nested.count;
-    bytes += nested.bytes;
-    lines.push(...nested.lines);
-  }
-  return { count, bytes, lines };
-}
-function gmailAttachmentLine(filename, part, size) {
-  const details = [
-    part.mimeType?.trim() || undefined,
-    size !== undefined ? `${size} bytes` : undefined,
-    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined
-  ].filter((value) => Boolean(value));
-  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
-}
-function metadataCount(metadata, key) {
-  const value = metadata[key];
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
-function extractMessageText(message2) {
+  const children = options.children === true;
   const plain = [];
   const html = [];
-  collectPartText(message2.payload, plain, html);
-  const selected = plain.length > 0 ? plain.join(`
+  if (!metadataOnly)
+    collectPartText(message2.payload, plain, html, children);
+  const messageId = bareMessageId(headers.get("message-id"));
+  return {
+    id: message2.id,
+    ...message2.threadId ? { threadId: message2.threadId } : {},
+    ...message2.historyId ? { historyId: message2.historyId, sourceVersion: message2.historyId } : {},
+    ...message2.internalDate ? { internalDate: message2.internalDate } : {},
+    labelIds: message2.labelIds ?? [],
+    headers: {
+      ...headers.get("subject") ? { subject: headers.get("subject") } : {},
+      ...headers.get("from") ? { from: headers.get("from") } : {},
+      ...headers.get("to") ? { to: headers.get("to") } : {},
+      ...headers.get("date") ? { date: headers.get("date") } : {},
+      ...messageId ? { messageId } : {}
+    },
+    ...message2.snippet && !metadataOnly ? { snippet: message2.snippet } : {},
+    body: plain.length > 0 ? plain.join(`
 
 `) : html.map(stripHtml).join(`
 
-`);
-  return [headersSummary(message2.payload), message2.snippet, selected].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
-
-`);
+`),
+    metadataOnly,
+    attachments: gmailAttachments(message2.id, message2.payload, false, children)
+  };
 }
-function collectPartText(part, plain, html) {
+function bareMessageId(value) {
+  const trimmed = value?.trim();
+  if (!trimmed)
+    return;
+  const inner = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
+  return inner || undefined;
+}
+function gmailMessageInScope(message2, scope) {
+  const labels = new Set((message2.labelIds ?? []).map((label) => label.toUpperCase()));
+  if (labels.has("SPAM") || labels.has("TRASH"))
+    return false;
+  for (const skipped of [...scope.skippedCategoryLabelIds ?? [], ...scope.skippedLabelIds ?? []]) {
+    if (labels.has(skipped.toUpperCase()))
+      return false;
+  }
+  const received = internalDateNumber({ internalDate: message2.internalDate });
+  if (scope.contentAfterMs !== undefined && (received === undefined || received < scope.contentAfterMs))
+    return false;
+  const from = headersFromPart(message2.payload).get("from");
+  if (scope.skipSenders?.some((rule) => senderMatchesRule(from, rule)))
+    return false;
+  return true;
+}
+function gmailPartLocator(messageId, partId) {
+  return `${GMAIL_PART_LOCATOR_PREFIX}${messageId}:${partId}`;
+}
+function parseGmailPartLocator(locator) {
+  if (!locator.startsWith(GMAIL_PART_LOCATOR_PREFIX))
+    return;
+  const rest = locator.slice(GMAIL_PART_LOCATOR_PREFIX.length);
+  const split = rest.indexOf(":");
+  if (split <= 0)
+    return;
+  const messageId = rest.slice(0, split);
+  const partId = rest.slice(split + 1);
+  return /^[A-Za-z0-9_-]{1,128}$/.test(messageId) && /^[0-9.]{0,64}$/.test(partId) ? { messageId, partId } : undefined;
+}
+function gmailAttachments(messageId, part, inside, children = false) {
+  if (!part)
+    return [];
+  const headers = headersFromPart(part);
+  const disposition = headers.get("content-disposition")?.split(";")[0]?.trim();
+  const filename = part.filename?.trim();
+  const partId = part.partId?.trim() ?? "";
+  const attachment = children ? isGmailAttachmentPart({ ...part.mimeType ? { mimeType: part.mimeType } : {}, ...filename ? { filename } : {}, ...disposition ? { disposition } : {} }) : Boolean(filename);
+  const size = attachment && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
+  const found = attachment ? [{
+    partId,
+    filename: children ? gmailAttachmentPartName({ partId, ...filename ? { filename } : {}, ...headers.get("content-id") ? { contentId: headers.get("content-id") } : {}, ...part.mimeType ? { mimeType: part.mimeType } : {} }) : filename,
+    ...part.mimeType?.trim() ? { mimeType: part.mimeType.trim() } : {},
+    ...size !== undefined ? { size } : {},
+    ...part.partId !== undefined ? { locator: gmailPartLocator(messageId, partId) } : {},
+    ...inside ? { nested: true } : {}
+  }] : [];
+  for (const child of part.parts ?? [])
+    found.push(...gmailAttachments(messageId, child, inside || attachment, children));
+  return found;
+}
+function gmailPartAt(part, partId) {
   if (!part)
     return;
+  if ((part.partId?.trim() ?? "") === partId)
+    return part;
+  for (const child of part.parts ?? []) {
+    const found = gmailPartAt(child, partId);
+    if (found)
+      return found;
+  }
+  return;
+}
+function collectPartText(part, plain, html, children = false) {
+  if (!part)
+    return;
+  if (children) {
+    const disposition = headersFromPart(part).get("content-disposition")?.split(";")[0]?.trim();
+    if (isGmailAttachmentPart({ ...part.mimeType ? { mimeType: part.mimeType } : {}, ...part.filename?.trim() ? { filename: part.filename } : {}, ...disposition ? { disposition } : {} }))
+      return;
+  }
   if (part.filename?.trim())
     return;
   const decoded = part.body?.data ? decodeBase64Url(part.body.data) : undefined;
@@ -10574,7 +11070,7 @@ function collectPartText(part, plain, html) {
   if (decoded && part.mimeType === "text/html")
     html.push(decoded);
   for (const child of part.parts ?? [])
-    collectPartText(child, plain, html);
+    collectPartText(child, plain, html, children);
 }
 function headersFromPart(part) {
   const headers = new Map;
@@ -10586,34 +11082,12 @@ function headersFromPart(part) {
   }
   return headers;
 }
-function headersSummary(part) {
-  const headers = headersFromPart(part);
-  return [
-    headers.get("subject") ? `Subject: ${headers.get("subject")}` : undefined,
-    headers.get("from") ? `From: ${headers.get("from")}` : undefined,
-    headers.get("to") ? `To: ${headers.get("to")}` : undefined,
-    headers.get("date") ? `Date: ${headers.get("date")}` : undefined
-  ].filter(Boolean).join(`
-`);
-}
 function decodeBase64Url(value) {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
   return Buffer.from(normalized, "base64").toString("utf8");
 }
 function stripHtml(value) {
   return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-}
-function parsedDate(value) {
-  if (!value)
-    return;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-}
-function internalDateIso(value) {
-  if (!value)
-    return;
-  const ms = Number.parseInt(value, 10);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
 }
 function normalizeGmailMaxMessages(value) {
   if (value === undefined || !Number.isFinite(value))
@@ -10636,22 +11110,28 @@ function optionalStringProp(record, key) {
 function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
-function hashString(value) {
-  return createHash4("sha256").update(value).digest("hex");
+function metadataCount(metadata, key) {
+  const value = metadata[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
-var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+function hashString2(value) {
+  return createHash6("sha256").update(value).digest("hex");
+}
+var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
   init_olympus_layout();
   init_mail_source_scope();
   init_sender_rules();
+  init_file_extraction_source();
   init_credential_broker();
   init_ingest_filter();
+  init_gmail_mail_record();
   init_request_budget();
-  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
+  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date", "Message-ID"];
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -10767,7 +11247,7 @@ class GoogleDriveSourceConnector {
   async fetchItem(localItemId) {
     const item = this.itemsByLocalId.get(localItemId);
     if (!item) {
-      throw new Error(`Google Drive connector cannot fetch unknown item ${hashString2(localItemId).slice(0, 16)}.`);
+      throw new Error(`Google Drive connector cannot fetch unknown item ${hashString3(localItemId).slice(0, 16)}.`);
     }
     return item;
   }
@@ -10837,7 +11317,7 @@ class GoogleDriveSourceConnector {
         content: text2?.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
         metadata: Object.freeze({
           ...metadata,
-          ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString2(`${file.version ?? ""}:${text2 ?? title}`) }
+          ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString3(`${file.version ?? ""}:${text2 ?? title}`) }
         }),
         fetchedAt: new Date().toISOString()
       }
@@ -11216,8 +11696,8 @@ function optionalStringProp2(record, key) {
 function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
-function hashString2(value) {
-  return createHash5("sha256").update(value).digest("hex");
+function hashString3(value) {
+  return createHash7("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -12352,7 +12832,7 @@ var init_secret_patterns = __esm(() => {
 });
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text2 = input.text?.trim() ?? "";
   if (!text2) {
@@ -12421,7 +12901,7 @@ function dedupeFindings(findings) {
   return unique;
 }
 function hashFinding(type, matchedText) {
-  return createHash6("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash8("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-10-13", REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -12882,7 +13362,7 @@ function pathPrefixMatches(path, prefix) {
 }
 
 // src/workers/classification/tier-classifier.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 function tierRank(tier) {
   return TIER_RANK[tier];
 }
@@ -12893,7 +13373,7 @@ function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
 }
 function contentDigestReason(text2) {
-  return `content:sha256:${createHash7("sha256").update(text2.trim()).digest("hex")}`;
+  return `content:sha256:${createHash9("sha256").update(text2.trim()).digest("hex")}`;
 }
 function snifferContentMaterial(names, excerpt, parentContext) {
   const trimmed = names.trim();
@@ -12925,7 +13405,7 @@ function splitParentContext(material) {
 }
 function tierSnifferInputHash(pass, signals, text2, parentContext) {
   const context = parentContext?.replace(/\s+/g, " ").trim().slice(0, PARENT_CONTEXT_MAX_CHARS);
-  return createHash7("sha256").update(JSON.stringify([
+  return createHash9("sha256").update(JSON.stringify([
     pass,
     signals.title ?? null,
     signals.path ?? null,
@@ -13475,7 +13955,7 @@ var init_tier_classifier = __esm(() => {
 
 // src/workers/classification/secret-locations.ts
 import { Database } from "bun:sqlite";
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 import { chmodSync as chmodSync2, closeSync as closeSync7, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync7 } from "node:fs";
 import { dirname as dirname14 } from "node:path";
 function screenedSecretLocator(locator) {
@@ -13521,7 +14001,7 @@ class SecretLocationsIndex {
     const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
     const locator = screenedSecretLocator(input.locator);
     const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
-    const contentHash = input.text !== undefined ? createHash8("sha256").update(input.text, "utf8").digest("hex") : null;
+    const contentHash = input.text !== undefined ? createHash10("sha256").update(input.text, "utf8").digest("hex") : null;
     const existing = this.get(input.identity);
     if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
       return false;
@@ -13608,7 +14088,7 @@ class SecretLocationsIndex {
   }
 }
 function secretLocationRef(location) {
-  return `secret:${createHash8("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+  return `secret:${createHash10("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
 }
 function secretLocationWithinScope(location, scope) {
   if (scope.accountScope && location.accountScope !== scope.accountScope)
@@ -13741,11 +14221,11 @@ var init_secret_locations = __esm(() => {
 
 // src/workers/classification/sniffer-store.ts
 import { Database as Database2 } from "bun:sqlite";
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 import { chmodSync as chmodSync3, existsSync as existsSync11, mkdirSync as mkdirSync10 } from "node:fs";
 import { dirname as dirname15 } from "node:path";
 function snifferMaterialHash(pass, material) {
-  return createHash9("sha256").update(`${pass}
+  return createHash11("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
 
@@ -18158,7 +18638,7 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash10, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash12, randomUUID as randomUUID4 } from "node:crypto";
 import {
   chmodSync as chmodSync5,
   closeSync as closeSync9,
@@ -18390,7 +18870,7 @@ function refsDir(path) {
   return join18(dirname18(path), `${basename4(path)}.refs`);
 }
 function holderDigest(name) {
-  return createHash10("sha256").update(name).digest("hex").slice(0, 32);
+  return createHash12("sha256").update(name).digest("hex").slice(0, 32);
 }
 function holderName(holder) {
   const digest = holderDigest(mediaHolderName(holder));
@@ -18605,7 +19085,7 @@ var init_delphi_scorer = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 function snifferTierKey(verdict) {
   if (verdict.failSafe || verdict.tier === "private" || recordRequiresPrivate(verdict))
     return "secure";
@@ -18683,7 +19163,7 @@ function snifferCacheModelId(lane) {
   return lane.cacheModelId ?? lane.modelId;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
-  const model = createHash11("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
+  const model = createHash13("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
   return `${lane.kind}:${promptVersion}.m${model}`;
 }
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
@@ -18706,7 +19186,7 @@ function snifferPromptVersions(ownerContext) {
   const context2 = boundedOwnerContext(ownerContext);
   if (!context2)
     return { approval: SNIFFER_PROMPT_VERSION, cache: SNIFFER_PROMPT_VERSION };
-  const digest = createHash11("sha256").update(context2).digest("hex").slice(0, 8);
+  const digest = createHash13("sha256").update(context2).digest("hex").slice(0, 8);
   return { approval: SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, cache: `${SNIFFER_OWNER_CONTEXT_PROMPT_VERSION}.o${digest}` };
 }
 function parseSnifferBatchResponse(text2, expected) {
@@ -18891,8 +19371,8 @@ var init_sniffer = __esm(() => {
     `{"verdicts":[{"i":1,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map((c) => `"${c}"`).join("|")},"ownRecord":true|false,"privateKind":${SNIFFER_PRIVATE_KINDS.map((c) => `"${c}"`).join("|")},"confidence":<number from 0 to 1>}]}`
   ].join(`
 `);
-  SNIFFER_PROMPT_VERSION = `p-${createHash11("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash11("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash13("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash13("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
   SNIFFER_CATEGORY_SYNONYMS = {
     insurance: "financial",
     money: "financial",
@@ -19389,7 +19869,7 @@ function hiddenChildKeys(lane, probes) {
   }
   return childrenWithHiddenParents(lane, links);
 }
-var CHILD_ITEM_ID_SEPARATOR = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   HIDDEN = { visible: false, gone: false };
@@ -19877,7 +20357,7 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -20026,7 +20506,7 @@ class GeminiSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = hashString3(JSON.stringify({
+    this.configHash = hashString4(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       baseUrl: this.baseUrl,
@@ -20211,7 +20691,7 @@ class OpenAICompatibleSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = hashString3(JSON.stringify({
+    this.configHash = hashString4(JSON.stringify({
       provider: this.provider,
       baseUrl: this.baseUrl,
       model: this.modelId,
@@ -20635,8 +21115,8 @@ function normalizeOutputDimensionality(value) {
   }
   return value;
 }
-function hashString3(value) {
-  return createHash12("sha256").update(value).digest("hex");
+function hashString4(value) {
+  return createHash14("sha256").update(value).digest("hex");
 }
 var SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
 var init_embeddings = __esm(() => {
@@ -20782,7 +21262,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash13, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash15, randomUUID as randomUUID5 } from "node:crypto";
 import { existsSync as existsSync18, lstatSync as lstatSync9, mkdirSync as mkdirSync13, statSync as statSync11 } from "node:fs";
 import { dirname as dirname20 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
@@ -21353,7 +21833,7 @@ function parseEmbeddingMaintenanceJournal(value) {
   };
 }
 function connectorStoreEmbeddingWriteAuthorityId(modelId) {
-  return `connector-store-embedding-write-authority:${hashString4(modelId)}`;
+  return `connector-store-embedding-write-authority:${hashString5(modelId)}`;
 }
 function connectorStoreEmbeddingWriteAuthority(provider, providerEpoch, currencyRebuildPending = false) {
   assertConnectorStoreEmbeddingAuthorityProviderDimension(provider);
@@ -21426,10 +21906,10 @@ function connectorStoreEmbeddingWriteAuthorityMatches(authority, provider) {
 }
 function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   const normalized = normalizeEmbedLocalItemIds(localItemIds);
-  return hashString4(JSON.stringify(normalized ? [...normalized].sort() : null));
+  return hashString5(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash13("sha256");
+  const digest = createHash15("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -21522,7 +22002,7 @@ function namesOnlyKept(db, itemPks) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash13("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash15("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -21701,8 +22181,8 @@ function sweepMediaCacheThrottled() {
   } catch {}
 }
 function connectorStoreChunkEmbeddingInputHash(embeddingText, mediaSha256) {
-  return mediaSha256 ? hashString4(`${embeddingText}
-\x00image:sha256:${mediaSha256}`) : hashString4(embeddingText);
+  return mediaSha256 ? hashString5(`${embeddingText}
+\x00image:sha256:${mediaSha256}`) : hashString5(embeddingText);
 }
 function buildConnectorStoreEmbeddingText(row) {
   return [
@@ -21828,6 +22308,7 @@ function normalizeConnectorStoreSearchFilters(value) {
   const normalized = {
     ...provider ? { provider } : {},
     ...value.observedConnectorId ? { observedConnectorId: requireNonEmpty(value.observedConnectorId, "Observed connector id") } : {},
+    ...value.observedConnectorIdPrefix ? { observedConnectorIdPrefix: requireNonEmpty(value.observedConnectorIdPrefix, "Observed connector id prefix") } : {},
     ...locatorPathScope ? { locatorPathScope } : {},
     ...locatorPathScopes.length > 0 ? { locatorPathScopes } : {},
     ...locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {},
@@ -21856,9 +22337,15 @@ function connectorStoreFilterSql(filters) {
     clauses.push("AND i.provider = ?");
     params.push(normalized.provider);
   }
-  if (normalized.observedConnectorId) {
+  if (normalized.observedConnectorId && normalized.observedConnectorIdPrefix) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND (scope_owner.connector_id = ? OR substr(scope_owner.connector_id, 1, length(?)) = ?) AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorId, normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
+  } else if (normalized.observedConnectorId) {
     clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
     params.push(normalized.observedConnectorId);
+  } else if (normalized.observedConnectorIdPrefix) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND substr(scope_owner.connector_id, 1, length(?)) = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push("AND i.source_scope_generation = ?");
@@ -22206,7 +22693,7 @@ function assertContentFetchFailureBudget(consecutiveFailures) {
   throw new Error(`connector_fetch_failed: ${consecutiveFailures} consecutive connector fetchItem failures; failing sync run instead of committing a content-less batch.`);
 }
 function itemIdHash(item) {
-  return hashString4(item.identity.localItemId).slice(0, 16);
+  return hashString5(item.identity.localItemId).slice(0, 16);
 }
 function metadataString2(metadata, key2) {
   const value = metadata[key2];
@@ -22905,8 +23392,8 @@ function requireNonEmpty(value, label) {
     throw new Error(`${label} is required.`);
   return text2;
 }
-function hashString4(value) {
-  return createHash13("sha256").update(value).digest("hex");
+function hashString5(value) {
+  return createHash15("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -23291,27 +23778,27 @@ var init_local_index = __esm(() => {
       }
       return hidden;
     }
-    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false) {
+    tierVisibleRows(rows, identityOf2, layerOf, throwOnUnavailable = false) {
       if (rows.length === 0)
         return [];
       let copies;
       try {
         const ledger = this.visibilityLedger();
         if (ledger && ledger.corpusHasCopies(this.corpusId))
-          copies = ledger.copiesForMany(rows.map(identityOf));
+          copies = ledger.copiesForMany(rows.map(identityOf2));
       } catch (error) {
         if (throwOnUnavailable)
           throw error;
         return [];
       }
-      const served = copies ? rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row))) : [...rows];
-      return this.withoutChildrenOfHiddenParents(served, identityOf);
+      const served = copies ? rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf2(row))), this.corpusId, layerOf(row))) : [...rows];
+      return this.withoutChildrenOfHiddenParents(served, identityOf2);
     }
-    withoutChildrenOfHiddenParents(rows, identityOf) {
+    withoutChildrenOfHiddenParents(rows, identityOf2) {
       if (rows.length === 0)
         return rows;
-      const hidden = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
-      return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
+      const hidden = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf2));
+      return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf2(row))));
     }
     tierHiddenItemPks() {
       const base = this.tierLedgerHiddenItemPks();
@@ -24168,7 +24655,7 @@ var init_local_index = __esm(() => {
       const row = this.db.query(`
       SELECT status, cursor, audit_receipt_sha256 FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?
     `).get(connectorStoreEmbeddingWriteAuthorityId(modelId), "connector_store_embedding_write_authority");
-      if (!row || row.status !== "running" || row.audit_receipt_sha256 !== hashString4(row.cursor ?? ""))
+      if (!row || row.status !== "running" || row.audit_receipt_sha256 !== hashString5(row.cursor ?? ""))
         return;
       try {
         const parsed = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
@@ -25205,7 +25692,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash13("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash15("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -25323,7 +25810,7 @@ var init_local_index = __esm(() => {
           counts.chunksWithoutCurrentEmbeddings += 1;
           currentMissingEmbedding = true;
         }
-        if (row.bounded_text === null || hashString4(row.bounded_text) !== row.content_hash) {
+        if (row.bounded_text === null || hashString5(row.bounded_text) !== row.content_hash) {
           currentHashDisagreement = true;
         }
       }
@@ -26099,8 +26586,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash13("sha256");
-      const outputDigest = createHash13("sha256");
+      const inputDigest = createHash15("sha256");
+      const outputDigest = createHash15("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -26170,8 +26657,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash13("sha256");
-      const outputDigest = createHash13("sha256");
+      const inputDigest = createHash15("sha256");
+      const outputDigest = createHash15("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -26238,19 +26725,19 @@ var init_local_index = __esm(() => {
               repaired,
               renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json))
             ]);
-            inputDigest.update(`${row.item_pk}:${hashString4(row.search_text ?? "")}:${hashString4(derived ?? "")}
+            inputDigest.update(`${row.item_pk}:${hashString5(row.search_text ?? "")}:${hashString5(derived ?? "")}
 `);
             counts.itemsScanned += 1;
             lastItemPk = row.item_pk;
             if (derived === null) {
               counts.itemsWithoutChunks += 1;
-              outputDigest.update(`${row.item_pk}:${hashString4(row.search_text ?? "")}
+              outputDigest.update(`${row.item_pk}:${hashString5(row.search_text ?? "")}
 `);
               continue;
             }
             if (row.search_text === derived) {
               counts.itemsUnchanged += 1;
-              outputDigest.update(`${row.item_pk}:${hashString4(derived)}
+              outputDigest.update(`${row.item_pk}:${hashString5(derived)}
 `);
               continue;
             }
@@ -26264,7 +26751,7 @@ var init_local_index = __esm(() => {
               updated_at: row.updated_at
             });
             counts.ftsRowsRefreshed += this.refreshFtsForItem(row.item_pk);
-            outputDigest.update(`${row.item_pk}:${hashString4(derived)}
+            outputDigest.update(`${row.item_pk}:${hashString5(derived)}
 `);
           }
         })();
@@ -26304,7 +26791,7 @@ var init_local_index = __esm(() => {
         if (priorJournal && priorJournal.status !== "completed") {
           throw new Error("Connector store facet-refresh journal is not terminal.");
         }
-        if (priorJournal && priorJournal.audit_receipt_sha256 !== hashString4(priorJournal.cursor ?? "")) {
+        if (priorJournal && priorJournal.audit_receipt_sha256 !== hashString5(priorJournal.cursor ?? "")) {
           throw new Error("Connector store facet-refresh journal CAS state is corrupt.");
         }
         const prior = priorJournal ? parseFacetRefreshJournal(priorJournal.cursor) : undefined;
@@ -26393,7 +26880,7 @@ var init_local_index = __esm(() => {
             items_seen, items_indexed, started_at, completed_at,
             audit_receipt_sha256
           ) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
-        `).run(journalId, this.corpusId, "connector_store_owned_search_facet_refresh", cursor, counts.itemsScanned, counts.itemsRefreshed, completedAt, completedAt, hashString4(cursor));
+        `).run(journalId, this.corpusId, "connector_store_owned_search_facet_refresh", cursor, counts.itemsScanned, counts.itemsRefreshed, completedAt, completedAt, hashString5(cursor));
         }
       })();
       return { counts, matchedLocalItemIds, refreshedLocalItemIds };
@@ -26571,7 +27058,7 @@ var init_local_index = __esm(() => {
               tallyExclusion(metadataOnlyTally, exclusion);
             let itemForStorage = item;
             let contentFetchFailed = false;
-            if (!metadataOnly && !deferMetadataOnlyContent && classification && fetchContent && item.content.kind === "metadata_only") {
+            if (!metadataOnly && !deferMetadataOnlyContent && item.deferredBytes === undefined && classification && fetchContent && item.content.kind === "metadata_only") {
               try {
                 itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
                 consecutiveContentFetchFailures = 0;
@@ -26668,7 +27155,7 @@ var init_local_index = __esm(() => {
             const sourceScopeObservation = options?.sourceScopeObservation ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) : undefined;
             let upsert;
             try {
-              upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined);
+              upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", false, (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined);
             } catch (error) {
               if (!(error instanceof ConnectorStoreTierWriteRefusedError))
                 throw error;
@@ -26678,7 +27165,7 @@ var init_local_index = __esm(() => {
             itemsIndexed += 1;
             let itemChanged = upsert.contentChanged;
             let ftsContentChanged = false;
-            if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!deferMetadataOnlyContent || itemForStorage.content.kind !== "metadata_only")) {
+            if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== "metadata_only")) {
               const indexed = await this.indexItemContent(connector, (fetched) => routedLayer !== undefined ? sensitivity : classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain), (fetched, fetchedSensitivity) => routedLayer !== undefined ? undefined : this.recordTierDecision(connector, fetched, fetchedSensitivity, tierClassification, tierRun, itemContentKeptNamesOnly(fetched)), itemForStorage, upsert.itemPk, maxChunkChars, gaps, () => {
                 consecutiveContentFetchFailures += 1;
                 assertContentFetchFailureBudget(consecutiveContentFetchFailures);
@@ -26823,7 +27310,7 @@ var init_local_index = __esm(() => {
       const locatorUri = metadataString2(meta, "locatorUri") ?? metadataString2(meta, "pathDisplay") ?? metadataString2(meta, "url");
       const authoredAt = metadataString2(meta, "authoredAt") ?? metadataString2(meta, "sentAt") ?? metadataString2(meta, "clientModifiedAt");
       const updatedAt = metadataString2(meta, "updatedAt") ?? metadataString2(meta, "serverModifiedAt");
-      const emittedContentHash = metadataString2(meta, "contentHash") ?? (item.content.kind === "text" ? hashString4(item.content.text) : undefined);
+      const emittedContentHash = metadataString2(meta, "contentHash") ?? (item.content.kind === "text" ? hashString5(item.content.text) : undefined);
       const now = nowIso();
       const suppliedReactions = normalizeSourceReactions(meta["reactions"]);
       const existing = this.db.query(`
@@ -27218,7 +27705,7 @@ var init_local_index = __esm(() => {
         return {
           index,
           text: chunk,
-          hash: hashString4(chunk),
+          hash: hashString5(chunk),
           media: chunkMedia,
           embeddingHash: connectorStoreChunkEmbeddingInputHash(buildConnectorStoreEmbeddingText({ ...seasoning, bounded_text: chunk }), chunkMedia?.sha256)
         };
@@ -27538,7 +28025,7 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store embedding journal has an invalid status.");
       }
       const priorCounts = priorJournal ? parseEmbeddingMaintenanceJournal(priorJournal.cursor) : undefined;
-      if (priorJournal && priorJournal.audit_receipt_sha256 !== hashString4(priorJournal.cursor ?? "")) {
+      if (priorJournal && priorJournal.audit_receipt_sha256 !== hashString5(priorJournal.cursor ?? "")) {
         throw new Error("Connector store embedding journal CAS state is corrupt.");
       }
       if (priorCounts && priorCounts.leaseGeneration !== journalLeaseGeneration && journalLeaseGeneration <= priorCounts.leaseGeneration) {
@@ -27585,7 +28072,7 @@ var init_local_index = __esm(() => {
           if (!mustBindLegacyJournal && !mustClaimRunningJournal)
             return;
           const claimedCursor = embeddingMaintenanceJournal(provider, selectionSha256, inputSha256, rows.length, priorCounts.chunksEmbedded, priorJournal.status === "running" ? journalLeaseGeneration : priorCounts.leaseGeneration, providerEpoch, invalidateCurrentModelEmbeddings);
-          const claimedSha256 = hashString4(claimedCursor);
+          const claimedSha256 = hashString5(claimedCursor);
           const claimed = this.db.query(`
           UPDATE sync_runs
           SET cursor = ?, audit_receipt_sha256 = ?
@@ -27605,7 +28092,7 @@ var init_local_index = __esm(() => {
             invalidateOnCreate: invalidateCurrentModelEmbeddings
           });
           const cursor = embeddingMaintenanceJournal(provider, selectionSha256, inputSha256, rows.length, 0, journalLeaseGeneration, providerEpoch, invalidateCurrentModelEmbeddings);
-          const journalSha256 = hashString4(cursor);
+          const journalSha256 = hashString5(cursor);
           activeJournalSha256 = journalSha256;
           this.db.query(`
           INSERT INTO sync_runs (
@@ -27767,7 +28254,7 @@ var init_local_index = __esm(() => {
           if (journalId) {
             const cumulative = embedded + written;
             const cursor = embeddingMaintenanceJournal(provider, selectionSha256, inputSha256, rows.length, cumulative, journalLeaseGeneration, providerEpoch, invalidateCurrentModelEmbeddings);
-            nextJournalSha256 = hashString4(cursor);
+            nextJournalSha256 = hashString5(cursor);
             const updated = this.db.query(`
             UPDATE sync_runs
             SET cursor = ?, items_indexed = ?, audit_receipt_sha256 = ?
@@ -27801,7 +28288,7 @@ var init_local_index = __esm(() => {
       if (journalId) {
         const completedAt = this.now().toISOString();
         const cursor = embeddingMaintenanceJournal(provider, selectionSha256, inputSha256, rows.length, embedded, journalLeaseGeneration, providerEpoch, invalidateCurrentModelEmbeddings);
-        const completedSha256 = hashString4(cursor);
+        const completedSha256 = hashString5(cursor);
         this.db.transaction(() => {
           this.assertEmbeddingWriteAuthority(provider, providerEpoch);
           const completed = this.db.query(`
@@ -27858,10 +28345,10 @@ var init_local_index = __esm(() => {
           items_seen, items_indexed, started_at, completed_at,
           audit_receipt_sha256
         ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, NULL, ?)
-      `).run(authorityId, this.corpusId, "connector_store_embedding_write_authority", cursor2, startedAt, hashString4(cursor2));
+      `).run(authorityId, this.corpusId, "connector_store_embedding_write_authority", cursor2, startedAt, hashString5(cursor2));
         return providerEpoch2;
       }
-      if (existing.status !== "running" || existing.audit_receipt_sha256 !== hashString4(existing.cursor ?? "")) {
+      if (existing.status !== "running" || existing.audit_receipt_sha256 !== hashString5(existing.cursor ?? "")) {
         throw new Error("Connector store embedding write authority is corrupt.");
       }
       let current2;
@@ -27881,7 +28368,7 @@ var init_local_index = __esm(() => {
         SET cursor = ?, audit_receipt_sha256 = ?
         WHERE sync_run_id = ? AND connector_id = ? AND status = 'running'
           AND audit_receipt_sha256 = ?
-      `).run(cursor2, hashString4(cursor2), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
+      `).run(cursor2, hashString5(cursor2), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
         if (rebound2.changes !== 1) {
           throw new Error("Connector store embedding write authority was superseded.");
         }
@@ -27907,7 +28394,7 @@ var init_local_index = __esm(() => {
       SET cursor = ?, audit_receipt_sha256 = ?
       WHERE sync_run_id = ? AND connector_id = ? AND status = 'running'
         AND audit_receipt_sha256 = ?
-    `).run(cursor, hashString4(cursor), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
+    `).run(cursor, hashString5(cursor), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
       if (rebound.changes !== 1) {
         throw new Error("Connector store embedding write authority was superseded.");
       }
@@ -27923,7 +28410,7 @@ var init_local_index = __esm(() => {
     `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
       if (!authority)
         throw new Error("Connector store embedding write authority is missing.");
-      if (authority.status !== "running" || authority.audit_receipt_sha256 !== hashString4(authority.cursor ?? "")) {
+      if (authority.status !== "running" || authority.audit_receipt_sha256 !== hashString5(authority.cursor ?? "")) {
         throw new Error("Connector store embedding write authority is corrupt.");
       }
       const current2 = parseConnectorStoreEmbeddingWriteAuthority(authority.cursor);
@@ -27943,7 +28430,7 @@ var init_local_index = __esm(() => {
     `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
       if (!existing)
         return false;
-      if (existing.status !== "running" || existing.audit_receipt_sha256 !== hashString4(existing.cursor ?? "")) {
+      if (existing.status !== "running" || existing.audit_receipt_sha256 !== hashString5(existing.cursor ?? "")) {
         return false;
       }
       let current2;
@@ -27977,7 +28464,7 @@ var init_local_index = __esm(() => {
         SET cursor = ?, audit_receipt_sha256 = ?
         WHERE sync_run_id = ? AND connector_id = ? AND status = 'running'
           AND audit_receipt_sha256 = ?
-      `).run(cursor, hashString4(cursor), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
+      `).run(cursor, hashString5(cursor), authorityId, "connector_store_embedding_write_authority", existing.audit_receipt_sha256);
         if (cleared.changes !== 1) {
           throw new Error("Connector store embedding write authority was superseded.");
         }
@@ -28182,7 +28669,7 @@ var init_local_index = __esm(() => {
     `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
       if (!row)
         return { token: "no_embedding_write_authority" };
-      if (row.status !== "running" || row.audit_receipt_sha256 !== hashString4(row.cursor ?? "")) {
+      if (row.status !== "running" || row.audit_receipt_sha256 !== hashString5(row.cursor ?? "")) {
         return { token: "corrupt", skippedReason: "embedding_authority_corrupt" };
       }
       let record;
@@ -28581,6 +29068,35 @@ var init_local_index = __esm(() => {
     }
     holdsAnyItem() {
       return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
+    }
+    parentsAwaitingChildren(provider, needle, afterPk, limit) {
+      if (!this.childItemColumnsPresent)
+        return [];
+      const rows = this.db.query(`
+      SELECT i.item_pk AS itemPk, i.provider_item_id AS providerItemId, i.account_scope AS accountScope, i.local_item_id AS localItemId
+      FROM items i
+      WHERE i.provider = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL AND i.item_pk > ?
+        AND instr(i.provider_item_id, ?) = 0
+        AND instr(COALESCE(i.search_text, ''), ?) > 0
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM items k WHERE k.parent_local_item_id = i.local_item_id)
+      ORDER BY i.item_pk
+      LIMIT ?
+    `).all(provider, afterPk, CHILD_ITEM_ID_SEPARATOR, needle, Math.max(1, Math.floor(limit)));
+      return rows;
+    }
+    hasChildRowsOf(localItemId) {
+      if (!this.childItemColumnsPresent)
+        return false;
+      return this.db.query("SELECT 1 AS present FROM items WHERE parent_local_item_id = ? LIMIT 1").get(localItemId) !== null;
+    }
+    holdsItemsMatching(filters) {
+      const scoped = connectorStoreFilterSql(filters);
+      return this.db.query(`SELECT 1 AS present FROM items i WHERE i.tombstoned = 0 ${scoped.sql} LIMIT 1`).get(...scoped.params) !== null;
+    }
+    itemAccountScopes(provider, limit = 2) {
+      const rows = this.db.query("SELECT DISTINCT account_scope AS scope FROM items WHERE provider = ? LIMIT ?").all(provider, limit);
+      return rows.map((row) => row.scope);
     }
     fileReplacedOrRemoved() {
       if (!this.openedFile)
@@ -29430,13 +29946,13 @@ function settleNamesOnlyItems(options) {
     } catch {}
   }
   const last = rows.at(-1);
-  ledger.writeMeta(SETTLE_META_KEY, rows.length >= limit && last ? JSON.stringify(identityOf(last)) : "");
+  ledger.writeMeta(SETTLE_META_KEY, rows.length >= limit && last ? JSON.stringify(identityOf2(last)) : "");
   return report;
 }
 function settleOne(set, record) {
   if (!record.reasons.includes("content:unread") || record.decidedBy === "override")
     return false;
-  const identity = identityOf(record);
+  const identity = identityOf2(record);
   const current2 = set.ledger.copies(identity).filter((copy) => copy.state === "current");
   const names = copyServingLayer(current2, "metadata");
   const domain = names ? set.domainForCorpus(names.corpusId) : undefined;
@@ -29482,7 +29998,7 @@ function parseIdentity(raw) {
     return;
   }
 }
-function identityOf(record) {
+function identityOf2(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -29761,7 +30277,7 @@ var init_embedding_ledger = __esm(() => {
 });
 
 // src/workers/connector-store/tier-move.ts
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 function rowRehomeReceiptId(ledger, identity, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
 }
@@ -30055,7 +30571,7 @@ function readVerifiedMove(ledger, identity) {
   return receipt;
 }
 function copyFingerprint(copy, layers) {
-  return createHash14("sha256").update(JSON.stringify({
+  return createHash16("sha256").update(JSON.stringify({
     identity: copy.identity,
     columns: copy.columns,
     chunks: layers === "metadata" ? [] : copy.chunks
@@ -30684,7 +31200,7 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 import { readFileSync as readFileSync17 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname23, join as join23 } from "node:path";
@@ -30733,7 +31249,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash15("sha256").update(JSON.stringify({
+    this.configHash = createHash17("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -31256,7 +31772,7 @@ function rejudgeRoutedItems(options) {
 function rejudgeStoredContent(set, record, options) {
   const { report, key: key2, autoMoves } = options;
   const ledger = set.ledger;
-  const identity = identityOf2(record);
+  const identity = identityOf3(record);
   const read = ledger.classificationRead(identity);
   if (read.override) {
     if (key2)
@@ -31468,7 +31984,7 @@ function recordSecretLocation(locations, decision, exported, finding) {
     ...finding.text !== undefined ? { text: finding.text } : {}
   });
 }
-function identityOf2(record) {
+function identityOf3(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -31523,7 +32039,7 @@ function applyOwnerOverrides(options) {
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
-  const identity = identityOf3(record);
+  const identity = identityOf4(record);
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity, ...holdUntilJudged ? { holdUntilJudged: true } : {} }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
@@ -31605,7 +32121,7 @@ function storedCopy(set, identity) {
   }
   return;
 }
-function identityOf3(record) {
+function identityOf4(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -31621,7 +32137,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash16 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -31657,7 +32173,7 @@ function sweepOwnerRuleRaises(options) {
       report.secrets += 1;
     else if (raised === "deferred") {
       if (held.length < MAX_HELD_ITEMS)
-        held.push(identityOf4(record));
+        held.push(identityOf5(record));
       else
         overflow = true;
     }
@@ -31693,7 +32209,7 @@ function sweepOwnerRuleRaises(options) {
     report.complete = false;
     writeState(ledger, {
       done,
-      pending: { rules: pendingKeys, after: identityOf4(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+      pending: { rules: pendingKeys, after: identityOf5(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
     });
   }
   return report;
@@ -31701,7 +32217,7 @@ function sweepOwnerRuleRaises(options) {
 function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
   if (record.contentTier === "secrets" || record.metadataTier === "secrets")
     return "unchanged";
-  const identity = identityOf4(record);
+  const identity = identityOf5(record);
   if (set.ledger.getOverride(identity))
     return "unchanged";
   const copies = set.ledger.copies(identity);
@@ -31761,7 +32277,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash16("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash18("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function readState(raw) {
   if (!raw)
@@ -31811,7 +32327,7 @@ function writeState(ledger, state) {
 function sameKeys(left, right) {
   return left.length === right.length && left.every((key2, index) => key2 === right[index]);
 }
-function identityOf4(record) {
+function identityOf5(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -31846,7 +32362,7 @@ function sweepImageContentToPrivate(options) {
   }
   if (rows.length >= limit) {
     report.complete = false;
-    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf5(rows.at(-1)) }));
+    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf6(rows.at(-1)) }));
     return report;
   }
   for (const domain of ["public_safe", "internal"]) {
@@ -31863,7 +32379,7 @@ function raiseIfImage(set, record) {
     return false;
   if (record.contentTier === "secure")
     return false;
-  const identity = identityOf5(record);
+  const identity = identityOf6(record);
   if (set.ledger.getOverride(identity))
     return false;
   const current2 = set.ledger.copies(identity).filter((copy) => copy.state === "current");
@@ -31907,7 +32423,7 @@ function readState2(raw) {
     return { done: false };
   }
 }
-function identityOf5(record) {
+function identityOf6(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -33200,14 +33716,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash17 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash17("sha256").update(block).digest());
+    blockDigests.push(createHash19("sha256").update(block).digest());
   }
-  return createHash17("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash19("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -33568,37 +34084,433 @@ var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
   init_corpus();
 });
+// src/core/source-inputs.ts
+var init_source_inputs = () => {};
+
 // src/workers/connector-store/capture-spool-secrets.ts
+var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES;
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
   init_secrets_disposition();
+  SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
+  SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
+});
+
+// src/workers/connector-store/spool-file-identity.ts
+var SPOOL_IDENTITY_HEAD_BYTES, SPOOL_BOUNDARY_WINDOW_BYTES;
+var init_spool_file_identity = __esm(() => {
+  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
+});
+
+// src/workers/telegram-messages/spool-lines.ts
+var CHUNK_BYTES, hints;
+var init_spool_lines = __esm(() => {
+  init_spool_file_identity();
+  CHUNK_BYTES = 1 << 20;
+  hints = new Map;
+});
+
+// src/workers/archive-import/telegram/message.ts
+var TELEGRAM_MEDIA_KEYS, READ_OBJECTS;
+var init_message = __esm(() => {
+  TELEGRAM_MEDIA_KEYS = new Set([
+    "photo",
+    "file",
+    "media_type",
+    "file_name",
+    "sticker_emoji",
+    "performer",
+    "title",
+    "duration_seconds"
+  ]);
+  READ_OBJECTS = new Set([
+    "contact_information",
+    "location_information",
+    "poll",
+    "todo_list",
+    "invoice_information",
+    "text",
+    "text_entities",
+    "reactions",
+    "inline_bot_buttons"
+  ]);
+});
+
+// src/workers/telegram-messages/record-builder.ts
+var init_record_builder = __esm(() => {
+  init_capture_spool_connector();
+});
+
+// src/workers/telegram-messages/media-child.ts
+var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, LIVE_MEDIA_MAX_READ_BYTES, MEDIA_DISK_FLOOR_BYTES;
+var init_media_child = __esm(() => {
+  TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
+  LIVE_MEDIA_MAX_READ_BYTES = 64 * 1024 * 1024;
+  MEDIA_DISK_FLOOR_BYTES = 5 * 1024 * 1024 * 1024;
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts
-var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID;
+var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID, MAX_READ_BYTES, MAX_RECORD_BYTES, MAX_TAIL_SCAN_BYTES, SERVICE_FIELDS;
 var init_capture_spool_connector = __esm(() => {
   init_olympus_layout();
   init_source_placement();
+  init_source_inputs();
   init_capture_spool_secrets();
   init_corpus_adapter4();
+  init_spool_lines();
+  init_message();
+  init_record_builder();
+  init_media_child();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
     secure_local: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_secure_local`
   };
   TELEGRAM_TRUST_EVICTION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_eviction`;
   TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
+  MAX_READ_BYTES = 64 * 1024 * 1024;
+  MAX_RECORD_BYTES = 32 * 1024 * 1024;
+  MAX_TAIL_SCAN_BYTES = 16 * 1024 * 1024;
+  SERVICE_FIELDS = new Set([
+    "title",
+    "new_title",
+    "members",
+    "duration_seconds",
+    "duration",
+    "discard_reason",
+    "period",
+    "amount",
+    "currency",
+    "boosts",
+    "inviter"
+  ]);
+});
+
+// src/workers/telegram-messages/protection-claims.ts
+var init_protection_claims = __esm(() => {
+  init_tier_move();
+  init_capture_spool_connector();
+  init_record_builder();
+});
+
+// src/workers/archive-import/byte-source.ts
+import * as zlib from "node:zlib";
+function tableCrc32(data2, value) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0;n < 256; n += 1) {
+      let c = n;
+      for (let k = 0;k < 8; k += 1)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let crc = ~value;
+  for (let index = 0;index < data2.length; index += 1) {
+    crc = crcTable[(crc ^ data2[index]) & 255] ^ crc >>> 8;
+  }
+  return ~crc >>> 0;
+}
+function crc32Update(value, data2) {
+  if (data2.length === 0)
+    return value >>> 0;
+  return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
+}
+var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var init_byte_source = __esm(() => {
+  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
+  nativeCrc32 = zlib.crc32;
+});
+// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
+var TokenType;
+var init_tokenType = __esm(() => {
+  (function(TokenType2) {
+    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType2[TokenType2["COLON"] = 4] = "COLON";
+    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
+    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
+    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
+    TokenType2[TokenType2["NULL"] = 8] = "NULL";
+    TokenType2[TokenType2["STRING"] = 9] = "STRING";
+    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
+    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  })(TokenType || (TokenType = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
+var charset;
+var init_utf_8 = __esm(() => {
+  (function(charset2) {
+    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
+    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
+    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
+    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset2[charset2["TAB"] = 9] = "TAB";
+    charset2[charset2["SPACE"] = 32] = "SPACE";
+    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
+    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
+    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset2[charset2["COMMA"] = 44] = "COMMA";
+    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
+    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
+    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset2[charset2["COLON"] = 58] = "COLON";
+    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
+    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
+    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset2[charset2["TILDE"] = 126] = "TILDE";
+  })(charset || (charset = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/tokenizer.js
+var TokenizerStates;
+var init_tokenizer = __esm(() => {
+  init_tokenType();
+  init_utf_8();
+  (function(TokenizerStates2) {
+    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
+    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
+    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
+    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
+    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
+    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
+    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  })(TokenizerStates || (TokenizerStates = {}));
+});
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire5 } from "node:module";
+var runtimeRequire3, SCOPE_FILE_MAX_RANGE_BYTES;
+var init_scope_safe_fs = __esm(() => {
+  runtimeRequire3 = createRequire5(import.meta.url);
+  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/archive-import/stop-errors.ts
+var init_stop_errors = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+});
+
+// src/workers/archive-import/json-stream.ts
+var EMPTY_FRAME, MAX_SAFE_DIGITS;
+var init_json_stream = __esm(() => {
+  init_tokenizer();
+  init_tokenType();
+  init_archive_formats();
+  init_stop_errors();
+  EMPTY_FRAME = Object.freeze({});
+  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
+});
+
+// src/workers/archive-import/source-input.ts
+var init_source_input = __esm(() => {
+  init_archive_formats();
+  init_source_inputs();
+});
+// src/workers/archive-import/telegram/account.ts
+var ACCOUNT_SECTIONS;
+var init_account = __esm(() => {
+  init_message();
+  ACCOUNT_SECTIONS = [
+    { name: "personal_information", path: ["personal_information"], label: "profile", whole: true },
+    { name: "profile_pictures", path: ["profile_pictures"], label: "profile pictures", whole: false },
+    { name: "stories", path: ["stories"], label: "stories", whole: false },
+    { name: "profile_music", path: ["profile_music"], label: "profile music", whole: false },
+    { name: "contacts", path: ["contacts", "list"], label: "contacts", whole: false },
+    { name: "frequent_contacts", path: ["frequent_contacts", "list"], label: "frequent contacts", whole: false },
+    { name: "sessions", path: ["sessions", "list"], label: "sessions", whole: false },
+    { name: "web_sessions", path: ["web_sessions", "list"], label: "web sessions", whole: false },
+    { name: "other_data", path: ["other_data"], label: "other data", whole: true }
+  ];
+});
+
+// src/workers/archive-import/telegram/connector.ts
+var TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING, TELEGRAM_MAX_MESSAGE_BYTES, MESSAGE_PATHS, ITEM_PATHS, SECTION_ROOTS, LISTED_SECTIONS;
+var init_connector4 = __esm(() => {
+  init_archive_formats();
+  init_byte_source();
+  init_json_stream();
+  init_account();
+  init_message();
+  TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+  MESSAGE_PATHS = [
+    ["chats", "list", "*", "messages"],
+    ["left_chats", "list", "*", "messages"],
+    ["messages"]
+  ];
+  ITEM_PATHS = [...MESSAGE_PATHS, ...ACCOUNT_SECTIONS.map((section) => section.path)];
+  SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
+  LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
+});
+// src/workers/telegram-messages/export-facts.ts
+var SCAN_CHUNK_BYTES, remembered;
+var init_export_facts = __esm(() => {
+  init_byte_source();
+  init_json_stream();
+  init_message();
+  SCAN_CHUNK_BYTES = 1 << 20;
+  remembered = new Map;
+});
+
+// src/workers/telegram-messages/export-records.ts
+var init_export_records = __esm(() => {
+  init_message();
+  init_account();
+  init_corpus_adapter4();
+  init_capture_spool_connector();
+  init_export_facts();
+});
+
+// src/workers/telegram-messages/export-input.ts
+var init_export_input = __esm(() => {
+  init_archive_formats();
+  init_media_child();
+  init_connector4();
+  init_export_records();
+  init_export_facts();
+});
+
+// src/workers/telegram-messages/archive-target.ts
+var PROFILE_SCAN_BYTES;
+var init_archive_target = __esm(() => {
+  init_olympus_layout();
+  init_byte_source();
+  init_json_stream();
+  init_source_input();
+  init_message();
+  init_corpus_adapter4();
+  init_export_input();
+  PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 });
 
 // src/workers/telegram-messages/store-sync.ts
-var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
+var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY;
 var init_store_sync = __esm(() => {
+  init_media_child();
   init_source_placement();
+  init_spool_file_identity();
   init_source_storage();
   init_tiered_store_set();
+  init_record_builder();
+  init_protection_claims();
   init_capture_spool_secrets();
   init_capture_freshness();
   init_corpus_adapter4();
   init_capture_spool_connector();
+  init_archive_target();
+  init_record_builder();
+  TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
 });
 
 // src/workers/telegram-messages/index.ts
@@ -33731,10 +34643,10 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "whatsapp.personal.messages",
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "optional exports", "exclude Status broadcasts"],
+      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
       dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
-      supported_formats: ["message text", "link previews", "reactions", "media metadata", "voice-note transcript sidecars"],
+      supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],
       doctor_lane: {
         provider: "whatsapp_personal",
         capability: "whatsapp.personal.messages.sync"
@@ -33759,7 +34671,7 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", DASHBOARD_SUPPORTED_SOURCES;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -33829,6 +34741,153 @@ var init_source_dashboard = __esm(() => {
       }
     ]
   };
+  DASHBOARD_SUPPORTED_SOURCES = [
+    {
+      source_id: "gmail.email",
+      primary_corpus_id: "internal.email",
+      corpus_source_ids: ["gmail.email"],
+      ingestion_ledger_source_id: "email",
+      label: "Gmail",
+      provider: "gmail",
+      family: "email",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "gmail" }
+    },
+    {
+      source_id: "google_drive.docs",
+      primary_corpus_id: "internal.drive.docs",
+      corpus_source_ids: ["google_drive.docs"],
+      ingestion_ledger_source_id: "google_drive",
+      label: "Google Drive",
+      provider: "google_drive",
+      family: "file",
+      trust_domain: "internal",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "google-drive" }
+    },
+    {
+      source_id: "dropbox.files",
+      primary_corpus_id: "secure_local.dropbox.files",
+      corpus_source_ids: ["dropbox.files"],
+      ingestion_ledger_source_id: "dropbox",
+      label: "Dropbox",
+      provider: "dropbox",
+      family: "file",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "dropbox" }
+    },
+    {
+      source_id: "local.files",
+      primary_corpus_id: "secure_local.local.files",
+      corpus_source_ids: ["local.files"],
+      ingestion_ledger_source_id: "local_files",
+      label: "Files on this computer",
+      provider: "local_files",
+      family: "file",
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      sync_name: { mid: "your files", start: "Your files", plural: true },
+      connect_action: { kind: "this_computer", source: "local.files" }
+    },
+    {
+      source_id: "archive.imports",
+      primary_corpus_id: "secure_local.archive.email",
+      corpus_source_ids: ["archive.imports"],
+      owns_corpus: (corpus) => corpus.corpus_id.split(".")[1] === "archive" || isArchiveProvider(corpus.provider),
+      ingestion_ledger_source_id: "archive_imports",
+      label: "Archives",
+      provider: ARCHIVE_NEUTRAL_PROVIDER,
+      family: "email",
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    },
+    {
+      source_id: "x.bookmarks",
+      primary_corpus_id: "internal.x.bookmarks",
+      corpus_source_ids: ["x.bookmarks"],
+      ingestion_ledger_source_id: "x",
+      label: "X bookmarks",
+      provider: "x",
+      family: "x",
+      trust_domain: "internal",
+      connect_kind: "oauth",
+      content_arrives_extracted: true,
+      connect_action: { kind: "oauth", source: "x" }
+    },
+    {
+      source_id: "telegram.messages",
+      primary_corpus_id: "internal.telegram.messages",
+      corpus_source_ids: ["telegram.messages"],
+      ingestion_ledger_source_id: "telegram",
+      label: "Telegram",
+      provider: "telegram",
+      family: "chat",
+      trust_domain: "internal",
+      connect_kind: "pairing",
+      content_arrives_extracted: true,
+      raw_message_copies: "messages",
+      connect_action: {
+        kind: "guided_session",
+        source: "telegram",
+        instructions: [
+          "Telegram pairs with a phone-number login on this computer.",
+          "Ask your agent to start Telegram pairing; this card updates once the login completes."
+        ]
+      }
+    },
+    {
+      source_id: "whatsapp.personal.messages",
+      primary_corpus_id: "secure_local.whatsapp.messages",
+      corpus_source_ids: ["whatsapp.personal.messages"],
+      ingestion_ledger_source_id: "whatsapp",
+      label: "WhatsApp",
+      provider: "whatsapp_personal",
+      family: "chat",
+      trust_domain: "secure_local",
+      connect_kind: "pairing",
+      content_arrives_extracted: true,
+      raw_message_copies: "messages_and_media",
+      connect_action: {
+        kind: "guided_session",
+        source: "whatsapp",
+        instructions: [
+          "WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).",
+          WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
+          "Ask your agent to start WhatsApp pairing; this card updates once the scan completes."
+        ]
+      }
+    },
+    {
+      source_id: "readwise.library",
+      primary_corpus_id: "internal.readwise.library",
+      corpus_source_ids: ["readwise.library"],
+      ingestion_ledger_source_id: "readwise",
+      label: "Readwise",
+      provider: "readwise",
+      family: "readwise",
+      trust_domain: "internal",
+      connect_kind: "api_token",
+      content_arrives_extracted: true,
+      connect_action: { kind: "api_key", source: "readwise" }
+    },
+    ...archiveSourceCards().map((card) => ({
+      source_id: card.id,
+      primary_corpus_id: card.id,
+      corpus_source_ids: [],
+      owns_corpus: () => false,
+      ingestion_ledger_source_id: card.id,
+      public_source_id: ARCHIVE_IMPORTS_CARD_ID,
+      label: card.label,
+      provider: card.formats[0].provider,
+      family: card.formats[0].family,
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    }))
+  ];
 });
 
 // src/workers/dashboard/display-text.ts
@@ -34263,8 +35322,17 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      mail_for_another_account: { one: "1 message delivered to another address left out", many: "{n} messages delivered to another address left out" },
+      gmail_budget_too_small: {
+        one: "Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.",
+        many: "Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus."
+      },
+      gmail_import_allowance_spent: { one: "Waiting until tomorrow: imports have used their share of today's Gmail requests.", many: "Waiting until tomorrow: imports have used their share of today's Gmail requests." },
+      gmail_requests_spent: { one: "Waiting until tomorrow: today's Gmail requests are used up.", many: "Waiting until tomorrow: today's Gmail requests are used up." },
+      gmail_labels_unavailable: { one: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.", many: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now." },
       system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
       message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
+      match_near_miss: { one: "1 message may also be in the live chat, shown differently there (a renamed contact, an edited caption), so it was kept as its own", many: "{n} messages may also be in the live chat, shown differently there (a renamed contact, an edited caption), so each was kept as its own" },
       status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
       note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
       note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
@@ -34314,9 +35382,15 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: "not_imported",
       text_cut: "not_imported",
       spam_or_trash: "not_imported",
+      mail_for_another_account: "not_imported",
+      gmail_budget_too_small: "not_imported",
+      gmail_import_allowance_spent: "not_imported",
+      gmail_requests_spent: "not_imported",
+      gmail_labels_unavailable: "not_imported",
       message_content_unsupported: "not_imported",
       system_message: "how_read",
       message_empty: "how_read",
+      match_near_miss: "how_read",
       message_without_text: "how_read",
       status_updates: "not_imported",
       service_message: "not_imported",
@@ -34373,6 +35447,10 @@ var init_vocabulary = __esm(() => {
       },
       held: { one: "1 imported item waits for the private model", many: "{n} imported items wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
+      waiting: {
+        gmail_budget_too_small: "An import waits: {name}. The daily limit on Gmail requests is too low; set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more",
+        other: "An import waits: {name}"
+      },
       seeWhy: "See why",
       review: "Review",
       setUp: "Set up the private model",
@@ -35633,7 +36711,7 @@ var init_open_targets = __esm(() => {
 });
 
 // src/core/dashboard-launch.ts
-import { createHash as createHash19, randomBytes as randomBytes4 } from "node:crypto";
+import { createHash as createHash21, randomBytes as randomBytes4 } from "node:crypto";
 
 class DashboardLaunchTickets {
   tickets = new Map;
@@ -35696,7 +36774,7 @@ class DashboardLaunchTickets {
   }
 }
 function dashboardLaunchOriginTag(origin) {
-  return createHash19("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+  return createHash21("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
 }
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
@@ -36038,14 +37116,47 @@ var init_reaction_index = __esm(() => {
   init_reactions();
 });
 
-// src/workers/whatsapp/live-connector.ts
-var init_live_connector = __esm(() => {
-  init_capture_spool_secrets();
+// src/workers/whatsapp/spool-index.ts
+var init_spool_index = __esm(() => {
+  init_spool_file_identity();
   init_reaction_index();
 });
 
+// src/workers/whatsapp/spool-resets.ts
+var init_spool_resets = () => {};
+
+// src/workers/whatsapp/match-keys.ts
+var init_match_keys = __esm(() => {
+  init_reaction_index();
+});
+
+// src/workers/whatsapp/spool-reader.ts
+var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES2, FINISH_STEP_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
+var init_spool_reader = __esm(() => {
+  init_spool_file_identity();
+  WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
+  CHUNK_BYTES2 = 256 * 1024;
+  FINISH_STEP_BYTES = 4 * 1024;
+  NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
+  CAPTURE_STATUS_MAX_BYTES = 64 * 1024;
+});
+
+// src/workers/whatsapp/live-connector.ts
+var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES;
+var init_live_connector = __esm(() => {
+  init_source_inputs();
+  init_capture_spool_secrets();
+  init_reaction_index();
+  init_spool_index();
+  init_spool_resets();
+  init_match_keys();
+  init_spool_reader();
+  DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
+  TARGET_READ_CHUNK_BYTES = 4 * 1024;
+});
+
 // src/workers/whatsapp/store-sync.ts
-var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
+var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT, WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES, CLEARED_FILES_KEY;
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
   init_source_placement();
@@ -36054,10 +37165,15 @@ var init_store_sync2 = __esm(() => {
   init_capture_spool_secrets();
   init_capture_freshness();
   init_live_connector();
+  init_spool_reader();
+  init_spool_file_identity();
+  init_spool_index();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local"
   });
+  WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
+  CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 });
 
 // src/workers/file-extraction/extractors/bounded-text.ts
@@ -36513,8 +37629,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return { kind: "unreadable" };
     const parts = Array.isArray(result.content) ? result.content : [];
     const said = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
-    const text2 = said ? String(said.text).slice(0, RELAY_FAILURE_TEXT_MAX) : "";
-    return text2 ? { kind: "error", text: text2 } : { kind: "unreadable" };
+    const text3 = said ? String(said.text).slice(0, RELAY_FAILURE_TEXT_MAX) : "";
+    return text3 ? { kind: "error", text: text3 } : { kind: "unreadable" };
   }
   function rejectionFailure(error) {
     if (error instanceof Error && error.message === "timeout")
@@ -36575,8 +37691,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool)))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
-    const text2 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
-    return text2 ? String(text2.text) : "";
+    const text3 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+    return text3 ? String(text3.text) : "";
   }
   function callTool(name, args, key2) {
     const mine = supersede();
@@ -36745,12 +37861,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     node.setAttribute("aria-hidden", "true");
     return node;
   }
-  function el(tag, cls, text2) {
+  function el(tag, cls, text3) {
     const node = doc.createElement(tag);
     if (cls)
       node.className = cls;
-    if (text2 !== undefined)
-      node.textContent = text2;
+    if (text3 !== undefined)
+      node.textContent = text3;
     return node;
   }
   function add(parent, ...children) {
@@ -36886,8 +38002,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }, "plain");
     return node;
   }
-  function copyLine(text2, key2) {
-    const code = el("code", "", text2);
+  function copyLine(text3, key2) {
+    const code = el("code", "", text3);
     return add(el("div", "remote-line"), code, copyControl(code, key2));
   }
   function remoteBox(key2, href, source) {
@@ -36913,10 +38029,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return "";
     return (C[current2] || C.relay_unavailable).disabledReason;
   }
-  function rowReason(text2) {
+  function rowReason(text3) {
     if (state.hostReadOnly && state.hostKind === "computer")
       return null;
-    return el("span", "reason", text2);
+    return el("span", "reason", text3);
   }
   function compact() {
     return state.displayMode !== "" && state.displayMode !== "fullscreen";
@@ -37007,10 +38123,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     return add(wrap, button(fix.label, key2, action, style), action && fix.tool ? howLink(fix, key2, source) : null, errorNote(failure));
   }
-  function errorNote(text2) {
-    if (!text2)
+  function errorNote(text3) {
+    if (!text3)
       return null;
-    const note = el("span", "reason error", text2);
+    const note = el("span", "reason error", text3);
     note.setAttribute("role", "alert");
     return note;
   }
@@ -37223,7 +38339,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     add(row, main);
     const controls = el("div", "source-actions");
     const context2 = { id, label: String(source.label || id) };
-    const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary);
+    const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary, id);
     const isSync = (entry) => !!entry && entry.tool === config.syncTool;
     const own3 = archiveSourceMeta(id);
     if (own3) {
@@ -37234,7 +38350,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context2));
     if (checking)
       add(controls, checkingControl("primary:" + id));
-    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry, id)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
     if (other) {
       const importing = (entry) => !!entry && (entry.archiveImport === true || entry.label === H.copy.archives.importAction);
       const shown2 = menu.filter(importing)[0];
@@ -37272,21 +38388,28 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     return row;
   }
-  function archivesMeta(id) {
+  function archiveGroups() {
     const meta = state.computerMeta;
-    if (!onComputer() || !meta || !meta.archives || typeof meta.archives !== "object")
-      return null;
-    const archives = meta.archives;
-    return archives.sourceId === id && Array.isArray(archives.archives) && Array.isArray(archives.requests) ? archives : null;
+    if (!onComputer() || !meta)
+      return [];
+    const groups = [meta.archives].concat(Array.isArray(meta.archiveCards) ? meta.archiveCards : []);
+    return groups.filter((group) => !!group && typeof group === "object" && typeof group.sourceId === "string" && Array.isArray(group.archives) && Array.isArray(group.requests));
   }
-  function archiveFix(archives, fix) {
-    return archives && fix && fix.openHref === true && fix.label === H.copy.archives.importAction ? { label: fix.label, archiveImport: true } : fix;
+  function archivesMeta(id) {
+    return archiveGroups().filter((group) => group.sourceId === id)[0] || null;
+  }
+  function archiveFix(archives, fix, id) {
+    if (!fix || fix.openHref !== true)
+      return fix;
+    if (archives && archives === state.computerMeta.archives && fix.label === H.copy.archives.importAction)
+      return { label: fix.label, archiveImport: true };
+    const own3 = archiveSourceMeta(id);
+    return own3 && fix.label === H.copy.archives.sourceImport.action ? { label: fix.label, archiveImport: true, archiveSource: own3.sourceId } : fix;
   }
   function archiveNeedFix(item) {
     const fix = item && item.fix;
-    const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
     const id = item && typeof item.id === "string" ? item.id : "";
-    if (!fix || typeof fix.label !== "string" || !meta || typeof meta !== "object")
+    if (!fix || typeof fix.label !== "string" || archiveGroups().length === 0)
       return fix;
     if (id === "archives:held")
       return { label: fix.label, archiveModels: true };
@@ -37367,10 +38490,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
     if (joined.some((group) => !!group && !archiveSetting(group) && Array.isArray(group.imports) && group.imports.some((entry) => !!entry && entry.status === "importing")))
       return true;
-    const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
-    if (!meta || typeof meta !== "object")
-      return false;
-    return !archiveSetting(meta) && Array.isArray(meta.archives) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || Array.isArray(meta.requests) && meta.requests.some((entry) => !!entry && entry.status === "checking");
+    return archiveGroups().some((meta) => !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking"));
   }
   function startArchivePick(key2, sourceId) {
     supersede();
@@ -37408,7 +38528,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (name === H.archiveRemoveTool) {
       const asked = args && args.request_id && meta && Array.isArray(meta.requests) ? meta.requests.filter((entry) => entry && entry.id === args.request_id)[0] : null;
       const target = asked ? asked.archiveId : args && args.archive_id;
-      const removed = meta && Array.isArray(meta.archives) ? meta.archives.filter((entry) => entry && entry.id === target)[0] : null;
+      const removed = archiveGroups().flatMap((group) => group.archives).filter((entry) => entry && entry.id === target)[0] || null;
       return removed && typeof removed.name === "string" ? fill2(A.removing, { name: removed.name }) : "";
     }
     if (name === H.archiveStopTool) {
@@ -38033,8 +39153,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return sentence.slice(prefix.length);
     return typeof source.detail === "string" && source.detail ? source.detail : sentence;
   }
-  function capitalise(text2) {
-    return text2 ? text2.charAt(0).toUpperCase() + text2.slice(1) : text2;
+  function capitalise(text3) {
+    return text3 ? text3.charAt(0).toUpperCase() + text3.slice(1) : text3;
   }
   function isArchivesCard(source) {
     return !!source && String(source.id) === config.archivesSourceId;
@@ -38076,15 +39196,15 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return null;
     const section = add(el("section", "section privacy-row"), el("h2", "", W.section));
     const row = el("li", "row");
-    const text2 = el("div", "row-text");
+    const text3 = el("div", "row-text");
     if (configured) {
       const rules = typeof info.ruleCount === "number" && isFinite(info.ruleCount) ? Math.max(0, Math.round(info.ruleCount)) : state.privacyRules;
       const words2 = rules === 0 ? W.row.none : rules === 1 ? W.row.one : W.row.many;
-      add(text2, el("p", "", rules >= 0 ? fill2(words2, { n: count(rules) }) : W.rowNoCount));
+      add(text3, el("p", "", rules >= 0 ? fill2(words2, { n: count(rules) }) : W.rowNoCount));
     }
     if (pending2 > 0)
-      add(text2, el("p", "muted", fill2(pending2 === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending2) })));
-    add(row, text2);
+      add(text3, el("p", "muted", fill2(pending2 === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending2) })));
+    add(row, text3);
     if (configured) {
       const blocked = globalReason();
       const edit = button(W.edit, "privacy:edit", blocked ? null : () => openPrivacy("privacy:edit"), "plain");
@@ -38305,22 +39425,22 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function installLine(entry) {
     const model = P.modelNames[entry.which];
     const line = el("div", "model-install" + (entry.state === "failed" ? " failed" : ""));
-    let text2;
+    let text3;
     if (entry.state === "failed") {
-      text2 = fill2(P.modelInstallFailed, { model, reason: P.modelInstallReasons[entry.reason] });
+      text3 = fill2(P.modelInstallFailed, { model, reason: P.modelInstallReasons[entry.reason] });
     } else if (entry.state === "verifying") {
-      text2 = fill2(P.modelInstallVerifying, { model });
+      text3 = fill2(P.modelInstallVerifying, { model });
     } else {
       const parts = [fill2(P.modelInstallDownloading, { model })];
       if (entry.percent >= 0)
         parts.push(percent(entry.percent) + "%");
       if (entry.total > 0 && entry.done >= 0)
         parts.push(installBytes(entry.done, entry.total));
-      text2 = parts.join(" · ");
+      text3 = parts.join(" · ");
     }
-    add(line, el("p", "", text2));
+    add(line, el("p", "", text3));
     if (entry.state !== "failed" && entry.percent >= 0)
-      add(line, progressBar(entry.percent, text2));
+      add(line, progressBar(entry.percent, text3));
     return line;
   }
   function modelsSection(models) {
@@ -38420,11 +39540,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const list = el("ul", "rows");
     for (const key2 of keys) {
       const words2 = W.rows[key2];
-      const text2 = add(el("div", "row-text"), el("p", "", words2.title), el("p", "muted", words2.line));
+      const text3 = add(el("div", "row-text"), el("p", "", words2.title), el("p", "muted", words2.line));
       const href = state.hostLinks[key2];
       const open3 = button(W.open, "computer:" + key2, () => openLink(href), "plain");
       open3.setAttribute("aria-label", W.open + " " + words2.title);
-      add(list, add(el("li", "row"), text2, open3));
+      add(list, add(el("li", "row"), text3, open3));
     }
     return add(section, list);
   }
@@ -38680,20 +39800,20 @@ function privacyLogic(config) {
   const KINDS = ["folder", "label", "sender"];
   const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
-  const text2 = (value) => typeof value === "string" && value.trim() !== "";
+  const text3 = (value) => typeof value === "string" && value.trim() !== "";
   function validRule(rule) {
     if (!rule || typeof rule !== "object" || KINDS.indexOf(rule.kind) < 0)
       return false;
     if (rule.kind === "sender")
-      return rule.source_id === config.mailSourceId && text2(rule.value);
+      return rule.source_id === config.mailSourceId && text3(rule.value);
     if (rule.kind === "label")
-      return rule.source_id === config.mailSourceId && text2(rule.key) && text2(rule.value);
-    return Object.prototype.hasOwnProperty.call(config.folderSources, rule.source_id) && text2(rule.key) && (rule.display === undefined || typeof rule.display === "string");
+      return rule.source_id === config.mailSourceId && text3(rule.key) && text3(rule.value);
+    return Object.prototype.hasOwnProperty.call(config.folderSources, rule.source_id) && text3(rule.key) && (rule.display === undefined || typeof rule.display === "string");
   }
   function displayOf(rule, unnamed) {
     if (rule.kind === "sender" || rule.kind === "label")
       return String(rule.value);
-    return text2(rule.display) ? String(rule.display) : unnamed;
+    return text3(rule.display) ? String(rule.display) : unnamed;
   }
   function viewRule(rule, display) {
     const raw = {};
@@ -38720,7 +39840,7 @@ function privacyLogic(config) {
       out.key = rule.key;
     if (typeof rule.value === "string")
       out.value = rule.value;
-    if (rule.kind === "folder" && text2(rule.display))
+    if (rule.kind === "folder" && text3(rule.display))
       out.display = rule.display;
     return out;
   }
@@ -38812,9 +39932,9 @@ function privacyLogic(config) {
   function topicById(id) {
     return TOPICS.filter((entry) => entry.id === id)[0];
   }
-  function named(topic, text3) {
+  function named(topic, text4) {
     const alternatives = topic.words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+"));
-    return new RegExp("(^|[^a-z0-9])(" + alternatives.join("|") + ")(?![a-z0-9])", "i").test(text3);
+    return new RegExp("(^|[^a-z0-9])(" + alternatives.join("|") + ")(?![a-z0-9])", "i").test(text4);
   }
   function leadOf(id) {
     if (!words2 || !words2.topics[id])
@@ -38902,19 +40022,19 @@ function privacyLogic(config) {
     return leadOf(id) + " " + parts.join("; ") + ".";
   }
   function refineDescription(description, answers) {
-    const text3 = String(description || "").replace(/\r\n/g, `
+    const text4 = String(description || "").replace(/\r\n/g, `
 `);
-    const refined = refineUnbounded(text3, answers);
-    return refined.length > DESCRIPTION_MAX ? text3 : refined;
+    const refined = refineUnbounded(text4, answers);
+    return refined.length > DESCRIPTION_MAX ? text4 : refined;
   }
   function fitsAnswers(description, answers) {
     return refineUnbounded(String(description || "").replace(/\r\n/g, `
 `), answers).length <= DESCRIPTION_MAX;
   }
-  function refineUnbounded(text3, answers) {
+  function refineUnbounded(text4, answers) {
     if (!words2)
-      return text3;
-    const lines = text3.split(`
+      return text4;
+    const lines = text4.split(`
 `);
     for (const topic of TOPICS) {
       const answer = answers[topic.id];
@@ -39256,8 +40376,8 @@ function chatgptPickerProgram(kit) {
   }
   function errorSentence(result) {
     const parts = result && Array.isArray(result.content) ? result.content : [];
-    const text2 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
-    return text2 ? String(text2.text) : "";
+    const text3 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+    return text3 ? String(text3.text) : "";
   }
   function stopDropTimers() {
     if (!drop)
@@ -39306,12 +40426,12 @@ function chatgptPickerProgram(kit) {
     drop.confirm = null;
     kit.render("picker:drop:zone");
   }
-  function dropFail(text2, access) {
+  function dropFail(text3, access) {
     if (!drop)
       return;
     discardUpload();
     drop.phase = "error";
-    drop.error = text2 || drop.words.failed;
+    drop.error = text3 || drop.words.failed;
     drop.access = access && typeof access.message === "string" && access.message ? access : null;
     kit.render("picker:drop:retry");
   }
@@ -40426,9 +41546,9 @@ function chatgptPickerProgram(kit) {
     line.setAttribute("role", "status");
     return line;
   }
-  function topRow(text2, control) {
+  function topRow(text3, control) {
     const row = el("div", "this-row");
-    add(row, el("p", "this-label", text2), control);
+    add(row, el("p", "this-label", text3), control);
     return row;
   }
   function exceptionList(rules) {
@@ -40654,7 +41774,7 @@ function chatgptPickerProgram(kit) {
     p.saveError = "";
     kit.render(focus);
   }
-  function option(type, name, key2, checked, text2, hint, onChange) {
+  function option(type, name, key2, checked, text3, hint, onChange) {
     const label = el("label", "opt");
     const input = el("input");
     input.type = type;
@@ -40664,7 +41784,7 @@ function chatgptPickerProgram(kit) {
     input.disabled = p.saving;
     input.setAttribute("data-key", key2);
     input.addEventListener("change", () => onChange(input));
-    const words2 = add(el("span", "opt-text"), el("span", "", text2));
+    const words2 = add(el("span", "opt-text"), el("span", "", text3));
     if (hint)
       add(words2, el("span", "muted opt-hint", hint));
     return add(label, input, words2);
@@ -40782,11 +41902,11 @@ function chatgptPickerProgram(kit) {
       const listNode = el("ul", "suggestions");
       p.suggestions.forEach((entry, index) => {
         const item = el("li", "suggestion");
-        const text2 = add(el("p", "suggestion-text"), el("span", "", entry.sender));
+        const text3 = add(el("p", "suggestion-text"), el("span", "", entry.sender));
         if (typeof entry.sample_messages === "number" && p.sampleSize > 0) {
-          add(text2, el("span", "muted", " · " + fill2(Q.mailSuggestionCount, { n: kit.count(entry.sample_messages), total: kit.count(p.sampleSize) })));
+          add(text3, el("span", "muted", " · " + fill2(Q.mailSuggestionCount, { n: kit.count(entry.sample_messages), total: kit.count(p.sampleSize) })));
         }
-        add(item, text2, add(el("div", "actions"), kit.button(Q.mailPrivate, "picker:suggest:private:" + index, p.saving ? null : () => addSender("always_private_senders", entry.sender, "picker:suggest:private:" + index), "plain"), kit.button(Q.mailSkip, "picker:suggest:skip:" + index, p.saving ? null : () => addSender("skip_senders", entry.sender, "picker:suggest:skip:" + index), "plain")));
+        add(item, text3, add(el("div", "actions"), kit.button(Q.mailPrivate, "picker:suggest:private:" + index, p.saving ? null : () => addSender("always_private_senders", entry.sender, "picker:suggest:private:" + index), "plain"), kit.button(Q.mailSkip, "picker:suggest:skip:" + index, p.saving ? null : () => addSender("skip_senders", entry.sender, "picker:suggest:skip:" + index), "plain")));
         add(listNode, item);
       });
       add(senders, listNode);
@@ -42050,9 +43170,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
 `;
 });
 // src/workers/chatgpt/dashboard-resource.ts
-import { createHash as createHash21 } from "node:crypto";
+import { createHash as createHash22 } from "node:crypto";
 function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash21("sha256").update(html2).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash22("sha256").update(html2).digest("hex").slice(0, 12)}`;
 }
 var DASHBOARD_HTML, DASHBOARD_RESOURCE_VERSIONED_URI;
 var init_dashboard_resource = __esm(() => {
@@ -42096,6 +43216,7 @@ var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
   init_tier_rules_sweep();
   init_embeddings();
+  init_gmail_mail_record();
   init_gmail();
   init_gmail_live_control();
   GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
@@ -42156,14 +43277,6 @@ var init_store2 = __esm(() => {
   });
 });
 
-// src/core/scope-safe-fs.ts
-import { createRequire as createRequire5 } from "node:module";
-var runtimeRequire3, SCOPE_FILE_MAX_RANGE_BYTES;
-var init_scope_safe_fs = __esm(() => {
-  runtimeRequire3 = createRequire5(import.meta.url);
-  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
-});
-
 // src/workers/archive-import/media-bindings.ts
 var init_media_bindings = __esm(() => {
   init_sqlite_migrations();
@@ -42193,217 +43306,6 @@ var init_account_files = __esm(() => {
   SOURCE_ALIASES = {
     [WHATSAPP_SOURCE_ID]: ["whatsapp.messages"]
   };
-});
-
-// src/workers/archive-import/byte-source.ts
-import * as zlib from "node:zlib";
-function tableCrc32(data2, value) {
-  if (!crcTable) {
-    crcTable = new Int32Array(256);
-    for (let n = 0;n < 256; n += 1) {
-      let c = n;
-      for (let k = 0;k < 8; k += 1)
-        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
-      crcTable[n] = c;
-    }
-  }
-  let crc = ~value;
-  for (let index = 0;index < data2.length; index += 1) {
-    crc = crcTable[(crc ^ data2[index]) & 255] ^ crc >>> 8;
-  }
-  return ~crc >>> 0;
-}
-function crc32Update(value, data2) {
-  if (data2.length === 0)
-    return value >>> 0;
-  return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
-}
-var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
-var init_byte_source = __esm(() => {
-  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
-  nativeCrc32 = zlib.crc32;
-});
-// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
-var TokenType;
-var init_tokenType = __esm(() => {
-  (function(TokenType2) {
-    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
-    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
-    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
-    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
-    TokenType2[TokenType2["COLON"] = 4] = "COLON";
-    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
-    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
-    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
-    TokenType2[TokenType2["NULL"] = 8] = "NULL";
-    TokenType2[TokenType2["STRING"] = 9] = "STRING";
-    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
-    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
-  })(TokenType || (TokenType = {}));
-});
-
-// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
-var charset;
-var init_utf_8 = __esm(() => {
-  (function(charset2) {
-    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
-    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
-    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
-    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
-    charset2[charset2["TAB"] = 9] = "TAB";
-    charset2[charset2["SPACE"] = 32] = "SPACE";
-    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
-    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
-    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
-    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
-    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
-    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
-    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
-    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
-    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
-    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
-    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
-    charset2[charset2["COMMA"] = 44] = "COMMA";
-    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
-    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
-    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
-    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
-    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
-    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
-    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
-    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
-    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
-    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
-    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
-    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
-    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
-    charset2[charset2["COLON"] = 58] = "COLON";
-    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
-    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
-    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
-    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
-    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
-    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
-    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
-    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
-    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
-    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
-    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
-    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
-    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
-    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
-    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
-    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
-    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
-    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
-    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
-    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
-    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
-    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
-    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
-    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
-    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
-    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
-    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
-    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
-    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
-    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
-    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
-    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
-    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
-    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
-    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
-    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
-    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
-    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
-    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
-    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
-    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
-    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
-    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
-    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
-    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
-    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
-    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
-    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
-    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
-    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
-    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
-    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
-    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
-    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
-    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
-    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
-    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
-    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
-    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
-    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
-    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
-    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
-    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
-    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
-    charset2[charset2["TILDE"] = 126] = "TILDE";
-  })(charset || (charset = {}));
-});
-
-// node_modules/@streamparser/json/dist/mjs/tokenizer.js
-var TokenizerStates;
-var init_tokenizer = __esm(() => {
-  init_tokenType();
-  init_utf_8();
-  (function(TokenizerStates2) {
-    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
-    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
-    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
-    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
-    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
-    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
-    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
-    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
-    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
-    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
-    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
-    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
-    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
-    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
-    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
-    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
-    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
-    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
-    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
-  })(TokenizerStates || (TokenizerStates = {}));
-});
-
-// src/workers/archive-import/stop-errors.ts
-var init_stop_errors = __esm(() => {
-  init_archive_formats();
-  init_scope_safe_fs();
-});
-
-// src/workers/archive-import/json-stream.ts
-var EMPTY_FRAME, MAX_SAFE_DIGITS;
-var init_json_stream = __esm(() => {
-  init_tokenizer();
-  init_tokenType();
-  init_archive_formats();
-  init_stop_errors();
-  EMPTY_FRAME = Object.freeze({});
-  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
 });
 
 // src/workers/archive-import/record-probe.ts
@@ -43428,10 +44330,10 @@ async function readClassificationLedger(path) {
   const { entries, skipped } = parseClassificationLedgerJsonl(raw);
   return { entries: newestFirst(entries), skipped, path };
 }
-function parseClassificationLedgerJsonl(text2) {
+function parseClassificationLedgerJsonl(text3) {
   const entries = [];
   let skipped = 0;
-  for (const line of text2.split(`
+  for (const line of text3.split(`
 `)) {
     if (line.trim() === "")
       continue;
@@ -44159,7 +45061,7 @@ init_config();
 init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
-import { createHash as createHash25 } from "node:crypto";
+import { createHash as createHash26 } from "node:crypto";
 import { existsSync as existsSync28, lstatSync as lstatSync14, mkdirSync as mkdirSync18, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname33, isAbsolute as isAbsolute14 } from "node:path";
 
@@ -44172,7 +45074,7 @@ init_local_private_answers();
 init_linux_desktop_opener();
 
 // src/core/linux-owner-bridge.ts
-import { createHmac, createHash as createHash18, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
+import { createHmac, createHash as createHash20, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync10, openSync as openSync10, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
 import { dirname as dirname26, join as join27 } from "node:path";
 init_worker_transport();
@@ -44190,18 +45092,18 @@ var CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'sel
 function randomOwnerHostname() {
   const bytes = randomBytes3(16);
   const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
-  let bits = 0, value = 0, text2 = "";
+  let bits = 0, value = 0, text3 = "";
   for (const byte of bytes) {
     value = value << 8 | byte;
     bits += 8;
     while (bits >= 5) {
       bits -= 5;
-      text2 += alphabet[value >>> bits & 31];
+      text3 += alphabet[value >>> bits & 31];
     }
   }
   if (bits)
-    text2 += alphabet[value << 5 - bits & 31];
-  return `${text2}.localhost`;
+    text3 += alphabet[value << 5 - bits & 31];
+  return `${text3}.localhost`;
 }
 var secret = () => randomBytes3(32).toString("base64url");
 function equal(a, b) {
@@ -44260,7 +45162,7 @@ document.addEventListener('submit',function(event){
 },true);
 })();</script>`;
 function documentPolicy(policy) {
-  const hash = "'sha256-" + createHash18("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
+  const hash = "'sha256-" + createHash20("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
   const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
   const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
   const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
@@ -44353,7 +45255,7 @@ function proofPage() {
   response.headers.set("Access-Control-Allow-Origin", "*");
   return response;
 }
-var hashSecret = (value) => createHash18("sha256").update(value).digest("hex");
+var hashSecret = (value) => createHash20("sha256").update(value).digest("hex");
 function equalHash(value, hash) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(hashSecret(value), "hex"), Buffer.from(hash, "hex"));
 }
@@ -44968,52 +45870,7 @@ init_worker_auth();
 // src/workers/email-source/file-extraction-runtime.ts
 init_credential_broker();
 init_types();
-
-// src/core/file-extraction-source.ts
-import { createHash as createHash20 } from "node:crypto";
-var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
-  source_item_not_found: "failed_terminal",
-  source_permission_denied: "failed_terminal",
-  source_version_gone: "failed_terminal",
-  source_content_unavailable: "skipped_unsupported",
-  source_request_rejected: "failed_terminal",
-  source_too_large: "skipped_too_large",
-  source_rate_limited: "failed_retryable",
-  source_unavailable: "failed_retryable",
-  source_auth_expired: "failed_retryable",
-  source_budget_exhausted: "failed_retryable",
-  network_unreachable: "failed_retryable",
-  network_socket_closed: "failed_retryable"
-});
-var ERROR_HASH_CHARS = 32;
-
-class FileExtractionSourceError extends Error {
-  errorKind;
-  settleAs;
-  retryable;
-  errorHash;
-  constructor(errorKind, options = {}) {
-    super(errorKind);
-    this.name = "FileExtractionSourceError";
-    this.errorKind = errorKind;
-    this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
-    this.retryable = this.settleAs === "failed_retryable";
-    const errorHash = options.detailForHash === undefined ? undefined : createHash20("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
-    if (errorHash)
-      this.errorHash = errorHash;
-  }
-}
-function splitScopedLocalItemId(localItemId) {
-  const separator = localItemId.indexOf(":");
-  if (separator <= 0 || separator === localItemId.length - 1)
-    return;
-  return {
-    accountScope: localItemId.slice(0, separator),
-    providerItemId: localItemId.slice(separator + 1)
-  };
-}
-
-// src/workers/email-source/file-extraction-runtime.ts
+init_file_extraction_source();
 init_media_cache();
 init_olympus_layout();
 init_source_placement();
@@ -45024,6 +45881,7 @@ init_connector_store2();
 init_dropbox_content_hash();
 init_provider_client();
 init_http_timeout();
+init_file_extraction_source();
 import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
 import { relative as relative5, resolve as resolve9, sep as sep5 } from "node:path";
 var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2";
@@ -45387,6 +46245,7 @@ init_store();
 init_drive();
 
 // src/workers/google-connectors/drive-extraction-source.ts
+init_file_extraction_source();
 init_drive();
 init_request_budget();
 var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
@@ -45399,6 +46258,9 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
   "image/heic",
   "image/heif"
 ]);
+
+// src/workers/whatsapp/extraction-source.ts
+init_file_extraction_source();
 
 // src/workers/email-source/file-extraction-runtime.ts
 init_store_sync2();
@@ -45526,6 +46388,7 @@ init_media_cache();
 init_operation_error();
 init_model_transport();
 init_types();
+init_file_extraction_source();
 init_command_runner();
 init_tier_classifier();
 init_bounded_text();
@@ -45780,14 +46643,14 @@ async function fetchCatalog(input, fetchedAtMs) {
   return { status: "success", catalog };
 }
 function parseCatalogModels(payload2) {
-  if (!isRecord2(payload2) || !Array.isArray(payload2.data) || payload2.data.length === 0) {
+  if (!isRecord3(payload2) || !Array.isArray(payload2.data) || payload2.data.length === 0) {
     return;
   }
   const models = {};
   for (const rawItem of payload2.data) {
-    if (!isRecord2(rawItem) || typeof rawItem.id !== "string" || !rawItem.id.trim())
+    if (!isRecord3(rawItem) || typeof rawItem.id !== "string" || !rawItem.id.trim())
       continue;
-    if (!isRecord2(rawItem.model_spec))
+    if (!isRecord3(rawItem.model_spec))
       continue;
     const category = parsePrivacyCategory(rawItem.model_spec.privacy);
     if (!category)
@@ -45805,13 +46668,13 @@ function readCatalogCache(path, type) {
   } catch {
     return;
   }
-  if (!isRecord2(payload2) || payload2.schema_version !== CACHE_SCHEMA_VERSION)
+  if (!isRecord3(payload2) || payload2.schema_version !== CACHE_SCHEMA_VERSION)
     return;
   if (payload2.catalog_type !== undefined && payload2.catalog_type !== type)
     return;
   if (type === "embedding" && payload2.catalog_type !== "embedding")
     return;
-  if (typeof payload2.fetched_at !== "string" || !isRecord2(payload2.models))
+  if (typeof payload2.fetched_at !== "string" || !isRecord3(payload2.models))
     return;
   const fetchedAtMs = Date.parse(payload2.fetched_at);
   if (!Number.isFinite(fetchedAtMs))
@@ -45866,7 +46729,7 @@ function boundedPositiveMs(value, fallback, maximum) {
     return fallback;
   return Math.min(maximum, Math.max(1, Math.floor(value)));
 }
-function isRecord2(value) {
+function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function throwIfAborted(signal) {
@@ -46608,7 +47471,7 @@ init_connector_store();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
-import { createHash as createHash22 } from "node:crypto";
+import { createHash as createHash23 } from "node:crypto";
 var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
 var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
 var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
@@ -46692,7 +47555,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash22("sha256").update(value).digest("hex");
+  return createHash23("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -46859,6 +47722,10 @@ init_store();
 
 // src/workers/local-files/own-roots-cleanup.ts
 init_tiered_store_set();
+
+// src/workers/local-files/connector.ts
+init_file_extraction_source();
+
 // src/core/file-mime.ts
 var MIME_BY_EXTENSION = Object.freeze({
   pdf: "application/pdf",
@@ -47213,7 +48080,7 @@ init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
-import { createHash as createHash23 } from "node:crypto";
+import { createHash as createHash24 } from "node:crypto";
 init_connector_store();
 init_google_connectors();
 init_readwise();
@@ -48109,7 +48976,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash23("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash24("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -48292,6 +49159,194 @@ init_archive_formats();
 init_remote_connections();
 init_waiting_private_questions();
 
+// src/workers/archive-import/mbox/connector.ts
+init_archive_formats();
+init_stop_errors();
+init_sender_rules();
+
+// src/workers/archive-import/mbox/split.ts
+var SEPARATOR2 = Buffer.from(`
+From `, "latin1");
+var FROM = Buffer.from("From ", "latin1");
+var LF = 10;
+var CR = 13;
+var GT = 62;
+var MBOX_DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
+var MIN_READ_BYTES = 1024 * 1024;
+var MAX_SEPARATOR_CHARS = 1024;
+
+class MboxFormatError extends Error {
+  offset;
+  constructor(offset) {
+    super("No message starts at this position of the mail file.");
+    this.name = "MboxFormatError";
+    this.offset = offset;
+  }
+}
+
+class MboxReadBoundError extends Error {
+  constructor() {
+    super("The mail file was read as far as this look may read.");
+    this.name = "MboxReadBoundError";
+  }
+}
+
+class MboxSplitter {
+  source;
+  maxMessageBytes;
+  buffer = Buffer.alloc(0);
+  bufferStart;
+  next_;
+  maxReadBytes;
+  bytesRead = 0;
+  constructor(source, options = {}) {
+    this.source = source;
+    this.maxReadBytes = options.maxReadBytes ?? Number.POSITIVE_INFINITY;
+    this.maxMessageBytes = Math.max(1, options.maxMessageBytes ?? MBOX_DEFAULT_MAX_MESSAGE_BYTES);
+    this.next_ = options.start ?? 0;
+    this.bufferStart = this.next_;
+  }
+  get position() {
+    return this.next_;
+  }
+  get done() {
+    return this.next_ >= this.source.size;
+  }
+  next() {
+    const start = this.next_;
+    if (start >= this.source.size)
+      return;
+    this.dropBefore(start);
+    this.ensure(start, FROM.length);
+    if (!this.bytesAt(start).subarray(0, FROM.length).equals(FROM))
+      throw new MboxFormatError(start);
+    let scanFrom = start + 1;
+    for (;; ) {
+      const found = this.indexOfSeparator(scanFrom);
+      if (found !== undefined) {
+        const end = found + 1;
+        this.next_ = end;
+        return this.span(start, end);
+      }
+      const buffered = this.bufferStart + this.buffer.length;
+      if (buffered >= this.source.size) {
+        this.next_ = this.source.size;
+        return this.span(start, this.source.size);
+      }
+      if (buffered - start > this.maxMessageBytes)
+        return this.skipTooLarge(start);
+      scanFrom = Math.max(start + 1, buffered - SEPARATOR2.length + 1);
+      this.readMore(Math.max(MIN_READ_BYTES, this.buffer.length));
+    }
+  }
+  span(start, end) {
+    const length = end - start;
+    if (length > this.maxMessageBytes)
+      return { offset: start, length, tooLarge: true };
+    const bytes = this.bytesAt(start).subarray(0, length);
+    return { offset: start, length, raw: unquote(stripSeparatorLines(bytes)), separator: separatorLine(bytes), tooLarge: false };
+  }
+  skipTooLarge(start) {
+    let scanFrom = this.bufferStart + Math.max(0, this.buffer.length - SEPARATOR2.length + 1);
+    for (;; ) {
+      const keepFrom = Math.max(this.bufferStart, scanFrom - SEPARATOR2.length);
+      this.dropBefore(keepFrom);
+      const buffered = this.bufferStart + this.buffer.length;
+      if (buffered >= this.source.size) {
+        this.next_ = this.source.size;
+        return { offset: start, length: this.source.size - start, tooLarge: true };
+      }
+      this.readMore(MIN_READ_BYTES);
+      const found = this.indexOfSeparator(Math.max(start + 1, scanFrom));
+      if (found !== undefined) {
+        this.next_ = found + 1;
+        return { offset: start, length: found + 1 - start, tooLarge: true };
+      }
+      scanFrom = Math.max(start + 1, this.bufferStart + this.buffer.length - SEPARATOR2.length + 1);
+    }
+  }
+  indexOfSeparator(fromOffset) {
+    const index = this.buffer.indexOf(SEPARATOR2, Math.max(0, fromOffset - this.bufferStart));
+    return index < 0 ? undefined : this.bufferStart + index;
+  }
+  bytesAt(offset) {
+    return this.buffer.subarray(offset - this.bufferStart);
+  }
+  dropBefore(offset) {
+    if (offset < this.bufferStart) {
+      this.buffer = Buffer.alloc(0);
+      this.bufferStart = offset;
+      return;
+    }
+    const drop = offset - this.bufferStart;
+    if (drop >= this.buffer.length) {
+      this.buffer = Buffer.alloc(0);
+      this.bufferStart = offset;
+    } else if (drop > 0) {
+      this.buffer = this.buffer.subarray(drop);
+      this.bufferStart = offset;
+    }
+  }
+  ensure(offset, length) {
+    while (this.bufferStart + this.buffer.length < Math.min(offset + length, this.source.size)) {
+      this.readMore(MIN_READ_BYTES);
+    }
+  }
+  readMore(length) {
+    const from = this.bufferStart + this.buffer.length;
+    const allowed = this.maxReadBytes - this.bytesRead;
+    if (allowed <= 0)
+      throw new MboxReadBoundError;
+    const chunk = this.source.readAt(from, Math.min(length, allowed, Math.max(0, this.source.size - from)));
+    this.bytesRead += chunk.length;
+    if (chunk.length === 0)
+      throw new MboxFormatError(from);
+    this.buffer = this.buffer.length === 0 ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length) : Buffer.concat([this.buffer, chunk]);
+  }
+}
+function separatorLine(bytes) {
+  const end = bytes.indexOf(LF);
+  const line = bytes.subarray(0, Math.min(end < 0 ? bytes.length : end, MAX_SEPARATOR_CHARS)).toString("latin1");
+  return line.endsWith("\r") ? line.slice(0, -1) : line;
+}
+function stripSeparatorLines(bytes) {
+  const firstLineEnd = bytes.indexOf(LF);
+  let body = firstLineEnd < 0 ? Buffer.alloc(0) : bytes.subarray(firstLineEnd + 1);
+  const n = body.length;
+  if (n >= 4 && body[n - 4] === CR && body[n - 3] === LF && body[n - 2] === CR && body[n - 1] === LF) {
+    body = body.subarray(0, n - 2);
+  } else if (n >= 2 && body[n - 2] === LF && body[n - 1] === LF) {
+    body = body.subarray(0, n - 1);
+  } else if (n === 1 && body[0] === LF) {
+    body = body.subarray(0, 0);
+  }
+  return body;
+}
+function unquote(bytes) {
+  const out = [];
+  let copied = 0;
+  let lineStart = 0;
+  while (lineStart < bytes.length) {
+    if (bytes[lineStart] === GT) {
+      let index = lineStart;
+      while (index < bytes.length && bytes[index] === GT)
+        index += 1;
+      if (bytes.subarray(index, index + FROM.length).equals(FROM)) {
+        out.push(bytes.subarray(copied, lineStart));
+        copied = lineStart + 1;
+      }
+    }
+    const next = bytes.indexOf(LF, lineStart);
+    if (next < 0)
+      break;
+    lineStart = next + 1;
+  }
+  if (copied === 0)
+    return bytes;
+  out.push(bytes.subarray(copied));
+  return Buffer.concat(out);
+}
+
 // node_modules/postal-mime/dist/esm/decode-strings.js
 var textEncoder = new TextEncoder;
 var base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -48442,178 +49497,12 @@ var ATTACHMENT_ENCODINGS = new Set(["arraybuffer", "base64", "utf8"]);
 var LINE_FEED = new Uint8Array([10]);
 var MAX_HEADERS_SIZE = 2 * 1024 * 1024;
 
-// src/workers/archive-import/mbox/connector.ts
-init_archive_formats();
-init_stop_errors();
-init_sender_rules();
-
-// src/workers/archive-import/mbox/split.ts
-var SEPARATOR2 = Buffer.from(`
-From `, "latin1");
-var FROM = Buffer.from("From ", "latin1");
-var LF = 10;
-var CR = 13;
-var GT = 62;
-var MBOX_DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
-var MIN_READ_BYTES = 1024 * 1024;
-
-class MboxFormatError extends Error {
-  offset;
-  constructor(offset) {
-    super("No message starts at this position of the mail file.");
-    this.name = "MboxFormatError";
-    this.offset = offset;
-  }
-}
-
-class MboxSplitter {
-  source;
-  maxMessageBytes;
-  buffer = Buffer.alloc(0);
-  bufferStart;
-  next_;
-  constructor(source, options = {}) {
-    this.source = source;
-    this.maxMessageBytes = Math.max(1, options.maxMessageBytes ?? MBOX_DEFAULT_MAX_MESSAGE_BYTES);
-    this.next_ = options.start ?? 0;
-    this.bufferStart = this.next_;
-  }
-  get position() {
-    return this.next_;
-  }
-  get done() {
-    return this.next_ >= this.source.size;
-  }
-  next() {
-    const start = this.next_;
-    if (start >= this.source.size)
-      return;
-    this.dropBefore(start);
-    this.ensure(start, FROM.length);
-    if (!this.bytesAt(start).subarray(0, FROM.length).equals(FROM))
-      throw new MboxFormatError(start);
-    let scanFrom = start + 1;
-    for (;; ) {
-      const found = this.indexOfSeparator(scanFrom);
-      if (found !== undefined) {
-        const end = found + 1;
-        this.next_ = end;
-        return this.span(start, end);
-      }
-      const buffered = this.bufferStart + this.buffer.length;
-      if (buffered >= this.source.size) {
-        this.next_ = this.source.size;
-        return this.span(start, this.source.size);
-      }
-      if (buffered - start > this.maxMessageBytes)
-        return this.skipTooLarge(start);
-      scanFrom = Math.max(start + 1, buffered - SEPARATOR2.length + 1);
-      this.readMore(Math.max(MIN_READ_BYTES, this.buffer.length));
-    }
-  }
-  span(start, end) {
-    const length = end - start;
-    if (length > this.maxMessageBytes)
-      return { offset: start, length, tooLarge: true };
-    const bytes = this.bytesAt(start).subarray(0, length);
-    return { offset: start, length, raw: unquote(stripSeparatorLines(bytes)), tooLarge: false };
-  }
-  skipTooLarge(start) {
-    let scanFrom = this.bufferStart + Math.max(0, this.buffer.length - SEPARATOR2.length + 1);
-    for (;; ) {
-      const keepFrom = Math.max(this.bufferStart, scanFrom - SEPARATOR2.length);
-      this.dropBefore(keepFrom);
-      const buffered = this.bufferStart + this.buffer.length;
-      if (buffered >= this.source.size) {
-        this.next_ = this.source.size;
-        return { offset: start, length: this.source.size - start, tooLarge: true };
-      }
-      this.readMore(MIN_READ_BYTES);
-      const found = this.indexOfSeparator(Math.max(start + 1, scanFrom));
-      if (found !== undefined) {
-        this.next_ = found + 1;
-        return { offset: start, length: found + 1 - start, tooLarge: true };
-      }
-      scanFrom = Math.max(start + 1, this.bufferStart + this.buffer.length - SEPARATOR2.length + 1);
-    }
-  }
-  indexOfSeparator(fromOffset) {
-    const index = this.buffer.indexOf(SEPARATOR2, Math.max(0, fromOffset - this.bufferStart));
-    return index < 0 ? undefined : this.bufferStart + index;
-  }
-  bytesAt(offset) {
-    return this.buffer.subarray(offset - this.bufferStart);
-  }
-  dropBefore(offset) {
-    if (offset < this.bufferStart) {
-      this.buffer = Buffer.alloc(0);
-      this.bufferStart = offset;
-      return;
-    }
-    const drop = offset - this.bufferStart;
-    if (drop >= this.buffer.length) {
-      this.buffer = Buffer.alloc(0);
-      this.bufferStart = offset;
-    } else if (drop > 0) {
-      this.buffer = this.buffer.subarray(drop);
-      this.bufferStart = offset;
-    }
-  }
-  ensure(offset, length) {
-    while (this.bufferStart + this.buffer.length < Math.min(offset + length, this.source.size)) {
-      this.readMore(MIN_READ_BYTES);
-    }
-  }
-  readMore(length) {
-    const from = this.bufferStart + this.buffer.length;
-    const chunk = this.source.readAt(from, Math.min(length, Math.max(0, this.source.size - from)));
-    if (chunk.length === 0)
-      throw new MboxFormatError(from);
-    this.buffer = this.buffer.length === 0 ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length) : Buffer.concat([this.buffer, chunk]);
-  }
-}
-function stripSeparatorLines(bytes) {
-  const firstLineEnd = bytes.indexOf(LF);
-  let body = firstLineEnd < 0 ? Buffer.alloc(0) : bytes.subarray(firstLineEnd + 1);
-  const n = body.length;
-  if (n >= 4 && body[n - 4] === CR && body[n - 3] === LF && body[n - 2] === CR && body[n - 1] === LF) {
-    body = body.subarray(0, n - 2);
-  } else if (n >= 2 && body[n - 2] === LF && body[n - 1] === LF) {
-    body = body.subarray(0, n - 1);
-  } else if (n === 1 && body[0] === LF) {
-    body = body.subarray(0, 0);
-  }
-  return body;
-}
-function unquote(bytes) {
-  const out = [];
-  let copied = 0;
-  let lineStart = 0;
-  while (lineStart < bytes.length) {
-    if (bytes[lineStart] === GT) {
-      let index = lineStart;
-      while (index < bytes.length && bytes[index] === GT)
-        index += 1;
-      if (bytes.subarray(index, index + FROM.length).equals(FROM)) {
-        out.push(bytes.subarray(copied, lineStart));
-        copied = lineStart + 1;
-      }
-    }
-    const next = bytes.indexOf(LF, lineStart);
-    if (next < 0)
-      break;
-    lineStart = next + 1;
-  }
-  if (copied === 0)
-    return bytes;
-  out.push(bytes.subarray(copied));
-  return Buffer.concat(out);
-}
+// src/workers/archive-import/mbox/parse.ts
+var MBOX_SKIPPED_LABELS = new Set(["spam", "trash"]);
+var decodableCharsets = new Map;
 
 // src/workers/archive-import/mbox/connector.ts
 var MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-var SKIPPED_LABELS = new Set(["spam", "trash"]);
-var decodableCharsets = new Map;
 
 // src/workers/archive-import/whatsapp/connector.ts
 init_archive_formats();
@@ -48762,58 +49651,523 @@ var INLINE_EDITOR_NODE_TYPES = new Set(["hardbreak", "text"]);
 // src/workers/archive-import/roam/connector.ts
 init_archive_formats();
 
-// src/workers/archive-import/telegram/connector.ts
+// src/workers/archive-import/format-connectors.ts
+init_connector4();
+
+// src/workers/archive-import/evernote/connector.ts
 init_archive_formats();
+init_file_extraction_source();
 init_byte_source();
-init_json_stream();
+init_stop_errors();
 
-// src/workers/archive-import/telegram/message.ts
-var TELEGRAM_MEDIA_KEYS = new Set([
-  "photo",
-  "file",
-  "media_type",
-  "file_name",
-  "sticker_emoji",
-  "performer",
-  "title",
-  "duration_seconds"
+// src/workers/archive-import/xml-stream.ts
+var XML_STREAM_MAX_DEPTH = 256;
+var XML_STREAM_MAX_MARKUP_BYTES = 1024 * 1024;
+var XML_STREAM_RANGE_COST = 32;
+
+class XmlStreamError extends Error {
+  code;
+  offset;
+  constructor(code, message2, offset) {
+    super(message2);
+    this.name = "XmlStreamError";
+    this.code = code;
+    this.offset = offset;
+  }
+}
+var LT = 60;
+var GT2 = 62;
+var AMP = 38;
+var PREDEFINED = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
+function decodeXmlEntities(text3) {
+  if (!text3.includes("&"))
+    return text3;
+  return text3.replace(/&(#x[0-9a-fA-F]{1,6}|#[0-9]{1,7}|[A-Za-z][A-Za-z0-9._-]*);/g, (whole, ref) => {
+    if (ref.startsWith("#")) {
+      const code = ref[1] === "x" ? Number.parseInt(ref.slice(2), 16) : Number.parseInt(ref.slice(1), 10);
+      return Number.isInteger(code) && code > 0 && code <= 1114111 && !(code >= 55296 && code <= 57343) ? String.fromCodePoint(code) : whole;
+    }
+    return PREDEFINED[ref] ?? whole;
+  });
+}
+var NAME = /^[A-Za-z_:À-￿][\w.:\-·À-￿]*$/;
+var ATTRIBUTE = /\s*([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/y;
+function parseXmlTag(inner) {
+  let text3 = inner;
+  const empty = text3.endsWith("/");
+  if (empty)
+    text3 = text3.slice(0, -1);
+  const nameMatch = /^[^\s/>]+/.exec(text3);
+  if (!nameMatch || !NAME.test(nameMatch[0]))
+    return;
+  const attributes = {};
+  let at = nameMatch[0].length;
+  ATTRIBUTE.lastIndex = at;
+  for (;; ) {
+    if (/^\s*$/.test(text3.slice(at)))
+      break;
+    ATTRIBUTE.lastIndex = at;
+    const match = ATTRIBUTE.exec(text3);
+    if (!match)
+      return;
+    attributes[match[1]] = decodeXmlEntities(match[2] ?? match[3] ?? "");
+    at = ATTRIBUTE.lastIndex;
+  }
+  return { name: nameMatch[0], attributes, empty };
+}
+
+class XmlStreamReader {
+  source;
+  recordPaths;
+  rangeNames;
+  maxRecordBytes;
+  decoder = new TextDecoder("utf-8");
+  chunk = new Uint8Array(0);
+  chunkStart = 0;
+  index = 0;
+  ended = false;
+  stack;
+  mode = "text";
+  markup = [];
+  markupStart = 0;
+  doctypeDepth = 0;
+  doctypeQuote = 0;
+  markupQuote = 0;
+  recordDepth = -1;
+  recordPath = [];
+  recordStart = 0;
+  recordBytes = 0;
+  discarding = false;
+  building = [];
+  cdataHeld = [];
+  rootSeenName;
+  constructor(source, options) {
+    this.source = source;
+    this.recordPaths = options.recordPaths;
+    this.rangeNames = new Set(options.rangeElements ?? []);
+    this.maxRecordBytes = Math.max(1, options.maxRecordBytes);
+    this.stack = [...options.open ?? []];
+    if (this.stack.length > 0)
+      this.rootSeenName = this.stack[0];
+    this.chunkStart = source.position;
+  }
+  get rootName() {
+    return this.rootSeenName;
+  }
+  get open() {
+    return this.stack;
+  }
+  get offset() {
+    return this.chunkStart + this.index;
+  }
+  fail(code, message2, offset = this.offset) {
+    throw new XmlStreamError(code, message2, offset);
+  }
+  fill() {
+    if (this.index < this.chunk.length)
+      return true;
+    if (this.ended)
+      return false;
+    for (;; ) {
+      const position = this.source.position;
+      const next = this.source.next();
+      if (next === undefined) {
+        this.ended = true;
+        return false;
+      }
+      if (next.length === 0)
+        continue;
+      this.chunkStart = position;
+      this.chunk = next;
+      this.index = 0;
+      return true;
+    }
+  }
+  inRecord() {
+    return this.recordDepth >= 0;
+  }
+  keeping() {
+    return this.inRecord() && !this.discarding;
+  }
+  count(bytes) {
+    if (!this.keeping())
+      return;
+    this.recordBytes += bytes;
+    if (this.recordBytes > this.maxRecordBytes) {
+      this.discarding = true;
+      this.building = [];
+    }
+  }
+  top() {
+    return this.building[this.building.length - 1];
+  }
+  flushText() {
+    const open4 = this.top();
+    if (!open4 || open4.pending.length === 0)
+      return;
+    const total = open4.pending.reduce((sum, part) => sum + part.length, 0);
+    const bytes = new Uint8Array(total);
+    let at = 0;
+    for (const part of open4.pending) {
+      bytes.set(part, at);
+      at += part.length;
+    }
+    const text3 = this.decoder.decode(bytes);
+    open4.element.children.push(open4.pendingCdata ? text3 : decodeXmlEntities(text3));
+    open4.pending = [];
+  }
+  keepText(bytes, cdata) {
+    if (!this.keeping() || bytes.length === 0)
+      return;
+    const open4 = this.top();
+    if (!open4)
+      return;
+    if (open4.pending.length > 0 && open4.pendingCdata !== cdata)
+      this.flushText();
+    open4.pendingCdata = cdata;
+    open4.pending.push(bytes.slice());
+    this.count(bytes.length);
+  }
+  inRange() {
+    const open4 = this.top();
+    return !!open4 && this.rangeNames.has(open4.element.name);
+  }
+  matchRecord() {
+    return this.recordPaths.find((path) => path.length === this.stack.length && path.every((name, at) => name === this.stack[at]));
+  }
+  next() {
+    for (;; ) {
+      if (!this.fill()) {
+        if (this.mode !== "text" || this.stack.length > 0) {
+          this.fail("truncated", "The document ends inside an element.");
+        }
+        return;
+      }
+      const event = this.step();
+      if (event)
+        return event;
+    }
+  }
+  step() {
+    const chunk = this.chunk;
+    while (this.index < chunk.length) {
+      switch (this.mode) {
+        case "text": {
+          const lt = chunk.indexOf(LT, this.index);
+          const end = lt < 0 ? chunk.length : lt;
+          if (end > this.index) {
+            const piece = chunk.subarray(this.index, end);
+            if (this.inRange() && this.keeping()) {
+              const open4 = this.top();
+              if (piece.includes(AMP))
+                open4.element.rangeEntities = true;
+              this.addRange(open4, this.offset, piece.length);
+            } else if (this.keeping()) {
+              this.keepText(piece, false);
+            } else if (!this.inRecord() && this.stack.length === 0 && this.rootSeenName !== undefined) {
+              if (piece.some((byte) => byte !== 32 && byte !== 10 && byte !== 13 && byte !== 9)) {
+                this.fail("invalid_xml", "Text after the document's root element.");
+              }
+            }
+            this.index = end;
+          }
+          if (lt >= 0) {
+            this.mode = "markup";
+            this.markup = [];
+            this.markupStart = this.offset;
+            this.markupQuote = 0;
+            this.index += 1;
+          }
+          break;
+        }
+        case "markup": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          this.markup.push(byte);
+          if (this.markup.length > XML_STREAM_MAX_MARKUP_BYTES)
+            this.fail("invalid_xml", "A tag is too long.", this.markupStart);
+          if (this.markup.length === 3 && this.markup[0] === 33 && this.markup[1] === 45 && this.markup[2] === 45) {
+            this.mode = "comment";
+            this.markup = [];
+            break;
+          }
+          if (this.markup.length === 8 && String.fromCharCode(...this.markup) === "![CDATA[") {
+            if (!this.inRecord() && this.stack.length === 0)
+              this.fail("invalid_xml", "A CDATA section outside the document's root element.", this.markupStart);
+            this.mode = "cdata";
+            this.markup = [];
+            this.cdataHeld = [];
+            break;
+          }
+          if (this.markup.length === 8 && String.fromCharCode(...this.markup).toUpperCase() === "!DOCTYPE") {
+            this.mode = "doctype";
+            this.doctypeDepth = 0;
+            this.doctypeQuote = 0;
+            break;
+          }
+          if (this.markup.length === 1 && byte === 63) {
+            this.mode = "pi";
+            this.markup = [];
+            break;
+          }
+          if (byte === 34 || byte === 39) {
+            if (this.markupQuote === 0)
+              this.markupQuote = byte;
+            else if (this.markupQuote === byte)
+              this.markupQuote = 0;
+          }
+          if (byte === GT2 && this.markupQuote === 0) {
+            const event = this.tag();
+            if (event)
+              return event;
+          }
+          break;
+        }
+        case "comment": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (byte === GT2 && this.markup.length >= 2 && this.markup[this.markup.length - 1] === 45 && this.markup[this.markup.length - 2] === 45) {
+            this.mode = "text";
+            this.markup = [];
+            this.chargeSkipped();
+            break;
+          }
+          this.markup.push(byte);
+          if (this.markup.length > 2)
+            this.markup.shift();
+          this.countMarkupLength();
+          break;
+        }
+        case "pi": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (byte === GT2 && this.markup[this.markup.length - 1] === 63) {
+            this.mode = "text";
+            this.markup = [];
+            this.chargeSkipped();
+            break;
+          }
+          this.markup.push(byte);
+          if (this.markup.length > 1)
+            this.markup.shift();
+          this.countMarkupLength();
+          break;
+        }
+        case "doctype": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (this.inRecord() || this.stack.length > 0)
+            this.fail("invalid_xml", "A document type declaration inside an element.", this.markupStart);
+          if (this.doctypeQuote !== 0) {
+            if (byte === this.doctypeQuote)
+              this.doctypeQuote = 0;
+          } else if (byte === 34 || byte === 39)
+            this.doctypeQuote = byte;
+          else if (byte === 91)
+            this.doctypeDepth += 1;
+          else if (byte === 93)
+            this.doctypeDepth = Math.max(0, this.doctypeDepth - 1);
+          else if (byte === GT2 && this.doctypeDepth === 0) {
+            this.mode = "text";
+            this.markup = [];
+            break;
+          }
+          this.countMarkupLength();
+          break;
+        }
+        case "cdata": {
+          let view = chunk.subarray(this.index);
+          let base = this.offset;
+          if (this.cdataHeld.length > 0) {
+            const joined = new Uint8Array(this.cdataHeld.length + view.length);
+            joined.set(this.cdataHeld, 0);
+            joined.set(view, this.cdataHeld.length);
+            base -= this.cdataHeld.length;
+            view = joined;
+            this.cdataHeld = [];
+          }
+          let close = -1;
+          for (let at = 0;at + 2 < view.length; at += 1) {
+            if (view[at] === 93 && view[at + 1] === 93 && view[at + 2] === GT2) {
+              close = at;
+              break;
+            }
+          }
+          if (close >= 0) {
+            this.cdataText(view.subarray(0, close), base);
+            this.index = chunk.length - (view.length - (close + 3));
+            this.mode = "text";
+            break;
+          }
+          let tail = 0;
+          while (tail < 2 && tail < view.length && view[view.length - 1 - tail] === 93)
+            tail += 1;
+          this.cdataText(view.subarray(0, view.length - tail), base);
+          this.cdataHeld = Array.from(view.subarray(view.length - tail));
+          this.index = chunk.length;
+          break;
+        }
+        default:
+          this.index = chunk.length;
+      }
+    }
+    return;
+  }
+  cdataText(bytes, start) {
+    if (bytes.length === 0)
+      return;
+    if (this.inRange() && this.keeping()) {
+      this.addRange(this.top(), start, bytes.length);
+      return;
+    }
+    this.keepText(bytes, true);
+  }
+  addRange(open4, start, length) {
+    const ranges = open4.element.ranges;
+    const last = ranges[ranges.length - 1];
+    if (last && last.end === start) {
+      last.end = start + length;
+      return;
+    }
+    ranges.push({ start, end: start + length });
+    this.count(XML_STREAM_RANGE_COST);
+  }
+  chargeSkipped() {
+    this.count(this.offset - this.markupStart);
+  }
+  countMarkupLength() {
+    if (this.offset - this.markupStart > XML_STREAM_MAX_MARKUP_BYTES)
+      this.fail("invalid_xml", "Markup is too long.", this.markupStart);
+  }
+  tag() {
+    const bytes = Uint8Array.from(this.markup.slice(0, -1));
+    this.markup = [];
+    this.mode = "text";
+    const tagStart = this.markupStart;
+    const tagEnd = this.offset;
+    const text3 = this.decoder.decode(bytes);
+    if (text3.startsWith("/")) {
+      const name = text3.slice(1).trim();
+      const expected = this.stack[this.stack.length - 1];
+      if (expected === undefined || name !== expected)
+        this.fail("invalid_xml", "An end tag does not close the open element.", tagStart);
+      return this.close(tagEnd, tagEnd - tagStart);
+    }
+    if (text3.startsWith("!"))
+      this.fail("invalid_xml", "Markup that is not XML.", tagStart);
+    const parsed = parseXmlTag(text3);
+    if (!parsed)
+      this.fail("invalid_xml", "A tag that is not XML.", tagStart);
+    if (this.stack.length === 0) {
+      if (this.rootSeenName !== undefined)
+        this.fail("invalid_xml", "A second root element.", tagStart);
+      this.rootSeenName = parsed.name;
+    }
+    this.stack.push(parsed.name);
+    if (this.stack.length > XML_STREAM_MAX_DEPTH)
+      this.fail("too_deep", "Elements are nested too deeply.", tagStart);
+    if (!this.inRecord()) {
+      const path = this.matchRecord();
+      if (path) {
+        this.recordDepth = this.stack.length;
+        this.recordPath = path;
+        this.recordStart = tagStart;
+        this.recordBytes = 0;
+        this.discarding = false;
+        this.building = [];
+      }
+    }
+    if (this.keeping()) {
+      this.flushText();
+      const element = { name: parsed.name, attributes: parsed.attributes, children: [] };
+      if (this.rangeNames.has(parsed.name))
+        element.ranges = [];
+      const parent = this.top();
+      if (parent)
+        parent.element.children.push(element);
+      this.building.push({ element, pending: [], pendingCdata: false });
+      this.count(tagEnd - tagStart);
+    }
+    if (parsed.empty)
+      return this.close(tagEnd, 0);
+    return;
+  }
+  close(end, tagBytes) {
+    if (this.keeping()) {
+      this.flushText();
+      this.count(tagBytes);
+    }
+    const depth = this.stack.length;
+    this.stack.pop();
+    if (!this.inRecord())
+      return;
+    if (this.discarding) {
+      if (depth !== this.recordDepth)
+        return;
+      this.recordDepth = -1;
+      this.discarding = false;
+      this.building = [];
+      return { kind: "oversize", path: this.recordPath, start: this.recordStart, end };
+    }
+    const done = this.building.pop();
+    if (depth !== this.recordDepth || !done)
+      return;
+    this.recordDepth = -1;
+    this.building = [];
+    return { kind: "record", path: this.recordPath, element: done.element, start: this.recordStart, end };
+  }
+}
+
+// src/workers/archive-import/evernote/enml.ts
+var BLOCKS = new Set([
+  "address",
+  "article",
+  "aside",
+  "blockquote",
+  "dd",
+  "details",
+  "div",
+  "dl",
+  "dt",
+  "en-note",
+  "figcaption",
+  "figure",
+  "footer",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "hr",
+  "li",
+  "main",
+  "nav",
+  "ol",
+  "p",
+  "pre",
+  "section",
+  "summary",
+  "table",
+  "tbody",
+  "tfoot",
+  "thead",
+  "tr",
+  "ul"
 ]);
-var READ_OBJECTS = new Set([
-  "contact_information",
-  "location_information",
-  "poll",
-  "todo_list",
-  "invoice_information",
-  "text",
-  "text_entities",
-  "reactions",
-  "inline_bot_buttons"
-]);
+var SILENT = new Set(["script", "style", "head", "title", "object", "embed", "applet"]);
 
-// src/workers/archive-import/telegram/account.ts
-var ACCOUNT_SECTIONS = [
-  { name: "personal_information", path: ["personal_information"], label: "profile", whole: true },
-  { name: "profile_pictures", path: ["profile_pictures"], label: "profile pictures", whole: false },
-  { name: "stories", path: ["stories"], label: "stories", whole: false },
-  { name: "profile_music", path: ["profile_music"], label: "profile music", whole: false },
-  { name: "contacts", path: ["contacts", "list"], label: "contacts", whole: false },
-  { name: "frequent_contacts", path: ["frequent_contacts", "list"], label: "frequent contacts", whole: false },
-  { name: "sessions", path: ["sessions", "list"], label: "sessions", whole: false },
-  { name: "web_sessions", path: ["web_sessions", "list"], label: "web sessions", whole: false },
-  { name: "other_data", path: ["other_data"], label: "other data", whole: true }
-];
-
-// src/workers/archive-import/telegram/connector.ts
-var TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-var TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
-var MESSAGE_PATHS = [
-  ["chats", "list", "*", "messages"],
-  ["left_chats", "list", "*", "messages"],
-  ["messages"]
-];
-var ITEM_PATHS = [...MESSAGE_PATHS, ...ACCOUNT_SECTIONS.map((section) => section.path)];
-var SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
-var LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
+// src/workers/archive-import/evernote/connector.ts
+var EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+var FETCH_SLICE_BYTES = 1024 * 1024;
+var BASE64 = (() => {
+  const table = new Int16Array(256).fill(-1);
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (let index = 0;index < alphabet.length; index += 1)
+    table[alphabet.charCodeAt(index)] = index;
+  return table;
+})();
 
 // src/workers/archive-import/runtime.ts
 init_lane();
@@ -48930,10 +50284,12 @@ init_store2();
 
 // src/workers/archive-import/extraction-source.ts
 init_archive_formats();
+init_file_extraction_source();
 init_scope_safe_fs();
 
 // src/workers/file-extraction/connector-source.ts
 init_spool();
+init_file_extraction_source();
 
 // src/workers/archive-import/extraction-source.ts
 init_spool();
@@ -48954,11 +50310,7 @@ init_archive_formats();
 init_scope_safe_fs();
 init_source_storage();
 init_tiered_store_set();
-
-// src/workers/archive-import/source-input.ts
-init_archive_formats();
-
-// src/workers/archive-import/sync.ts
+init_source_input();
 init_media_bindings();
 init_manifest3();
 init_state();
@@ -48976,7 +50328,7 @@ init_source_ingestion_policy();
 
 // src/workers/local-files/volume-identity.ts
 init_paths();
-import { createHash as createHash24 } from "node:crypto";
+import { createHash as createHash25 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { existsSync as existsSync25, lstatSync as lstatSync12, readFileSync as readFileSync22, readdirSync as readdirSync3, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
@@ -49186,7 +50538,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value) {
-  return createHash24("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash25("sha256").update(value).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -49726,6 +51078,53 @@ init_connector_store();
 // src/workers/email-source/gmail-status-scope.ts
 init_google_connectors();
 
+// src/workers/google-connectors/gmail-archive-target.ts
+init_provider_account_identity();
+init_source_inputs();
+init_manifest3();
+
+// src/workers/archive-import/mbox/gmail-account.ts
+var DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+var MAX_HEADER_BYTES = 256 * 1024;
+var MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
+
+// src/workers/archive-import/mbox/gmail-input.ts
+init_gmail_mail_record();
+init_state();
+
+// src/workers/archive-import/mbox/mime-parts.ts
+init_gmail_mail_record();
+var MAX_HEADER_BYTES2 = 256 * 1024;
+
+// src/workers/archive-import/mbox/gmail-input.ts
+var MAX_GMAIL_ID = (1n << 64n) - 1n;
+var SYSTEM_LABELS = new Map([
+  ["inbox", "INBOX"],
+  ["sent", "SENT"],
+  ["important", "IMPORTANT"],
+  ["starred", "STARRED"],
+  ["unread", "UNREAD"],
+  ["draft", "DRAFT"],
+  ["drafts", "DRAFT"],
+  ["chat", "CHAT"],
+  ["spam", "SPAM"],
+  ["trash", "TRASH"],
+  ["category personal", "CATEGORY_PERSONAL"],
+  ["category social", "CATEGORY_SOCIAL"],
+  ["category promotions", "CATEGORY_PROMOTIONS"],
+  ["category updates", "CATEGORY_UPDATES"],
+  ["category forums", "CATEGORY_FORUMS"],
+  ["opened", null],
+  ["archived", null]
+]);
+var exportAddresses = new Map;
+
+// src/workers/google-connectors/gmail-archive-target.ts
+init_gmail_mail_record();
+var GMAIL_PROVIDER_ID = "gmail";
+var GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.";
+var GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
+
 // src/workers/email-source/server.ts
 init_tiered_store_set();
 init_tier_set2();
@@ -49786,6 +51185,46 @@ init_provider();
 init_assets();
 init_manifest();
 init_source_watch();
+
+// src/workers/whatsapp/archive-target.ts
+init_olympus_layout();
+init_source_input();
+
+// src/workers/whatsapp/archive-input.ts
+init_archive_formats();
+init_state();
+
+// src/workers/archive-import/input-media.ts
+init_file_extraction_source();
+init_scope_safe_fs();
+init_media_bindings();
+init_zip_reader();
+
+// src/workers/whatsapp/archive-input.ts
+init_zip_reader();
+init_match_keys();
+init_spool_index();
+init_live_connector();
+
+// src/workers/whatsapp/export-zone.ts
+var formatters = new Map;
+
+// src/workers/whatsapp/archive-input.ts
+var SAMPLE_BYTES = 1024 * 1024 * 1024;
+var LIVE_INDEX_BYTES = 64 * 1024 * 1024;
+var SLOT_LOOKAHEAD_BYTES = 4 * 1024 * 1024;
+var DAY_MS2 = 24 * 3600000;
+
+// src/workers/whatsapp/archive-target.ts
+init_live_connector();
+init_store_sync2();
+var WHATSAPP_LANE_SYNC = Object.freeze({
+  placement: WHATSAPP_STORE_PLACEMENT,
+  fetchContent: true,
+  deferMetadataOnlyContent: true
+});
+
+// src/workers/email-source/server.ts
 init_source_dashboard();
 init_source_ingestion_ledger();
 init_connected_handles();
@@ -49807,6 +51246,41 @@ init_gmail();
 init_request_budget();
 var GMAIL_PICKER_DAILY_REQUEST_BUDGET = 4 * GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
 var SKIPPABLE_SYSTEM_LABELS = new Set(["SENT", "CHAT"]);
+
+// src/workers/google-connectors/gmail-header-match.ts
+init_gmail();
+
+// src/workers/google-connectors/gmail-import-allowance.ts
+var GMAIL_IMPORT_MAX_RETRIES = 1;
+var GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
+var GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
+var GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
+var GMAIL_IMPORT_SHARE = 0.5;
+var GMAIL_IMPORT_MIN_DAILY_BUDGET = Math.ceil((GMAIL_IMPORT_LABELS_COST + GMAIL_IMPORT_MESSAGE_COST) / GMAIL_IMPORT_SHARE);
+
+// src/workers/google-connectors/gmail-header-match.ts
+init_request_budget();
+
+// src/workers/email-source/server.ts
+init_source_registry();
+init_gmail_live_sync();
+
+// src/workers/google-connectors/gmail-attachment-extraction.ts
+init_file_extraction_source();
+
+// src/workers/archive-import/mbox/part-reader.ts
+init_file_extraction_source();
+init_scope_safe_fs();
+init_manifest3();
+init_gmail_mail_record();
+
+// src/workers/google-connectors/gmail-attachment-extraction.ts
+init_tier_ledger();
+init_child_visibility();
+init_gmail();
+
+// src/workers/email-source/server.ts
+init_tiered_store_set();
 
 // src/workers/source-account-guard.ts
 init_provider_account_identity();
@@ -51158,6 +52632,7 @@ init_embedding_ledger();
 init_http();
 
 // src/workers/email-source/server.ts
+var GMAIL_ATTACHMENT_READER_REUSE_MS = 5 * 60000;
 function requireSourceEmbeddingDimension(options) {
   const configuredKey = options.envKeys.find((key2) => Boolean(options.env[key2]?.trim()));
   if (options.envKeys.every((key2) => options.env[key2] === undefined)) {
@@ -51535,7 +53010,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash25("sha256").update(message2).digest("hex"));
+      scopeReport.errors.push(createHash26("sha256").update(message2).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -51865,7 +53340,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash25("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash26("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
