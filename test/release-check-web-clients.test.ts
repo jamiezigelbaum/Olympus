@@ -30,6 +30,8 @@ describe('web clients: what a turn is held to', () => {
     const checks = evaluateTurn('claude', pickup, { turn: 'Pick-up is at 12:30. Your LDL of 162 is fine.', frames: '', ms: 1 });
     expect(statusOf(checks)).toMatchObject({ 'web.claude.pickup.used-olympus': 'fail', 'web.claude.pickup.no-leak': 'fail', 'web.claude.pickup.facts': 'fail', 'web.claude.pickup.cited': 'fail' });
     expect(JSON.stringify(checks)).not.toContain('162');
+    // A reply still coming at the deadline is not a finished answer, however right it looks so far.
+    expect(statusOf(evaluateTurn('claude', pickup, { turn: 'Olympus says pick-up is at', frames: '', ms: 300_000, unfinished: true }))['web.claude.pickup.answered']).toBe('fail');
     expect(redactForbidden('LDL 162 mg', ['162'])).toBe('LDL [forbidden 1] mg');
   });
 
@@ -57,6 +59,13 @@ describe('web clients: what a turn is held to', () => {
     const obs = await askQuestion(tab, 'chatgpt', doctor, { pollMs: 0, loadMs: 1_000, answerMs: 1_000, settleMs: 0, panelMs: 5_000, sleep: async () => {} });
     expect('frames' in obs && obs.frames).toContain('162');
     expect(frameReads).toBe(3);
+  });
+
+  test('a reply still streaming when the answer time runs out comes back unfinished', async () => {
+    const state: PageState = { url: 'https://claude.ai/chat/1', title: 'Claude', challenge: false, signedOut: false, composer: true, composerText: '', busy: true, text: `${pickup.prompt}\nOlympus says pick-up is at` };
+    const tab = { evaluate: async () => state as never, framesText: async () => '', goto: async () => {}, type: async () => {}, enter: async () => {}, screenshot: async () => {}, close: async () => {} };
+    const obs = await askQuestion(tab, 'claude', pickup, { pollMs: 0, loadMs: 1_000, answerMs: 0, settleMs: 0, panelMs: 0, sleep: async () => {} });
+    expect(obs).toMatchObject({ unfinished: true });
   });
 
   test('an app that cannot reach Olympus, a signed-out app and a bot check are inconclusive, with what to renew', () => {

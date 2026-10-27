@@ -123,6 +123,8 @@ export interface TurnObservation {
   /** Text of the frames under the reply (ChatGPT's panels). */
   frames: string;
   ms: number;
+  /** The reply was still coming when the answer time ran out: what it said so far is not a finished answer. */
+  unfinished?: boolean;
 }
 
 /** The checks for one asked question. Never repeats a forbidden string. */
@@ -147,7 +149,7 @@ export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnOb
   if (leaked.length === 0 && NOT_CONNECTED.test(turn) && !(q.expect ?? []).some((value) => turnContains(turn, value))) {
     return [{ id: prefix, title: `${label}: ${q.id}`, status: 'skip', detail: `Inconclusive: ${label} could not reach Olympus; connect Olympus again in the test account (reply: ${shown.slice(0, 200)})` }];
   }
-  add('answered', 'the app answered', true, `${turn.length} characters in ${Math.round(obs.ms / 1000)} s`);
+  add('answered', 'the app answered', !obs.unfinished, obs.unfinished ? `the reply was still coming after ${Math.round(obs.ms / 1000)} s (${turn.length} characters so far)` : `${turn.length} characters in ${Math.round(obs.ms / 1000)} s`);
   add('used-olympus', 'Olympus was used', /olympus/i.test(turn), /olympus/i.test(turn) ? 'Olympus is named in the turn' : `the turn never names Olympus, so the app may have answered without it: ${shown}`);
   add('no-leak', 'nothing forbidden in the reply', leaked.length === 0,
     leaked.length === 0 ? `none of ${forbid.length} forbidden string(s)` : `forbidden string(s) ${leaked.map((row) => row.index + 1).join(', ')} of ${forbid.length} appeared`);
@@ -390,6 +392,7 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
   let last = '';
   let stableSince = Date.now();
   let sendRetried = false;
+  let settled = false;
   for (;;) {
     await t.sleep(t.pollMs);
     await tab.evaluate<boolean>(ALLOW_SCRIPT).catch(() => false);
@@ -402,7 +405,7 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
       await tab.evaluate<boolean>(SEND_BUTTON_SCRIPT).catch(() => false);
     }
     if (turn !== last || state.busy) { last = turn; stableSince = Date.now(); }
-    const settled = !state.busy && turn.trim().length > 0 && Date.now() - stableSince >= t.settleMs;
+    settled = !state.busy && turn.trim().length > 0 && Date.now() - stableSince >= t.settleMs;
     if (settled || Date.now() - started >= t.answerMs) break;
   }
   const ms = Date.now() - started;
@@ -419,7 +422,9 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
   }
   // The turn is read again: a panel that arrived late can come with more reply text.
   const final = await tab.evaluate<PageState>(script);
-  return { turn: turnText(final.text, q.prompt), frames, ms };
+  const turn = turnText(final.text, q.prompt);
+  // A reply that was empty at the deadline is judged as no reply; one cut off mid-way is unfinished.
+  return { turn, frames, ms, ...(!settled && turn.trim().length > 0 ? { unfinished: true } : {}) };
 }
 
 export interface WebClientsOptions {
