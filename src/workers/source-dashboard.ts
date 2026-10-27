@@ -1527,6 +1527,8 @@ export type DashboardImportAttention =
   | { kind: 'held'; count: number; model: 'off' | 'waiting' }
   /** An archive is importing or being removed, and the setting named stops it running. */
   | { kind: 'scheduler'; setting: 'disabled' | 'not_selected' }
+  /** An import waits for a limit the owner must raise (`minimum`: the least it must be). */
+  | { kind: 'waiting'; id: string; name: string; reason: string; minimum: number }
   | { kind: 'unreadable'; reason: DashboardImportsUnreadableReason };
 
 /**

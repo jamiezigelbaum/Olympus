@@ -26,6 +26,8 @@ import {
   telegramChat, telegramFullExport, telegramJson, telegramPhoto, telegramService, telegramText,
 } from '../../test/support/archive-fixtures-telegram.ts';
 import { chatText, chatZip, mediaNames, notice, type SyntheticMessage } from '../../test/support/archive-fixtures-whatsapp.ts';
+import { apiMessage as gmailApiMessage, mail as gmailMail, takeoutMbox } from '../../test/support/archive-fixtures-gmail.ts';
+import type { GmailMessage } from '../../src/workers/google-connectors/gmail.ts';
 
 /** The folder under the home directory the archives are written to, and the picker's first press. */
 export const FIXTURE_FOLDER = 'rc-archives';
@@ -61,6 +63,32 @@ export interface BuiltArchive {
   expect: ArchiveExpectation;
 }
 
+/**
+ * What an import beside a source's live input must come to (docs/design/archive-live-one-dataset.md): it joins the source, is listed in
+ * the source's card with how many records it read and how many of them the source already had from its live input, is found by a search,
+ * has no Remove, and goes with the source's Delete.
+ */
+export interface BesideLiveExpectation {
+  /** Records the import reads (each counted once, a repeat included), and how many of them the live input had already brought. */
+  read: number;
+  alreadyThere: number;
+  /** How a search result names the source's items. */
+  citationLabel: string;
+}
+
+/** An export of the account a source's live input reads, imported beside that input. */
+export interface BesideLiveSpec {
+  /** The source the export joins, as the registry and the dashboard name it. */
+  sourceId: string;
+  /**
+   * The machine-side hook (archive-live-seeds.ts) that sets the source's account and live input up: through the source's own connector
+   * path or a fake of its provider, never by writing its stores.
+   */
+  seedHook: string;
+  /** The export of the account the hook seeds, with the token in a record the live input does not hold. */
+  small(token: string): { bytes: Uint8Array; expect: BesideLiveExpectation };
+}
+
 export interface ArchiveFixtureSpec {
   /** The id the report uses ("mbox"). */
   format: string;
@@ -74,6 +102,11 @@ export interface ArchiveFixtureSpec {
   provider: string;
   /** A small Takeout-style archive: readable items, something not imported, something taken as given or left out with nothing lost. */
   small(token: string): BuiltArchive;
+  /**
+   * For a format that is an input of an existing source: the import of that source's own account beside its live input. `small` is then
+   * an export of ANOTHER account, so it stays under Archives and keeps covering that path.
+   */
+  besideLive?: BesideLiveSpec;
 }
 
 /** What the model-off and changed-file stages need besides `small`. */
@@ -522,6 +555,80 @@ export const ARCHIVE_FORMATS: Readonly<Record<string, ArchiveFixtureSpec>> = {
   [EVERNOTE_FORMAT]: EVERNOTE_FIXTURES,
 };
 
+/** The formats whose exports are imported beside their source's live input as well. */
+export const BESIDE_LIVE_FORMATS: readonly string[] = Object.keys(ARCHIVE_FORMATS).filter((format) => ARCHIVE_FORMATS[format]!.besideLive !== undefined);
+
+// ---------------------------------------------------------------------------
+// Import beside live: a source's own export joins its live data
+// (docs/design/archive-live-one-dataset.md). The case's data, run through the product by
+// test/release-check-source-input-fixtures.test.ts. The leg runs it on a machine once the mbox entry's `besideLive` names a seed hook
+// that connects a synthetic Gmail live input (archive-live-seeds.ts); until then it is not in ARCHIVE_FORMATS.
+
+/** An import beside live: the export, the live records the source already holds, and what the source must hold after. */
+export interface SourceInputFixtureSpec {
+  /** The id the report uses. */
+  id: string;
+  /** The archive format the export is. */
+  format: string;
+  /** The source it joins, and its card's label. */
+  sourceId: string;
+  label: string;
+  extension: string;
+  /** The export, and the live input's records (in the live reader's own shape) that are there before it is imported. */
+  small(token: string): BuiltArchive & {
+    live: readonly GmailMessage[];
+    /** What the import's own run counts: what it read, and how much of that the source already held. */
+    read: number;
+    alreadyThere: number;
+    /** The distinct items the source holds after the import: each once. */
+    items: number;
+  };
+}
+
+/**
+ * A Google Takeout mbox of the owner's Gmail account: four messages Takeout names by Gmail's id, one of them already held live and
+ * one held live by name only (older than the content window), and one Spam message left out. The token is in the bodies of the two
+ * messages only the export brings in full.
+ */
+function gmailTakeoutSmall(token: string): ReturnType<SourceInputFixtureSpec['small']> {
+  const held = gmailMail(101, { date: '2024-03-04T12:00:00.000Z', body: 'Packing for the lake trip: tent, stove, two jackets.' });
+  const namesOnly = gmailMail(102, { date: '2015-03-05T12:00:00.000Z', body: `The old ferry timetable, kept since 2015. Reference word: ${token}.` });
+  const fresh = gmailMail(103, { date: '2024-03-06T12:00:00.000Z', body: `Lentil soup: onion, carrot, lentils. Same reference word: ${token}.` });
+  const other = gmailMail(104, { date: '2024-03-09T12:00:00.000Z', body: 'The photos are in the shared album.' });
+  const spam = gmailMail(105, { date: '2023-12-30T12:00:00.000Z', labels: ['Spam', 'Unread'], labelIds: ['SPAM', 'UNREAD'], body: 'A synthetic offer.' });
+  return {
+    bytes: bytesOf(takeoutMbox([held, namesOnly, fresh, other, spam])),
+    live: [gmailApiMessage(held), gmailApiMessage(namesOnly)],
+    read: 4,
+    alreadyThere: 2,
+    items: 4,
+    expect: {
+      label: 'Gmail',
+      citationLabel: 'Gmail',
+      family: 'email',
+      messages: 4,
+      earliest: '2015-03-05',
+      latest: '2024-03-09',
+      notImported: [{ kind: 'spam_or_trash', count: 1 }],
+      howRead: [],
+    },
+  };
+}
+
+export const GMAIL_TAKEOUT_FIXTURES: SourceInputFixtureSpec = {
+  id: 'gmail_takeout',
+  format: 'mbox',
+  sourceId: 'gmail.email',
+  label: 'Gmail',
+  extension: '.mbox',
+  small: gmailTakeoutSmall,
+};
+
+/** Every import-beside-live case. A later source adds its entry here. */
+export const SOURCE_INPUT_FORMATS: Readonly<Record<string, SourceInputFixtureSpec>> = {
+  [GMAIL_TAKEOUT_FIXTURES.id]: GMAIL_TAKEOUT_FIXTURES,
+};
+
 /** The format the picker, model-off and changed-file stages use. */
 export const STRESS_FORMAT = 'mbox';
 
@@ -531,7 +638,7 @@ export const EXTRA_FORMATS: readonly string[] = Object.keys(ARCHIVE_FORMATS).fil
 // ---------------------------------------------------------------------------
 // The fixtures of one run
 
-export type FixtureRole = 'agent' | 'picker' | 'held' | 'bulk';
+export type FixtureRole = 'agent' | 'picker' | 'held' | 'bulk' | 'beside';
 
 export interface LegFixture {
   role: FixtureRole;
@@ -542,6 +649,8 @@ export interface LegFixture {
   /** The folder and file under the home directory, with the separators the machine uses. */
   relPath: string;
   expect: ArchiveExpectation;
+  /** The `beside` role: what its import beside the live input must come to. */
+  beside?: BesideLiveExpectation;
   bytes: Uint8Array;
 }
 
@@ -571,6 +680,14 @@ export function legFixture(role: FixtureRole, seed: string, format: string = STR
   const spec = role === 'agent' || role === 'picker' ? formatSpec(format) : stressSpec();
   const fileName = role === 'bulk' ? `rc-${role}-${count}${spec.extension}` : `rc-${role}-${format}${spec.extension}`;
   let built: BuiltArchive;
+  if (role === 'beside') {
+    const formatOf = formatSpec(format);
+    const beside = formatOf.besideLive;
+    if (!beside) throw new Error(`the "${format}" fixtures have no import beside a live input`);
+    const made = beside.small(token);
+    const expect: ArchiveExpectation = { label: formatOf.label, citationLabel: made.expect.citationLabel, family: formatOf.family, messages: made.expect.read, earliest: '', latest: '', notImported: [], howRead: [] };
+    return { role, format, fileName: `rc-beside-${format}${formatOf.extension}`, token, relPath: `${FIXTURE_FOLDER}/rc-beside-${format}${formatOf.extension}`, expect, beside: made.expect, bytes: made.bytes };
+  }
   if (role === 'held') built = stressSpec().plain(token);
   else if (role === 'bulk') built = { bytes: stressSpec().bulk(token, count), expect: { label: spec.label, citationLabel: spec.citationLabel, family: spec.family, messages: count, earliest: '', latest: '', notImported: [], howRead: [] } };
   else built = spec.small(token);

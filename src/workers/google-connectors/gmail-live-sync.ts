@@ -22,6 +22,7 @@ import {
 } from '../../core/invocation-provenance.ts';
 import {
   type ConnectorStoreEmbedSummary,
+  type ConnectorStoreSyncOptions,
   type ConnectorStoreSyncSummary,
   type LocalConnectorStore,
 } from '../connector-store/index.ts';
@@ -33,6 +34,7 @@ import {
   type TieredStoreSet,
   type TieredStoreSetRun,
 } from '../connector-store/tiered-store-set.ts';
+import type { OwnerTierRule } from '../classification/tier-classifier.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import { LabelPageRejectedError, sweepLabelRuleRaises } from '../connector-store/tier-rules-sweep.ts';
 import {
@@ -221,6 +223,19 @@ export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnect
   publicStore?: { open: () => LocalConnectorStore; exists: () => boolean };
   secretLocations?: SecretLocationsIndex;
   onTierLegOpened?: (store: LocalConnectorStore) => void;
+}
+
+/**
+ * The Gmail lane's own sync options under the owner's rules: what every input
+ * of the lane is stored with, a live pull and an imported mbox alike
+ * (gmail-archive-target.ts).
+ */
+export function gmailLaneSyncOptions(ownerRules: readonly OwnerTierRule[] = []): ConnectorStoreSyncOptions {
+  return {
+    fetchContent: true,
+    classification: gmailConnectorStoreClassification(ownerRules),
+    tierClassification: { ...(ownerRules.length > 0 ? { rules: [...ownerRules] } : {}) },
+  };
 }
 
 export function createGmailConnectorStoreSyncHandler(

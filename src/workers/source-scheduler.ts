@@ -2113,6 +2113,24 @@ export function createGmailConnectorStoreSchedulerSource(input: {
   };
 }
 
+/**
+ * Gmail's stores with no live lane (not connected, or no mail approval) that
+ * hold mail an import brought in: a source with no sync of its own, so the
+ * worker's embedding sweep and private meaning backfill (attached to every
+ * source) still drain the imported history. Live approval governs live reads,
+ * not the account's own stores.
+ */
+export function createGmailImportedHistorySchedulerSource(input: { config: OlympusConfig }): SourceSchedulerSource {
+  return {
+    sourceId: SCHEDULER_SOURCE_IDS.gmail,
+    corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+    cadence: 'continuous',
+    intervalMs: input.config.worker.scheduler.syncIntervalSeconds * 1_000,
+    freshnessThresholdHours: input.config.worker.scheduler.freshnessThresholdHours,
+    tasks: [],
+  };
+}
+
 export function createGoogleDriveConnectorStoreSchedulerSource(input: {
   config: OlympusConfig;
   liveSync?: GoogleDriveConnectorStoreSyncHandler;

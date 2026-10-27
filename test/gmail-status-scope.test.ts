@@ -92,6 +92,8 @@ describe('Gmail store status scope: the approved window', () => {
     const observed = {
       provider: 'gmail',
       observedConnectorId: gmailCursorConnectorId('personal', { generation: ref.accountGeneration, revision: ref.revision }),
+      // Mail an import brought into the account is in the approved scope too.
+      observedConnectorIdPrefix: 'archive.',
     };
     expect(gmailPrivateStoreStatusScope({ authority: subject, handle: { accountRole: 'personal' } })).toEqual({
       accountScope: 'personal',

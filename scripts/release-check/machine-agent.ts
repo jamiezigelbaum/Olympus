@@ -47,7 +47,9 @@ import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import type { StoreView } from './archive-leg.ts';
-import { changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
+import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
+import { liveSeedHook } from './archive-live-seeds.ts';
+import './archive-live-seed-hooks.ts';
 
 export { ISOLATED_BROWSER_FLAGS } from './browser.ts';
 import type { AskView, CardView, DestinationId, EgressView, EntryView, FixView, InboxObservation, PageView, ShotView } from './inbox.ts';
@@ -1539,6 +1541,28 @@ function readArchiveStores(spec: { family: string; provider: string }, archiveId
   });
 }
 
+/** A source's own stores (through its live seed hook), read-only: how many of its rows carry the archive's word. */
+function readSourceStores(hook: string, token: string): StoreView[] {
+  const seeded = liveSeedHook(hook);
+  const like = `%${token}%`;
+  return seeded.stores({ env: process.env, home: homedir() }).map(({ tier, path }): StoreView => {
+    if (!existsSync(path)) return { tier, exists: false, live: 0, tokenRows: 0 };
+    try {
+      const db = new Database(path, { readonly: true });
+      try {
+        db.exec('PRAGMA busy_timeout = 10000;');
+        const count = (sql: string, ...params: string[]): number => Number((db.query(sql).get(...params) as { n: number } | null)?.n ?? 0);
+        const tokenRows = count('select count(*) as n from items where tombstoned = 0 and (title like ? or search_text like ?)', like, like)
+          + count('select count(*) as n from chunks c join items i on i.item_pk = c.item_pk where i.tombstoned = 0 and c.bounded_text like ?', like);
+        const live = count('select count(*) as n from items where provider = ? and tombstoned = 0', seeded.provider);
+        return { tier, exists: true, live, tokenRows };
+      } finally { db.close(); }
+    } catch (error) {
+      return { tier, exists: true, live: 0, tokenRows: 0, error: (error instanceof Error ? error.message : String(error)).slice(0, 160) };
+    }
+  });
+}
+
 /** One signed-in browser for the whole of `work`: a fresh profile, the owner's opening link and Unlock, the dashboard open. */
 async function withArchiveBrowser<T>(work: (session: ArchiveBrowserSession) => Promise<T>): Promise<T> {
   const browser = findBrowser();
@@ -1596,6 +1620,12 @@ function archiveHost(): ArchiveHost {
     search: archiveSearch,
     readStores: readArchiveStores,
     restartEngine,
+    seedLive: (hook) => liveSeedHook(hook).seed({ env: process.env, home: homedir() }),
+    readSourceStores,
+    deleteSourceData(sourceId) {
+      const result = olympus(['data', 'delete', '--source', sourceId], { timeoutMs: 300_000 });
+      return { code: result.code, json: jsonFrom(result.stdout, result.stderr), stderr: result.stderr };
+    },
   };
 }
 
@@ -1614,6 +1644,14 @@ async function archiveImportCommand(args: { role: string; format: string; via: s
     ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
   });
   emit({ ...observation });
+}
+
+async function archiveSeedLiveCommand(format: string): Promise<never> {
+  emit({ ...(await seedLiveStage(archiveHost(), { format })) });
+}
+
+async function archiveBesideLiveCommand(args: { format: string; seed: string; settleS?: number }): Promise<never> {
+  emit({ ...(await besideLiveStage(archiveHost(), { format: args.format, seed: args.seed, ...(args.settleS !== undefined ? { settleS: args.settleS } : {}) })) });
 }
 
 async function archiveDrainCommand(args: { role: string; format: string; seed: string; search: boolean; boundS?: number }): Promise<never> {
@@ -1887,6 +1925,11 @@ async function main(): Promise<void> {
       role: flag('--role'), format: flag('--format', STRESS_FORMAT), via: flag('--via'), seed: flag('--seed'),
       resetFolder: rest.includes('--reset-folder'), clean: rest.includes('--clean'), search: rest.includes('--search'), watchEgress: rest.includes('--watch-egress'),
       ...(rest.includes('--drain-s') ? { drainS: Number(flag('--drain-s')) } : {}),
+      ...(rest.includes('--settle-s') ? { settleS: Number(flag('--settle-s')) } : {}),
+    });
+    case 'archive-seed-live': return await archiveSeedLiveCommand(flag('--format'));
+    case 'archive-beside-live': return await archiveBesideLiveCommand({
+      format: flag('--format'), seed: flag('--seed'),
       ...(rest.includes('--settle-s') ? { settleS: Number(flag('--settle-s')) } : {}),
     });
     case 'archive-drain': return await archiveDrainCommand({
