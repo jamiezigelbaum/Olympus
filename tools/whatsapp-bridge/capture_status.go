@@ -32,6 +32,8 @@ type captureStatusReceipt struct {
 	// this state directory (carried across restarts).
 	DroppedMessages int64  `json:"dropped_messages"`
 	LastDroppedAt   string `json:"last_dropped_at,omitempty"`
+	// Media is waiting for disk space (media_waiting.go): said, never counted.
+	MediaWaitingForDisk bool `json:"media_waiting_for_disk,omitempty"`
 }
 
 type captureStatus struct {
@@ -44,6 +46,7 @@ type captureStatus struct {
 	connectedThrough time.Time
 	dropped          int64
 	lastDropped      time.Time
+	mediaWaiting     bool
 	writeFailed      bool
 }
 
@@ -96,6 +99,20 @@ func (s *captureStatus) setConnected(connected bool) {
 	s.poke()
 }
 
+// setMediaWaiting says whether any media is waiting for disk space.
+func (s *captureStatus) setMediaWaiting(waiting bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	changed := s.mediaWaiting != waiting
+	s.mediaWaiting = waiting
+	s.mu.Unlock()
+	if changed {
+		s.poke()
+	}
+}
+
 // recordDrop never blocks: it runs on the provider's event loop.
 func (s *captureStatus) recordDrop() {
 	if s == nil {
@@ -116,10 +133,11 @@ func (s *captureStatus) receipt() captureStatusReceipt {
 		s.connectedThrough = now
 	}
 	receipt := captureStatusReceipt{
-		Kind:            captureStatusKind,
-		UpdatedAt:       now.Format(time.RFC3339),
-		Connected:       s.connected,
-		DroppedMessages: s.dropped,
+		Kind:                captureStatusKind,
+		UpdatedAt:           now.Format(time.RFC3339),
+		Connected:           s.connected,
+		DroppedMessages:     s.dropped,
+		MediaWaitingForDisk: s.mediaWaiting,
 	}
 	if !s.connectedThrough.IsZero() {
 		receipt.ConnectedThrough = s.connectedThrough.UTC().Format(time.RFC3339)

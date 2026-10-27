@@ -4,7 +4,7 @@
 
 import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import {
   legacyWhatsAppLiveSyncPaths,
@@ -54,6 +54,8 @@ import {
 import { offsetAfterLines, terminatedLinesEnd } from './spool-reader.ts';
 import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import { WhatsAppSpoolIndex } from './spool-index.ts';
+import { bridgeMediaCall, runWhatsAppMediaFetch, WhatsAppMediaFetchState, type WhatsAppMediaCall, type WhatsAppVolumeSpace } from './media-fetch.ts';
+import { createWhatsAppChildReader, type WhatsAppChildReader } from './child-media.ts';
 
 export const WHATSAPP_PERSONAL_SOURCE_ID = 'whatsapp.personal.messages';
 export const WHATSAPP_LIVE_CORPUS_ID = 'secure_local.whatsapp.messages';
@@ -88,6 +90,8 @@ export const WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING = 'whatsapp_spool_cursor_re
 export const WHATSAPP_CAPTURE_DISCONNECTED_WARNING = 'whatsapp_capture_disconnected';
 /** The bridge dropped messages from a full queue within the stale threshold. */
 export const WHATSAPP_CAPTURE_DROPPED_WARNING = 'whatsapp_capture_dropped_messages';
+/** The bridge holds media until this computer has disk space for it; every message is kept meanwhile. */
+export const WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING = 'whatsapp_media_waiting_for_disk_space';
 // Where the full-spool Secrets pass stands, kept in the set's tier ledger.
 export const WHATSAPP_SPOOL_REDACTION_STATE_KEY = 'capture_spool_secret_redaction:whatsapp';
 
@@ -115,6 +119,8 @@ export interface WhatsAppConnectorStoreSyncReceipt {
     spool_pass_budget_reached: number;
     /** Messages the bridge dropped from a full queue, over the life of its state folder. */
     capture_dropped_messages: number;
+    /** 1 while the bridge holds media until there is disk space for it (a flag, never a number of items). */
+    capture_media_waiting_for_disk: 0 | 1;
     capture_fresh: number;
     capture_stale: number;
     capture_unavailable: number;
@@ -167,11 +173,31 @@ export function defaultWhatsAppMediaDir(
   return resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media', env);
 }
 
-/** The folders a media extraction may read from: a folder account's whole media folder, else the audio folder. */
+/**
+ * The folders the bridge saves media in, which a media read (extraction, a
+ * child's bytes) and Secrets clearing may touch: a folder account's whole
+ * media folder, else the audio folder; and the bridge's picture and video
+ * folders beside its audio (`media/images`, `media/video` in its state folder).
+ */
+/** Olympus's own folder for media it fetched from the bridge after it waited for disk space (media-fetch.ts). */
+export function defaultWhatsAppFetchedMediaDir(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return join(defaultWhatsAppStateDir(env), 'media', 'olympus');
+}
+
 export function defaultWhatsAppMediaRoots(
   env: Record<string, string | undefined> = process.env,
 ): string[] {
-  return [resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media-root', env)];
+  const root = resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media-root', env);
+  const state = defaultWhatsAppStateDir(env);
+  // A folder account's media folder holds them already; only a folder outside the root is added.
+  const beside = [join(state, 'media', 'images'), join(state, 'media', 'video'), defaultWhatsAppFetchedMediaDir(env)]
+    .filter((dir) => {
+      const from = relative(root, dir);
+      return from === '' || from.startsWith('..') || isAbsolute(from);
+    });
+  return [root, ...beside];
 }
 
 /**
@@ -296,6 +322,12 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   env?: Record<string, string | undefined>;
   /** Where the bridge saves audio, deleted for a Secret message. */
   mediaDir?: string;
+  /** Reads a child's bytes by its locator (default: the bridge's media folders only; child-media.ts). */
+  readChild?: WhatsAppChildReader;
+  /** The space on the media folders' volume (test seam; media-fetch.ts). */
+  mediaVolumeSpace?: WhatsAppVolumeSpace;
+  /** The bridge's media download call (test seam; the bridge's socket by default). */
+  mediaCall?: WhatsAppMediaCall;
   /**
    * The lane's per-tier stores (createWhatsAppTierLane), whose secure leg is
    * `store`. Absent: the single-store lane exactly as before.
@@ -306,9 +338,12 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   const spoolDir = options.spoolDir?.trim() || defaultWhatsAppSpoolDir(env);
   const account = options.account?.trim() || WHATSAPP_PERSONAL_ACCOUNT_SCOPE;
   const mediaDir = options.mediaDir?.trim() || defaultWhatsAppMediaDir(env);
+  // Every folder the bridge saves media in: a Secret message's picture or video goes as its audio does.
+  const mediaDirs = [mediaDir, ...defaultWhatsAppMediaRoots(env)];
+  const readChild = options.readChild ?? createWhatsAppChildReader({ mediaRoots: defaultWhatsAppMediaRoots(env), relocate: whatsappMovedPathMapper(env) });
   // One connector per pull, so each receipt counts what that pull read.
   const connectorFor = (findings: WhatsAppSpoolPassFindings) => ({
-    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings }),
+    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings, readChild }),
     // The private drain retains WHATSAPP_LIVE_CONNECTOR_ID until it is retired
     // after observed qualification. A distinct product cursor prevents either
     // writer from advancing or regressing the other's traversal meanwhile.
@@ -350,32 +385,64 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
       let tiered: TieredLaneReceiptCounts = {};
       let redacted: CaptureSpoolRedactionResult | undefined;
       let redactionFailed = false;
+      let mediaWaitingForDisk = false;
       if (tierSet) {
-        const setRun = await tierSet.sync(connector, sync);
-        run = mergedTieredLaneRun(setRun, 'secure_local').sync;
-        tiered = tieredLaneReceiptCounts({ routing: setRun.routing });
-        // Every line the set has now committed past was judged. Any whose
-        // message is Secrets loses its text and audio here, and a whole-spool
-        // pass runs when the set of Secrets changed. The stores already hold
-        // none of it; a failure is reported and retried on the next pull.
+        // What waits for disk space is recorded as the listing reads it, before the set commits past it
+        // (media-fetch.ts): a crash after the commit loses none of it.
+        const mediaState = WhatsAppMediaFetchState.open(spoolDir);
         try {
-          const committed = sanitizeWhatsAppLiveCursor(
-            tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined,
-          );
-          redacted = clearWhatsAppSpoolSecrets({
-            spoolDir,
-            account,
-            mediaDir,
-            relocateMediaPath: whatsappMovedPathMapper(env),
-            ledger: tierSet.ledger,
-            through: lineCursorOf(committed),
-            ...(byteOffsetOf(committed) !== undefined ? { throughOffset: byteOffsetOf(committed)! } : {}),
-          });
-        } catch (error) {
-          redactionFailed = true;
-          console.error(
-            `[olympus:whatsapp] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
-          );
+          findings.onWaitingMedia = (media) => mediaState.note(media);
+          const setRun = await tierSet.sync(connector, sync);
+          run = mergedTieredLaneRun(setRun, 'secure_local').sync;
+          tiered = tieredLaneReceiptCounts({ routing: setRun.routing });
+          // Every line the set has now committed past was judged. Any whose
+          // message is Secrets loses its text and audio here, and a whole-spool
+          // pass runs when the set of Secrets changed. The stores already hold
+          // none of it; a failure is reported and retried on the next pull.
+          try {
+            const committed = sanitizeWhatsAppLiveCursor(
+              tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined,
+            );
+            redacted = clearWhatsAppSpoolSecrets({
+              spoolDir,
+              account,
+              mediaDir,
+              mediaDirs,
+              relocateMediaPath: whatsappMovedPathMapper(env),
+              ledger: tierSet.ledger,
+              through: lineCursorOf(committed),
+              ...(byteOffsetOf(committed) !== undefined ? { throughOffset: byteOffsetOf(committed)! } : {}),
+            });
+          } catch (error) {
+            redactionFailed = true;
+            console.error(
+              `[olympus:whatsapp] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
+            );
+          }
+          // Media waiting for disk space is fetched only once its message is judged not Secrets, and only as
+          // Olympus asks (media-fetch.ts). After the clearing, which a failure skips; the next pull goes on.
+          if (!redactionFailed) {
+            try {
+              mediaWaitingForDisk = (await runWhatsAppMediaFetch({
+                state: mediaState,
+                spoolDir,
+                account,
+                folder: defaultWhatsAppFetchedMediaDir(env),
+                tierSet,
+                findings,
+                sync,
+                call: options.mediaCall ?? bridgeMediaCall(defaultWhatsAppStateDir(env)),
+                readChild,
+                ...(options.mediaVolumeSpace ? { space: options.mediaVolumeSpace } : {}),
+              })).waitingForDisk;
+            } catch (error) {
+              console.error(
+                `[olympus:whatsapp] media_fetch_failed reason=${error instanceof Error ? error.name : 'unknown'}`,
+              );
+            }
+          }
+        } finally {
+          mediaState.close();
         }
       } else {
         run = await options.store.syncFromConnector(connector, sync);
@@ -389,6 +456,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
         tiered,
         redacted,
         redactionFailed,
+        mediaWaitingForDisk,
       );
     },
 
@@ -424,6 +492,8 @@ export function clearWhatsAppSpoolSecrets(options: {
   spoolDir: string;
   account: string;
   mediaDir?: string;
+  /** Every other folder the bridge saves media in (pictures, videos). */
+  mediaDirs?: readonly string[];
   ledger: TierLedger;
   /** Where the set has committed to, `<file>:<lines>`: nothing past it is cleared yet. */
   through: string | undefined;
@@ -438,6 +508,7 @@ export function clearWhatsAppSpoolSecrets(options: {
     spoolDir: options.spoolDir,
     account: options.account,
     ...(options.mediaDir ? { mediaDir: options.mediaDir } : {}),
+    ...(options.mediaDirs ? { mediaDirs: options.mediaDirs } : {}),
     ...(options.relocateMediaPath ? { relocateMediaPath: options.relocateMediaPath } : {}),
     ...window,
     judge,
@@ -645,7 +716,10 @@ function whatsappSyncReceipt(
   tiered: TieredLaneReceiptCounts = {},
   redacted?: CaptureSpoolRedactionResult,
   redactionFailed = false,
+  /** Olympus's own word: media it keeps waiting while the volume is below the floor (media-fetch.ts). */
+  olympusMediaWaiting = false,
 ): WhatsAppConnectorStoreSyncReceipt {
+  const mediaWaiting = state.status?.mediaWaitingForDisk === true || olympusMediaWaiting;
   // The bridge's heartbeat tells a quiet account from a stopped capture; a
   // bridge that writes none is judged by its newest message, as before.
   const capture = captureLiveness(
@@ -666,6 +740,7 @@ function whatsappSyncReceipt(
     ...(findings.unresolvedReactionTargets > 0 ? [WHATSAPP_UNRESOLVED_REACTIONS_WARNING] : []),
     ...(findings.cursorsRecovered > 0 || findings.cursorFilesMissing > 0 ? [WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING] : []),
     ...(recentDrop && (state.status?.droppedMessages ?? 0) > 0 ? [WHATSAPP_CAPTURE_DROPPED_WARNING] : []),
+    ...(mediaWaiting ? [WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING] : []),
     ...(capture.status === 'stale' ? [WHATSAPP_CAPTURE_STALE_WARNING] : []),
     ...(capture.stopped ? [WHATSAPP_CAPTURE_DISCONNECTED_WARNING] : []),
     ...(capture.status === 'unavailable' ? [WHATSAPP_CAPTURE_UNAVAILABLE_WARNING] : []),
@@ -689,6 +764,8 @@ function whatsappSyncReceipt(
       spool_cursor_file_missing: findings.cursorFilesMissing > 0 ? 1 : 0,
       spool_pass_budget_reached: findings.passBudgetReached > 0 ? 1 : 0,
       capture_dropped_messages: state.status?.droppedMessages ?? 0,
+      // Read by the card as a findable problem (source-dashboard.ts, CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT).
+      capture_media_waiting_for_disk: mediaWaiting ? 1 : 0,
       ...captureFreshnessCounts(capture),
       spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
       ...tiered,

@@ -15453,6 +15453,16 @@ class TierLedger {
     }
     return;
   }
+  async holdingWrites(work) {
+    if (this.db.inTransaction)
+      return work();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      return await work();
+    } finally {
+      this.db.exec("COMMIT");
+    }
+  }
   readMeta(key) {
     if (key === "ledger_id")
       return;
@@ -37100,6 +37110,712 @@ var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
 
+// src/workers/archive-import/state.ts
+var ARCHIVE_IMPORTS_SOURCE_ID2 = "archive.imports";
+var init_state = __esm(() => {
+  init_source_placement();
+  init_source_storage();
+  init_atomic_file();
+  init_archive_formats();
+  init_file_lease();
+});
+
+// src/workers/archive-import/media-bindings.ts
+var init_media_bindings = __esm(() => {
+  init_sqlite_migrations();
+  init_scope_safe_fs();
+  init_source_placement();
+  init_source_storage();
+  init_state();
+  init_olympus_layout();
+});
+
+// node_modules/fflate/esm/browser.js
+var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
+  var b = new u16(31);
+  for (var i = 0;i < 31; ++i) {
+    b[i] = start += 1 << eb[i - 1];
+  }
+  var r = new i32(b[30]);
+  for (var i = 1;i < 30; ++i) {
+    for (var j = b[i];j < b[i + 1]; ++j) {
+      r[j] = j - b[i] << 5 | i;
+    }
+  }
+  return { b, r };
+}, _a2, fl, revfl, _b, fd, revfd, rev, x, i, hMap = function(cd, mb, r) {
+  var s = cd.length;
+  var i2 = 0;
+  var l = new u16(mb);
+  for (;i2 < s; ++i2) {
+    if (cd[i2])
+      ++l[cd[i2] - 1];
+  }
+  var le = new u16(mb);
+  for (i2 = 1;i2 < mb; ++i2) {
+    le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
+  }
+  var co;
+  if (r) {
+    co = new u16(1 << mb);
+    var rvb = 15 - mb;
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        var sv = i2 << 4 | cd[i2];
+        var r_1 = mb - cd[i2];
+        var v = le[cd[i2] - 1]++ << r_1;
+        for (var m = v | (1 << r_1) - 1;v <= m; ++v) {
+          co[rev[v] >> rvb] = sv;
+        }
+      }
+    }
+  } else {
+    co = new u16(s);
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
+      }
+    }
+  }
+  return co;
+}, flt, i, i, i, i, fdt, i, flrm, fdrm, max = function(a) {
+  var m = a[0];
+  for (var i2 = 1;i2 < a.length; ++i2) {
+    if (a[i2] > m)
+      m = a[i2];
+  }
+  return m;
+}, bits = function(d, p, m) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
+}, bits16 = function(d, p) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
+}, shft = function(p) {
+  return (p + 7) / 8 | 0;
+}, slc = function(v, s, e) {
+  if (s == null || s < 0)
+    s = 0;
+  if (e == null || e > v.length)
+    e = v.length;
+  return new u8(v.subarray(s, e));
+}, ec, err = function(ind, msg, nt) {
+  var e = new Error(msg || ec[ind]);
+  e.code = ind;
+  if (Error.captureStackTrace)
+    Error.captureStackTrace(e, err);
+  if (!nt)
+    throw e;
+  return e;
+}, inflt = function(dat, st, buf, dict) {
+  var sl = dat.length, dl = dict ? dict.length : 0;
+  if (!sl || st.f && !st.l)
+    return buf || new u8(0);
+  var noBuf = !buf;
+  var resize = noBuf || st.i != 2;
+  var noSt = st.i;
+  if (noBuf)
+    buf = new u8(sl * 3);
+  var cbuf = function(l2) {
+    var bl = buf.length;
+    if (l2 > bl) {
+      var nbuf = new u8(Math.max(bl * 2, l2));
+      nbuf.set(buf);
+      buf = nbuf;
+    }
+  };
+  var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
+  var tbts = sl * 8;
+  do {
+    if (!lm) {
+      final = bits(dat, pos, 1);
+      var type = bits(dat, pos + 1, 3);
+      pos += 3;
+      if (!type) {
+        var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
+        if (t > sl) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + l);
+        buf.set(dat.subarray(s, t), bt);
+        st.b = bt += l, st.p = pos = t * 8, st.f = final;
+        continue;
+      } else if (type == 1)
+        lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
+      else if (type == 2) {
+        var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
+        var tl = hLit + bits(dat, pos + 5, 31) + 1;
+        pos += 14;
+        var ldt = new u8(tl);
+        var clt = new u8(19);
+        for (var i2 = 0;i2 < hcLen; ++i2) {
+          clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
+        }
+        pos += hcLen * 3;
+        var clb = max(clt), clbmsk = (1 << clb) - 1;
+        var clm = hMap(clt, clb, 1);
+        for (var i2 = 0;i2 < tl; ) {
+          var r = clm[bits(dat, pos, clbmsk)];
+          pos += r & 15;
+          var s = r >> 4;
+          if (s < 16) {
+            ldt[i2++] = s;
+          } else {
+            var c = 0, n = 0;
+            if (s == 16)
+              n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
+            else if (s == 17)
+              n = 3 + bits(dat, pos, 7), pos += 3;
+            else if (s == 18)
+              n = 11 + bits(dat, pos, 127), pos += 7;
+            while (n--)
+              ldt[i2++] = c;
+          }
+        }
+        var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
+        lbt = max(lt);
+        dbt = max(dt);
+        lm = hMap(lt, lbt, 1);
+        dm = hMap(dt, dbt, 1);
+      } else
+        err(1);
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+    }
+    if (resize)
+      cbuf(bt + 131072);
+    var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
+    var lpos = pos;
+    for (;; lpos = pos) {
+      var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
+      pos += c & 15;
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+      if (!c)
+        err(2);
+      if (sym < 256)
+        buf[bt++] = sym;
+      else if (sym == 256) {
+        lpos = pos, lm = null;
+        break;
+      } else {
+        var add = sym - 254;
+        if (sym > 264) {
+          var i2 = sym - 257, b = fleb[i2];
+          add = bits(dat, pos, (1 << b) - 1) + fl[i2];
+          pos += b;
+        }
+        var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
+        if (!d)
+          err(3);
+        pos += d & 15;
+        var dt = fd[dsym];
+        if (dsym > 3) {
+          var b = fdeb[dsym];
+          dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
+        }
+        if (pos > tbts) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + 131072);
+        var end = bt + add;
+        if (bt < dt) {
+          var shift = dl - dt, dend = Math.min(dt, end);
+          if (shift + bt < 0)
+            err(3);
+          for (;bt < dend; ++bt)
+            buf[bt] = dict[shift + bt];
+        }
+        for (;bt < end; ++bt)
+          buf[bt] = buf[bt - dt];
+      }
+    }
+    st.l = lm, st.p = lpos, st.b = bt, st.f = final;
+    if (lm)
+      final = 1, st.m = lbt, st.d = dm, st.n = dbt;
+  } while (!final);
+  return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
+}, et, Inflate, td, tds = 0;
+var init_browser = __esm(() => {
+  u8 = Uint8Array;
+  u16 = Uint16Array;
+  i32 = Int32Array;
+  fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
+  fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
+  clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+  _a2 = freb(fleb, 2);
+  fl = _a2.b;
+  revfl = _a2.r;
+  fl[28] = 258, revfl[258] = 28;
+  _b = freb(fdeb, 0);
+  fd = _b.b;
+  revfd = _b.r;
+  rev = new u16(32768);
+  for (i = 0;i < 32768; ++i) {
+    x = (i & 43690) >> 1 | (i & 21845) << 1;
+    x = (x & 52428) >> 2 | (x & 13107) << 2;
+    x = (x & 61680) >> 4 | (x & 3855) << 4;
+    rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
+  }
+  flt = new u8(288);
+  for (i = 0;i < 144; ++i)
+    flt[i] = 8;
+  for (i = 144;i < 256; ++i)
+    flt[i] = 9;
+  for (i = 256;i < 280; ++i)
+    flt[i] = 7;
+  for (i = 280;i < 288; ++i)
+    flt[i] = 8;
+  fdt = new u8(32);
+  for (i = 0;i < 32; ++i)
+    fdt[i] = 5;
+  flrm = /* @__PURE__ */ hMap(flt, 9, 1);
+  fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
+  ec = [
+    "unexpected EOF",
+    "invalid block type",
+    "invalid length/literal",
+    "invalid distance",
+    "stream finished",
+    "no stream handler",
+    ,
+    "no callback",
+    "invalid UTF-8 data",
+    "extra field too long",
+    "date not in range 1980-2099",
+    "filename too long",
+    "stream finishing",
+    "invalid zip data"
+  ];
+  et = /* @__PURE__ */ new u8(0);
+  Inflate = /* @__PURE__ */ function() {
+    function Inflate2(opts, cb) {
+      if (typeof opts == "function")
+        cb = opts, opts = {};
+      this.ondata = cb;
+      var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
+      this.s = { i: 0, b: dict ? dict.length : 0 };
+      this.o = new u8(32768);
+      this.p = new u8(0);
+      if (dict)
+        this.o.set(dict);
+    }
+    Inflate2.prototype.e = function(c) {
+      if (!this.ondata)
+        err(5);
+      if (this.d)
+        err(4);
+      if (!this.p.length)
+        this.p = c;
+      else if (c.length) {
+        var n = new u8(this.p.length + c.length);
+        n.set(this.p), n.set(c, this.p.length), this.p = n;
+      }
+    };
+    Inflate2.prototype.c = function(final) {
+      this.s.i = +(this.d = final || false);
+      var bts = this.s.b;
+      var dt = inflt(this.p, this.s, this.o);
+      this.ondata(slc(dt, bts, this.s.b), this.d);
+      this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
+      this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
+    };
+    Inflate2.prototype.push = function(chunk, final) {
+      this.e(chunk), this.c(final);
+    };
+    return Inflate2;
+  }();
+  td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder;
+  try {
+    td.decode(et, { stream: true });
+    tds = 1;
+  } catch (e) {}
+});
+
+// src/workers/archive-import/zip-reader.ts
+function readExact(source, offset, length) {
+  if (length < 0 || offset < 0 || offset + length > source.size)
+    throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+  if (length <= ZIP_READ_CHUNK_BYTES) {
+    const bytes = source.readAt(offset, length);
+    if (bytes.length !== length)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    return bytes;
+  }
+  const out = new Uint8Array(length);
+  for (let done = 0;done < length; ) {
+    const part = source.readAt(offset + done, Math.min(ZIP_READ_CHUNK_BYTES, length - done));
+    if (part.length === 0)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    out.set(part, done);
+    done += part.length;
+  }
+  return out;
+}
+function memberKey(entry) {
+  return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
+}
+
+class ZipMemberReader {
+  entry;
+  archive;
+  dataStart;
+  startAt;
+  pos = 0;
+  runningCrc = 0;
+  crcKnown;
+  out = [];
+  lastChunk = new Uint8Array(0);
+  crcBeforeLast = 0;
+  heldLast = 0;
+  closed = false;
+  result;
+  storedNext = 0;
+  inflate;
+  compressedNext = 0;
+  compressedBlock = new Uint8Array(0);
+  compressedOffset = 0;
+  inflateFinished = false;
+  failure;
+  replayed = 0;
+  replayStep;
+  catchUpEnded = false;
+  constructor(archive, entry, dataStart, options) {
+    this.archive = archive;
+    this.entry = entry;
+    this.dataStart = dataStart;
+    const start = options.start ?? 0;
+    if (!Number.isSafeInteger(start) || start < 0 || start > entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
+    }
+    this.startAt = start;
+    if (options.replayStepBytes !== undefined && (!Number.isSafeInteger(options.replayStepBytes) || options.replayStepBytes < 1)) {
+      throw new RangeError("replayStepBytes must be a positive whole number");
+    }
+    this.replayStep = options.replayStepBytes;
+    this.crcKnown = start === 0;
+    if (entry.isDirectory || entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0)) {
+      this.inflateFinished = true;
+      this.pos = start;
+      this.crcKnown = true;
+      return;
+    }
+    if (entry.method === 0) {
+      this.storedNext = start;
+      this.pos = start;
+      if (start > 0 && options.startCrc !== undefined) {
+        this.runningCrc = options.startCrc >>> 0;
+        this.crcKnown = true;
+      }
+      return;
+    }
+    const kept = options.continuation;
+    if (kept && kept.memberKey === memberKey(entry) && kept.position === start) {
+      this.inflate = this.bind(kept.inflate);
+      this.compressedNext = kept.compressedNext;
+      this.compressedBlock = kept.compressedBlock;
+      this.compressedOffset = 0;
+      this.out = [...kept.out];
+      this.inflateFinished = kept.inflateFinished;
+      this.pos = kept.reached;
+      this.runningCrc = kept.crc;
+      this.crcKnown = kept.crcKnown;
+      return;
+    }
+    this.inflate = this.bind(new Inflate(() => {
+      return;
+    }));
+    this.crcKnown = true;
+  }
+  bind(inflate) {
+    inflate.ondata = (chunk) => {
+      if (chunk.length > 0)
+        this.out.push(chunk);
+    };
+    return inflate;
+  }
+  static open(archive, entry, options = {}) {
+    if (entry.encrypted)
+      throw new ZipMemberError("encrypted", entry.name, "This member is encrypted.");
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new ZipMemberError("unsupported_method", entry.name, `This member uses compression method ${entry.method}.`);
+    }
+    if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
+    }
+    const dataStart = entry.isDirectory ? 0 : archive.dataStart(entry);
+    return new ZipMemberReader(archive, entry, dataStart, options);
+  }
+  get position() {
+    return Math.max(this.pos, this.startAt);
+  }
+  get crc32() {
+    return this.crcKnown && this.pos >= this.startAt ? this.runningCrc : undefined;
+  }
+  get catchingUp() {
+    return this.pos < this.startAt && !this.closed && !this.failure && !this.catchUpEnded;
+  }
+  get replayedBytes() {
+    return this.replayed;
+  }
+  get end() {
+    return this.result;
+  }
+  next() {
+    this.assertUsable();
+    if (!this.replay()) {
+      this.heldLast = 0;
+      this.lastChunk = new Uint8Array(0);
+      return this.lastChunk;
+    }
+    for (;; ) {
+      const chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (!this.fillOrFail()) {
+          this.conclude();
+          return;
+        }
+        continue;
+      }
+      this.crcBeforeLast = this.runningCrc;
+      if (this.crcKnown)
+        this.runningCrc = crc32Update(this.runningCrc, chunk);
+      this.lastChunk = chunk;
+      this.heldLast = chunk.length;
+      this.pos += chunk.length;
+      return chunk;
+    }
+  }
+  catchUp() {
+    this.assertUsable();
+    return this.replay();
+  }
+  assertUsable() {
+    if (this.closed)
+      throw new Error("This member reader was suspended or closed.");
+    if (this.failure)
+      throw this.failure;
+  }
+  replay() {
+    const stepFrom = this.replayed;
+    while (this.pos < this.startAt && !this.catchUpEnded) {
+      const chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (this.replayStep !== undefined && this.replayed - stepFrom >= this.replayStep)
+          return false;
+        if (!this.fillOrFail()) {
+          this.catchUpEnded = true;
+          break;
+        }
+        continue;
+      }
+      const skip = this.startAt - this.pos;
+      const head = chunk.length <= skip ? chunk : chunk.subarray(0, skip);
+      this.runningCrc = crc32Update(this.runningCrc, head);
+      this.pos += head.length;
+      this.replayed += head.length;
+      if (head.length < chunk.length)
+        this.out.unshift(chunk.subarray(head.length));
+    }
+    return true;
+  }
+  unread(count) {
+    if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
+      throw new RangeError("unread past the last chunk");
+    if (count === 0)
+      return;
+    this.heldLast -= count;
+    this.pos -= count;
+    if (this.crcKnown)
+      this.runningCrc = crc32Update(this.crcBeforeLast, this.lastChunk.subarray(0, this.heldLast));
+    this.out.unshift(this.lastChunk.subarray(this.heldLast));
+    this.lastChunk = this.lastChunk.subarray(0, this.heldLast);
+    this.result = undefined;
+  }
+  suspend() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
+      return;
+    const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
+    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES)
+      return;
+    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
+    const state = {
+      position: Math.max(this.pos, this.startAt),
+      reached: this.pos,
+      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
+      memberKey: memberKey(this.entry),
+      crc: this.runningCrc,
+      crcKnown: this.crcKnown,
+      inflate: this.inflate,
+      compressedNext: this.compressedNext,
+      compressedBlock: this.compressedBlock.slice(this.compressedOffset),
+      out: [...this.out],
+      inflateFinished: this.inflateFinished
+    };
+    this.inflate = undefined;
+    this.out = [];
+    return state;
+  }
+  close() {
+    this.closed = true;
+    this.inflate = undefined;
+    this.out = [];
+  }
+  fillOrFail() {
+    try {
+      return this.fill();
+    } catch (error) {
+      if (error instanceof ZipMemberError) {
+        this.failure = error;
+        this.out = [];
+        this.inflateFinished = true;
+      }
+      throw error;
+    }
+  }
+  fill() {
+    if (this.entry.method === 0) {
+      if (this.storedNext >= this.entry.uncompressedSize)
+        return false;
+      const length = Math.min(ZIP_READ_CHUNK_BYTES, this.entry.uncompressedSize - this.storedNext);
+      const bytes = this.archive.source.readAt(this.dataStart + this.storedNext, length);
+      if (bytes.length === 0)
+        throw new ZipMemberError("damaged", this.entry.name, "A stored member ends early.");
+      this.storedNext += bytes.length;
+      this.out.push(bytes);
+      return true;
+    }
+    if (this.inflateFinished || !this.inflate)
+      return false;
+    if (this.compressedOffset >= this.compressedBlock.length && this.compressedNext < this.entry.compressedSize) {
+      const length = Math.min(ZIP_COMPRESSED_BLOCK_BYTES, this.entry.compressedSize - this.compressedNext);
+      this.compressedBlock = readBlock(this.archive.source, this.dataStart + this.compressedNext, length, this.entry.name);
+      this.compressedOffset = 0;
+      this.compressedNext += length;
+    }
+    const slice = this.compressedBlock.subarray(this.compressedOffset, this.compressedOffset + ZIP_INFLATE_PUSH_BYTES);
+    this.compressedOffset += slice.length;
+    const final = this.compressedOffset >= this.compressedBlock.length && this.compressedNext >= this.entry.compressedSize;
+    try {
+      this.inflate.push(slice, final);
+    } catch (error) {
+      if (error instanceof ZipMemberError)
+        throw error;
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
+    }
+    const progress = inflaterProgress(this.inflate);
+    if (progress.ended) {
+      const pushed = this.compressedNext - (this.compressedBlock.length - this.compressedOffset);
+      const consumed = pushed - progress.unconsumed;
+      if (consumed < this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends before the size the zip gives it.");
+      }
+      if (consumed > this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data runs past the size the zip gives it.");
+      }
+      this.inflateFinished = true;
+    } else if (final) {
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends without a complete stream.");
+    }
+    return true;
+  }
+  conclude() {
+    if (this.result)
+      return;
+    const sizeOk = this.pos === this.entry.uncompressedSize;
+    this.result = {
+      bytes: this.pos,
+      sizeOk,
+      crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
+    };
+  }
+}
+function inflaterProgress(inflate) {
+  const internal = inflate;
+  const state = internal.s;
+  if (typeof state !== "object" || state === null || !(internal.p instanceof Uint8Array) || state.p !== undefined && typeof state.p !== "number") {
+    throw new Error("The installed inflater does not expose the state this reader reads; the zip reader must be updated with it.");
+  }
+  const ended = Boolean(state.f) && !state.l;
+  const partialByte = typeof state.p === "number" && (state.p & 7) !== 0 ? 1 : 0;
+  return { ended, unconsumed: Math.max(0, internal.p.length - partialByte) };
+}
+function readBlock(source, offset, length, name) {
+  try {
+    return readExact(source, offset, length);
+  } catch (error) {
+    if (error instanceof ZipFormatError)
+      throw new ZipMemberError("damaged", name, error.message);
+    throw error;
+  }
+}
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_REPLAY_STEP_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
+var init_zip_reader = __esm(() => {
+  init_browser();
+  init_archive_formats();
+  init_stop_errors();
+  init_byte_source();
+  ZIP_READ_CHUNK_BYTES = 1024 * 1024;
+  ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
+  ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
+  ZIP_REPLAY_STEP_BYTES = 16 * 1024 * 1024;
+  ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+  ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
+  ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
+  MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
+  ZipFormatError = class ZipFormatError extends Error {
+    code;
+    constructor(code, message2) {
+      super(message2);
+      this.name = "ZipFormatError";
+      this.code = code;
+    }
+  };
+  ZipMemberError = class ZipMemberError extends Error {
+    code;
+    memberName;
+    constructor(code, memberName, message2) {
+      super(message2);
+      this.name = "ZipMemberError";
+      this.code = code;
+      this.memberName = memberName;
+    }
+  };
+  strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+  lenientUtf8 = new TextDecoder("utf-8");
+});
+
+// src/workers/archive-import/input-media.ts
+var init_input_media = __esm(() => {
+  init_file_extraction_source();
+  init_scope_safe_fs();
+  init_media_bindings();
+  init_zip_reader();
+});
+
+// src/workers/whatsapp/child-media.ts
+var COPY_CHUNK_BYTES;
+var init_child_media = __esm(() => {
+  init_file_extraction_source();
+  init_input_media();
+  COPY_CHUNK_BYTES = 1024 * 1024;
+});
+
 // src/workers/whatsapp/reaction-index.ts
 var init_reaction_index = __esm(() => {
   init_reactions();
@@ -37131,17 +37847,34 @@ var init_spool_reader = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES;
+var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, WHATSAPP_FETCHED_MEDIA_TYPES, MEDIA_TEMP_MAX_AGE_MS;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
   init_reaction_index();
   init_spool_index();
   init_spool_resets();
+  init_child_media();
   init_match_keys();
   init_spool_reader();
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
   TARGET_READ_CHUNK_BYTES = 4 * 1024;
+  CHILD_MEDIA_TYPES = new Set(["image", "video", "video_note"]);
+  WHATSAPP_FETCHED_MEDIA_TYPES = new Set([...CHILD_MEDIA_TYPES, "audio"]);
+  MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
+});
+
+// src/workers/whatsapp/media-fetch.ts
+var DISK_FLOOR_MIN_BYTES, ANSWER_HEAD_MAX_BYTES;
+var init_media_fetch = __esm(() => {
+  init_source_inputs();
+  init_secrets_disposition();
+  init_tier_rejudge();
+  init_child_media();
+  init_live_connector();
+  init_spool_reader();
+  DISK_FLOOR_MIN_BYTES = 5 * 1024 * 1024 * 1024;
+  ANSWER_HEAD_MAX_BYTES = 64 * 1024;
 });
 
 // src/workers/whatsapp/store-sync.ts
@@ -37157,6 +37890,8 @@ var init_store_sync2 = __esm(() => {
   init_spool_reader();
   init_spool_file_identity();
   init_spool_index();
+  init_media_fetch();
+  init_child_media();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local"
@@ -39534,8 +40269,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       picker.afterRender();
     if (keepFocus) {
       const nodes = root.querySelectorAll("[data-key]");
-      for (let i = 0;i < nodes.length; i++) {
-        const node = nodes[i];
+      for (let i2 = 0;i2 < nodes.length; i2++) {
+        const node = nodes[i2];
         if (node.getAttribute("data-key") === keepFocus) {
           node.focus();
           if (selection && (node.tagName === "TEXTAREA" || node.tagName === "INPUT")) {
@@ -42812,16 +43547,6 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
-// src/workers/archive-import/state.ts
-var ARCHIVE_IMPORTS_SOURCE_ID2 = "archive.imports";
-var init_state = __esm(() => {
-  init_source_placement();
-  init_source_storage();
-  init_atomic_file();
-  init_archive_formats();
-  init_file_lease();
-});
-
 // src/workers/archive-import/store.ts
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
@@ -42835,16 +43560,6 @@ var init_store2 = __esm(() => {
     trustDomain: "secure_local",
     secretsInContent: true
   });
-});
-
-// src/workers/archive-import/media-bindings.ts
-var init_media_bindings = __esm(() => {
-  init_sqlite_migrations();
-  init_scope_safe_fs();
-  init_source_placement();
-  init_source_storage();
-  init_state();
-  init_olympus_layout();
 });
 
 // src/core/account-files.ts
@@ -42875,676 +43590,6 @@ var init_record_probe = __esm(() => {
   RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
   RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
   RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
-});
-
-// node_modules/fflate/esm/browser.js
-var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
-  var b = new u16(31);
-  for (var i = 0;i < 31; ++i) {
-    b[i] = start += 1 << eb[i - 1];
-  }
-  var r = new i32(b[30]);
-  for (var i = 1;i < 30; ++i) {
-    for (var j = b[i];j < b[i + 1]; ++j) {
-      r[j] = j - b[i] << 5 | i;
-    }
-  }
-  return { b, r };
-}, _a2, fl, revfl, _b, fd, revfd, rev, x, i, hMap = function(cd, mb, r) {
-  var s = cd.length;
-  var i2 = 0;
-  var l = new u16(mb);
-  for (;i2 < s; ++i2) {
-    if (cd[i2])
-      ++l[cd[i2] - 1];
-  }
-  var le = new u16(mb);
-  for (i2 = 1;i2 < mb; ++i2) {
-    le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
-  }
-  var co;
-  if (r) {
-    co = new u16(1 << mb);
-    var rvb = 15 - mb;
-    for (i2 = 0;i2 < s; ++i2) {
-      if (cd[i2]) {
-        var sv = i2 << 4 | cd[i2];
-        var r_1 = mb - cd[i2];
-        var v = le[cd[i2] - 1]++ << r_1;
-        for (var m = v | (1 << r_1) - 1;v <= m; ++v) {
-          co[rev[v] >> rvb] = sv;
-        }
-      }
-    }
-  } else {
-    co = new u16(s);
-    for (i2 = 0;i2 < s; ++i2) {
-      if (cd[i2]) {
-        co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
-      }
-    }
-  }
-  return co;
-}, flt, i, i, i, i, fdt, i, flrm, fdrm, max = function(a) {
-  var m = a[0];
-  for (var i2 = 1;i2 < a.length; ++i2) {
-    if (a[i2] > m)
-      m = a[i2];
-  }
-  return m;
-}, bits = function(d, p, m) {
-  var o = p / 8 | 0;
-  return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
-}, bits16 = function(d, p) {
-  var o = p / 8 | 0;
-  return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
-}, shft = function(p) {
-  return (p + 7) / 8 | 0;
-}, slc = function(v, s, e) {
-  if (s == null || s < 0)
-    s = 0;
-  if (e == null || e > v.length)
-    e = v.length;
-  return new u8(v.subarray(s, e));
-}, ec, err = function(ind, msg, nt) {
-  var e = new Error(msg || ec[ind]);
-  e.code = ind;
-  if (Error.captureStackTrace)
-    Error.captureStackTrace(e, err);
-  if (!nt)
-    throw e;
-  return e;
-}, inflt = function(dat, st, buf, dict) {
-  var sl = dat.length, dl = dict ? dict.length : 0;
-  if (!sl || st.f && !st.l)
-    return buf || new u8(0);
-  var noBuf = !buf;
-  var resize = noBuf || st.i != 2;
-  var noSt = st.i;
-  if (noBuf)
-    buf = new u8(sl * 3);
-  var cbuf = function(l2) {
-    var bl = buf.length;
-    if (l2 > bl) {
-      var nbuf = new u8(Math.max(bl * 2, l2));
-      nbuf.set(buf);
-      buf = nbuf;
-    }
-  };
-  var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
-  var tbts = sl * 8;
-  do {
-    if (!lm) {
-      final = bits(dat, pos, 1);
-      var type = bits(dat, pos + 1, 3);
-      pos += 3;
-      if (!type) {
-        var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
-        if (t > sl) {
-          if (noSt)
-            err(0);
-          break;
-        }
-        if (resize)
-          cbuf(bt + l);
-        buf.set(dat.subarray(s, t), bt);
-        st.b = bt += l, st.p = pos = t * 8, st.f = final;
-        continue;
-      } else if (type == 1)
-        lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
-      else if (type == 2) {
-        var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
-        var tl = hLit + bits(dat, pos + 5, 31) + 1;
-        pos += 14;
-        var ldt = new u8(tl);
-        var clt = new u8(19);
-        for (var i2 = 0;i2 < hcLen; ++i2) {
-          clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
-        }
-        pos += hcLen * 3;
-        var clb = max(clt), clbmsk = (1 << clb) - 1;
-        var clm = hMap(clt, clb, 1);
-        for (var i2 = 0;i2 < tl; ) {
-          var r = clm[bits(dat, pos, clbmsk)];
-          pos += r & 15;
-          var s = r >> 4;
-          if (s < 16) {
-            ldt[i2++] = s;
-          } else {
-            var c = 0, n = 0;
-            if (s == 16)
-              n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
-            else if (s == 17)
-              n = 3 + bits(dat, pos, 7), pos += 3;
-            else if (s == 18)
-              n = 11 + bits(dat, pos, 127), pos += 7;
-            while (n--)
-              ldt[i2++] = c;
-          }
-        }
-        var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
-        lbt = max(lt);
-        dbt = max(dt);
-        lm = hMap(lt, lbt, 1);
-        dm = hMap(dt, dbt, 1);
-      } else
-        err(1);
-      if (pos > tbts) {
-        if (noSt)
-          err(0);
-        break;
-      }
-    }
-    if (resize)
-      cbuf(bt + 131072);
-    var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
-    var lpos = pos;
-    for (;; lpos = pos) {
-      var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
-      pos += c & 15;
-      if (pos > tbts) {
-        if (noSt)
-          err(0);
-        break;
-      }
-      if (!c)
-        err(2);
-      if (sym < 256)
-        buf[bt++] = sym;
-      else if (sym == 256) {
-        lpos = pos, lm = null;
-        break;
-      } else {
-        var add = sym - 254;
-        if (sym > 264) {
-          var i2 = sym - 257, b = fleb[i2];
-          add = bits(dat, pos, (1 << b) - 1) + fl[i2];
-          pos += b;
-        }
-        var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
-        if (!d)
-          err(3);
-        pos += d & 15;
-        var dt = fd[dsym];
-        if (dsym > 3) {
-          var b = fdeb[dsym];
-          dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
-        }
-        if (pos > tbts) {
-          if (noSt)
-            err(0);
-          break;
-        }
-        if (resize)
-          cbuf(bt + 131072);
-        var end = bt + add;
-        if (bt < dt) {
-          var shift = dl - dt, dend = Math.min(dt, end);
-          if (shift + bt < 0)
-            err(3);
-          for (;bt < dend; ++bt)
-            buf[bt] = dict[shift + bt];
-        }
-        for (;bt < end; ++bt)
-          buf[bt] = buf[bt - dt];
-      }
-    }
-    st.l = lm, st.p = lpos, st.b = bt, st.f = final;
-    if (lm)
-      final = 1, st.m = lbt, st.d = dm, st.n = dbt;
-  } while (!final);
-  return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
-}, et, Inflate, td, tds = 0;
-var init_browser = __esm(() => {
-  u8 = Uint8Array;
-  u16 = Uint16Array;
-  i32 = Int32Array;
-  fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
-  fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
-  clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
-  _a2 = freb(fleb, 2);
-  fl = _a2.b;
-  revfl = _a2.r;
-  fl[28] = 258, revfl[258] = 28;
-  _b = freb(fdeb, 0);
-  fd = _b.b;
-  revfd = _b.r;
-  rev = new u16(32768);
-  for (i = 0;i < 32768; ++i) {
-    x = (i & 43690) >> 1 | (i & 21845) << 1;
-    x = (x & 52428) >> 2 | (x & 13107) << 2;
-    x = (x & 61680) >> 4 | (x & 3855) << 4;
-    rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
-  }
-  flt = new u8(288);
-  for (i = 0;i < 144; ++i)
-    flt[i] = 8;
-  for (i = 144;i < 256; ++i)
-    flt[i] = 9;
-  for (i = 256;i < 280; ++i)
-    flt[i] = 7;
-  for (i = 280;i < 288; ++i)
-    flt[i] = 8;
-  fdt = new u8(32);
-  for (i = 0;i < 32; ++i)
-    fdt[i] = 5;
-  flrm = /* @__PURE__ */ hMap(flt, 9, 1);
-  fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
-  ec = [
-    "unexpected EOF",
-    "invalid block type",
-    "invalid length/literal",
-    "invalid distance",
-    "stream finished",
-    "no stream handler",
-    ,
-    "no callback",
-    "invalid UTF-8 data",
-    "extra field too long",
-    "date not in range 1980-2099",
-    "filename too long",
-    "stream finishing",
-    "invalid zip data"
-  ];
-  et = /* @__PURE__ */ new u8(0);
-  Inflate = /* @__PURE__ */ function() {
-    function Inflate2(opts, cb) {
-      if (typeof opts == "function")
-        cb = opts, opts = {};
-      this.ondata = cb;
-      var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
-      this.s = { i: 0, b: dict ? dict.length : 0 };
-      this.o = new u8(32768);
-      this.p = new u8(0);
-      if (dict)
-        this.o.set(dict);
-    }
-    Inflate2.prototype.e = function(c) {
-      if (!this.ondata)
-        err(5);
-      if (this.d)
-        err(4);
-      if (!this.p.length)
-        this.p = c;
-      else if (c.length) {
-        var n = new u8(this.p.length + c.length);
-        n.set(this.p), n.set(c, this.p.length), this.p = n;
-      }
-    };
-    Inflate2.prototype.c = function(final) {
-      this.s.i = +(this.d = final || false);
-      var bts = this.s.b;
-      var dt = inflt(this.p, this.s, this.o);
-      this.ondata(slc(dt, bts, this.s.b), this.d);
-      this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
-      this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
-    };
-    Inflate2.prototype.push = function(chunk, final) {
-      this.e(chunk), this.c(final);
-    };
-    return Inflate2;
-  }();
-  td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder;
-  try {
-    td.decode(et, { stream: true });
-    tds = 1;
-  } catch (e) {}
-});
-
-// src/workers/archive-import/zip-reader.ts
-function readExact(source, offset, length) {
-  if (length < 0 || offset < 0 || offset + length > source.size)
-    throw new ZipFormatError("damaged", "The zip ends before its own records do.");
-  if (length <= ZIP_READ_CHUNK_BYTES) {
-    const bytes = source.readAt(offset, length);
-    if (bytes.length !== length)
-      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
-    return bytes;
-  }
-  const out = new Uint8Array(length);
-  for (let done = 0;done < length; ) {
-    const part = source.readAt(offset + done, Math.min(ZIP_READ_CHUNK_BYTES, length - done));
-    if (part.length === 0)
-      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
-    out.set(part, done);
-    done += part.length;
-  }
-  return out;
-}
-function memberKey(entry) {
-  return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
-}
-
-class ZipMemberReader {
-  entry;
-  archive;
-  dataStart;
-  startAt;
-  pos = 0;
-  runningCrc = 0;
-  crcKnown;
-  out = [];
-  lastChunk = new Uint8Array(0);
-  crcBeforeLast = 0;
-  heldLast = 0;
-  closed = false;
-  result;
-  storedNext = 0;
-  inflate;
-  compressedNext = 0;
-  compressedBlock = new Uint8Array(0);
-  compressedOffset = 0;
-  inflateFinished = false;
-  failure;
-  replayed = 0;
-  replayStep;
-  catchUpEnded = false;
-  constructor(archive, entry, dataStart, options) {
-    this.archive = archive;
-    this.entry = entry;
-    this.dataStart = dataStart;
-    const start = options.start ?? 0;
-    if (!Number.isSafeInteger(start) || start < 0 || start > entry.uncompressedSize) {
-      throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
-    }
-    this.startAt = start;
-    if (options.replayStepBytes !== undefined && (!Number.isSafeInteger(options.replayStepBytes) || options.replayStepBytes < 1)) {
-      throw new RangeError("replayStepBytes must be a positive whole number");
-    }
-    this.replayStep = options.replayStepBytes;
-    this.crcKnown = start === 0;
-    if (entry.isDirectory || entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0)) {
-      this.inflateFinished = true;
-      this.pos = start;
-      this.crcKnown = true;
-      return;
-    }
-    if (entry.method === 0) {
-      this.storedNext = start;
-      this.pos = start;
-      if (start > 0 && options.startCrc !== undefined) {
-        this.runningCrc = options.startCrc >>> 0;
-        this.crcKnown = true;
-      }
-      return;
-    }
-    const kept = options.continuation;
-    if (kept && kept.memberKey === memberKey(entry) && kept.position === start) {
-      this.inflate = this.bind(kept.inflate);
-      this.compressedNext = kept.compressedNext;
-      this.compressedBlock = kept.compressedBlock;
-      this.compressedOffset = 0;
-      this.out = [...kept.out];
-      this.inflateFinished = kept.inflateFinished;
-      this.pos = kept.reached;
-      this.runningCrc = kept.crc;
-      this.crcKnown = kept.crcKnown;
-      return;
-    }
-    this.inflate = this.bind(new Inflate(() => {
-      return;
-    }));
-    this.crcKnown = true;
-  }
-  bind(inflate) {
-    inflate.ondata = (chunk) => {
-      if (chunk.length > 0)
-        this.out.push(chunk);
-    };
-    return inflate;
-  }
-  static open(archive, entry, options = {}) {
-    if (entry.encrypted)
-      throw new ZipMemberError("encrypted", entry.name, "This member is encrypted.");
-    if (entry.method !== 0 && entry.method !== 8) {
-      throw new ZipMemberError("unsupported_method", entry.name, `This member uses compression method ${entry.method}.`);
-    }
-    if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
-      throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
-    }
-    const dataStart = entry.isDirectory ? 0 : archive.dataStart(entry);
-    return new ZipMemberReader(archive, entry, dataStart, options);
-  }
-  get position() {
-    return Math.max(this.pos, this.startAt);
-  }
-  get crc32() {
-    return this.crcKnown && this.pos >= this.startAt ? this.runningCrc : undefined;
-  }
-  get catchingUp() {
-    return this.pos < this.startAt && !this.closed && !this.failure && !this.catchUpEnded;
-  }
-  get replayedBytes() {
-    return this.replayed;
-  }
-  get end() {
-    return this.result;
-  }
-  next() {
-    this.assertUsable();
-    if (!this.replay()) {
-      this.heldLast = 0;
-      this.lastChunk = new Uint8Array(0);
-      return this.lastChunk;
-    }
-    for (;; ) {
-      const chunk = this.out.shift();
-      if (chunk === undefined) {
-        if (!this.fillOrFail()) {
-          this.conclude();
-          return;
-        }
-        continue;
-      }
-      this.crcBeforeLast = this.runningCrc;
-      if (this.crcKnown)
-        this.runningCrc = crc32Update(this.runningCrc, chunk);
-      this.lastChunk = chunk;
-      this.heldLast = chunk.length;
-      this.pos += chunk.length;
-      return chunk;
-    }
-  }
-  catchUp() {
-    this.assertUsable();
-    return this.replay();
-  }
-  assertUsable() {
-    if (this.closed)
-      throw new Error("This member reader was suspended or closed.");
-    if (this.failure)
-      throw this.failure;
-  }
-  replay() {
-    const stepFrom = this.replayed;
-    while (this.pos < this.startAt && !this.catchUpEnded) {
-      const chunk = this.out.shift();
-      if (chunk === undefined) {
-        if (this.replayStep !== undefined && this.replayed - stepFrom >= this.replayStep)
-          return false;
-        if (!this.fillOrFail()) {
-          this.catchUpEnded = true;
-          break;
-        }
-        continue;
-      }
-      const skip = this.startAt - this.pos;
-      const head = chunk.length <= skip ? chunk : chunk.subarray(0, skip);
-      this.runningCrc = crc32Update(this.runningCrc, head);
-      this.pos += head.length;
-      this.replayed += head.length;
-      if (head.length < chunk.length)
-        this.out.unshift(chunk.subarray(head.length));
-    }
-    return true;
-  }
-  unread(count) {
-    if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
-      throw new RangeError("unread past the last chunk");
-    if (count === 0)
-      return;
-    this.heldLast -= count;
-    this.pos -= count;
-    if (this.crcKnown)
-      this.runningCrc = crc32Update(this.crcBeforeLast, this.lastChunk.subarray(0, this.heldLast));
-    this.out.unshift(this.lastChunk.subarray(this.heldLast));
-    this.lastChunk = this.lastChunk.subarray(0, this.heldLast);
-    this.result = undefined;
-  }
-  suspend() {
-    if (this.closed)
-      return;
-    this.closed = true;
-    if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
-      return;
-    const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
-    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES)
-      return;
-    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
-    const state = {
-      position: Math.max(this.pos, this.startAt),
-      reached: this.pos,
-      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
-      memberKey: memberKey(this.entry),
-      crc: this.runningCrc,
-      crcKnown: this.crcKnown,
-      inflate: this.inflate,
-      compressedNext: this.compressedNext,
-      compressedBlock: this.compressedBlock.slice(this.compressedOffset),
-      out: [...this.out],
-      inflateFinished: this.inflateFinished
-    };
-    this.inflate = undefined;
-    this.out = [];
-    return state;
-  }
-  close() {
-    this.closed = true;
-    this.inflate = undefined;
-    this.out = [];
-  }
-  fillOrFail() {
-    try {
-      return this.fill();
-    } catch (error) {
-      if (error instanceof ZipMemberError) {
-        this.failure = error;
-        this.out = [];
-        this.inflateFinished = true;
-      }
-      throw error;
-    }
-  }
-  fill() {
-    if (this.entry.method === 0) {
-      if (this.storedNext >= this.entry.uncompressedSize)
-        return false;
-      const length = Math.min(ZIP_READ_CHUNK_BYTES, this.entry.uncompressedSize - this.storedNext);
-      const bytes = this.archive.source.readAt(this.dataStart + this.storedNext, length);
-      if (bytes.length === 0)
-        throw new ZipMemberError("damaged", this.entry.name, "A stored member ends early.");
-      this.storedNext += bytes.length;
-      this.out.push(bytes);
-      return true;
-    }
-    if (this.inflateFinished || !this.inflate)
-      return false;
-    if (this.compressedOffset >= this.compressedBlock.length && this.compressedNext < this.entry.compressedSize) {
-      const length = Math.min(ZIP_COMPRESSED_BLOCK_BYTES, this.entry.compressedSize - this.compressedNext);
-      this.compressedBlock = readBlock(this.archive.source, this.dataStart + this.compressedNext, length, this.entry.name);
-      this.compressedOffset = 0;
-      this.compressedNext += length;
-    }
-    const slice = this.compressedBlock.subarray(this.compressedOffset, this.compressedOffset + ZIP_INFLATE_PUSH_BYTES);
-    this.compressedOffset += slice.length;
-    const final = this.compressedOffset >= this.compressedBlock.length && this.compressedNext >= this.entry.compressedSize;
-    try {
-      this.inflate.push(slice, final);
-    } catch (error) {
-      if (error instanceof ZipMemberError)
-        throw error;
-      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
-    }
-    const progress = inflaterProgress(this.inflate);
-    if (progress.ended) {
-      const pushed = this.compressedNext - (this.compressedBlock.length - this.compressedOffset);
-      const consumed = pushed - progress.unconsumed;
-      if (consumed < this.entry.compressedSize) {
-        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends before the size the zip gives it.");
-      }
-      if (consumed > this.entry.compressedSize) {
-        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data runs past the size the zip gives it.");
-      }
-      this.inflateFinished = true;
-    } else if (final) {
-      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends without a complete stream.");
-    }
-    return true;
-  }
-  conclude() {
-    if (this.result)
-      return;
-    const sizeOk = this.pos === this.entry.uncompressedSize;
-    this.result = {
-      bytes: this.pos,
-      sizeOk,
-      crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
-    };
-  }
-}
-function inflaterProgress(inflate) {
-  const internal = inflate;
-  const state = internal.s;
-  if (typeof state !== "object" || state === null || !(internal.p instanceof Uint8Array) || state.p !== undefined && typeof state.p !== "number") {
-    throw new Error("The installed inflater does not expose the state this reader reads; the zip reader must be updated with it.");
-  }
-  const ended = Boolean(state.f) && !state.l;
-  const partialByte = typeof state.p === "number" && (state.p & 7) !== 0 ? 1 : 0;
-  return { ended, unconsumed: Math.max(0, internal.p.length - partialByte) };
-}
-function readBlock(source, offset, length, name) {
-  try {
-    return readExact(source, offset, length);
-  } catch (error) {
-    if (error instanceof ZipFormatError)
-      throw new ZipMemberError("damaged", name, error.message);
-    throw error;
-  }
-}
-var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_REPLAY_STEP_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
-var init_zip_reader = __esm(() => {
-  init_browser();
-  init_archive_formats();
-  init_stop_errors();
-  init_byte_source();
-  ZIP_READ_CHUNK_BYTES = 1024 * 1024;
-  ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
-  ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
-  ZIP_REPLAY_STEP_BYTES = 16 * 1024 * 1024;
-  ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
-  ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
-  ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
-  MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
-  ZipFormatError = class ZipFormatError extends Error {
-    code;
-    constructor(code, message2) {
-      super(message2);
-      this.name = "ZipFormatError";
-      this.code = code;
-    }
-  };
-  ZipMemberError = class ZipMemberError extends Error {
-    code;
-    memberName;
-    constructor(code, memberName, message2) {
-      super(message2);
-      this.name = "ZipMemberError";
-      this.code = code;
-      this.memberName = memberName;
-    }
-  };
-  strictUtf8 = new TextDecoder("utf-8", { fatal: true });
-  lenientUtf8 = new TextDecoder("utf-8");
 });
 
 // src/workers/archive-import/manifest.ts
@@ -45819,8 +45864,24 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
   "image/heif"
 ]);
 
-// src/workers/whatsapp/extraction-source.ts
+// src/workers/whatsapp/extraction-factory.ts
+init_source_placement();
+
+// src/workers/file-extraction/connector-source.ts
+init_spool();
 init_file_extraction_source();
+
+// src/workers/whatsapp/extraction-factory.ts
+init_child_media();
+
+// src/workers/whatsapp/extraction-source.ts
+init_spool();
+init_child_media();
+init_input_media();
+init_file_extraction_source();
+
+// src/workers/whatsapp/extraction-factory.ts
+init_store_sync2();
 
 // src/workers/email-source/file-extraction-runtime.ts
 init_store_sync2();
@@ -49836,12 +49897,6 @@ init_store2();
 init_archive_formats();
 init_file_extraction_source();
 init_scope_safe_fs();
-
-// src/workers/file-extraction/connector-source.ts
-init_spool();
-init_file_extraction_source();
-
-// src/workers/archive-import/extraction-source.ts
 init_spool();
 init_manifest3();
 init_media_bindings();
@@ -50767,14 +50822,7 @@ init_source_input();
 // src/workers/whatsapp/archive-input.ts
 init_archive_formats();
 init_state();
-
-// src/workers/archive-import/input-media.ts
-init_file_extraction_source();
-init_scope_safe_fs();
-init_media_bindings();
-init_zip_reader();
-
-// src/workers/whatsapp/archive-input.ts
+init_input_media();
 init_zip_reader();
 init_match_keys();
 init_spool_index();
