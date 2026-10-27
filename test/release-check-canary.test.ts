@@ -223,6 +223,8 @@ describe('release-check canary', () => {
     expect(() => parseCanaryAccounts({ clients: ['chatgpt'] }, () => questions)).toThrow('no questions file');
     expect(() => parseCanaryAccounts({ clients: ['bard'], questions: 'q.json' }, () => questions)).toThrow('clients are chatgpt, claude, grok');
     expect(() => parseCanaryAccounts({ sources: [{ id: 'Gmail!', label: 'Gmail' }] }, () => questions)).toThrow('each source needs an id');
+    const chatgptOnly = { questions: [{ ...questions.questions[0], clients: ['chatgpt'] }] };
+    expect(() => parseCanaryAccounts({ clients: ['chatgpt', 'grok'], questions: 'q.json' }, () => chatgptOnly)).toThrow('no question applies to grok');
   });
 
   test('accounts only: the run\'s connection is made, the sources are asked over MCP, and the connection is revoked', async () => {

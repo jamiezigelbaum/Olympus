@@ -160,6 +160,9 @@ export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) 
   for (const client of clients) if (!WEB_CLIENT_IDS.includes(client as WebClientId)) throw new Error(`clients are ${WEB_CLIENT_IDS.join(', ')}`);
   const questions = typeof record.questions === 'string' ? parseClientQuestions(readQuestions(record.questions)) : [];
   if (clients.length > 0 && questions.length === 0) throw new Error('web clients are listed but no questions file is named');
+  // A client no question applies to would pass having been asked nothing.
+  const unasked = clients.filter((client) => !questions.some((q) => !q.clients || q.clients.includes(client as WebClientId)));
+  if (unasked.length > 0) throw new Error(`no question applies to ${unasked.join(', ')}`);
   return { sources, clients: clients as WebClientId[], questions };
 }
 
