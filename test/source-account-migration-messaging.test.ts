@@ -427,7 +427,7 @@ describe('what keeps a messaging account where it is', () => {
   test('without the switch, or without the records gathered, a messaging account is not considered', async () => {
     const h = fixture();
     telegramInstall(h);
-    const { [MIGRATE_ACCOUNT_FOLDERS_ENV]: _off, ...off } = h.env;
+    const off = { ...h.env, [MIGRATE_ACCOUNT_FOLDERS_ENV]: '0' };
     expect(migrateAccountFolders(off, { messaging: await messagingMoveFacts(off, memorySecretStore()) }).moved).toEqual([]);
     expect(migrateAccountFolders(h.env).moved).toEqual([]);
     expect(entryOf(h, TELEGRAM)!.migration).toBeUndefined();
@@ -451,7 +451,7 @@ describe('a move that stops part way', () => {
       expect(sourceAccountMovePending(entryOf(h, TELEGRAM)!)).toBe(true);
       expect(accountMovePending(TELEGRAM, h.env)).toBe(true);
     }
-    const { [MIGRATE_ACCOUNT_FOLDERS_ENV]: _off, ...off } = h.env;
+    const off = { ...h.env, [MIGRATE_ACCOUNT_FOLDERS_ENV]: '0' };
     const report = migrateAccountFolders(off);
     if (at !== 'flipped') expect(report.resumed).toEqual([TELEGRAM]);
     for (const { from, to } of files) expect(inode(to), to).toBe(before.get(from)!);
