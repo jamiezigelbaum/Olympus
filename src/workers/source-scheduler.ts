@@ -2108,8 +2108,45 @@ export function createGmailConnectorStoreSchedulerSource(input: {
           } catch (error) { throw gmailSchedulerFailure(error); }
         },
       }] : []),
+      // Once: attachment children for mail stored before attachments were children. Each pass asks Gmail for a
+      // bounded number of messages under the same day budget, and resumes where the last one stopped.
+      ...(input.sync.backfillChildren ? [{
+        id: 'gmail.email_children_backfill_v1', kind: 'sync' as const, writer: true as const,
+        intervalMs: liveConfig.storePullIntervalMs,
+        freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
+        run: async (context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult> => {
+          try {
+            const result = await input.sync!.backfillChildren!({
+              ...(context?.provenance === 'operator' ? { provenance: 'operator' as const } : {}),
+            });
+            return {
+              status: result.listed > 0 ? 'progress' : 'idle',
+              counts: { items_seen: result.examined, items_changed: result.listed },
+              ...(!result.done ? { continueSoon: true } : {}),
+            };
+          } catch (error) { throw gmailSchedulerFailure(error); }
+        },
+      }] : []),
     ],
     lastSyncCompletedAt: lastCompletedAt,
+  };
+}
+
+/**
+ * Gmail's stores with no live lane (not connected, or no mail approval) that
+ * hold mail an import brought in: a source with no sync of its own, so the
+ * worker's embedding sweep and private meaning backfill (attached to every
+ * source) still drain the imported history. Live approval governs live reads,
+ * not the account's own stores.
+ */
+export function createGmailImportedHistorySchedulerSource(input: { config: OlympusConfig }): SourceSchedulerSource {
+  return {
+    sourceId: SCHEDULER_SOURCE_IDS.gmail,
+    corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+    cadence: 'continuous',
+    intervalMs: input.config.worker.scheduler.syncIntervalSeconds * 1_000,
+    freshnessThresholdHours: input.config.worker.scheduler.freshnessThresholdHours,
+    tasks: [],
   };
 }
 

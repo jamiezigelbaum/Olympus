@@ -5669,6 +5669,11 @@ function readsJsonExport(entry, format) {
   }
   return notesJsonFormat(entry) === format;
 }
+function looksLikeEnex(head) {
+  const text2 = archiveHeadText(head).replace(/^\ufeff/, "");
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text2);
+  return start !== null && (start[1] ?? start[2]) === "en-export";
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
@@ -5681,7 +5686,7 @@ function archiveCorpusId(trustDomain, family) {
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -5742,6 +5747,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
@@ -5752,6 +5758,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export as Markdown (the .zip file)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*, *, ????.md"]),
     detect: (probe) => detectFile(probe, (entry) => {
       if (!entry.members || /^roam/i.test(entry.name))
@@ -5772,8 +5779,25 @@ var init_archive_formats = __esm(() => {
     provider: "roam",
     chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
     citationLabel: "Roam",
+    sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
+    id: "evernote-enex",
+    label: "Evernote export (.enex)",
+    family: "note",
+    provider: "evernote",
+    chooseHint: "an Evernote export (the .enex file, or a folder of them)",
+    citationLabel: "Evernote",
+    sourceCard: Object.freeze({ id: "evernote.archive", label: "Evernote" }),
+    probeNames: Object.freeze(["*.enex"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
+      const files = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && looksLikeEnex(entry.head)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      return files.length > 0 ? files : undefined;
+    }
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
@@ -5823,7 +5847,8 @@ var init_archive_formats = __esm(() => {
     REFLECT_JSON_ARCHIVE_FORMAT,
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
-    TELEGRAM_JSON_ARCHIVE_FORMAT
+    TELEGRAM_JSON_ARCHIVE_FORMAT,
+    EVERNOTE_ENEX_ARCHIVE_FORMAT
   ]);
   CONNECTOR_FACTORIES = new Map;
 });
@@ -13257,7 +13282,8 @@ var init_credential_broker = __esm(() => {
     "whatsapp_business",
     "apple_messages",
     "reflect",
-    "roam"
+    "roam",
+    "evernote"
   ];
   CREDENTIAL_PROVIDERS = [
     ...PUBLIC_CREDENTIAL_PROVIDERS,
@@ -13624,6 +13650,25 @@ var init_credential_broker = __esm(() => {
         backendState: {
           kind: "archive_path",
           archiveRootAlias: "roam_archive",
+          readerWorker: "archive_import_reader",
+          contentBounds: "approved_archive_root",
+          backendLabel: "local_private:archive_import"
+        }
+      },
+      {
+        handle: "evernote.archive",
+        provider: "evernote",
+        sessionKind: "archive_path",
+        accountRole: "archive",
+        trustDomain: "internal",
+        allowedCapabilities: ["evernote.archive.import"],
+        scopes: [],
+        tokenEnvNames: [],
+        statusEnvNames: ["OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY"],
+        expiresInSeconds: 3600,
+        backendState: {
+          kind: "archive_path",
+          archiveRootAlias: "evernote_archive",
           readerWorker: "archive_import_reader",
           contentBounds: "approved_archive_root",
           backendLabel: "local_private:archive_import"
@@ -14083,6 +14128,10 @@ var DEFAULT_DROPBOX_CONTENT_EXTRACTION_STALL_HOURS = 6, DROPBOX_CONTENT_EXTRACTI
 var init_ingestion_throughput = __esm(() => {
   init_operation_error();
 });
+
+// src/core/whatsapp-notice.ts
+var WHATSAPP_UNOFFICIAL_CLIENT_NOTICE = "WhatsApp connects through an unofficial client. WhatsApp's terms don't allow third-party clients, and accounts have been restricted or banned for using them. Connect only if you accept that risk.";
+
 // src/workers/dashboard/scheduler-markers.ts
 var OPERATOR_PAUSED_SCHEDULER_MARKERS;
 var init_scheduler_markers = __esm(() => {
@@ -14305,6 +14354,7 @@ var init_vocabulary = __esm(() => {
     sourcesCloud: "Accounts",
     notConnected: "Not connected",
     noSources: "No sources yet.",
+    otherArchives: { title: "Other archives", line: "For an export that isn't from one of your sources above." },
     progress: "Progress",
     progressInitial: "First index",
     progressRefresh: "Catching up",
@@ -14453,11 +14503,12 @@ var init_vocabulary = __esm(() => {
     other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
   };
   DASHBOARD_ARCHIVE_COPY = {
-    importAction: "Import an archive",
+    importAction: "Import another archive",
+    sourceImport: { action: "Import an archive", title: "Import an archive into {source}" },
     pick: {
       back: "Back to Olympus",
-      title: "Import an archive",
-      intro: ARCHIVE_PICK_INTRO,
+      title: "Import another archive",
+      intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
       source: "This computer",
       makePrivate: "Import",
       makePrivateFor: "Import {name}",
@@ -14518,11 +14569,11 @@ var init_vocabulary = __esm(() => {
     thisFile: "A file of this archive",
     account: {
       line: "{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?",
-      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.",
+      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Other archives, it stays apart, with its own Remove.",
       add: "Add to {source}",
-      apart: "Keep it under Archives",
+      apart: "Keep it under Other archives",
       addFor: "Add {name} to {source}",
-      apartFor: "Keep {name} under Archives",
+      apartFor: "Keep {name} under Other archives",
       sourceFallback: "this source",
       reconfirm: {
         line: "{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?",
@@ -14561,6 +14612,14 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      mail_for_another_account: { one: "1 message delivered to another address left out", many: "{n} messages delivered to another address left out" },
+      gmail_budget_too_small: {
+        one: "Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.",
+        many: "Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus."
+      },
+      gmail_import_allowance_spent: { one: "Waiting until tomorrow: imports have used their share of today's Gmail requests.", many: "Waiting until tomorrow: imports have used their share of today's Gmail requests." },
+      gmail_requests_spent: { one: "Waiting until tomorrow: today's Gmail requests are used up.", many: "Waiting until tomorrow: today's Gmail requests are used up." },
+      gmail_labels_unavailable: { one: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.", many: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now." },
       system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
       message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
       match_near_miss: { one: "1 message may also be in the live chat, shown differently there (a renamed contact, an edited caption), so it was kept as its own", many: "{n} messages may also be in the live chat, shown differently there (a renamed contact, an edited caption), so each was kept as its own" },
@@ -14613,6 +14672,11 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: "not_imported",
       text_cut: "not_imported",
       spam_or_trash: "not_imported",
+      mail_for_another_account: "not_imported",
+      gmail_budget_too_small: "not_imported",
+      gmail_import_allowance_spent: "not_imported",
+      gmail_requests_spent: "not_imported",
+      gmail_labels_unavailable: "not_imported",
       message_content_unsupported: "not_imported",
       system_message: "how_read",
       message_empty: "how_read",
@@ -14654,7 +14718,8 @@ var init_vocabulary = __esm(() => {
     },
     tryAgain: "Try again",
     dismiss: "Dismiss",
-    started: "Importing {name}. It shows under Archives as it is read.",
+    started: "Importing {name}. It shows under Other archives as it is read.",
+    startedIn: "Importing {name} into {source}. It shows in {source} as it is read.",
     checking: "Checking whether {name} is already imported…",
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
@@ -14672,6 +14737,10 @@ var init_vocabulary = __esm(() => {
       },
       held: { one: "1 imported item waits for the private model", many: "{n} imported items wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
+      waiting: {
+        gmail_budget_too_small: "An import waits: {name}. The daily limit on Gmail requests is too low; set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more",
+        other: "An import waits: {name}"
+      },
       seeWhy: "See why",
       review: "Review",
       setUp: "Set up the private model",
@@ -14684,7 +14753,7 @@ var init_vocabulary = __esm(() => {
         permission: "Your user account is not allowed to open {file}.",
         other: "Olympus could not open {file}."
       },
-      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, no archive can be imported, so nothing overwrites it.",
       fix: {
         damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
         unknown_form: "Update Olympus, then open this page again.",
@@ -16038,8 +16107,10 @@ var init_gmail = __esm(() => {
   init_olympus_layout();
   init_mail_source_scope();
   init_sender_rules();
+  init_file_extraction_source();
   init_credential_broker();
   init_ingest_filter();
+  init_gmail_mail_record();
   init_request_budget();
   GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
 });
@@ -17301,6 +17372,7 @@ var init_secrets_disposition = __esm(() => {
   init_sniffer_store();
   init_job_names();
 });
+
 // src/workers/connector-store/child-visibility.ts
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
@@ -19311,6 +19383,9 @@ var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
   init_corpus();
 });
+// src/core/source-inputs.ts
+var init_source_inputs = () => {};
+
 // src/workers/connector-store/capture-spool-secrets.ts
 var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES;
 var init_capture_spool_secrets = __esm(() => {
@@ -19320,30 +19395,410 @@ var init_capture_spool_secrets = __esm(() => {
   SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
 
+// src/workers/connector-store/spool-file-identity.ts
+var SPOOL_IDENTITY_HEAD_BYTES, SPOOL_BOUNDARY_WINDOW_BYTES;
+var init_spool_file_identity = __esm(() => {
+  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
+});
+
+// src/workers/telegram-messages/spool-lines.ts
+var CHUNK_BYTES, hints;
+var init_spool_lines = __esm(() => {
+  init_spool_file_identity();
+  CHUNK_BYTES = 1 << 20;
+  hints = new Map;
+});
+
+// src/workers/archive-import/telegram/message.ts
+var TELEGRAM_MEDIA_KEYS, READ_OBJECTS;
+var init_message = __esm(() => {
+  TELEGRAM_MEDIA_KEYS = new Set([
+    "photo",
+    "file",
+    "media_type",
+    "file_name",
+    "sticker_emoji",
+    "performer",
+    "title",
+    "duration_seconds"
+  ]);
+  READ_OBJECTS = new Set([
+    "contact_information",
+    "location_information",
+    "poll",
+    "todo_list",
+    "invoice_information",
+    "text",
+    "text_entities",
+    "reactions",
+    "inline_bot_buttons"
+  ]);
+});
+
+// src/workers/telegram-messages/record-builder.ts
+var init_record_builder = __esm(() => {
+  init_capture_spool_connector();
+});
+
 // src/workers/telegram-messages/capture-spool-connector.ts
-var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID;
+var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID, MAX_READ_BYTES, MAX_RECORD_BYTES, MAX_TAIL_SCAN_BYTES, SERVICE_FIELDS;
 var init_capture_spool_connector = __esm(() => {
   init_olympus_layout();
   init_source_placement();
+  init_source_inputs();
   init_capture_spool_secrets();
   init_corpus_adapter4();
+  init_spool_lines();
+  init_message();
+  init_record_builder();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
     secure_local: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_secure_local`
   };
   TELEGRAM_TRUST_EVICTION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_eviction`;
   TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
+  MAX_READ_BYTES = 64 * 1024 * 1024;
+  MAX_RECORD_BYTES = 32 * 1024 * 1024;
+  MAX_TAIL_SCAN_BYTES = 16 * 1024 * 1024;
+  SERVICE_FIELDS = new Set([
+    "title",
+    "new_title",
+    "members",
+    "duration_seconds",
+    "duration",
+    "discard_reason",
+    "period",
+    "amount",
+    "currency",
+    "boosts",
+    "inviter"
+  ]);
+});
+
+// src/workers/telegram-messages/protection-claims.ts
+var init_protection_claims = __esm(() => {
+  init_tier_move();
+  init_capture_spool_connector();
+  init_record_builder();
+});
+
+// src/workers/archive-import/byte-source.ts
+import * as zlib from "node:zlib";
+function tableCrc32(data, value) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0;n < 256; n += 1) {
+      let c = n;
+      for (let k = 0;k < 8; k += 1)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let crc = ~value;
+  for (let index = 0;index < data.length; index += 1) {
+    crc = crcTable[(crc ^ data[index]) & 255] ^ crc >>> 8;
+  }
+  return ~crc >>> 0;
+}
+function crc32Update(value, data) {
+  if (data.length === 0)
+    return value >>> 0;
+  return nativeCrc32 ? nativeCrc32(data, value) >>> 0 : tableCrc32(data, value);
+}
+var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var init_byte_source = __esm(() => {
+  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
+  nativeCrc32 = zlib.crc32;
+});
+// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
+var TokenType;
+var init_tokenType = __esm(() => {
+  (function(TokenType2) {
+    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType2[TokenType2["COLON"] = 4] = "COLON";
+    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
+    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
+    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
+    TokenType2[TokenType2["NULL"] = 8] = "NULL";
+    TokenType2[TokenType2["STRING"] = 9] = "STRING";
+    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
+    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  })(TokenType || (TokenType = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
+var charset;
+var init_utf_8 = __esm(() => {
+  (function(charset2) {
+    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
+    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
+    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
+    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset2[charset2["TAB"] = 9] = "TAB";
+    charset2[charset2["SPACE"] = 32] = "SPACE";
+    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
+    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
+    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset2[charset2["COMMA"] = 44] = "COMMA";
+    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
+    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
+    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset2[charset2["COLON"] = 58] = "COLON";
+    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
+    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
+    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset2[charset2["TILDE"] = 126] = "TILDE";
+  })(charset || (charset = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/tokenizer.js
+var TokenizerStates;
+var init_tokenizer = __esm(() => {
+  init_tokenType();
+  init_utf_8();
+  (function(TokenizerStates2) {
+    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
+    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
+    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
+    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
+    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
+    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
+    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  })(TokenizerStates || (TokenizerStates = {}));
+});
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire5 } from "node:module";
+var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
+var init_scope_safe_fs = __esm(() => {
+  runtimeRequire4 = createRequire5(import.meta.url);
+  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/archive-import/stop-errors.ts
+var init_stop_errors = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+});
+
+// src/workers/archive-import/json-stream.ts
+var EMPTY_FRAME, MAX_SAFE_DIGITS;
+var init_json_stream = __esm(() => {
+  init_tokenizer();
+  init_tokenType();
+  init_archive_formats();
+  init_stop_errors();
+  EMPTY_FRAME = Object.freeze({});
+  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
+});
+
+// src/workers/archive-import/source-input.ts
+var init_source_input = __esm(() => {
+  init_archive_formats();
+  init_source_inputs();
+});
+// src/workers/archive-import/telegram/account.ts
+var ACCOUNT_SECTIONS;
+var init_account = __esm(() => {
+  init_message();
+  ACCOUNT_SECTIONS = [
+    { name: "personal_information", path: ["personal_information"], label: "profile", whole: true },
+    { name: "profile_pictures", path: ["profile_pictures"], label: "profile pictures", whole: false },
+    { name: "stories", path: ["stories"], label: "stories", whole: false },
+    { name: "profile_music", path: ["profile_music"], label: "profile music", whole: false },
+    { name: "contacts", path: ["contacts", "list"], label: "contacts", whole: false },
+    { name: "frequent_contacts", path: ["frequent_contacts", "list"], label: "frequent contacts", whole: false },
+    { name: "sessions", path: ["sessions", "list"], label: "sessions", whole: false },
+    { name: "web_sessions", path: ["web_sessions", "list"], label: "web sessions", whole: false },
+    { name: "other_data", path: ["other_data"], label: "other data", whole: true }
+  ];
+});
+
+// src/workers/archive-import/telegram/connector.ts
+var TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING, TELEGRAM_MAX_MESSAGE_BYTES, MESSAGE_PATHS, ITEM_PATHS, SECTION_ROOTS, LISTED_SECTIONS;
+var init_connector4 = __esm(() => {
+  init_archive_formats();
+  init_byte_source();
+  init_json_stream();
+  init_account();
+  init_message();
+  TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+  MESSAGE_PATHS = [
+    ["chats", "list", "*", "messages"],
+    ["left_chats", "list", "*", "messages"],
+    ["messages"]
+  ];
+  ITEM_PATHS = [...MESSAGE_PATHS, ...ACCOUNT_SECTIONS.map((section) => section.path)];
+  SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
+  LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
+});
+// src/workers/telegram-messages/export-facts.ts
+var SCAN_CHUNK_BYTES, remembered;
+var init_export_facts = __esm(() => {
+  init_byte_source();
+  init_json_stream();
+  init_message();
+  SCAN_CHUNK_BYTES = 1 << 20;
+  remembered = new Map;
+});
+
+// src/workers/telegram-messages/export-records.ts
+var init_export_records = __esm(() => {
+  init_message();
+  init_account();
+  init_corpus_adapter4();
+  init_capture_spool_connector();
+  init_export_facts();
+});
+
+// src/workers/telegram-messages/export-input.ts
+var init_export_input = __esm(() => {
+  init_archive_formats();
+  init_connector4();
+  init_export_records();
+  init_export_facts();
+});
+
+// src/workers/telegram-messages/archive-target.ts
+var PROFILE_SCAN_BYTES;
+var init_archive_target = __esm(() => {
+  init_olympus_layout();
+  init_byte_source();
+  init_json_stream();
+  init_source_input();
+  init_message();
+  init_corpus_adapter4();
+  init_export_input();
+  PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 });
 
 // src/workers/telegram-messages/store-sync.ts
+var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY;
 var init_store_sync = __esm(() => {
   init_source_placement();
+  init_spool_file_identity();
   init_source_storage();
   init_tiered_store_set();
+  init_record_builder();
+  init_protection_claims();
   init_capture_spool_secrets();
   init_capture_freshness();
   init_corpus_adapter4();
   init_capture_spool_connector();
+  init_archive_target();
+  init_record_builder();
+  TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
 });
 
 // src/workers/telegram-messages/index.ts
@@ -19520,7 +19975,7 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", DASHBOARD_SUPPORTED_SOURCES;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -19590,6 +20045,153 @@ var init_source_dashboard = __esm(() => {
       }
     ]
   };
+  DASHBOARD_SUPPORTED_SOURCES = [
+    {
+      source_id: "gmail.email",
+      primary_corpus_id: "internal.email",
+      corpus_source_ids: ["gmail.email"],
+      ingestion_ledger_source_id: "email",
+      label: "Gmail",
+      provider: "gmail",
+      family: "email",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "gmail" }
+    },
+    {
+      source_id: "google_drive.docs",
+      primary_corpus_id: "internal.drive.docs",
+      corpus_source_ids: ["google_drive.docs"],
+      ingestion_ledger_source_id: "google_drive",
+      label: "Google Drive",
+      provider: "google_drive",
+      family: "file",
+      trust_domain: "internal",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "google-drive" }
+    },
+    {
+      source_id: "dropbox.files",
+      primary_corpus_id: "secure_local.dropbox.files",
+      corpus_source_ids: ["dropbox.files"],
+      ingestion_ledger_source_id: "dropbox",
+      label: "Dropbox",
+      provider: "dropbox",
+      family: "file",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "dropbox" }
+    },
+    {
+      source_id: "local.files",
+      primary_corpus_id: "secure_local.local.files",
+      corpus_source_ids: ["local.files"],
+      ingestion_ledger_source_id: "local_files",
+      label: "Files on this computer",
+      provider: "local_files",
+      family: "file",
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      sync_name: { mid: "your files", start: "Your files", plural: true },
+      connect_action: { kind: "this_computer", source: "local.files" }
+    },
+    {
+      source_id: "archive.imports",
+      primary_corpus_id: "secure_local.archive.email",
+      corpus_source_ids: ["archive.imports"],
+      owns_corpus: (corpus) => corpus.corpus_id.split(".")[1] === "archive" || isArchiveProvider(corpus.provider),
+      ingestion_ledger_source_id: "archive_imports",
+      label: "Archives",
+      provider: ARCHIVE_NEUTRAL_PROVIDER,
+      family: "email",
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    },
+    {
+      source_id: "x.bookmarks",
+      primary_corpus_id: "internal.x.bookmarks",
+      corpus_source_ids: ["x.bookmarks"],
+      ingestion_ledger_source_id: "x",
+      label: "X bookmarks",
+      provider: "x",
+      family: "x",
+      trust_domain: "internal",
+      connect_kind: "oauth",
+      content_arrives_extracted: true,
+      connect_action: { kind: "oauth", source: "x" }
+    },
+    {
+      source_id: "telegram.messages",
+      primary_corpus_id: "internal.telegram.messages",
+      corpus_source_ids: ["telegram.messages"],
+      ingestion_ledger_source_id: "telegram",
+      label: "Telegram",
+      provider: "telegram",
+      family: "chat",
+      trust_domain: "internal",
+      connect_kind: "pairing",
+      content_arrives_extracted: true,
+      raw_message_copies: "messages",
+      connect_action: {
+        kind: "guided_session",
+        source: "telegram",
+        instructions: [
+          "Telegram pairs with a phone-number login on this computer.",
+          "Ask your agent to start Telegram pairing; this card updates once the login completes."
+        ]
+      }
+    },
+    {
+      source_id: "whatsapp.personal.messages",
+      primary_corpus_id: "secure_local.whatsapp.messages",
+      corpus_source_ids: ["whatsapp.personal.messages"],
+      ingestion_ledger_source_id: "whatsapp",
+      label: "WhatsApp",
+      provider: "whatsapp_personal",
+      family: "chat",
+      trust_domain: "secure_local",
+      connect_kind: "pairing",
+      content_arrives_extracted: true,
+      raw_message_copies: "messages_and_media",
+      connect_action: {
+        kind: "guided_session",
+        source: "whatsapp",
+        instructions: [
+          "WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).",
+          WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
+          "Ask your agent to start WhatsApp pairing; this card updates once the scan completes."
+        ]
+      }
+    },
+    {
+      source_id: "readwise.library",
+      primary_corpus_id: "internal.readwise.library",
+      corpus_source_ids: ["readwise.library"],
+      ingestion_ledger_source_id: "readwise",
+      label: "Readwise",
+      provider: "readwise",
+      family: "readwise",
+      trust_domain: "internal",
+      connect_kind: "api_token",
+      content_arrives_extracted: true,
+      connect_action: { kind: "api_key", source: "readwise" }
+    },
+    ...archiveSourceCards().map((card) => ({
+      source_id: card.id,
+      primary_corpus_id: card.id,
+      corpus_source_ids: [],
+      owns_corpus: () => false,
+      ingestion_ledger_source_id: card.id,
+      public_source_id: ARCHIVE_IMPORTS_CARD_ID,
+      label: card.label,
+      provider: card.formats[0].provider,
+      family: card.formats[0].family,
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    }))
+  ];
 });
 
 // src/workers/google-connectors/gmail-live-control.ts
@@ -19607,6 +20209,7 @@ var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
   init_tier_rules_sweep();
   init_embeddings();
+  init_gmail_mail_record();
   init_gmail();
   init_gmail_live_control();
   GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
@@ -19671,14 +20274,6 @@ var init_store2 = __esm(() => {
     trustDomain: "secure_local",
     secretsInContent: true
   });
-});
-
-// src/core/scope-safe-fs.ts
-import { createRequire as createRequire5 } from "node:module";
-var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
-var init_scope_safe_fs = __esm(() => {
-  runtimeRequire4 = createRequire5(import.meta.url);
-  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 });
 
 // src/workers/archive-import/media-bindings.ts
@@ -29755,11 +30350,11 @@ async function consultVocabularyCheck(deps) {
   const bundledAltered = status.some((entry) => entry.origin === "shipped" && entry.state !== "verified" && entry.state !== "missing");
   const bundledMissing = status.some((entry) => entry.origin === "shipped" && entry.state === "missing");
   const userPacks = status.filter((entry) => entry.origin === "user" && entry.state !== "verified").map((entry) => entry.id);
-  const hints = [
+  const hints2 = [
     bundledAltered ? "A bundled vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/." : bundledMissing ? "A bundled vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/." : undefined,
     userPacks.length > 0 ? `The optional language pack${userPacks.length === 1 ? "" : "s"} ${userPacks.join(", ")} ${userPacks.length === 1 ? "is" : "are"} not installed or not intact, so words in that language stay refused. Install ${userPacks.length === 1 ? "it" : "them"} with scripts/install-consult-language-pack.ts (de or it) from an Olympus checkout.` : undefined
   ].filter((part) => part !== undefined);
-  const hint = hints.length > 0 ? hints.join(" ") : undefined;
+  const hint = hints2.length > 0 ? hints2.join(" ") : undefined;
   return {
     name,
     ok: !integrityFailure,
@@ -30515,8 +31110,8 @@ function ingestionHealthStateFromLedger(ledger) {
   return { generated_at: ledger.generated_at, sources };
 }
 function ingestionHealthHint(ledger) {
-  const hints = ledger.rows.map((row) => row.ingestion_health.drain.hint).filter((value) => typeof value === "string" && value.trim().length > 0);
-  return hints[0];
+  const hints2 = ledger.rows.map((row) => row.ingestion_health.drain.hint).filter((value) => typeof value === "string" && value.trim().length > 0);
+  return hints2[0];
 }
 async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
   try {
@@ -32284,10 +32879,10 @@ async function requestDashboardTool(input) {
   } catch {
     throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
   }
-  if (!isRecord3(body))
+  if (!isRecord4(body))
     throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
   if (response.status < 200 || response.status >= 300) {
-    const error = isRecord3(body.error) ? body.error : {};
+    const error = isRecord4(body.error) ? body.error : {};
     const message = typeof error.message === "string" ? error.message.slice(0, 400) : "Olympus could not do that.";
     return { isError: true, content: [{ type: "text", text: message }], structuredContent: { error: typeof error.code === "string" ? error.code : "internal" } };
   }
@@ -32357,8 +32952,8 @@ function registerPanelRoute(api, config, fetchImpl) {
   });
 }
 function resolveGatewayPublicOrigin(value) {
-  const root = isRecord3(value) ? value : undefined;
-  const gateway = isRecord3(root?.gateway) ? root.gateway : undefined;
+  const root = isRecord4(value) ? value : undefined;
+  const gateway = isRecord4(root?.gateway) ? root.gateway : undefined;
   const raw = typeof gateway?.publicOrigin === "string" ? gateway.publicOrigin.trim() : "";
   if (!raw)
     return;
@@ -32383,7 +32978,7 @@ function resolveNativeOAuthOrigin(openClawConfig, browserOrigin) {
   return resolveGatewayPublicOrigin(openClawConfig) ?? localLoopbackBrowserOrigin(browserOrigin);
 }
 function localLoopbackBrowserOrigin(value) {
-  if (!isRecord3(value) || value.isLocalClient !== true)
+  if (!isRecord4(value) || value.isLocalClient !== true)
     return;
   const origin = loopbackHttpOrigin(value.origin);
   if (!origin || typeof value.requestHost !== "string")
@@ -32690,11 +33285,11 @@ function exactRecord(value, keys) {
   return record2;
 }
 function recordValue(value) {
-  if (!isRecord3(value))
+  if (!isRecord4(value))
     throw new DashboardGatewayInvalidRequestError("Dashboard request must be an object.");
   return value;
 }
-function isRecord3(value) {
+function isRecord4(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function enumValue(value, values, label) {

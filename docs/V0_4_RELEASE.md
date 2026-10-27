@@ -39,7 +39,9 @@ delivery sequence:
 All four steps are built: mail (mbox) with the shared spine (2026-10-23), then
 Reflect and Roam, WhatsApp chat exports and Telegram Desktop exports
 (2026-10-24). One "Import an archive"
-entry point in the dashboard and one `archive_import` operation for agents:
+entry point in the dashboard (since 2026-10-25, Import an archive on each source's
+card that reads its exports, and Import another archive under Other archives)
+and one `archive_import` operation for agents:
 Olympus detects the format and a thin per-format connector reads it. An agent
 can only ask; the person approves each import and each removal in the
 dashboard. On 2026-10-24 the release check's archive leg passed all 55 of its

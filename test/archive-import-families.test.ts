@@ -135,13 +135,13 @@ describe('the Archives card holds every family\'s stores', () => {
 
 describe('the dashboard words come from the registry and the family', () => {
   test('the picker names each registered format in its own words, or its label', () => {
-    // The shipped copy names every format the product reads, in the registry's order.
-    expect(archivePickIntro()).toBe(DASHBOARD_ARCHIVE_COPY.pick.intro);
+    // The shipped copy names every format the product reads, in the registry's order, then says where each export goes.
+    expect(DASHBOARD_ARCHIVE_COPY.pick.intro.startsWith(archivePickIntro())).toBe(true);
     for (const format of ARCHIVE_FORMATS) expect(DASHBOARD_ARCHIVE_COPY.pick.intro).toContain(format.chooseHint ?? format.label);
     const one = archivePickIntro([MBOX_ARCHIVE_FORMAT]);
     expect(one).toContain(MBOX_ARCHIVE_FORMAT.chooseHint!);
     // The words the dashboard ships name every registered format.
-    expect(archivePickIntro(ARCHIVE_FORMATS)).toBe(DASHBOARD_ARCHIVE_COPY.pick.intro);
+    expect(DASHBOARD_ARCHIVE_COPY.pick.intro.startsWith(archivePickIntro(ARCHIVE_FORMATS))).toBe(true);
     for (const format of ARCHIVE_FORMATS) expect(DASHBOARD_ARCHIVE_COPY.pick.intro).toContain(format.chooseHint ?? format.label);
     const two = archivePickIntro([MBOX_ARCHIVE_FORMAT, NOTES, SECOND_MAIL]);
     expect(two).toContain('a notes export (a .zip file)');

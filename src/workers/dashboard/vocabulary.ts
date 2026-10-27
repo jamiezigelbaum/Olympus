@@ -396,15 +396,20 @@ export function dashboardSubLine(
     case 'Failing':
       return dashboardAttentionLine(source, options);
     case 'Working':
-      return workingLine(source);
+      // A card with no corpus of its own whose connection is its imports (an import-only source) says what they do.
+      return source.connection.action.kind === 'archive_import' && source.coverage.indexed_items === 0 && source.connection.label
+        ? source.connection.label
+        : workingLine(source);
     case 'Waiting':
       return waitingLine(source);
     case 'Fresh':
       return freshLine(source, options?.now ?? new Date());
     case 'Off':
       // Not connected with indexed data left: disconnected on purpose, data
-      // kept (owner ruling, 2026-10-23), not a lost sign-in.
+      // kept (owner ruling, 2026-10-23), not a lost sign-in. A card whose
+      // connection is its imports has no account to disconnect: its line is its imports'.
       return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source)
+        && source.connection.action.kind !== 'archive_import'
         && !dashboardUnsettledWithData(source)
         ? DASHBOARD_DISCONNECTED_DATA_KEPT
         : source.connection.label;
@@ -1767,6 +1772,12 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   sourcesCloud: 'Accounts',
   notConnected: 'Not connected',
   noSources: 'No sources yet.',
+  /**
+   * The Archives card, in its own section below Sources (owner, 2026-10-25):
+   * exports that are not from one of the sources above. A source's own
+   * exports are imported from its card's ⋯ menu (Import an archive).
+   */
+  otherArchives: { title: 'Other archives', line: "For an export that isn't from one of your sources above." },
   progress: 'Progress',
   progressInitial: 'First index',
   progressRefresh: 'Catching up',
@@ -2065,12 +2076,19 @@ export function dashboardArchiveNouns(family: unknown): DashboardArchiveNouns {
 }
 
 export const DASHBOARD_ARCHIVE_COPY = {
-  importAction: 'Import an archive',
+  /** The Other archives section's button: any export, routed to its source when one reads it. */
+  importAction: 'Import another archive',
+  /**
+   * A source's own ⋯ menu entry: the picker for that source's exports only
+   * (`ComputerArchiveSourceMeta`). {source} is the source's name.
+   */
+  sourceImport: { action: 'Import an archive', title: 'Import an archive into {source}' },
   /** The picker in archive mode: one file or folder, no save step. */
   pick: {
     back: 'Back to Olympus',
-    title: 'Import an archive',
-    intro: ARCHIVE_PICK_INTRO,
+    title: 'Import another archive',
+    /** Any export: one of a source's own still joins that source (start.ts), so the line says where each goes. */
+    intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
     source: 'This computer',
     makePrivate: 'Import',
     makePrivateFor: 'Import {name}',
@@ -2154,11 +2172,11 @@ export const DASHBOARD_ARCHIVE_COPY = {
    */
   account: {
     line: '{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?',
-    note: 'Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.',
+    note: 'Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Other archives, it stays apart, with its own Remove.',
     add: 'Add to {source}',
-    apart: 'Keep it under Archives',
+    apart: 'Keep it under Other archives',
     addFor: 'Add {name} to {source}',
-    apartFor: 'Keep {name} under Archives',
+    apartFor: 'Keep {name} under Other archives',
     sourceFallback: 'this source',
     /** The same question for an import already inside a source, stopped because the source now holds another account. */
     reconfirm: {
@@ -2211,6 +2229,15 @@ export const DASHBOARD_ARCHIVE_COPY = {
     // Old records only (a message used to be cut at a million characters; nothing is cut now).
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
+    mail_for_another_account: { one: '1 message delivered to another address left out', many: '{n} messages delivered to another address left out' },
+    // Why an import waits (the record's `waiting`): for a limit too small, {n} is the least it must be.
+    gmail_budget_too_small: {
+      one: 'Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.',
+      many: 'Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.',
+    },
+    gmail_import_allowance_spent: { one: "Waiting until tomorrow: imports have used their share of today's Gmail requests.", many: "Waiting until tomorrow: imports have used their share of today's Gmail requests." },
+    gmail_requests_spent: { one: "Waiting until tomorrow: today's Gmail requests are used up.", many: "Waiting until tomorrow: today's Gmail requests are used up." },
+    gmail_labels_unavailable: { one: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.", many: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now." },
     system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
     message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
     // WhatsApp export beside live capture (whatsapp/archive-input.ts).
@@ -2287,6 +2314,11 @@ export const DASHBOARD_ARCHIVE_COPY = {
     attachments_not_read: 'not_imported',
     text_cut: 'not_imported',
     spam_or_trash: 'not_imported',
+    mail_for_another_account: 'not_imported',
+    gmail_budget_too_small: 'not_imported',
+    gmail_import_allowance_spent: 'not_imported',
+    gmail_requests_spent: 'not_imported',
+    gmail_labels_unavailable: 'not_imported',
     // Chats (WhatsApp, Telegram).
     message_content_unsupported: 'not_imported',
     system_message: 'how_read',
@@ -2338,7 +2370,9 @@ export const DASHBOARD_ARCHIVE_COPY = {
   tryAgain: 'Try again',
   dismiss: 'Dismiss',
   /** After a choice in the picker. */
-  started: 'Importing {name}. It shows under Archives as it is read.',
+  started: 'Importing {name}. It shows under Other archives as it is read.',
+  /** An import that joined a source: it shows in that source's card. */
+  startedIn: 'Importing {name} into {source}. It shows in {source} as it is read.',
   checking: 'Checking whether {name} is already imported…',
   already: '{name} is already imported as {archive}.',
   alreadyUnnamed: '{name} is already imported.',
@@ -2360,6 +2394,11 @@ export const DASHBOARD_ARCHIVE_COPY = {
     },
     held: { one: '1 imported item waits for the private model', many: '{n} imported items wait for the private model' },
     unreadable: "Olympus can't read its list of imported archives",
+    /** An import waits for a limit the owner must raise; {n} is the least it must be. */
+    waiting: {
+      gmail_budget_too_small: "An import waits: {name}. The daily limit on Gmail requests is too low; set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more",
+      other: 'An import waits: {name}',
+    },
     seeWhy: 'See why',
     review: 'Review',
     setUp: 'Set up the private model',
@@ -2373,7 +2412,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
       permission: 'Your user account is not allowed to open {file}.',
       other: 'Olympus could not open {file}.',
     },
-    kept: 'Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.',
+    kept: 'Nothing Olympus imported is deleted. Until it can read this list, no archive can be imported, so nothing overwrites it.',
     fix: {
       damaged: 'Restore that file from a backup, or ask for help at olympusplugin.ai/support.',
       unknown_form: 'Update Olympus, then open this page again.',
@@ -2408,6 +2447,10 @@ export function dashboardImportAttentionSentence(entry: DashboardImportAttention
       return entry.count === 1 ? words.held.one : words.held.many.replace('{n}', dashboardCount(entry.count));
     case 'unreadable':
       return words.unreadable;
+    case 'waiting': {
+      const template = entry.reason === 'gmail_budget_too_small' ? words.waiting.gmail_budget_too_small : words.waiting.other;
+      return template.replace('{name}', () => displayText(entry.name)).replace('{n}', dashboardCount(entry.minimum));
+    }
   }
 }
 

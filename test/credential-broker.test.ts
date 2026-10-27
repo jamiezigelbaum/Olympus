@@ -436,6 +436,7 @@ describe('Olympus credential broker', () => {
       'google_drive.personal',
       'reflect.archive',
       'roam.archive',
+      'evernote.archive',
     ]);
     expect(statuses.map((status) => status?.handle)).toEqual(handles);
     expect(statuses.every((status) => status?.status === 'missing')).toBe(true);

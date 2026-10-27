@@ -17,6 +17,10 @@ same way, with the same privacy and the same status.
 ## Owner decisions (2026-10-23)
 
 - **One entry point.** One "Import an archive" action, not a row per format.
+  (Superseded 2026-10-25 by the owner: each source whose connector reads its
+  exports has Import an archive in its own card, and the general one is Import
+  another archive under Other archives; see archive-live-one-dataset.md,
+  "Built, per-card Import". Olympus still detects the format either way.)
 - **Olympus detects the format.** The user picks a file or folder; they never
   say "this is Roam".
 - **Mail archives first** (mbox), because old mail is the largest gap and no
@@ -259,7 +263,8 @@ Ordinary cloud models never judge.
 - **Shared, not per format.** An archive import lane sets one lane option,
   `holdContentUntilJudged`, on its store's tier classification
   (`tier-placement.ts`); only a module under `src/workers/archive-import/`
-  may set it (`test/tier-hold-until-judged-guard.test.ts`). The shared
+  may set it (`test/tier-hold-until-judged-guard.test.ts`; the one
+  exception is a Gmail attachment child, held live too, child-items.md). The shared
   classifier then holds content without a verdict as for own-record items,
   never sets `content:personal_first`, and records
   `content:held_until_judged`, which every later pass (re-judge, migration,

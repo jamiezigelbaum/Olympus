@@ -15,7 +15,7 @@ import {
   type FixtureRole, type LegFixture,
 } from './archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed,
+  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed, unpairJourney,
   shownPath, startViewOf, statusViewOf, stoppedJourney,
   type BesideLiveObservation, type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
   type SearchView, type SeedLiveObservation, type StatusView, type StoreView,
@@ -57,6 +57,8 @@ export interface ArchiveHost {
   readStores(archive: { family: string; provider: string }, archiveId: string | undefined, token: string): StoreView[];
   /** `olympus engine restart`, then until the engine is ready (models included). */
   restartEngine(timeoutMs: number): Promise<{ ok: boolean; ms: number; detail?: string }>;
+  /** Until the engine is ready (models included), without restarting it: after a restart the engine asked for itself. */
+  awaitEngine?(timeoutMs: number): Promise<{ ok: boolean; ms: number; detail?: string }>;
   /** Runs a source's live seed hook (archive-live-seeds.ts). Only the import beside a live input needs it. */
   seedLive?(hook: string): Promise<LiveSeedResult>;
   /** The source's own stores, read for the archive's word, through its hook. */
@@ -220,7 +222,7 @@ export async function besideLiveStage(host: ArchiveHost, args: { format: string;
   try {
     const beside = formatSpec(args.format).besideLive;
     if (!beside) throw new Error(`the "${args.format}" fixtures have no import beside a live input`);
-    if (!host.readSourceStores || !host.deleteSourceData) throw new Error('this machine cannot read or delete a source\'s stores');
+    if (!host.readSourceStores || !host.deleteSourceData || !host.awaitEngine) throw new Error('this machine cannot read or delete a source\'s stores, or wait for its engine');
     const path = writeFixture(host.home, fx);
     await host.withBrowser(async (session) => {
       const driver = session.driver;
@@ -245,23 +247,63 @@ export async function besideLiveStage(host: ArchiveHost, args: { format: string;
       const cited = { ...fx, expect: { ...fx.expect, citationLabel: fx.beside!.citationLabel } };
       obs.search = await searchWhenJudged(host, cited, (args.drainS ?? drainBoundS(host.os)) * 1_000, fx.beside!.search ?? 'cited');
       obs.stores = host.readSourceStores!(beside.seedHook, fx.token);
-      // The history goes only with the source: its Delete, then nothing of the archive in its stores or on the page.
+      // The history goes only with the source: the owner unpairs it (the engine refuses to delete a paired source's data), then
+      // its Delete, then nothing of the archive in its stores or on the page.
+      const unpair = await runJourney(driver, unpairJourney(beside.sourceId, beside.sourceLabel, {
+        ...(args.openS !== undefined ? { openS: args.openS } : {}),
+      }));
+      obs.traces.push(unpair);
+      host.say(`${unpair.id}: ${unpair.ok ? 'ok' : 'FAILED'} (${Math.round(unpair.ms / 1000)} s)`);
       const deleted = host.deleteSourceData!(beside.sourceId);
       const deleteOk = deleted.code === 0 && (deleted.json === undefined || (deleted.json as { ok?: unknown }).ok !== false);
-      await driver.go('/dashboard');
-      const panel = await until(host, () => readPanel(driver), 15_000, 500);
       obs.deleted = {
         ok: deleteOk,
+        unpaired: unpair.ok,
         ...(deleteOk ? {} : { detail: (deleted.stderr || JSON.stringify(deleted.json ?? null)).slice(0, 200) }),
-        stores: host.readSourceStores!(beside.seedHook, fx.token),
-        rowGone: panel !== undefined && rowNamed(panel, fx.fileName) === undefined,
+        stores: [],
+        rowGone: false,
       };
     });
+    // The Delete is applied at the engine's restart: the worker marks the account and restarts itself, and its files go at boot,
+    // before anything opens them. So the stores are read once they are gone (or the bound runs out, and the last reading is
+    // judged), the engine is waited for, and the page is read in a fresh browser: the next stage meets a ready engine.
+    if (obs.deleted?.ok) {
+      const after = await afterSourceDelete(host, beside.seedHook, fx.token, ARCHIVE_BOUNDS.engineS * 1_000);
+      obs.deleted.stores = after.stores;
+      obs.deleted.goneMs = after.goneMs;
+      obs.deleted.engineBack = after.engineBack;
+      if (!after.engineBack) obs.deleted.detail = `the engine was not ready after the Delete's restart: ${after.detail ?? 'no answer'}`;
+      if (after.engineBack) {
+        await host.withBrowser(async (session) => {
+          const panel = await until(host, () => readPanel(session.driver), 15_000, 500);
+          obs.deleted!.rowGone = panel !== undefined && rowNamed(panel, fx.fileName) === undefined;
+        });
+      }
+    }
     obs.ok = true;
   } catch (error) {
     obs.detail = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
   }
   return obs;
+}
+
+/**
+ * What a source's Delete left, read once it has been applied. The running worker only marks the account and restarts itself; its
+ * files go at the next boot, before anything opens them. So the source's stores are read again until none holds the archive's word
+ * (or the bound runs out, and the last reading is what is judged), and then the engine is waited for, so whatever runs next meets a
+ * ready engine rather than one restarting.
+ */
+export async function afterSourceDelete(host: ArchiveHost, hook: string, token: string, boundMs: number): Promise<{ stores: StoreView[]; goneMs: number; engineBack: boolean; detail?: string }> {
+  const started = host.now();
+  const cleared = (stores: StoreView[]) => stores.every((store) => !store.error && store.tokenRows === 0);
+  let stores = host.readSourceStores!(hook, token);
+  while (!cleared(stores) && host.now() - started < boundMs) {
+    await host.sleep(SETTLE_POLL_MS);
+    stores = host.readSourceStores!(hook, token);
+  }
+  const goneMs = host.now() - started;
+  const engine = await host.awaitEngine!(Math.max(60_000, boundMs - goneMs));
+  return { stores, goneMs, engineBack: engine.ok, ...(engine.detail ? { detail: engine.detail } : {}) };
 }
 
 /** Archives an earlier attempt left on the machine, removed from their rows, so a stage starts from an empty Archives line. */

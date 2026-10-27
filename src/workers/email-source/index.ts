@@ -2878,7 +2878,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 throw new EmailSourceWorkerError(400, 'invalid_request', 'Give either confirm_account or keep_apart.');
               }
               const answer = { ...(confirmAccount ? { confirmAccount: true as const } : {}), ...(keepApart ? { keepApart: true as const } : {}) };
-              return json(await archiveImports.approve(key !== undefined ? { key, ...answer } : { requestId: requestId!, ...answer }));
+              // A source's own Import an archive names its card: only that source's exports are taken.
+              const sourceId = asOptionalString(record.source_id);
+              if (sourceId !== undefined && key === undefined) {
+                throw new EmailSourceWorkerError(400, 'invalid_request', 'source_id goes with a chosen key.');
+              }
+              return json(await archiveImports.approve(key !== undefined ? { key, ...(sourceId !== undefined ? { sourceId } : {}), ...answer } : { requestId: requestId!, ...answer }));
             });
           }
           if (url.pathname === '/dashboard/archive-import/stop') {
@@ -5608,12 +5613,22 @@ function sourceWatchNotSupported(): EmailSourceWorkerError {
  * The Archives card's connection. A failure to read it is said as such,
  * never as no archives imported.
  */
-function dashboardImportedArchives(archiveImports: ArchiveImportDashboard | undefined): { importedArchives?: DashboardImportedArchives } {
+function dashboardImportedArchives(archiveImports: ArchiveImportDashboard | undefined): {
+  importedArchives?: DashboardImportedArchives;
+  importedArchivesByCard?: Record<string, DashboardImportedArchives>;
+} {
   if (!archiveImports) return {};
+  let importedArchives: DashboardImportedArchives;
   try {
-    return { importedArchives: archiveImports.present() };
+    importedArchives = archiveImports.present();
   } catch {
-    return { importedArchives: { archives: 0, importing: false, attention: [{ kind: 'unreadable', reason: 'other' }] } };
+    importedArchives = { archives: 0, importing: false, attention: [{ kind: 'unreadable', reason: 'other' }] };
+  }
+  // Each import-only source's card (Reflect, Roam, ...): the imports of its formats.
+  try {
+    return { importedArchives, importedArchivesByCard: archiveImports.presentCards() };
+  } catch {
+    return { importedArchives };
   }
 }
 

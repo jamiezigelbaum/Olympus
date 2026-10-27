@@ -72,7 +72,7 @@ the Olympus dashboard on their computer, and nothing happens before they do.
    with `/`).
 3. The result is `ok: false, code: "needs_approval"`. That is expected, not an
    error. Tell the user, in the words of its `message`, to open Olympus on
-   their computer and choose Import under Sources, Archives. `open` names that
+   their computer and choose Import under Other archives. `open` names that
    page (`olympus://open/archives`, or the `page` link).
 4. Follow it with `action: "status"`. Do not ask the user again while it waits.
 
