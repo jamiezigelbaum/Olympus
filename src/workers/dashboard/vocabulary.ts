@@ -3103,6 +3103,10 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   deleteAll: 'Delete all',
   deleteAllConfirm: 'Delete every question and answer in your private inbox?',
   deleted: 'That answer was deleted',
+  // A delete that removed nothing says so; the page keeps what it shows (owner rule: nothing looks deleted when it isn't).
+  deleteNotFound: 'Olympus could not find this answer, so nothing was deleted. Reload to see your inbox as it is now.',
+  deleteUnavailable: 'Private answers cannot be changed right now, so nothing was deleted. Try again in a moment.',
+  nothingDeleted: 'Nothing was deleted. Reload to see your inbox as it is now.',
   retrying: 'Retrying on this computer…',
   queued: 'Queued on this computer. Automatic answers wait for their turn.',
   checkUnavailable: "Couldn't check this answer right now",
