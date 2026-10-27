@@ -631,3 +631,48 @@ describe('the worst reading across a source\'s pulls', () => {
     expect(card.freshness.capture).toEqual({ state: 'fresh', age_seconds: 360, threshold_seconds: THRESHOLD });
   });
 });
+
+// The computer's disk is nearly full (owner, 2026-10-26): new media waits to download. The receipt count a pull stores, written out
+// literally; the line has no counts (owner ruling, 2026-08-24).
+const DISK_LOW = { media_disk_low: 1 };
+const DISK_LINE = 'the computer\'s disk is nearly full; new media will download once space is freed';
+
+describe.each(['whatsapp', 'telegram'] as const)('%s on a computer whose disk is nearly full', (which) => {
+  const spec = SOURCES[which];
+
+  test('reads Needs you with a plain line and the way to free it, and no counts', () => {
+    const { card, row, needsYou } = build({ which, counts: receiptCounts({ ...fresh(600), ...DISK_LOW }) });
+    expect(card.media_storage).toEqual({ state: 'disk_low' });
+    expect(dashboardStatus({ source: card })).toBe('Needs you');
+    expect(dashboardAttentionLine(card)).toBe(DISK_LINE);
+    expect(card.setup?.next_action).toBe(`This computer's disk is nearly full, so new photos and files from ${spec.label} wait to download. `
+      + 'Messages still arrive. Free space on this computer, and the waiting media downloads on its own.');
+    expect(row.status).toBe('Needs you');
+    expect(row.detail).toBe(DISK_LINE);
+    expect(row.detail).not.toMatch(/\d/);
+    // Sync now cannot free space: the control checks again once space is freed.
+    expect(row.primary?.label).toBe('Check again');
+    expect(needsYou).toHaveLength(1);
+    expect(needsYou[0]!.sentence).toBe(`${spec.label} — ${DISK_LINE}`);
+    expect(needsYou[0]!.fix.label).toBe('Check again');
+  });
+
+  test('beside a stalled feed, both are said and neither hides the other', () => {
+    const { card, needsYou } = build({ which, counts: receiptCounts({ ...stale(3 * DAY), ...DISK_LOW }) });
+    expect(dashboardAttentionLine(card)).toBe(`capture stale: newest message 3d ago · ${DISK_LINE}`);
+    expect(needsYou[0]!.sentence).toBe(`${spec.label} — capture stale: newest message 3d ago · ${DISK_LINE}`);
+    expect(needsYou[0]!.fix.label).toBe('Check capture');
+  });
+
+  test('a disk with room, or a reading from a failed pull, says nothing about media', () => {
+    const room = build({ which, counts: receiptCounts({ ...fresh(600), media_disk_low: 0 }) });
+    expect(room.card).not.toHaveProperty('media_storage');
+    expect(dashboardStatus({ source: room.card })).toBe('Fresh');
+    expect(room.needsYou).toEqual([]);
+    const failed = build({ which, counts: receiptCounts({ ...fresh(600), ...DISK_LOW }), status: 'failed' });
+    expect(failed.card).not.toHaveProperty('media_storage');
+    // The retired storage-full counts say nothing.
+    const retired = build({ which, counts: receiptCounts({ ...fresh(600), media_storage_full: 1, media_left_out_storage_full: 7 }) });
+    expect(retired.card).not.toHaveProperty('media_storage');
+  });
+});

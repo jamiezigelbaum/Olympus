@@ -331,7 +331,8 @@ Each source's Import an archive appears as its step registers it.
 7. Reflect, Roam, Evernote: their own sources, assets as children (built,
    see "Built, step 7").
 8. Live Telegram media and live WhatsApp images and video, so both
-   inputs bring the same media.
+   inputs bring the same media. Telegram's part built (see "Built, step 8:
+   Telegram"); reading the kept bytes waits for a Telegram extraction roster.
 
 Each step is proved on fresh Mac and Linux installs by the release check's
 archive leg, which gains an import-beside-live case per source with a
@@ -876,6 +877,70 @@ Telegram connector (`src/workers/telegram-messages/`: `export-records.ts`,
   own tiers. Before, such an item's later live edits were dropped.
 - **Production.** The worker registers the target when the Telegram store
   lane is up; without it an export stays under Archives, as before.
+
+## Built, step 8: Telegram
+
+Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
+`src/workers/telegram-messages/media-child.ts`; tests
+`test/telegram-live-media.test.ts`, and the helper's in
+`test/telegram-telethon-richer-records.test.ts` and
+`test/telegram-telethon-media.test.ts`).
+
+- **Kept beside the spool.** The capture helper keeps a captured message's
+  photo or document under `media/<chat>/<message>.<tag><ext>` in the spool's
+  own folder (the account's, owner-only). The tag comes from Telegram's id,
+  access hash, size and date for the file, so a changed attachment is
+  downloaded again under a new name, replaces the old file, and arrives with
+  the message's edit. Media can only change through an edit, so the child's
+  version moves with it.
+- **Every file, one safeguard** (owner, 2026-10-26: every message and every
+  media file is ingested). No size cap and no total quota: the former
+  `OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES` and `OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES`
+  are gone, and the native service no longer passes them. The one safeguard
+  is the computer's own: while the free space of the volume the spool is on
+  is under the larger of 5 GB and 5% of the disk, new downloads pause. It is
+  checked before a download (with what overlapping downloads reserved of
+  their stated sizes, under a lock) and again every few MB while the bytes
+  arrive. A paused message is still captured and ingested; its attachment
+  says `mediaLeftOut: waiting_for_disk`, so its child does too, and it is
+  listed in `.capture-media-waiting.jsonl` beside the spool: appended to
+  (each entry once, written whole), rewritten only as entries are done, never
+  truncated, and read entry by entry so a damaged line loses nothing else.
+- **Filled in once space returns.** Each gateway cycle, once there is room,
+  the helper fetches the waiting messages again, downloads their media and
+  captures them again with it; the newer capture brings the readable child
+  over the waiting one. An entry leaves the list only once its message was
+  captured again with its file, or the message is gone from Telegram or out
+  of the approved chats; a fetch, download or write that fails keeps it for
+  the next cycle. A file too large for the room left is skipped and the rest
+  goes on; only free space under the floor itself pauses the pass.
+- **Said on the card, with no counts.** Each pull reads the same floor on
+  the spool's volume, and the waiting list: the receipt carries
+  `media_disk_low` and the `telegram_media_disk_low` warning while free space
+  is under the floor or any media still waits. The dashboard reads that
+  count from any source's receipt, and the card reads Needs you with one
+  line: "the computer's disk is nearly full; new media will download once
+  space is freed", with Check again. It clears at the next pull once space
+  is freed and the waiting media is filled in.
+- **No copy left behind.** A download is written to `.<name>.tmp.<pid>` and
+  renamed into place, and the temporary is removed on any failure, the rename
+  included. A stopped process's temporaries are swept when the gateway starts
+  and before every Secrets cleanup.
+- **One child, both inputs.** The connector lists a live message's media as
+  its `media` child, the same child an export brings: readable through a
+  `telegram-live-media:v1:<path>` locator when the file was kept (read back by
+  `fetchItem`, bounded, only from under the media folder), named only when it
+  was not. A named-only live child takes the version without the capture's
+  mark, so it never replaces a readable child an export brought at the same
+  edit time.
+- **Secrets.** A media child judged Secrets loses every file kept for its
+  message at the next pull's clearing: the current file, an earlier
+  attachment's, and any download of it in progress.
+- **Not yet.** Nothing reads the kept bytes until Telegram has an extraction
+  roster for its stores (the factory's per-account connector resolution).
+  `fetchItem` hands a reader a kept file whole, up to 64 MB per read; a
+  larger file is kept and listed, and its reading needs a streaming read when
+  that roster lands. That bound is on reading, never on what is kept.
 
 ## Built, step 6
 
