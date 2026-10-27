@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { findBrowser } from '../scripts/release-check/browser.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
 import {
-  blockedReason, evaluateTurn, parseClientQuestions, redactForbidden, runWebClients, startBrowserScript, turnText,
+  askQuestion, blockedReason, evaluateTurn, parseClientQuestions, redactForbidden, runWebClients, startBrowserScript, turnText,
   type ClientQuestion, type PageState,
 } from '../scripts/release-check/web-clients.ts';
 
@@ -44,6 +44,19 @@ describe('web clients: what a turn is held to', () => {
     expect(statusOf(evaluateTurn('grok', doctor, { turn, frames: '', ms: 1 }))).toEqual({
       'web.grok.doctor.answered': 'pass', 'web.grok.doctor.used-olympus': 'pass', 'web.grok.doctor.no-leak': 'pass', 'web.grok.doctor.private-note': 'pass',
     });
+  });
+
+  test('ChatGPT\'s private panel is waited for until its facts show, not just its heading', async () => {
+    let frameReads = 0;
+    const state: PageState = { url: 'https://chatgpt.com/c/1', title: 'ChatGPT', challenge: false, signedOut: false, composer: true, composerText: '', busy: false, text: `${doctor.prompt}\nOlympus is answering this privately on your computer.` };
+    const tab = {
+      evaluate: async () => state as never, goto: async () => {}, type: async () => {}, enter: async () => {}, screenshot: async () => {}, close: async () => {},
+      // The panel shows its heading while it prepares the answer; the facts come two reads later.
+      framesText: async () => (++frameReads >= 3 ? 'Private answer from your computer\nTotal cholesterol 162.' : 'Private answer from your computer\nPreparing…'),
+    };
+    const obs = await askQuestion(tab, 'chatgpt', doctor, { pollMs: 0, loadMs: 1_000, answerMs: 1_000, settleMs: 0, panelMs: 5_000, sleep: async () => {} });
+    expect('frames' in obs && obs.frames).toContain('162');
+    expect(frameReads).toBe(3);
   });
 
   test('an app that cannot reach Olympus, a signed-out app and a bot check are inconclusive, with what to renew', () => {

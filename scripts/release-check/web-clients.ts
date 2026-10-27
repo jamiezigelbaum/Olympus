@@ -408,9 +408,11 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
   const ms = Date.now() - started;
   let frames = await tab.framesText();
   const panel = adapter.privatePanel;
-  if (q.kind === 'private' && panel && !panel.test(frames)) {
+  // The panel shows its heading while it still prepares the answer, so it is ready only once its facts are there too.
+  const panelReady = (text: string): boolean => !!panel && panel.test(text) && (q.panel_expect ?? []).every((fact) => turnContains(text, fact));
+  if (q.kind === 'private' && panel && !panelReady(frames)) {
     const deadline = Date.now() + t.panelMs;
-    while (!panel.test(frames) && Date.now() < deadline) {
+    while (!panelReady(frames) && Date.now() < deadline) {
       await t.sleep(t.pollMs);
       frames = await tab.framesText();
     }
