@@ -36637,14 +36637,41 @@ var init_reaction_index = __esm(() => {
   init_reactions();
 });
 
-// src/workers/whatsapp/live-connector.ts
-var init_live_connector = __esm(() => {
-  init_capture_spool_secrets();
+// src/workers/whatsapp/spool-index.ts
+var init_spool_index = __esm(() => {
+  init_spool_file_identity();
   init_reaction_index();
 });
 
+// src/workers/whatsapp/spool-resets.ts
+var init_spool_resets = () => {};
+
+// src/workers/whatsapp/spool-reader.ts
+var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES2, FINISH_STEP_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
+var init_spool_reader = __esm(() => {
+  init_spool_file_identity();
+  WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
+  CHUNK_BYTES2 = 256 * 1024;
+  FINISH_STEP_BYTES = 4 * 1024;
+  NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
+  CAPTURE_STATUS_MAX_BYTES = 64 * 1024;
+});
+
+// src/workers/whatsapp/live-connector.ts
+var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES;
+var init_live_connector = __esm(() => {
+  init_source_inputs();
+  init_capture_spool_secrets();
+  init_reaction_index();
+  init_spool_index();
+  init_spool_resets();
+  init_spool_reader();
+  DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
+  TARGET_READ_CHUNK_BYTES = 4 * 1024;
+});
+
 // src/workers/whatsapp/store-sync.ts
-var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
+var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT, WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES, CLEARED_FILES_KEY;
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
   init_source_placement();
@@ -36653,10 +36680,15 @@ var init_store_sync2 = __esm(() => {
   init_capture_spool_secrets();
   init_capture_freshness();
   init_live_connector();
+  init_spool_reader();
+  init_spool_file_identity();
+  init_spool_index();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local"
   });
+  WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
+  CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 });
 
 // src/workers/file-extraction/extractors/bounded-text.ts

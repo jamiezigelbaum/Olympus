@@ -32,7 +32,7 @@ describe('whatsapp live sync resume cursor', () => {
 
     const first = runSync(stateDir, dbPath);
     expect(first.exitCode).toBe(0);
-    expect(JSON.parse(first.stdout).summary.cursor).toBe('2026-07-05.jsonl:2');
+    expect(JSON.parse(first.stdout).summary.cursor).toStartWith('2026-07-05.jsonl:2@');
 
     // The archive-import lane writes the same store with a bare-integer cursor.
     seedForeignSyncRun(dbPath, '1200');
@@ -42,7 +42,7 @@ describe('whatsapp live sync resume cursor', () => {
     expect(second.stderr).not.toContain('WhatsApp live spool cursors look like');
     expect(second.exitCode).toBe(0);
     const summary = JSON.parse(second.stdout).summary as { itemsSeen: number; cursor: string };
-    expect(summary.cursor).toBe('2026-07-05.jsonl:3');
+    expect(summary.cursor).toStartWith('2026-07-05.jsonl:3@');
     expect(summary.itemsSeen).toBe(1);
   }, 20_000);
 });
