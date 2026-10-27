@@ -15,6 +15,7 @@ import {
 } from '../../core/invocation-provenance.ts';
 import { gmailAfterBound, gmailBeforeBound } from '../../core/mail-source-scope.ts';
 import { senderMatchesRule } from '../../core/sender-rules.ts';
+import { FileExtractionSourceError } from '../../core/file-extraction-source.ts';
 import type { OwnerTierRule } from '../classification/tier-classifier.ts';
 import {
   createEnvCredentialBroker,
@@ -34,7 +35,10 @@ import {
   metadataStringArray,
 } from './classification.ts';
 import {
+  gmailAttachmentPartName,
+  gmailChildProviderId,
   gmailClassificationSignals,
+  isGmailAttachmentPart,
   gmailMailItems,
   gmailMessageItem,
   type GmailMailAttachment,
@@ -120,6 +124,11 @@ export interface GoogleGmailSourceConnectorOptions {
   now?: () => number;
   /** How mail is built into items (gmail-mail-record.ts): attachments as children of their message. */
   build?: GmailMailBuild;
+  /**
+   * Asked before every provider request an attachment read makes: throws when
+   * the mail approval is no longer current, so nothing more is asked.
+   */
+  beforeEachRequest?: () => void;
 }
 
 /** Metadata reads for retained Private scope confirmation per connector pass. */
@@ -320,6 +329,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   private readonly ingestFilterOptions: EmailIngestFilterOptions;
   private readonly itemsByLocalId = new Map<string, RawItem>();
   private readonly build: GmailMailBuild;
+  private readonly beforeEachRequest: (() => void) | undefined;
   /** The messages this run read whole, so an attachment of one is read without asking for it again. */
   private readonly messagesById = new Map<string, GmailMessage>();
 
@@ -345,6 +355,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     this.scope = options.scope;
     this.now = options.now ?? (() => Date.now());
     this.build = options.build ?? {};
+    this.beforeEachRequest = options.beforeEachRequest;
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     // The approved scope says which categories are skipped. An explicit
     // operator setting still wins; otherwise the scope replaces the built-in
@@ -496,7 +507,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
           this.itemsSkippedStored += 1;
           continue;
         }
-        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff });
+        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff, children: this.build.children === true });
         const [item, ...children] = gmailMailItems(record, this.account, this.build) as [RawItem, ...RawItem[]];
         this.attachmentsDeclared += metadataCount(item.metadata, 'attachmentCount');
         this.attachmentBytesDeclared += metadataCount(item.metadata, 'attachmentBytesDeclared');
@@ -653,29 +664,79 @@ export class GoogleGmailSourceConnector implements SourceConnector {
    * it), and the part's bytes are inline or asked for by the part's
    * attachment id. Every request is the traversal's, under the same budget.
    */
-  private async fetchAttachment(localItemId: string, locator: string): Promise<RawItem> {
+  /**
+   * One attachment child's bytes within `maxBytes` (the extraction factory's
+   * bounded read): see `fetchAttachment`.
+   */
+  async fetchItemWithin(
+    localItemId: string,
+    options: { maxBytes?: number; deferredBytes?: { locator: string } },
+  ): Promise<RawItem> {
+    if (!options.deferredBytes) return this.fetchItem(localItemId);
+    return this.fetchAttachment(localItemId, options.deferredBytes.locator, options.maxBytes);
+  }
+
+  /**
+   * One attachment's bytes (a child item, 2.1.0), from the locator its row
+   * keeps:
+   *
+   * - the locator must name the child it is read for (its message and part
+   *   key), or nothing is read;
+   * - the mail approval is asked again before every provider call
+   *   (`beforeEachRequest`), and the message must still be inside the current
+   *   mail scope (window, skipped labels and categories, skipped senders, not
+   *   Spam or Trash): a child outside it stays names only;
+   * - the part's declared size is checked before its bytes are asked for, and
+   *   the decoded size again after: a part over `maxBytes` is too large.
+   *
+   * The message is read once (the listing's copy when this run listed it), and
+   * the part's bytes are inline or asked for by its attachment id. Every
+   * request is the traversal's, under the same budget.
+   */
+  private async fetchAttachment(localItemId: string, locator: string, maxBytes?: number): Promise<RawItem> {
     const where = parseGmailPartLocator(locator);
-    if (!where) throw new Error('This Gmail attachment cannot be found from what Olympus kept.');
+    if (!where) throw new FileExtractionSourceError('source_content_unavailable');
+    const wanted = `${this.account}:${gmailChildProviderId(where.messageId, where.partId)}`;
+    // A locator read for another child than its own fails closed.
+    if (localItemId !== wanted && `${this.account}:${localItemId}` !== wanted) throw new FileExtractionSourceError('source_content_unavailable');
     const client = await this.clientForRequest();
+    const gone = (error: unknown): never => {
+      if (error instanceof Error && /Gmail API request failed \(404\)/.test(error.message)) throw new FileExtractionSourceError('source_item_not_found');
+      throw error;
+    };
     let message = this.messagesById.get(where.messageId);
-    if (!message) {
+    if (message) {
+      // The message's parts are known; its labels may have changed since (moved to Trash, a skipped label):
+      // the parent is checked against the scope as it is now, by a fresh metadata read, before any part.
+      this.beforeEachRequest?.();
       this.providerRequests += 1;
-      message = await client.getMessage(where.messageId);
+      const current = await client.getMessage(where.messageId, { format: 'metadata', metadataHeaders: ['From'] }).catch(gone);
+      if (this.scope && !gmailMessageInScope(current, this.scope)) throw new FileExtractionSourceError('source_permission_denied');
+    } else {
+      this.beforeEachRequest?.();
+      this.providerRequests += 1;
+      message = await client.getMessage(where.messageId).catch(gone);
       this.messagesById.set(where.messageId, message);
     }
+    if (this.scope && !gmailMessageInScope(message, this.scope)) throw new FileExtractionSourceError('source_permission_denied');
     const part = gmailPartAt(message.payload, where.partId);
-    const record = gmailMailRecordFromMessage(message);
-    const child = gmailMailItems(record, this.account, { children: true }).find((item) => item.identity.localItemId === localItemId
-      || item.identity.localItemId === `${this.account}:${localItemId}`);
-    if (!part || !child) throw new Error('This Gmail attachment is no longer in its message.');
+    const record = gmailMailRecordFromMessage(message, { children: true });
+    const child = gmailMailItems(record, this.account, { children: true }).find((item) => item.identity.localItemId === wanted);
+    if (!part || !child) throw new FileExtractionSourceError('source_version_gone');
+    const declared = part.body?.size;
+    if (maxBytes !== undefined && typeof declared === 'number' && declared > maxBytes) throw new FileExtractionSourceError('source_too_large');
     let data = part.body?.data;
     if (!data && part.body?.attachmentId) {
-      if (!client.getAttachment) throw new Error('This Gmail client cannot read attachments.');
+      if (!client.getAttachment) throw new FileExtractionSourceError('source_content_unavailable');
+      this.beforeEachRequest?.();
       this.providerRequests += 1;
       data = (await client.getAttachment(where.messageId, part.body.attachmentId)).data;
     }
-    if (data === undefined) throw new Error('Gmail returned no bytes for this attachment.');
+    if (data === undefined) throw new FileExtractionSourceError('source_content_unavailable');
+    // A declared size that understated the part: refused once decoded, as too large.
+    if (maxBytes !== undefined && Math.floor((data.length * 3) / 4) > maxBytes + 3) throw new FileExtractionSourceError('source_too_large');
     const bytes = new Uint8Array(Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64'));
+    if (maxBytes !== undefined && bytes.byteLength > maxBytes) throw new FileExtractionSourceError('source_too_large');
     return { ...child, content: { kind: 'bytes', mimeType: child.mimeType, bytes } };
   }
 
@@ -687,7 +748,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   ): Promise<{ items: RawItem[]; next?: number }> {
     const message = await client.getMessage(at.id);
     this.messagesById.set(at.id, message);
-    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message), this.account, this.build);
+    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message, { children: this.build.children === true }), this.account, this.build);
     const items = children.slice(at.from, at.from + Math.max(1, room));
     for (const item of items) this.itemsByLocalId.set(item.identity.localItemId, item);
     const next = at.from + items.length;
@@ -758,6 +819,8 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       provenance: this.provenance,
       ...(this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {}),
       ...(this.sleepImpl ? { sleep: this.sleepImpl } : {}),
+      // The approval is asked before every HTTP attempt, retries included: a backoff can outlast it.
+      ...(this.beforeEachRequest ? { beforeEachAttempt: this.beforeEachRequest } : {}),
     });
   }
 
@@ -1091,6 +1154,7 @@ class RestGmailApiClient implements GmailApiClient {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly requestBudget: GmailRequestCounter | undefined;
   private readonly provenance: SourceInvocationProvenance;
+  private readonly beforeEachAttempt: (() => void) | undefined;
 
   constructor(options: {
     token: string;
@@ -1100,7 +1164,10 @@ class RestGmailApiClient implements GmailApiClient {
     provenance?: SourceInvocationProvenance;
     maxRetries?: number;
     sleep?: (ms: number) => Promise<void>;
+    /** Called before every HTTP attempt, retries included; throws to stop the request. */
+    beforeEachAttempt?: () => void;
   }) {
+    this.beforeEachAttempt = options.beforeEachAttempt;
     this.token = options.token;
     this.fetchImpl = options.fetch;
     this.baseUrl = options.baseUrl;
@@ -1181,6 +1248,8 @@ class RestGmailApiClient implements GmailApiClient {
   private async getJson(path: string): Promise<unknown> {
     let attempt = 0;
     for (;;) {
+      // An authorization revoked during a backoff stops the retry before it is sent.
+      this.beforeEachAttempt?.();
       // The retry loop is the request boundary. Reserving here makes one
       // ledger increment correspond to one real provider request. Gmail's own
       // 429 is handled below and binds every provenance: the budget exemption
@@ -1247,13 +1316,14 @@ function gmailLabelFromJson(record: Record<string, unknown>): GmailLabel {
  */
 export function gmailMailRecordFromMessage(
   message: GmailMessage,
-  options: { metadataOnly?: boolean } = {},
+  options: { metadataOnly?: boolean; children?: boolean } = {},
 ): GmailMailRecord {
   const headers = headersFromPart(message.payload);
   const metadataOnly = options.metadataOnly === true;
+  const children = options.children === true;
   const plain: string[] = [];
   const html: string[] = [];
-  if (!metadataOnly) collectPartText(message.payload, plain, html);
+  if (!metadataOnly) collectPartText(message.payload, plain, html, children);
   const messageId = bareMessageId(headers.get('message-id'));
   return {
     id: message.id,
@@ -1271,7 +1341,7 @@ export function gmailMailRecordFromMessage(
     ...(message.snippet && !metadataOnly ? { snippet: message.snippet } : {}),
     body: plain.length > 0 ? plain.join('\n\n') : html.map(stripHtml).join('\n\n'),
     metadataOnly,
-    attachments: gmailAttachments(message.id, message.payload, false),
+    attachments: gmailAttachments(message.id, message.payload, false, children),
   };
 }
 
@@ -1283,8 +1353,32 @@ export function bareMessageId(value: string | undefined): string | undefined {
   return inner || undefined;
 }
 
+/**
+ * Whether a message is inside the approved mail scope as it stands now: within
+ * the content window, carrying none of the skipped labels or categories, not
+ * from a skipped sender, and not in Spam or Trash. (The operator's hidden query
+ * override is not re-checked here; it only narrows what is listed.)
+ */
+export function gmailMessageInScope(message: GmailMessage, scope: GmailConnectorScope): boolean {
+  const labels = new Set((message.labelIds ?? []).map((label) => label.toUpperCase()));
+  if (labels.has('SPAM') || labels.has('TRASH')) return false;
+  for (const skipped of [...(scope.skippedCategoryLabelIds ?? []), ...(scope.skippedLabelIds ?? [])]) {
+    if (labels.has(skipped.toUpperCase())) return false;
+  }
+  const received = internalDateNumber({ internalDate: message.internalDate });
+  if (scope.contentAfterMs !== undefined && (received === undefined || received < scope.contentAfterMs)) return false;
+  const from = headersFromPart(message.payload).get('from');
+  if (scope.skipSenders?.some((rule) => senderMatchesRule(from, rule))) return false;
+  return true;
+}
+
 /** The locator of one MIME part of a Gmail message: what a later read of its bytes needs. */
 const GMAIL_PART_LOCATOR_PREFIX = 'gmail-part1:';
+
+/** The prefix every live Gmail part locator starts with. */
+export function gmailPartLocatorPrefix(): string {
+  return GMAIL_PART_LOCATOR_PREFIX;
+}
 
 export function gmailPartLocator(messageId: string, partId: string): string {
   return `${GMAIL_PART_LOCATOR_PREFIX}${messageId}:${partId}`;
@@ -1305,17 +1399,25 @@ function parseGmailPartLocator(locator: string): { messageId: string; partId: st
  * with a file name (a file in a forwarded message) is named but `nested`: it is
  * read with the part that holds it, never as a child of its own.
  */
-function gmailAttachments(messageId: string, part: GmailMessagePart | undefined, inside: boolean): GmailMailAttachment[] {
+function gmailAttachments(messageId: string, part: GmailMessagePart | undefined, inside: boolean, children = false): GmailMailAttachment[] {
   if (!part) return [];
+  const headers = headersFromPart(part);
+  const disposition = headers.get('content-disposition')?.split(';')[0]?.trim();
   const filename = part.filename?.trim();
-  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0
+  const partId = part.partId?.trim() ?? '';
+  // With attachments as children, every attachment part is one (the shared rule); without, named parts only.
+  const attachment = children
+    ? isGmailAttachmentPart({ ...(part.mimeType ? { mimeType: part.mimeType } : {}), ...(filename ? { filename } : {}), ...(disposition ? { disposition } : {}) })
+    : Boolean(filename);
+  const size = attachment && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0
     ? part.body!.size!
     : undefined;
-  const partId = part.partId?.trim() ?? '';
-  const found: GmailMailAttachment[] = filename
+  const found: GmailMailAttachment[] = attachment
     ? [{
       partId,
-      filename,
+      filename: children
+        ? gmailAttachmentPartName({ partId, ...(filename ? { filename } : {}), ...(headers.get('content-id') ? { contentId: headers.get('content-id')! } : {}), ...(part.mimeType ? { mimeType: part.mimeType } : {}) })
+        : filename!,
       ...(part.mimeType?.trim() ? { mimeType: part.mimeType.trim() } : {}),
       ...(size !== undefined ? { size } : {}),
       // A part Gmail gave no id cannot be found again.
@@ -1323,7 +1425,7 @@ function gmailAttachments(messageId: string, part: GmailMessagePart | undefined,
       ...(inside ? { nested: true } : {}),
     }]
     : [];
-  for (const child of part.parts ?? []) found.push(...gmailAttachments(messageId, child, inside || Boolean(filename)));
+  for (const child of part.parts ?? []) found.push(...gmailAttachments(messageId, child, inside || attachment, children));
   return found;
 }
 
@@ -1338,8 +1440,14 @@ function gmailPartAt(part: GmailMessagePart | undefined, partId: string): GmailM
   return undefined;
 }
 
-function collectPartText(part: GmailMessagePart | undefined, plain: string[], html: string[]): void {
+function collectPartText(part: GmailMessagePart | undefined, plain: string[], html: string[], children = false): void {
   if (!part) return;
+  // With attachments as children, an attachment part's whole subtree is its own (a forwarded message's text
+  // included), never the message's body: the shared rule decides which parts those are.
+  if (children) {
+    const disposition = headersFromPart(part).get('content-disposition')?.split(';')[0]?.trim();
+    if (isGmailAttachmentPart({ ...(part.mimeType ? { mimeType: part.mimeType } : {}), ...(part.filename?.trim() ? { filename: part.filename } : {}), ...(disposition ? { disposition } : {}) })) return;
+  }
   // A filename-bearing MIME part is an attachment even when Gmail inlines its
   // bytes in `body.data`. Do not accidentally index a small text attachment
   // while receipts truthfully say attachment bytes are not ingested.
@@ -1354,7 +1462,7 @@ function collectPartText(part: GmailMessagePart | undefined, plain: string[], ht
   const decoded = part.body?.data ? decodeBase64Url(part.body.data) : undefined;
   if (decoded && part.mimeType === 'text/plain') plain.push(decoded);
   if (decoded && part.mimeType === 'text/html') html.push(decoded);
-  for (const child of part.parts ?? []) collectPartText(child, plain, html);
+  for (const child of part.parts ?? []) collectPartText(child, plain, html, children);
 }
 
 function headersFromPart(part: GmailMessagePart | undefined): Map<string, string> {

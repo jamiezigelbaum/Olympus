@@ -42,6 +42,7 @@ import {
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
 import { accountFromGoogleHandle } from './classification.ts';
+import { GMAIL_OWN_ID_PREFIX, gmailMailItems } from './gmail-mail-record.ts';
 import {
   GMAIL_PROVIDER,
   GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
@@ -52,6 +53,8 @@ import {
   gmailCursorIsMidTraversal,
   gmailLabelledMessageSource,
   isGmailConnectorCursor,
+  gmailMailRecordFromMessage,
+  gmailMessageInScope,
   type GmailSourceConnectorTraversalStatus,
   type GmailConnectorScope,
   type GoogleGmailSourceConnectorOptions,
@@ -183,6 +186,13 @@ export interface GmailConnectorStoreSyncHandler {
   lastStoreRunCompletedAt(): string | undefined;
   requestBudgetStatus(): GoogleRequestBudgetStatus | undefined;
   confirmPrivateScope?(request?: { max_items?: number; checkpoint?: string }): Promise<{ confirmed: number; done: boolean; checkpoint: string | null }>;
+  /**
+   * Once, for mail stored before attachments were children: lists the
+   * attachments of messages whose stored text names one and that no child row
+   * points to, a bounded number per pass, resumable, under the day budget and
+   * the current mail scope. Done once the stores hold no such message.
+   */
+  backfillChildren?(request?: { max_items?: number; provenance?: SourceInvocationProvenance }): Promise<{ listed: number; examined: number; done: boolean }>;
 }
 
 export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnectorOptions {
@@ -237,6 +247,27 @@ export function gmailLaneSyncOptions(ownerRules: readonly OwnerTierRule[] = []):
     tierClassification: { ...(ownerRules.length > 0 ? { rules: [...ownerRules] } : {}) },
   };
 }
+
+/** The children backfill's resume point lives under one fixed key, whatever the scope revision. */
+const GMAIL_CHILDREN_BACKFILL_SET = 'gmail.email';
+const GMAIL_CHILDREN_BACKFILL_CONNECTOR = 'gmail.children-backfill.v1';
+/** Messages one backfill pass asks Gmail for (one request each). */
+export const GMAIL_CHILDREN_BACKFILL_PER_PASS = 20;
+/** What a stored message's search text says of each attachment it has (gmail-mail-record.ts, `attachments`). */
+const GMAIL_ATTACHMENT_LINE = 'Attachment: ';
+
+function readChildrenBackfill(cursor: string | null | undefined): { internal: number; secure: number; done?: boolean } {
+  try {
+    const parsed = cursor ? JSON.parse(cursor) as { internal?: unknown; secure?: unknown; done?: unknown } : {};
+    const pk = (value: unknown): number => (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0);
+    return { internal: pk(parsed.internal), secure: pk(parsed.secure), ...(parsed.done === true ? { done: true } : {}) };
+  } catch {
+    return { internal: 0, secure: 0 };
+  }
+}
+
+/** Gmail's attachment children are listed by name; their bytes are read later (child items, 2.1.0). */
+export const gmailContentArrivesLater = (item: RawItem): boolean => item.deferredBytes !== undefined;
 
 export function createGmailConnectorStoreSyncHandler(
   options: GmailConnectorStoreSyncOptions,
@@ -312,6 +343,8 @@ export function createGmailConnectorStoreSyncHandler(
     tierClassification,
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened!(store) } : {}),
+    // An attachment child's text lands later, read by the extraction factory: its names are placed now.
+    contentArrivesLaterFor: gmailContentArrivesLater,
   });
 
   // An owner's "always Private" (or Secrets) label saved after mail was stored:
@@ -517,6 +550,77 @@ export function createGmailConnectorStoreSyncHandler(
       });
     },
 
+    ...(options.build?.children === true ? {
+      backfillChildren: async (request: { max_items?: number; provenance?: SourceInvocationProvenance } = {}) => {
+        const saved = readChildrenBackfill(tierSet.ledger.setCursor(GMAIL_CHILDREN_BACKFILL_SET, GMAIL_CHILDREN_BACKFILL_CONNECTOR)?.cursor);
+        if (saved.done) return { listed: 0, examined: 0, done: true };
+        const max = Math.max(1, Math.min(request.max_items ?? GMAIL_CHILDREN_BACKFILL_PER_PASS, GMAIL_CHILDREN_BACKFILL_PER_PASS));
+        options.assertScopeCurrent?.();
+        const connector = buildConnector({ maxMessages: max, provenance: sourceInvocationProvenance(request.provenance) });
+        const client = await connector.apiClientForTooling();
+        const children: RawItem[] = [];
+        let examined = 0;
+        let exhausted = 0;
+        let stopped: unknown;
+        const stores = [['internal', options.internalStore, options.secureStore], ['secure', options.secureStore, options.internalStore]] as const;
+        for (const [name, store, other] of stores) {
+          let storeDone = false;
+          while (examined < max && stopped === undefined) {
+            const rows = store.parentsAwaitingChildren(GMAIL_PROVIDER, GMAIL_ATTACHMENT_LINE, saved[name], max - examined);
+            if (rows.length === 0) {
+              storeDone = true;
+              break;
+            }
+            for (const row of rows) {
+              if (examined >= max || stopped !== undefined) break;
+              // Only this account's Gmail messages; a copy whose other store already holds its children is done.
+              if (row.accountScope === account && !row.providerItemId.startsWith(GMAIL_OWN_ID_PREFIX) && !other.hasChildRowsOf(row.localItemId)) {
+                examined += 1;
+                let message;
+                try {
+                  options.assertScopeCurrent?.();
+                  message = await client.getMessage(row.providerItemId);
+                  options.assertScopeCurrent?.();
+                } catch (error) {
+                  // Gone from Gmail: nothing to list. A spent budget, a changed scope or anything else stops the
+                  // pass before this message, keeping what it listed so far; the next pass resumes here.
+                  if (!(error instanceof Error && /Gmail API request failed \(404\)/.test(error.message))) {
+                    stopped = error;
+                    break;
+                  }
+                  saved[name] = row.itemPk;
+                  continue;
+                }
+                if (!options.scope || gmailMessageInScope(message, options.scope)) {
+                  const [, ...kids] = gmailMailItems(gmailMailRecordFromMessage(message, { children: true }), account, { children: true });
+                  children.push(...kids);
+                }
+              }
+              saved[name] = row.itemPk;
+            }
+          }
+          if (storeDone) exhausted += 1;
+          if (stopped !== undefined) break;
+        }
+        if (children.length > 0) {
+          // Stored as the live lane stores them (its own observation, so its approved scope counts them).
+          const byId = new Map(children.map((item) => [item.identity.localItemId, item] as const));
+          const listing: SourceConnector = {
+            id: connectorId,
+            family: 'email',
+            authenticate: async () => {},
+            async *listItems() { yield { items: children, done: true }; },
+            fetchItem: async (localItemId) => byId.get(localItemId) ?? Promise.reject(new Error('not listed')),
+            classificationSignals: (item) => connector.classificationSignals(item),
+          };
+          await tierSet.sync(listing, { fetchContent: true, classification, tierClassification }, { commitCursor: false });
+        }
+        const done = stopped === undefined && exhausted === stores.length;
+        tierSet.ledger.commitSetCursor(GMAIL_CHILDREN_BACKFILL_SET, GMAIL_CHILDREN_BACKFILL_CONNECTOR, JSON.stringify({ ...saved, ...(done ? { done: true } : {}) }));
+        if (stopped !== undefined) throw stopped;
+        return { listed: children.length, examined, done };
+      },
+    } : {}),
     lastStoreRunCompletedAt: () => latestCompletedAt([
       options.internalStore.status().lastSyncRun?.completedAt,
       options.secureStore.status().lastSyncRun?.completedAt,

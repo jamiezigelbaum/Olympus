@@ -120,10 +120,11 @@ function declaredCharsets(raw: Uint8Array): string[] {
 }
 
 /** Undefined when the message does not parse. */
-export async function parseMboxMessage(raw: Uint8Array): Promise<ParsedMboxMessage | undefined> {
+export async function parseMboxMessage(raw: Uint8Array, options: { rfc822AsAttachments?: boolean } = {}): Promise<ParsedMboxMessage | undefined> {
   let email: Email;
   try {
     email = await PostalMime.parse(raw, {
+      ...(options.rfc822AsAttachments ? { forceRfc822Attachments: true } : {}),
       maxHeadersSize: 1024 * 1024,
       maxPartCount: 2_000,
       maxNestingDepth: 64,

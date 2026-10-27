@@ -1,4 +1,5 @@
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
+import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
@@ -944,7 +945,8 @@ export interface ConnectorStoreSyncOptions {
    * representation when that listing is metadata-only. This is the ownership
    * mode for connectors whose binary bodies are handled by the shared
    * extraction factory: metadata sync observes the item; extraction owns the
-   * derived text.
+   * derived text. A child listed with `deferredBytes` (2.1.0) is always taken
+   * this way, whatever the lane's option: its bytes are the factory's to read.
    */
   deferMetadataOnlyContent?: boolean;
   maxChunkChars?: number;
@@ -8083,7 +8085,7 @@ export class LocalConnectorStore {
           let contentFetchFailed = false;
           if (
             !metadataOnly
-            && !deferMetadataOnlyContent
+            && !deferMetadataOnlyContent && item.deferredBytes === undefined
             && classification
             && fetchContent
             && item.content.kind === 'metadata_only'
@@ -8280,9 +8282,9 @@ export class LocalConnectorStore {
               ownershipKind,
               syncRunId,
               options?.ownerObservation ?? 'provider_listing',
-              deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+              (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === 'metadata_only',
               false,
-              deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+              (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === 'metadata_only',
               sourceScopeObservation,
               routedLayer && routedLayer !== 'metadata' ? 'content' : undefined,
             );
@@ -8300,7 +8302,7 @@ export class LocalConnectorStore {
             && !contentFetchFailed
             && !metadataOnly
             && routedLayer !== 'metadata'
-            && (!deferMetadataOnlyContent || itemForStorage.content.kind !== 'metadata_only')
+            && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== 'metadata_only')
           ) {
             const indexed = await this.indexItemContent(
               connector,
@@ -11701,6 +11703,35 @@ export class LocalConnectorStore {
    */
   holdsAnyItem(): boolean {
     return this.db.query('SELECT 1 AS present FROM items LIMIT 1').get() !== null;
+  }
+
+  /**
+   * A provider's messages stored before their attachments were children: a
+   * parent row (no parent, not itself a child) that holds content, whose
+   * search text names an attachment (`needle`: the attachment lines a message
+   * keeps there) and that no child row points to. In `item_pk` order
+   * after `afterPk`, so a walk over them resumes where it stopped.
+   */
+  parentsAwaitingChildren(provider: string, needle: string, afterPk: number, limit: number): Array<{ itemPk: number; providerItemId: string; accountScope: string; localItemId: string }> {
+    if (!this.childItemColumnsPresent) return [];
+    const rows = this.db.query(`
+      SELECT i.item_pk AS itemPk, i.provider_item_id AS providerItemId, i.account_scope AS accountScope, i.local_item_id AS localItemId
+      FROM items i
+      WHERE i.provider = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL AND i.item_pk > ?
+        AND instr(i.provider_item_id, ?) = 0
+        AND instr(COALESCE(i.search_text, ''), ?) > 0
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM items k WHERE k.parent_local_item_id = i.local_item_id)
+      ORDER BY i.item_pk
+      LIMIT ?
+    `).all(provider, afterPk, CHILD_ITEM_ID_SEPARATOR, needle, Math.max(1, Math.floor(limit))) as Array<{ itemPk: number; providerItemId: string; accountScope: string; localItemId: string }>;
+    return rows;
+  }
+
+  /** Whether any row names this item as its parent (tombstones included). */
+  hasChildRowsOf(localItemId: string): boolean {
+    if (!this.childItemColumnsPresent) return false;
+    return this.db.query('SELECT 1 AS present FROM items WHERE parent_local_item_id = ? LIMIT 1').get(localItemId) !== null;
   }
 
   /** Whether any live (not tombstoned) row matches these filters. */

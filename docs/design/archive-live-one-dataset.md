@@ -321,8 +321,8 @@ Each source's Import an archive appears as its step registers it.
 
 6. Mail: live Gmail requests `Message-ID`, and gains attachments as children;
    mbox of a Gmail account becomes a Gmail input (built, PR #546, see "Built,
-   step 6"; children are built but off until Gmail attachments have a
-   reader).
+   step 6"; attachments are children, read by one extraction lane, in the PR
+   stacked on #546).
 7. Reflect, Roam, Evernote: their own sources, assets as children.
 
 6. Mail: live Gmail requests `Message-ID`, with the background pass, and
@@ -963,19 +963,75 @@ connector; any other mbox stays under Archives, as before.
   senders and categories, the one-time-code filter, the content window)
   governs what live reads; an import is its own approval, as it was under
   Archives. Spam and Trash are skipped, as before.
-- **Children: built, off.** The child key is the MIME part path, computed by
-  both inputs as Gmail numbers `partId` (`archive-import/mbox/mime-parts.ts`;
-  a `message/rfc822` part is one attachment). Live listing keeps a message
-  and its attachments within the item budget, can resume inside one
-  message's attachments, and resumes a cut-short page after the last message
-  it handled, found by its id (`after`), never by position, whether or not
-  the store would skip it; `fetchItem` with a locator reads a part's bytes
-  (inline, or `attachments.get`). They stay off (`GmailMailBuild.children`)
-  because nothing reads a Gmail child's bytes yet: the Gmail lane has no
-  extraction roster entry, and an imported child's locator points into the
-  export (`mbox-part1:`), which that reader would also need to open. A child
-  nobody reads stays owed reading on the card for ever. Turning them on is
-  the follow-up, with child-items' step 3.
+- **Children** (on, a PR stacked on #546). Every attachment part is a child
+  item of its message, from both inputs, by one rule
+  (`isGmailAttachmentPart` in `gmail-mail-record.ts`): a part with a file
+  name, a forwarded message (`message/rfc822`), and any other non-text part
+  (an inline picture, an invite), named by file name, else content id, else
+  type and part; never a multipart, and never the message's own plain or
+  HTML text. A forwarded message's own parts are children too (its parts
+  under its path, `P.0`, `P.1`, …, on both inputs; how Gmail numbers inside a
+  forward is not yet checked against a real mailbox), to a depth of 8, and
+  its text is its own child's, never the message's body. Its id is
+  `<message>#child:<part path>` (`core/child-item-id.ts`; the whole-message
+  part is `root`), the part path both inputs compute alike for one message
+  (Gmail's `partId`; the export's own MIME tree, `archive-import/mbox/mime-parts.ts`),
+  never a file name. A child carries its name, type and size, the parent's
+  sender and date, and its own tier judgment; it follows its parent's
+  deletions (child visibility, as every child does). Every child is held
+  until it is judged (`holdContentUntilJudged`), live and imported alike, so
+  its text is never served before its own judgment. Live listing keeps a message and its attachments within
+  the item budget, can resume inside one message's attachments, and resumes a
+  cut-short page after the last message it handled, by id (`after`). A child
+  listed with `deferredBytes` is always deferred to extraction, whatever the
+  lane's sync option, and its tier set places its names now and its text when
+  it lands (`gmailContentArrivesLater`).
+- **Mail stored before children.** A one-time, resumable backfill
+  (`backfillChildren` in `gmail-live-sync.ts`, the scheduler task
+  `gmail.email_children_backfill_v1`) walks the stored messages of this
+  account that hold content, name an attachment in their search text and
+  have no child row, asks Gmail for each message once (at most 20 a pass,
+  under the same day budget and approval check), and stores its children as
+  the live lane does, under the current mail scope; bodies are not rewritten.
+  A pass stopped by the budget or a changed approval keeps its place; once
+  both stores hold no such message it is done for good. Imported messages
+  (`mbox-` ids) are not backfilled: they were imported with children.
+- **Reading attachments** (`google-connectors/gmail-attachment-extraction.ts`).
+  One extraction roster entry over the Gmail stores (a corpus per legacy
+  store, Private and Personal, the Private one listing the Public store too),
+  with one reader for both locators. Each locator is bound to its child: it
+  names the message and the part, and a read for any other child fails
+  closed. `gmail-part1:<message>:<part>` reads through the Gmail lane's
+  connector under the current mail scope. The approval is checked again
+  before every HTTP attempt, a retry after a backoff included. The message
+  is checked against the scope as it is now: fetched whole the first time,
+  and by a fresh metadata read (labels and sender) before each later part of
+  the same message. A parent now outside the scope is refused, and its child
+  keeps its names only; one deleted in Gmail is not found. The part's
+  declared size is checked before its bytes are asked for and its decoded
+  size after (an understated part is too large), under the lane's day budget.
+  `mbox-part1:<import>:<file>:<offset>:<digest>:<message>:<part>` reads from
+  the import's own approved files (`archive-import/mbox/part-reader.ts`: the
+  folder and every file the versions imported; the message at the offset
+  must have the bytes the import recorded there, by the digest of their
+  SHA-256, whatever form the parent's id takes, and be the named parent; the
+  part bounded before it is decoded; only for an import joined to Gmail and
+  not being removed). A forwarded message is read as its headers and text.
+  Before a child's bytes are fetched, and again before its text is accepted,
+  the child must still be there and its parent visible (child visibility);
+  a queued read of a child whose parent was deleted meanwhile is closed and
+  its text dropped. The product keeps one live reader per account and
+  approval revision for up to five minutes, so a message's body is fetched
+  once for all its parts. **Follow-up:** a child live listed first
+  keeps only its live locator when an import later brings the same message
+  (intake skips the same version), so once live Gmail is disconnected its
+  bytes wait although the import holds them; a second locator per child, or
+  an index from message to its place in the import, would let the import
+  serve it. Only children are
+  candidates. A readable attachment's text is read, held, judged and stored
+  like any file's; one over the readers' limits keeps its names and is listed
+  as a file Olympus could not read. The Gmail source (live, or the one with no
+  sync of its own) runs the lanes.
 - **Release check.** The import-beside-live case is
   `GMAIL_TAKEOUT_FIXTURES` in `scripts/release-check/archive-fixtures.ts`
   (`SOURCE_INPUT_FORMATS`), run through the product by
