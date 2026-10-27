@@ -278,7 +278,9 @@ describe('Telegram connector-store operational surfaces', () => {
       expect(second.warnings).toContain(TELEGRAM_TRUST_CONFLICT_WARNING);
 
       expect(fixture.stores.internal.status().counts.items).toBe(1);
-      expect(fixture.stores.internal.status().counts.tombstonedItems).toBe(1);
+      // The internal copy is moved up by the tier move (superseded, its text purged once the protected copy
+      // is verified), never deleted first: the searches below prove it is served from the protected lane only.
+      expect(fixture.stores.internal.localContent(`${ACCOUNT}:reclassified:9`)?.chunks.join(' ') ?? '').toBe('');
       expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
 
       const worker = createWorker(fixture.stores);

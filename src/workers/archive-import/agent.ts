@@ -167,7 +167,7 @@ export interface ArchiveImportAgentDeps {
  */
 export const ARCHIVE_AGENT_COPY = {
   invalidPath: 'Give the full path of the file or folder, starting with /. Olympus does not look at it until the person approves.',
-  tooMany: 'Too many requests are already waiting for the person. Ask them to answer the ones under Archives on their computer\'s dashboard first.',
+  tooMany: 'Too many requests are already waiting for the person. Ask them to answer the ones under Other archives on their computer\'s dashboard first.',
   archivesUnreadable: 'Olympus cannot read its list of imported archives right now, so it cannot tell what is imported. Nothing was deleted. Ask the person to open Archives on their computer\'s dashboard and choose See why.',
   requestsUnreadable: 'Olympus cannot read its list of imports waiting for an answer right now, so it did not record the request. Ask the person to open Archives on their computer\'s dashboard and choose See why.',
   unknownArchive: 'No archive with that id is imported. Call archive_import with status to list them.',

@@ -152,12 +152,12 @@
     "requested_on": "2026-10-13",
     "reason": "Linux anonymous-answer activation, unavailable wording, launcher installation recovery, and the corrected API-key step await owner acceptance. The missing-route Add zkAPI box now precedes the turn-on card and awaits owner acceptance.",
     "rendered_states_sha256": {
-      "available": "9e86b4360b1e2fe23382ab2395c051125355657982645cca65d348b917da5643",
-      "unavailable": "ccad7f449df39097dabccaaa428cc686ed1e3be289155aaa548597f18886b1f6",
-      "missing": "bcc01f801773abdfe427598454098a64e50522fd4501834a0630bff9be38b5f0",
-      "outdated": "49f24288ec5feb1512a6fc00dae65cd602c5b47b38c84a7c2cf6fdeb835cf617",
-      "system": "89267fa6efdb3bc6998c62a830543fa6ae74f9e0723666330fa11ad2b5d10583",
-      "configured": "95bf8d3b21c0186a06a63ae767585f2440a66de2bfb1a913c7d294c6c3a598c7"
+      "available": "988506190b185faebd836471a93ee689fd3a0a1811de57aa48f5b3e69e296607",
+      "unavailable": "c6d0b35b9e83d24106e6fa1809f85279b35dff52bd7a41a4f0904562192f30e5",
+      "missing": "6261ec4e92de826e4691669739fb917947c906517201410e802b4f61f3d25b31",
+      "outdated": "9cfcd53ae6a6af4838be265934795268bd50a5f2e44c02a07915a65b7d3e9ed5",
+      "system": "b5f97c798d8e01e439c81afb3d5af69c706b1d56d3a817de22aec326bfc5f9af",
+      "configured": "309d7046bf6809eca1aa8109bc44b16333780033de9b7ddddcd91802a951f04e"
     }
   }
 }
