@@ -401,9 +401,13 @@ type fakeDownloader struct {
 	calls int
 }
 
-func (f *fakeDownloader) Download(_ context.Context, _ whatsmeow.DownloadableMessage) ([]byte, error) {
+func (f *fakeDownloader) DownloadMediaWithPathToFile(_ context.Context, _ string, _, _, _ []byte, _ whatsmeow.MediaType, _ string, _ bool, file whatsmeow.File) error {
 	f.calls += 1
-	return f.bytes, f.err
+	if f.err != nil {
+		return f.err
+	}
+	_, err := file.Write(f.bytes)
+	return err
 }
 
 func TestChatDisplayNameKeepsPhoneJIDContactPath(t *testing.T) {
@@ -441,10 +445,8 @@ func TestRecordFromMessageDownloadsAudioAndKeepsRetryFields(t *testing.T) {
 	dir := t.TempDir()
 	downloader := &fakeDownloader{bytes: []byte("voice-bytes")}
 	store := &audioMediaStore{
-		dir:          filepath.Join(dir, "media", "audio"),
-		maxFileBytes: audioMediaMaxFileBytes,
-		quotaBytes:   audioMediaQuotaBytes,
-		downloader:   downloader,
+		dir:        filepath.Join(dir, "media", "audio"),
+		downloader: downloader,
 	}
 
 	rec, ok := recordFromMessage(context.Background(), nil, store, audioEvent("voice:1", audioMessage(10)))
@@ -489,36 +491,27 @@ func TestRecordFromMessageDownloadsAudioAndKeepsRetryFields(t *testing.T) {
 	}
 }
 
-func TestRecordFromMessageTooLargeAudioSkipsDownloadButKeepsSpoolRecord(t *testing.T) {
-	downloader := &fakeDownloader{bytes: []byte("should-not-download")}
+// Every piece of media is kept (owner, 2026-10-26): a voice note said to be huge is downloaded like any other.
+func TestRecordFromMessageDownloadsAudioWhateverItsStatedSize(t *testing.T) {
+	downloader := &fakeDownloader{bytes: []byte("a long voice note")}
 	store := &audioMediaStore{
-		dir:          filepath.Join(t.TempDir(), "media", "audio"),
-		maxFileBytes: 5,
-		quotaBytes:   audioMediaQuotaBytes,
-		downloader:   downloader,
+		dir:        filepath.Join(t.TempDir(), "media", "audio"),
+		downloader: downloader,
 	}
-
-	rec, ok := recordFromMessage(context.Background(), nil, store, audioEvent("voice-2", audioMessage(6)))
-	if !ok {
-		t.Fatal("expected oversized audio to degrade to a spool record")
+	audio := audioMessage(8 * 1024 * 1024 * 1024)
+	rec, ok := recordFromMessage(context.Background(), nil, store, audioEvent("voice-2", audio))
+	if !ok || downloader.calls != 1 || rec.DownloadStatus != "ok" || rec.MediaPath == "" {
+		t.Fatalf("record = %#v, calls = %d", rec, downloader.calls)
 	}
-	if downloader.calls != 0 {
-		t.Fatalf("Download calls = %d, want 0", downloader.calls)
-	}
-	if rec.DownloadStatus != "too_large" || rec.MediaPath != "" || rec.MediaSizeBytes != 6 {
-		t.Fatalf("unexpected oversized fields: %#v", rec)
-	}
-	if rec.MediaKey == "" || rec.MediaDirectPath == "" {
-		t.Fatalf("expected retry fields on oversized record: %#v", rec)
+	if rec.MediaSizeBytes != int64(len(downloader.bytes)) {
+		t.Fatalf("size = %d, want the bytes received", rec.MediaSizeBytes)
 	}
 }
 
 func TestRecordFromMessageFailedDownloadKeepsMetadataOnlyRecord(t *testing.T) {
 	store := &audioMediaStore{
-		dir:          filepath.Join(t.TempDir(), "media", "audio"),
-		maxFileBytes: audioMediaMaxFileBytes,
-		quotaBytes:   audioMediaQuotaBytes,
-		downloader:   &fakeDownloader{err: errors.New("network unavailable")},
+		dir:        filepath.Join(t.TempDir(), "media", "audio"),
+		downloader: &fakeDownloader{err: errors.New("network unavailable")},
 	}
 
 	rec, ok := recordFromMessage(context.Background(), nil, store, audioEvent("voice-3", audioMessage(4)))
@@ -533,46 +526,24 @@ func TestRecordFromMessageFailedDownloadKeepsMetadataOnlyRecord(t *testing.T) {
 	}
 }
 
-func TestAudioMediaStoreEvictsOldestFilesWithinQuota(t *testing.T) {
+// Nothing is evicted: media saved earlier stays however much there is.
+func TestAudioMediaStoreKeepsEveryEarlierFile(t *testing.T) {
 	dir := t.TempDir()
 	audioDir := filepath.Join(dir, "media", "audio")
 	if err := os.MkdirAll(audioDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	old1 := filepath.Join(audioDir, "old-1.ogg")
-	old2 := filepath.Join(audioDir, "old-2.ogg")
-	if err := os.WriteFile(old1, []byte("1111"), 0o600); err != nil {
+	old := filepath.Join(audioDir, "old-1.ogg")
+	if err := os.WriteFile(old, []byte("1111"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(old2, []byte("2222"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	if err := os.Chtimes(old1, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(old2, now.Add(-1*time.Hour), now.Add(-1*time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	store := &audioMediaStore{
-		dir:          audioDir,
-		maxFileBytes: audioMediaMaxFileBytes,
-		quotaBytes:   8,
-		downloader:   &fakeDownloader{bytes: []byte("33333")},
-	}
-
+	store := &audioMediaStore{dir: audioDir, downloader: &fakeDownloader{bytes: []byte("33333")}}
 	rec := store.capture(context.Background(), "15551234567@s.whatsapp.net", "new-voice", audioMessage(5))
 	if rec.DownloadStatus != "ok" {
 		t.Fatalf("capture status = %q, want ok", rec.DownloadStatus)
 	}
-	if _, err := os.Stat(old1); !os.IsNotExist(err) {
-		t.Fatalf("oldest file still present or stat failed with non-not-exist error: %v", err)
-	}
-	if _, err := os.Stat(old2); !os.IsNotExist(err) {
-		t.Fatalf("second-oldest file still present or stat failed with non-not-exist error: %v", err)
-	}
-	if _, err := os.Stat(rec.MediaPath); err != nil {
-		t.Fatalf("new protected media file missing: %v", err)
+	if _, err := os.Stat(old); err != nil {
+		t.Fatalf("earlier media was removed: %v", err)
 	}
 }
 
@@ -584,10 +555,8 @@ func audioEventInChat(chat types.JID, id string, audio *waE2E.AudioMessage) *eve
 
 func newTestAudioStore(dir string, downloader *fakeDownloader) *audioMediaStore {
 	return &audioMediaStore{
-		dir:          dir,
-		maxFileBytes: audioMediaMaxFileBytes,
-		quotaBytes:   audioMediaQuotaBytes,
-		downloader:   downloader,
+		dir:        dir,
+		downloader: downloader,
 	}
 }
 
@@ -1385,10 +1354,8 @@ func captureThroughHandler(t *testing.T, allowed map[string]struct{}, downloader
 	writer := newSpoolWriter(spoolDir)
 	go writer.run()
 	audio := &audioMediaStore{
-		dir:          mediaDir,
-		maxFileBytes: audioMediaMaxFileBytes,
-		quotaBytes:   audioMediaQuotaBytes,
-		downloader:   downloader,
+		dir:        mediaDir,
+		downloader: downloader,
 	}
 	for _, evt := range incoming {
 		handleEvent(context.Background(), nil, audio, writer, make(chan string, 1), nil, allowed, evt)

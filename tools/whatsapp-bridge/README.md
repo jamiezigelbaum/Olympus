@@ -14,7 +14,9 @@ WhatsApp's terms do not allow third-party clients, and accounts have been
 banned for using them. The owner reviewed and **explicitly accepted this risk**
 (2026-06). Mitigations baked into the daemon: it is strictly receive-only —
 no message sends, no read receipts beyond protocol minimums, no presence
-broadcasting, no control surface (no sockets, no HTTP, no IPC). If WhatsApp
+broadcasting, and one local control only: an owner-only Unix socket that
+answers Olympus's media downloads (`media_serve.go`) and nothing else (no
+HTTP, no other IPC). If WhatsApp
 logs the device out, the daemon exits and waits to be re-paired; it never
 retries in a way that looks like automation.
 
@@ -75,7 +77,27 @@ Non-text payloads add `"media_type":"image"` (or
 `video`, `audio`, `document`, `sticker`, `contact`, `location`, `poll`,
 `reaction`, `event`, `video_note`). A photo, video, video note or document
 carries its caption as `"text"` (empty when it has none, and on every other
-media type). Only the newest spool file ever grows;
+media type).
+
+Voice notes, pictures, videos and video notes are saved in the state dir's
+`media/audio`, `media/images` and `media/video`, whatever their size, with no
+quota: every piece of media is kept. Each download streams into a temp file,
+never into memory. The one safeguard is the computer's: below a free-space
+floor on the volume (the larger of 5 GB and 5% of it) no download starts and
+a running one stops; the message is still spooled with `"download_status":
+"waiting_for_disk"` and what a later download needs, and the bridge keeps
+nothing else. Olympus fetches the media itself once it has judged that
+message version not Secret. It calls the bridge's one local socket (named in
+`media-download.json` in the state dir), which answers the bytes, decrypted
+in an unnamed temp: the bridge writes no file and keeps no state for it.
+While a download runs, it sends a bare newline every 30 seconds. A download
+is never cut for its length, only after 5 minutes without writing.
+`capture-status.json` says `"media_waiting_for_disk": true` while media waits
+below the floor. A saved file's line carries `media_path`, `media_mime` and
+`download_status`. Olympus reads a saved picture or video as its message's
+child, and deletes it when the picture is judged Secrets.
+
+Only the newest spool file ever grows;
 the daemon fsyncs after every batch. `session.db` holds the device keys —
 treat the whole state dir as secret (`0700`).
 
@@ -205,9 +227,9 @@ replaced, spool write failure) — the daemon is deliberately crash-only.
   collapse harmlessly.
 - Group chats spool with an empty `chat_name` (resolving group subjects would
   need live metadata queries; the connector falls back to the chat JID).
-- Audio messages are downloaded into the private bounded local media cache for
-  the local transcription lane. Other media keeps metadata only; no media or
-  message content leaves the host through this bridge.
+- Voice notes, pictures and videos are downloaded into the private local media
+  folders (above); no media or message content leaves the host through this
+  bridge.
 
 New pairings advertise the linked-device name **Olympus Plugin** using the desktop device type.
 

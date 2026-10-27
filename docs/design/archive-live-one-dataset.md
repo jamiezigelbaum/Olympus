@@ -331,6 +331,9 @@ Each source's Import an archive appears as its step registers it.
 7. Reflect, Roam, Evernote: their own sources, assets as children (built,
    see "Built, step 7").
 8. Live Telegram media and live WhatsApp images and video, so both
+   inputs bring the same media. WhatsApp part built (see "Built, step 8:
+   WhatsApp").
+
    inputs bring the same media. Telegram's part built (see "Built, step 8:
    Telegram"); reading the kept bytes waits for a Telegram extraction roster.
 
@@ -690,12 +693,13 @@ The WhatsApp chat export is an input of the WhatsApp connector
 - **Notices** from WhatsApp itself stay left out (owner).
 - **Media** become children (section 5), keyed `media` as live capture keys
   its own, so a picture both inputs bring is one child; a child that can be
-  read brings content, so a later export (or live capture) with the bytes
-  fills one an earlier export left out. Reading them is the shared reader
-  of an input's media (`archive-import/input-media.ts`: a folder binding or a
-  zip member by its place, served only while the import is an input of a
-  source and not being removed); wiring it into WhatsApp's extraction is
-  step 8's.
+  read brings content, so a later record of the same message with the bytes
+  fills one that could not be read. A file one export left out is never
+  guessed to be one a later export has (they are different messages by
+  content). Reading them is the shared reader of an input's media
+  (`archive-import/input-media.ts`: a folder binding or a zip member by its
+  place, served only while the import is an input of a source and not being
+  removed), wired into WhatsApp's extraction in step 8.
 - **Account.** An export names no account: it joins the source's account at
   the owner's confirmation in the import sheet, or creates it, or stays
   under Archives by the owner's choice. WhatsApp has no exclusive runner:
@@ -707,6 +711,146 @@ The WhatsApp chat export is an input of the WhatsApp connector
   the beside case expects the imported word in the Private store only and
   no search answer carrying it through the drain bound (`search:
   'withheld'`), where Telegram's, judged like its own, is cited.
+
+## Built, step 8: WhatsApp
+
+Live WhatsApp pictures and videos are children of their message, as an
+export's media are (section 5).
+
+- **The bridge saves them all** (`tools/whatsapp-bridge`; owner's ruling,
+  2026-10-26: every message and every piece of media is ingested): pictures
+  in `media/images` and videos and video notes in `media/video` of its state
+  folder, beside the voice notes, with no size bound, no quota and no
+  eviction. A download streams into a temp (`DownloadMediaWithPathToFile`,
+  never whatsmeow's `Download`, which reads it all into memory). The one
+  safeguard is the computer's own: a free-space floor on the volume, the
+  larger of 5 GB and 5% of it (`media_waiting.go`). Below it no download
+  starts, and one running stops (the temp writer checks as it writes); the
+  message is still spooled, its media `waiting_for_disk`, with what a later
+  download needs on the line (where the media is, its keys and hashes, its
+  type and size). That line is the only record: the bridge keeps no list of
+  waiting media. The owner decided that Olympus fetches it (2026-10-26):
+  "Olympus asks the bridge for the exact message version, receives the
+  bytes into its own folder, re-checks the judgment before indexing, and
+  keys everything by version". See Secrets below. The bridge answers that
+  one local call (`media_serve.go`): an owner-only Unix socket named in
+  `media-download.json` in its state folder, which does nothing but
+  download. It decrypts into an unnamed temp, so it writes no file and
+  keeps no state; below the floor it answers a passing failure. While media
+  waits below the floor, the capture status says so (no count), as does
+  Olympus's own pass, and the card shows "media waiting for disk space"
+  with what to do. Every temp has one name,
+  `.olympus-media-<pid>-<boot>-<stem>-*.tmp` (boot: this boot's nonce, since
+  a pid is unique only within a boot): removed on every failure, and swept
+  at start and before Secrets clearing when its writer is gone (pid dead, or
+  of another boot). A live writer's temp is never swept, however long its
+  download stalls; only an older build's temp is judged by age (30
+  minutes). Olympus finds temps in every media folder, the kind folders
+  inside a folder account's media root included, through one walk shared by
+  the sweep and a message's cleanup (`media_files.go`, `live-connector.ts`).
+- **The connector lists them** (`live-connector.ts`, `childrenOf`): a
+  picture, video or video note line is its message (its caption, or its
+  names alone) with the file as a child keyed `media`, located by
+  `whatsapp-media-file:v1:<path>`. The saved file is the child's to read,
+  never the message's metadata. A file the bridge could not save is a child
+  that cannot be read, so a later line with the bytes fills it. Voice notes
+  keep their one row and transcript. Every media child, live or imported,
+  is held Private until its own judgment (`holdContentUntilJudged`,
+  child-items.md "WhatsApp media").
+- **One child reader** (`child-media.ts`): a saved file is read only when
+  it really lives under one of the account's media folders (a spool line is
+  data and must never name another file): opened once without following a
+  link at the end, proved to be that file (device and inode), and read from
+  that descriptor only, never past what the file held when it was checked
+  or the caller's own bound (there is no content cap). An export's file is read only
+  while its import serves it. The connector's `fetchItem`, the live pull and the
+  extraction source (`extraction-factory.ts`, built by the runtime and, with
+  the archive imports, by the engine) read children through it, by the
+  locator the store keeps at the child's version. Extraction lists them
+  across the lane's tier stores (WhatsApp is in the engine's extraction tier
+  sets), so a child routed out of the Private store is still read and
+  judged.
+- **Media folders** (`defaultWhatsAppMediaRoots`): the account's media
+  folder (or, in the older layout, the audio folder) and the bridge's
+  picture and video folders beside it.
+- **Secrets.** Saved media follows the judgment of what it is part of.
+  Media that waited for disk space is fetched by Olympus alone
+  (`media-fetch.ts`).
+  - **Recording.** The listing tells Olympus of each waiting line as it
+    reads it, before the pull commits past it. Olympus keeps it as a row
+    keyed by the message and its version digest, with the line's place in
+    the spool (`media-fetch.sqlite`, beside the spool index).
+  - **Each message, in the pull after the clearing:**
+    1. The message is stored at the row's version. Neither it nor its
+       media child is Secret there: each is stored at that version, not
+       hidden, and not judged Secret since. The names of both are settled,
+       and the disk has room. An uncaptioned picture qualifies.
+    2. Olympus asks the bridge for that version's media and receives the
+       bytes into `<stem>~<version digest><ext>.part` in its own folder
+       (`media/olympus`), fsynced.
+    3. It checks step 1 again. On a Secret or another version the part is
+       deleted; otherwise it is renamed and the folder fsynced.
+    4. The file is read into the stored item through the connector's own
+       record builder (`mediaFill`), from the version's own spool line. That
+       fills the picture's or video's child, or the voice note itself, and
+       nothing else: no caption goes out this way. Extraction and judgment
+       follow as for any media.
+
+    Each fill is fenced, one item at a time, under the ledger's write hold
+    (`TierLedger.holdingWrites`): step 1 is checked, the fill alone is synced
+    (no embedding and no other settlement; writes a cut-off pass owes and
+    the orphaned-children sweep run before the hold), and step 1 is checked
+    again. A decision another process makes waits for
+    the hold. One this process makes meanwhile is seen by the last check,
+    which takes the fill back at once. A row is done only once the stores
+    are seen to hold the file at that version, so a fill a sync did not land
+    is filled again. A line read again (a replay, or a recovered spool)
+    gives the row its new place; a done version asks nothing again. The
+    bridge sends a bare newline while a download runs: Olympus gives up
+    only on a call that stalls, and never on one for its length.
+  - **Take-back, every pass.** A row whose message is now Secret (the
+    message or its media) is taken back, done rows included. The row is
+    marked first, so a take-back of that version is owed until it is
+    confirmed. The picture's or video's child at that version is made
+    Secret through the one Secrets path (`settleRoutedSecrets`, or
+    `settleLegacySecrets` for a row the set never routed), whether or not the
+    file is still there. Its copies, chunks and embeddings go, and the side
+    stores forget it. Only once the child is confirmed Secret, with no active
+    copy of that version anywhere, is its file deleted and the folder
+    fsynced; the row is forgotten last.
+
+    A take-back cut off anywhere is taken up again by the next pass, but only
+    for that version and only while a Secret still covers it. A Secret
+    cleared meanwhile drops the obligation with nothing settled or deleted. A
+    newer version stored meanwhile is never touched; only the old version's
+    file goes. A legacy settlement cut off after its tombstones resumes from
+    the Secret location it recorded first. Without a location index, the
+    decision is written before any tombstone, so leftover copies are
+    finished on retry.
+
+    A row stored at another version, or whose message is gone, loses its
+    file and is forgotten. A file no row names is deleted. The clearing
+    deletes a fetched copy whose media is judged Secret too, and every
+    Secret deletion fsyncs its folder. Fetched media is stricter than saved
+    media: a Secret caption keeps a live-saved picture but takes a fetched
+    one back.
+- **Reading large media.** Keeping every file does not mean reading every
+  file into memory: the extraction source hands a file reader the media as
+  a file (`fetchFile`), copied a chunk at a time from the descriptor the
+  confinement check opened. A
+  picture or video is judged as its own child (`<id>#child:media`): when it
+  is Secrets, its file, every temp of it (by the message's file stem), its
+  path and its re-download keys go, whatever the caption's judgment; a
+  Secret caption alone leaves the picture. A file or temp that cannot be
+  removed (anything but its being gone already) fails that line's clearing:
+  the keys stay, the pull reports the failure, and the next pull tries
+  again. A voice note or document is the
+  message, so its media goes with the message's judgment. A file is deleted
+  only under the media folders and only when no other message names it.
+- **Residual (owner's ruling, post-launch).** A captionless picture both
+  live capture and an export bring stays two children, even with identical
+  bytes: a duplicate, never a wrong merge (the strict-match rule of step
+  5). Matching such media by file digest is a follow-up.
 
 ## Built, step 3: Telegram
 

@@ -406,6 +406,7 @@ import {
   type WhatsAppConnectorStoreSyncHandler,
 } from '../whatsapp/index.ts';
 import { createWhatsAppArchiveTarget } from '../whatsapp/archive-target.ts';
+import { whatsAppChildReader, whatsAppExtractionSourceFactory } from '../whatsapp/extraction-factory.ts';
 import { readArchiveInputMedia } from '../archive-import/input-media.ts';
 import { SqliteSourceDashboardHistory, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
 import type { DashboardPanelTools } from './dashboard-panel-tools.ts';
@@ -3290,6 +3291,11 @@ export async function main(): Promise<void> {
   // live lane open yet (the export creates the account), the import opens the
   // account's stores the way the live lane does.
   let whatsappImportTierSet: TieredStoreSet | undefined = whatsappTierSet;
+  // The account's one child reader: what the bridge saved, and an imported export's files (read at each call: the
+  // archive imports open later in boot).
+  const whatsappArchiveMedia = () => ({ state: archiveImports.state, bindings: archiveImports.media });
+  const whatsappReadChild = whatsAppChildReader(process.env, whatsappArchiveMedia);
+  const whatsappExtraction = whatsAppExtractionSourceFactory(process.env, whatsappArchiveMedia);
   archiveSourceTargets.register(createWhatsAppArchiveTarget({
     env: process.env,
     set: () => {
@@ -3307,7 +3313,7 @@ export async function main(): Promise<void> {
       if (tierSecureEmbeddingProvider) whatsappImportTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
       return whatsappImportTierSet;
     },
-    readChild: (locator, options) => readArchiveInputMedia(locator, { state: archiveImports.state, bindings: archiveImports.media }, options),
+    readChild: whatsappReadChild,
   }));
   const whatsappConnectorStoreSync: WhatsAppConnectorStoreSyncHandler | undefined = whatsappConnectorStore
     ? createWhatsAppConnectorStoreSyncHandler({
@@ -3315,6 +3321,7 @@ export async function main(): Promise<void> {
         store: whatsappConnectorStore,
         account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
         env: process.env,
+        readChild: whatsappReadChild,
       })
     : undefined;
   const whatsappLiveMaxItems = parseOptionalPositiveInteger(
@@ -3542,6 +3549,8 @@ export async function main(): Promise<void> {
     // The Dropbox lane reads and lands text across its tier stores.
     ...(dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set] as const] : []),
     ...(localFilesTierLane ? [[LOCAL_FILES_CORPUS_ID, localFilesTierLane.set] as const] : []),
+    // WhatsApp's media children (and voice notes) are read and land across its tier stores.
+    ...(whatsappTierSet ? [[WHATSAPP_LIVE_CORPUS_ID, whatsappTierSet] as const] : []),
     // Each Drive store's corpus lists its own store (and the Private one the
     // routed-only Public store too).
     ...(googleDriveExtractionTierSet && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
@@ -3669,6 +3678,8 @@ export async function main(): Promise<void> {
           })),
         });
       }],
+      // WhatsApp's media, its children an export brought included.
+      ['whatsapp', ({ config, store, view }) => whatsappExtraction({ config, store, ...(view ? { view } : {}) })],
     ]),
     ...(fileExtractionTierSets.size > 0 ? { tierSets: fileExtractionTierSets } : {}),
     scopeGuard: {
