@@ -50758,6 +50758,7 @@ init_archive_formats();
 init_state();
 
 // src/workers/archive-import/input-media.ts
+init_file_extraction_source();
 init_scope_safe_fs();
 init_media_bindings();
 init_zip_reader();
