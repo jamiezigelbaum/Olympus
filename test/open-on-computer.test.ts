@@ -572,7 +572,7 @@ describe('the Linux link handler', () => {
       program, exec: () => ({ status: 0, stdout: '', stderr: '' }) });
     expect(installed.ok).toBe(true);
     expect(installed.path).toBe(layout.openHandlerPath);
-    expect(readFileSync(layout.openHandlerPath, 'utf8')).toContain(`Exec="${layout.launcherPath}" open %u`);
+    expect(readFileSync(layout.openHandlerPath, 'utf8')).toContain(`Exec=${layout.launcherPath} open %u`);
     expect(existsSync(join(home, 'wrong-data'))).toBe(false);
     expect(() => renderLinuxDesktopEntry(program, '/unsafe\nlauncher')).toThrow();
   });
@@ -593,9 +593,18 @@ describe('the Linux link handler', () => {
     } finally { if (path === undefined) delete process.env.PATH; else process.env.PATH = path; }
   });
 
+  test('xdg-open\'s generic mode finds the program: the first word of Exec is the bare path', () => {
+    // On Hyprland xdg-open takes Exec's first word as written and looks it up; a quoted path is "not found"
+    // there and the link falls through to the browser (release check, test-omarchy canary).
+    const first = /^Exec=(\S+)/m.exec(renderLinuxDesktopEntry(program, '/home/a/.local/bin/olympus'))![1];
+    expect(first).toBe('/home/a/.local/bin/olympus');
+  });
+
   test('the desktop entry passes the link as %u, hidden from menus', () => {
     const entry = renderLinuxDesktopEntry(program);
-    expect(entry).toContain('Exec="/home/a/.bun/bin/bun" --no-env-file "/home/a/olympus/dist/cli.js" open %u');
+    expect(entry).toContain('Exec=/home/a/.bun/bin/bun --no-env-file /home/a/olympus/dist/cli.js open %u');
+    // A path with a space is still one quoted argument.
+    expect(renderLinuxDesktopEntry({ ...program, entryPath: '/home/a/my olympus/dist/cli.js' })).toContain('--no-env-file "/home/a/my olympus/dist/cli.js" open %u');
     expect(entry).toContain('Path=/home/a/olympus\n');
     expect(renderLinuxDesktopEntry({ ...program, workingDirectory: '/opt/olympus' })).toContain('Path=/opt/olympus\n');
     expect(() => renderLinuxDesktopEntry({ ...program, workingDirectory: '/opt/$HOME' })).toThrow();

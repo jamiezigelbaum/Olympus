@@ -230,10 +230,15 @@ describe('the Privacy screen', () => {
     expect(text).toContain('12 items are waiting to be checked on your computer.');
     // Nothing to save yet: Save is inactive. A change makes it the one accent; Cancel is quiet.
     expect(host.button(W.save).disabled).toBe(true);
+    // ...and says why beside it (release check: a disabled Save that said nothing).
+    expect(host.doc.getElementById('privacy-save-reason')?.textContent).toBe(W.nothingToSave);
+    expect(host.button(W.save).getAttribute('aria-describedby')).toBe('privacy-save-reason');
     expect(host.doc.querySelectorAll('.btn.primary')).toHaveLength(0);
     area.value = `${DESCRIPTION} and more`;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
     expect(host.button(W.save).disabled).toBe(false);
+    expect(host.doc.getElementById('privacy-save-reason')).toBeNull();
+    expect(host.button(W.save).hasAttribute('aria-describedby')).toBe(false);
     const primary = Array.from(host.doc.querySelectorAll('.btn.primary'));
     expect(primary.map((node) => node.textContent)).toEqual([W.save]);
     expect(host.button(W.cancel).className).not.toContain('primary');

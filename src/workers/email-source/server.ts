@@ -2616,12 +2616,13 @@ export async function main(): Promise<void> {
   // `embeddingProvider`: the store's own canonical identity. Omitted, the
   // sibling's (a Public store shares its Personal sibling's cloud identity);
   // null, no embedding lane (the store is served by keyword only).
-  let registerTierLegStore: (
-    store: LocalConnectorStore,
-    siblingCorpusId: string,
-    embeddingProvider?: SourceEmbeddingProvider | null,
-  ) => void = () => {
-    throw new Error('A tier store opened before the source runtime finished wiring its stores.');
+  // A lane can open a tier store while it is being built, before the stores below are wired (its file
+  // already exists at boot, as after Delete indexed data restarts the worker). Such a store waits here and
+  // is registered once wiring finishes; throwing instead left the worker in a crash loop.
+  type TierLegRegistration = [store: LocalConnectorStore, siblingCorpusId: string, embeddingProvider?: SourceEmbeddingProvider | null];
+  const tierLegsOpenedEarly: TierLegRegistration[] = [];
+  let registerTierLegStore: (...registration: TierLegRegistration) => void = (...registration) => {
+    tierLegsOpenedEarly.push(registration);
   };
   const openTierSecretLocations = (account: StorageAccount, secureDbPath: string, label: string): SecretLocationsIndex | undefined => {
     try {
@@ -3869,6 +3870,7 @@ export async function main(): Promise<void> {
       });
     }
   };
+  for (const registration of tierLegsOpenedEarly.splice(0)) registerTierLegStore(...registration);
   // Imported archives: one tier lane per family, adopted like every other
   // lane's, and built only once an archive of that family exists (an install
   // that never imported anything creates no file). Every store is created on

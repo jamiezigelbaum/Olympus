@@ -1238,6 +1238,15 @@ describe('the Private answers page', () => {
     expect(card.querySelector('.pameta')!.textContent).toContain('Left out: Gmail.');
   });
 
+  test('Ask with an empty question sends nothing and says why beside the button', async () => {
+    const page = renderAndRun(() => ({ status: 200, body: { ok: true, status: 'answered', answer: 'never' } }));
+    page.document.querySelector('form[data-pa-ask]')!.dispatchEvent(new page.document.defaultView!.Event('submit', { cancelable: true }));
+    await page.settle();
+    expect(page.posts).toHaveLength(0);
+    expect(page.document.querySelector('form[data-pa-ask] .pareason')!.textContent).toBe('Type a question first.');
+    expect(page.document.activeElement).toBe(page.document.querySelector('form[data-pa-ask] textarea')!);
+  });
+
   test('pending, not-found and error states stay in the question panel; Markdown has a text fallback', async () => {
     for (const reply of [
       { status: 200, body: { ok: true, status: 'not_found', left_out: ['Gmail'] } },
