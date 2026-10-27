@@ -742,7 +742,8 @@ describe('Reflect, Roam and Evernote: import-only sources with cards of their ow
     const evernote = cardRow(page, 'Evernote');
     const button = Array.from(evernote.querySelectorAll('.source-actions button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement;
     expect(button).toBeDefined();
-    // Never twice: the ⋯ menu does not repeat the row's own Import an archive.
+    // Never twice: neither the row (whose fix is the same import) nor the ⋯ menu repeats it.
+    expect(Array.from(evernote.querySelectorAll('.source-actions button')).filter((node) => node.textContent === 'Import an archive')).toHaveLength(1);
     expect(Array.from(evernote.querySelectorAll('.menu-panel button')).map((node) => node.textContent)).not.toContain('Import an archive');
     button.click();
     await settle();

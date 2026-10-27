@@ -39081,7 +39081,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(controls, fixControl({ label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own3.sourceId }, "import:" + id, "plain", true, context2));
       row.className += " has-import";
     }
-    if (fix && !(checking && isSync(fix)))
+    const ownFix = !!own3 && !!fix && fix.archiveImport === true && fix.archiveSource === own3.sourceId;
+    if (fix && !ownFix && !(checking && isSync(fix)))
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context2));
     if (checking)
       add(controls, checkingControl("primary:" + id));

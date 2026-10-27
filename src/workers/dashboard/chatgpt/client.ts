@@ -1171,7 +1171,9 @@ export function chatgptDashboardClient(
       add(controls, fixControl({ label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own.sourceId }, 'import:' + id, 'plain', true, context));
       row.className += ' has-import';
     }
-    if (fix && !(checking && isSync(fix))) add(controls, fixControl(fix, 'primary:' + id, 'plain', true, context));
+    // An import-only source's fix is its own Import an archive, already on the row: never twice.
+    const ownFix = !!own && !!fix && fix.archiveImport === true && fix.archiveSource === own.sourceId;
+    if (fix && !ownFix && !(checking && isSync(fix))) add(controls, fixControl(fix, 'primary:' + id, 'plain', true, context));
     // A press still checking: its button says so, disabled, in the row's place.
     if (checking) add(controls, checkingControl('primary:' + id));
     // The ⋯ menu keeps only secondary actions, never a copy of the row's fix,
