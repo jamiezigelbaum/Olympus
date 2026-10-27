@@ -422,6 +422,7 @@ export type AccountRawName =
   | 'archive-imports.json'
   | 'archive-import-requests.json'
   | 'archive-media-bindings.sqlite'
+  | 'archive-staging'
   | MessagingRawName;
 
 const RAW_OWNER: Readonly<Record<AccountRawName, string>> = {
@@ -430,13 +431,14 @@ const RAW_OWNER: Readonly<Record<AccountRawName, string>> = {
   'archive-imports.json': ARCHIVE_IMPORTS,
   'archive-import-requests.json': ARCHIVE_IMPORTS,
   'archive-media-bindings.sqlite': ARCHIVE_IMPORTS,
+  'archive-staging': ARCHIVE_IMPORTS,
   ...messagingRawOwners(),
 };
 
 /**
  * A file the archive record keeps beside it, wherever the record is (its
  * account folder's `raw/`, or the data folder for a `legacy` account): the
- * import requests and the media bindings.
+ * import requests, the media bindings and the staging copies of dropped files.
  */
 export function archiveStateSiblingPath(statePath: string, name: 'archive-import-requests.json' | 'archive-media-bindings.sqlite' | 'archive-staging'): string {
   return join(dirname(statePath), name);
@@ -479,7 +481,7 @@ export function accountRawPath(
     if (relocated && relocated !== xBookmarksApiUsageDbPath(env)) return `${relocated}.reconcile`;
   } else if (account.layout === 'legacy') {
     if (name === 'watch') return olympusDataPath(env, 'local-files-watch');
-    // The record, the requests and the media bindings sit in the data root.
+    // The record, the requests, the media bindings and the staging copies sit in the data root.
     return olympusDataPath(env, name);
   }
   return join(accountFolder(account, env), 'raw', name);

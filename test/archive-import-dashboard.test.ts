@@ -55,7 +55,7 @@ import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
 import { createArchivePathResolver, createLocalFilesFolderScopeBrowser } from '../src/workers/local-files/scope-browser.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { approveStaged, stageUpload } from './support/stage-upload.ts';
-import { archiveStateSiblingPath } from '../src/core/olympus-layout.ts';
+import { archiveStateSiblingPath, olympusDataRoot } from '../src/core/olympus-layout.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -1164,6 +1164,24 @@ describe('a dropped archive', () => {
     expect(f.dashboard.remove(started.archive_id)).toEqual({ ok: true });
     f.dashboard.view();
     expect(copies(f)).toEqual([]);
+  });
+
+  test('in a legacy layout, deleting the source\'s data takes the copies beside the record, with the worker stopped', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'archive-staging-legacy-')));
+    cleanups.push(() => rmSync(base, { recursive: true, force: true }));
+    const home = join(base, 'home');
+    const env = { HOME: home, XDG_DATA_HOME: join(base, 'xdg') };
+    // A legacy record, readable and empty: its folder is the data root, not an account folder.
+    mkdirSync(olympusDataRoot(env), { recursive: true });
+    writeFileSync(join(olympusDataRoot(env), 'archive-imports.json'), JSON.stringify({ version: 1, archives: [] }));
+    expect(defaultArchiveImportStatePath(env)).toBe(join(olympusDataRoot(env), 'archive-imports.json'));
+    // An upload left when the worker stopped: nothing sweeps it now, so only the lifecycle's own list can find it.
+    const copy = join(archiveStateSiblingPath(defaultArchiveImportStatePath(env), 'archive-staging'), 'upload-1', 'files', 'Takeout.mbox');
+    mkdirSync(dirname(copy), { recursive: true });
+    writeFileSync(copy, mbox([mail(0)]));
+    const result = deleteOlympusDataWithCustody({ sourceId: 'archive.imports', homeDir: home, env, connectedRegistry: { version: 1, handles: [] } });
+    expect(result.removed).toContain(join(olympusDataRoot(env), 'archive-staging'));
+    expect(existsSync(copy)).toBe(false);
   });
 
   test('a folder is imported as one archive from the copy of the whole folder', async () => {

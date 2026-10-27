@@ -2299,6 +2299,7 @@ var init_olympus_layout = __esm(() => {
     "archive-imports.json": ARCHIVE_IMPORTS,
     "archive-import-requests.json": ARCHIVE_IMPORTS,
     "archive-media-bindings.sqlite": ARCHIVE_IMPORTS,
+    "archive-staging": ARCHIVE_IMPORTS,
     ...messagingRawOwners()
   };
   MOUNTED_STORE_FILES = {
@@ -43603,7 +43604,7 @@ function accountFiles(account, context2) {
       files.raw.push(rawPath("watch"));
       break;
     case "archive.imports":
-      files.raw.push(rawPath("archive-imports.json"), rawPath("archive-import-requests.json"));
+      files.raw.push(rawPath("archive-imports.json"), rawPath("archive-import-requests.json"), rawPath("archive-staging"));
       files.rawDatabases.push({ path: rawPath("archive-media-bindings.sqlite"), storeId: ARCHIVE_MEDIA_BINDINGS_STORE_ID });
       break;
     case "x.bookmarks":

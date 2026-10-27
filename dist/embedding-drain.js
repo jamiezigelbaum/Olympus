@@ -1501,6 +1501,7 @@ var init_olympus_layout = __esm(() => {
     "archive-imports.json": ARCHIVE_IMPORTS,
     "archive-import-requests.json": ARCHIVE_IMPORTS,
     "archive-media-bindings.sqlite": ARCHIVE_IMPORTS,
+    "archive-staging": ARCHIVE_IMPORTS,
     ...messagingRawOwners()
   };
   MESSAGING_RAW_NAMES = [
