@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=c221ff2b0673"
+          "resourceUri": "ui://olympus/dashboard?v=8180e495ddd9"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=c221ff2b0673",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=8180e495ddd9",
         "openai/ui": {
           "entrypoints": [
             {
@@ -947,7 +947,7 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=c221ff2b0673",
+      "uri": "ui://olympus/dashboard?v=8180e495ddd9",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },
