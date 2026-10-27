@@ -176,6 +176,7 @@ describe('where the label may go', () => {
       providerItemId: 'm1',
       privateAtAnswer: false,
       layer: 'names',
+      dependency: 'parent_label',
     }]);
   });
 });
@@ -274,7 +275,7 @@ describe('the label in an answer', () => {
 
     const inputs = sink.manifests[0]!.inputs;
     expect(inputs.filter((input) => input.layer === 'names')).toEqual([{
-      corpusId: CORPUS, provider: 'fixture', accountScope: ACCOUNT, providerItemId: 'm1', privateAtAnswer: false, layer: 'names',
+      corpusId: CORPUS, provider: 'fixture', accountScope: ACCOUNT, providerItemId: 'm1', privateAtAnswer: false, layer: 'names', dependency: 'parent_label',
     }]);
     expect(inputs.filter((input) => input.layer === undefined).map((input) => input.providerItemId)).toEqual(['m1#child:p1']);
   });
@@ -410,7 +411,7 @@ describe('what the release check is asked', () => {
       ledger.recordDecision({ ...parent, family: 'email' }, decision('secure', 'secure') as never);
       const posture = { now: 'allow' as 'allow' | 'approval' };
       const check = createReleaseTierCheck(() => [{ ledger, corpusIds: new Set([NAMES_CORPUS]) }], () => posture.now);
-      const names: ReleaseInput = { corpusId: NAMES_CORPUS, ...parent, privateAtAnswer: true, layer: 'names' };
+      const names: ReleaseInput = { corpusId: NAMES_CORPUS, ...parent, privateAtAnswer: true, layer: 'names', dependency: 'parent_label' };
       const wrote = { secureDerivativeDefault: 'allow' as const, includeSecureLocalContent: false };
 
       expect(answerReleaseWithheldReason([{ inputs: [names], constraints: wrote }], check)).toBeUndefined();
