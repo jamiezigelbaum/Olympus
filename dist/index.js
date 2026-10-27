@@ -19678,36 +19678,120 @@ var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
   init_corpus();
 });
+// src/core/source-inputs.ts
+var init_source_inputs = () => {};
+
 // src/workers/connector-store/capture-spool-secrets.ts
+var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES;
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
   init_secrets_disposition();
+  SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
+  SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
+});
+
+// src/workers/connector-store/spool-file-identity.ts
+var SPOOL_IDENTITY_HEAD_BYTES, SPOOL_BOUNDARY_WINDOW_BYTES;
+var init_spool_file_identity = __esm(() => {
+  SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
+  SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
+});
+
+// src/workers/telegram-messages/spool-lines.ts
+var CHUNK_BYTES, hints;
+var init_spool_lines = __esm(() => {
+  init_spool_file_identity();
+  CHUNK_BYTES = 1 << 20;
+  hints = new Map;
+});
+
+// src/workers/archive-import/telegram/message.ts
+var TELEGRAM_MEDIA_KEYS, READ_OBJECTS;
+var init_message = __esm(() => {
+  TELEGRAM_MEDIA_KEYS = new Set([
+    "photo",
+    "file",
+    "media_type",
+    "file_name",
+    "sticker_emoji",
+    "performer",
+    "title",
+    "duration_seconds"
+  ]);
+  READ_OBJECTS = new Set([
+    "contact_information",
+    "location_information",
+    "poll",
+    "todo_list",
+    "invoice_information",
+    "text",
+    "text_entities",
+    "reactions",
+    "inline_bot_buttons"
+  ]);
+});
+
+// src/workers/telegram-messages/record-builder.ts
+var init_record_builder = __esm(() => {
+  init_capture_spool_connector();
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts
-var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID;
+var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID, MAX_READ_BYTES, MAX_RECORD_BYTES, MAX_TAIL_SCAN_BYTES, SERVICE_FIELDS;
 var init_capture_spool_connector = __esm(() => {
   init_olympus_layout();
   init_source_placement();
+  init_source_inputs();
   init_capture_spool_secrets();
   init_corpus_adapter4();
+  init_spool_lines();
+  init_message();
+  init_record_builder();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
     secure_local: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_secure_local`
   };
   TELEGRAM_TRUST_EVICTION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_eviction`;
   TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
+  MAX_READ_BYTES = 64 * 1024 * 1024;
+  MAX_RECORD_BYTES = 32 * 1024 * 1024;
+  MAX_TAIL_SCAN_BYTES = 16 * 1024 * 1024;
+  SERVICE_FIELDS = new Set([
+    "title",
+    "new_title",
+    "members",
+    "duration_seconds",
+    "duration",
+    "discard_reason",
+    "period",
+    "amount",
+    "currency",
+    "boosts",
+    "inviter"
+  ]);
+});
+
+// src/workers/telegram-messages/protection-claims.ts
+var init_protection_claims = __esm(() => {
+  init_tier_move();
+  init_capture_spool_connector();
+  init_record_builder();
 });
 
 // src/workers/telegram-messages/store-sync.ts
+var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY;
 var init_store_sync = __esm(() => {
   init_source_placement();
+  init_spool_file_identity();
   init_source_storage();
   init_tiered_store_set();
+  init_record_builder();
+  init_protection_claims();
   init_capture_spool_secrets();
   init_capture_freshness();
   init_corpus_adapter4();
   init_capture_spool_connector();
+  TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
 });
 
 // src/workers/telegram-messages/index.ts
@@ -30266,11 +30350,11 @@ async function consultVocabularyCheck(deps) {
   const bundledAltered = status.some((entry) => entry.origin === "shipped" && entry.state !== "verified" && entry.state !== "missing");
   const bundledMissing = status.some((entry) => entry.origin === "shipped" && entry.state === "missing");
   const userPacks = status.filter((entry) => entry.origin === "user" && entry.state !== "verified").map((entry) => entry.id);
-  const hints = [
+  const hints2 = [
     bundledAltered ? "A bundled vocabulary pack does not match its pinned hash or cannot be read: the installed package is not intact. Reinstall Olympus to restore assets/consult/vocabulary/." : bundledMissing ? "A bundled vocabulary pack is missing, so the consult gate would refuse every question. Reinstall Olympus to restore assets/consult/vocabulary/." : undefined,
     userPacks.length > 0 ? `The optional language pack${userPacks.length === 1 ? "" : "s"} ${userPacks.join(", ")} ${userPacks.length === 1 ? "is" : "are"} not installed or not intact, so words in that language stay refused. Install ${userPacks.length === 1 ? "it" : "them"} with scripts/install-consult-language-pack.ts (de or it) from an Olympus checkout.` : undefined
   ].filter((part) => part !== undefined);
-  const hint = hints.length > 0 ? hints.join(" ") : undefined;
+  const hint = hints2.length > 0 ? hints2.join(" ") : undefined;
   return {
     name,
     ok: !integrityFailure,
@@ -31026,8 +31110,8 @@ function ingestionHealthStateFromLedger(ledger) {
   return { generated_at: ledger.generated_at, sources };
 }
 function ingestionHealthHint(ledger) {
-  const hints = ledger.rows.map((row) => row.ingestion_health.drain.hint).filter((value) => typeof value === "string" && value.trim().length > 0);
-  return hints[0];
+  const hints2 = ledger.rows.map((row) => row.ingestion_health.drain.hint).filter((value) => typeof value === "string" && value.trim().length > 0);
+  return hints2[0];
 }
 async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
   try {
