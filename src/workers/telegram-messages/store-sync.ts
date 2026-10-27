@@ -783,9 +783,9 @@ function telegramSyncReceipt(
     spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
     spool_cursor_resets: cursorResets,
     trust_claims_moved: trustClaimsMoved,
-    capture_quiet: quiet ? 1 as const : 0 as const,
     media_disk_low: mediaDiskLow ? 1 as const : 0 as const,
-    ...captureFreshnessCounts(capture),
+    // The shared counts state quiet and stopped; this feed's quiet comes from its heartbeat.
+    ...captureFreshnessCounts({ ...capture, quiet }),
   };
   const warnings = [
     ...(malformedRecords > 0 ? [TELEGRAM_MALFORMED_SPOOL_WARNING] : []),

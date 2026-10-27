@@ -66,10 +66,14 @@ runs so it never moves the live cursor; its findings; its progress; and, for
 an archive, the import record with a Stop control. Stopping keeps what was
 imported.
 
-A source with no live connector (Reflect, Roam, Evernote), mail that matches
-no Gmail account, and an archive of a different account than the connected
-one stay under Archives as today (`archive.imports`, one account scope per
-import), with their Remove.
+Mail that matches no Gmail account, and an archive of a different account
+than the connected one, stay under Archives as today (`archive.imports`, one
+account scope per import), with their Remove; the dashboard shows them under
+Other archives. A source with no live connector (Reflect, Roam, Evernote) is a
+source of its own on the dashboard, with its own card listing its imports
+(step 7), and its imports are stored the same way, under `archive.imports`
+with their Remove, as [source storage](source-storage.md) keeps archive-only
+formats.
 
 ### 2. Intake: one version per item, chosen before judging
 
@@ -120,15 +124,16 @@ unchanged.
   marked form (users positive, basic groups `-id`, supergroups and channels
   `-100id`, from the export's chat type) and the message id, so its record
   has the live item's key.
-- **Gmail:** exact where the export carries the Gmail id (Takeout, to
-  verify). Otherwise a message is the live item whose `Message-ID`, `Date`,
-  `From` and `Subject` all agree, and its own item when none or several do.
-  Two mails that agree on all four (a list resend) are taken as one, a
-  residual this rule accepts. Live Gmail adds `Message-ID` to the headers it
-  requests; when an mbox of the connected account is imported, a bounded
-  background pass reads it for mail already stored (one metadata read per
-  message, within the provider budget), and matching waits for the pass to
-  finish.
+- **Gmail:** exact where the export carries the Gmail id (Takeout does, on
+  every message: "Built, step 6"). Otherwise a message is the Gmail message
+  whose `Message-ID`, `Date`, `From` and `Subject` all agree, and its own
+  item when none or several do. Two mails that agree on all four (a list
+  resend) are taken as one, a residual this rule accepts. Live Gmail adds
+  `Message-ID` to the headers it requests. A message without the id is
+  looked up in Gmail itself (`rfc822msgid:`, then the four headers of each
+  candidate), under the provider budget and the current mail approval. This
+  replaces the background pass the first draft had, which would have read
+  every stored message's headers into a local index (step 6 explains why).
 - **WhatsApp:** an export has no message ids, so nothing can make it
   certain; this is the closest the data allows. A message's key is its chat,
   its minute, its sender and its text (caption included). The sender is
@@ -200,8 +205,9 @@ steps 4 and 6 below); live connect and pairing record the hash.
 - **Mail:** an mbox with Gmail's own markers (`X-Gmail-Labels`,
   `X-GM-THRID`) and one delivered-to address is a Gmail account, hashed into
   the opaque address label the source binding keeps; matching a connected
-  account needs that label among the account's labels and the owner's
-  confirmation. With no connected account, the account is created with the
+  account needs that label among the account's labels (or none: an account
+  known by immutable labels only) and the owner's confirmation. An account
+  that carries another address is a different account. With no connected account, the account is created with the
   label and a later connect of that address joins it. Absent, mixed or
   conflicting addresses, or no Gmail markers, make it archive mail under
   Archives.
@@ -244,7 +250,7 @@ its own.
 | Stage | Kept | From | Why |
 |---|---|---|---|
 | Reading | chunked streaming, a bound per record and per pass, damage reported as a finding | archive | live Telegram re-reads whole spool files from its cursor each page and fails once the files one read visits pass 768 MB; live WhatsApp scans its whole spool for freshness each pull, with no byte bound; neither prunes |
-| Resume | a cursor bound to its input's version, with named stop codes | archive | a missing Telegram cursor wedges its lane; a WhatsApp cursor whose file vanished silently skips the rest |
+| Resume | a cursor bound to its input's version, with named stop codes | archive | a missing Telegram cursor wedges its lane; a WhatsApp cursor whose file was replaced by a shorter one silently skipped that file's first lines, and one whose file vanished went on with no count (corrected 2026-10-25: the draft said the vanished case skips the rest; it resumes at the next file) |
 | Identity and versions | account, chat and message ids; a version that tracks edits and reactions, with explicit clears | live | archive Telegram ids hash file positions, WhatsApp's hash time, sender, text and occurrence, mbox's the raw message, and versions hash text, so a second export of the same chat would not match |
 | Item text | service messages as items, sender names, forward names, captions | archive (Telegram), new (WhatsApp) | live Telegram's search context left out the chat and sender names the helper records (its explicit search text was the words alone), wrote a service message as an empty item and a forward as a bare flag; the WhatsApp bridge drops captions. Neither Telegram input has a reply's sender name: the export gives only the replied-to message id, as live does (corrected 2026-10-25; this row said "reply names") |
 | Privacy signals | chat id as the folder key, priors, protected floors, owner chat rules | live | archive copies today carry file positions as folder keys, so an owner rule on a chat never reached its imported history |
@@ -276,6 +282,9 @@ ownership and the delete paths do not change.
 
 ## Order
 
+Per-card Import (owner, 2026-10-25): built, see "Built, per-card Import".
+Each source's Import an archive appears as its step registers it.
+
 1. Child items spine (2.1.0, merged).
 2. One-pipeline spine (2.2.0, built, awaiting critical review): connector
    inputs and their cursors, the intake lookup and rule, the hold on the item,
@@ -283,6 +292,9 @@ ownership and the delete paths do not change.
    fixture source that has a live and an archive input (see "Built, step 2").
 3. Live capture fixes from "Best of both", each with its own tests:
    streaming spool reads with bounds, cursor recovery, counted bridge
+   drops, WhatsApp captions, freshness told apart from quiet. WhatsApp part
+   built (see "Built, step 3: WhatsApp").
+
    drops, WhatsApp captions, freshness told apart from quiet. Telegram's
    part built (see "Built, step 3: Telegram"); WhatsApp's in its own lane.
 4. Telegram: the export becomes an input of the Telegram connector (exact
@@ -292,10 +304,17 @@ ownership and the delete paths do not change.
    shared archive-input media reader and the Telegram extraction roster.
 5. WhatsApp: the export becomes an input (counted keys, zone alignment,
    chat joining); the bridge's records carry the contact's saved name.
+6. Mail: live Gmail requests `Message-ID`, and gains attachments as children;
+   mbox of a Gmail account becomes a Gmail input (built, PR #546, see "Built,
+   step 6"; children are built but off until Gmail attachments have a
+   reader).
+7. Reflect, Roam, Evernote: their own sources, assets as children.
+
 6. Mail: live Gmail requests `Message-ID`, with the background pass, and
    gains attachments as children; mbox of a Gmail account becomes a Gmail
    input. After storage's account-identity step.
-7. Reflect, Roam, Evernote: their own sources, assets as children.
+7. Reflect, Roam, Evernote: their own sources, assets as children (built,
+   see "Built, step 7").
 8. Live Telegram media and live WhatsApp images and video, so both
    inputs bring the same media. Telegram's part built (see "Built, step 8:
    Telegram"); reading the kept bytes waits for a Telegram extraction roster.
@@ -448,6 +467,152 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   which M were already there"), advanced under the position of the record it
   last read so a replay after a crash counts each record once; the card counts
   each item once.
+
+## Built, step 3: WhatsApp
+
+Live WhatsApp capture, with no change to identities or stores
+(`src/workers/whatsapp/spool-reader.ts`, `spool-index.ts`,
+`live-connector.ts`, `store-sync.ts`,
+`tools/whatsapp-bridge/capture_status.go`; tests in
+`test/whatsapp-live-capture-fixes.test.ts`,
+`test/whatsapp-live-review-fixes.test.ts` and
+`tools/whatsapp-bridge/capture_status_test.go`).
+
+- **The spool contract.** A spool file is append-only for every writer but
+  one: the bridge only appends whole lines, and Olympus's own clearing of
+  Secrets rewrites a line in place at its own length, updating what it
+  keeps of the file (what was cleared, the index's record) in the same step,
+  so its rewrite never reads as a break. Anything else breaks the contract
+  (a file replaced, cut and written again, edited) and is caught cheaply: at
+  every boundary kept in a file (cleared-through, indexed-through) the
+  digest of the 4 KiB ending there is kept too, and is read again before the
+  boundary is trusted (`connector-store/spool-file-identity.ts`). A mismatch
+  is a file read again from its start, keeping none of its old boundaries:
+  cleared again in full from byte 0, its index rows rebuilt, and the
+  listing's cursor moved back to it. Detected: a file replaced, cut shorter
+  than a boundary, or rewritten in the 4 KiB before one. Not detected: a
+  rewrite in place elsewhere in the file by anything but the bridge or
+  Olympus; finding it would mean reading the whole prefix on every pass,
+  which the read bounds forbid, so the contract is held by who can write:
+  the spool folder is the owner's alone (0700, files 0600, the bridge
+  making it so at start), written only by the bridge and by Olympus.
+  Index rows, the files' records and the high-water mark commit in one
+  transaction. A boundary and its receipt (the offset and the digest that ends there)
+  are one record, written in one step, so a boundary is never trusted at an
+  offset its receipt was not taken for: a crash before clearing records its
+  new boundary leaves the old record, whose window is checked on the next
+  pull. The listing's cursor carries no receipt and is never what decides
+  whether a Secret is cleared; clearing's own record does. A boundary is
+  what a scan reached, fixed before the scan starts (the lines the file held
+  then, or the cursor's), never recounted after: a line appended while
+  clearing runs is owed to the next pull. A listing reset (a file replaced,
+  cut or rewritten under a cursor, or the disposable index rebuilt, since it
+  then no longer knows what the files held) adds one to a single durable
+  counter beside the spool (`spool-resets.ts`), written before the index
+  forgets anything. Every cursor carries the count as `~r<count>`; a cursor
+  with another count, or none, reads the whole spool again from its start.
+  That is safe because intake is idempotent by identity and version, and a
+  reset is rare enough for a full replay to be cheap. Nothing is owed or
+  settled per reader: a reader is caught up when its cursor carries the
+  current count, so one reader catching up never affects another, and a pass
+  that fails before its cursor commits reads the spool again. A counter or
+  index that cannot be opened fails the listing before anything is forgotten,
+  and no cursor is handed out; the first index build the counter sees counts
+  as a reset too. Clearing the Secrets already known never waits on a
+  replay: a file past the cursor that was never cleared, or no longer holds
+  what clearing recorded of it, is cleared of them from its start on the
+  next pull, whatever the cursor or item limit (bounded by bytes, one whole
+  file at least), with none of its lines certified for a later judgment. Every
+  other durable write that comes before the one
+  that depends on it is safe to repeat: a Secrets rewrite before its cleared
+  record (redone, the same rewrite), the index's rows before the tier set's
+  cursor (read again from the old cursor, the rows already there), the match
+  ledger's ids and aliases before the store (the same ids again), and the
+  index's refresh after clearing (a missed refresh reads as a replacement,
+  counted and read again).
+- **One builder, the intake rule.** The spool is the WhatsApp connector's
+  live input: its records become items through the connector's one record
+  builder under the shared intake rule (`core/source-inputs.ts`), versions
+  ordered by the message's time. A record read again (a recovered cursor, a
+  redelivery) never replaces a newer version the stores hold. A record that
+  restates a message's reactions applies at the same version, as live's word.
+- **Streaming reads with bounds.** A spool file is read in 256 KiB chunks
+  from the resume point, never whole. The cursor is `<file>:<lines>@<offset>`
+  and a resume seeks to the offset (a cursor from before offsets is resolved
+  by counting its lines once). Every byte read is spent from the pull's
+  budget (64 MiB), and a read pauses once it is spent: between records, or
+  inside an over-long record (over 1 MiB), which is never held, is counted
+  once (`oversized_spool_records`) and is skipped on from the place the
+  cursor names (`…@<offset>s`), never read again. A record within the bound
+  is finished before a pause, so a pull reads at most its budget plus one
+  record's bound. The pull no longer scans the whole spool for its receipt:
+  the newest message time is read back from the end of the spool (4 MiB at
+  most), and malformed lines and unresolved reactions are counted for what
+  this pull read.
+- **Reactions from a persistent index.** `spool-index.sqlite` beside the
+  spool keeps each message's newest line (by position) and each actor's
+  current reaction to each message, built as the listing reads, within its
+  budget; an index started on an existing spool catches up from the spool's
+  start, a budget at a time, before a page is aggregated. A page's reactions
+  are aggregated from a few rows and the reacted-to message is read from its
+  one line; memory does not grow with the spool's history. The index holds
+  ids, positions and reactions, never a message's text, and is a cache:
+  deleting it costs one catch-up. `fetchItem` reads from it too, and scans
+  the spool only for a message the index does not hold. Each indexed file
+  is known by its identity (device, inode, birth time where the platform
+  keeps one, and a digest of its first line, so a replacement on a reused
+  inode is told apart; the time of the last change is left out, since every
+  append changes it) and its size, and every listing
+  reconciles the index with the files that are there before trusting it: a
+  file that is gone loses its rows (its reactions stop counting), and one
+  put in another's place, even of the same length, is indexed again. A
+  reacted-to message is read from its one line in 4 KiB steps, out of the
+  same budget as the rest of the pass, so a page of many reactions pauses
+  like any other.
+- **Cursor recovery.** A cursor's file only grows, so one shorter than its
+  cursor, or where the cursor's offset is not the start of a line, was
+  replaced (the spool folder removed and capture started again the same
+  day): it is read again from its start, its index rows dropped, and
+  counted (`spool_cursor_recovered`); the intake rule keeps what the stores
+  hold newer. A cursor whose file has gone is counted
+  (`spool_cursor_file_missing`) and listing goes on at the next file. Not
+  covered: a replaced file whose bytes at the old offset happen to start a
+  line, and a file named earlier than the cursor's (a clock set back).
+- **Secrets clearing.** The shared rewrite streams its files
+  (`connector-store/capture-spool-secrets.ts`, from the Telegram lane). What
+  was cleared is kept per file, by the file's identity and size, never by a
+  line number alone: a file is owed again from its start whenever its
+  identity changed (a replacement, a cursor reset) or it is shorter than
+  when it was cleared, and an appended file from the line clearing reached.
+  Every pull clears whatever it owes, however little it read, and records a
+  file only once its clearing succeeded; a pull that owes nothing reads no
+  spool file. The whole-spool pass still runs when the set of Secrets
+  changed. A seeded test runs appends, prunes, replacements (same and other
+  length, inodes reused), failed cleanups and cursor resets, and checks that
+  no known Secret survives a pull that succeeded and that no reaction from a
+  file that is gone is emitted (`test/whatsapp-spool-bookkeeping.test.ts`).
+- **Counted bridge drops.** The bridge writes `spool/capture-status.json`
+  every minute and on connect and disconnect: connected, the last time it
+  knew it was connected, and the messages a full queue dropped, carried
+  across restarts. The pull reports the count (`capture_dropped_messages`)
+  and warns while the last drop is within the stale threshold.
+- **Captions.** The bridge keeps the caption of a photo, video, video note
+  or document as the line's text, and spools a document sent with a caption
+  (before, it was taken for protocol noise and not spooled at all). The
+  connector reads a captioned media line as a text item with its media type
+  kept; Secrets are judged and cleared on the caption like any text.
+- **Freshness told apart from quiet, and from stopped.** `captureLiveness`
+  in `connector-store/capture-freshness.ts` ages a feed by the newer of its
+  newest message and the bridge's last connected time, and reports
+  `capture_quiet` when the bridge is connected and no message arrived within
+  the threshold. A bridge that says it is disconnected for more than ten
+  minutes is stale and stopped (`capture_stopped`, warning
+  `whatsapp_capture_disconnected`), never quiet; the stale route on the card
+  is to open WhatsApp on this computer and link it. A bridge that writes no
+  receipt is judged by its newest message, as before. The Telegram lane
+  adopts the same rule.
+  Open: the dashboard's stale wording says "newest message" for an age that
+  can now be the bridge's last connected time.
 
 ## Built, step 3: Telegram
 
@@ -683,6 +848,190 @@ Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
   larger file is kept and listed, and its reading needs a streaming read when
   that roster lands. That bound is on reading, never on what is kept.
 
+## Built, step 6
+
+Mail (PR #546). An mbox export of a Gmail account is an input of the Gmail
+connector; any other mbox stays under Archives, as before.
+
+- **One record.** Both inputs yield the Gmail connector's own record, a
+  parsed mail (`google-connectors/gmail-mail-record.ts`), and one builder
+  makes the items. Live converts an API message
+  (`gmailMailRecordFromMessage`); the mbox input converts each message
+  (`archive-import/mbox/gmail-input.ts`). Mail does not change, so every
+  version of a message is the same: the intake rule keeps what is stored,
+  fills in the text of mail live holds by name only, and keeps live's copy
+  on a tie.
+- **Ids.** Takeout's `From <decimal>@xxx` is Gmail's id in decimal and
+  `X-GM-THRID` the thread's; both become the API's hex form, so an imported
+  message names the live item. Labels Takeout names are given as live
+  Gmail's ids (`Inbox` is `INBOX`; `Opened` and `Archived` are absences);
+  user labels are resolved to the account's label ids through Gmail's label
+  list and kept by id and by name, so an owner rule on either applies. When a
+  rule names a label and the list cannot be read, the import waits rather
+  than store mail the rule could miss.
+- **Header matching** (`google-connectors/gmail-header-match.ts`) for a
+  message without Takeout's id. The first draft had a background pass read
+  every stored message's `Message-ID` into a local index. Gmail already
+  indexes `Message-ID` for every message, so the input asks it directly:
+  one search, and one metadata read per candidate (at most five), only for
+  such messages, under the day budget and only while the mail approval is
+  current. A Takeout import costs no request; no new store is kept.
+- **One budget model** (`google-connectors/gmail-import-allowance.ts`).
+  Imports read Gmail through their own client, whose day counter charges
+  every HTTP attempt, retries included, to the imports' allowance and then to
+  the lane's day counter, so nothing goes around it. The allowance is half of
+  the day's budget. The client retries a failed request once, so one message
+  costs at most 14 attempts (the mailbox check, the search, five candidates)
+  and the label list 2; the smallest accepted budget (32) holds both, so any
+  accepted budget moves at least one message a day. A message, or the label
+  list, is begun only when the allowance holds its worst case, and a refusal
+  spends nothing. The label list is asked only when an owner rule names a
+  label, and once a day while the rules stay the same.
+- **Waiting is findable.** Waiting, what was read goes out with its resume
+  point and the import waits for its next scheduled pass. The import record
+  keeps why (`waiting`), its row says it in a plain line (the day's share is
+  spent; the day's requests are spent; a rule names a label Gmail cannot
+  read now; or the daily limit is too low, with the setting
+  `OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET` and the least it must
+  be), and a limit too low is a Needs you item too. The pass's receipt names
+  the reason (`archive_import_waiting_for_provider: …`). The note goes with
+  the next pass that does not wait.
+- **Account** (`archive-import/mbox/gmail-account.ts`). Headers of the first
+  500 messages (or 64 MB) are read: every one must carry a Gmail marker, and
+  the topmost `Delivered-To` of the received ones must name exactly one
+  address. An address is something the export's author wrote, and an
+  address can change hands, so `resolveImportAccount` never takes it as
+  proof: it joins only an entry that carries that address (or no address),
+  at the owner's yes; an entry with another address is another account.
+  With no Gmail account yet, the import makes it, named by the address
+  label, and a later connect of that address joins it. The first messages
+  decide the account, so every message is checked again as it is read: one
+  whose topmost `Delivered-To` names another address is counted ("delivered
+  to another address left out") and never written. The look stops at its
+  byte bound inside the splitter, an oversized message included.
+- **Lane.** The worker registers the target when the Gmail lane's stores
+  exist. Imports write the Gmail stores and ledger with the live lane's own
+  sync options and the owner's current rules, under Gmail's scheduler key
+  and inside `runExclusiveForSource('gmail.email')`. The account scope is
+  the connected handle's account role, else `personal`, unless the Gmail
+  stores already hold Gmail rows under one other scope: then every reader and
+  writer, live included, keeps that one (`gmailItemAccountScope`), so an
+  import made before the connect and a connect under another role still name
+  one item. The Private store's approved-scope filter (status counts, private
+  embedding) accepts an observation by an import's input (`archive.<id>`)
+  beside the live lane's scoped one: the owner approved each import.
+- **Before Gmail is connected.** Importing Takeout first and connecting
+  later is a normal first run. Live approval governs live reads, not the
+  account's own stores: an import pass embeds what it writes, as a live pull
+  does (under the live scope binding when there is an approval); with no live
+  lane, a Gmail scheduler source with no sync of its own carries the
+  embedding sweep and the private meaning backfill; and the Private store's
+  counts and backfill accept what the imports brought (`archive.` observations
+  alone) while live Gmail is not connected and approved. Live mail stored
+  under an approval that no longer stands is neither counted nor embedded by
+  that path.
+- **What an import does not apply.** The owner's mail scope (skipped
+  senders and categories, the one-time-code filter, the content window)
+  governs what live reads; an import is its own approval, as it was under
+  Archives. Spam and Trash are skipped, as before.
+- **Children: built, off.** The child key is the MIME part path, computed by
+  both inputs as Gmail numbers `partId` (`archive-import/mbox/mime-parts.ts`;
+  a `message/rfc822` part is one attachment). Live listing keeps a message
+  and its attachments within the item budget, can resume inside one
+  message's attachments, and resumes a cut-short page after the last message
+  it handled, found by its id (`after`), never by position, whether or not
+  the store would skip it; `fetchItem` with a locator reads a part's bytes
+  (inline, or `attachments.get`). They stay off (`GmailMailBuild.children`)
+  because nothing reads a Gmail child's bytes yet: the Gmail lane has no
+  extraction roster entry, and an imported child's locator points into the
+  export (`mbox-part1:`), which that reader would also need to open. A child
+  nobody reads stays owed reading on the card for ever. Turning them on is
+  the follow-up, with child-items' step 3.
+- **Release check.** The import-beside-live case is
+  `GMAIL_TAKEOUT_FIXTURES` in `scripts/release-check/archive-fixtures.ts`
+  (`SOURCE_INPUT_FORMATS`), run through the product by
+  `test/release-check-source-input-fixtures.test.ts`. It is not in
+  `ARCHIVE_FORMATS`: the leg's archive path expects a row under Other
+  archives and a Remove, which a merged import does not have, and a fresh
+  machine has no live Gmail input. The leg's journey for it is still to
+  build.
+
+## Built, per-card Import (owner-approved 2026-10-25)
+
+Which button to use is decided by where the export came from, and the page
+says so.
+
+- **A source's own card.** Every source whose connector reads its exports as
+  inputs (a registered `ArchiveSourceTarget`) gets **Import an archive** in its
+  ⋯ menu, before Disconnect and Delete. It opens the picker titled "Import an
+  archive into Telegram", whose opening sentence names only that source's exports.
+  The approval names the card (`source_id`), and the engine recognises only that
+  source's formats (`prepareArchiveImport` with the target's formats). Any other
+  export is refused in the picker: "This isn't a Telegram export. From the
+  Telegram card, Olympus imports only these: … For any other export, use Import
+  another archive under Other archives." A card gets the entry only once its
+  source registers (steps 4 to 7), so no card offers an import that would land
+  elsewhere. The computer lists the cards in `ComputerDashboardMeta.archiveSources`;
+  while the list of imports cannot be read, no card offers it.
+- **Other archives.** The Archives card is its own section below Sources,
+  titled Other archives, with the line "For an export that isn't from one of
+  your sources above." and the button **Import another archive**, always in
+  sight (never in ⋯). It still sends an export to its source when one reads
+  it (`forFormat`, as before), and lists only the archives that cannot join a
+  source. Its picker says so: "An export from one of your sources joins that
+  source; any other is kept under Other archives."
+- **Where it shows.** A start says where the import is: "Importing result.json
+  into Telegram. It shows in Telegram as it is read." or "… It shows under Other
+  archives as it is read." (`started.source` on the approval).
+- **ChatGPT.** The section is there too; its button opens the computer's
+  dashboard. A card's own Import an archive is on the computer only (the picker
+  is the computer's).
+
+## Built, step 7
+
+Reflect, Roam and Evernote are sources of their own on the dashboard, and an
+Evernote export is a new format whose attachments are child items.
+
+- **One card each.** A format no live connector reads names its import-only
+  source in the format registry (`ArchiveFormatDefinition.sourceCard`):
+  `reflect.archive` (Reflect's JSON and Markdown exports), `roam.archive` and
+  `evernote.archive`, the ids their source postures already had. Each card sits
+  in Sources with "Import an archive", whose picker takes only that source's
+  exports, and lists its imports with their progress, findings and Remove (as
+  the Archives row does). "Import another archive" sends the same file to the
+  same card, and Other archives no longer lists them. A start says "Importing
+  Field notes.enex into Evernote. It shows in Evernote as it is read."
+- **Storage does not move.** The imports stay where source-storage.md (step 4e)
+  keeps archive-only formats: `archive.imports`'s note store set, one account
+  scope per import, with their Remove. The cards are views of the public
+  Archives source (`public_source_id`), so no new public source id, scheduler
+  source, store set or relay enum is added, and nothing moves on disk. What
+  this does not give: deleting one card's imports together (each has its
+  Remove, and the Archives source's Delete removes all), and a card count of
+  items by corpus (the card counts its imports).
+- **Not inputs of a connector.** No live connector reads these formats, so
+  there is no live input to share a dataset with and no `ArchiveSourceTarget`:
+  the format's archive connector reads each export, as before. Two exports of
+  the same graph are two imports (their notes are identified by place), as
+  under Archives.
+- **Evernote (.enex).** A shared streaming XML reader
+  (`archive-import/xml-stream.ts`) hands out one `<note>` at a time with a
+  resume point, never holding base64 `<data>`; it reports its byte range. Each
+  note is a note item (ENML to plain lines; `<en-crypt>` is never decrypted and
+  is reported as content Olympus cannot read). Each `<resource>` is a child item
+  with a locator to its base64 range, read later by the extraction factory and
+  judged on its own.
+- **Assets of Reflect and Roam: there are none to read.** Their exports link to
+  pictures on the provider's servers rather than holding them (community
+  reports for Roam's Export All; Reflect's documentation does not say), and an
+  import never fetches from the network. Evernote is the only one of the three
+  whose export holds its files, so it is the only one with children.
+- **Evernote's recognition text is not used yet.** Each attachment's
+  `<recognition>` (Evernote's own reading, handwriting included) is left in the
+  file and never held. Using it needs `RawItem.providerText` (child-items.md,
+  "Text the provider supplies"), a contract change that lands on its own after
+  2.2.0 (branch `claude/provider-text-2-3-0`).
+
 ## To verify before step 4
 
 - Telegram Desktop writes bare chat ids, with the type telling the marked
@@ -709,7 +1058,12 @@ Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
     `personal_information`, so it gives no account hash. It joins the account
     at the owner's confirmation, like a single-chat export (section 7).
 - Takeout's mbox separator line carries the Gmail message id in decimal (the
-  API id is its hex). If not, mail matches by its headers only.
+  API id is its hex). **Checked 2026-10-25 against the published format**
+  (community and vendor samples, and Google's IMAP documentation, which says
+  `X-GM-MSGID` and `X-GM-THRID` are the decimal forms of the API's hex ids):
+  every message starts `From <decimal>@xxx <date>` and carries `X-GM-THRID`
+  in decimal and `X-Gmail-Labels` by name. Not yet checked against a real
+  export: the owner canary confirms the `From` number is the message id.
 - The WhatsApp export's chat names equal the bridge's contact names for
   direct chats. Check with the owner canary.
 

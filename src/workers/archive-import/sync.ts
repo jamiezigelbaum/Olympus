@@ -499,6 +499,10 @@ async function runPass(
     };
     const connectorId = archiveConnectorId(record.archive_id);
     const shouldContinue = options.shouldContinue ?? (() => true);
+    // Set when the listing stopped because the source's provider cannot be asked now: the import waits for its
+    // next scheduled pass instead of being run again at once.
+    let providerWait: string | undefined;
+    let providerWaitMinimum: number | undefined;
     const connector = sink.connector({
       archiveId: record.archive_id,
       connectorId,
@@ -510,6 +514,10 @@ async function runPass(
       report: (finding) => { pending.push(finding); },
       reportPosition: (next) => { position = next; },
       reportItemPositions: (positions) => { itemPositions = positions; },
+      waitForProvider: (reason, detail) => {
+        providerWait = reason;
+        providerWaitMinimum = detail?.minimum;
+      },
       shouldContinue,
       ...(options.media ? { media: archiveMediaAccess({ bindings: options.media, archiveId: record.archive_id, root, chosenRelPath: record.chosen_rel_path }) } : {}),
       ...(options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {}),
@@ -601,6 +609,12 @@ async function runPass(
       else if (!media.ok) mediaChange = stopFrom(media, now().toISOString());
     }
     const updated = options.state.update(record.archive_id, (entry) => {
+      // Why it waits, on the record, so the import's row and Needs you say it; gone once a pass does not wait.
+      if (providerWait !== undefined) {
+        entry.waiting = { reason: providerWait, at: now().toISOString(), ...(providerWaitMinimum !== undefined ? { minimum: providerWaitMinimum } : {}) };
+      } else {
+        delete entry.waiting;
+      }
       if (dates.earliest && dates.latest) {
         entry.date_range = {
           earliest: entry.date_range && entry.date_range.earliest < dates.earliest ? entry.date_range.earliest : dates.earliest,
@@ -637,10 +651,12 @@ async function runPass(
         warnings: [
           ...legs.flatMap((leg) => leg.gaps),
           ...(waiting > 0 ? [`archive_items_waiting: ${waiting} item(s) are in the middle of a tier move and are read again once it is done.`] : []),
+          ...(providerWait !== undefined ? [`archive_import_waiting_for_provider: ${providerWait}`] : []),
         ],
       }),
-      // Nothing more can be stored until the move is done: the next scheduled pass tries again.
-      continueSoon: !complete && waiting === 0,
+      // Nothing more can be stored until the move is done, or until the provider can be asked again: the next
+      // scheduled pass tries again.
+      continueSoon: !complete && waiting === 0 && providerWait === undefined,
       ...(updated ? { record: updated } : {}),
     };
   } finally {
