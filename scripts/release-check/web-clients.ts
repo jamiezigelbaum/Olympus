@@ -60,7 +60,7 @@ export const CLIENT_ADAPTERS: Record<WebClientId, ClientAdapter> = {
 /** The note an agent gets for a Private match, as the apps reword it: the answer is in Olympus, on the computer. */
 const PRIVATE_NOTE = /privately|private (answer|panel)|on (your|the) (computer|mac)\b|not sent to/i;
 /** A reply that says the app cannot reach Olympus: its connection needs renewing, not the product fixing. */
-const NOT_CONNECTED = /(connect|reconnect|authori[sz]e|sign in to) olympus|olympus (is|isn't|is not) (connected|available)|couldn't (reach|access) olympus|no (access|connection) to olympus/i;
+const NOT_CONNECTED = /(connect|reconnect|authori[sz]e|sign in to) olympus|olympus (isn't|is not) (connected|available)|couldn't (reach|access) olympus|no (access|connection) to olympus/i;
 
 export const WEB_DEBUG_PORT = 9333;
 export const WEB_PROFILE = '.olympus-canary/web-clients';

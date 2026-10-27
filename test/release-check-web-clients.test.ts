@@ -50,6 +50,8 @@ describe('web clients: what a turn is held to', () => {
     const [notConnected] = evaluateTurn('claude', pickup, { turn: 'I need you to connect Olympus before I can look that up.', frames: '', ms: 1 });
     expect(notConnected).toMatchObject({ status: 'skip' });
     expect(notConnected!.detail).toContain('connect Olympus again');
+    // Saying Olympus is connected is not a connection problem: the turn is judged as usual.
+    expect(statusOf(evaluateTurn('grok', doctor, { turn: 'Olympus is connected. Your answer is in Olympus on your computer.', frames: '', ms: 1 }))['web.grok.doctor.private-note']).toBe('pass');
     const base: PageState = { url: 'https://chatgpt.com/', title: 'ChatGPT', challenge: false, signedOut: false, composer: true, composerText: '', busy: false, text: '' };
     expect(blockedReason('chatgpt', base)).toBeUndefined();
     expect(blockedReason('chatgpt', { ...base, signedOut: true })).toContain('signed out');

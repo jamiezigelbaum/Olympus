@@ -124,7 +124,10 @@ export function evidenceOf(structured: unknown): SearchEvidence[] {
   return rows.map((row) => ({ source: String(row?.source ?? ''), title: String(row?.title ?? ''), excerpt: String(row?.excerpt ?? '') }));
 }
 
-/** Connected and syncing: a configured corpus of the source holds items, and its newest refresh finished recently and did not fail. */
+/**
+ * Connected and syncing: a configured corpus of the source holds items, and a refresh succeeded recently (or one is running now).
+ * Cached items beside a recent failure are not syncing, so a failure newer than the last success warns.
+ */
 export function statusCheck(spec: LiveSourceSpec, rows: readonly CorpusRow[], now = Date.now()): CheckResult {
   const id = `live.${spec.id}.status`;
   const title = `${spec.label}: connected and syncing`;
@@ -132,15 +135,19 @@ export function statusCheck(spec: LiveSourceSpec, rows: readonly CorpusRow[], no
   if (own.length === 0) return { id, title, status: 'fail', detail: `Olympus has no ${spec.label} source set up (it has ${[...new Set(rows.filter((r) => r.configured).map((r) => r.label))].join(', ') || 'none'})` };
   const items = own.reduce((sum, row) => sum + (row.counts?.indexed_items ?? 0), 0);
   const refreshed = own.map((row) => row.last_refresh).filter((r): r is NonNullable<CorpusRow['last_refresh']> => Boolean(r));
-  const newest = refreshed.filter((r) => r.completed_at).sort((a, b) => Date.parse(b.completed_at!) - Date.parse(a.completed_at!))[0];
+  const finished = refreshed.filter((r) => r.completed_at).sort((a, b) => Date.parse(b.completed_at!) - Date.parse(a.completed_at!));
+  const newest = finished[0];
+  const success = finished.find((r) => r.status === 'completed');
   const said = `${own.length} corpus(es), ${items} item(s) indexed${newest ? `, last refresh ${newest.status} at ${newest.completed_at}` : ''}`;
   if (items === 0) return { id, title, status: 'fail', detail: `${said}: nothing indexed yet` };
-  if (refreshed.length > 0 && refreshed.every((r) => r.status === 'failed')) return { id, title, status: 'fail', detail: `${said}: every refresh failed` };
-  const maxAgeH = spec.maxSyncAgeH ?? 24;
   const running = refreshed.some((r) => r.status === 'running');
-  if (!running && newest && now - Date.parse(newest.completed_at!) > maxAgeH * 3_600_000) return { id, title, status: 'fail', detail: `${said}: more than ${maxAgeH} h ago` };
+  if (!running && finished.length > 0 && !success) return { id, title, status: 'fail', detail: `${said}: every refresh failed` };
+  if (!running && !success) return { id, title, status: 'fail', detail: `${said}: no refresh has finished` };
+  const maxAgeH = spec.maxSyncAgeH ?? 24;
+  if (!running && now - Date.parse(success!.completed_at!) > maxAgeH * 3_600_000) return { id, title, status: 'fail', detail: `${said}: the last successful one was more than ${maxAgeH} h ago` };
+  const failedSince = newest !== undefined && newest !== success && newest.status === 'failed';
   const degraded = own.some((row) => row.retrieval?.state === 'degraded');
-  return { id, title, status: degraded ? 'warn' : 'pass', detail: `${said}${running ? '; a refresh is running' : ''}${degraded ? '; search is degraded' : ''}` };
+  return { id, title, status: degraded || failedSince ? 'warn' : 'pass', detail: `${said}${running ? '; a refresh is running' : ''}${failedSince ? `; it failed after the last success (${success?.completed_at})` : ''}${degraded ? '; search is degraded' : ''}` };
 }
 
 /** The search found an item of this source holding every needle. */
@@ -202,10 +209,14 @@ export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOp
     for (const row of [...waiting]) {
       const search = await engine.call('olympus_search', { question: row.word, limit: 24 });
       const title = `${row.spec.label}: a new item is found within ${row.spec.plant!.withinS ?? 900} s`;
-      const result = searchCheck(`live.${row.spec.id}.fresh`, title, row.spec.label, [row.word], search);
-      if (result.status === 'pass' || Date.now() >= row.deadline) {
-        const ms = Date.now() - row.started;
-        checks.push({ ...result, detail: result.status === 'pass' ? `found after ${Math.round(ms / 1000)} s: ${result.detail}` : `not found after ${Math.round(ms / 1000)} s: ${result.detail}`, ms });
+      const found = searchCheck(`live.${row.spec.id}.fresh`, title, row.spec.label, [row.word], search);
+      const at = Date.now();
+      // A match that came back after the bound does not prove the bound: it fails, with when it was found.
+      const late = at > row.deadline;
+      if (found.status === 'pass' || late) {
+        const ms = at - row.started;
+        const result: CheckResult = found.status === 'pass' && late ? { ...found, status: 'fail', detail: `found only after ${Math.round(ms / 1000)} s, past the bound: ${found.detail}` } : found.status === 'pass' ? { ...found, detail: `found after ${Math.round(ms / 1000)} s: ${found.detail}` } : { ...found, detail: `not found after ${Math.round(ms / 1000)} s: ${found.detail}` };
+        checks.push({ ...result, ms });
         waiting.delete(row);
       }
     }

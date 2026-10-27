@@ -26,6 +26,9 @@ describe('live accounts: what each source is held to', () => {
     // A refresh that is running now is syncing, however long ago the last one finished.
     expect(statusCheck(gmail, [corpus('Gmail', { last_refresh: { status: 'completed', completed_at: '2026-10-26T07:40:00Z' } }), corpus('Gmail', { corpus_id: 'gmail.private', last_refresh: { status: 'running' } })], NOW).status).toBe('pass');
     expect(statusCheck(gmail, [corpus('Gmail', { retrieval: { mode: 'keyword', state: 'degraded' } })], NOW).status).toBe('warn');
+    // Cached items are not syncing: a failure newer than the last success warns, and no finished refresh at all fails.
+    expect(statusCheck(gmail, [corpus('Gmail'), corpus('Gmail', { corpus_id: 'gmail.private', last_refresh: { status: 'failed', completed_at: '2026-10-28T07:59:00Z' } })], NOW)).toMatchObject({ status: 'warn', detail: expect.stringContaining('it failed after the last success') });
+    expect(statusCheck(gmail, [(({ last_refresh: _none, ...row }) => row)(corpus('Gmail'))], NOW).detail).toContain('no refresh has finished');
   });
 
   test('a search passes only on an item of that source holding every expected string', () => {
@@ -74,6 +77,10 @@ describe('live accounts: what each source is held to', () => {
     expect(planted.gmail).toMatch(/^olycanary[0-9a-f]{10}$/);
     expect(searchesForWord).toBe(3);
     expect(checks.find((check) => check.id === 'live.telegram.fresh')!.detail).toBe('Inconclusive: the plant command failed (exit 1): no bot token');
+    // A match that only comes back after the bound fails: it does not prove the bound.
+    const lateEngine: EngineMcp = { ...engine, call: async (tool, args) => tool === 'source_index_status' ? { ok: true, text: '', structured: { corpora: [corpus('Gmail')] } } : { ok: true, text: '', structured: { evidence: [{ source: 'Gmail', title: `Release canary ${String(args.question)}`, excerpt: '' }] } } };
+    const late = await runLiveAccounts(lateEngine, { sources: [{ id: 'gmail', label: 'Gmail', plant: { argv: ['plant-mail'], withinS: -1 } }], sleep: async () => {}, pollMs: 1, runPlant: () => ({ code: 0, output: '' }) });
+    expect(late.find((check) => check.id === 'live.gmail.fresh')).toMatchObject({ status: 'fail', detail: expect.stringContaining('past the bound') });
   });
 
   test('a failed status read fails every source, and the corpora are read from the remote shape', async () => {
