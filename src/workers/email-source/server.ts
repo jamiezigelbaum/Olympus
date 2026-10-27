@@ -6330,6 +6330,7 @@ export async function main(): Promise<void> {
     archives: () => archiveImportDashboard.view(),
     sourceImports: () => archiveImportDashboard.sourceImports(),
     archiveSources: () => archiveImportDashboard.archiveSources(),
+    archiveCards: () => archiveImportDashboard.cardViews(),
   });
 
   const socketPath = prepareWorkerSocket();

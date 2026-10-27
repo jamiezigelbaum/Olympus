@@ -79,6 +79,7 @@ import {
   TELEGRAM_JSON_ARCHIVE_FORMAT,
   WHATSAPP_ARCHIVE_FORMAT,
   archiveFamilyProvider,
+  archiveSourceCards,
 } from '../src/core/archive-formats.ts';
 import { archivePickIntro } from '../src/workers/dashboard/vocabulary.ts';
 import type { SourceFamily } from '../src/core/source-index/types.ts';
@@ -737,6 +738,9 @@ function localFilesPreview(state: string) {
  *   archives-empty       an archive that held nothing: read as an empty import, never as a count of nothing
  *   archives-chat-whatsapp  a WhatsApp chat export imported: messages, a snapshot (not updated), and the two lists in plain words
  *   archives-notes-reflect  a Reflect export (a zip of Markdown notes) imported: notes, and what a notes export did not import or only read a certain way
+ *   archives-notes-evernote an Evernote export importing: notes and their attachments, one encrypted passage not read
+ * Reflect, Roam and Evernote are import-only sources (step 7): their imports show in their own card in
+ * Sources, not under Other archives (previewSplitArchives, as archive-import/dashboard.ts cardViews does).
  *   archives-nothing-imported  an archive whose messages were all left out or not read: No messages imported, the reasons under See what was not imported, never an empty archive
  * A stopped import, an agent's request, a check that ended without importing,
  * an archive that cannot be counted, imports that cannot run, and held
@@ -747,7 +751,7 @@ const ARCHIVE_STATES = [
   'archives-remove-request', 'archives-request-hidden',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
   'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty', 'archives-chat',
-  'archives-chat-whatsapp', 'archives-notes-reflect',
+  'archives-chat-whatsapp', 'archives-notes-reflect', 'archives-notes-evernote',
   'archives-nothing-imported',
   'archives-account-confirm', 'archives-account-request', 'archives-account-apart',
 ] as const;
@@ -809,7 +813,9 @@ function archivesPreview(state: string): SourceDashboardViewModel {
     sovereigntyEngine: engine,
     connectedHandleRegistry: registry([]),
     apiKeyAvailability: {},
-    importedArchives: previewImportedArchives(meta),
+    importedArchives: previewImportedArchives(previewSplitArchives(meta).archives),
+    // While the list cannot be read, each card says so too (dashboard.ts presentCards).
+    importedArchivesByCard: Object.fromEntries(previewSplitArchives(meta).cards.map((card) => [card.sourceId, previewImportedArchives(meta.unreadable ? { ...card, unreadable: meta.unreadable } : card)])),
     now: NOW,
   });
 }
@@ -967,6 +973,22 @@ function previewImportedArchives(meta: ComputerArchivesMeta, extra: readonly Das
     importing: !meta.notRunning && waiting,
     ...(attention.length > 0 ? { attention } : {}),
   };
+}
+
+/**
+ * A state's list as the computer sends it: what stays under Other archives, and
+ * each import-only source's card with the imports of its formats (by format label).
+ */
+export function previewSplitArchives(meta: ComputerArchivesMeta): { archives: ComputerArchivesMeta; cards: ComputerArchivesMeta[] } {
+  const cardOfLabel = (label: string) => archiveSourceCards().find((card) => card.formats.some((format) => format.label === label));
+  const cards = archiveSourceCards().map((card): ComputerArchivesMeta => ({
+    sourceId: card.id,
+    privateModel: meta.privateModel,
+    archives: meta.archives.filter((entry) => cardOfLabel(entry.format)?.id === card.id),
+    requests: [],
+    ...(meta.notRunning ? { notRunning: meta.notRunning } : {}),
+  }));
+  return { archives: { ...meta, archives: meta.archives.filter((entry) => !cardOfLabel(entry.format)) }, cards };
 }
 
 /** The Archives row's list for an archives-* state: invented names, never anyone's files. */
@@ -1143,6 +1165,28 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       ],
       skipped: [{ kind: 'note_empty', count: 17 }],
     });
+  } else if (state === 'archives-notes-evernote') {
+    // An invented Evernote export: notes, their pictures and files listed as items of their own, one encrypted passage not read.
+    archives.push({
+      ...takeout,
+      id: '2b4d6f80-1a3c-4e5f-8b9d-0c1e2f3a4b5c',
+      name: 'Field notes.enex',
+      format: 'Evernote export (.enex)',
+      family: 'note',
+      where: '~/Downloads',
+      status: 'importing',
+      percent: 64,
+      items: 2_310,
+      judged: 1_480,
+      held: 830,
+      earliest: '2012-03-19',
+      latest: '2024-08-02',
+      gaps: [
+        { kind: 'note_content_unsupported', count: 1 },
+        { kind: 'media_not_imported', count: 4 },
+      ],
+      skipped: [{ kind: 'note_empty', count: 9 }],
+    });
   } else if (state === 'archives-empty') {
     const { earliest: _earliest, latest: _latest, ...dated } = takeout;
     archives.push({ ...dated, name: 'Empty notes.json', format: 'Reflect notes (JSON)', family: 'note', items: 0, judged: 0, held: 0 });
@@ -1190,6 +1234,7 @@ export function previewArchiveBrowse(args: { parent_key?: unknown }) {
       folder('Downloads', { access: { state: 'needs_permission', message: MAC_ACCESS_COPY.needsPermission } }),
       folder('Mail exports'),
       folder('Telegram exports'),
+      folder('Notes exports'),
       { key: '/@disk-1', name: 'Backup Drive', kind: 'folder', has_children: true, selectable: true, is_disk: true },
     ];
   } else if (parent === `${LOCAL_FILES_HOME}/Mail exports`) {
@@ -1197,6 +1242,12 @@ export function previewArchiveBrowse(args: { parent_key?: unknown }) {
       folder('Inbox.mbox', {}, parent),
       file('Takeout-2026-10.mbox', 6_420_000_000, parent),
       file('notes.txt', 2_400, parent),
+    ];
+  } else if (parent === `${LOCAL_FILES_HOME}/Notes exports`) {
+    nodes = [
+      file('Field notes.enex', 48_200_000, parent),
+      file('Reflect export.zip', 12_400_000, parent),
+      file('Roam-Export-1760180000000.zip', 8_900_000, parent),
     ];
   } else if (parent === `${LOCAL_FILES_HOME}/Telegram exports`) {
     nodes = [
@@ -1221,10 +1272,22 @@ export function previewArchiveBrowse(args: { parent_key?: unknown }) {
  * each source's connector reads its archives as inputs (archive-live-one-dataset.md,
  * steps 4 to 7). Invented: no source registers here.
  */
+const PREVIEW_NOTES_FILES: Readonly<Record<string, (name: string) => boolean>> = {
+  'reflect.archive': (name) => /^reflect/i.test(name) && /\.(?:zip|json)$/i.test(name),
+  'roam.archive': (name) => /^roam/i.test(name) && /\.(?:zip|json)$/i.test(name),
+  'evernote.archive': (name) => /\.enex$/i.test(name),
+};
 const PREVIEW_ARCHIVE_SOURCES = [
   { sourceId: 'gmail.email', label: 'Gmail', formats: [MBOX_ARCHIVE_FORMAT], accepts: (name: string) => name.endsWith('.mbox') },
   { sourceId: 'telegram.messages', label: 'Telegram', formats: [TELEGRAM_JSON_ARCHIVE_FORMAT], accepts: (name: string) => name === 'result.json' || name.startsWith('DataExport') },
   { sourceId: 'whatsapp.personal.messages', label: 'WhatsApp', formats: [WHATSAPP_ARCHIVE_FORMAT], accepts: (name: string) => name.startsWith('WhatsApp Chat') || name === '_chat.txt' },
+  // Import-only sources, as the format registry names them (archive-live-one-dataset.md, step 7).
+  ...archiveSourceCards().map((card) => ({
+    sourceId: card.id,
+    label: card.label,
+    formats: [...card.formats],
+    accepts: PREVIEW_NOTES_FILES[card.id] ?? (() => false),
+  })),
 ];
 
 /** The computer meta's archiveSources for an archives or source-import state. */
@@ -1694,7 +1757,9 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
         indexFaster: { on: indexFasterOn },
         ...(state === 'local-files-needs-permission' ? { permissionSettings: [{ sourceId: 'local.files', url: FILES_AND_FOLDERS_URL }] } : {}),
         ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}),
-        ...(previewArchivesMeta(state) ? { archives: previewArchivesMeta(state) } : {}),
+        ...(previewArchivesMeta(state) ? { archives: previewSplitArchives(previewArchivesMeta(state)!).archives } : {}),
+        ...(previewArchivesMeta(state) && previewSplitArchives(previewArchivesMeta(state)!).cards.some((card) => card.archives.length > 0)
+          ? { archiveCards: previewSplitArchives(previewArchivesMeta(state)!).cards.filter((card) => card.archives.length > 0) } : {}),
         ...(previewSourceImports(state) ? { sourceImports: previewSourceImports(state) } : {}),
         ...(previewArchiveSources(state) ? { archiveSources: previewArchiveSources(state) } : {}),
       },

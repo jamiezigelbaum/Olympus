@@ -5613,12 +5613,22 @@ function sourceWatchNotSupported(): EmailSourceWorkerError {
  * The Archives card's connection. A failure to read it is said as such,
  * never as no archives imported.
  */
-function dashboardImportedArchives(archiveImports: ArchiveImportDashboard | undefined): { importedArchives?: DashboardImportedArchives } {
+function dashboardImportedArchives(archiveImports: ArchiveImportDashboard | undefined): {
+  importedArchives?: DashboardImportedArchives;
+  importedArchivesByCard?: Record<string, DashboardImportedArchives>;
+} {
   if (!archiveImports) return {};
+  let importedArchives: DashboardImportedArchives;
   try {
-    return { importedArchives: archiveImports.present() };
+    importedArchives = archiveImports.present();
   } catch {
-    return { importedArchives: { archives: 0, importing: false, attention: [{ kind: 'unreadable', reason: 'other' }] } };
+    importedArchives = { archives: 0, importing: false, attention: [{ kind: 'unreadable', reason: 'other' }] };
+  }
+  // Each import-only source's card (Reflect, Roam, ...): the imports of its formats.
+  try {
+    return { importedArchives, importedArchivesByCard: archiveImports.presentCards() };
+  } catch {
+    return { importedArchives };
   }
 }
 

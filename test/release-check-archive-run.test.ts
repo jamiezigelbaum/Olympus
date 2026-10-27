@@ -89,8 +89,8 @@ const failedIds = (report: Report): string[] => checksOf(report).filter((c) => c
 describe('the archive-import leg in a run', () => {
   test('runs after the install checks, in the order the machine needs, and tells each verb what to do', async () => {
     const report = await runReleaseCheck(options());
-    expect(verbs()).toEqual(['archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-model', 'archive-model', 'archive-remove', 'archive-changed', 'archive-cleanup', 'archive-collect']);
-    const [picker, agent, telegram, whatsapp, reflect, roam, off, on, remove, changed] = archiveCalls();
+    expect(verbs()).toEqual(['archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-model', 'archive-model', 'archive-remove', 'archive-changed', 'archive-cleanup', 'archive-collect']);
+    const [picker, agent, telegram, whatsapp, reflect, roam, evernote, off, on, remove, changed] = archiveCalls();
     // The picker goes first, on an empty list, with the folder reset; the agent path waits for the model to judge, then searches.
     expect(picker).toMatch(/^archive-import --role picker --format mbox --seed \S+ --via picker --reset-folder --clean$/);
     expect(agent).toMatch(/^archive-import --role agent --format mbox --seed \S+ --via request --drain-s \d+ --search$/);
@@ -99,9 +99,10 @@ describe('the archive-import leg in a run', () => {
     expect(whatsapp).toMatch(/^archive-import --role agent --format whatsapp_chat --seed \S+ --via request --drain-s \d+ --search$/);
     expect(reflect).toMatch(/^archive-import --role agent --format reflect-json --seed \S+ --via request --drain-s \d+ --search$/);
     expect(roam).toMatch(/^archive-import --role agent --format roam-json --seed \S+ --via request --drain-s \d+ --search$/);
+    expect(evernote).toMatch(/^archive-import --role agent --format evernote-enex --seed \S+ --via request --drain-s \d+ --search$/);
     expect(off).toBe('archive-model --mode off');
     expect(on).toBe('archive-model --mode on');
-    expect(remove).toMatch(/^archive-remove --targets '?agent:mbox,agent:telegram_json,agent:whatsapp_chat,agent:reflect-json,agent:roam-json,picker:mbox,held:mbox'? --seed \S+$/);
+    expect(remove).toMatch(/^archive-remove --targets '?agent:mbox,agent:telegram_json,agent:whatsapp_chat,agent:reflect-json,agent:roam-json,agent:evernote-enex,picker:mbox,held:mbox'? --seed \S+$/);
     expect(changed).toMatch(/^archive-changed --seed \S+ --sizes \d+(,\d+)*$/);
     // One seed for the whole leg: every archive of the run has its own token and file from it.
     const seeds = new Set(archiveCalls().map((line) => /--seed '?(\w+)'?/.exec(line)?.[1]).filter(Boolean));

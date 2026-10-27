@@ -396,15 +396,20 @@ export function dashboardSubLine(
     case 'Failing':
       return dashboardAttentionLine(source, options);
     case 'Working':
-      return workingLine(source);
+      // A card with no corpus of its own whose connection is its imports (an import-only source) says what they do.
+      return source.connection.action.kind === 'archive_import' && source.coverage.indexed_items === 0 && source.connection.label
+        ? source.connection.label
+        : workingLine(source);
     case 'Waiting':
       return waitingLine(source);
     case 'Fresh':
       return freshLine(source, options?.now ?? new Date());
     case 'Off':
       // Not connected with indexed data left: disconnected on purpose, data
-      // kept (owner ruling, 2026-10-23), not a lost sign-in.
+      // kept (owner ruling, 2026-10-23), not a lost sign-in. A card whose
+      // connection is its imports has no account to disconnect: its line is its imports'.
       return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source)
+        && source.connection.action.kind !== 'archive_import'
         && !dashboardUnsettledWithData(source)
         ? DASHBOARD_DISCONNECTED_DATA_KEPT
         : source.connection.label;

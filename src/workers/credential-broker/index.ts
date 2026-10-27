@@ -70,6 +70,7 @@ const PRIVATE_CREDENTIAL_PROVIDERS = [
   'apple_messages',
   'reflect',
   'roam',
+  'evernote',
 ] as const;
 
 export const CREDENTIAL_PROVIDERS = [
@@ -879,6 +880,25 @@ const DEFAULT_ENV_HANDLES: EnvCredentialHandleDefinition[] = [
     backendState: {
       kind: 'archive_path',
       archiveRootAlias: 'roam_archive',
+      readerWorker: 'archive_import_reader',
+      contentBounds: 'approved_archive_root',
+      backendLabel: 'local_private:archive_import',
+    },
+  },
+  {
+    handle: 'evernote.archive',
+    provider: 'evernote',
+    sessionKind: 'archive_path',
+    accountRole: 'archive',
+    trustDomain: 'internal',
+    allowedCapabilities: ['evernote.archive.import'],
+    scopes: [],
+    tokenEnvNames: [],
+    statusEnvNames: ['OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY'],
+    expiresInSeconds: 3600,
+    backendState: {
+      kind: 'archive_path',
+      archiveRootAlias: 'evernote_archive',
       readerWorker: 'archive_import_reader',
       contentBounds: 'approved_archive_root',
       backendLabel: 'local_private:archive_import',
