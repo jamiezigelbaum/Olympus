@@ -94,7 +94,10 @@ printf '%s' "$out" | tr -d '\\n' | sed -n 's/.*"connection": *{[^}]*"id": *"\\([
       const out = message.result ?? {};
       const text = ((out.content ?? []) as Array<{ type: string; text?: string }>).filter((part) => part.type === 'text').map((part) => part.text ?? '').join('\n');
       const error = message.error?.message ?? (out.isError ? text.slice(0, 300) : undefined);
-      return { ok: !error, text, structured: out.structuredContent ?? null, ...(error ? { error: String(error) } : {}) };
+      // The remote surface answers in text only (src/mcp/server.ts handleRemoteCallTool): its JSON is the structured result.
+      let structured: unknown = out.structuredContent ?? null;
+      if (structured === null && !error) { try { structured = JSON.parse(text); } catch { structured = null; } }
+      return { ok: !error, text, structured, ...(error ? { error: String(error) } : {}) };
     },
     close: async () => {
       const revoke = /^[A-Za-z0-9_-]+$/.test(connectionId) ? `"$HOME/.local/bin/olympus" connections revoke ${connectionId} >/dev/null 2>&1 || true; ` : '';

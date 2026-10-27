@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  corpusRows, mcpCallScript, parseRpc, runLiveAccounts, searchCheck, statusCheck,
+  corpusRows, mcpCallScript, openEngineMcp, parseRpc, runLiveAccounts, searchCheck, statusCheck,
   type CorpusRow, type EngineMcp, type LiveSourceSpec,
 } from '../scripts/release-check/live-accounts.ts';
 
@@ -81,6 +81,16 @@ describe('live accounts: what each source is held to', () => {
     const lateEngine: EngineMcp = { ...engine, call: async (tool, args) => tool === 'source_index_status' ? { ok: true, text: '', structured: { corpora: [corpus('Gmail')] } } : { ok: true, text: '', structured: { evidence: [{ source: 'Gmail', title: `Release canary ${String(args.question)}`, excerpt: '' }] } } };
     const late = await runLiveAccounts(lateEngine, { sources: [{ id: 'gmail', label: 'Gmail', plant: { argv: ['plant-mail'], withinS: -1 } }], sleep: async () => {}, pollMs: 1, runPlant: () => ({ code: 0, output: '' }) });
     expect(late.find((check) => check.id === 'live.gmail.fresh')).toMatchObject({ status: 'fail', detail: expect.stringContaining('past the bound') });
+  });
+
+  test('the remote surface answers in text only, and that text is the structured result', async () => {
+    const status = { kind: 'source_index_status', corpora: [corpus('Gmail')] };
+    const machine = {
+      os: 'linux',
+      exec: async (script: string) => ({ code: 0, stderr: '', ms: 1, stdout: script.includes('connections add') ? 'conn_1\n' : script.includes('tools/call') ? `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: JSON.stringify(status, null, 2) }] } })}\n\n` : '' }),
+    };
+    const engine = await openEngineMcp(machine as never);
+    expect(await runLiveAccounts(engine, { sources: [{ id: 'gmail', label: 'Gmail' }] })).toMatchObject([{ id: 'live.gmail.status', status: 'pass' }]);
   });
 
   test('a failed status read fails every source, and the corpora are read from the remote shape', async () => {
