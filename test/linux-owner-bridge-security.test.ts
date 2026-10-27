@@ -25,7 +25,7 @@ test('H1a: real worker route contract: /v1/health is healthy and bare /health re
   const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
   const port = reservation.port!; await reservation.stop(true);
   const token = 'review-400-fixture-token-aaaaaaaaaaaaaaaaaaaa';
-  const env = { ...process.env, HOME: root, XDG_RUNTIME_DIR: runtime, OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_AUTH_TOKEN: token };
+  const env = { ...process.env, HOME: root, XDG_DATA_HOME: join(root, '.local', 'share'), XDG_STATE_HOME: join(root, '.local', 'state'), XDG_CONFIG_HOME: join(root, '.config'), XDG_RUNTIME_DIR: runtime, OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_AUTH_TOKEN: token };
   const child = spawn(process.execPath, [join(import.meta.dir, '../src/workers/email-source/server.ts')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout!.on('data', d => { output += d; }); child.stderr!.on('data', d => { output += d; });
   const socket = join(runtime, 'olympus', 'worker.sock');
@@ -44,7 +44,7 @@ test('H1b: real engine host + real worker: the desktop bridge reaches `listening
   const token = 'review-400-fixture-token-aaaaaaaaaaaaaaaaaaaa';
   const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
   const port = reservation.port!; await reservation.stop(true);
-  const env = { ...process.env, HOME: root, XDG_RUNTIME_DIR: runtime, OLYMPUS_WORKER_AUTH_TOKEN: token, OLYMPUS_SERVER_MODE: 'auto', OLYMPUS_EMAIL_SOURCE_PORT: String(port) };
+  const env = { ...process.env, HOME: root, XDG_DATA_HOME: join(root, '.local', 'share'), XDG_STATE_HOME: join(root, '.local', 'state'), XDG_CONFIG_HOME: join(root, '.config'), XDG_RUNTIME_DIR: runtime, OLYMPUS_WORKER_AUTH_TOKEN: token, OLYMPUS_SERVER_MODE: 'auto', OLYMPUS_EMAIL_SOURCE_PORT: String(port) };
   const paths = engineServicePaths({ homeDir: root, env, platform: 'linux' });
   mkdirSync(join(paths.configPath, '..'), { recursive: true, mode: 0o700 });
   const entry = `http://127.0.0.1:${port}`;
