@@ -695,9 +695,19 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       const busy = kit.button(W.saving, 'privacy:save', null, 'main');
       busy.setAttribute('aria-busy', 'true');
       add(row, busy);
-    } else add(row, kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main'));
+    } else {
+      const button = kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main');
+      // A Save with nothing to do says why it is off, as the folder picker's does.
+      if (!canSave()) button.setAttribute('aria-describedby', 'privacy-save-reason');
+      add(row, button);
+    }
     add(row, kit.button(W.cancel, 'privacy:cancel', s.saving ? null : backOut, 'plain'));
     const wrap = add(el('div', 'save'), row);
+    if (!s.saving && !canSave()) {
+      const reason = el('p', 'reason', W.nothingToSave);
+      reason.id = 'privacy-save-reason';
+      add(wrap, reason);
+    }
     if (s.saveError) {
       const error = el('p', 'error', s.saveError);
       error.setAttribute('role', 'alert');

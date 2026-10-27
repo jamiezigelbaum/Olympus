@@ -417,7 +417,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     }
   };
   // Staging copies nothing reads any more are deleted: an upload walked away from, an approval that imported nothing,
-  // an import that finished (or was removed).
+  // an import that was removed.
   const sweepStaging = (): void => {
     if (closed) return;
     try {

@@ -140,13 +140,22 @@ export function renderLinuxDesktopEntry(program: OpenHandlerProgram, launcherPat
     'Type=Application',
     'Name=Olympus',
     'Comment=Opens the Olympus dashboard on this computer',
-    launcherPath ? `Exec="${launcherPath}" open %u` : `Exec="${program.runtimePath}" --no-env-file "${program.entryPath}" open %u`,
+    launcherPath ? `Exec=${execArgument(launcherPath)} open %u` : `Exec=${execArgument(program.runtimePath)} --no-env-file ${execArgument(program.entryPath)} open %u`,
     `Path=${workDir}`,
     'Terminal=false',
     'NoDisplay=true',
     `MimeType=${OPEN_HANDLER_MIME_TYPE};`,
     '',
   ].join('\n');
+}
+
+/**
+ * A path as one Exec argument: bare unless it holds a character the desktop-entry spec reserves. xdg-open's
+ * generic mode (Hyprland, no recognised desktop) takes the first word of Exec literally, quotes included, so a
+ * quoted program is "not found" there and the link falls through to the browser.
+ */
+function execArgument(path: string): string {
+  return /[\s'><~|&;*?#()]/.test(path) ? `"${path}"` : path;
 }
 
 export function installOpenHandler(options: OpenHandlerOptions = {}): OpenHandlerResult {

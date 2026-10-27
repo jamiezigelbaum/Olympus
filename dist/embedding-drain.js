@@ -35730,6 +35730,7 @@ var init_vocabulary = __esm(() => {
     addSender: "Add a sender",
     needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
     needGmail: "Connect Gmail to add a label.",
+    nothingToSave: "Nothing to save yet. Change a rule or the description first.",
     pending: {
       one: "{n} item is waiting to be checked on your computer.",
       many: "{n} items are waiting to be checked on your computer."
@@ -43328,10 +43329,19 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       const busy = kit.button(W.saving, "privacy:save", null, "main");
       busy.setAttribute("aria-busy", "true");
       add(row, busy);
-    } else
-      add(row, kit.button(W.save, "privacy:save", canSave() ? save : null, "main"));
+    } else {
+      const button = kit.button(W.save, "privacy:save", canSave() ? save : null, "main");
+      if (!canSave())
+        button.setAttribute("aria-describedby", "privacy-save-reason");
+      add(row, button);
+    }
     add(row, kit.button(W.cancel, "privacy:cancel", s.saving ? null : backOut, "plain"));
     const wrap = add(el("div", "save"), row);
+    if (!s.saving && !canSave()) {
+      const reason = el("p", "reason", W.nothingToSave);
+      reason.id = "privacy-save-reason";
+      add(wrap, reason);
+    }
     if (s.saveError) {
       const error = el("p", "error", s.saveError);
       error.setAttribute("role", "alert");
@@ -47161,7 +47171,8 @@ input, select, textarea { max-width: 100%; min-width: 0; }
 .page { padding: 28px 0 40px; }
 .top { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 20px; }
 .brand { font-weight: 650; font-size: var(--fs-title); letter-spacing: -.01em; }
-.brand .lead { color: var(--t3); text-decoration: none; }
+/* The header link is told from the title beside it by more than colour (WCAG link-in-text-block). */
+.brand .lead { color: var(--t3); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .brand a.lead:hover, .brand a.lead:focus-visible { color: var(--link); }
 .brand .crumb { color: var(--t3); font-weight: 400; }
 .meta { color: var(--t3); font-size: var(--fs-caption); }

@@ -52930,6 +52930,7 @@ var init_vocabulary = __esm(() => {
     addSender: "Add a sender",
     needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
     needGmail: "Connect Gmail to add a label.",
+    nothingToSave: "Nothing to save yet. Change a rule or the description first.",
     pending: {
       one: "{n} item is waiting to be checked on your computer.",
       many: "{n} items are waiting to be checked on your computer."
@@ -143096,7 +143097,8 @@ input, select, textarea { max-width: 100%; min-width: 0; }
 .page { padding: 28px 0 40px; }
 .top { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 20px; }
 .brand { font-weight: 650; font-size: var(--fs-title); letter-spacing: -.01em; }
-.brand .lead { color: var(--t3); text-decoration: none; }
+/* The header link is told from the title beside it by more than colour (WCAG link-in-text-block). */
+.brand .lead { color: var(--t3); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .brand a.lead:hover, .brand a.lead:focus-visible { color: var(--link); }
 .brand .crumb { color: var(--t3); font-weight: 400; }
 .meta { color: var(--t3); font-size: var(--fs-caption); }
@@ -143655,6 +143657,8 @@ function standaloneDashboardControllerScript(input) {
         navigate: function (href) { window.location.assign(href); },
         refresh: async function () {
           var response = await fetch(window.location.href, { cache: 'no-store' });
+          // Locked (here or in another tab): load the page again so it shows the locked gate, not stale controls.
+          if (response.status === 401) { window.location.reload(); return undefined; }
           if (!response.ok) return undefined;
           var next = new DOMParser().parseFromString(await response.text(), 'text/html');
           var nextRoot = next.querySelector('[data-olympus-dashboard-root]');
@@ -149737,10 +149741,19 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       const busy = kit.button(W.saving, "privacy:save", null, "main");
       busy.setAttribute("aria-busy", "true");
       add(row, busy);
-    } else
-      add(row, kit.button(W.save, "privacy:save", canSave() ? save : null, "main"));
+    } else {
+      const button = kit.button(W.save, "privacy:save", canSave() ? save : null, "main");
+      if (!canSave())
+        button.setAttribute("aria-describedby", "privacy-save-reason");
+      add(row, button);
+    }
     add(row, kit.button(W.cancel, "privacy:cancel", s.saving ? null : backOut, "plain"));
     const wrap = add(el("div", "save"), row);
+    if (!s.saving && !canSave()) {
+      const reason = el("p", "reason", W.nothingToSave);
+      reason.id = "privacy-save-reason";
+      add(wrap, reason);
+    }
     if (s.saveError) {
       const error2 = el("p", "error", s.saveError);
       error2.setAttribute("role", "alert");
@@ -151827,8 +151840,10 @@ function setupBlurb(source) {
     return action.instructions.plain_intro;
   if (action.kind === "this_computer")
     return "Choose the folders on this computer Olympus may read. Nothing is read until you choose.";
-  if (action.kind === "archive_import")
-    return "Import a mail export from this computer on the dashboard. Olympus copies it into its own storage to read it, and never changes the original.";
+  if (action.kind === "archive_import") {
+    const what = source.source_id === "archive.imports" ? "an export from another app" : `your ${source.label} export`;
+    return `Import ${what} on the dashboard. Olympus copies it into its own storage to read it, and never changes the original.`;
+  }
   return "";
 }
 function connectAction(source) {
@@ -152223,6 +152238,7 @@ function privateAnswersClientScript(input) {
       sentItems: DASHBOARD_PRIVATE_ANSWERS_COPY.sentItems,
       venicePath: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName,
       destinationBusy: DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy,
+      emptyQuestion: DASHBOARD_PRIVATE_ANSWERS_COPY.emptyQuestion,
       sent: DASHBOARD_PRIVATE_ANSWERS_COPY.sent,
       privatePath: DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath,
       anonymousPath: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath,
@@ -152397,7 +152413,13 @@ function privateAnswersClientScript(input) {
       if (!button || button.disabled || !button.getAttribute('data-pa-action')) return;
       var reason = button.parentElement.querySelector('.pareason');
       var question = field ? String(field.value || '').trim() : '';
-      if (!question || !out) return;
+      if (!out) return;
+      // An empty question is never sent; the press says why beside the button instead of doing nothing.
+      if (!question) {
+        if (reason) reason.textContent = config.copy.emptyQuestion;
+        if (field) field.focus();
+        return;
+      }
       if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
       if (reason) reason.textContent = config.copy.destinationBusy;
       message(out, config.copy.answering, false, question);
@@ -200404,8 +200426,9 @@ async function main() {
   }) : undefined;
   const fileExtractionLocalVlmClient = createFileExtractionLocalVlmClientFromEnv(process.env);
   const tierLanes = [];
-  let registerTierLegStore = () => {
-    throw new Error("A tier store opened before the source runtime finished wiring its stores.");
+  const tierLegsOpenedEarly = [];
+  let registerTierLegStore = (...registration) => {
+    tierLegsOpenedEarly.push(registration);
   };
   const openTierSecretLocations = (account, secureDbPath, label) => {
     try {
@@ -201276,6 +201299,8 @@ ${key2}`;
       });
     }
   };
+  for (const registration of tierLegsOpenedEarly.splice(0))
+    registerTierLegStore(...registration);
   const archiveImports = createArchiveImportRuntime({
     env: process.env,
     openSecretLocations: (secureDbPath) => openTierSecretLocations({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, secureDbPath, "imported archives"),
@@ -204586,7 +204611,7 @@ function renderLinuxDesktopEntry2(program, launcherPath) {
     "Type=Application",
     "Name=Olympus",
     "Comment=Opens the Olympus dashboard on this computer",
-    launcherPath ? `Exec="${launcherPath}" open %u` : `Exec="${program.runtimePath}" --no-env-file "${program.entryPath}" open %u`,
+    launcherPath ? `Exec=${execArgument(launcherPath)} open %u` : `Exec=${execArgument(program.runtimePath)} --no-env-file ${execArgument(program.entryPath)} open %u`,
     `Path=${workDir}`,
     "Terminal=false",
     "NoDisplay=true",
@@ -204594,6 +204619,9 @@ function renderLinuxDesktopEntry2(program, launcherPath) {
     ""
   ].join(`
 `);
+}
+function execArgument(path) {
+  return /[\s'><~|&;*?#()]/.test(path) ? `"${path}"` : path;
 }
 function installOpenHandler(options = {}) {
   const platform2 = options.platform ?? osPlatform2();

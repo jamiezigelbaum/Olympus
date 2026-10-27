@@ -15022,6 +15022,7 @@ var init_vocabulary = __esm(() => {
     addSender: "Add a sender",
     needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
     needGmail: "Connect Gmail to add a label.",
+    nothingToSave: "Nothing to save yet. Change a rule or the description first.",
     pending: {
       one: "{n} item is waiting to be checked on your computer.",
       many: "{n} items are waiting to be checked on your computer."

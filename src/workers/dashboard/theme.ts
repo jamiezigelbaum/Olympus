@@ -226,7 +226,8 @@ input, select, textarea { max-width: 100%; min-width: 0; }
 .page { padding: 28px 0 40px; }
 .top { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 20px; }
 .brand { font-weight: 650; font-size: var(--fs-title); letter-spacing: -.01em; }
-.brand .lead { color: var(--t3); text-decoration: none; }
+/* The header link is told from the title beside it by more than colour (WCAG link-in-text-block). */
+.brand .lead { color: var(--t3); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .brand a.lead:hover, .brand a.lead:focus-visible { color: var(--link); }
 .brand .crumb { color: var(--t3); font-weight: 400; }
 .meta { color: var(--t3); font-size: var(--fs-caption); }

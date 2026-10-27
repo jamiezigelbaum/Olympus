@@ -910,6 +910,8 @@ export function standaloneDashboardControllerScript(
         navigate: function (href) { window.location.assign(href); },
         refresh: async function () {
           var response = await fetch(window.location.href, { cache: 'no-store' });
+          // Locked (here or in another tab): load the page again so it shows the locked gate, not stale controls.
+          if (response.status === 401) { window.location.reload(); return undefined; }
           if (!response.ok) return undefined;
           var next = new DOMParser().parseFromString(await response.text(), 'text/html');
           var nextRoot = next.querySelector('[data-olympus-dashboard-root]');

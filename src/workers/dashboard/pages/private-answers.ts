@@ -234,6 +234,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       sentItems: W.sentItems,
       venicePath: W.veniceName,
       destinationBusy: W.destinationBusy,
+      emptyQuestion: W.emptyQuestion,
       sent: W.sent,
       privatePath: W.privatePath,
       anonymousPath: W.anonymousPath,
@@ -408,7 +409,13 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (!button || button.disabled || !button.getAttribute('data-pa-action')) return;
       var reason = button.parentElement.querySelector('.pareason');
       var question = field ? String(field.value || '').trim() : '';
-      if (!question || !out) return;
+      if (!out) return;
+      // An empty question is never sent; the press says why beside the button instead of doing nothing.
+      if (!question) {
+        if (reason) reason.textContent = config.copy.emptyQuestion;
+        if (field) field.focus();
+        return;
+      }
       if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
       if (reason) reason.textContent = config.copy.destinationBusy;
       message(out, config.copy.answering, false, question);
