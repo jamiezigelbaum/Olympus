@@ -135,6 +135,8 @@ export interface DashboardPanelToolsOptions {
   sourceImports?: () => ComputerSourceImportsMeta[] | undefined;
   /** The cards that import their own exports (archive-import/dashboard.ts archiveSources). */
   archiveSources?: () => ComputerArchiveSourceMeta[] | undefined;
+  /** Each import-only source's card and its imports (archive-import/dashboard.ts cardViews). */
+  archiveCards?: () => ComputerArchivesMeta[] | undefined;
 }
 
 /** Why an archive control did nothing for a session that is not this computer's own. */
@@ -372,6 +374,16 @@ async function archiveStop(options: DashboardPanelToolsOptions, args: Record<str
   return { content: [{ type: 'text', text: 'Stopped.' }], structuredContent: { status: 'stopped' } };
 }
 
+/** The import-only sources' cards with any import, or undefined when none has one (or they cannot be read). */
+function archiveCardsMeta(options: DashboardPanelToolsOptions): ComputerArchivesMeta[] | undefined {
+  try {
+    const cards = (options.archiveCards?.() ?? []).filter((card) => card.archives.length > 0);
+    return cards.length > 0 ? cards : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The cards that import their own exports, or undefined when none does: Import another archive is then the only way in. */
 function archiveSourcesMeta(options: DashboardPanelToolsOptions): ComputerArchiveSourceMeta[] | undefined {
   try {
@@ -567,7 +579,8 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       const archives = archivesMeta(options);
       const sourceImports = sourceImportsMeta(options);
       const archiveSources = archiveSourcesMeta(options);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources) return result;
+      const archiveCards = archiveCardsMeta(options);
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards) return result;
       const meta: ComputerDashboardMeta = {
         ...(missingFolders.length ? { missingFolders } : {}),
         ...(permissionSettings.length ? { permissionSettings } : {}),
@@ -578,6 +591,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
         ...(archives ? { archives } : {}),
         ...(sourceImports ? { sourceImports } : {}),
         ...(archiveSources ? { archiveSources } : {}),
+        ...(archiveCards ? { archiveCards } : {}),
       };
       const existing = result._meta && typeof result._meta === 'object' ? result._meta as Record<string, unknown> : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta } };

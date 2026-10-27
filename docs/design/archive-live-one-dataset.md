@@ -66,10 +66,14 @@ runs so it never moves the live cursor; its findings; its progress; and, for
 an archive, the import record with a Stop control. Stopping keeps what was
 imported.
 
-A source with no live connector (Reflect, Roam, Evernote), mail that matches
-no Gmail account, and an archive of a different account than the connected
-one stay under Archives as today (`archive.imports`, one account scope per
-import), with their Remove.
+Mail that matches no Gmail account, and an archive of a different account
+than the connected one, stay under Archives as today (`archive.imports`, one
+account scope per import), with their Remove; the dashboard shows them under
+Other archives. A source with no live connector (Reflect, Roam, Evernote) is a
+source of its own on the dashboard, with its own card listing its imports
+(step 7), and its imports are stored the same way, under `archive.imports`
+with their Remove, as [source storage](source-storage.md) keeps archive-only
+formats.
 
 ### 2. Intake: one version per item, chosen before judging
 
@@ -295,7 +299,8 @@ Each source's Import an archive appears as its step registers it.
 6. Mail: live Gmail requests `Message-ID`, with the background pass, and
    gains attachments as children; mbox of a Gmail account becomes a Gmail
    input. After storage's account-identity step.
-7. Reflect, Roam, Evernote: their own sources, assets as children.
+7. Reflect, Roam, Evernote: their own sources, assets as children (built,
+   see "Built, step 7").
 8. Live Telegram media and live WhatsApp images and video, so both
    inputs bring the same media.
 
@@ -478,6 +483,51 @@ says so.
 - **ChatGPT.** The section is there too; its button opens the computer's
   dashboard. A card's own Import an archive is on the computer only (the picker
   is the computer's).
+
+## Built, step 7
+
+Reflect, Roam and Evernote are sources of their own on the dashboard, and an
+Evernote export is a new format whose attachments are child items.
+
+- **One card each.** A format no live connector reads names its import-only
+  source in the format registry (`ArchiveFormatDefinition.sourceCard`):
+  `reflect.archive` (Reflect's JSON and Markdown exports), `roam.archive` and
+  `evernote.archive`, the ids their source postures already had. Each card sits
+  in Sources with "Import an archive", whose picker takes only that source's
+  exports, and lists its imports with their progress, findings and Remove (as
+  the Archives row does). "Import another archive" sends the same file to the
+  same card, and Other archives no longer lists them. A start says "Importing
+  Field notes.enex into Evernote. It shows in Evernote as it is read."
+- **Storage does not move.** The imports stay where source-storage.md (step 4e)
+  keeps archive-only formats: `archive.imports`'s note store set, one account
+  scope per import, with their Remove. The cards are views of the public
+  Archives source (`public_source_id`), so no new public source id, scheduler
+  source, store set or relay enum is added, and nothing moves on disk. What
+  this does not give: deleting one card's imports together (each has its
+  Remove, and the Archives source's Delete removes all), and a card count of
+  items by corpus (the card counts its imports).
+- **Not inputs of a connector.** No live connector reads these formats, so
+  there is no live input to share a dataset with and no `ArchiveSourceTarget`:
+  the format's archive connector reads each export, as before. Two exports of
+  the same graph are two imports (their notes are identified by place), as
+  under Archives.
+- **Evernote (.enex).** A shared streaming XML reader
+  (`archive-import/xml-stream.ts`) hands out one `<note>` at a time with a
+  resume point, never holding base64 `<data>`; it reports its byte range. Each
+  note is a note item (ENML to plain lines; `<en-crypt>` is never decrypted and
+  is reported as content Olympus cannot read). Each `<resource>` is a child item
+  with a locator to its base64 range, read later by the extraction factory and
+  judged on its own.
+- **Assets of Reflect and Roam: there are none to read.** Their exports link to
+  pictures on the provider's servers rather than holding them (community
+  reports for Roam's Export All; Reflect's documentation does not say), and an
+  import never fetches from the network. Evernote is the only one of the three
+  whose export holds its files, so it is the only one with children.
+- **Evernote's recognition text is not used yet.** Each attachment's
+  `<recognition>` (Evernote's own reading, handwriting included) is left in the
+  file and never held. Using it needs `RawItem.providerText` (child-items.md,
+  "Text the provider supplies"), a contract change that lands on its own after
+  2.2.0 (branch `claude/provider-text-2-3-0`).
 
 ## To verify before step 4
 
