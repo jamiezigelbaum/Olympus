@@ -66,10 +66,14 @@ runs so it never moves the live cursor; its findings; its progress; and, for
 an archive, the import record with a Stop control. Stopping keeps what was
 imported.
 
-A source with no live connector (Reflect, Roam, Evernote), mail that matches
-no Gmail account, and an archive of a different account than the connected
-one stay under Archives as today (`archive.imports`, one account scope per
-import), with their Remove.
+Mail that matches no Gmail account, and an archive of a different account
+than the connected one, stay under Archives as today (`archive.imports`, one
+account scope per import), with their Remove; the dashboard shows them under
+Other archives. A source with no live connector (Reflect, Roam, Evernote) is a
+source of its own on the dashboard, with its own card listing its imports
+(step 7), and its imports are stored the same way, under `archive.imports`
+with their Remove, as [source storage](source-storage.md) keeps archive-only
+formats.
 
 ### 2. Intake: one version per item, chosen before judging
 
@@ -120,15 +124,16 @@ unchanged.
   marked form (users positive, basic groups `-id`, supergroups and channels
   `-100id`, from the export's chat type) and the message id, so its record
   has the live item's key.
-- **Gmail:** exact where the export carries the Gmail id (Takeout, to
-  verify). Otherwise a message is the live item whose `Message-ID`, `Date`,
-  `From` and `Subject` all agree, and its own item when none or several do.
-  Two mails that agree on all four (a list resend) are taken as one, a
-  residual this rule accepts. Live Gmail adds `Message-ID` to the headers it
-  requests; when an mbox of the connected account is imported, a bounded
-  background pass reads it for mail already stored (one metadata read per
-  message, within the provider budget), and matching waits for the pass to
-  finish.
+- **Gmail:** exact where the export carries the Gmail id (Takeout does, on
+  every message: "Built, step 6"). Otherwise a message is the Gmail message
+  whose `Message-ID`, `Date`, `From` and `Subject` all agree, and its own
+  item when none or several do. Two mails that agree on all four (a list
+  resend) are taken as one, a residual this rule accepts. Live Gmail adds
+  `Message-ID` to the headers it requests. A message without the id is
+  looked up in Gmail itself (`rfc822msgid:`, then the four headers of each
+  candidate), under the provider budget and the current mail approval. This
+  replaces the background pass the first draft had, which would have read
+  every stored message's headers into a local index (step 6 explains why).
 - **WhatsApp:** an export has no message ids, so nothing can make it
   certain; this is the closest the data allows. A message's key is its chat,
   its minute, its sender and its text (caption included). The sender is
@@ -200,8 +205,9 @@ steps 4 and 6 below); live connect and pairing record the hash.
 - **Mail:** an mbox with Gmail's own markers (`X-Gmail-Labels`,
   `X-GM-THRID`) and one delivered-to address is a Gmail account, hashed into
   the opaque address label the source binding keeps; matching a connected
-  account needs that label among the account's labels and the owner's
-  confirmation. With no connected account, the account is created with the
+  account needs that label among the account's labels (or none: an account
+  known by immutable labels only) and the owner's confirmation. An account
+  that carries another address is a different account. With no connected account, the account is created with the
   label and a later connect of that address joins it. Absent, mixed or
   conflicting addresses, or no Gmail markers, make it archive mail under
   Archives.
@@ -276,6 +282,9 @@ ownership and the delete paths do not change.
 
 ## Order
 
+Per-card Import (owner, 2026-10-25): built, see "Built, per-card Import".
+Each source's Import an archive appears as its step registers it.
+
 1. Child items spine (2.1.0, merged).
 2. One-pipeline spine (2.2.0, built, awaiting critical review): connector
    inputs and their cursors, the intake lookup and rule, the hold on the item,
@@ -290,10 +299,17 @@ ownership and the delete paths do not change.
    new record kinds. After storage's account-identity step.
 5. WhatsApp: the export becomes an input (counted keys, zone alignment,
    chat joining); the bridge's records carry the contact's saved name.
+6. Mail: live Gmail requests `Message-ID`, and gains attachments as children;
+   mbox of a Gmail account becomes a Gmail input (built, PR #546, see "Built,
+   step 6"; children are built but off until Gmail attachments have a
+   reader).
+7. Reflect, Roam, Evernote: their own sources, assets as children.
+
 6. Mail: live Gmail requests `Message-ID`, with the background pass, and
    gains attachments as children; mbox of a Gmail account becomes a Gmail
    input. After storage's account-identity step.
-7. Reflect, Roam, Evernote: their own sources, assets as children.
+7. Reflect, Roam, Evernote: their own sources, assets as children (built,
+   see "Built, step 7").
 8. Live Telegram media and live WhatsApp images and video, so both
    inputs bring the same media.
 
@@ -547,6 +563,190 @@ message beyond its search context (`src/workers/telegram-messages/`,
 - **Cost.** An existing item is rewritten only when it is read again, and
   its new search context then re-embeds it once.
 
+## Built, step 6
+
+Mail (PR #546). An mbox export of a Gmail account is an input of the Gmail
+connector; any other mbox stays under Archives, as before.
+
+- **One record.** Both inputs yield the Gmail connector's own record, a
+  parsed mail (`google-connectors/gmail-mail-record.ts`), and one builder
+  makes the items. Live converts an API message
+  (`gmailMailRecordFromMessage`); the mbox input converts each message
+  (`archive-import/mbox/gmail-input.ts`). Mail does not change, so every
+  version of a message is the same: the intake rule keeps what is stored,
+  fills in the text of mail live holds by name only, and keeps live's copy
+  on a tie.
+- **Ids.** Takeout's `From <decimal>@xxx` is Gmail's id in decimal and
+  `X-GM-THRID` the thread's; both become the API's hex form, so an imported
+  message names the live item. Labels Takeout names are given as live
+  Gmail's ids (`Inbox` is `INBOX`; `Opened` and `Archived` are absences);
+  user labels are resolved to the account's label ids through Gmail's label
+  list and kept by id and by name, so an owner rule on either applies. When a
+  rule names a label and the list cannot be read, the import waits rather
+  than store mail the rule could miss.
+- **Header matching** (`google-connectors/gmail-header-match.ts`) for a
+  message without Takeout's id. The first draft had a background pass read
+  every stored message's `Message-ID` into a local index. Gmail already
+  indexes `Message-ID` for every message, so the input asks it directly:
+  one search, and one metadata read per candidate (at most five), only for
+  such messages, under the day budget and only while the mail approval is
+  current. A Takeout import costs no request; no new store is kept.
+- **One budget model** (`google-connectors/gmail-import-allowance.ts`).
+  Imports read Gmail through their own client, whose day counter charges
+  every HTTP attempt, retries included, to the imports' allowance and then to
+  the lane's day counter, so nothing goes around it. The allowance is half of
+  the day's budget. The client retries a failed request once, so one message
+  costs at most 14 attempts (the mailbox check, the search, five candidates)
+  and the label list 2; the smallest accepted budget (32) holds both, so any
+  accepted budget moves at least one message a day. A message, or the label
+  list, is begun only when the allowance holds its worst case, and a refusal
+  spends nothing. The label list is asked only when an owner rule names a
+  label, and once a day while the rules stay the same.
+- **Waiting is findable.** Waiting, what was read goes out with its resume
+  point and the import waits for its next scheduled pass. The import record
+  keeps why (`waiting`), its row says it in a plain line (the day's share is
+  spent; the day's requests are spent; a rule names a label Gmail cannot
+  read now; or the daily limit is too low, with the setting
+  `OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET` and the least it must
+  be), and a limit too low is a Needs you item too. The pass's receipt names
+  the reason (`archive_import_waiting_for_provider: …`). The note goes with
+  the next pass that does not wait.
+- **Account** (`archive-import/mbox/gmail-account.ts`). Headers of the first
+  500 messages (or 64 MB) are read: every one must carry a Gmail marker, and
+  the topmost `Delivered-To` of the received ones must name exactly one
+  address. An address is something the export's author wrote, and an
+  address can change hands, so `resolveImportAccount` never takes it as
+  proof: it joins only an entry that carries that address (or no address),
+  at the owner's yes; an entry with another address is another account.
+  With no Gmail account yet, the import makes it, named by the address
+  label, and a later connect of that address joins it. The first messages
+  decide the account, so every message is checked again as it is read: one
+  whose topmost `Delivered-To` names another address is counted ("delivered
+  to another address left out") and never written. The look stops at its
+  byte bound inside the splitter, an oversized message included.
+- **Lane.** The worker registers the target when the Gmail lane's stores
+  exist. Imports write the Gmail stores and ledger with the live lane's own
+  sync options and the owner's current rules, under Gmail's scheduler key
+  and inside `runExclusiveForSource('gmail.email')`. The account scope is
+  the connected handle's account role, else `personal`, unless the Gmail
+  stores already hold Gmail rows under one other scope: then every reader and
+  writer, live included, keeps that one (`gmailItemAccountScope`), so an
+  import made before the connect and a connect under another role still name
+  one item. The Private store's approved-scope filter (status counts, private
+  embedding) accepts an observation by an import's input (`archive.<id>`)
+  beside the live lane's scoped one: the owner approved each import.
+- **Before Gmail is connected.** Importing Takeout first and connecting
+  later is a normal first run. Live approval governs live reads, not the
+  account's own stores: an import pass embeds what it writes, as a live pull
+  does (under the live scope binding when there is an approval); with no live
+  lane, a Gmail scheduler source with no sync of its own carries the
+  embedding sweep and the private meaning backfill; and the Private store's
+  counts and backfill accept what the imports brought (`archive.` observations
+  alone) while live Gmail is not connected and approved. Live mail stored
+  under an approval that no longer stands is neither counted nor embedded by
+  that path.
+- **What an import does not apply.** The owner's mail scope (skipped
+  senders and categories, the one-time-code filter, the content window)
+  governs what live reads; an import is its own approval, as it was under
+  Archives. Spam and Trash are skipped, as before.
+- **Children: built, off.** The child key is the MIME part path, computed by
+  both inputs as Gmail numbers `partId` (`archive-import/mbox/mime-parts.ts`;
+  a `message/rfc822` part is one attachment). Live listing keeps a message
+  and its attachments within the item budget, can resume inside one
+  message's attachments, and resumes a cut-short page after the last message
+  it handled, found by its id (`after`), never by position, whether or not
+  the store would skip it; `fetchItem` with a locator reads a part's bytes
+  (inline, or `attachments.get`). They stay off (`GmailMailBuild.children`)
+  because nothing reads a Gmail child's bytes yet: the Gmail lane has no
+  extraction roster entry, and an imported child's locator points into the
+  export (`mbox-part1:`), which that reader would also need to open. A child
+  nobody reads stays owed reading on the card for ever. Turning them on is
+  the follow-up, with child-items' step 3.
+- **Release check.** The import-beside-live case is
+  `GMAIL_TAKEOUT_FIXTURES` in `scripts/release-check/archive-fixtures.ts`
+  (`SOURCE_INPUT_FORMATS`), run through the product by
+  `test/release-check-source-input-fixtures.test.ts`. It is not in
+  `ARCHIVE_FORMATS`: the leg's archive path expects a row under Other
+  archives and a Remove, which a merged import does not have, and a fresh
+  machine has no live Gmail input. The leg's journey for it is still to
+  build.
+
+## Built, per-card Import (owner-approved 2026-10-25)
+
+Which button to use is decided by where the export came from, and the page
+says so.
+
+- **A source's own card.** Every source whose connector reads its exports as
+  inputs (a registered `ArchiveSourceTarget`) gets **Import an archive** in its
+  ⋯ menu, before Disconnect and Delete. It opens the picker titled "Import an
+  archive into Telegram", whose opening sentence names only that source's exports.
+  The approval names the card (`source_id`), and the engine recognises only that
+  source's formats (`prepareArchiveImport` with the target's formats). Any other
+  export is refused in the picker: "This isn't a Telegram export. From the
+  Telegram card, Olympus imports only these: … For any other export, use Import
+  another archive under Other archives." A card gets the entry only once its
+  source registers (steps 4 to 7), so no card offers an import that would land
+  elsewhere. The computer lists the cards in `ComputerDashboardMeta.archiveSources`;
+  while the list of imports cannot be read, no card offers it.
+- **Other archives.** The Archives card is its own section below Sources,
+  titled Other archives, with the line "For an export that isn't from one of
+  your sources above." and the button **Import another archive**, always in
+  sight (never in ⋯). It still sends an export to its source when one reads
+  it (`forFormat`, as before), and lists only the archives that cannot join a
+  source. Its picker says so: "An export from one of your sources joins that
+  source; any other is kept under Other archives."
+- **Where it shows.** A start says where the import is: "Importing result.json
+  into Telegram. It shows in Telegram as it is read." or "… It shows under Other
+  archives as it is read." (`started.source` on the approval).
+- **ChatGPT.** The section is there too; its button opens the computer's
+  dashboard. A card's own Import an archive is on the computer only (the picker
+  is the computer's).
+
+## Built, step 7
+
+Reflect, Roam and Evernote are sources of their own on the dashboard, and an
+Evernote export is a new format whose attachments are child items.
+
+- **One card each.** A format no live connector reads names its import-only
+  source in the format registry (`ArchiveFormatDefinition.sourceCard`):
+  `reflect.archive` (Reflect's JSON and Markdown exports), `roam.archive` and
+  `evernote.archive`, the ids their source postures already had. Each card sits
+  in Sources with "Import an archive", whose picker takes only that source's
+  exports, and lists its imports with their progress, findings and Remove (as
+  the Archives row does). "Import another archive" sends the same file to the
+  same card, and Other archives no longer lists them. A start says "Importing
+  Field notes.enex into Evernote. It shows in Evernote as it is read."
+- **Storage does not move.** The imports stay where source-storage.md (step 4e)
+  keeps archive-only formats: `archive.imports`'s note store set, one account
+  scope per import, with their Remove. The cards are views of the public
+  Archives source (`public_source_id`), so no new public source id, scheduler
+  source, store set or relay enum is added, and nothing moves on disk. What
+  this does not give: deleting one card's imports together (each has its
+  Remove, and the Archives source's Delete removes all), and a card count of
+  items by corpus (the card counts its imports).
+- **Not inputs of a connector.** No live connector reads these formats, so
+  there is no live input to share a dataset with and no `ArchiveSourceTarget`:
+  the format's archive connector reads each export, as before. Two exports of
+  the same graph are two imports (their notes are identified by place), as
+  under Archives.
+- **Evernote (.enex).** A shared streaming XML reader
+  (`archive-import/xml-stream.ts`) hands out one `<note>` at a time with a
+  resume point, never holding base64 `<data>`; it reports its byte range. Each
+  note is a note item (ENML to plain lines; `<en-crypt>` is never decrypted and
+  is reported as content Olympus cannot read). Each `<resource>` is a child item
+  with a locator to its base64 range, read later by the extraction factory and
+  judged on its own.
+- **Assets of Reflect and Roam: there are none to read.** Their exports link to
+  pictures on the provider's servers rather than holding them (community
+  reports for Roam's Export All; Reflect's documentation does not say), and an
+  import never fetches from the network. Evernote is the only one of the three
+  whose export holds its files, so it is the only one with children.
+- **Evernote's recognition text is not used yet.** Each attachment's
+  `<recognition>` (Evernote's own reading, handwriting included) is left in the
+  file and never held. Using it needs `RawItem.providerText` (child-items.md,
+  "Text the provider supplies"), a contract change that lands on its own after
+  2.2.0 (branch `claude/provider-text-2-3-0`).
+
 ## To verify before step 4
 
 - Telegram Desktop writes bare chat ids, with the type telling the marked
@@ -572,7 +772,12 @@ message beyond its search context (`src/workers/telegram-messages/`,
     `personal_information`, so it gives no account hash. It joins the account
     at the owner's confirmation, like a single-chat export (section 7).
 - Takeout's mbox separator line carries the Gmail message id in decimal (the
-  API id is its hex). If not, mail matches by its headers only.
+  API id is its hex). **Checked 2026-10-25 against the published format**
+  (community and vendor samples, and Google's IMAP documentation, which says
+  `X-GM-MSGID` and `X-GM-THRID` are the decimal forms of the API's hex ids):
+  every message starts `From <decimal>@xxx <date>` and carries `X-GM-THRID`
+  in decimal and `X-Gmail-Labels` by name. Not yet checked against a real
+  export: the owner canary confirms the `From` number is the message id.
 - The WhatsApp export's chat names equal the bridge's contact names for
   direct chats. Check with the owner canary.
 

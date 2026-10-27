@@ -2252,7 +2252,7 @@
       "source_sha256": "2757122532034910eaa809324ec603bb9a6b8e2c7cc92924f20cc5c1f64c10e1",
       "replacement_sha256": "e13590f28abe425a53e58889fd8af1db58cb953d6cdaa37436898b9741d02f52",
       "disposition": "retained_product_or_governance",
-      "public_sha256": "f4d10ad74d2e1523c6f39b212467a538f0848dd095f8836eccab389f3c0edb15"
+      "public_sha256": "7ce67a86ea5041af07134cb9778a31f44ac9c57d9e31fca669d8605264d85c08"
     },
     {
       "path": "test/delphi-scorer.test.ts",

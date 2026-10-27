@@ -278,6 +278,11 @@ function readsJsonExport(entry, format) {
   }
   return notesJsonFormat(entry) === format;
 }
+function looksLikeEnex(head) {
+  const text = archiveHeadText(head).replace(/^\ufeff/, "");
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text);
+  return start !== null && (start[1] ?? start[2]) === "en-export";
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
@@ -286,6 +291,21 @@ function isTelegramJsonHead(head) {
 }
 function getArchiveFormat(formatId) {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
+}
+function archiveSourceCards(formats = ARCHIVE_FORMATS) {
+  const cards = new Map;
+  for (const format of formats) {
+    if (!format.sourceCard)
+      continue;
+    const card = cards.get(format.sourceCard.id) ?? { id: format.sourceCard.id, label: format.sourceCard.label, formats: [] };
+    card.formats.push(format);
+    cards.set(card.id, card);
+  }
+  return [...cards.values()];
+}
+function archiveSourceCardOf(formatId, formats = ARCHIVE_FORMATS) {
+  const card = formats.find((format) => format.id === formatId)?.sourceCard;
+  return card ? archiveSourceCards(formats).find((entry) => entry.id === card.id) : undefined;
 }
 function archiveFormatForProvider(provider, formats = ARCHIVE_FORMATS) {
   return formats.find((format) => format.provider === provider);
@@ -426,7 +446,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -487,6 +507,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
@@ -497,6 +518,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export as Markdown (the .zip file)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*, *, ????.md"]),
     detect: (probe) => detectFile(probe, (entry) => {
       if (!entry.members || /^roam/i.test(entry.name))
@@ -517,8 +539,25 @@ var init_archive_formats = __esm(() => {
     provider: "roam",
     chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
     citationLabel: "Roam",
+    sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
+    id: "evernote-enex",
+    label: "Evernote export (.enex)",
+    family: "note",
+    provider: "evernote",
+    chooseHint: "an Evernote export (the .enex file, or a folder of them)",
+    citationLabel: "Evernote",
+    sourceCard: Object.freeze({ id: "evernote.archive", label: "Evernote" }),
+    probeNames: Object.freeze(["*.enex"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
+      const files = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && looksLikeEnex(entry.head)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      return files.length > 0 ? files : undefined;
+    }
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
@@ -568,7 +607,8 @@ var init_archive_formats = __esm(() => {
     REFLECT_JSON_ARCHIVE_FORMAT,
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
-    TELEGRAM_JSON_ARCHIVE_FORMAT
+    TELEGRAM_JSON_ARCHIVE_FORMAT,
+    EVERNOTE_ENEX_ARCHIVE_FORMAT
   ]);
   ARCHIVE_COMMON_FINDINGS = {
     mediaNotImported: "media_not_imported",
@@ -9432,7 +9472,8 @@ var init_credential_broker = __esm(() => {
     "whatsapp_business",
     "apple_messages",
     "reflect",
-    "roam"
+    "roam",
+    "evernote"
   ];
   CREDENTIAL_PROVIDERS = [
     ...PUBLIC_CREDENTIAL_PROVIDERS,
@@ -9799,6 +9840,25 @@ var init_credential_broker = __esm(() => {
         backendState: {
           kind: "archive_path",
           archiveRootAlias: "roam_archive",
+          readerWorker: "archive_import_reader",
+          contentBounds: "approved_archive_root",
+          backendLabel: "local_private:archive_import"
+        }
+      },
+      {
+        handle: "evernote.archive",
+        provider: "evernote",
+        sessionKind: "archive_path",
+        accountRole: "archive",
+        trustDomain: "internal",
+        allowedCapabilities: ["evernote.archive.import"],
+        scopes: [],
+        tokenEnvNames: [],
+        statusEnvNames: ["OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY"],
+        expiresInSeconds: 3600,
+        backendState: {
+          kind: "archive_path",
+          archiveRootAlias: "evernote_archive",
           readerWorker: "archive_import_reader",
           contentBounds: "approved_archive_root",
           backendLabel: "local_private:archive_import"
@@ -10536,6 +10596,17 @@ function compareProviderAccounts(recorded, observed) {
 }
 function sameProviderAccount(recorded, observed) {
   return compareProviderAccounts(recorded, observed) === "same";
+}
+function namesAccountByAddressOnly(id) {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && labels.has("google") && !hasImmutableAccountLabel(id);
+}
+function compareAddressToRecord(recorded, address) {
+  const mine = parseProviderAccountId(address)?.get("google");
+  const theirs = parseProviderAccountId(recorded)?.get("google");
+  if (mine === undefined || theirs === undefined)
+    return "unproven";
+  return mine === theirs ? "same" : "different";
 }
 function hasImmutableAccountLabel(id) {
   const labels = parseProviderAccountId(id);
@@ -16983,6 +17054,9 @@ function determineBranch(decodeTree, current2, nodeIndex, char) {
     }
   }
   return -1;
+}
+function decodeHTML(htmlString, mode = DecodingMode.Legacy) {
+  return htmlDecoder(htmlString, mode);
 }
 function decodeHTMLStrict(htmlString) {
   return htmlDecoder(htmlString, DecodingMode.Strict);
@@ -26925,6 +26999,16 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key2) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key2 || key2.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key2}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
 // src/workers/connector-store/child-visibility.ts
 function parentIdentityOf(child) {
   const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
@@ -27157,7 +27241,7 @@ function hiddenChildKeys(lane, probes) {
   }
   return childrenWithHiddenParents(lane, links);
 }
-var CHILD_ITEM_ID_SEPARATOR = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   HIDDEN = { visible: false, gone: false };
@@ -30504,6 +30588,7 @@ function normalizeConnectorStoreSearchFilters(value) {
   const normalized = {
     ...provider ? { provider } : {},
     ...value.observedConnectorId ? { observedConnectorId: requireNonEmpty(value.observedConnectorId, "Observed connector id") } : {},
+    ...value.observedConnectorIdPrefix ? { observedConnectorIdPrefix: requireNonEmpty(value.observedConnectorIdPrefix, "Observed connector id prefix") } : {},
     ...locatorPathScope ? { locatorPathScope } : {},
     ...locatorPathScopes.length > 0 ? { locatorPathScopes } : {},
     ...locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {},
@@ -30532,9 +30617,15 @@ function connectorStoreFilterSql(filters) {
     clauses.push("AND i.provider = ?");
     params.push(normalized.provider);
   }
-  if (normalized.observedConnectorId) {
+  if (normalized.observedConnectorId && normalized.observedConnectorIdPrefix) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND (scope_owner.connector_id = ? OR substr(scope_owner.connector_id, 1, length(?)) = ?) AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorId, normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
+  } else if (normalized.observedConnectorId) {
     clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
     params.push(normalized.observedConnectorId);
+  } else if (normalized.observedConnectorIdPrefix) {
+    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND substr(scope_owner.connector_id, 1, length(?)) = ? AND scope_owner.ownership_kind = 'observed')");
+    params.push(normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push("AND i.source_scope_generation = ?");
@@ -37258,6 +37349,14 @@ var init_local_index = __esm(() => {
     holdsAnyItem() {
       return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
     }
+    holdsItemsMatching(filters) {
+      const scoped = connectorStoreFilterSql(filters);
+      return this.db.query(`SELECT 1 AS present FROM items i WHERE i.tombstoned = 0 ${scoped.sql} LIMIT 1`).get(...scoped.params) !== null;
+    }
+    itemAccountScopes(provider, limit = 2) {
+      const rows = this.db.query("SELECT DISTINCT account_scope AS scope FROM items WHERE provider = ? LIMIT ?").all(provider, limit);
+      return rows.map((row) => row.scope);
+    }
     fileReplacedOrRemoved() {
       if (!this.openedFile)
         return false;
@@ -37979,7 +38078,9 @@ function resolveImportAccount(sourceId, importAccountId, options = {}) {
     return { match: written === "same" ? "same" : "new", account };
   }
   const recorded = entry.provider_account_hash;
-  const match = recorded !== undefined && importAccountId !== undefined ? compareProviderAccounts(recorded, importAccountId) : "unproven";
+  const addressOnly = importAccountId !== undefined && namesAccountByAddressOnly(importAccountId);
+  const compared = recorded !== undefined && importAccountId !== undefined ? addressOnly ? compareAddressToRecord(recorded, importAccountId) : compareProviderAccounts(recorded, importAccountId) : "unproven";
+  const match = addressOnly && compared === "same" ? "unproven" : compared;
   if (match === "different")
     return { match };
   if (match === "unproven" && options.ownerConfirmed !== true)
@@ -51324,13 +51425,13 @@ function dashboardSubLine(source, options) {
     case "Failing":
       return dashboardAttentionLine(source, options);
     case "Working":
-      return workingLine(source);
+      return source.connection.action.kind === "archive_import" && source.coverage.indexed_items === 0 && source.connection.label ? source.connection.label : workingLine(source);
     case "Waiting":
       return waitingLine(source);
     case "Fresh":
       return freshLine(source, options?.now ?? new Date);
     case "Off":
-      return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && !dashboardUnsettledWithData(source) ? DASHBOARD_DISCONNECTED_DATA_KEPT : source.connection.label;
+      return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && source.connection.action.kind !== "archive_import" && !dashboardUnsettledWithData(source) ? DASHBOARD_DISCONNECTED_DATA_KEPT : source.connection.label;
   }
 }
 function dashboardIsUnconnectedState(source) {
@@ -51796,6 +51897,10 @@ function dashboardImportAttentionSentence(entry) {
       return entry.count === 1 ? words2.held.one : words2.held.many.replace("{n}", dashboardCount(entry.count));
     case "unreadable":
       return words2.unreadable;
+    case "waiting": {
+      const template = entry.reason === "gmail_budget_too_small" ? words2.waiting.gmail_budget_too_small : words2.waiting.other;
+      return template.replace("{name}", () => displayText(entry.name)).replace("{n}", dashboardCount(entry.minimum));
+    }
   }
 }
 function archiveFindingList(kind) {
@@ -52043,6 +52148,7 @@ var init_vocabulary = __esm(() => {
     sourcesCloud: "Accounts",
     notConnected: "Not connected",
     noSources: "No sources yet.",
+    otherArchives: { title: "Other archives", line: "For an export that isn't from one of your sources above." },
     progress: "Progress",
     progressInitial: "First index",
     progressRefresh: "Catching up",
@@ -52210,11 +52316,12 @@ var init_vocabulary = __esm(() => {
     other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
   };
   DASHBOARD_ARCHIVE_COPY = {
-    importAction: "Import an archive",
+    importAction: "Import another archive",
+    sourceImport: { action: "Import an archive", title: "Import an archive into {source}" },
     pick: {
       back: "Back to Olympus",
-      title: "Import an archive",
-      intro: ARCHIVE_PICK_INTRO,
+      title: "Import another archive",
+      intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
       source: "This computer",
       makePrivate: "Import",
       makePrivateFor: "Import {name}",
@@ -52275,11 +52382,11 @@ var init_vocabulary = __esm(() => {
     thisFile: "A file of this archive",
     account: {
       line: "{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?",
-      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.",
+      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Other archives, it stays apart, with its own Remove.",
       add: "Add to {source}",
-      apart: "Keep it under Archives",
+      apart: "Keep it under Other archives",
       addFor: "Add {name} to {source}",
-      apartFor: "Keep {name} under Archives",
+      apartFor: "Keep {name} under Other archives",
       sourceFallback: "this source",
       reconfirm: {
         line: "{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?",
@@ -52318,6 +52425,14 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      mail_for_another_account: { one: "1 message delivered to another address left out", many: "{n} messages delivered to another address left out" },
+      gmail_budget_too_small: {
+        one: "Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.",
+        many: "Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus."
+      },
+      gmail_import_allowance_spent: { one: "Waiting until tomorrow: imports have used their share of today's Gmail requests.", many: "Waiting until tomorrow: imports have used their share of today's Gmail requests." },
+      gmail_requests_spent: { one: "Waiting until tomorrow: today's Gmail requests are used up.", many: "Waiting until tomorrow: today's Gmail requests are used up." },
+      gmail_labels_unavailable: { one: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.", many: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now." },
       system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
       message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
       status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
@@ -52369,6 +52484,11 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: "not_imported",
       text_cut: "not_imported",
       spam_or_trash: "not_imported",
+      mail_for_another_account: "not_imported",
+      gmail_budget_too_small: "not_imported",
+      gmail_import_allowance_spent: "not_imported",
+      gmail_requests_spent: "not_imported",
+      gmail_labels_unavailable: "not_imported",
       message_content_unsupported: "not_imported",
       system_message: "how_read",
       message_empty: "how_read",
@@ -52409,7 +52529,8 @@ var init_vocabulary = __esm(() => {
     },
     tryAgain: "Try again",
     dismiss: "Dismiss",
-    started: "Importing {name}. It shows under Archives as it is read.",
+    started: "Importing {name}. It shows under Other archives as it is read.",
+    startedIn: "Importing {name} into {source}. It shows in {source} as it is read.",
     checking: "Checking whether {name} is already imported…",
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
@@ -52427,6 +52548,10 @@ var init_vocabulary = __esm(() => {
       },
       held: { one: "1 imported item waits for the private model", many: "{n} imported items wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
+      waiting: {
+        gmail_budget_too_small: "An import waits: {name}. The daily limit on Gmail requests is too low; set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more",
+        other: "An import waits: {name}"
+      },
       seeWhy: "See why",
       review: "Review",
       setUp: "Set up the private model",
@@ -52439,7 +52564,7 @@ var init_vocabulary = __esm(() => {
         permission: "Your user account is not allowed to open {file}.",
         other: "Olympus could not open {file}."
       },
-      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, no archive can be imported, so nothing overwrites it.",
       fix: {
         damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
         unknown_form: "Update Olympus, then open this page again.",
@@ -53851,6 +53976,169 @@ function metadataStringArray2(metadata, key2) {
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
 
+// src/workers/google-connectors/gmail-mail-record.ts
+import { createHash as createHash31 } from "node:crypto";
+function childrenOf(record, build) {
+  return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.nested !== true && attachment.filename.trim() !== "");
+}
+function hashString3(value) {
+  return createHash31("sha256").update(value).digest("hex");
+}
+function parsedDate(value) {
+  if (!value)
+    return;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function internalDateIso(value) {
+  if (!value)
+    return;
+  const ms = Number.parseInt(value, 10);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function attachmentLine(attachment) {
+  const details = [
+    attachment.mimeType?.trim() || undefined,
+    attachment.size !== undefined ? `${attachment.size} bytes` : undefined,
+    attachment.partId.trim() ? `part ${attachment.partId.trim()}` : undefined
+  ].filter((value) => Boolean(value));
+  return `Attachment: ${attachment.filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
+}
+function headersSummary(headers) {
+  return [
+    headers.subject ? `Subject: ${headers.subject}` : undefined,
+    headers.from ? `From: ${headers.from}` : undefined,
+    headers.to ? `To: ${headers.to}` : undefined,
+    headers.date ? `Date: ${headers.date}` : undefined
+  ].filter(Boolean).join(`
+`);
+}
+function messageText(record) {
+  return [headersSummary(record.headers), record.snippet, record.body].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
+
+`);
+}
+function identityOf(record, account) {
+  return {
+    family: "email",
+    provider: GMAIL_MAIL_PROVIDER,
+    accountScope: account,
+    providerItemId: record.id,
+    ...record.threadId ? { providerThreadId: record.threadId } : {},
+    localItemId: `${account}:${record.id}`,
+    ...record.sourceVersion ? { sourceVersion: record.sourceVersion } : {}
+  };
+}
+function childIdentityOf(record, account, attachment) {
+  const providerItemId = gmailChildProviderId(record.id, attachment.partId);
+  return {
+    family: "email",
+    provider: GMAIL_MAIL_PROVIDER,
+    accountScope: account,
+    providerItemId,
+    ...record.threadId ? { providerThreadId: record.threadId } : {},
+    localItemId: `${account}:${providerItemId}`,
+    ...record.sourceVersion ? { sourceVersion: record.sourceVersion } : {},
+    parent: { providerItemId: record.id, localItemId: `${account}:${record.id}` }
+  };
+}
+function gmailMessageItem(record, account, fetchedAt = new Date().toISOString()) {
+  const subject = record.headers.subject ?? "(no subject)";
+  const rawFrom = record.headers.from ?? "";
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
+  const date = parsedDate(record.headers.date) ?? internalDateIso(record.internalDate);
+  const metadataOnly = record.metadataOnly;
+  const attachments = record.attachments;
+  const lines = attachments.map(attachmentLine);
+  const bytes = attachments.reduce((total, attachment) => total + (attachment.size ?? 0), 0);
+  const text2 = metadataOnly ? "" : messageText(record) || (lines.length > 0 ? lines.join(`
+`) : `Subject: ${subject}`);
+  return {
+    identity: identityOf(record, account),
+    mimeType: "message/rfc822",
+    content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
+    metadata: Object.freeze({
+      title: subject,
+      subject,
+      from,
+      ...record.headers.to ? { to: record.headers.to } : {},
+      ...date ? { authoredAt: date } : {},
+      ...record.internalDate ? { internalDate: record.internalDate } : {},
+      ...record.historyId ? { historyId: record.historyId } : {},
+      ...record.headers.messageId ? { messageId: record.headers.messageId } : {},
+      ...record.snippet && !metadataOnly ? { snippet: record.snippet } : {},
+      ...metadataOnly ? namesOnlyContentScopeMetadata() : {},
+      labels: [...record.labelIds],
+      attachmentCount: attachments.length,
+      attachmentBytesDeclared: bytes,
+      ...lines.length > 0 ? { attachments: lines } : {},
+      attachmentsNotIngested: attachments.length,
+      ...gmailId(record) ? { locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(record.id)}` } : {},
+      contentHash: hashString3(`${record.historyId ?? ""}:${metadataOnly ? "metadata_only" : text2}`)
+    }),
+    fetchedAt
+  };
+}
+function gmailChildItem(record, account, attachment, fetchedAt) {
+  const date = parsedDate(record.headers.date) ?? internalDateIso(record.internalDate);
+  const name = attachment.filename.slice(0, MAX_ATTACHMENT_NAME_CHARS);
+  const rawFrom = record.headers.from ?? "";
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
+  return {
+    identity: childIdentityOf(record, account, attachment),
+    mimeType: attachment.mimeType?.trim() || "application/octet-stream",
+    content: { kind: "metadata_only" },
+    metadata: Object.freeze({
+      title: name,
+      name,
+      ...from ? { from } : {},
+      ...date ? { authoredAt: date } : {},
+      ...attachment.size !== undefined ? { sizeBytes: attachment.size } : {},
+      ...gmailId(record) ? { locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(record.id)}` } : {}
+    }),
+    fetchedAt,
+    deferredBytes: {
+      locator: attachment.locator ?? "",
+      available: attachment.locator !== undefined,
+      ...attachment.size !== undefined ? { sizeBytes: attachment.size } : {}
+    }
+  };
+}
+function gmailMailItems(record, account, build = {}, wanted) {
+  const fetchedAt = new Date().toISOString();
+  const items = [];
+  const parent = gmailMessageItem(record, account, fetchedAt);
+  if (!wanted || wanted.has(parent.identity.localItemId))
+    items.push(parent);
+  for (const attachment of childrenOf(record, build)) {
+    const child = gmailChildItem(record, account, attachment, fetchedAt);
+    if (!wanted || wanted.has(child.identity.localItemId))
+      items.push(child);
+  }
+  return items;
+}
+function gmailMailEntries(record, account, build = {}) {
+  const authoredAt = parsedDate(record.headers.date) ?? internalDateIso(record.internalDate);
+  return [
+    { identity: identityOf(record, account), bringsContent: !record.metadataOnly, ...authoredAt ? { authoredAt } : {} },
+    ...childrenOf(record, build).map((attachment) => ({ identity: childIdentityOf(record, account, attachment), bringsContent: false }))
+  ];
+}
+function gmailClassificationSignals(item) {
+  const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
+  const sender = metadataString2(item.metadata, "from");
+  const labels = metadataStringArray2(item.metadata, "labels");
+  return {
+    ...subject ? { title: subject } : {},
+    ...sender ? { sender } : {},
+    ...labels.length > 0 ? { labels } : {}
+  };
+}
+var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX), compareGmailMailVersions = (_a3, _b2) => 0;
+var init_gmail_mail_record = __esm(() => {
+  init_sender_rules();
+});
+
 // src/workers/google-connectors/request-budget.ts
 import {
   chmodSync as chmodSync14,
@@ -54202,7 +54490,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash31 } from "node:crypto";
+import { createHash as createHash32 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -54232,6 +54520,8 @@ class GoogleGmailSourceConnector {
   itemsSkippedStored = 0;
   ingestFilterOptions;
   itemsByLocalId = new Map;
+  build;
+  messagesById = new Map;
   constructor(options = {}) {
     const env = options.env ?? process.env;
     this.fetchImpl = options.fetch ?? fetch;
@@ -54251,6 +54541,7 @@ class GoogleGmailSourceConnector {
     this.injectedClient = options.apiClient;
     this.scope = options.scope;
     this.now = options.now ?? (() => Date.now());
+    this.build = options.build ?? {};
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
     if (this.scope?.skippedLabelIds?.length) {
@@ -54281,9 +54572,34 @@ class GoogleGmailSourceConnector {
     const nowMs = this.now();
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
     let pageToken = staleLeg ? undefined : resume.pageToken;
+    let itemRoom = remaining;
+    let pageAfter = staleLeg ? undefined : resume.after;
+    if (resume.childOf && !staleLeg) {
+      const rest = await this.attachmentsFrom(client, resume.childOf, itemRoom);
+      this.providerRequests += 1;
+      remaining -= 1;
+      itemRoom -= rest.items.length;
+      const cursorFields = {
+        ...watermarkMs !== undefined ? { watermarkMs } : {},
+        ...highWaterMs !== undefined ? { highWaterMs } : {},
+        ...pageToken ? { pageToken } : {},
+        ...metadataLeg ? { phase: "metadata" } : {},
+        ...startedMs !== undefined ? { startedMs } : {},
+        ...pageAfter ? { after: pageAfter } : {}
+      };
+      if (rest.next !== undefined) {
+        const nextCursor2 = encodeGmailCursor({ ...cursorFields, childOf: { id: resume.childOf.id, from: rest.next } });
+        yield { items: rest.items, ...nextCursor2 ? { nextCursor: nextCursor2 } : {}, done: false, truncated: true };
+        return;
+      }
+      const nextCursor = encodeGmailCursor(cursorFields);
+      yield { items: rest.items, ...nextCursor ? { nextCursor } : {}, done: false };
+      if (remaining <= 0 || itemRoom <= 0)
+        return;
+    }
     const requestedPageTokens = new Set;
     let listPages = 0;
-    while (remaining > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
+    while (remaining > 0 && itemRoom > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
       if (pageToken)
         assertNewProviderPage(requestedPageTokens, pageToken);
       this.providerRequests += 1;
@@ -54294,13 +54610,19 @@ class GoogleGmailSourceConnector {
         ...query ? { query } : {}
       });
       const listed = page2.messages.filter((message2) => message2.id);
+      const resumedAt = pageAfter ? listed.findIndex((message2) => message2.id === pageAfter) : -1;
+      const baseSkip = resumedAt + 1;
+      const examinedIds = resumedAt >= 0 ? [pageAfter] : [];
+      pageAfter = undefined;
       const items = [];
       let messagesExamined = 0;
       let messagesFetched = 0;
-      for (const message2 of listed) {
-        if (messagesFetched >= remaining)
+      let childOf;
+      for (const message2 of listed.slice(baseSkip)) {
+        if (messagesFetched >= remaining || items.length >= itemRoom)
           break;
         messagesExamined += 1;
+        examinedIds.push(message2.id);
         const stored = this.scope?.storedItem?.(message2.id);
         if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
           continue;
@@ -54311,7 +54633,7 @@ class GoogleGmailSourceConnector {
             this.providerRequests += 1;
             const metadata = await client.getMessage(message2.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
             const received = internalDateNumber({ internalDate: metadata.internalDate });
-            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const item2 = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
             const subject2 = metadataString2(item2.metadata, "subject");
             const from2 = metadataString2(item2.metadata, "from");
             const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray2(item2.metadata, "labels") }, this.ingestFilterOptions);
@@ -54332,7 +54654,8 @@ class GoogleGmailSourceConnector {
           this.itemsSkippedStored += 1;
           continue;
         }
-        const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
+        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff });
+        const [item, ...children] = gmailMailItems(record, this.account, this.build);
         this.attachmentsDeclared += metadataCount(item.metadata, "attachmentCount");
         this.attachmentBytesDeclared += metadataCount(item.metadata, "attachmentBytesDeclared");
         this.attachmentsNotIngested += metadataCount(item.metadata, "attachmentsNotIngested");
@@ -54360,12 +54683,40 @@ class GoogleGmailSourceConnector {
             this.itemsSkippedCategory += 1;
           continue;
         }
-        this.itemsByLocalId.set(item.identity.localItemId, item);
-        items.push(item);
+        if (items.length + 1 + children.length > itemRoom && items.length > 0) {
+          messagesExamined -= 1;
+          examinedIds.pop();
+          break;
+        }
+        const unit = [item, ...children].slice(0, Math.max(1, itemRoom - items.length));
+        if (unit.length < 1 + children.length)
+          childOf = { id: record.id, from: unit.length - 1 };
+        for (const entry of unit)
+          this.itemsByLocalId.set(entry.identity.localItemId, entry);
+        this.messagesById.set(fetched.id, fetched);
+        items.push(...unit);
+        if (childOf)
+          break;
       }
       remaining -= messagesFetched;
-      pageToken = page2.nextPageToken;
-      const pageTruncated = messagesExamined < listed.length;
+      itemRoom -= items.length;
+      if (childOf) {
+        const nextCursor2 = encodeGmailCursor({
+          ...watermarkMs !== undefined ? { watermarkMs } : {},
+          ...highWaterMs !== undefined ? { highWaterMs } : {},
+          ...pageToken ? { pageToken } : {},
+          ...metadataLeg ? { phase: "metadata" } : {},
+          ...startedMs !== undefined ? { startedMs } : {},
+          childOf,
+          after: childOf.id
+        });
+        yield { items, ...nextCursor2 ? { nextCursor: nextCursor2 } : {}, done: false, truncated: true };
+        return;
+      }
+      const handled = baseSkip + messagesExamined;
+      const pageTruncated = handled < listed.length;
+      if (!pageTruncated)
+        pageToken = page2.nextPageToken;
       const legDone = !pageToken && !pageTruncated;
       const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
       const done = legDone && !enterMetadataLeg;
@@ -54385,7 +54736,8 @@ class GoogleGmailSourceConnector {
         ...highWaterMs !== undefined ? { highWaterMs } : {},
         ...pageToken ? { pageToken } : {},
         ...metadataLeg ? { phase: "metadata" } : {},
-        ...startedMs !== undefined ? { startedMs } : {}
+        ...startedMs !== undefined ? { startedMs } : {},
+        ...pageTruncated && examinedIds.length > 0 ? { after: examinedIds.at(-1) } : {}
       });
       yield {
         items,
@@ -54402,13 +54754,53 @@ class GoogleGmailSourceConnector {
         break;
     }
   }
-  async fetchItem(localItemId) {
+  async fetchItem(localItemId, options) {
+    if (options?.deferredBytes)
+      return this.fetchAttachment(localItemId, options.deferredBytes.locator);
     const item = this.itemsByLocalId.get(localItemId) ?? this.itemsByLocalId.get(`${this.account}:${localItemId}`);
     if (!item) {
-      throw new Error(`Gmail connector cannot fetch unknown item ${hashString3(localItemId).slice(0, 16)}.`);
+      throw new Error(`Gmail connector cannot fetch unknown item ${hashString4(localItemId).slice(0, 16)}.`);
     }
     this.fetchItemCacheHits += 1;
     return item;
+  }
+  async fetchAttachment(localItemId, locator) {
+    const where = parseGmailPartLocator(locator);
+    if (!where)
+      throw new Error("This Gmail attachment cannot be found from what Olympus kept.");
+    const client = await this.clientForRequest();
+    let message2 = this.messagesById.get(where.messageId);
+    if (!message2) {
+      this.providerRequests += 1;
+      message2 = await client.getMessage(where.messageId);
+      this.messagesById.set(where.messageId, message2);
+    }
+    const part = gmailPartAt(message2.payload, where.partId);
+    const record = gmailMailRecordFromMessage(message2);
+    const child = gmailMailItems(record, this.account, { children: true }).find((item) => item.identity.localItemId === localItemId || item.identity.localItemId === `${this.account}:${localItemId}`);
+    if (!part || !child)
+      throw new Error("This Gmail attachment is no longer in its message.");
+    let data2 = part.body?.data;
+    if (!data2 && part.body?.attachmentId) {
+      if (!client.getAttachment)
+        throw new Error("This Gmail client cannot read attachments.");
+      this.providerRequests += 1;
+      data2 = (await client.getAttachment(where.messageId, part.body.attachmentId)).data;
+    }
+    if (data2 === undefined)
+      throw new Error("Gmail returned no bytes for this attachment.");
+    const bytes = new Uint8Array(Buffer.from(data2.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+    return { ...child, content: { kind: "bytes", mimeType: child.mimeType, bytes } };
+  }
+  async attachmentsFrom(client, at, room) {
+    const message2 = await client.getMessage(at.id);
+    this.messagesById.set(at.id, message2);
+    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message2), this.account, this.build);
+    const items = children.slice(at.from, at.from + Math.max(1, room));
+    for (const item of items)
+      this.itemsByLocalId.set(item.identity.localItemId, item);
+    const next = at.from + items.length;
+    return { items, ...next < children.length ? { next } : {} };
   }
   traversalStatus() {
     return {
@@ -54429,14 +54821,7 @@ class GoogleGmailSourceConnector {
     return this.clientForRequest();
   }
   classificationSignals(item) {
-    const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
-    const sender = metadataString2(item.metadata, "from");
-    const labels = metadataStringArray2(item.metadata, "labels");
-    return {
-      ...subject ? { title: subject } : {},
-      ...sender ? { sender } : {},
-      ...labels.length > 0 ? { labels } : {}
-    };
+    return gmailClassificationSignals(item);
   }
   async clientForRequest() {
     if (this.client)
@@ -54577,6 +54962,18 @@ function budgetedGmailApiClient(inner, budget, provenance) {
       budget.reserve(provenance);
       return inner.getMessage(id, options);
     },
+    ...inner.getProfile ? {
+      getProfile() {
+        budget.reserve(provenance);
+        return inner.getProfile();
+      }
+    } : {},
+    ...inner.getAttachment ? {
+      getAttachment(messageId, attachmentId) {
+        budget.reserve(provenance);
+        return inner.getAttachment(messageId, attachmentId);
+      }
+    } : {},
     ...inner.listLabels ? {
       listLabels() {
         budget.reserve(provenance);
@@ -54603,7 +55000,7 @@ function promotedWatermark(input) {
   return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
 }
 function encodeGmailCursor(cursor) {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf && !cursor.after) {
     return;
   }
   return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
@@ -54624,16 +55021,31 @@ function decodeGmailCursor(value) {
     }
     if (parsed.phase !== undefined && parsed.phase !== "metadata")
       throw new Error("invalid");
+    const childOf = decodeChildOf(parsed.childOf);
+    if (parsed.after !== undefined && (typeof parsed.after !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(parsed.after))) {
+      throw new Error("invalid");
+    }
     return {
       ...watermarkMs !== undefined ? { watermarkMs } : {},
       ...highWaterMs !== undefined ? { highWaterMs } : {},
       ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {},
       ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
-      ...startedMs !== undefined ? { startedMs } : {}
+      ...startedMs !== undefined ? { startedMs } : {},
+      ...childOf ? { childOf } : {},
+      ...typeof parsed.after === "string" ? { after: parsed.after } : {}
     };
   } catch {
     throw new TypeError("Gmail connector cursor is invalid.");
   }
+}
+function decodeChildOf(value) {
+  if (value === undefined)
+    return;
+  const record = value;
+  if (!record || typeof record !== "object" || typeof record.id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(record.id) || typeof record.from !== "number" || !Number.isSafeInteger(record.from) || record.from < 0) {
+    throw new Error("invalid");
+  }
+  return { id: record.id, from: record.from };
 }
 function decodeCursorEpochMs(value) {
   if (value === undefined)
@@ -54704,6 +55116,17 @@ class RestGmailApiClient {
     const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
     return json;
   }
+  async getProfile() {
+    const record = asRecord8(await this.getJson("users/me/profile"), "Gmail profile");
+    return { emailAddress: stringValue(record.emailAddress) };
+  }
+  async getAttachment(messageId, attachmentId) {
+    const record = asRecord8(await this.getJson(`users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`), "Gmail attachment");
+    return {
+      data: stringValue(record.data),
+      ...typeof record.size === "number" && Number.isSafeInteger(record.size) ? { size: record.size } : {}
+    };
+  }
   async listLabels() {
     const record = asRecord8(await this.getJson("users/me/labels"), "Gmail labels list response");
     return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord8(item, "Gmail label"))).filter((label) => label.id) : [];
@@ -54759,89 +55182,87 @@ function gmailLabelFromJson(record) {
     ...typeof record.messagesTotal === "number" && Number.isFinite(record.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record.messagesTotal)) } : {}
   };
 }
-function rawItemFromGmailMessage(message2, account, options = {}) {
+function gmailMailRecordFromMessage(message2, options = {}) {
   const headers = headersFromPart(message2.payload);
-  const subject = headers.get("subject") ?? "(no subject)";
-  const rawFrom = headers.get("from") ?? "";
-  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
-  const date = parsedDate(headers.get("date")) ?? internalDateIso(message2.internalDate);
   const metadataOnly = options.metadataOnly === true;
-  const attachments = gmailAttachmentInventory(message2.payload);
-  const text2 = metadataOnly ? "" : extractMessageText(message2) || (attachments.lines.length > 0 ? attachments.lines.join(`
-`) : `Subject: ${subject}`);
-  const fetchedAt = new Date().toISOString();
-  return {
-    identity: {
-      family: "email",
-      provider: "gmail",
-      accountScope: account,
-      providerItemId: message2.id,
-      ...message2.threadId ? { providerThreadId: message2.threadId } : {},
-      localItemId: `${account}:${message2.id}`,
-      ...message2.historyId ? { sourceVersion: message2.historyId } : {}
-    },
-    mimeType: "message/rfc822",
-    content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
-    metadata: Object.freeze({
-      title: subject,
-      subject,
-      from,
-      ...date ? { authoredAt: date } : {},
-      ...message2.internalDate ? { internalDate: message2.internalDate } : {},
-      ...message2.historyId ? { historyId: message2.historyId } : {},
-      ...message2.snippet && !metadataOnly ? { snippet: message2.snippet } : {},
-      ...metadataOnly ? namesOnlyContentScopeMetadata() : {},
-      labels: message2.labelIds ?? [],
-      attachmentCount: attachments.count,
-      attachmentBytesDeclared: attachments.bytes,
-      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
-      attachmentsNotIngested: attachments.count,
-      locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message2.id)}`,
-      contentHash: hashString3(`${message2.historyId ?? ""}:${metadataOnly ? "metadata_only" : text2}`)
-    }),
-    fetchedAt
-  };
-}
-function gmailAttachmentInventory(part) {
-  if (!part)
-    return { count: 0, bytes: 0, lines: [] };
-  const filename = part.filename?.trim();
-  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
-  let count = filename ? 1 : 0;
-  let bytes = size ?? 0;
-  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
-  for (const child of part.parts ?? []) {
-    const nested = gmailAttachmentInventory(child);
-    count += nested.count;
-    bytes += nested.bytes;
-    lines.push(...nested.lines);
-  }
-  return { count, bytes, lines };
-}
-function gmailAttachmentLine(filename, part, size) {
-  const details = [
-    part.mimeType?.trim() || undefined,
-    size !== undefined ? `${size} bytes` : undefined,
-    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined
-  ].filter((value) => Boolean(value));
-  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
-}
-function metadataCount(metadata, key2) {
-  const value = metadata[key2];
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
-function extractMessageText(message2) {
   const plain = [];
   const html2 = [];
-  collectPartText(message2.payload, plain, html2);
-  const selected = plain.length > 0 ? plain.join(`
+  if (!metadataOnly)
+    collectPartText(message2.payload, plain, html2);
+  const messageId = bareMessageId(headers.get("message-id"));
+  return {
+    id: message2.id,
+    ...message2.threadId ? { threadId: message2.threadId } : {},
+    ...message2.historyId ? { historyId: message2.historyId, sourceVersion: message2.historyId } : {},
+    ...message2.internalDate ? { internalDate: message2.internalDate } : {},
+    labelIds: message2.labelIds ?? [],
+    headers: {
+      ...headers.get("subject") ? { subject: headers.get("subject") } : {},
+      ...headers.get("from") ? { from: headers.get("from") } : {},
+      ...headers.get("to") ? { to: headers.get("to") } : {},
+      ...headers.get("date") ? { date: headers.get("date") } : {},
+      ...messageId ? { messageId } : {}
+    },
+    ...message2.snippet && !metadataOnly ? { snippet: message2.snippet } : {},
+    body: plain.length > 0 ? plain.join(`
 
 `) : html2.map(stripHtml).join(`
 
-`);
-  return [headersSummary(message2.payload), message2.snippet, selected].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
-
-`);
+`),
+    metadataOnly,
+    attachments: gmailAttachments(message2.id, message2.payload, false)
+  };
+}
+function bareMessageId(value) {
+  const trimmed = value?.trim();
+  if (!trimmed)
+    return;
+  const inner = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
+  return inner || undefined;
+}
+function gmailPartLocator(messageId, partId) {
+  return `${GMAIL_PART_LOCATOR_PREFIX}${messageId}:${partId}`;
+}
+function parseGmailPartLocator(locator) {
+  if (!locator.startsWith(GMAIL_PART_LOCATOR_PREFIX))
+    return;
+  const rest = locator.slice(GMAIL_PART_LOCATOR_PREFIX.length);
+  const split = rest.indexOf(":");
+  if (split <= 0)
+    return;
+  const messageId = rest.slice(0, split);
+  const partId = rest.slice(split + 1);
+  return /^[A-Za-z0-9_-]{1,128}$/.test(messageId) && /^[0-9.]{0,64}$/.test(partId) ? { messageId, partId } : undefined;
+}
+function gmailAttachments(messageId, part, inside) {
+  if (!part)
+    return [];
+  const filename = part.filename?.trim();
+  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
+  const partId = part.partId?.trim() ?? "";
+  const found = filename ? [{
+    partId,
+    filename,
+    ...part.mimeType?.trim() ? { mimeType: part.mimeType.trim() } : {},
+    ...size !== undefined ? { size } : {},
+    ...part.partId !== undefined ? { locator: gmailPartLocator(messageId, partId) } : {},
+    ...inside ? { nested: true } : {}
+  }] : [];
+  for (const child of part.parts ?? [])
+    found.push(...gmailAttachments(messageId, child, inside || Boolean(filename)));
+  return found;
+}
+function gmailPartAt(part, partId) {
+  if (!part)
+    return;
+  if ((part.partId?.trim() ?? "") === partId)
+    return part;
+  for (const child of part.parts ?? []) {
+    const found = gmailPartAt(child, partId);
+    if (found)
+      return found;
+  }
+  return;
 }
 function collectPartText(part, plain, html2) {
   if (!part)
@@ -54866,34 +55287,12 @@ function headersFromPart(part) {
   }
   return headers;
 }
-function headersSummary(part) {
-  const headers = headersFromPart(part);
-  return [
-    headers.get("subject") ? `Subject: ${headers.get("subject")}` : undefined,
-    headers.get("from") ? `From: ${headers.get("from")}` : undefined,
-    headers.get("to") ? `To: ${headers.get("to")}` : undefined,
-    headers.get("date") ? `Date: ${headers.get("date")}` : undefined
-  ].filter(Boolean).join(`
-`);
-}
 function decodeBase64Url(value) {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
   return Buffer.from(normalized, "base64").toString("utf8");
 }
 function stripHtml(value) {
   return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-}
-function parsedDate(value) {
-  if (!value)
-    return;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-}
-function internalDateIso(value) {
-  if (!value)
-    return;
-  const ms = Number.parseInt(value, 10);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
 }
 function normalizeGmailMaxMessages(value) {
   if (value === undefined || !Number.isFinite(value))
@@ -54916,16 +55315,21 @@ function optionalStringProp(record, key2) {
 function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
-function hashString3(value) {
-  return createHash31("sha256").update(value).digest("hex");
+function metadataCount(metadata, key2) {
+  const value = metadata[key2];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
-var GMAIL_SOURCE_ID = "gmail.email", GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+function hashString4(value) {
+  return createHash32("sha256").update(value).digest("hex");
+}
+var GMAIL_SOURCE_ID = "gmail.email", GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
   init_olympus_layout();
   init_mail_source_scope();
   init_sender_rules();
   init_credential_broker();
   init_ingest_filter();
+  init_gmail_mail_record();
   init_request_budget();
   GmailPageTokenRejectedError = class GmailPageTokenRejectedError extends Error {
     constructor() {
@@ -54933,11 +55337,11 @@ var init_gmail = __esm(() => {
       this.name = "GmailPageTokenRejectedError";
     }
   };
-  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
+  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date", "Message-ID"];
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -55053,7 +55457,7 @@ class GoogleDriveSourceConnector {
   async fetchItem(localItemId) {
     const item = this.itemsByLocalId.get(localItemId);
     if (!item) {
-      throw new Error(`Google Drive connector cannot fetch unknown item ${hashString4(localItemId).slice(0, 16)}.`);
+      throw new Error(`Google Drive connector cannot fetch unknown item ${hashString5(localItemId).slice(0, 16)}.`);
     }
     return item;
   }
@@ -55123,7 +55527,7 @@ class GoogleDriveSourceConnector {
         content: text2?.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
         metadata: Object.freeze({
           ...metadata,
-          ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString4(`${file.version ?? ""}:${text2 ?? title}`) }
+          ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString5(`${file.version ?? ""}:${text2 ?? title}`) }
         }),
         fetchedAt: new Date().toISOString()
       }
@@ -55555,8 +55959,8 @@ function optionalStringProp2(record, key2) {
 function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
-function hashString4(value) {
-  return createHash32("sha256").update(value).digest("hex");
+function hashString5(value) {
+  return createHash33("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_SOURCE_ID = "google_drive.docs", GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
 var init_drive = __esm(() => {
@@ -55875,7 +56279,7 @@ var init_corpus_adapter2 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { createHash as createHash33 } from "node:crypto";
+import { createHash as createHash34 } from "node:crypto";
 import { mkdirSync as mkdirSync31, readFileSync as readFileSync37 } from "node:fs";
 import { dirname as dirname45 } from "node:path";
 
@@ -56246,7 +56650,7 @@ function rawItem(input) {
       ...input.authoredAt ? { authoredAt: input.authoredAt } : {},
       ...input.updatedAt ? { updatedAt: input.updatedAt } : {},
       ...input.metadata,
-      contentHash: createHash33("sha256").update(JSON.stringify({
+      contentHash: createHash34("sha256").update(JSON.stringify({
         text: input.text,
         title: input.title,
         author: input.author,
@@ -56680,13 +57084,13 @@ function settleNamesOnlyItems(options) {
     } catch {}
   }
   const last = rows.at(-1);
-  ledger.writeMeta(SETTLE_META_KEY, rows.length >= limit && last ? JSON.stringify(identityOf(last)) : "");
+  ledger.writeMeta(SETTLE_META_KEY, rows.length >= limit && last ? JSON.stringify(identityOf2(last)) : "");
   return report;
 }
 function settleOne(set, record) {
   if (!record.reasons.includes("content:unread") || record.decidedBy === "override")
     return false;
-  const identity2 = identityOf(record);
+  const identity2 = identityOf2(record);
   const current2 = set.ledger.copies(identity2).filter((copy) => copy.state === "current");
   const names = copyServingLayer(current2, "metadata");
   const domain = names ? set.domainForCorpus(names.corpusId) : undefined;
@@ -56732,7 +57136,7 @@ function parseIdentity(raw) {
     return;
   }
 }
-function identityOf(record) {
+function identityOf2(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -57020,7 +57424,7 @@ var init_embedding_ledger = __esm(() => {
 });
 
 // src/workers/connector-store/tier-move.ts
-import { createHash as createHash34 } from "node:crypto";
+import { createHash as createHash35 } from "node:crypto";
 function rowRehomeReceiptId(ledger, identity2, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity2)}:${generation}`;
 }
@@ -57321,7 +57725,7 @@ function readVerifiedMove(ledger, identity2) {
   return receipt;
 }
 function copyFingerprint(copy, layers) {
-  return createHash34("sha256").update(JSON.stringify({
+  return createHash35("sha256").update(JSON.stringify({
     identity: copy.identity,
     columns: copy.columns,
     chunks: layers === "metadata" ? [] : copy.chunks
@@ -58178,7 +58582,7 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash35 } from "node:crypto";
+import { createHash as createHash36 } from "node:crypto";
 import { readFileSync as readFileSync38 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname48, join as join52 } from "node:path";
@@ -58230,7 +58634,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash35("sha256").update(JSON.stringify({
+    this.configHash = createHash36("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -59133,7 +59537,7 @@ function rejudgeRoutedItems(options) {
 function rejudgeStoredContent(set, record, options) {
   const { report, key: key2, autoMoves } = options;
   const ledger = set.ledger;
-  const identity2 = identityOf2(record);
+  const identity2 = identityOf3(record);
   const read = ledger.classificationRead(identity2);
   if (read.override) {
     if (key2)
@@ -59345,7 +59749,7 @@ function recordSecretLocation(locations, decision, exported, finding) {
     ...finding.text !== undefined ? { text: finding.text } : {}
   });
 }
-function identityOf2(record) {
+function identityOf3(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -59400,7 +59804,7 @@ function applyOwnerOverrides(options) {
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
-  const identity2 = identityOf3(record);
+  const identity2 = identityOf4(record);
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity2, ...holdUntilJudged ? { holdUntilJudged: true } : {} }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
@@ -59482,7 +59886,7 @@ function storedCopy(set, identity2) {
   }
   return;
 }
-function identityOf3(record) {
+function identityOf4(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -59498,7 +59902,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash36 } from "node:crypto";
+import { createHash as createHash37 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -59534,7 +59938,7 @@ function sweepOwnerRuleRaises(options) {
       report.secrets += 1;
     else if (raised === "deferred") {
       if (held.length < MAX_HELD_ITEMS)
-        held.push(identityOf4(record));
+        held.push(identityOf5(record));
       else
         overflow = true;
     }
@@ -59570,7 +59974,7 @@ function sweepOwnerRuleRaises(options) {
     report.complete = false;
     writeState2(ledger, {
       done,
-      pending: { rules: pendingKeys, after: identityOf4(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+      pending: { rules: pendingKeys, after: identityOf5(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
     });
   }
   return report;
@@ -59578,7 +59982,7 @@ function sweepOwnerRuleRaises(options) {
 function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
   if (record.contentTier === "secrets" || record.metadataTier === "secrets")
     return "unchanged";
-  const identity2 = identityOf4(record);
+  const identity2 = identityOf5(record);
   if (set.ledger.getOverride(identity2))
     return "unchanged";
   const copies = set.ledger.copies(identity2);
@@ -59765,7 +60169,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash36("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash37("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function readState5(raw) {
   if (!raw)
@@ -59815,7 +60219,7 @@ function writeState2(ledger, state) {
 function sameKeys(left, right) {
   return left.length === right.length && left.every((key2, index) => key2 === right[index]);
 }
-function identityOf4(record) {
+function identityOf5(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -59856,7 +60260,7 @@ function sweepImageContentToPrivate(options) {
   }
   if (rows.length >= limit) {
     report.complete = false;
-    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf5(rows.at(-1)) }));
+    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf6(rows.at(-1)) }));
     return report;
   }
   for (const domain of ["public_safe", "internal"]) {
@@ -59873,7 +60277,7 @@ function raiseIfImage(set, record) {
     return false;
   if (record.contentTier === "secure")
     return false;
-  const identity2 = identityOf5(record);
+  const identity2 = identityOf6(record);
   if (set.ledger.getOverride(identity2))
     return false;
   const current2 = set.ledger.copies(identity2).filter((copy) => copy.state === "current");
@@ -59917,7 +60321,7 @@ function readState6(raw) {
     return { done: false };
   }
 }
-function identityOf5(record) {
+function identityOf6(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -59990,7 +60394,7 @@ var init_tier_media_judgment_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-store-set.ts
-import { createHash as createHash37 } from "node:crypto";
+import { createHash as createHash38 } from "node:crypto";
 import { existsSync as existsSync46 } from "node:fs";
 function tieredStoreSetLedgerPath(secureLocalStoreDbPath) {
   return tierLedgerPathForStore(secureLocalStoreDbPath);
@@ -61239,7 +61643,7 @@ function identityKey(identity2) {
   return tierLedgerIdentityKey(identity2);
 }
 function planKey(item) {
-  const judged = createHash37("sha256").update(JSON.stringify([
+  const judged = createHash38("sha256").update(JSON.stringify([
     item.content.kind,
     item.content.kind === "metadata_only" ? "" : connectorStoreItemText(item) ?? "",
     stringMetadata(item, ["title", "name", "subject"]) ?? "",
@@ -61342,7 +61746,7 @@ var init_tiered_store_set = __esm(() => {
 });
 
 // src/workers/readwise/live-sync.ts
-import { createHash as createHash38 } from "node:crypto";
+import { createHash as createHash39 } from "node:crypto";
 function createReadwiseConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultReadwiseLiveSyncConfig(env);
@@ -61516,7 +61920,7 @@ function taskOutcome(input) {
   };
 }
 function readwiseReceiptDigest(receipt) {
-  return createHash38("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash39("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function emptyEmbedSummary(store, provider) {
   return {
@@ -67127,7 +67531,7 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash39, randomUUID as randomUUID15 } from "node:crypto";
+import { createHash as createHash40, randomUUID as randomUUID15 } from "node:crypto";
 import { chmodSync as chmodSync15, existsSync as existsSync47, lstatSync as lstatSync24, mkdirSync as mkdirSync32 } from "node:fs";
 import { dirname as dirname49 } from "node:path";
 import { Database as Database14 } from "bun:sqlite";
@@ -67962,7 +68366,7 @@ function rateLimitStatus(row) {
   };
 }
 function hashResourceId(resourceId) {
-  return createHash39("sha256").update(resourceId).digest("hex");
+  return createHash40("sha256").update(resourceId).digest("hex");
 }
 function utcDayFrom(date) {
   return date.toISOString().slice(0, 10);
@@ -68084,7 +68488,7 @@ var init_live_control2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/api-connector.ts
-import { createHash as createHash40 } from "node:crypto";
+import { createHash as createHash41 } from "node:crypto";
 function createXBookmarksApiSourceConnector(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultXBookmarksLiveSyncConfig(env);
@@ -68811,7 +69215,7 @@ function classifyXBookmarksProviderWindowBoundary(error, context2, policy = X_BO
   const matchedCode = error.providerErrorCode && approvedCodes.has(error.providerErrorCode) ? error.providerErrorCode : undefined;
   if (!matchedType && !matchedCode)
     return;
-  const fingerprintSha256 = createHash40("sha256").update(JSON.stringify({
+  const fingerprintSha256 = createHash41("sha256").update(JSON.stringify({
     kind: "x_provider_window_boundary",
     algorithm_version: algorithmVersion,
     http_status: error.status,
@@ -69012,7 +69416,7 @@ var init_api_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash41, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash42, randomUUID as randomUUID16 } from "node:crypto";
 import {
   chmodSync as chmodSync16,
   existsSync as existsSync48,
@@ -69064,7 +69468,7 @@ async function runXBookmarksWindowDiagnostic(options) {
     kind: "x_bookmarks_window_diagnostic",
     version: 1,
     generated_at: attemptedAt.toISOString(),
-    account_sha256: createHash41("sha256").update(account).digest("hex"),
+    account_sha256: createHash42("sha256").update(account).digest("hex"),
     page_size: config.reconcilePageSize,
     max_pages_per_traversal: MAX_DIAGNOSTIC_PAGES,
     probes: [freshRoot, identicalCursorRetry, idOnlyTraversal, richTraversal],
@@ -69087,7 +69491,7 @@ async function runXBookmarksWindowDiagnostic(options) {
   return {
     report,
     report_path: options.reportPath,
-    report_sha256: createHash41("sha256").update(reportJson).digest("hex")
+    report_sha256: createHash42("sha256").update(reportJson).digest("hex")
   };
 }
 async function diagnosticClient(options, env) {
@@ -69691,7 +70095,7 @@ var init_live_sync2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash42, randomUUID as randomUUID17 } from "node:crypto";
+import { createHash as createHash43, randomUUID as randomUUID17 } from "node:crypto";
 import {
   chmodSync as chmodSync17,
   renameSync as renameSync9,
@@ -69905,7 +70309,7 @@ function sameFolderFacetAuthorityReading(atGate, atRestore) {
   return atGate.leaseGeneration === atRestore.leaseGeneration;
 }
 function contentRecoveryEmbeddingJournalId(restoreItems) {
-  const inputSha256 = createHash42("sha256").update(JSON.stringify(restoreItems)).digest("hex");
+  const inputSha256 = createHash43("sha256").update(JSON.stringify(restoreItems)).digest("hex");
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
@@ -70018,7 +70422,7 @@ function writeReceipt(pathValue, receipt) {
   }
 }
 function sha256Json2(value) {
-  return createHash42("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash43("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function requireNonEmpty2(value, label) {
   const normalized = value.trim();
@@ -70436,7 +70840,7 @@ var init_provider_client = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector.ts
-import { createHash as createHash43 } from "node:crypto";
+import { createHash as createHash44 } from "node:crypto";
 function createDropboxSourceConnector(options) {
   const account = requireNonEmpty3(options.account, "Dropbox source connector account");
   const credentialHandle = options.credentialHandle?.trim() || DEFAULT_CREDENTIAL_HANDLE;
@@ -70937,7 +71341,7 @@ function resumedPageOffset(cursor, page2) {
   return cursor.pageDigest === metadataPageDigest(page2) ? cursor.itemOffset : 0;
 }
 function metadataPageDigest(page2) {
-  return createHash43("sha256").update(JSON.stringify({
+  return createHash44("sha256").update(JSON.stringify({
     entries: page2.entries,
     cursor: page2.cursor?.trim() || null,
     hasMore: Boolean(page2.hasMore)
@@ -70952,7 +71356,7 @@ function providerItemIdFromLocalItemId(localItemId, account) {
 }
 function deletedProviderItemId(entry) {
   const ref = entry.pathLower || entry.pathDisplay || entry.name;
-  return `deleted:${createHash43("sha256").update(ref).digest("hex").slice(0, 32)}`;
+  return `deleted:${createHash44("sha256").update(ref).digest("hex").slice(0, 32)}`;
 }
 function listRootPath(rootFolderPath, approvedScopeKey, account) {
   const explicit = rootFolderPath?.trim();
@@ -71223,7 +71627,7 @@ var init_connector_store2 = __esm(() => {
 });
 
 // src/workers/dropbox-files/provider-store-sync.ts
-import { createHash as createHash44 } from "node:crypto";
+import { createHash as createHash45 } from "node:crypto";
 function createDropboxProviderStoreSyncHandler(options) {
   const account = required2(options.account, "Dropbox connector-store account");
   if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
@@ -71366,7 +71770,7 @@ function createDropboxProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash44("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash45("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: dropboxScopedCheckpoint(sync.cursor, connectorId, options.scope !== undefined)
       };
@@ -71378,7 +71782,7 @@ function dropboxConnectorIdForScope(account, approvedScopeKey, scope) {
   const normalizedAccount = required2(account, "Dropbox connector account");
   const normalizedScope = required2(approvedScopeKey, "Dropbox approved scope key");
   const approvedScopeIdentity = scope ? `\x00${required2(scope.generation, "Dropbox approved scope generation")}` + `\x00${required2(scope.revision, "Dropbox approved scope revision")}` : "";
-  const scopeHash = createHash44("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
+  const scopeHash = createHash45("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
   return `dropbox.files.${scopeHash}`;
 }
 function dropboxScopedCheckpoint(cursor, connectorId, scoped) {
@@ -71595,14 +71999,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash45 } from "node:crypto";
+import { createHash as createHash46 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash45("sha256").update(block).digest());
+    blockDigests.push(createHash46("sha256").update(block).digest());
   }
-  return createHash45("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash46("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -72906,7 +73310,7 @@ function addCaptureSpoolRedactions(...results) {
   }), { recordsRedacted: 0, recordsBlanked: 0 });
 }
 function secretsDigest(ledger) {
-  const hash = createHash46("sha256");
+  const hash = createHash47("sha256");
   for (const { identity: identity2, names } of ledger.secretsIdentities()) {
     hash.update([
       identity2.provider,
@@ -77461,7 +77865,7 @@ function buildSourceDashboardViewModel(options) {
     for (const corpus of corpora)
       claimedCorpusIds.add(corpus.corpus_id);
     const captureRuntime = options.captureRuntime?.[definition.source_id];
-    const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false, options.importedArchives, captureRuntime?.paired_at);
+    const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false, definition.source_id === ARCHIVE_IMPORTS_CARD_ID ? options.importedArchives : options.importedArchivesByCard?.[definition.source_id], captureRuntime?.paired_at);
     const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
     const manualSync = dashboardLiveManualSync(options.manualSyncs?.[definition.source_id], built.last_sync_at, now);
     const unreadableFiles = unreadableFilesFor(built, corpora, options.unreadableFileNames);
@@ -77706,7 +78110,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     provider: definition.provider,
     family: definition.family,
     trust_domain: trustDomain,
-    capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id),
+    capabilities: renderPublicSourceCapabilityForDashboard(definition.public_source_id ?? definition.source_id),
     ...fileSourceScopeStatus !== undefined ? {
       scope_selection: {
         required: true,
@@ -77777,7 +78181,7 @@ function dashboardSourceSetupStatus(card) {
     return {
       stage: pairing ? "credential_or_pairing" : dependenciesReady ? "credential_or_pairing" : "dependency_check",
       condition: "blocked",
-      next_action: pairing ? action.kind === "guided_session" ? action.instructions.join(" ") : `Finish pairing ${card.label}.` : action.kind === "needs_setup" ? `Open Set up for ${card.label}, register the provider app, then start authorization.` : action.kind === "archive_import" ? "Import an archive from this page: choose a mail export on this computer." : `Connect one ${card.label} account from this page.`,
+      next_action: pairing ? action.kind === "guided_session" ? action.instructions.join(" ") : `Finish pairing ${card.label}.` : action.kind === "needs_setup" ? `Open Set up for ${card.label}, register the provider app, then start authorization.` : action.kind === "archive_import" ? `${action.label} from this page: choose an export on this computer.` : `Connect one ${card.label} account from this page.`,
       dependencies
     };
   }
@@ -78381,8 +78785,9 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       return { kind: "none" };
     return { kind: "this_computer", source: definition.connect_action.source, label: "Connect" };
   }
-  if (definition.connect_action.kind === "archive_import")
-    return { kind: "archive_import", label: "Import an archive" };
+  if (definition.connect_action.kind === "archive_import") {
+    return { kind: "archive_import", label: definition.source_id === ARCHIVE_IMPORTS_CARD_ID ? "Import another archive" : "Import an archive" };
+  }
   if (definition.connect_action.kind === "api_key") {
     if (connected && !reauthRequired && !providerRefusing)
       return { kind: "none" };
@@ -79289,7 +79694,7 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -79562,7 +79967,21 @@ var init_source_dashboard = __esm(() => {
       connect_kind: "api_token",
       content_arrives_extracted: true,
       connect_action: { kind: "api_key", source: "readwise" }
-    }
+    },
+    ...archiveSourceCards().map((card) => ({
+      source_id: card.id,
+      primary_corpus_id: card.id,
+      corpus_source_ids: [],
+      owns_corpus: () => false,
+      ingestion_ledger_source_id: card.id,
+      public_source_id: ARCHIVE_IMPORTS_CARD_ID,
+      label: card.label,
+      provider: card.formats[0].provider,
+      family: card.formats[0].family,
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    }))
   ];
   VENICE_ANSWER_LANE = {
     source_id: "venice.api",
@@ -126932,7 +127351,7 @@ class LocalFileExtractionJobStore {
     const now = nowIso4();
     const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
     const leaseToken = randomUUID27();
-    const workerHash = hashString5(workerId);
+    const workerHash = hashString6(workerId);
     const claimed = [];
     this.db.transaction(() => {
       this.db.query(`
@@ -126994,7 +127413,7 @@ class LocalFileExtractionJobStore {
       corpusId: lane.corpusId,
       provider: lane.provider,
       accountScope: lane.accountScope,
-      scopeKeyHash: hashString5(lane.approvedScopeKey),
+      scopeKeyHash: hashString6(lane.approvedScopeKey),
       workerIdHash: workerHash,
       leasedJobs: claimed.map(({ row, grant }) => ({
         jobId: row.job_id,
@@ -127045,7 +127464,7 @@ class LocalFileExtractionJobStore {
         throw new Error("Extraction record references an unknown job.");
       if (row.status !== "leased")
         throw new Error("Extraction record requires a leased job.");
-      if (request.workerId !== undefined && row.leased_by_hash !== null && row.leased_by_hash !== hashString5(requireBoundedString(request.workerId, "workerId"))) {
+      if (request.workerId !== undefined && row.leased_by_hash !== null && row.leased_by_hash !== hashString6(requireBoundedString(request.workerId, "workerId"))) {
         throw new Error("Extraction record worker does not hold the job lease.");
       }
       if (request.leaseToken !== undefined && row.lease_token !== request.leaseToken) {
@@ -127083,7 +127502,7 @@ class LocalFileExtractionJobStore {
     const jobIds = [...new Set(request.jobIds.map((jobId) => jobId?.trim()).filter(Boolean))];
     if (jobIds.length === 0)
       return { releasedJobs: 0 };
-    const workerHash = request.workerId === undefined ? null : hashString5(requireBoundedString(request.workerId, "workerId"));
+    const workerHash = request.workerId === undefined ? null : hashString6(requireBoundedString(request.workerId, "workerId"));
     const now = nowIso4();
     let released = 0;
     this.db.transaction(() => {
@@ -139850,7 +140269,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (privacy && privacy.handles(fix)) {
       action = () => openPrivacy(key2);
     } else if (fix.archiveImport === true && picker) {
-      action = () => startArchivePick(key2);
+      action = () => {
+        const fromMenu = key2.indexOf("menu:") === 0;
+        if (fromMenu && source)
+          state.open["menu:" + source.id] = false;
+        startArchivePick(fromMenu ? "summary:" + key2.slice(0, key2.lastIndexOf(":")) : key2, typeof fix.archiveSource === "string" ? fix.archiveSource : "");
+      };
     } else if (typeof fix.archiveFocus === "string" && fix.archiveFocus) {
       action = () => focusArchive(String(fix.archiveFocus));
     } else if (fix.archiveModels === true) {
@@ -140062,7 +140486,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const label = typeof source.label === "string" ? source.label : "";
     return !!label && typeof item.sentence === "string" && item.sentence.indexOf(label + " — ") === 0;
   }
-  function sourceRow(source) {
+  function sourceRow(source, other) {
     const id = String(source.id || source.label);
     const status = String(source.status || "");
     const archives = archivesMeta(id);
@@ -140072,7 +140496,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const main = el("div", "source-main");
     const dot2 = el("span", "dot tone-" + tone);
     dot2.setAttribute("aria-hidden", "true");
-    const head = add(el("p", "source-head"), dot2, el("span", "source-name", String(source.label || "")));
+    const head = add(el("p", "source-head"), dot2, other ? add(el("span", "source-name source-for", P.otherArchives.line), el("span", "sr", " — " + String(source.label || ""))) : el("span", "source-name", String(source.label || "")));
     const off = status === "Off" && !item;
     if (!off)
       add(head, el("span", "sr", " — " + (item ? P.needsYou : status)));
@@ -140120,16 +140544,31 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(row, main);
     const controls = el("div", "source-actions");
     const context2 = { id, label: String(source.label || id) };
-    const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary);
+    const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary, id);
     const isSync = (entry) => !!entry && entry.tool === config2.syncTool;
     if (fix && !(checking && isSync(fix)))
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context2));
     if (checking)
       add(controls, checkingControl("primary:" + id));
-    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry, id)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    if (other) {
+      const importing = (entry) => !!entry && (entry.archiveImport === true || entry.label === H.copy.archives.importAction);
+      const shown2 = menu.filter(importing)[0];
+      if (shown2 && !importing(fix))
+        add(controls, fixControl(shown2, "import:" + id, "plain", true, context2));
+      for (let at = menu.length - 1;at >= 0; at -= 1)
+        if (importing(menu[at]))
+          menu.splice(at, 1);
+    }
     const unpair = unpairEntry(id);
     if (unpair)
       menu.push(unpair);
+    const own3 = archiveSourceMeta(id);
+    const ownImport = (entry) => !!entry && entry.archiveImport === true && entry.archiveSource === (own3 && own3.sourceId);
+    if (own3 && !ownImport(fix) && !menu.some(ownImport)) {
+      const destructive = menu.findIndex((entry) => !!entry && entry.destructive === true);
+      menu.splice(destructive < 0 ? menu.length : destructive, 0, { label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own3.sourceId });
+    }
     let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "⋯");
@@ -140155,21 +140594,28 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     return row;
   }
-  function archivesMeta(id) {
+  function archiveGroups() {
     const meta2 = state.computerMeta;
-    if (!onComputer() || !meta2 || !meta2.archives || typeof meta2.archives !== "object")
-      return null;
-    const archives = meta2.archives;
-    return archives.sourceId === id && Array.isArray(archives.archives) && Array.isArray(archives.requests) ? archives : null;
+    if (!onComputer() || !meta2)
+      return [];
+    const groups = [meta2.archives].concat(Array.isArray(meta2.archiveCards) ? meta2.archiveCards : []);
+    return groups.filter((group) => !!group && typeof group === "object" && typeof group.sourceId === "string" && Array.isArray(group.archives) && Array.isArray(group.requests));
   }
-  function archiveFix(archives, fix) {
-    return archives && fix && fix.openHref === true && fix.label === H.copy.archives.importAction ? { label: fix.label, archiveImport: true } : fix;
+  function archivesMeta(id) {
+    return archiveGroups().filter((group) => group.sourceId === id)[0] || null;
+  }
+  function archiveFix(archives, fix, id) {
+    if (!fix || fix.openHref !== true)
+      return fix;
+    if (archives && archives === state.computerMeta.archives && fix.label === H.copy.archives.importAction)
+      return { label: fix.label, archiveImport: true };
+    const own3 = archiveSourceMeta(id);
+    return own3 && fix.label === H.copy.archives.sourceImport.action ? { label: fix.label, archiveImport: true, archiveSource: own3.sourceId } : fix;
   }
   function archiveNeedFix(item) {
     const fix = item && item.fix;
-    const meta2 = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
     const id = item && typeof item.id === "string" ? item.id : "";
-    if (!fix || typeof fix.label !== "string" || !meta2 || typeof meta2 !== "object")
+    if (!fix || typeof fix.label !== "string" || archiveGroups().length === 0)
       return fix;
     if (id === "archives:held")
       return { label: fix.label, archiveModels: true };
@@ -140250,16 +140696,22 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
     if (joined.some((group) => !!group && !archiveSetting(group) && Array.isArray(group.imports) && group.imports.some((entry) => !!entry && entry.status === "importing")))
       return true;
-    const meta2 = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
-    if (!meta2 || typeof meta2 !== "object")
-      return false;
-    return !archiveSetting(meta2) && Array.isArray(meta2.archives) && meta2.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || Array.isArray(meta2.requests) && meta2.requests.some((entry) => !!entry && entry.status === "checking");
+    return archiveGroups().some((meta2) => !archiveSetting(meta2) && meta2.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta2.requests.some((entry) => !!entry && entry.status === "checking"));
   }
-  function startArchivePick(key2) {
+  function startArchivePick(key2, sourceId) {
     supersede();
     state.notice = "";
     state.confirming = "";
-    picker.pickArchive({ ...H.copy.archives.pick, account: H.copy.archives.account }, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2));
+    const A = H.copy.archives;
+    const own3 = sourceId ? archiveSourceMeta(sourceId) : null;
+    const words2 = own3 ? { ...A.pick, title: fill2(A.sourceImport.title, { source: String(own3.label) }), intro: String(own3.intro), account: A.account } : { ...A.pick, account: A.account };
+    picker.pickArchive(words2, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2), own3 ? String(own3.sourceId) : "");
+  }
+  function archiveSourceMeta(id) {
+    const meta2 = state.computerMeta;
+    if (!onComputer() || !meta2 || !Array.isArray(meta2.archiveSources))
+      return null;
+    return meta2.archiveSources.filter((entry) => !!entry && entry.sourceId === id && typeof entry.label === "string" && !!entry.label && typeof entry.intro === "string" && !!entry.intro)[0] || null;
   }
   function archiveOutcome(outcome) {
     const A = H.copy.archives;
@@ -140271,7 +140723,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return fill2(A.checking, { name });
     if (outcome.status === "already_imported")
       return archive ? fill2(A.already, { name, archive }) : fill2(A.alreadyUnnamed, { name });
-    return outcome.status === "started" ? fill2(A.started, { name }) : "";
+    const source = outcome.source && typeof outcome.source.label === "string" ? outcome.source.label : "";
+    if (outcome.status === "started")
+      return source ? fill2(A.startedIn, { name, source }) : fill2(A.started, { name });
+    return "";
   }
   function archiveNotice(name, args, result) {
     const A = H.copy.archives;
@@ -140279,7 +140734,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (name === H.archiveRemoveTool) {
       const asked = args && args.request_id && meta2 && Array.isArray(meta2.requests) ? meta2.requests.filter((entry) => entry && entry.id === args.request_id)[0] : null;
       const target = asked ? asked.archiveId : args && args.archive_id;
-      const removed = meta2 && Array.isArray(meta2.archives) ? meta2.archives.filter((entry) => entry && entry.id === target)[0] : null;
+      const removed = archiveGroups().flatMap((group) => group.archives).filter((entry) => entry && entry.id === target)[0] || null;
       return removed && typeof removed.name === "string" ? fill2(A.removing, { name: removed.name }) : "";
     }
     if (name === H.archiveStopTool) {
@@ -140907,6 +141362,15 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function capitalise(text3) {
     return text3 ? text3.charAt(0).toUpperCase() + text3.slice(1) : text3;
   }
+  function isArchivesCard(source) {
+    return !!source && String(source.id) === config2.archivesSourceId;
+  }
+  function otherArchivesSection(source) {
+    if (!source)
+      return null;
+    const section = add(el("section", "section other-archives"), el("h2", "", P.otherArchives.title));
+    return add(section, add(el("ul", "rows"), sourceRow(source, true)));
+  }
   function sourcesSection(sources) {
     const section = add(el("section", "section"), el("h2", "", P.sources));
     if (!sources.length)
@@ -141243,7 +141707,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(page2, staleLine());
     const listed = Array.isArray(data2.sources) ? data2.sources : [];
     add(page2, needsYouSection((Array.isArray(data2.needsYou) ? data2.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
-    add(page2, sourcesSection(Array.isArray(data2.sources) ? data2.sources : []));
+    const allSources = Array.isArray(data2.sources) ? data2.sources : [];
+    add(page2, sourcesSection(allSources.filter((source) => !isArchivesCard(source))));
+    add(page2, otherArchivesSection(allSources.filter(isArchivesCard)[0]));
     add(page2, privacySection(data2));
     const sourceList = Array.isArray(data2.sources) ? data2.sources : [];
     add(page2, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data2.progress, true));
@@ -142074,12 +142540,12 @@ function chatgptPickerProgram(kit) {
       kit.fullscreen();
     openScope(sourceId, sourceLabel4, words2.title, "", "", undefined, { words: words2, taken: taken.slice(), done });
   }
-  function pickArchive(words2, done) {
+  function pickArchive(words2, done, sourceId) {
     stopTimer();
     session++;
     if (kit.compact())
       kit.fullscreen();
-    openScope("", words2.source, words2.title, "", "", undefined, { words: words2, taken: [], done: () => done(null), archive: { done } });
+    openScope("", words2.source, words2.title, "", "", undefined, { words: words2, taken: [], done: () => done(null), archive: { done, sourceId: sourceId || "" } });
   }
   function archiveMode() {
     return !!p && !!p.pick && !!p.pick.archive;
@@ -142108,7 +142574,8 @@ function chatgptPickerProgram(kit) {
       p.saveAccess = access && typeof access.message === "string" && access.message ? access : null;
       kit.render("picker:archive-error");
     };
-    kit.call(T.archiveApprove, answer ? { key: key2, ...answer } : { key: key2 }).then((result) => {
+    const only = p.pick.archive.sourceId ? { source_id: p.pick.archive.sourceId } : {};
+    kit.call(T.archiveApprove, answer ? { key: key2, ...only, ...answer } : { key: key2, ...only }).then((result) => {
       if (mine !== session || !p)
         return;
       const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
@@ -142129,6 +142596,8 @@ function chatgptPickerProgram(kit) {
       const picked = { name: typeof content.name === "string" && content.name ? content.name : name, status };
       if (typeof content.archive_name === "string" && content.archive_name)
         picked.archiveName = content.archive_name;
+      if (status === "started" && content.source && typeof content.source.label === "string" && content.source.label)
+        picked.source = { label: content.source.label };
       stopTimer();
       p = null;
       session++;
@@ -144140,6 +144609,7 @@ function chatgptDashboardPageHtml(options = {}) {
     syncTool: SYNC_SOURCE_TOOL_NAME,
     deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
+    archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
@@ -144205,7 +144675,7 @@ function privacyProgramSource() {
 function scriptJson(value2) {
   return JSON.stringify(value2).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_DASHBOARD_LANDED_MS = 4000;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_ARCHIVES_SOURCE_ID = "archive.imports", CHATGPT_DASHBOARD_LANDED_MS = 4000;
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
@@ -144321,6 +144791,7 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .source-main{min-width:0}
 .source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .source-name{font-weight:600}
+.source-head .source-for{flex:1 1 0;min-width:0;font-weight:400}
 .status{color:var(--muted);font-size:0.875rem}
 .source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
@@ -144495,7 +144966,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
 });
@@ -149693,7 +150164,11 @@ function createEmailSourceWorker(options = {}) {
                 throw new EmailSourceWorkerError(400, "invalid_request", "Give either confirm_account or keep_apart.");
               }
               const answer = { ...confirmAccount ? { confirmAccount: true } : {}, ...keepApart ? { keepApart: true } : {} };
-              return json(await archiveImports.approve(key2 !== undefined ? { key: key2, ...answer } : { requestId, ...answer }));
+              const sourceId = asOptionalString(record5.source_id);
+              if (sourceId !== undefined && key2 === undefined) {
+                throw new EmailSourceWorkerError(400, "invalid_request", "source_id goes with a chosen key.");
+              }
+              return json(await archiveImports.approve(key2 !== undefined ? { key: key2, ...sourceId !== undefined ? { sourceId } : {}, ...answer } : { requestId, ...answer }));
             });
           }
           if (url.pathname === "/dashboard/archive-import/stop") {
@@ -151523,10 +151998,16 @@ function sourceWatchNotSupported() {
 function dashboardImportedArchives(archiveImports) {
   if (!archiveImports)
     return {};
+  let importedArchives;
   try {
-    return { importedArchives: archiveImports.present() };
+    importedArchives = archiveImports.present();
   } catch {
-    return { importedArchives: { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: "other" }] } };
+    importedArchives = { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: "other" }] };
+  }
+  try {
+    return { importedArchives, importedArchivesByCard: archiveImports.presentCards() };
+  } catch {
+    return { importedArchives };
   }
 }
 function asOptionalString(value2) {
@@ -155533,6 +156014,16 @@ function createGmailConnectorStoreSchedulerSource(input) {
     lastSyncCompletedAt: lastCompletedAt
   };
 }
+function createGmailImportedHistorySchedulerSource(input) {
+  return {
+    sourceId: SCHEDULER_SOURCE_IDS.gmail,
+    corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+    cadence: "continuous",
+    intervalMs: input.config.worker.scheduler.syncIntervalSeconds * 1000,
+    freshnessThresholdHours: input.config.worker.scheduler.freshnessThresholdHours,
+    tasks: []
+  };
+}
 function createGoogleDriveConnectorStoreSchedulerSource(input) {
   if (!input.liveSync)
     return;
@@ -156503,6 +156994,185 @@ var init_scheduler_source = __esm(() => {
   init_watch_hub();
   DAY_MS3 = 24 * 60 * 60 * 1000;
   PERMISSION_RETRY_MS = 10 * 60 * 1000;
+});
+
+// src/workers/archive-import/mbox/split.ts
+class MboxSplitter {
+  source;
+  maxMessageBytes;
+  buffer = Buffer.alloc(0);
+  bufferStart;
+  next_;
+  maxReadBytes;
+  bytesRead = 0;
+  constructor(source, options = {}) {
+    this.source = source;
+    this.maxReadBytes = options.maxReadBytes ?? Number.POSITIVE_INFINITY;
+    this.maxMessageBytes = Math.max(1, options.maxMessageBytes ?? MBOX_DEFAULT_MAX_MESSAGE_BYTES);
+    this.next_ = options.start ?? 0;
+    this.bufferStart = this.next_;
+  }
+  get position() {
+    return this.next_;
+  }
+  get done() {
+    return this.next_ >= this.source.size;
+  }
+  next() {
+    const start = this.next_;
+    if (start >= this.source.size)
+      return;
+    this.dropBefore(start);
+    this.ensure(start, FROM.length);
+    if (!this.bytesAt(start).subarray(0, FROM.length).equals(FROM))
+      throw new MboxFormatError(start);
+    let scanFrom = start + 1;
+    for (;; ) {
+      const found = this.indexOfSeparator(scanFrom);
+      if (found !== undefined) {
+        const end = found + 1;
+        this.next_ = end;
+        return this.span(start, end);
+      }
+      const buffered = this.bufferStart + this.buffer.length;
+      if (buffered >= this.source.size) {
+        this.next_ = this.source.size;
+        return this.span(start, this.source.size);
+      }
+      if (buffered - start > this.maxMessageBytes)
+        return this.skipTooLarge(start);
+      scanFrom = Math.max(start + 1, buffered - SEPARATOR2.length + 1);
+      this.readMore(Math.max(MIN_READ_BYTES, this.buffer.length));
+    }
+  }
+  span(start, end) {
+    const length = end - start;
+    if (length > this.maxMessageBytes)
+      return { offset: start, length, tooLarge: true };
+    const bytes = this.bytesAt(start).subarray(0, length);
+    return { offset: start, length, raw: unquote(stripSeparatorLines(bytes)), separator: separatorLine(bytes), tooLarge: false };
+  }
+  skipTooLarge(start) {
+    let scanFrom = this.bufferStart + Math.max(0, this.buffer.length - SEPARATOR2.length + 1);
+    for (;; ) {
+      const keepFrom = Math.max(this.bufferStart, scanFrom - SEPARATOR2.length);
+      this.dropBefore(keepFrom);
+      const buffered = this.bufferStart + this.buffer.length;
+      if (buffered >= this.source.size) {
+        this.next_ = this.source.size;
+        return { offset: start, length: this.source.size - start, tooLarge: true };
+      }
+      this.readMore(MIN_READ_BYTES);
+      const found = this.indexOfSeparator(Math.max(start + 1, scanFrom));
+      if (found !== undefined) {
+        this.next_ = found + 1;
+        return { offset: start, length: found + 1 - start, tooLarge: true };
+      }
+      scanFrom = Math.max(start + 1, this.bufferStart + this.buffer.length - SEPARATOR2.length + 1);
+    }
+  }
+  indexOfSeparator(fromOffset) {
+    const index = this.buffer.indexOf(SEPARATOR2, Math.max(0, fromOffset - this.bufferStart));
+    return index < 0 ? undefined : this.bufferStart + index;
+  }
+  bytesAt(offset) {
+    return this.buffer.subarray(offset - this.bufferStart);
+  }
+  dropBefore(offset) {
+    if (offset < this.bufferStart) {
+      this.buffer = Buffer.alloc(0);
+      this.bufferStart = offset;
+      return;
+    }
+    const drop = offset - this.bufferStart;
+    if (drop >= this.buffer.length) {
+      this.buffer = Buffer.alloc(0);
+      this.bufferStart = offset;
+    } else if (drop > 0) {
+      this.buffer = this.buffer.subarray(drop);
+      this.bufferStart = offset;
+    }
+  }
+  ensure(offset, length) {
+    while (this.bufferStart + this.buffer.length < Math.min(offset + length, this.source.size)) {
+      this.readMore(MIN_READ_BYTES);
+    }
+  }
+  readMore(length) {
+    const from = this.bufferStart + this.buffer.length;
+    const allowed = this.maxReadBytes - this.bytesRead;
+    if (allowed <= 0)
+      throw new MboxReadBoundError;
+    const chunk = this.source.readAt(from, Math.min(length, allowed, Math.max(0, this.source.size - from)));
+    this.bytesRead += chunk.length;
+    if (chunk.length === 0)
+      throw new MboxFormatError(from);
+    this.buffer = this.buffer.length === 0 ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length) : Buffer.concat([this.buffer, chunk]);
+  }
+}
+function separatorLine(bytes) {
+  const end = bytes.indexOf(LF);
+  const line2 = bytes.subarray(0, Math.min(end < 0 ? bytes.length : end, MAX_SEPARATOR_CHARS)).toString("latin1");
+  return line2.endsWith("\r") ? line2.slice(0, -1) : line2;
+}
+function stripSeparatorLines(bytes) {
+  const firstLineEnd = bytes.indexOf(LF);
+  let body = firstLineEnd < 0 ? Buffer.alloc(0) : bytes.subarray(firstLineEnd + 1);
+  const n = body.length;
+  if (n >= 4 && body[n - 4] === CR && body[n - 3] === LF && body[n - 2] === CR && body[n - 1] === LF) {
+    body = body.subarray(0, n - 2);
+  } else if (n >= 2 && body[n - 2] === LF && body[n - 1] === LF) {
+    body = body.subarray(0, n - 1);
+  } else if (n === 1 && body[0] === LF) {
+    body = body.subarray(0, 0);
+  }
+  return body;
+}
+function unquote(bytes) {
+  const out = [];
+  let copied = 0;
+  let lineStart = 0;
+  while (lineStart < bytes.length) {
+    if (bytes[lineStart] === GT) {
+      let index = lineStart;
+      while (index < bytes.length && bytes[index] === GT)
+        index += 1;
+      if (bytes.subarray(index, index + FROM.length).equals(FROM)) {
+        out.push(bytes.subarray(copied, lineStart));
+        copied = lineStart + 1;
+      }
+    }
+    const next = bytes.indexOf(LF, lineStart);
+    if (next < 0)
+      break;
+    lineStart = next + 1;
+  }
+  if (copied === 0)
+    return bytes;
+  out.push(bytes.subarray(copied));
+  return Buffer.concat(out);
+}
+var SEPARATOR2, FROM, LF = 10, CR = 13, GT = 62, MBOX_DEFAULT_MAX_MESSAGE_BYTES, MIN_READ_BYTES, MAX_SEPARATOR_CHARS = 1024, MboxFormatError, MboxReadBoundError;
+var init_split = __esm(() => {
+  SEPARATOR2 = Buffer.from(`
+From `, "latin1");
+  FROM = Buffer.from("From ", "latin1");
+  MBOX_DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
+  MIN_READ_BYTES = 1024 * 1024;
+  MboxFormatError = class MboxFormatError extends Error {
+    offset;
+    constructor(offset) {
+      super("No message starts at this position of the mail file.");
+      this.name = "MboxFormatError";
+      this.offset = offset;
+    }
+  };
+  MboxReadBoundError = class MboxReadBoundError extends Error {
+    constructor() {
+      super("The mail file was read as far as this look may read.");
+      this.name = "MboxReadBoundError";
+    }
+  };
 });
 
 // node_modules/postal-mime/dist/esm/decode-strings.js
@@ -161697,7 +162367,7 @@ function decoded(value2) {
     return value2;
   }
 }
-function bareMessageId(value2) {
+function bareMessageId2(value2) {
   const trimmed2 = value2?.trim();
   if (!trimmed2)
     return;
@@ -161706,7 +162376,7 @@ function bareMessageId(value2) {
 }
 function firstMessageId(value2) {
   const match = value2 ? /<([^<>\s]+)>/.exec(value2) : null;
-  return match?.[1] ?? bareMessageId(value2?.split(/\s+/)[0]);
+  return match?.[1] ?? bareMessageId2(value2?.split(/\s+/)[0]);
 }
 function isoDate(value2) {
   if (!value2)
@@ -161752,6 +162422,85 @@ function declaredCharsets(raw) {
   }
   return [...found];
 }
+async function parseMboxMessage(raw) {
+  let email2;
+  try {
+    email2 = await PostalMime.parse(raw, {
+      maxHeadersSize: 1024 * 1024,
+      maxPartCount: 2000,
+      maxNestingDepth: 64,
+      maxRfc822NestingDepth: 4
+    });
+  } catch {
+    return;
+  }
+  const labels = (headerValue(email2, "x-gmail-labels") ?? "").split(",").map((label) => decoded(label.trim()) ?? "").filter((label) => label !== "");
+  const dateHeader = headerValue(email2, "date");
+  const authoredAt = isoDate(email2.date) ?? isoDate(dateHeader);
+  const to = decoded(headerValue(email2, "to"));
+  const messageId = bareMessageId2(email2.messageId ?? headerValue(email2, "message-id"));
+  const thread = headerValue(email2, "x-gm-thrid");
+  const deliveredTo = headerValue(email2, "delivered-to");
+  const threadRoot = firstMessageId(email2.references) ?? firstMessageId(email2.inReplyTo) ?? messageId;
+  return {
+    email: email2,
+    labels,
+    spamOrTrash: labels.some((label) => MBOX_SKIPPED_LABELS.has(label.toLowerCase())),
+    ...email2.subject?.trim() ? { subject: email2.subject.trim() } : {},
+    from: decoded(headerValue(email2, "from")) ?? "",
+    ...to ? { to } : {},
+    ...dateHeader ? { dateHeader } : {},
+    ...authoredAt ? { authoredAt } : {},
+    ...messageId ? { messageId } : {},
+    body: email2.text?.trim() || (email2.html ? stripHtml2(email2.html) : ""),
+    messageHash: sha2567(raw),
+    ...thread && /^\d{1,20}$/.test(thread) ? { gmailThread: thread } : {},
+    ...threadRoot ? { threadRoot } : {},
+    charsetNotDecoded: declaredCharsets(raw).some((charset2) => !charsetDecodable(charset2)),
+    ...deliveredTo ? { deliveredTo } : {}
+  };
+}
+var MBOX_SKIPPED_LABELS, decodableCharsets;
+var init_parse4 = __esm(() => {
+  init_postal_mime();
+  MBOX_SKIPPED_LABELS = new Set(["spam", "trash"]);
+  decodableCharsets = new Map;
+});
+
+// src/workers/archive-import/mbox/connector.ts
+function manifestTag(input) {
+  return input.manifestSha256.slice(0, 16);
+}
+function cursorAt(input, fileIndex, offset) {
+  return `${MBOX_CURSOR_PREFIX}${manifestTag(input)}:${fileIndex}:${offset}`;
+}
+function doneCursor(input) {
+  return `${MBOX_CURSOR_PREFIX}${manifestTag(input)}:done`;
+}
+function parseCursor(input, cursor) {
+  if (!cursor)
+    return { fileIndex: 0, offset: 0, done: false };
+  const prefix = `${MBOX_CURSOR_PREFIX}${manifestTag(input)}:`;
+  if (!cursor.startsWith(prefix)) {
+    throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point belongs to other files than this archive's.");
+  }
+  const rest = cursor.slice(prefix.length);
+  if (rest === "done")
+    return { fileIndex: input.files.length, offset: 0, done: true };
+  const [fileText, offsetText, extra] = rest.split(":");
+  const fileIndex = Number(fileText);
+  const offset = Number(offsetText);
+  if (extra !== undefined || !Number.isSafeInteger(fileIndex) || !Number.isSafeInteger(offset) || fileIndex < 0 || offset < 0 || fileIndex >= input.files.length || offset > input.files[fileIndex].version.size) {
+    throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point is not a position in this archive.");
+  }
+  return { fileIndex, offset, done: false };
+}
+function stoppedFrom(error2, relPath) {
+  if (error2 instanceof MboxFormatError) {
+    return new ArchiveImportStoppedError("resume_point_invalid", "No message starts where this import was to resume.", relPath);
+  }
+  return archiveStopFromScopeError(error2, relPath);
+}
 function attachmentInventory(email2) {
   const inventory = { count: 0, bytes: 0, lines: [] };
   for (const attachment of email2.attachments) {
@@ -161770,31 +162519,23 @@ function attachmentInventory(email2) {
 }
 async function messageOutcome(input, span) {
   const raw = span.raw;
-  let email2;
-  try {
-    email2 = await PostalMime.parse(raw, {
-      maxHeadersSize: 1024 * 1024,
-      maxPartCount: 2000,
-      maxNestingDepth: 64,
-      maxRfc822NestingDepth: 4
-    });
-  } catch {
+  const parsed = await parseMboxMessage(raw);
+  if (!parsed)
     return { kind: "unreadable" };
-  }
-  const labels = (headerValue(email2, "x-gmail-labels") ?? "").split(",").map((label) => decoded(label.trim()) ?? "").filter((label) => label !== "");
-  if (labels.some((label) => SKIPPED_LABELS.has(label.toLowerCase())))
+  const { email: email2, labels } = parsed;
+  if (parsed.spamOrTrash)
     return { kind: "skipped", reason: MBOX_FINDINGS.spamOrTrash };
   const findings = [];
-  const subject = email2.subject?.trim() || "(no subject)";
-  const rawFrom = decoded(headerValue(email2, "from")) ?? "";
+  const subject = parsed.subject ?? "(no subject)";
+  const rawFrom = parsed.from;
   const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
-  const to = decoded(headerValue(email2, "to"));
-  const dateHeader = headerValue(email2, "date");
-  const authoredAt = isoDate(email2.date) ?? isoDate(dateHeader);
+  const to = parsed.to;
+  const dateHeader = parsed.dateHeader;
+  const authoredAt = parsed.authoredAt;
   const attachments = attachmentInventory(email2);
   if (attachments.count > 0)
     findings.push({ kind: MBOX_FINDINGS.attachments, count: attachments.count });
-  if (declaredCharsets(raw).some((charset2) => !charsetDecodable(charset2)))
+  if (parsed.charsetNotDecoded)
     findings.push({ kind: MBOX_FINDINGS.charset });
   const summary = [
     email2.subject?.trim() ? `Subject: ${email2.subject.trim()}` : undefined,
@@ -161808,12 +162549,12 @@ async function messageOutcome(input, span) {
 `)].filter((part) => part !== "").join(`
 
 `) || `Subject: ${subject}`;
-  const messageId = bareMessageId(email2.messageId ?? headerValue(email2, "message-id"));
-  const messageHash = sha2567(raw);
+  const messageId = parsed.messageId;
+  const messageHash = parsed.messageHash;
   const providerItemId = sha2567(`${messageId ?? ""}\x00${messageHash}`).slice(0, 32);
-  const gmailThread = headerValue(email2, "x-gm-thrid");
-  const threadRoot = firstMessageId(email2.references) ?? firstMessageId(email2.inReplyTo) ?? messageId;
-  const providerThreadId = gmailThread && /^\d+$/.test(gmailThread) ? `gm:${gmailThread}` : threadRoot ? `mid:${sha2567(threadRoot).slice(0, 24)}` : undefined;
+  const gmailThread = parsed.gmailThread;
+  const threadRoot = parsed.threadRoot;
+  const providerThreadId = gmailThread ? `gm:${gmailThread}` : threadRoot ? `mid:${sha2567(threadRoot).slice(0, 24)}` : undefined;
   const item = {
     identity: {
       family: input.format.family,
@@ -161972,13 +162713,13 @@ function createMboxArchiveConnector(input) {
 function registerMboxArchiveConnector() {
   registerArchiveFormatConnector("mbox", createMboxArchiveConnector);
 }
-var MBOX_CURSOR_PREFIX = "mbox1:", MBOX_DEFAULT_PAGE_SIZE = 100, MBOX_DEFAULT_MAX_BYTES_PER_LISTING, MAX_ATTACHMENT_NAME_CHARS2 = 256, MBOX_FINDINGS, SKIPPED_LABELS, decodableCharsets;
+var MBOX_CURSOR_PREFIX = "mbox1:", MBOX_DEFAULT_PAGE_SIZE = 100, MBOX_DEFAULT_MAX_BYTES_PER_LISTING, MAX_ATTACHMENT_NAME_CHARS2 = 256, MBOX_FINDINGS;
 var init_connector5 = __esm(() => {
-  init_postal_mime();
   init_archive_formats();
   init_stop_errors();
   init_sender_rules();
   init_split();
+  init_parse4();
   MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
   MBOX_FINDINGS = {
     tooLarge: "message_too_large",
@@ -161986,10 +162727,9 @@ var init_connector5 = __esm(() => {
     charset: "charset_not_decoded",
     attachments: "attachments_not_read",
     textCut: "text_cut",
-    spamOrTrash: "spam_or_trash"
+    spamOrTrash: "spam_or_trash",
+    otherAccount: "mail_for_another_account"
   };
-  SKIPPED_LABELS = new Set(["spam", "trash"]);
-  decodableCharsets = new Map;
 });
 
 // src/workers/archive-import/whatsapp/grammar.ts
@@ -164450,7 +165190,7 @@ function parseReflectNote(record5) {
   };
 }
 var MAX_EDITOR_DEPTH = 200, BLOCK_EDITOR_NODE_TYPES, INLINE_EDITOR_NODE_TYPES, CHILD_KEYS, NOTHING;
-var init_parse4 = __esm(() => {
+var init_parse5 = __esm(() => {
   init_archive_formats();
   init_note();
   BLOCK_EDITOR_NODE_TYPES = new Set([
@@ -164504,7 +165244,7 @@ var init_connector7 = __esm(() => {
   init_archive_formats();
   init_archive();
   init_markdown();
-  init_parse4();
+  init_parse5();
   REFLECT_JSON_SPEC = {
     cursorPrefix: REFLECT_JSON_CURSOR_PREFIX,
     source: {
@@ -164596,7 +165336,7 @@ function parseRoamPage(record5) {
   };
 }
 var MAX_BLOCK_DEPTH = 256, MONTHS5, DAILY_PAGE_TITLE;
-var init_parse5 = __esm(() => {
+var init_parse6 = __esm(() => {
   init_note();
   MONTHS5 = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
   DAILY_PAGE_TITLE = /^([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th),?\s+(\d{4})$/;
@@ -164613,7 +165353,7 @@ var ROAM_CURSOR_PREFIX = "roam1:", ROAM_SPEC;
 var init_connector8 = __esm(() => {
   init_archive_formats();
   init_archive();
-  init_parse5();
+  init_parse6();
   ROAM_SPEC = {
     cursorPrefix: ROAM_CURSOR_PREFIX,
     source: {
@@ -165310,6 +166050,1028 @@ var init_connector9 = __esm(() => {
   LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
 });
 
+// src/workers/archive-import/xml-stream.ts
+function decodeXmlEntities2(text4) {
+  if (!text4.includes("&"))
+    return text4;
+  return text4.replace(/&(#x[0-9a-fA-F]{1,6}|#[0-9]{1,7}|[A-Za-z][A-Za-z0-9._-]*);/g, (whole, ref) => {
+    if (ref.startsWith("#")) {
+      const code = ref[1] === "x" ? Number.parseInt(ref.slice(2), 16) : Number.parseInt(ref.slice(1), 10);
+      return Number.isInteger(code) && code > 0 && code <= 1114111 && !(code >= 55296 && code <= 57343) ? String.fromCodePoint(code) : whole;
+    }
+    return PREDEFINED[ref] ?? whole;
+  });
+}
+function parseXmlTag(inner) {
+  let text4 = inner;
+  const empty = text4.endsWith("/");
+  if (empty)
+    text4 = text4.slice(0, -1);
+  const nameMatch = /^[^\s/>]+/.exec(text4);
+  if (!nameMatch || !NAME.test(nameMatch[0]))
+    return;
+  const attributes = {};
+  let at = nameMatch[0].length;
+  ATTRIBUTE.lastIndex = at;
+  for (;; ) {
+    if (/^\s*$/.test(text4.slice(at)))
+      break;
+    ATTRIBUTE.lastIndex = at;
+    const match = ATTRIBUTE.exec(text4);
+    if (!match)
+      return;
+    attributes[match[1]] = decodeXmlEntities2(match[2] ?? match[3] ?? "");
+    at = ATTRIBUTE.lastIndex;
+  }
+  return { name: nameMatch[0], attributes, empty };
+}
+
+class XmlStreamReader {
+  source;
+  recordPaths;
+  rangeNames;
+  maxRecordBytes;
+  decoder = new TextDecoder("utf-8");
+  chunk = new Uint8Array(0);
+  chunkStart = 0;
+  index = 0;
+  ended = false;
+  stack;
+  mode = "text";
+  markup = [];
+  markupStart = 0;
+  doctypeDepth = 0;
+  doctypeQuote = 0;
+  markupQuote = 0;
+  recordDepth = -1;
+  recordPath = [];
+  recordStart = 0;
+  recordBytes = 0;
+  discarding = false;
+  building = [];
+  cdataHeld = [];
+  rootSeenName;
+  constructor(source, options) {
+    this.source = source;
+    this.recordPaths = options.recordPaths;
+    this.rangeNames = new Set(options.rangeElements ?? []);
+    this.maxRecordBytes = Math.max(1, options.maxRecordBytes);
+    this.stack = [...options.open ?? []];
+    if (this.stack.length > 0)
+      this.rootSeenName = this.stack[0];
+    this.chunkStart = source.position;
+  }
+  get rootName() {
+    return this.rootSeenName;
+  }
+  get open() {
+    return this.stack;
+  }
+  get offset() {
+    return this.chunkStart + this.index;
+  }
+  fail(code, message2, offset = this.offset) {
+    throw new XmlStreamError(code, message2, offset);
+  }
+  fill() {
+    if (this.index < this.chunk.length)
+      return true;
+    if (this.ended)
+      return false;
+    for (;; ) {
+      const position = this.source.position;
+      const next = this.source.next();
+      if (next === undefined) {
+        this.ended = true;
+        return false;
+      }
+      if (next.length === 0)
+        continue;
+      this.chunkStart = position;
+      this.chunk = next;
+      this.index = 0;
+      return true;
+    }
+  }
+  inRecord() {
+    return this.recordDepth >= 0;
+  }
+  keeping() {
+    return this.inRecord() && !this.discarding;
+  }
+  count(bytes) {
+    if (!this.keeping())
+      return;
+    this.recordBytes += bytes;
+    if (this.recordBytes > this.maxRecordBytes) {
+      this.discarding = true;
+      this.building = [];
+    }
+  }
+  top() {
+    return this.building[this.building.length - 1];
+  }
+  flushText() {
+    const open6 = this.top();
+    if (!open6 || open6.pending.length === 0)
+      return;
+    const total = open6.pending.reduce((sum2, part) => sum2 + part.length, 0);
+    const bytes = new Uint8Array(total);
+    let at = 0;
+    for (const part of open6.pending) {
+      bytes.set(part, at);
+      at += part.length;
+    }
+    const text4 = this.decoder.decode(bytes);
+    open6.element.children.push(open6.pendingCdata ? text4 : decodeXmlEntities2(text4));
+    open6.pending = [];
+  }
+  keepText(bytes, cdata) {
+    if (!this.keeping() || bytes.length === 0)
+      return;
+    const open6 = this.top();
+    if (!open6)
+      return;
+    if (open6.pending.length > 0 && open6.pendingCdata !== cdata)
+      this.flushText();
+    open6.pendingCdata = cdata;
+    open6.pending.push(bytes.slice());
+    this.count(bytes.length);
+  }
+  inRange() {
+    const open6 = this.top();
+    return !!open6 && this.rangeNames.has(open6.element.name);
+  }
+  matchRecord() {
+    return this.recordPaths.find((path) => path.length === this.stack.length && path.every((name, at) => name === this.stack[at]));
+  }
+  next() {
+    for (;; ) {
+      if (!this.fill()) {
+        if (this.mode !== "text" || this.stack.length > 0) {
+          this.fail("truncated", "The document ends inside an element.");
+        }
+        return;
+      }
+      const event = this.step();
+      if (event)
+        return event;
+    }
+  }
+  step() {
+    const chunk = this.chunk;
+    while (this.index < chunk.length) {
+      switch (this.mode) {
+        case "text": {
+          const lt = chunk.indexOf(LT, this.index);
+          const end = lt < 0 ? chunk.length : lt;
+          if (end > this.index) {
+            const piece = chunk.subarray(this.index, end);
+            if (this.inRange() && this.keeping()) {
+              const open6 = this.top();
+              if (piece.includes(AMP))
+                open6.element.rangeEntities = true;
+              this.addRange(open6, this.offset, piece.length);
+            } else if (this.keeping()) {
+              this.keepText(piece, false);
+            } else if (!this.inRecord() && this.stack.length === 0 && this.rootSeenName !== undefined) {
+              if (piece.some((byte) => byte !== 32 && byte !== 10 && byte !== 13 && byte !== 9)) {
+                this.fail("invalid_xml", "Text after the document's root element.");
+              }
+            }
+            this.index = end;
+          }
+          if (lt >= 0) {
+            this.mode = "markup";
+            this.markup = [];
+            this.markupStart = this.offset;
+            this.markupQuote = 0;
+            this.index += 1;
+          }
+          break;
+        }
+        case "markup": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          this.markup.push(byte);
+          if (this.markup.length > XML_STREAM_MAX_MARKUP_BYTES)
+            this.fail("invalid_xml", "A tag is too long.", this.markupStart);
+          if (this.markup.length === 3 && this.markup[0] === 33 && this.markup[1] === 45 && this.markup[2] === 45) {
+            this.mode = "comment";
+            this.markup = [];
+            break;
+          }
+          if (this.markup.length === 8 && String.fromCharCode(...this.markup) === "![CDATA[") {
+            if (!this.inRecord() && this.stack.length === 0)
+              this.fail("invalid_xml", "A CDATA section outside the document's root element.", this.markupStart);
+            this.mode = "cdata";
+            this.markup = [];
+            this.cdataHeld = [];
+            break;
+          }
+          if (this.markup.length === 8 && String.fromCharCode(...this.markup).toUpperCase() === "!DOCTYPE") {
+            this.mode = "doctype";
+            this.doctypeDepth = 0;
+            this.doctypeQuote = 0;
+            break;
+          }
+          if (this.markup.length === 1 && byte === 63) {
+            this.mode = "pi";
+            this.markup = [];
+            break;
+          }
+          if (byte === 34 || byte === 39) {
+            if (this.markupQuote === 0)
+              this.markupQuote = byte;
+            else if (this.markupQuote === byte)
+              this.markupQuote = 0;
+          }
+          if (byte === GT2 && this.markupQuote === 0) {
+            const event = this.tag();
+            if (event)
+              return event;
+          }
+          break;
+        }
+        case "comment": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (byte === GT2 && this.markup.length >= 2 && this.markup[this.markup.length - 1] === 45 && this.markup[this.markup.length - 2] === 45) {
+            this.mode = "text";
+            this.markup = [];
+            this.chargeSkipped();
+            break;
+          }
+          this.markup.push(byte);
+          if (this.markup.length > 2)
+            this.markup.shift();
+          this.countMarkupLength();
+          break;
+        }
+        case "pi": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (byte === GT2 && this.markup[this.markup.length - 1] === 63) {
+            this.mode = "text";
+            this.markup = [];
+            this.chargeSkipped();
+            break;
+          }
+          this.markup.push(byte);
+          if (this.markup.length > 1)
+            this.markup.shift();
+          this.countMarkupLength();
+          break;
+        }
+        case "doctype": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (this.inRecord() || this.stack.length > 0)
+            this.fail("invalid_xml", "A document type declaration inside an element.", this.markupStart);
+          if (this.doctypeQuote !== 0) {
+            if (byte === this.doctypeQuote)
+              this.doctypeQuote = 0;
+          } else if (byte === 34 || byte === 39)
+            this.doctypeQuote = byte;
+          else if (byte === 91)
+            this.doctypeDepth += 1;
+          else if (byte === 93)
+            this.doctypeDepth = Math.max(0, this.doctypeDepth - 1);
+          else if (byte === GT2 && this.doctypeDepth === 0) {
+            this.mode = "text";
+            this.markup = [];
+            break;
+          }
+          this.countMarkupLength();
+          break;
+        }
+        case "cdata": {
+          let view3 = chunk.subarray(this.index);
+          let base = this.offset;
+          if (this.cdataHeld.length > 0) {
+            const joined = new Uint8Array(this.cdataHeld.length + view3.length);
+            joined.set(this.cdataHeld, 0);
+            joined.set(view3, this.cdataHeld.length);
+            base -= this.cdataHeld.length;
+            view3 = joined;
+            this.cdataHeld = [];
+          }
+          let close = -1;
+          for (let at = 0;at + 2 < view3.length; at += 1) {
+            if (view3[at] === 93 && view3[at + 1] === 93 && view3[at + 2] === GT2) {
+              close = at;
+              break;
+            }
+          }
+          if (close >= 0) {
+            this.cdataText(view3.subarray(0, close), base);
+            this.index = chunk.length - (view3.length - (close + 3));
+            this.mode = "text";
+            break;
+          }
+          let tail = 0;
+          while (tail < 2 && tail < view3.length && view3[view3.length - 1 - tail] === 93)
+            tail += 1;
+          this.cdataText(view3.subarray(0, view3.length - tail), base);
+          this.cdataHeld = Array.from(view3.subarray(view3.length - tail));
+          this.index = chunk.length;
+          break;
+        }
+        default:
+          this.index = chunk.length;
+      }
+    }
+    return;
+  }
+  cdataText(bytes, start) {
+    if (bytes.length === 0)
+      return;
+    if (this.inRange() && this.keeping()) {
+      this.addRange(this.top(), start, bytes.length);
+      return;
+    }
+    this.keepText(bytes, true);
+  }
+  addRange(open6, start, length) {
+    const ranges = open6.element.ranges;
+    const last = ranges[ranges.length - 1];
+    if (last && last.end === start) {
+      last.end = start + length;
+      return;
+    }
+    ranges.push({ start, end: start + length });
+    this.count(XML_STREAM_RANGE_COST);
+  }
+  chargeSkipped() {
+    this.count(this.offset - this.markupStart);
+  }
+  countMarkupLength() {
+    if (this.offset - this.markupStart > XML_STREAM_MAX_MARKUP_BYTES)
+      this.fail("invalid_xml", "Markup is too long.", this.markupStart);
+  }
+  tag() {
+    const bytes = Uint8Array.from(this.markup.slice(0, -1));
+    this.markup = [];
+    this.mode = "text";
+    const tagStart = this.markupStart;
+    const tagEnd = this.offset;
+    const text4 = this.decoder.decode(bytes);
+    if (text4.startsWith("/")) {
+      const name = text4.slice(1).trim();
+      const expected = this.stack[this.stack.length - 1];
+      if (expected === undefined || name !== expected)
+        this.fail("invalid_xml", "An end tag does not close the open element.", tagStart);
+      return this.close(tagEnd, tagEnd - tagStart);
+    }
+    if (text4.startsWith("!"))
+      this.fail("invalid_xml", "Markup that is not XML.", tagStart);
+    const parsed = parseXmlTag(text4);
+    if (!parsed)
+      this.fail("invalid_xml", "A tag that is not XML.", tagStart);
+    if (this.stack.length === 0) {
+      if (this.rootSeenName !== undefined)
+        this.fail("invalid_xml", "A second root element.", tagStart);
+      this.rootSeenName = parsed.name;
+    }
+    this.stack.push(parsed.name);
+    if (this.stack.length > XML_STREAM_MAX_DEPTH)
+      this.fail("too_deep", "Elements are nested too deeply.", tagStart);
+    if (!this.inRecord()) {
+      const path = this.matchRecord();
+      if (path) {
+        this.recordDepth = this.stack.length;
+        this.recordPath = path;
+        this.recordStart = tagStart;
+        this.recordBytes = 0;
+        this.discarding = false;
+        this.building = [];
+      }
+    }
+    if (this.keeping()) {
+      this.flushText();
+      const element = { name: parsed.name, attributes: parsed.attributes, children: [] };
+      if (this.rangeNames.has(parsed.name))
+        element.ranges = [];
+      const parent = this.top();
+      if (parent)
+        parent.element.children.push(element);
+      this.building.push({ element, pending: [], pendingCdata: false });
+      this.count(tagEnd - tagStart);
+    }
+    if (parsed.empty)
+      return this.close(tagEnd, 0);
+    return;
+  }
+  close(end, tagBytes) {
+    if (this.keeping()) {
+      this.flushText();
+      this.count(tagBytes);
+    }
+    const depth2 = this.stack.length;
+    this.stack.pop();
+    if (!this.inRecord())
+      return;
+    if (this.discarding) {
+      if (depth2 !== this.recordDepth)
+        return;
+      this.recordDepth = -1;
+      this.discarding = false;
+      this.building = [];
+      return { kind: "oversize", path: this.recordPath, start: this.recordStart, end };
+    }
+    const done = this.building.pop();
+    if (depth2 !== this.recordDepth || !done)
+      return;
+    this.recordDepth = -1;
+    this.building = [];
+    return { kind: "record", path: this.recordPath, element: done.element, start: this.recordStart, end };
+  }
+}
+function xmlText(element) {
+  return element.children.map((child) => typeof child === "string" ? child : xmlText(child)).join("");
+}
+function xmlChild(element, name) {
+  for (const child of element.children)
+    if (typeof child !== "string" && child.name === name)
+      return child;
+  return;
+}
+function xmlChildren(element, name) {
+  return element.children.filter((child) => typeof child !== "string" && child.name === name);
+}
+var XML_STREAM_MAX_DEPTH = 256, XML_STREAM_MAX_MARKUP_BYTES, XML_STREAM_RANGE_COST = 32, XmlStreamError, LT = 60, GT2 = 62, AMP = 38, PREDEFINED, NAME, ATTRIBUTE;
+var init_xml_stream = __esm(() => {
+  XML_STREAM_MAX_MARKUP_BYTES = 1024 * 1024;
+  XmlStreamError = class XmlStreamError extends Error {
+    code;
+    offset;
+    constructor(code, message2, offset) {
+      super(message2);
+      this.name = "XmlStreamError";
+      this.code = code;
+      this.offset = offset;
+    }
+  };
+  PREDEFINED = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
+  NAME = /^[A-Za-z_:À-￿][\w.:\-·À-￿]*$/;
+  ATTRIBUTE = /\s*([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/y;
+});
+
+// src/workers/archive-import/evernote/enml.ts
+function attribute3(attributes, name) {
+  const match = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i").exec(attributes);
+  return match ? decodeHTML(match[1] ?? match[2] ?? match[3] ?? "") : undefined;
+}
+function enmlToText(enml) {
+  const lines = [];
+  let line2 = "";
+  let pre = 0;
+  let silent = 0;
+  let crypt = 0;
+  let unsupported = 0;
+  let media = 0;
+  let cell = 0;
+  const endLine = () => {
+    const done = pre > 0 ? line2.replace(/\s+$/, "") : line2.replace(/[ \t ]+/g, " ").trim();
+    if (done !== "")
+      lines.push(done);
+    line2 = "";
+    cell = 0;
+  };
+  const write = (text4) => {
+    if (silent > 0 || crypt > 0 || text4 === "")
+      return;
+    line2 += pre > 0 ? text4 : text4.replace(/\s+/g, " ");
+  };
+  for (const match of enml.matchAll(TOKEN)) {
+    const token = match[0];
+    if (token.startsWith("<!--") || token.startsWith("<?") || token.startsWith("<!") && !token.startsWith("<![CDATA["))
+      continue;
+    if (token.startsWith("<![CDATA[")) {
+      write(match[1] ?? "");
+      continue;
+    }
+    const tag = token.startsWith("<") ? TAG.exec(token) : null;
+    if (!tag) {
+      write(token === "<" ? "<" : decodeHTML(token));
+      continue;
+    }
+    const closing = tag[1] === "/";
+    const name = tag[2].toLowerCase();
+    const attributes = tag[3] ?? "";
+    const empty = tag[4] === "/";
+    if (name === "en-crypt") {
+      if (closing) {
+        crypt = Math.max(0, crypt - 1);
+      } else {
+        unsupported += 1;
+        write("[Encrypted text, not read]");
+        if (!empty)
+          crypt += 1;
+      }
+      continue;
+    }
+    if (SILENT.has(name)) {
+      if (!empty)
+        silent = Math.max(0, silent + (closing ? -1 : 1));
+      continue;
+    }
+    if (closing) {
+      if (BLOCKS.has(name))
+        endLine();
+      if (name === "pre")
+        pre = Math.max(0, pre - 1);
+      continue;
+    }
+    if (name === "br") {
+      endLine();
+      continue;
+    }
+    if (name === "en-todo") {
+      write(attribute3(attributes, "checked")?.toLowerCase() === "true" ? "[x] " : "[ ] ");
+      continue;
+    }
+    if (name === "en-media") {
+      media += 1;
+      const type = attribute3(attributes, "type");
+      write(` [Attachment${type ? `: ${type}` : ""}] `);
+      continue;
+    }
+    if (name === "td" || name === "th") {
+      if (cell > 0)
+        write(" | ");
+      cell += 1;
+      continue;
+    }
+    if (name === "img") {
+      const alt = attribute3(attributes, "alt");
+      if (alt)
+        write(` [Image: ${alt}] `);
+      continue;
+    }
+    if (BLOCKS.has(name)) {
+      if (line2.trim() !== "")
+        endLine();
+      if (name === "pre" && !empty)
+        pre += 1;
+      if (name === "li")
+        write("- ");
+      if (name === "hr" || empty)
+        endLine();
+    }
+  }
+  endLine();
+  return { text: lines.join(`
+`), unsupported, media };
+}
+var BLOCKS, SILENT, TOKEN, TAG;
+var init_enml = __esm(() => {
+  init_esm();
+  BLOCKS = new Set([
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "dd",
+    "details",
+    "div",
+    "dl",
+    "dt",
+    "en-note",
+    "figcaption",
+    "figure",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "tfoot",
+    "thead",
+    "tr",
+    "ul"
+  ]);
+  SILENT = new Set(["script", "style", "head", "title", "object", "embed", "applet"]);
+  TOKEN = /<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[([\s\S]*?)(?:\]\]>|$)|<![^>]*>?|<\?[\s\S]*?(?:\?>|$)|<\/?[A-Za-z][^>]*>?|[^<]+|</g;
+  TAG = /^<(\/?)([A-Za-z][\w:-]*)([^>]*?)(\/?)>?$/;
+});
+
+// src/workers/archive-import/evernote/connector.ts
+import { createHash as createHash85 } from "node:crypto";
+function sha25611(value2) {
+  return createHash85("sha256").update(value2).digest("hex");
+}
+function enexTime(value2) {
+  const match = /^\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\s*$/.exec(value2 ?? "");
+  if (!match)
+    return;
+  const ms = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]));
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function decodeBase64Range(reader, start, end, cap) {
+  const out = [];
+  let total = 0;
+  let pending = new Uint8Array(Math.min(cap, 64 * 1024) + 3);
+  let used = 0;
+  const push = (byte) => {
+    if (used === pending.length) {
+      out.push(pending.subarray(0, used));
+      pending = new Uint8Array(Math.min(Math.max(64 * 1024, pending.length * 2), 16 * 1024 * 1024));
+      used = 0;
+    }
+    pending[used++] = byte;
+    total += 1;
+    return total >= cap;
+  };
+  let quad = 0;
+  let count = 0;
+  let padded = false;
+  outer:
+    for (let at2 = start;at2 < end; at2 += FETCH_SLICE_BYTES) {
+      const slice = reader.readAt(at2, Math.min(FETCH_SLICE_BYTES, end - at2));
+      for (let index = 0;index < slice.length; index += 1) {
+        const byte = slice[index];
+        if (byte === 32 || byte === 10 || byte === 13 || byte === 9)
+          continue;
+        if (byte === 61) {
+          padded = true;
+          continue;
+        }
+        const value2 = BASE64[byte];
+        if (value2 < 0 || padded)
+          throw new FileExtractionSourceError("source_content_unavailable");
+        quad = quad << 6 | value2;
+        count += 1;
+        if (count === 4) {
+          if (push(quad >> 16 & 255) || push(quad >> 8 & 255) || push(quad & 255))
+            break outer;
+          quad = 0;
+          count = 0;
+        }
+      }
+    }
+  if (total < cap) {
+    if (count === 2)
+      push(quad >> 4 & 255);
+    else if (count === 3) {
+      if (!push(quad >> 10 & 255))
+        push(quad >> 2 & 255);
+    } else if (count === 1)
+      throw new FileExtractionSourceError("source_content_unavailable");
+  }
+  out.push(pending.subarray(0, used));
+  const bytes = new Uint8Array(Math.min(total, cap));
+  let at = 0;
+  for (const part of out) {
+    const take = Math.min(part.length, bytes.length - at);
+    bytes.set(part.subarray(0, take), at);
+    at += take;
+    if (at >= bytes.length)
+      break;
+  }
+  return bytes;
+}
+function createEvernoteArchiveConnector(input) {
+  const pageSizeDefault = Math.max(1, input.pageSize ?? EVERNOTE_DEFAULT_PAGE_SIZE);
+  const byteBudget = Math.max(1, input.maxBytesPerListing ?? EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING);
+  const tag = input.manifestSha256.slice(0, 16);
+  const prefix = `${EVERNOTE_CURSOR_PREFIX}${tag}:`;
+  const DONE2 = { file: input.files.length, offset: 0, from: 0, done: true };
+  const startOfFile = (file) => file >= input.files.length ? DONE2 : { file, offset: 0, from: 0, done: false };
+  const invalid4 = (message2) => new ArchiveImportStoppedError("resume_point_invalid", message2);
+  const encode3 = (cursor) => cursor.done ? `${prefix}done` : `${prefix}${cursor.file}:${cursor.offset}:${cursor.from}`;
+  const decode3 = (text4) => {
+    if (!text4)
+      return startOfFile(0);
+    if (!text4.startsWith(prefix))
+      throw invalid4("The resume point belongs to other files than this archive's.");
+    const rest = text4.slice(prefix.length);
+    if (rest === "done")
+      return DONE2;
+    const parts = rest.split(":").map(Number);
+    const [file, offset, from] = parts;
+    if (parts.length !== 3 || !parts.every((part) => Number.isSafeInteger(part) && part >= 0) || file >= input.files.length || offset > input.files[file].version.size) {
+      throw invalid4("The resume point is not a position in this archive.");
+    }
+    return { file, offset, from, done: false };
+  };
+  const report = (kind, findingClass, fileIndex, offset, count) => {
+    input.report({ kind, class: findingClass, fileIndex, offset, ...count !== undefined ? { count } : {} });
+  };
+  const buildNote = (note, fileIndex, start, savedAt) => {
+    const title = textOf(xmlChild(note, "title"));
+    const contentElement = xmlChild(note, "content");
+    const body = contentElement ? enmlToText(xmlText(contentElement)) : { text: "", unsupported: 0, media: 0 };
+    const resources = xmlChildren(note, "resource");
+    if (body.text === "" && resources.length === 0) {
+      report(NOTE_FINDINGS.empty, "skipped", fileIndex, start);
+      return { items: [], positions: [] };
+    }
+    const createdAt = enexTime(textOf(xmlChild(note, "created")));
+    const updatedAt = enexTime(textOf(xmlChild(note, "updated")));
+    const built = buildNoteItem(input, {
+      title,
+      body: body.text,
+      tags: cleanTags(xmlChildren(note, "tag").map((element) => textOf(element))),
+      ...createdAt ? { createdAt } : {},
+      ...updatedAt ? { updatedAt } : {},
+      ...body.unsupported > 0 ? { unsupported: body.unsupported } : {}
+    }, { fileIndex, member: -1, ordinal: start }, savedAt);
+    if (body.unsupported > 0)
+      report(NOTE_FINDINGS.unsupported, "gap", fileIndex, start);
+    if (built.dateAssumed)
+      report(NOTE_FINDINGS.dateAssumed, "gap", fileIndex, start);
+    const parent = built.item;
+    const items = [parent];
+    const positions = [start];
+    resources.forEach((resource, index) => {
+      const data2 = xmlChild(resource, "data");
+      const mime2 = textOf(xmlChild(resource, "mime")) || "application/octet-stream";
+      const attributes = xmlChild(resource, "resource-attributes");
+      const fileName = textOf(attributes ? xmlChild(attributes, "file-name") : undefined);
+      const name = (fileName || `Attachment ${index + 1} (${mime2})`).slice(0, 500);
+      const ranges = data2?.ranges ?? [];
+      const encoding = (data2?.attributes["encoding"] ?? "base64").toLowerCase();
+      const readable = data2 !== undefined && encoding === "base64" && data2.rangeEntities !== true && ranges.length === 1;
+      const range = readable ? ranges[0] : undefined;
+      const locator = range ? `${prefix}${fileIndex}:${range.start}:${range.end}:${Buffer.from(mime2).toString("base64url")}` : `${prefix}none`;
+      const providerItemId = childProviderItemId(parent.identity.providerItemId, `resource-${index}`);
+      const authoredAt = parent.metadata["authoredAt"];
+      items.push({
+        identity: {
+          family: input.format.family,
+          provider: input.format.provider,
+          accountScope: input.accountScope,
+          providerItemId,
+          localItemId: `${input.accountScope}:${providerItemId}`,
+          sourceVersion: sha25611(`${locator}\x00${name}`).slice(0, 32),
+          parent: { providerItemId: parent.identity.providerItemId, localItemId: parent.identity.localItemId }
+        },
+        mimeType: mime2,
+        content: { kind: "metadata_only" },
+        metadata: Object.freeze({
+          title: name,
+          name,
+          mimeType: mime2,
+          ...typeof authoredAt === "string" ? { authoredAt } : {}
+        }),
+        fetchedAt: new Date().toISOString(),
+        deferredBytes: { locator, available: readable }
+      });
+      positions.push(start + 1 + index);
+      if (!readable)
+        report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", fileIndex, start + 1 + index);
+    });
+    return { items, positions };
+  };
+  const readSegment = (cursor, room, bytesLeft, started) => {
+    const file = input.files[cursor.file];
+    const segment = { items: [], positions: [], next: cursor, consumed: 0, bytes: 0, stopped: false, budgetHit: false };
+    let reader;
+    try {
+      reader = input.root.openFile(file.relPath, { expected: file.version });
+    } catch (error2) {
+      throw archiveStopFromScopeError(error2, file.relPath);
+    }
+    try {
+      const savedAt = new Date(Number.isFinite(file.version.mtimeMs) ? file.version.mtimeMs : 0).toISOString();
+      if (cursor.offset === 0) {
+        let head;
+        try {
+          head = reader.readAt(0, ARCHIVE_PROBE_HEAD_BYTES);
+        } catch (error2) {
+          throw archiveStopFromScopeError(error2, file.relPath);
+        }
+        if (!looksLikeEnex(head)) {
+          report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", cursor.file, 0);
+          segment.next = startOfFile(cursor.file + 1);
+          return segment;
+        }
+      }
+      const inner = fileByteSource(reader, { start: cursor.offset });
+      const watched = {
+        get position() {
+          return inner.position;
+        },
+        next() {
+          if (!input.shouldContinue())
+            throw new ReadInterrupted2;
+          return inner.next();
+        },
+        unread: (count) => inner.unread(count)
+      };
+      const xml2 = new XmlStreamReader(watched, {
+        recordPaths: [RECORD_PATH],
+        rangeElements: ["data", "recognition"],
+        maxRecordBytes: NOTE_MAX_RECORD_BYTES,
+        ...cursor.offset > 0 ? { open: [RECORD_PATH[0]] } : {}
+      });
+      for (;; ) {
+        if (segment.items.length >= room || segment.consumed >= EVERNOTE_MAX_UNITS_PER_PAGE)
+          break;
+        if (segment.bytes >= bytesLeft && (segment.consumed > 0 || started)) {
+          segment.budgetHit = true;
+          break;
+        }
+        let event;
+        try {
+          event = xml2.next();
+        } catch (error2) {
+          if (error2 instanceof ReadInterrupted2) {
+            segment.stopped = true;
+            break;
+          }
+          if (error2 instanceof XmlStreamError) {
+            report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, error2.offset);
+            segment.next = startOfFile(cursor.file + 1);
+            break;
+          }
+          throw archiveStopFromScopeError(error2, file.relPath);
+        } finally {
+          segment.bytes = inner.position - cursor.offset;
+        }
+        if (!event) {
+          if (xml2.rootName === undefined)
+            report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, 0);
+          segment.next = startOfFile(cursor.file + 1);
+          break;
+        }
+        if (cursor.offset > 0 && event.start < cursor.offset)
+          throw invalid4("Nothing starts where this import was to resume.");
+        segment.consumed += 1;
+        if (event.kind === "oversize") {
+          report(NOTE_FINDINGS.tooLarge, "gap", cursor.file, event.start);
+          segment.next = { file: cursor.file, offset: event.end, from: 0, done: false };
+          continue;
+        }
+        const built = buildNote(event.element, cursor.file, event.start, savedAt);
+        const skip = event.start === cursor.offset ? Math.min(cursor.from, built.items.length) : 0;
+        const left = built.items.length - skip;
+        const take = Math.min(left, room - segment.items.length);
+        segment.items.push(...built.items.slice(skip, skip + take));
+        segment.positions.push(...built.positions.slice(skip, skip + take).map((offset) => ({ fileIndex: cursor.file, offset })));
+        if (take < left) {
+          segment.next = { file: cursor.file, offset: event.start, from: skip + take, done: false };
+          break;
+        }
+        segment.next = { file: cursor.file, offset: event.end, from: 0, done: false };
+      }
+      try {
+        reader.assertCurrent();
+      } catch (error2) {
+        throw archiveStopFromScopeError(error2, file.relPath);
+      }
+      return segment;
+    } finally {
+      reader.close();
+    }
+  };
+  const readAttachment = (localItemId, options, cap) => {
+    const locator = options?.deferredBytes?.locator;
+    if (!locator)
+      throw new FileExtractionSourceError("source_item_not_found");
+    const match = /^enex1:([0-9a-f]{16}):(\d+):(\d+):(\d+):([A-Za-z0-9_-]*)$/.exec(locator);
+    if (!match || match[1] !== tag)
+      throw new FileExtractionSourceError("source_version_gone");
+    const fileIndex = Number(match[2]);
+    const start = Number(match[3]);
+    const end = Number(match[4]);
+    const file = input.files[fileIndex];
+    if (!file || !(start < end) || end > file.version.size)
+      throw new FileExtractionSourceError("source_version_gone");
+    const mime2 = Buffer.from(match[5], "base64url").toString("utf8") || "application/octet-stream";
+    const reader = input.root.openFile(file.relPath, { expected: file.version });
+    try {
+      const bytes = decodeBase64Range(reader, start, end, cap);
+      reader.assertCurrent();
+      const scopePrefix = `${input.accountScope}:`;
+      const providerItemId = localItemId.startsWith(scopePrefix) ? localItemId.slice(scopePrefix.length) : localItemId;
+      return {
+        identity: {
+          family: input.format.family,
+          provider: input.format.provider,
+          accountScope: input.accountScope,
+          providerItemId,
+          localItemId
+        },
+        mimeType: mime2,
+        content: { kind: "bytes", mimeType: mime2, bytes },
+        metadata: Object.freeze({}),
+        fetchedAt: new Date().toISOString()
+      };
+    } finally {
+      reader.close();
+    }
+  };
+  const connector = {
+    id: input.connectorId,
+    family: input.format.family,
+    async authenticate() {},
+    listItems(options) {
+      return async function* () {
+        let cursor = decode3(options?.cursor);
+        if (cursor.done) {
+          yield { items: [], nextCursor: encode3(DONE2), done: true };
+          return;
+        }
+        const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
+        let emitted = 0;
+        let bytesRead = 0;
+        let page2 = [];
+        let positions = [];
+        let units = 0;
+        let pending = false;
+        const send = (done) => {
+          input.reportPosition?.({ fileIndex: Math.min(cursor.file, input.files.length - 1), offset: cursor.done ? input.files[input.files.length - 1]?.version.size ?? 0 : cursor.offset });
+          input.reportItemPositions?.(positions);
+          return done ? { items: page2, nextCursor: encode3(DONE2), done: true } : { items: page2, nextCursor: encode3(cursor), done: false };
+        };
+        for (;; ) {
+          const room = Math.max(1, Math.min(pageSizeDefault, limit - emitted) - page2.length);
+          const segment = readSegment(cursor, room, Math.max(1, byteBudget - bytesRead), bytesRead > 0 || emitted > 0 || page2.length > 0 || units > 0);
+          page2.push(...segment.items);
+          positions.push(...segment.positions);
+          cursor = segment.next;
+          units += segment.consumed;
+          bytesRead += segment.bytes;
+          if (segment.consumed > 0 || segment.items.length > 0)
+            pending = true;
+          if (segment.stopped) {
+            if (pending)
+              yield send(false);
+            return;
+          }
+          if (cursor.done) {
+            yield send(true);
+            return;
+          }
+          const spentBudget = segment.budgetHit || bytesRead >= byteBudget;
+          const full = page2.length >= Math.min(pageSizeDefault, limit - emitted);
+          if (full || spentBudget || units >= EVERNOTE_MAX_UNITS_PER_PAGE) {
+            yield send(false);
+            emitted += page2.length;
+            page2 = [];
+            positions = [];
+            units = 0;
+            pending = false;
+            if (emitted >= limit || spentBudget)
+              return;
+          }
+        }
+      }();
+    },
+    async fetchItem(localItemId, options) {
+      return readAttachment(localItemId, options, Number.MAX_SAFE_INTEGER);
+    },
+    async fetchItemWithin(localItemId, options) {
+      const cap = options.maxBytes !== undefined ? options.maxBytes + 1 : Number.MAX_SAFE_INTEGER;
+      return readAttachment(localItemId, options.deferredBytes ? { deferredBytes: options.deferredBytes } : undefined, cap);
+    },
+    classificationSignals(item) {
+      return noteClassificationSignals(item);
+    }
+  };
+  return connector;
+}
+function registerEvernoteArchiveConnector() {
+  registerArchiveFormatConnector("evernote-enex", createEvernoteArchiveConnector);
+}
+var EVERNOTE_CURSOR_PREFIX = "enex1:", EVERNOTE_DEFAULT_PAGE_SIZE = 100, EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING, EVERNOTE_MAX_UNITS_PER_PAGE = 5000, FETCH_SLICE_BYTES, RECORD_PATH, ReadInterrupted2, textOf = (element) => element ? xmlText(element).trim() : "", BASE64;
+var init_connector10 = __esm(() => {
+  init_archive_formats();
+  init_file_extraction_source();
+  init_byte_source();
+  init_stop_errors();
+  init_xml_stream();
+  init_note();
+  init_enml();
+  EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  FETCH_SLICE_BYTES = 1024 * 1024;
+  RECORD_PATH = ["en-export", "note"];
+  ReadInterrupted2 = class ReadInterrupted2 extends Error {
+  };
+  BASE64 = (() => {
+    const table = new Int16Array(256).fill(-1);
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (let index = 0;index < alphabet.length; index += 1)
+      table[alphabet.charCodeAt(index)] = index;
+    return table;
+  })();
+});
+
 // src/workers/archive-import/format-connectors.ts
 function registerArchiveFormatConnectors() {
   registerMboxArchiveConnector();
@@ -165317,6 +167079,7 @@ function registerArchiveFormatConnectors() {
   registerReflectArchiveConnectors();
   registerRoamArchiveConnector();
   registerTelegramArchiveConnector();
+  registerEvernoteArchiveConnector();
 }
 var init_format_connectors = __esm(() => {
   init_connector5();
@@ -165324,6 +167087,7 @@ var init_format_connectors = __esm(() => {
   init_connector7();
   init_connector8();
   init_connector9();
+  init_connector10();
 });
 
 // src/workers/archive-import/source-targets.ts
@@ -165940,7 +167704,7 @@ var init_agent = __esm(() => {
   init_state();
   ARCHIVE_AGENT_COPY = {
     invalidPath: "Give the full path of the file or folder, starting with /. Olympus does not look at it until the person approves.",
-    tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Archives on their computer's dashboard first.",
+    tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Other archives on their computer's dashboard first.",
     archivesUnreadable: "Olympus cannot read its list of imported archives right now, so it cannot tell what is imported. Nothing was deleted. Ask the person to open Archives on their computer's dashboard and choose See why.",
     requestsUnreadable: "Olympus cannot read its list of imports waiting for an answer right now, so it did not record the request. Ask the person to open Archives on their computer's dashboard and choose See why.",
     unknownArchive: "No archive with that id is imported. Call archive_import with status to list them.",
@@ -166172,6 +167936,30 @@ function createArchiveImportDashboard(options) {
     }
   };
   const refusal3 = (code, message2) => ({ ok: false, code, message: message2 });
+  const joinedSource = (record5) => {
+    const card = cardOf(record5);
+    if (card)
+      return { source: { id: card.id, label: named(card.label) } };
+    if (!record5.target)
+      return {};
+    const target = options.runtime.targets.forSource(record5.target.source_id);
+    return { source: { id: target?.cardId ?? record5.target.source_id, label: named(target?.label ?? record5.target.source_id) } };
+  };
+  const cardOf = (record5) => record5.target ? undefined : archiveSourceCardOf(record5.format);
+  const underArchives = (record5) => !record5.target && cardOf(record5) === undefined;
+  const sourceFormats = (target) => target.formats.flatMap((formatId) => {
+    const format = getArchiveFormat(formatId);
+    return format ? [format] : [];
+  });
+  const targetOfCard = (cardId) => {
+    for (const sourceId of options.runtime.targets.sourceIds()) {
+      const target = options.runtime.targets.forSource(sourceId);
+      if (target && (target.cardId ?? target.sourceId) === cardId)
+        return { label: target.label, formats: sourceFormats(target) };
+    }
+    const card = archiveSourceCards().find((entry) => entry.id === cardId);
+    return card ? { label: card.label, formats: [...card.formats] } : undefined;
+  };
   const outcome = (requestId, result) => {
     if (result.kind === "started") {
       requests.remove(requestId);
@@ -166271,14 +168059,21 @@ function createArchiveImportDashboard(options) {
       reopened.root.close();
     }
   };
-  const approvePath = async (path, from, answer = {}) => {
+  const approvePath = async (path, from, answer = {}, only) => {
     const name = named(posix6.basename(path));
     const requestId = from?.status === "pending" ? from.requestId : undefined;
     const answered = () => {
       if (from)
         requests.remove(from.requestId);
     };
-    const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets });
+    const formats = only ? only.formats : undefined;
+    const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets, ...formats ? { formats } : {} });
+    if (prepared.kind === "unsupported" && only && formats) {
+      return refusal3("not_this_source", fill3(ARCHIVE_APPROVE_COPY.not_this_source, {
+        source: named(only.label),
+        formats: formats.map((format) => format.label).join(", ")
+      }));
+    }
     if (prepared.kind === "unsupported") {
       const said = fill3(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(", ") });
       return refusal3("unsupported", prepared.advice ? `${said} ${prepared.advice}` : said);
@@ -166313,7 +168108,7 @@ function createArchiveImportDashboard(options) {
         answered();
         if (again) {
           refresh();
-          return { ok: true, status: "started", archive_id: again.archive_id, name };
+          return { ok: true, status: "started", archive_id: again.archive_id, name, ...joinedSource(again) };
         }
         return { ok: true, status: "already_imported", archive_id: archive.archive_id, name, archive_name: named(archive.label) };
       }
@@ -166321,7 +168116,7 @@ function createArchiveImportDashboard(options) {
       const resumed = resumeStopped(prepared.archive);
       if (resumed) {
         refresh();
-        return { ok: true, status: "started", archive_id: resumed.archive_id, name };
+        return { ok: true, status: "started", archive_id: resumed.archive_id, name, ...joinedSource(resumed) };
       }
       return { ok: true, status: "already_imported", archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
@@ -166356,7 +168151,7 @@ function createArchiveImportDashboard(options) {
           if (result.kind === "started") {
             answered();
             refresh();
-            return { ok: true, status: "started", archive_id: result.archive.archive_id, name };
+            return { ok: true, status: "started", archive_id: result.archive.archive_id, name, ...joinedSource(result.archive) };
           }
           if (result.kind === "already_imported") {
             answered();
@@ -166482,7 +168277,7 @@ function createArchiveImportDashboard(options) {
       startedAt: record5.created_at,
       ...record5.completed_at ? { importedAt: record5.completed_at } : {},
       ...record5.status === "stopped" && record5.stop ? { stop: { code: record5.stop.code, ...stopFile ? { file: stopFile } : {} } } : {},
-      gaps: gapsOf(record5),
+      gaps: record5.status === "importing" && record5.waiting ? [...gapsOf(record5), { kind: record5.waiting.reason, count: Math.max(1, Math.floor(record5.waiting.minimum ?? 1)) }] : gapsOf(record5),
       skipped: tallies(record5.findings.skipped)
     };
   };
@@ -166568,8 +168363,37 @@ function createArchiveImportDashboard(options) {
     wakeScheduler();
     return { ok: true };
   };
+  const listing = (shownHere) => {
+    const model = options.privateModel();
+    const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID2, privateModel: model };
+    let records;
+    try {
+      records = state.list();
+    } catch (error2) {
+      return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error2), file: shown(state.path), list: "archives" } };
+    }
+    const apart = records.filter(shownHere);
+    let asked;
+    try {
+      asked = requests.list();
+    } catch (error2) {
+      return {
+        ...base,
+        archives: apart.map(entryOf),
+        requests: [],
+        unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path), list: "requests" }
+      };
+    }
+    const setting = scheduling();
+    return {
+      ...base,
+      archives: apart.map(entryOf),
+      requests: askingNow(asked, records).map((request) => requestOf2(request, records)),
+      ...setting !== "on" && records.length > 0 ? { notRunning: setting } : {}
+    };
+  };
   const api2 = {
-    agent: createArchiveImportAgent({ state, requests, view: () => api2.view() }),
+    agent: createArchiveImportAgent({ state, requests, view: () => listing(() => true) }),
     async browse(request) {
       const page2 = await options.browser.browse(request);
       return {
@@ -166613,10 +168437,16 @@ function createArchiveImportDashboard(options) {
           return { ok: false, code: resolved2.code, message: resolved2.message, ...resolved2.access ? { access: resolved2.access } : {} };
         return approvePath(resolved2.path, { requestId: waiting.request_id, status: "pending" }, answer);
       }
+      let only;
+      if (request.sourceId !== undefined) {
+        only = targetOfCard(request.sourceId);
+        if (!only)
+          return refusal3("unknown_source", ARCHIVE_APPROVE_COPY.unknown_source);
+      }
       const resolved = await options.browser.resolve(request.key);
       if (!resolved.ok)
         return { ok: false, code: resolved.code, message: resolved.message, ...resolved.access ? { access: resolved.access } : {} };
-      return approvePath(resolved.path, undefined, answer);
+      return approvePath(resolved.path, undefined, answer, only);
     },
     decline(requestId) {
       const request = requests.get(requestId);
@@ -166667,33 +168497,68 @@ function createArchiveImportDashboard(options) {
       return result;
     },
     view() {
+      return listing(underArchives);
+    },
+    archiveSources() {
+      try {
+        state.list();
+      } catch {
+        return [];
+      }
+      const live = options.runtime.targets.sourceIds().flatMap((sourceId) => {
+        const target = options.runtime.targets.forSource(sourceId);
+        const formats = target ? sourceFormats(target) : [];
+        if (!target || formats.length === 0)
+          return [];
+        return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats) }];
+      });
+      const imported = archiveSourceCards().filter((card) => !live.some((entry) => entry.sourceId === card.id)).map((card) => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats) }));
+      return [...live, ...imported];
+    },
+    cardViews() {
+      let records;
+      try {
+        records = state.list();
+      } catch {
+        return [];
+      }
       const model = options.privateModel();
-      const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID2, privateModel: model };
+      const setting = scheduling();
+      return archiveSourceCards().map((card) => {
+        const own3 = records.filter((record5) => cardOf(record5)?.id === card.id);
+        return {
+          sourceId: card.id,
+          privateModel: model,
+          archives: own3.map(entryOf),
+          requests: [],
+          ...setting !== "on" && own3.length > 0 ? { notRunning: setting } : {}
+        };
+      });
+    },
+    presentCards() {
       let records;
       try {
         records = state.list();
       } catch (error2) {
-        return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error2), file: shown(state.path), list: "archives" } };
-      }
-      const apart = records.filter((record5) => !record5.target);
-      let asked;
-      try {
-        asked = requests.list();
-      } catch (error2) {
-        return {
-          ...base,
-          archives: apart.map(entryOf),
-          requests: [],
-          unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path), list: "requests" }
-        };
+        const unreadable = { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: recordUnreadableReason(error2) }] };
+        return Object.fromEntries(archiveSourceCards().map((card) => [card.id, unreadable]));
       }
       const setting = scheduling();
-      return {
-        ...base,
-        archives: apart.map(entryOf),
-        requests: askingNow(asked, records).map((request) => requestOf2(request, records)),
-        ...setting !== "on" && records.length > 0 ? { notRunning: setting } : {}
-      };
+      return Object.fromEntries(archiveSourceCards().map((card) => {
+        const own3 = records.filter((record5) => cardOf(record5)?.id === card.id);
+        const attention = [];
+        for (const record5 of own3) {
+          if (record5.status === "stopped" && record5.stop?.code !== "stopped_by_owner")
+            attention.push({ kind: "stopped", id: record5.archive_id, name: record5.label });
+          else if (record5.status !== "removing" && !counts(record5))
+            attention.push({ kind: "counts", id: record5.archive_id, name: record5.label });
+        }
+        return [card.id, {
+          archives: own3.length,
+          importing: setting === "on" && own3.some((record5) => record5.status === "importing" || record5.status === "removing"),
+          ...attention.length > 0 ? { attention } : {}
+        }];
+      }));
     },
     sourceImports() {
       try {
@@ -166717,8 +168582,13 @@ function createArchiveImportDashboard(options) {
         attention.push({ kind: "unreadable", reason: recordUnreadableReason(error2) });
       }
       for (const record5 of records) {
+        if (cardOf(record5))
+          continue;
         if (record5.status === "stopped" && record5.stop?.code !== "stopped_by_owner")
           attention.push({ kind: "stopped", id: record5.archive_id, name: record5.label });
+        if (record5.status === "importing" && record5.waiting?.minimum !== undefined) {
+          attention.push({ kind: "waiting", id: record5.archive_id, name: record5.label, reason: record5.waiting.reason, minimum: record5.waiting.minimum });
+        }
       }
       const setting = scheduling();
       if (setting !== "on" && stuck(records))
@@ -166730,7 +168600,7 @@ function createArchiveImportDashboard(options) {
         const tally = counts(record5);
         if (tally)
           counted.set(record5.archive_id, tally);
-        else
+        else if (!cardOf(record5))
           attention.push({ kind: "counts", id: record5.archive_id, name: record5.label });
       }
       for (const request of askingNow(asked, records)) {
@@ -166753,7 +168623,7 @@ function createArchiveImportDashboard(options) {
         if (held > 0)
           attention.push({ kind: "held", count: held, model });
       }
-      const apart = records.filter((record5) => !record5.target);
+      const apart = records.filter(underArchives);
       return {
         archives: apart.length,
         importing: setting === "on" && apart.some((record5) => record5.status === "importing" || record5.status === "removing"),
@@ -166785,6 +168655,7 @@ var init_dashboard2 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
   init_source_storage();
+  init_vocabulary();
   init_agent();
   init_source_scheduler();
   init_manifest2();
@@ -166809,7 +168680,9 @@ var init_dashboard2 = __esm(() => {
     part_of_source: "This import's items are held together with what the source reads live, so it has no Remove of its own. Deleting the whole source from its card deletes them.",
     not_an_input: "Only an import that is part of a source can be stopped. Remove stops and deletes an archive.",
     not_importing: "This import is not running.",
-    source_unavailable: "The source this export belongs to is being deleted or moved. Try again once that has finished."
+    source_unavailable: "The source this export belongs to is being deleted or moved. Try again once that has finished.",
+    not_this_source: "This isn't a {source} export. From the {source} card, Olympus imports only these: {formats}. For any other export, use Import another archive under Other archives.",
+    unknown_source: "Olympus can't import archives into this source. Use Import another archive."
   };
   ARCHIVE_NOT_RUNNING_COPY = {
     disabled: "Background syncing is turned off in Olympus's settings, so imports and removals can't run. The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it.",
@@ -167586,6 +169459,8 @@ async function runPass(options, record5, context2) {
     };
     const connectorId = archiveConnectorId(record5.archive_id);
     const shouldContinue = options.shouldContinue ?? (() => true);
+    let providerWait;
+    let providerWaitMinimum;
     const connector = sink.connector({
       archiveId: record5.archive_id,
       connectorId,
@@ -167602,6 +169477,10 @@ async function runPass(options, record5, context2) {
       },
       reportItemPositions: (positions) => {
         itemPositions = positions;
+      },
+      waitForProvider: (reason, detail) => {
+        providerWait = reason;
+        providerWaitMinimum = detail?.minimum;
       },
       shouldContinue,
       ...options.media ? { media: archiveMediaAccess({ bindings: options.media, archiveId: record5.archive_id, root, chosenRelPath: record5.chosen_rel_path }) } : {},
@@ -167683,6 +169562,11 @@ async function runPass(options, record5, context2) {
         mediaChange = stopFrom(media, now().toISOString());
     }
     const updated = options.state.update(record5.archive_id, (entry) => {
+      if (providerWait !== undefined) {
+        entry.waiting = { reason: providerWait, at: now().toISOString(), ...providerWaitMinimum !== undefined ? { minimum: providerWaitMinimum } : {} };
+      } else {
+        delete entry.waiting;
+      }
       if (dates.earliest && dates.latest) {
         entry.date_range = {
           earliest: entry.date_range && entry.date_range.earliest < dates.earliest ? entry.date_range.earliest : dates.earliest,
@@ -167718,10 +169602,11 @@ async function runPass(options, record5, context2) {
         stopped: false,
         warnings: [
           ...legs.flatMap((leg) => leg.gaps),
-          ...waiting > 0 ? [`archive_items_waiting: ${waiting} item(s) are in the middle of a tier move and are read again once it is done.`] : []
+          ...waiting > 0 ? [`archive_items_waiting: ${waiting} item(s) are in the middle of a tier move and are read again once it is done.`] : [],
+          ...providerWait !== undefined ? [`archive_import_waiting_for_provider: ${providerWait}`] : []
         ]
       }),
-      continueSoon: !complete && waiting === 0,
+      continueSoon: !complete && waiting === 0 && providerWait === undefined,
       ...updated ? { record: updated } : {}
     };
   } finally {
@@ -168883,6 +170768,637 @@ var init_source_answer_lanes = __esm(() => {
   init_connector_store();
 });
 
+// src/workers/archive-import/mbox/gmail-account.ts
+function topHeaders(raw) {
+  const text4 = Buffer.from(raw.buffer, raw.byteOffset, Math.min(raw.byteLength, MAX_HEADER_BYTES)).toString("latin1");
+  const end = text4.search(/\r?\n\r?\n/);
+  const block = (end < 0 ? text4 : text4.slice(0, end)).replace(/\r?\n[ \t]+/g, " ");
+  const headers = new Map;
+  for (const line2 of block.split(/\r?\n/)) {
+    const colon = line2.indexOf(":");
+    if (colon <= 0)
+      continue;
+    const name = line2.slice(0, colon).trim().toLowerCase();
+    if (!headers.has(name))
+      headers.set(name, line2.slice(colon + 1).trim());
+  }
+  return headers;
+}
+function bareAddress(value2) {
+  if (!value2)
+    return;
+  const inner = /<([^<>\s]+)>/.exec(value2)?.[1] ?? value2.trim();
+  return /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(inner) ? inner.toLowerCase() : undefined;
+}
+function identifyGmailExport(root, files, limits = {}) {
+  const MAX_MESSAGES = limits.maxMessages ?? DEFAULT_MAX_MESSAGES;
+  const MAX_BYTES = limits.maxBytes ?? DEFAULT_MAX_BYTES;
+  const addresses = new Set;
+  let messages = 0;
+  let bytes = 0;
+  for (const file of files) {
+    const reader = root.openFile(file.relPath, { expected: file.version });
+    try {
+      const splitter = new MboxSplitter(reader, { maxMessageBytes: MAX_MESSAGE_BYTES, maxReadBytes: MAX_BYTES - bytes });
+      for (;; ) {
+        if (messages >= MAX_MESSAGES || bytes >= MAX_BYTES)
+          break;
+        let span;
+        try {
+          span = splitter.next();
+        } catch (error2) {
+          if (!(error2 instanceof MboxReadBoundError))
+            throw error2;
+          bytes = MAX_BYTES;
+          break;
+        }
+        if (!span)
+          break;
+        bytes += span.length;
+        if (!span.raw)
+          continue;
+        messages += 1;
+        const headers = topHeaders(span.raw);
+        if (!headers.has("x-gm-thrid") && !headers.has("x-gmail-labels"))
+          return { kind: "not_gmail", reason: "no_markers" };
+        const delivered = headers.get("delivered-to");
+        if (delivered === undefined)
+          continue;
+        const address2 = bareAddress(delivered);
+        if (!address2)
+          return { kind: "not_gmail", reason: "several_addresses" };
+        addresses.add(address2);
+        if (addresses.size > 1)
+          return { kind: "not_gmail", reason: "several_addresses" };
+      }
+    } finally {
+      reader.close();
+    }
+    if (messages >= MAX_MESSAGES || bytes >= MAX_BYTES)
+      break;
+  }
+  if (messages === 0)
+    return { kind: "not_gmail", reason: "empty" };
+  const [address] = [...addresses];
+  return address ? { kind: "gmail", address } : { kind: "not_gmail", reason: "no_address" };
+}
+var DEFAULT_MAX_MESSAGES = 500, DEFAULT_MAX_BYTES, MAX_HEADER_BYTES, MAX_MESSAGE_BYTES;
+var init_gmail_account = __esm(() => {
+  init_split();
+  DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+  MAX_HEADER_BYTES = 256 * 1024;
+  MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
+});
+
+// src/workers/archive-import/mbox/mime-parts.ts
+function headerBlockEnd(text4, from, to) {
+  const window2 = text4.slice(from, Math.min(to, from + MAX_HEADER_BYTES2));
+  if (window2.startsWith(`\r
+`))
+    return { headersEnd: from, bodyStart: from + 2 };
+  if (window2.startsWith(`
+`))
+    return { headersEnd: from, bodyStart: from + 1 };
+  const crlf = window2.indexOf(`\r
+\r
+`);
+  const lf = window2.indexOf(`
+
+`);
+  if (crlf < 0 && lf < 0)
+    return { headersEnd: Math.min(to, from + window2.length), bodyStart: Math.min(to, from + window2.length) };
+  if (lf >= 0 && (crlf < 0 || lf < crlf))
+    return { headersEnd: from + lf, bodyStart: from + lf + 2 };
+  return { headersEnd: from + crlf, bodyStart: from + crlf + 4 };
+}
+function parseHeaders(block) {
+  const map2 = new Map;
+  const unfolded = block.replace(/\r?\n[ \t]+/g, " ");
+  for (const line2 of unfolded.split(/\r?\n/)) {
+    const colon = line2.indexOf(":");
+    if (colon <= 0)
+      continue;
+    const name = line2.slice(0, colon).trim().toLowerCase();
+    if (!map2.has(name))
+      map2.set(name, line2.slice(colon + 1).trim());
+  }
+  return { get: (name) => map2.get(name) };
+}
+function splitParams(header) {
+  const pieces = [];
+  let current2 = "";
+  let quoted2 = false;
+  for (let index = 0;index < header.length; index += 1) {
+    const char = header[index];
+    if (char === '"' && header[index - 1] !== "\\")
+      quoted2 = !quoted2;
+    if (char === ";" && !quoted2) {
+      pieces.push(current2);
+      current2 = "";
+    } else {
+      current2 += char;
+    }
+  }
+  pieces.push(current2);
+  const params = new Map;
+  for (const piece of pieces.slice(1)) {
+    const eq = piece.indexOf("=");
+    if (eq <= 0)
+      continue;
+    const name = piece.slice(0, eq).trim().toLowerCase();
+    let value2 = piece.slice(eq + 1).trim();
+    if (value2.startsWith('"') && value2.endsWith('"') && value2.length >= 2)
+      value2 = value2.slice(1, -1).replace(/\\(.)/g, "$1");
+    if (!params.has(name))
+      params.set(name, value2);
+  }
+  return { value: (pieces[0] ?? "").trim(), params };
+}
+function percentDecode(value2, charset2) {
+  const bytes = [];
+  for (let index = 0;index < value2.length; index += 1) {
+    const char = value2[index];
+    if (char === "%" && /^[0-9a-fA-F]{2}$/.test(value2.slice(index + 1, index + 3))) {
+      bytes.push(Number.parseInt(value2.slice(index + 1, index + 3), 16));
+      index += 2;
+    } else {
+      bytes.push(...Buffer.from(char, "latin1"));
+    }
+  }
+  try {
+    return new TextDecoder(charset2 || "utf-8").decode(new Uint8Array(bytes));
+  } catch {
+    return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+  }
+}
+function paramValue(params, name) {
+  const extended = params.get(`${name}*`);
+  if (extended !== undefined) {
+    const match = /^([^']*)'[^']*'(.*)$/.exec(extended);
+    return match ? percentDecode(match[2], match[1]) : extended;
+  }
+  const sections = [];
+  let charset2 = "";
+  for (let index = 0;index < 1000; index += 1) {
+    const encoded = params.get(`${name}*${index}*`);
+    const plain2 = params.get(`${name}*${index}`);
+    if (encoded === undefined && plain2 === undefined)
+      break;
+    if (encoded !== undefined) {
+      let value2 = encoded;
+      if (index === 0) {
+        const match = /^([^']*)'[^']*'(.*)$/.exec(encoded);
+        if (match) {
+          charset2 = match[1];
+          value2 = match[2];
+        }
+      }
+      sections.push(percentDecode(value2, charset2));
+    } else {
+      sections.push(plain2);
+    }
+  }
+  if (sections.length > 0)
+    return sections.join("");
+  const plain = params.get(name);
+  if (plain === undefined)
+    return;
+  try {
+    return decodeWords(plain);
+  } catch {
+    return plain;
+  }
+}
+function decodedSize(body, encoding) {
+  if (encoding === "base64") {
+    const clean2 = body.replace(/[^A-Za-z0-9+/=]/g, "");
+    const padding = clean2.endsWith("==") ? 2 : clean2.endsWith("=") ? 1 : 0;
+    return Math.max(0, Math.floor(clean2.length * 3 / 4) - padding);
+  }
+  if (encoding === "quoted-printable") {
+    const softBreaks = body.replace(/=\r?\n/g, "");
+    return Buffer.byteLength(softBreaks.replace(/=[0-9A-Fa-f]{2}/g, "x"), "latin1");
+  }
+  return body.length;
+}
+function multipartBodies(text4, from, to, boundary) {
+  const delimiter9 = `--${boundary}`;
+  const bodies = [];
+  let partStart;
+  let lineStart = from;
+  while (lineStart < to) {
+    let lineEnd = text4.indexOf(`
+`, lineStart);
+    if (lineEnd < 0 || lineEnd >= to)
+      lineEnd = to;
+    const line2 = text4.slice(lineStart, lineEnd).replace(/\r$/, "").trimEnd();
+    if (line2 === delimiter9 || line2 === `${delimiter9}--`) {
+      if (partStart !== undefined) {
+        let end = lineStart;
+        if (end > partStart && text4[end - 1] === `
+`)
+          end -= 1;
+        if (end > partStart && text4[end - 1] === "\r")
+          end -= 1;
+        bodies.push({ start: partStart, end });
+      }
+      if (line2 !== delimiter9)
+        return bodies;
+      partStart = lineEnd + 1;
+    }
+    lineStart = lineEnd + 1;
+  }
+  if (partStart !== undefined && partStart < to)
+    bodies.push({ start: partStart, end: to });
+  return bodies;
+}
+function mimeAttachments(raw) {
+  const text4 = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
+  const found = [];
+  let parts = 0;
+  const walk = (from, to, partId, depth2, inside) => {
+    parts += 1;
+    if (parts > MAX_PARTS)
+      return;
+    const { headersEnd, bodyStart } = headerBlockEnd(text4, from, to);
+    const headers = parseHeaders(text4.slice(from, headersEnd));
+    const type = splitParams(headers.get("content-type") ?? "text/plain");
+    const mimeType = type.value.toLowerCase() || "text/plain";
+    const disposition = splitParams(headers.get("content-disposition") ?? "");
+    const filename = (paramValue(disposition.params, "filename") ?? paramValue(type.params, "name"))?.trim();
+    if (filename) {
+      const encoding = (headers.get("content-transfer-encoding") ?? "").trim().toLowerCase();
+      found.push({
+        partId,
+        filename,
+        mimeType,
+        size: decodedSize(text4.slice(bodyStart, to), encoding),
+        ...inside ? { nested: true } : {}
+      });
+    }
+    const boundary = type.params.get("boundary");
+    if (mimeType.startsWith("multipart/") && boundary && depth2 < MAX_DEPTH) {
+      multipartBodies(text4, bodyStart, to, boundary).forEach((body, index) => {
+        walk(body.start, body.end, partId === "" ? String(index) : `${partId}.${index}`, depth2 + 1, inside || Boolean(filename));
+      });
+    }
+  };
+  walk(0, text4.length, "", 0, false);
+  return found;
+}
+var MAX_PARTS = 2000, MAX_DEPTH = 64, MAX_HEADER_BYTES2;
+var init_mime_parts = __esm(() => {
+  init_postal_mime();
+  MAX_HEADER_BYTES2 = 256 * 1024;
+});
+
+// src/workers/archive-import/mbox/gmail-input.ts
+function gmailIdFromDecimal(decimal) {
+  if (!decimal || !/^\d{1,20}$/.test(decimal))
+    return;
+  const value2 = BigInt(decimal);
+  return value2 > 0n && value2 <= MAX_GMAIL_ID ? value2.toString(16) : undefined;
+}
+function takeoutMessageId(separator) {
+  return gmailIdFromDecimal(separator ? TAKEOUT_ID.exec(separator)?.[1] : undefined);
+}
+function gmailLabelIds(names, byName) {
+  const ids = [];
+  const add = (value2) => {
+    if (value2 && !ids.includes(value2))
+      ids.push(value2);
+  };
+  for (const name of names) {
+    const trimmed2 = name.trim();
+    const system = SYSTEM_LABELS.get(trimmed2.toLowerCase());
+    if (system !== undefined) {
+      add(system);
+      continue;
+    }
+    add(byName?.get(trimmed2.toLowerCase()));
+    add(trimmed2);
+  }
+  return ids;
+}
+function mboxPartLocator(fileIndex, offset, partId) {
+  return `${MBOX_PART_LOCATOR_PREFIX}${fileIndex}:${offset}:${partId}`;
+}
+function recordOf(parsed, span, fileIndex, id, labelsByName) {
+  const threadId = parsed.gmailThread ? gmailIdFromDecimal(parsed.gmailThread) : parsed.threadRoot ? `mid:${sha2567(parsed.threadRoot).slice(0, 24)}` : undefined;
+  return {
+    id,
+    ...threadId ? { threadId } : {},
+    labelIds: gmailLabelIds(parsed.labels, labelsByName),
+    headers: {
+      ...parsed.subject ? { subject: parsed.subject } : {},
+      ...parsed.from ? { from: parsed.from } : {},
+      ...parsed.to ? { to: parsed.to } : {},
+      ...parsed.dateHeader ? { date: parsed.dateHeader } : {},
+      ...parsed.messageId ? { messageId: parsed.messageId } : {}
+    },
+    body: parsed.body,
+    metadataOnly: false,
+    attachments: mimeAttachments(span.raw).map((part) => ({
+      partId: part.partId,
+      filename: part.filename,
+      ...part.mimeType ? { mimeType: part.mimeType } : {},
+      size: part.size,
+      locator: mboxPartLocator(fileIndex, span.offset, part.partId),
+      ...part.nested ? { nested: true } : {}
+    })),
+    sourceVersion: parsed.messageHash.slice(0, 32)
+  };
+}
+function ownId(parsed) {
+  return `${GMAIL_OWN_ID_PREFIX}${sha2567(`${parsed.messageId ?? ""}\x00${parsed.messageHash}`).slice(0, 32)}`;
+}
+function exportAddress(archive) {
+  if (!exportAddresses.has(archive.manifestSha256)) {
+    const found = identifyGmailExport(archive.root, archive.files);
+    if (exportAddresses.size > 64)
+      exportAddresses.clear();
+    exportAddresses.set(archive.manifestSha256, found.kind === "gmail" ? found.address : undefined);
+  }
+  return exportAddresses.get(archive.manifestSha256);
+}
+function mboxGmailInput(archive, options = {}) {
+  const pageSizeDefault = Math.max(1, archive.pageSize ?? MBOX_DEFAULT_PAGE_SIZE);
+  const byteBudget = Math.max(1, archive.maxBytesPerListing ?? MBOX_DEFAULT_MAX_BYTES_PER_LISTING);
+  const children = options.build?.children === true;
+  return {
+    inputId: archiveConnectorId(archive.archiveId),
+    kind: "archive",
+    records(listOptions) {
+      return async function* () {
+        const start = parseCursor(archive, listOptions?.cursor);
+        if (start.done || archive.files.length === 0) {
+          yield { records: [], nextCursor: doneCursor(archive), done: true };
+          return;
+        }
+        const address = options.accountAddress ?? exportAddress(archive);
+        if (!address)
+          throw new Error("This export is not one Gmail account's: nothing of it is read into Gmail.");
+        const labels = options.labels ? await options.labels() : { kind: "none" };
+        if (labels.kind === "unavailable") {
+          archive.waitForProvider?.(labels.reason, labels.minimum !== undefined ? { minimum: labels.minimum } : undefined);
+          return;
+        }
+        const labelsByName = labels.kind === "map" ? labels.byName : undefined;
+        const limit = listOptions?.limit !== undefined && listOptions.limit > 0 ? listOptions.limit : Number.POSITIVE_INFINITY;
+        const pageSize = Math.max(1, Math.min(pageSizeDefault, limit));
+        let bytesRead = 0;
+        for (let fileIndex = start.fileIndex;fileIndex < archive.files.length; fileIndex += 1) {
+          const file = archive.files[fileIndex];
+          let reader;
+          try {
+            reader = archive.root.openFile(file.relPath, { expected: file.version });
+          } catch (error2) {
+            throw stoppedFrom(error2, file.relPath);
+          }
+          const current2 = () => {
+            try {
+              reader.assertCurrent();
+            } catch (error2) {
+              throw stoppedFrom(error2, file.relPath);
+            }
+          };
+          try {
+            const splitter = new MboxSplitter(reader, {
+              start: fileIndex === start.fileIndex ? start.offset : 0,
+              maxMessageBytes: MBOX_DEFAULT_MAX_MESSAGE_BYTES
+            });
+            let page2 = [];
+            let positions = [];
+            let pending = false;
+            const out = (nextOffset, last) => {
+              current2();
+              archive.reportItemPositions?.(positions);
+              if (last)
+                return { records: page2, nextCursor: doneCursor(archive), done: true };
+              archive.reportPosition?.({ fileIndex, offset: nextOffset });
+              return { records: page2, nextCursor: cursorAt(archive, fileIndex, nextOffset), done: false };
+            };
+            for (;; ) {
+              if (!archive.shouldContinue()) {
+                if (pending)
+                  yield out(splitter.position, false);
+                return;
+              }
+              const before = splitter.position;
+              let span;
+              try {
+                span = splitter.next();
+              } catch (error2) {
+                throw stoppedFrom(error2, file.relPath);
+              }
+              if (!span)
+                break;
+              bytesRead += span.length;
+              const report = (kind, findingClass, count) => {
+                archive.report({ kind, class: findingClass, fileIndex, offset: span.offset, ...count !== undefined ? { count } : {} });
+              };
+              if (span.tooLarge) {
+                report(MBOX_FINDINGS.tooLarge, "gap");
+              } else {
+                const parsed = await parseMboxMessage(span.raw);
+                if (!parsed)
+                  report(MBOX_FINDINGS.unreadable, "gap");
+                else if (parsed.spamOrTrash)
+                  report(MBOX_FINDINGS.spamOrTrash, "skipped");
+                else if (parsed.deliveredTo !== undefined && bareAddress(parsed.deliveredTo) !== address) {
+                  report(MBOX_FINDINGS.otherAccount, "gap");
+                } else {
+                  let id = takeoutMessageId(span.separator);
+                  if (id === undefined && options.match) {
+                    const matched = await options.match({
+                      ...parsed.messageId ? { messageId: parsed.messageId } : {},
+                      ...parsed.dateHeader ? { date: parsed.dateHeader } : {},
+                      from: parsed.from,
+                      ...parsed.subject ? { subject: parsed.subject } : {}
+                    });
+                    if (matched !== "none" && "later" in matched) {
+                      if (pending)
+                        yield out(before, false);
+                      archive.waitForProvider?.(matched.later, matched.minimum !== undefined ? { minimum: matched.minimum } : undefined);
+                      return;
+                    }
+                    if (matched !== "none")
+                      id = matched.id;
+                  }
+                  const record5 = recordOf(parsed, span, fileIndex, id ?? ownId(parsed), labelsByName);
+                  page2.push(record5);
+                  positions.push({ fileIndex, offset: span.offset });
+                  pending = true;
+                  const named = record5.attachments.filter((attachment) => attachment.nested !== true).length;
+                  if (named > 0 && !children)
+                    report(MBOX_FINDINGS.attachments, "gap", named);
+                  if (parsed.charsetNotDecoded)
+                    report(MBOX_FINDINGS.charset, "gap");
+                }
+              }
+              if (page2.length >= pageSize || bytesRead >= byteBudget) {
+                const last = fileIndex === archive.files.length - 1 && splitter.done;
+                yield out(splitter.position, last);
+                if (last)
+                  return;
+                page2 = [];
+                positions = [];
+                pending = false;
+                if (bytesRead >= byteBudget)
+                  return;
+              }
+            }
+            if (fileIndex === archive.files.length - 1) {
+              yield out(splitter.position, true);
+              return;
+            }
+            if (pending) {
+              current2();
+              archive.reportItemPositions?.(positions);
+              archive.reportPosition?.({ fileIndex: fileIndex + 1, offset: 0 });
+              yield { records: page2, nextCursor: cursorAt(archive, fileIndex + 1, 0), done: false };
+            }
+          } finally {
+            reader.close();
+          }
+        }
+      }();
+    }
+  };
+}
+var TAKEOUT_ID, MAX_GMAIL_ID, MBOX_PART_LOCATOR_PREFIX = "mbox-part1:", SYSTEM_LABELS, exportAddresses;
+var init_gmail_input = __esm(() => {
+  init_gmail_mail_record();
+  init_state();
+  init_connector5();
+  init_gmail_account();
+  init_mime_parts();
+  init_parse4();
+  init_split();
+  TAKEOUT_ID = /^From (\d{1,20})@xxx(?:\s|$)/;
+  MAX_GMAIL_ID = (1n << 64n) - 1n;
+  SYSTEM_LABELS = new Map([
+    ["inbox", "INBOX"],
+    ["sent", "SENT"],
+    ["important", "IMPORTANT"],
+    ["starred", "STARRED"],
+    ["unread", "UNREAD"],
+    ["draft", "DRAFT"],
+    ["drafts", "DRAFT"],
+    ["chat", "CHAT"],
+    ["spam", "SPAM"],
+    ["trash", "TRASH"],
+    ["category personal", "CATEGORY_PERSONAL"],
+    ["category social", "CATEGORY_SOCIAL"],
+    ["category promotions", "CATEGORY_PROMOTIONS"],
+    ["category updates", "CATEGORY_UPDATES"],
+    ["category forums", "CATEGORY_FORUMS"],
+    ["opened", null],
+    ["archived", null]
+  ]);
+  exportAddresses = new Map;
+});
+
+// src/workers/google-connectors/gmail-archive-target.ts
+function gmailItemAccountScope(stores, roleScope) {
+  const held = new Set(stores.flatMap((store) => store.itemAccountScopes(GMAIL_PROVIDER_ID, 3)));
+  if (held.size !== 1 || held.has(roleScope))
+    return roleScope;
+  return [...held][0];
+}
+function gmailHoldsImportedHistory(stores) {
+  return stores.some((store) => store?.holdsItemsMatching(GMAIL_IMPORTED_FILTERS) === true);
+}
+function gmailImportedHistoryEmbeddingTargets(input) {
+  return input.stores.flatMap((store) => {
+    const provider = input.providerFor(store);
+    return provider ? [{ store, provider, wholeStore: true, missingOnly: true, accountScope: input.accountScope, filters: GMAIL_IMPORTED_FILTERS }] : [];
+  });
+}
+function gmailLaneEmbeddingTargets(input) {
+  return [...input.live, ...gmailImportedHistoryEmbeddingTargets(input)];
+}
+function gmailRecordBuilder(account, build = {}) {
+  return {
+    family: "email",
+    entriesOf: (record5) => gmailMailEntries(record5, account, build),
+    compareVersions: compareGmailMailVersions,
+    build: (record5, wanted) => gmailMailItems(record5, account, build, wanted),
+    fetchItem: () => Promise.reject(new Error("An imported message is read only while its archive is listed.")),
+    classificationSignals: gmailClassificationSignals
+  };
+}
+function gmailExportEvidence(archive) {
+  const found = identifyGmailExport(archive.root, archiveFileEntries(archive.files));
+  return found.kind === "gmail" ? { kind: "account", importAccountId: googleAccountIdFromAddress(found.address) } : { kind: "archives" };
+}
+async function gmailLabelLookup(lane) {
+  const rules = lane.set.classification()?.rules ?? [];
+  if (!rules.some((rule) => rule.match.kind === "label"))
+    return { kind: "none" };
+  let found;
+  try {
+    found = await lane.labelIds?.();
+  } catch {
+    found = undefined;
+  }
+  if (found instanceof Map)
+    return { kind: "map", byName: found };
+  if (found && "unavailable" in found) {
+    return { kind: "unavailable", reason: found.unavailable, ...found.minimum !== undefined ? { minimum: found.minimum } : {} };
+  }
+  return { kind: "unavailable", reason: "gmail_labels_unavailable" };
+}
+function gmailArchiveTarget(options) {
+  let current2;
+  const laneNow = () => {
+    current2 = options.lane();
+    return current2;
+  };
+  return {
+    sourceId: GMAIL_ARCHIVE_SOURCE_ID,
+    label: GMAIL_ARCHIVE_LABEL,
+    formats: ["mbox"],
+    concurrencyKey: options.concurrencyKey,
+    identify: gmailExportEvidence,
+    input(archive) {
+      const lane = current2 ?? laneNow();
+      return mboxGmailInput(archive, {
+        ...lane.build ? { build: lane.build } : {},
+        ...lane.match ? { match: lane.match } : {},
+        labels: () => gmailLabelLookup(lane)
+      });
+    },
+    lane() {
+      const lane = laneNow();
+      const builder = gmailRecordBuilder(lane.account, lane.build);
+      const connector = {
+        id: GMAIL_PROVIDER_ID,
+        family: "email",
+        authenticate: () => Promise.resolve(),
+        listItems: () => {
+          throw new Error("Gmail lists live mail through its own lane.");
+        },
+        fetchItem: (localItemId, fetchOptions) => builder.fetchItem(localItemId, fetchOptions),
+        classificationSignals: (item) => builder.classificationSignals(item),
+        forInput: (input) => inputConnector(builder, input)
+      };
+      return { set: lane.set, sync: lane.sync, connector };
+    },
+    exclusive: (task) => options.exclusive(task)
+  };
+}
+var GMAIL_ARCHIVE_SOURCE_ID = "gmail.email", GMAIL_ARCHIVE_LABEL = "Gmail", GMAIL_PROVIDER_ID = "gmail", GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.", GMAIL_IMPORTED_FILTERS;
+var init_gmail_archive_target = __esm(() => {
+  init_provider_account_identity();
+  init_source_inputs();
+  init_manifest2();
+  init_gmail_account();
+  init_gmail_input();
+  init_gmail_mail_record();
+  GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
+});
+
 // src/workers/email-source/gmail-status-scope.ts
 function contentWindow(contentAfter) {
   return contentAfter ? { contentNotBefore: contentAfter } : {};
@@ -168897,13 +171413,18 @@ function gmailInternalStoreStatusScope(authority) {
 function gmailPrivateStoreStatusScope(input) {
   const { authority, handle } = input;
   const ref = authority?.mailPolicyRef();
-  if (!ref || !handle || !authority)
-    return { itemsAllowed: false, contentAllowed: false };
+  if (!ref || !handle || !authority) {
+    if (!input.importAccountScope)
+      return { itemsAllowed: false, contentAllowed: false };
+    const imported = { provider: "gmail", observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX };
+    return { accountScope: input.importAccountScope, itemFilters: imported, contentAllowed: true, contentFilters: imported };
+  }
   const approval = authority.assertCurrentMail(ref);
   const accountScope = handle.accountRole?.trim() || "personal";
   const itemFilters = {
     provider: "gmail",
-    observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
+    observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
+    observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX
   };
   return {
     accountScope,
@@ -168916,6 +171437,7 @@ function gmailPrivateStoreStatusScope(input) {
 }
 var init_gmail_status_scope = __esm(() => {
   init_google_connectors();
+  init_gmail_archive_target();
 });
 
 // src/workers/connector-store/parent-label.ts
@@ -170503,6 +173025,142 @@ var init_gmail_scope_browser = __esm(() => {
   SKIPPABLE_SYSTEM_LABELS = new Set(["SENT", "CHAT"]);
 });
 
+// src/workers/google-connectors/gmail-import-allowance.ts
+function gmailImportWait(reason) {
+  return reason === "gmail_budget_too_small" ? { later: reason, minimum: GMAIL_IMPORT_MIN_DAILY_BUDGET } : { later: reason };
+}
+function gmailImportAllowance(options) {
+  const now = options.now ?? (() => new Date);
+  let day = "";
+  let used = 0;
+  const check = (requests) => {
+    const today = now().toISOString().slice(0, 10);
+    if (today !== day) {
+      day = today;
+      used = 0;
+    }
+    const usage = options.usage();
+    if (!usage)
+      return true;
+    if (usage.dailyRequestBudget < GMAIL_IMPORT_MIN_DAILY_BUDGET)
+      return "gmail_budget_too_small";
+    if (usage.requests + requests > usage.dailyRequestBudget)
+      return "gmail_requests_spent";
+    return used + requests > Math.floor(usage.dailyRequestBudget * GMAIL_IMPORT_SHARE) ? "gmail_import_allowance_spent" : true;
+  };
+  return {
+    check,
+    take() {
+      const verdict = check(1);
+      if (verdict === true)
+        used += 1;
+      return verdict;
+    }
+  };
+}
+function gmailImportBudget(lane, allowance) {
+  return {
+    reserve(provenance) {
+      const verdict = allowance.take();
+      if (verdict !== true)
+        throw new GmailImportWaitError(verdict);
+      lane.reserve(provenance);
+    },
+    status: () => lane.status()
+  };
+}
+var GMAIL_IMPORT_MAX_RETRIES = 1, GMAIL_IMPORT_ATTEMPTS, GMAIL_IMPORT_MESSAGE_COST, GMAIL_IMPORT_LABELS_COST, GMAIL_IMPORT_SHARE = 0.5, GMAIL_IMPORT_MIN_DAILY_BUDGET, GmailImportWaitError;
+var init_gmail_import_allowance = __esm(() => {
+  GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
+  GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
+  GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
+  GMAIL_IMPORT_MIN_DAILY_BUDGET = Math.ceil((GMAIL_IMPORT_LABELS_COST + GMAIL_IMPORT_MESSAGE_COST) / GMAIL_IMPORT_SHARE);
+  GmailImportWaitError = class GmailImportWaitError extends Error {
+    reason;
+    constructor(reason) {
+      super(`Gmail import waits: ${reason}`);
+      this.reason = reason;
+      this.name = "GmailImportWaitError";
+    }
+  };
+});
+
+// src/workers/google-connectors/gmail-header-match.ts
+function sameDate(a, b) {
+  if (!a || !b)
+    return a === b;
+  const left = Date.parse(a);
+  const right = Date.parse(b);
+  return Number.isFinite(left) && Number.isFinite(right) ? left === right : a.trim() === b.trim();
+}
+function readable(value2) {
+  if (!value2)
+    return "";
+  try {
+    return decodeWords(value2).replace(/\s+/g, " ").trim();
+  } catch {
+    return value2.replace(/\s+/g, " ").trim();
+  }
+}
+function gmailHeaderMatch(client, options = {}) {
+  let checked;
+  return async (headers) => {
+    const wanted = bareMessageId(headers.messageId);
+    if (!wanted || !SEARCHABLE.test(wanted))
+      return "none";
+    const api2 = await client();
+    if (!api2)
+      return "none";
+    const room = options.allowance?.check(GMAIL_IMPORT_MESSAGE_COST) ?? true;
+    if (room !== true)
+      return waitFor2(room);
+    try {
+      return await matchWith(api2, wanted, headers);
+    } catch (error2) {
+      if (error2 instanceof GmailImportWaitError)
+        return waitFor2(error2.reason);
+      if (error2 instanceof GoogleRequestBudgetError)
+        return { later: "gmail_requests_spent" };
+      throw error2;
+    }
+  };
+  async function matchWith(api2, wanted, headers) {
+    if (options.sameAccount && checked === undefined) {
+      const address = api2.getProfile ? (await api2.getProfile()).emailAddress : "";
+      checked = address !== "" && options.sameAccount(address);
+    }
+    if (checked === false)
+      return "none";
+    const listed = await api2.listMessages({ maxResults: MAX_CANDIDATES + 1, query: `rfc822msgid:${wanted}` });
+    const candidates2 = listed.messages.map((message2) => message2.id).filter(Boolean);
+    if (candidates2.length === 0 || candidates2.length > MAX_CANDIDATES)
+      return "none";
+    const agreeing = [];
+    for (const id of candidates2) {
+      const message2 = await api2.getMessage(id, { format: "metadata", metadataHeaders: ["Message-ID", "Date", "From", "Subject"] });
+      const found = new Map;
+      for (const header of message2.payload?.headers ?? []) {
+        const name = header.name?.trim().toLowerCase();
+        if (name && header.value !== undefined && !found.has(name))
+          found.set(name, header.value);
+      }
+      if (bareMessageId(found.get("message-id")) === wanted && sameDate(found.get("date"), headers.date) && same(found.get("from"), headers.from) && same(found.get("subject"), headers.subject)) {
+        agreeing.push(id);
+      }
+    }
+    return agreeing.length === 1 ? { id: agreeing[0] } : "none";
+  }
+}
+var waitFor2, MAX_CANDIDATES = 5, SEARCHABLE, same = (a, b) => readable(a) === readable(b);
+var init_gmail_header_match = __esm(() => {
+  init_postal_mime();
+  init_gmail();
+  init_gmail_import_allowance();
+  init_request_budget();
+  waitFor2 = gmailImportWait;
+  SEARCHABLE = /^[^\s"()<>{}]{1,500}$/;
+});
+
 // src/workers/source-account-guard.ts
 import { createHash as createHash87 } from "node:crypto";
 function createExclusiveRunner() {
@@ -170514,6 +173172,9 @@ function createExclusiveRunner() {
     });
     return run2;
   };
+}
+function runExclusiveForSource(registryPath, sourceId, task) {
+  return sourceExclusiveRunner(sourceAccountBindingsPath(registryPath), sourceId)(task);
 }
 function sourceExclusiveRunner(bindingsPath, sourceId) {
   const key2 = `${bindingsPath}
@@ -172268,7 +174929,7 @@ data:
     }
     const encoder = new TextEncoder;
     let streamController;
-    const readable = new ReadableStream({
+    const readable2 = new ReadableStream({
       start: (controller) => {
         streamController = controller;
       },
@@ -172294,7 +174955,7 @@ data:
         } catch {}
       }
     });
-    return new Response(readable, { headers });
+    return new Response(readable2, { headers });
   }
   async replayEvents(lastEventId) {
     if (!this._eventStore) {
@@ -172324,7 +174985,7 @@ data:
       }
       const encoder = new TextEncoder;
       let streamController;
-      const readable = new ReadableStream({
+      const readable2 = new ReadableStream({
         start: (controller) => {
           streamController = controller;
         },
@@ -172351,7 +175012,7 @@ data:
           } catch {}
         }
       });
-      return new Response(readable, { headers });
+      return new Response(readable2, { headers });
     } catch (error2) {
       this.onerror?.(error2);
       return this.createJsonErrorResponse(500, -32000, "Error replaying events");
@@ -172486,7 +175147,7 @@ data:
       }
       const encoder = new TextEncoder;
       let streamController;
-      const readable = new ReadableStream({
+      const readable2 = new ReadableStream({
         start: (controller) => {
           streamController = controller;
         },
@@ -172531,7 +175192,7 @@ data:
         }
         this.onmessage?.(message2, { authInfo: options?.authInfo, requestInfo, closeSSEStream, closeStandaloneSSEStream });
       }
-      return new Response(readable, { status: 200, headers });
+      return new Response(readable2, { status: 200, headers });
     } catch (error2) {
       this.onerror?.(error2);
       return this.createJsonErrorResponse(400, -32700, "Parse error", { data: String(error2) });
@@ -172706,7 +175367,7 @@ function buildChatGptDashboardViewModel(view3, options = {}) {
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...degraded ? { degradedCredentials: degraded } : {} });
     const credentials = dashboardCredentialProblem(scrubbed, degraded);
     const imports = scrubbed.connection.imports_attention ?? [];
-    const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) || imports.length > 0 ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
+    const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) || imports.length > 0 || definition.public_source_id !== undefined ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
     const progress2 = measured?.progress;
     let status = connecting || credentials || missingScope(scrubbed) ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress2);
     if (imports.length > 0)
@@ -172721,7 +175382,7 @@ function buildChatGptDashboardViewModel(view3, options = {}) {
     entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress2, now, sync, options.remote !== undefined),
     index
   })).sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index).map(({ entry }) => entry);
-  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").flatMap(({ definition, card, actionKind, connecting, progress: progress2, sync }) => card.connection.imports_attention?.length ? card.connection.imports_attention.map(importAttentionItem) : [attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync)]);
+  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").flatMap(({ definition, card, actionKind, connecting, progress: progress2, sync }) => card.connection.imports_attention?.length ? card.connection.imports_attention.map(importAttentionItem) : [attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync)]).filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index);
   if (embedding.state === "failed") {
     needsYou.push({
       id: "model:embedding",
@@ -172927,6 +175588,8 @@ function importAttentionItem(entry) {
       return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words2.seeWhy, archives) };
     case "scheduler":
       return { id: "archives:scheduler", sentence, fix: helpLinkFix(words2.seeWhy, archives) };
+    case "waiting":
+      return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words2.seeWhy, archives) };
     case "held":
       return {
         id: "archives:held",
@@ -173154,7 +175817,8 @@ function oauthSource(definition) {
 }
 function connectFix(definition) {
   if (definition.connect_action.kind === "archive_import") {
-    return helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.importArchive, openPageUrl({ kind: "dashboard" }));
+    const label = definition.source_id === OPEN_ARCHIVES_SOURCE_ID ? DASHBOARD_CHATGPT_SETUP_LABELS.importArchive : DASHBOARD_ARCHIVE_COPY.sourceImport.action;
+    return helpLinkFix(label, openPageUrl({ kind: "dashboard" }));
   }
   const source = oauthSource(definition);
   return source ? { label: DASHBOARD_CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.connect, openOnComputer(definition, "connect"));
@@ -173312,6 +175976,8 @@ function importsAttention(input) {
       out.push({ kind: "scheduler", setting: entry.setting });
     } else if (entry.kind === "unreadable") {
       out.push({ kind: "unreadable", reason: IMPORT_UNREADABLE_REASONS.has(entry.reason) ? entry.reason : "other" });
+    } else if (entry.kind === "waiting" && typeof entry.id === "string" && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name) && typeof entry.reason === "string" && /^[a-z_]{1,64}$/.test(entry.reason) && finite(entry.minimum) && entry.minimum > 0) {
+      out.push({ kind: "waiting", id: entry.id, name: name(entry.name), reason: entry.reason, minimum: count(entry.minimum) });
     }
   }
   return out.length > 0 ? { imports_attention: out } : {};
@@ -173381,7 +176047,7 @@ function scrubCard(definition, card) {
     connection: {
       state: card.connection.state,
       label: connectionLabel,
-      action: card.connection.action.kind === "archive_import" ? { kind: "archive_import", label: "Import an archive" } : { kind: "none" },
+      action: card.connection.action.kind === "archive_import" ? { kind: "archive_import", label: card.connection.action.label === "Import an archive" ? "Import an archive" : "Import another archive" } : { kind: "none" },
       handles: [],
       ...pending && finite(pending.expires_in_minutes) ? { pending: { started_at: "", expires_at: "", expires_in_minutes: count(pending.expires_in_minutes) } } : {},
       ...refusal3 ? { provider_refusal: { code: KNOWN_REFUSAL_CODES.has(refusal3.code) ? refusal3.code : "", reason: "" } } : {},
@@ -173765,12 +176431,12 @@ function chatgptPrivateAnswerProgram(config2) {
       }
       return;
     }
-    const same = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;
+    const same2 = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;
     if (!info && !next && landed && !zeroResent) {
       zeroResent = true;
       reportHeight(true);
     }
-    if (same || !info && !next)
+    if (same2 || !info && !next)
       return;
     if (!next || !info || next.jobId !== info.jobId) {
       run2++;
@@ -186556,7 +189222,7 @@ function createRemoteOAuthHandler(options) {
       return fail("invalid_target", "This app connects to Olympus at its /mcp address.");
     }
     sweep();
-    const transaction = sha25611(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
+    const transaction = sha25612(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
     if (u.installId && !demo) {
       if ([...completed.values()].some((receipt) => receipt.transaction === transaction && liveReceipt(receipt)))
         return receiptPage(true);
@@ -186602,7 +189268,7 @@ function createRemoteOAuthHandler(options) {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
     const code = u.installId ? mintCredential("code", u.installId) : randomBytes28(32).toString("base64url");
-    codes.set(sha25611(code), {
+    codes.set(sha25612(code), {
       ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
@@ -186781,7 +189447,7 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash2 = sha25611(code);
+      const hash2 = sha25612(code);
       const issued = codes.get(hash2);
       if (!issued || issued.expiresAt <= now()) {
         codes.delete(hash2);
@@ -190745,8 +193411,10 @@ async function archiveBrowse(options, args, context3) {
   };
 }
 async function archiveApprove(options, args, context3) {
-  const keys = Object.keys(args).filter((key2) => key2 !== "confirm_account" && key2 !== "keep_apart");
+  const keys = Object.keys(args).filter((key2) => key2 !== "confirm_account" && key2 !== "keep_apart" && key2 !== "source_id");
   const byKey = keys.length === 1 && keys[0] === "key" && archiveArg(args.key);
+  if (args.source_id !== undefined && !(byKey && archiveArg(args.source_id)))
+    return refused2("source_id goes with a chosen key.", "invalid_params");
   const byRequest = keys.length === 1 && keys[0] === "request_id" && archiveArg(args.request_id);
   const answers = [args.confirm_account, args.keep_apart];
   if (!byKey && !byRequest)
@@ -190775,7 +193443,7 @@ async function archiveApprove(options, args, context3) {
       status,
       name,
       ...archiveName ? { archive_name: archiveName } : {},
-      ...status === "confirm_account" && sourceId ? { source: { id: sourceId, label: sourceLabel5 } } : {},
+      ...(status === "confirm_account" || status === "started") && sourceId ? { source: { id: sourceId, label: sourceLabel5 } } : {},
       ...status === "confirm_account" && answer.parsed.reconfirm === true ? { reconfirm: true } : {}
     }
   };
@@ -190808,6 +193476,22 @@ async function archiveStop(options, args, context3) {
   if (!answer.ok)
     return answer.result;
   return { content: [{ type: "text", text: "Stopped." }], structuredContent: { status: "stopped" } };
+}
+function archiveCardsMeta(options) {
+  try {
+    const cards = (options.archiveCards?.() ?? []).filter((card) => card.archives.length > 0);
+    return cards.length > 0 ? cards : undefined;
+  } catch {
+    return;
+  }
+}
+function archiveSourcesMeta(options) {
+  try {
+    const sources = options.archiveSources?.();
+    return sources && sources.length > 0 ? sources : undefined;
+  } catch {
+    return;
+  }
 }
 function sourceImportsMeta(options) {
   try {
@@ -190971,7 +193655,9 @@ function createDashboardPanelTools(options) {
       const waiting = context3.localSession === true ? waitingCount(options) : 0;
       const archives = archivesMeta(options);
       const sourceImports = sourceImportsMeta(options);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports)
+      const archiveSources = archiveSourcesMeta(options);
+      const archiveCards = archiveCardsMeta(options);
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
         return result;
       const meta2 = {
         ...missingFolders.length ? { missingFolders } : {},
@@ -190981,7 +193667,9 @@ function createDashboardPanelTools(options) {
         ...unreadable.length > 0 ? { unreadable } : {},
         ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {},
         ...archives ? { archives } : {},
-        ...sourceImports ? { sourceImports } : {}
+        ...sourceImports ? { sourceImports } : {},
+        ...archiveSources ? { archiveSources } : {},
+        ...archiveCards ? { archiveCards } : {}
       };
       const existing = result._meta && typeof result._meta === "object" ? result._meta : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta2 } };
@@ -191297,7 +193985,8 @@ function localPrivateEmbeddingTargets(input) {
     fileSourceScopeAuthority,
     readScope: connectorStoreReadScope,
     connectorStoreAccountScopes,
-    gmailAccountScope
+    gmailAccountScope,
+    gmailImportAccountScope
   } = input;
   const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
   if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== "built-in" || policy?.activationMode !== "hybrid_shadow" && policy?.activationMode !== "hybrid_primary")
@@ -191312,6 +194001,16 @@ function localPrivateEmbeddingTargets(input) {
     const registered3 = sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
     if (!definition || definition.activationMode === "lexical_only" || definition.embeddingPolicy === "disabled" || registered3?.activationMode === "lexical_only" || registered3?.embeddingPolicy === "disabled")
       return [];
+    if (source.sourceId === SCHEDULER_SOURCE_IDS.gmail && (!ref || !fileSourceScopeAuthority)) {
+      if (!gmailImportAccountScope)
+        return [];
+      return [{
+        store,
+        provider: secureLocalPolicyEmbeddingProvider,
+        accountScope: gmailImportAccountScope,
+        filters: { provider: "gmail", observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX }
+      }];
+    }
     if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles].some((id) => id === source.sourceId) && (!ref || !fileSourceScopeAuthority))
       return [];
     const scope = connectorStoreReadScope(store);
@@ -191323,7 +194022,8 @@ function localPrivateEmbeddingTargets(input) {
       return [];
     const filters = mail ? {
       provider: "gmail",
-      observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision })
+      observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
+      observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX
     } : scope.contentFilters;
     const provider = ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref) : secureLocalPolicyEmbeddingProvider;
     return [{
@@ -192524,6 +195224,112 @@ async function main() {
       onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID)
     })
   }) : undefined;
+  const gmailItemScopeFor = (handle) => {
+    const role = handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle);
+    return gmailInternalConnectorStore && gmailSecureConnectorStore ? gmailItemAccountScope([gmailInternalConnectorStore, gmailSecureConnectorStore], role) : role;
+  };
+  if (gmailInternalConnectorStore && gmailSecureConnectorStore) {
+    let gmailArchiveSet;
+    const gmailImportGate = gmailImportAllowance({ usage: () => gmailRequestBudget?.status() });
+    let gmailLabelCache;
+    archiveSourceTargets.register(gmailArchiveTarget({
+      concurrencyKey: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+      exclusive: (task) => connectedHandleRegistryPath ? runExclusiveForSource(connectedHandleRegistryPath, GMAIL_SOURCE_ID, task) : task(),
+      lane: () => {
+        const handle = selectedSourceCredentialHandle({
+          env: process.env,
+          pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
+          provider: "gmail",
+          capability: "gmail.email.sync",
+          handles: readActiveConnectedHandles(process.env)
+        });
+        const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
+        let ownerRules = [];
+        let approved = false;
+        try {
+          const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
+          if (approval) {
+            ownerRules = gmailConnectorScopeFromApproval(approval).ownerTierRules ?? [];
+            approved = true;
+          }
+        } catch {}
+        let importClientPromise;
+        const importClient = () => {
+          if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority)
+            return;
+          fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+          importClientPromise ??= new GoogleGmailSourceConnector({
+            credentialHandle: handle.handle,
+            ...handle.accountRole ? { account: handle.accountRole } : {},
+            requestBudget: gmailImportBudget(gmailRequestBudget, gmailImportGate),
+            maxRetries: GMAIL_IMPORT_MAX_RETRIES
+          }).apiClientForTooling();
+          return importClientPromise;
+        };
+        const bound = (provider) => provider && approved && scopeRef && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(provider, fileSourceScopeAuthority, scopeRef) : provider;
+        const internalEmbedder = bound(sourceIndexEmbeddingProvider);
+        const secureEmbedder = secureLocalPolicyEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider) ? bound(secureLocalPolicyEmbeddingProvider) : undefined;
+        const key2 = JSON.stringify([ownerRules, approved ? scopeRef?.revision ?? null : null]);
+        if (gmailArchiveSet?.key !== key2) {
+          gmailArchiveSet = {
+            key: key2,
+            set: createLaneTieredStoreSet({
+              setId: GMAIL_SOURCE_ID,
+              internalStore: gmailInternalConnectorStore,
+              secureStore: gmailSecureConnectorStore,
+              ...gmailTierLane?.publicStore ? { publicLeg: gmailTierLane.publicStore } : {},
+              ...gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {},
+              tierClassification: { ...ownerRules.length > 0 ? { rules: [...ownerRules] } : {} },
+              ...internalEmbedder ? { internalEmbeddingProvider: internalEmbedder } : {},
+              ...secureEmbedder ? { secureEmbeddingProvider: secureEmbedder } : {}
+            })
+          };
+        }
+        return {
+          set: gmailArchiveSet.set,
+          sync: gmailLaneSyncOptions(ownerRules),
+          account: gmailItemScopeFor(handle),
+          labelIds: async () => {
+            const cacheKey = `${new Date().toISOString().slice(0, 10)}
+${key2}`;
+            if (gmailLabelCache?.key === cacheKey)
+              return gmailLabelCache.map;
+            const client = importClient();
+            if (!client)
+              return { unavailable: "gmail_labels_unavailable" };
+            const room = gmailImportGate.check(GMAIL_IMPORT_LABELS_COST);
+            if (room !== true) {
+              const wait = gmailImportWait(room);
+              return { unavailable: wait.later, ...wait.minimum !== undefined ? { minimum: wait.minimum } : {} };
+            }
+            const api2 = await client;
+            if (!api2.listLabels)
+              return { unavailable: "gmail_labels_unavailable" };
+            try {
+              const map2 = new Map((await api2.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id]));
+              gmailLabelCache = { key: cacheKey, map: map2 };
+              return map2;
+            } catch (error2) {
+              if (error2 instanceof GmailImportWaitError) {
+                const wait = gmailImportWait(error2.reason);
+                return { unavailable: wait.later, ...wait.minimum !== undefined ? { minimum: wait.minimum } : {} };
+              }
+              if (error2 instanceof GoogleRequestBudgetError)
+                return { unavailable: "gmail_requests_spent" };
+              throw error2;
+            }
+          },
+          match: gmailHeaderMatch(async () => importClient(), {
+            allowance: gmailImportGate,
+            sameAccount: (address) => {
+              const named = readSourceRegistry(process.env).accounts.find((entry) => entry.source_id === GMAIL_SOURCE_ID)?.provider_account_hash;
+              return named === undefined || compareProviderAccounts(named, googleAccountIdFromAddress(address)) !== "different";
+            }
+          })
+        };
+      }
+    }));
+  }
   const googleDriveRequestBudget = googleDriveConnectorStoreLane.enabled ? createGoogleDriveDailyRequestBudget({ env: process.env }) : undefined;
   const googleDriveExclusions = googleDriveConnectorStoreLane.enabled ? googleDriveIngestionExclusionMatcher(process.env) : undefined;
   const googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
@@ -193020,7 +195826,11 @@ async function main() {
         capability: "gmail.email.sync",
         handles: readActiveConnectedHandles(process.env)
       });
-      return gmailPrivateStoreStatusScope({ authority: fileSourceScopeAuthority, handle });
+      return gmailPrivateStoreStatusScope({
+        authority: fileSourceScopeAuthority,
+        handle: handle ? { accountRole: gmailItemScopeFor(handle) } : undefined,
+        importAccountScope: gmailItemScopeFor(handle)
+      });
     }
     if (store === gmailInternalConnectorStore)
       return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
@@ -193174,7 +195984,7 @@ async function main() {
       ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: scopeBoundEmbeddingProvider(sourceIndexEmbeddingProvider, fileSourceScopeAuthority, scopeRef) } : {},
       ...secureLocalPolicyEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider) ? { secureEmbeddingProvider: scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, scopeRef) } : {},
       ...handle?.handle ? { credentialHandle: handle.handle } : {},
-      ...handle?.accountRole ? { account: handle.accountRole } : {}
+      account: gmailItemScopeFor(handle)
     }) : undefined;
   };
   const createGoogleDriveConnectorStoreSyncForHandle = (handle) => {
@@ -193731,6 +196541,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         });
       })
     ].filter((source) => source !== undefined);
+    let gmailImportedHistory;
+    if (!sources.some((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail) && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailHoldsImportedHistory([gmailInternalConnectorStore, gmailSecureConnectorStore, gmailTierLane?.publicStore?.current()])) {
+      gmailImportedHistory = createGmailImportedHistorySchedulerSource({ config: olympusConfig });
+      sources.push(gmailImportedHistory);
+    }
     const sweptSources = withEmbeddingSweep(sources, (source) => {
       const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
       corpusIds.add(source.corpusId);
@@ -193738,12 +196553,31 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === corpusId);
         return definition !== undefined && definition.activationMode !== "lexical_only" && definition.embeddingPolicy !== "disabled";
       };
+      if (source === gmailImportedHistory) {
+        const importScope = gmailItemScopeFor(currentGmailHandle);
+        const importTargets = () => gmailImportedHistoryEmbeddingTargets({
+          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
+          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
+          accountScope: importScope
+        });
+        return importTargets().length > 0 ? importTargets : undefined;
+      }
       const targets = () => connectorStores.flatMap((store) => {
         if (!corpusIds.has(store.corpusId))
           return [];
         const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
         return provider ? [{ store, provider, wholeStore: wholeStoreEmbeddingSweepAllowed(source.sourceId, store.corpusId) && hybridServed(store.corpusId) }] : [];
       });
+      if (source.sourceId === SCHEDULER_SOURCE_IDS.gmail) {
+        const importScope = gmailItemScopeFor(currentGmailHandle);
+        const laneTargets = () => gmailLaneEmbeddingTargets({
+          live: targets(),
+          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
+          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
+          accountScope: importScope
+        });
+        return laneTargets().length > 0 ? laneTargets : undefined;
+      }
       return targets().length > 0 ? targets : undefined;
     });
     const scopeRefs = new Map;
@@ -193762,7 +196596,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       fileSourceScopeAuthority,
       readScope: connectorStoreReadScope,
       connectorStoreAccountScopes,
-      gmailAccountScope: currentGmailHandle?.accountRole
+      gmailAccountScope: currentGmailHandle ? gmailItemScopeFor(currentGmailHandle) : undefined,
+      gmailImportAccountScope: gmailItemScopeFor(currentGmailHandle)
     }));
     const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
     return {
@@ -194826,7 +197661,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     unreadableFiles: () => unreadableFiles,
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
     archives: () => archiveImportDashboard.view(),
-    sourceImports: () => archiveImportDashboard.sourceImports()
+    sourceImports: () => archiveImportDashboard.sourceImports(),
+    archiveSources: () => archiveImportDashboard.archiveSources(),
+    archiveCards: () => archiveImportDashboard.cardViews()
   });
   const socketPath = prepareWorkerSocket();
   const serverOptions = {
@@ -195723,6 +198560,13 @@ var init_server5 = __esm(async () => {
   init_file_scope_sources();
   init_source_scope_approval();
   init_gmail_scope_browser();
+  init_gmail_archive_target();
+  init_gmail_header_match();
+  init_gmail_import_allowance();
+  init_source_registry();
+  init_gmail_live_sync();
+  init_source_targets();
+  init_tiered_store_set();
   init_source_account_guard();
   init_provider_account_identity();
   init_request_budget();

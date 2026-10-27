@@ -5669,11 +5669,33 @@ function readsJsonExport(entry, format) {
   }
   return notesJsonFormat(entry) === format;
 }
+function looksLikeEnex(head) {
+  const text2 = archiveHeadText(head).replace(/^\ufeff/, "");
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text2);
+  return start !== null && (start[1] ?? start[2]) === "en-export";
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
   const text2 = new TextDecoder("utf-8").decode(head);
   return TELEGRAM_FULL_HEAD.test(text2) || TELEGRAM_CHAT_HEAD.test(text2);
+}
+function archiveSourceCards(formats = ARCHIVE_FORMATS) {
+  const cards = new Map;
+  for (const format of formats) {
+    if (!format.sourceCard)
+      continue;
+    const card = cards.get(format.sourceCard.id) ?? { id: format.sourceCard.id, label: format.sourceCard.label, formats: [] };
+    card.formats.push(format);
+    cards.set(card.id, card);
+  }
+  return [...cards.values()];
+}
+function archiveFormatForProvider(provider, formats = ARCHIVE_FORMATS) {
+  return formats.find((format) => format.provider === provider);
+}
+function isArchiveProvider(provider, formats = ARCHIVE_FORMATS) {
+  return provider === ARCHIVE_NEUTRAL_PROVIDER || archiveFormatForProvider(provider, formats) !== undefined;
 }
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
@@ -5681,7 +5703,7 @@ function archiveCorpusId(trustDomain, family) {
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -5742,6 +5764,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
@@ -5752,6 +5775,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export as Markdown (the .zip file)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*, *, ????.md"]),
     detect: (probe) => detectFile(probe, (entry) => {
       if (!entry.members || /^roam/i.test(entry.name))
@@ -5772,8 +5796,25 @@ var init_archive_formats = __esm(() => {
     provider: "roam",
     chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
     citationLabel: "Roam",
+    sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
+    id: "evernote-enex",
+    label: "Evernote export (.enex)",
+    family: "note",
+    provider: "evernote",
+    chooseHint: "an Evernote export (the .enex file, or a folder of them)",
+    citationLabel: "Evernote",
+    sourceCard: Object.freeze({ id: "evernote.archive", label: "Evernote" }),
+    probeNames: Object.freeze(["*.enex"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
+      const files = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && looksLikeEnex(entry.head)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      return files.length > 0 ? files : undefined;
+    }
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
@@ -5823,7 +5864,8 @@ var init_archive_formats = __esm(() => {
     REFLECT_JSON_ARCHIVE_FORMAT,
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
-    TELEGRAM_JSON_ARCHIVE_FORMAT
+    TELEGRAM_JSON_ARCHIVE_FORMAT,
+    EVERNOTE_ENEX_ARCHIVE_FORMAT
   ]);
   CONNECTOR_FACTORIES = new Map;
 });
@@ -13257,7 +13299,8 @@ var init_credential_broker = __esm(() => {
     "whatsapp_business",
     "apple_messages",
     "reflect",
-    "roam"
+    "roam",
+    "evernote"
   ];
   CREDENTIAL_PROVIDERS = [
     ...PUBLIC_CREDENTIAL_PROVIDERS,
@@ -13624,6 +13667,25 @@ var init_credential_broker = __esm(() => {
         backendState: {
           kind: "archive_path",
           archiveRootAlias: "roam_archive",
+          readerWorker: "archive_import_reader",
+          contentBounds: "approved_archive_root",
+          backendLabel: "local_private:archive_import"
+        }
+      },
+      {
+        handle: "evernote.archive",
+        provider: "evernote",
+        sessionKind: "archive_path",
+        accountRole: "archive",
+        trustDomain: "internal",
+        allowedCapabilities: ["evernote.archive.import"],
+        scopes: [],
+        tokenEnvNames: [],
+        statusEnvNames: ["OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY"],
+        expiresInSeconds: 3600,
+        backendState: {
+          kind: "archive_path",
+          archiveRootAlias: "evernote_archive",
           readerWorker: "archive_import_reader",
           contentBounds: "approved_archive_root",
           backendLabel: "local_private:archive_import"
@@ -14083,6 +14145,10 @@ var DEFAULT_DROPBOX_CONTENT_EXTRACTION_STALL_HOURS = 6, DROPBOX_CONTENT_EXTRACTI
 var init_ingestion_throughput = __esm(() => {
   init_operation_error();
 });
+
+// src/core/whatsapp-notice.ts
+var WHATSAPP_UNOFFICIAL_CLIENT_NOTICE = "WhatsApp connects through an unofficial client. WhatsApp's terms don't allow third-party clients, and accounts have been restricted or banned for using them. Connect only if you accept that risk.";
+
 // src/workers/dashboard/scheduler-markers.ts
 var OPERATOR_PAUSED_SCHEDULER_MARKERS;
 var init_scheduler_markers = __esm(() => {
@@ -14305,6 +14371,7 @@ var init_vocabulary = __esm(() => {
     sourcesCloud: "Accounts",
     notConnected: "Not connected",
     noSources: "No sources yet.",
+    otherArchives: { title: "Other archives", line: "For an export that isn't from one of your sources above." },
     progress: "Progress",
     progressInitial: "First index",
     progressRefresh: "Catching up",
@@ -14453,11 +14520,12 @@ var init_vocabulary = __esm(() => {
     other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
   };
   DASHBOARD_ARCHIVE_COPY = {
-    importAction: "Import an archive",
+    importAction: "Import another archive",
+    sourceImport: { action: "Import an archive", title: "Import an archive into {source}" },
     pick: {
       back: "Back to Olympus",
-      title: "Import an archive",
-      intro: ARCHIVE_PICK_INTRO,
+      title: "Import another archive",
+      intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
       source: "This computer",
       makePrivate: "Import",
       makePrivateFor: "Import {name}",
@@ -14518,11 +14586,11 @@ var init_vocabulary = __esm(() => {
     thisFile: "A file of this archive",
     account: {
       line: "{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?",
-      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.",
+      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Other archives, it stays apart, with its own Remove.",
       add: "Add to {source}",
-      apart: "Keep it under Archives",
+      apart: "Keep it under Other archives",
       addFor: "Add {name} to {source}",
-      apartFor: "Keep {name} under Archives",
+      apartFor: "Keep {name} under Other archives",
       sourceFallback: "this source",
       reconfirm: {
         line: "{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?",
@@ -14561,6 +14629,14 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      mail_for_another_account: { one: "1 message delivered to another address left out", many: "{n} messages delivered to another address left out" },
+      gmail_budget_too_small: {
+        one: "Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.",
+        many: "Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus."
+      },
+      gmail_import_allowance_spent: { one: "Waiting until tomorrow: imports have used their share of today's Gmail requests.", many: "Waiting until tomorrow: imports have used their share of today's Gmail requests." },
+      gmail_requests_spent: { one: "Waiting until tomorrow: today's Gmail requests are used up.", many: "Waiting until tomorrow: today's Gmail requests are used up." },
+      gmail_labels_unavailable: { one: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.", many: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now." },
       system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
       message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
       status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
@@ -14612,6 +14688,11 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: "not_imported",
       text_cut: "not_imported",
       spam_or_trash: "not_imported",
+      mail_for_another_account: "not_imported",
+      gmail_budget_too_small: "not_imported",
+      gmail_import_allowance_spent: "not_imported",
+      gmail_requests_spent: "not_imported",
+      gmail_labels_unavailable: "not_imported",
       message_content_unsupported: "not_imported",
       system_message: "how_read",
       message_empty: "how_read",
@@ -14652,7 +14733,8 @@ var init_vocabulary = __esm(() => {
     },
     tryAgain: "Try again",
     dismiss: "Dismiss",
-    started: "Importing {name}. It shows under Archives as it is read.",
+    started: "Importing {name}. It shows under Other archives as it is read.",
+    startedIn: "Importing {name} into {source}. It shows in {source} as it is read.",
     checking: "Checking whether {name} is already imported…",
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
@@ -14670,6 +14752,10 @@ var init_vocabulary = __esm(() => {
       },
       held: { one: "1 imported item waits for the private model", many: "{n} imported items wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
+      waiting: {
+        gmail_budget_too_small: "An import waits: {name}. The daily limit on Gmail requests is too low; set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more",
+        other: "An import waits: {name}"
+      },
       seeWhy: "See why",
       review: "Review",
       setUp: "Set up the private model",
@@ -14682,7 +14768,7 @@ var init_vocabulary = __esm(() => {
         permission: "Your user account is not allowed to open {file}.",
         other: "Olympus could not open {file}."
       },
-      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, no archive can be imported, so nothing overwrites it.",
       fix: {
         damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
         unknown_form: "Update Olympus, then open this page again.",
@@ -15082,12 +15168,6 @@ var init_credential_health = __esm(() => {
 // src/core/embedding-cost-estimates.ts
 var init_embedding_cost_estimates = () => {};
 
-// src/core/classification-signals.ts
-function namesOnlyContentScopeMetadata() {
-  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
-}
-var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
-
 // src/core/invocation-provenance.ts
 function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
@@ -15379,6 +15459,178 @@ function metadataStringArray(metadata, key) {
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
 
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
+// src/core/classification-signals.ts
+function namesOnlyContentScopeMetadata() {
+  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
+}
+var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
+
+// src/workers/google-connectors/gmail-mail-record.ts
+import { createHash as createHash8 } from "node:crypto";
+function childrenOf(record2, build) {
+  return record2.metadataOnly || build.children !== true ? [] : record2.attachments.filter((attachment) => attachment.nested !== true && attachment.filename.trim() !== "");
+}
+function hashString(value) {
+  return createHash8("sha256").update(value).digest("hex");
+}
+function parsedDate(value) {
+  if (!value)
+    return;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function internalDateIso(value) {
+  if (!value)
+    return;
+  const ms = Number.parseInt(value, 10);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function attachmentLine(attachment) {
+  const details = [
+    attachment.mimeType?.trim() || undefined,
+    attachment.size !== undefined ? `${attachment.size} bytes` : undefined,
+    attachment.partId.trim() ? `part ${attachment.partId.trim()}` : undefined
+  ].filter((value) => Boolean(value));
+  return `Attachment: ${attachment.filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
+}
+function headersSummary(headers) {
+  return [
+    headers.subject ? `Subject: ${headers.subject}` : undefined,
+    headers.from ? `From: ${headers.from}` : undefined,
+    headers.to ? `To: ${headers.to}` : undefined,
+    headers.date ? `Date: ${headers.date}` : undefined
+  ].filter(Boolean).join(`
+`);
+}
+function messageText(record2) {
+  return [headersSummary(record2.headers), record2.snippet, record2.body].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
+
+`);
+}
+function identityOf(record2, account) {
+  return {
+    family: "email",
+    provider: GMAIL_MAIL_PROVIDER,
+    accountScope: account,
+    providerItemId: record2.id,
+    ...record2.threadId ? { providerThreadId: record2.threadId } : {},
+    localItemId: `${account}:${record2.id}`,
+    ...record2.sourceVersion ? { sourceVersion: record2.sourceVersion } : {}
+  };
+}
+function childIdentityOf(record2, account, attachment) {
+  const providerItemId = gmailChildProviderId(record2.id, attachment.partId);
+  return {
+    family: "email",
+    provider: GMAIL_MAIL_PROVIDER,
+    accountScope: account,
+    providerItemId,
+    ...record2.threadId ? { providerThreadId: record2.threadId } : {},
+    localItemId: `${account}:${providerItemId}`,
+    ...record2.sourceVersion ? { sourceVersion: record2.sourceVersion } : {},
+    parent: { providerItemId: record2.id, localItemId: `${account}:${record2.id}` }
+  };
+}
+function gmailMessageItem(record2, account, fetchedAt = new Date().toISOString()) {
+  const subject = record2.headers.subject ?? "(no subject)";
+  const rawFrom = record2.headers.from ?? "";
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
+  const date = parsedDate(record2.headers.date) ?? internalDateIso(record2.internalDate);
+  const metadataOnly = record2.metadataOnly;
+  const attachments = record2.attachments;
+  const lines = attachments.map(attachmentLine);
+  const bytes = attachments.reduce((total, attachment) => total + (attachment.size ?? 0), 0);
+  const text2 = metadataOnly ? "" : messageText(record2) || (lines.length > 0 ? lines.join(`
+`) : `Subject: ${subject}`);
+  return {
+    identity: identityOf(record2, account),
+    mimeType: "message/rfc822",
+    content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
+    metadata: Object.freeze({
+      title: subject,
+      subject,
+      from,
+      ...record2.headers.to ? { to: record2.headers.to } : {},
+      ...date ? { authoredAt: date } : {},
+      ...record2.internalDate ? { internalDate: record2.internalDate } : {},
+      ...record2.historyId ? { historyId: record2.historyId } : {},
+      ...record2.headers.messageId ? { messageId: record2.headers.messageId } : {},
+      ...record2.snippet && !metadataOnly ? { snippet: record2.snippet } : {},
+      ...metadataOnly ? namesOnlyContentScopeMetadata() : {},
+      labels: [...record2.labelIds],
+      attachmentCount: attachments.length,
+      attachmentBytesDeclared: bytes,
+      ...lines.length > 0 ? { attachments: lines } : {},
+      attachmentsNotIngested: attachments.length,
+      ...gmailId(record2) ? { locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(record2.id)}` } : {},
+      contentHash: hashString(`${record2.historyId ?? ""}:${metadataOnly ? "metadata_only" : text2}`)
+    }),
+    fetchedAt
+  };
+}
+function gmailChildItem(record2, account, attachment, fetchedAt) {
+  const date = parsedDate(record2.headers.date) ?? internalDateIso(record2.internalDate);
+  const name = attachment.filename.slice(0, MAX_ATTACHMENT_NAME_CHARS);
+  const rawFrom = record2.headers.from ?? "";
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
+  return {
+    identity: childIdentityOf(record2, account, attachment),
+    mimeType: attachment.mimeType?.trim() || "application/octet-stream",
+    content: { kind: "metadata_only" },
+    metadata: Object.freeze({
+      title: name,
+      name,
+      ...from ? { from } : {},
+      ...date ? { authoredAt: date } : {},
+      ...attachment.size !== undefined ? { sizeBytes: attachment.size } : {},
+      ...gmailId(record2) ? { locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(record2.id)}` } : {}
+    }),
+    fetchedAt,
+    deferredBytes: {
+      locator: attachment.locator ?? "",
+      available: attachment.locator !== undefined,
+      ...attachment.size !== undefined ? { sizeBytes: attachment.size } : {}
+    }
+  };
+}
+function gmailMailItems(record2, account, build = {}, wanted) {
+  const fetchedAt = new Date().toISOString();
+  const items = [];
+  const parent = gmailMessageItem(record2, account, fetchedAt);
+  if (!wanted || wanted.has(parent.identity.localItemId))
+    items.push(parent);
+  for (const attachment of childrenOf(record2, build)) {
+    const child = gmailChildItem(record2, account, attachment, fetchedAt);
+    if (!wanted || wanted.has(child.identity.localItemId))
+      items.push(child);
+  }
+  return items;
+}
+function gmailClassificationSignals(item) {
+  const subject = metadataString(item.metadata, "subject") ?? metadataString(item.metadata, "title");
+  const sender = metadataString(item.metadata, "from");
+  const labels = metadataStringArray(item.metadata, "labels");
+  return {
+    ...subject ? { title: subject } : {},
+    ...sender ? { sender } : {},
+    ...labels.length > 0 ? { labels } : {}
+  };
+}
+var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record2) => !record2.id.startsWith(GMAIL_OWN_ID_PREFIX);
+var init_gmail_mail_record = __esm(() => {
+  init_sender_rules();
+});
+
 // src/workers/google-connectors/request-budget.ts
 var GoogleRequestBudgetError;
 var init_request_budget = __esm(() => {
@@ -15399,7 +15651,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -15429,6 +15681,8 @@ class GoogleGmailSourceConnector {
   itemsSkippedStored = 0;
   ingestFilterOptions;
   itemsByLocalId = new Map;
+  build;
+  messagesById = new Map;
   constructor(options = {}) {
     const env = options.env ?? process.env;
     this.fetchImpl = options.fetch ?? fetch;
@@ -15448,6 +15702,7 @@ class GoogleGmailSourceConnector {
     this.injectedClient = options.apiClient;
     this.scope = options.scope;
     this.now = options.now ?? (() => Date.now());
+    this.build = options.build ?? {};
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
     if (this.scope?.skippedLabelIds?.length) {
@@ -15478,9 +15733,34 @@ class GoogleGmailSourceConnector {
     const nowMs = this.now();
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
     let pageToken = staleLeg ? undefined : resume.pageToken;
+    let itemRoom = remaining;
+    let pageAfter = staleLeg ? undefined : resume.after;
+    if (resume.childOf && !staleLeg) {
+      const rest = await this.attachmentsFrom(client, resume.childOf, itemRoom);
+      this.providerRequests += 1;
+      remaining -= 1;
+      itemRoom -= rest.items.length;
+      const cursorFields = {
+        ...watermarkMs !== undefined ? { watermarkMs } : {},
+        ...highWaterMs !== undefined ? { highWaterMs } : {},
+        ...pageToken ? { pageToken } : {},
+        ...metadataLeg ? { phase: "metadata" } : {},
+        ...startedMs !== undefined ? { startedMs } : {},
+        ...pageAfter ? { after: pageAfter } : {}
+      };
+      if (rest.next !== undefined) {
+        const nextCursor2 = encodeGmailCursor({ ...cursorFields, childOf: { id: resume.childOf.id, from: rest.next } });
+        yield { items: rest.items, ...nextCursor2 ? { nextCursor: nextCursor2 } : {}, done: false, truncated: true };
+        return;
+      }
+      const nextCursor = encodeGmailCursor(cursorFields);
+      yield { items: rest.items, ...nextCursor ? { nextCursor } : {}, done: false };
+      if (remaining <= 0 || itemRoom <= 0)
+        return;
+    }
     const requestedPageTokens = new Set;
     let listPages = 0;
-    while (remaining > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
+    while (remaining > 0 && itemRoom > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
       if (pageToken)
         assertNewProviderPage(requestedPageTokens, pageToken);
       this.providerRequests += 1;
@@ -15491,13 +15771,19 @@ class GoogleGmailSourceConnector {
         ...query ? { query } : {}
       });
       const listed = page2.messages.filter((message) => message.id);
+      const resumedAt = pageAfter ? listed.findIndex((message) => message.id === pageAfter) : -1;
+      const baseSkip = resumedAt + 1;
+      const examinedIds = resumedAt >= 0 ? [pageAfter] : [];
+      pageAfter = undefined;
       const items = [];
       let messagesExamined = 0;
       let messagesFetched = 0;
-      for (const message of listed) {
-        if (messagesFetched >= remaining)
+      let childOf;
+      for (const message of listed.slice(baseSkip)) {
+        if (messagesFetched >= remaining || items.length >= itemRoom)
           break;
         messagesExamined += 1;
+        examinedIds.push(message.id);
         const stored = this.scope?.storedItem?.(message.id);
         if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
           continue;
@@ -15508,7 +15794,7 @@ class GoogleGmailSourceConnector {
             this.providerRequests += 1;
             const metadata = await client.getMessage(message.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
             const received = internalDateNumber({ internalDate: metadata.internalDate });
-            const item2 = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const item2 = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
             const subject2 = metadataString(item2.metadata, "subject");
             const from2 = metadataString(item2.metadata, "from");
             const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from2, rule)) || classifyEmailIngestSkip({ ...subject2 ? { subject: subject2 } : {}, ...from2 ? { from: from2 } : {}, labels: metadataStringArray(item2.metadata, "labels") }, this.ingestFilterOptions);
@@ -15529,7 +15815,8 @@ class GoogleGmailSourceConnector {
           this.itemsSkippedStored += 1;
           continue;
         }
-        const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
+        const record2 = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff });
+        const [item, ...children] = gmailMailItems(record2, this.account, this.build);
         this.attachmentsDeclared += metadataCount(item.metadata, "attachmentCount");
         this.attachmentBytesDeclared += metadataCount(item.metadata, "attachmentBytesDeclared");
         this.attachmentsNotIngested += metadataCount(item.metadata, "attachmentsNotIngested");
@@ -15557,12 +15844,40 @@ class GoogleGmailSourceConnector {
             this.itemsSkippedCategory += 1;
           continue;
         }
-        this.itemsByLocalId.set(item.identity.localItemId, item);
-        items.push(item);
+        if (items.length + 1 + children.length > itemRoom && items.length > 0) {
+          messagesExamined -= 1;
+          examinedIds.pop();
+          break;
+        }
+        const unit = [item, ...children].slice(0, Math.max(1, itemRoom - items.length));
+        if (unit.length < 1 + children.length)
+          childOf = { id: record2.id, from: unit.length - 1 };
+        for (const entry of unit)
+          this.itemsByLocalId.set(entry.identity.localItemId, entry);
+        this.messagesById.set(fetched.id, fetched);
+        items.push(...unit);
+        if (childOf)
+          break;
       }
       remaining -= messagesFetched;
-      pageToken = page2.nextPageToken;
-      const pageTruncated = messagesExamined < listed.length;
+      itemRoom -= items.length;
+      if (childOf) {
+        const nextCursor2 = encodeGmailCursor({
+          ...watermarkMs !== undefined ? { watermarkMs } : {},
+          ...highWaterMs !== undefined ? { highWaterMs } : {},
+          ...pageToken ? { pageToken } : {},
+          ...metadataLeg ? { phase: "metadata" } : {},
+          ...startedMs !== undefined ? { startedMs } : {},
+          childOf,
+          after: childOf.id
+        });
+        yield { items, ...nextCursor2 ? { nextCursor: nextCursor2 } : {}, done: false, truncated: true };
+        return;
+      }
+      const handled = baseSkip + messagesExamined;
+      const pageTruncated = handled < listed.length;
+      if (!pageTruncated)
+        pageToken = page2.nextPageToken;
       const legDone = !pageToken && !pageTruncated;
       const enterMetadataLeg = legDone && splitsAtCutoff && !metadataLeg;
       const done = legDone && !enterMetadataLeg;
@@ -15582,7 +15897,8 @@ class GoogleGmailSourceConnector {
         ...highWaterMs !== undefined ? { highWaterMs } : {},
         ...pageToken ? { pageToken } : {},
         ...metadataLeg ? { phase: "metadata" } : {},
-        ...startedMs !== undefined ? { startedMs } : {}
+        ...startedMs !== undefined ? { startedMs } : {},
+        ...pageTruncated && examinedIds.length > 0 ? { after: examinedIds.at(-1) } : {}
       });
       yield {
         items,
@@ -15599,13 +15915,53 @@ class GoogleGmailSourceConnector {
         break;
     }
   }
-  async fetchItem(localItemId) {
+  async fetchItem(localItemId, options) {
+    if (options?.deferredBytes)
+      return this.fetchAttachment(localItemId, options.deferredBytes.locator);
     const item = this.itemsByLocalId.get(localItemId) ?? this.itemsByLocalId.get(`${this.account}:${localItemId}`);
     if (!item) {
-      throw new Error(`Gmail connector cannot fetch unknown item ${hashString(localItemId).slice(0, 16)}.`);
+      throw new Error(`Gmail connector cannot fetch unknown item ${hashString2(localItemId).slice(0, 16)}.`);
     }
     this.fetchItemCacheHits += 1;
     return item;
+  }
+  async fetchAttachment(localItemId, locator) {
+    const where = parseGmailPartLocator(locator);
+    if (!where)
+      throw new Error("This Gmail attachment cannot be found from what Olympus kept.");
+    const client = await this.clientForRequest();
+    let message = this.messagesById.get(where.messageId);
+    if (!message) {
+      this.providerRequests += 1;
+      message = await client.getMessage(where.messageId);
+      this.messagesById.set(where.messageId, message);
+    }
+    const part = gmailPartAt(message.payload, where.partId);
+    const record2 = gmailMailRecordFromMessage(message);
+    const child = gmailMailItems(record2, this.account, { children: true }).find((item) => item.identity.localItemId === localItemId || item.identity.localItemId === `${this.account}:${localItemId}`);
+    if (!part || !child)
+      throw new Error("This Gmail attachment is no longer in its message.");
+    let data = part.body?.data;
+    if (!data && part.body?.attachmentId) {
+      if (!client.getAttachment)
+        throw new Error("This Gmail client cannot read attachments.");
+      this.providerRequests += 1;
+      data = (await client.getAttachment(where.messageId, part.body.attachmentId)).data;
+    }
+    if (data === undefined)
+      throw new Error("Gmail returned no bytes for this attachment.");
+    const bytes = new Uint8Array(Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+    return { ...child, content: { kind: "bytes", mimeType: child.mimeType, bytes } };
+  }
+  async attachmentsFrom(client, at, room) {
+    const message = await client.getMessage(at.id);
+    this.messagesById.set(at.id, message);
+    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message), this.account, this.build);
+    const items = children.slice(at.from, at.from + Math.max(1, room));
+    for (const item of items)
+      this.itemsByLocalId.set(item.identity.localItemId, item);
+    const next = at.from + items.length;
+    return { items, ...next < children.length ? { next } : {} };
   }
   traversalStatus() {
     return {
@@ -15626,14 +15982,7 @@ class GoogleGmailSourceConnector {
     return this.clientForRequest();
   }
   classificationSignals(item) {
-    const subject = metadataString(item.metadata, "subject") ?? metadataString(item.metadata, "title");
-    const sender = metadataString(item.metadata, "from");
-    const labels = metadataStringArray(item.metadata, "labels");
-    return {
-      ...subject ? { title: subject } : {},
-      ...sender ? { sender } : {},
-      ...labels.length > 0 ? { labels } : {}
-    };
+    return gmailClassificationSignals(item);
   }
   async clientForRequest() {
     if (this.client)
@@ -15689,6 +16038,18 @@ function budgetedGmailApiClient(inner, budget, provenance) {
       budget.reserve(provenance);
       return inner.getMessage(id, options);
     },
+    ...inner.getProfile ? {
+      getProfile() {
+        budget.reserve(provenance);
+        return inner.getProfile();
+      }
+    } : {},
+    ...inner.getAttachment ? {
+      getAttachment(messageId, attachmentId) {
+        budget.reserve(provenance);
+        return inner.getAttachment(messageId, attachmentId);
+      }
+    } : {},
     ...inner.listLabels ? {
       listLabels() {
         budget.reserve(provenance);
@@ -15715,7 +16076,7 @@ function promotedWatermark(input) {
   return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
 }
 function encodeGmailCursor(cursor) {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf && !cursor.after) {
     return;
   }
   return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
@@ -15736,16 +16097,31 @@ function decodeGmailCursor(value) {
     }
     if (parsed.phase !== undefined && parsed.phase !== "metadata")
       throw new Error("invalid");
+    const childOf = decodeChildOf(parsed.childOf);
+    if (parsed.after !== undefined && (typeof parsed.after !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(parsed.after))) {
+      throw new Error("invalid");
+    }
     return {
       ...watermarkMs !== undefined ? { watermarkMs } : {},
       ...highWaterMs !== undefined ? { highWaterMs } : {},
       ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {},
       ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
-      ...startedMs !== undefined ? { startedMs } : {}
+      ...startedMs !== undefined ? { startedMs } : {},
+      ...childOf ? { childOf } : {},
+      ...typeof parsed.after === "string" ? { after: parsed.after } : {}
     };
   } catch {
     throw new TypeError("Gmail connector cursor is invalid.");
   }
+}
+function decodeChildOf(value) {
+  if (value === undefined)
+    return;
+  const record2 = value;
+  if (!record2 || typeof record2 !== "object" || typeof record2.id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(record2.id) || typeof record2.from !== "number" || !Number.isSafeInteger(record2.from) || record2.from < 0) {
+    throw new Error("invalid");
+  }
+  return { id: record2.id, from: record2.from };
 }
 function decodeCursorEpochMs(value) {
   if (value === undefined)
@@ -15816,6 +16192,17 @@ class RestGmailApiClient {
     const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
     return json;
   }
+  async getProfile() {
+    const record2 = asRecord14(await this.getJson("users/me/profile"), "Gmail profile");
+    return { emailAddress: stringValue(record2.emailAddress) };
+  }
+  async getAttachment(messageId, attachmentId) {
+    const record2 = asRecord14(await this.getJson(`users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`), "Gmail attachment");
+    return {
+      data: stringValue(record2.data),
+      ...typeof record2.size === "number" && Number.isSafeInteger(record2.size) ? { size: record2.size } : {}
+    };
+  }
   async listLabels() {
     const record2 = asRecord14(await this.getJson("users/me/labels"), "Gmail labels list response");
     return Array.isArray(record2.labels) ? record2.labels.map((item) => gmailLabelFromJson(asRecord14(item, "Gmail label"))).filter((label) => label.id) : [];
@@ -15871,89 +16258,87 @@ function gmailLabelFromJson(record2) {
     ...typeof record2.messagesTotal === "number" && Number.isFinite(record2.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record2.messagesTotal)) } : {}
   };
 }
-function rawItemFromGmailMessage(message, account, options = {}) {
+function gmailMailRecordFromMessage(message, options = {}) {
   const headers = headersFromPart(message.payload);
-  const subject = headers.get("subject") ?? "(no subject)";
-  const rawFrom = headers.get("from") ?? "";
-  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
-  const date = parsedDate(headers.get("date")) ?? internalDateIso(message.internalDate);
   const metadataOnly = options.metadataOnly === true;
-  const attachments = gmailAttachmentInventory(message.payload);
-  const text2 = metadataOnly ? "" : extractMessageText(message) || (attachments.lines.length > 0 ? attachments.lines.join(`
-`) : `Subject: ${subject}`);
-  const fetchedAt = new Date().toISOString();
-  return {
-    identity: {
-      family: "email",
-      provider: "gmail",
-      accountScope: account,
-      providerItemId: message.id,
-      ...message.threadId ? { providerThreadId: message.threadId } : {},
-      localItemId: `${account}:${message.id}`,
-      ...message.historyId ? { sourceVersion: message.historyId } : {}
-    },
-    mimeType: "message/rfc822",
-    content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
-    metadata: Object.freeze({
-      title: subject,
-      subject,
-      from,
-      ...date ? { authoredAt: date } : {},
-      ...message.internalDate ? { internalDate: message.internalDate } : {},
-      ...message.historyId ? { historyId: message.historyId } : {},
-      ...message.snippet && !metadataOnly ? { snippet: message.snippet } : {},
-      ...metadataOnly ? namesOnlyContentScopeMetadata() : {},
-      labels: message.labelIds ?? [],
-      attachmentCount: attachments.count,
-      attachmentBytesDeclared: attachments.bytes,
-      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
-      attachmentsNotIngested: attachments.count,
-      locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message.id)}`,
-      contentHash: hashString(`${message.historyId ?? ""}:${metadataOnly ? "metadata_only" : text2}`)
-    }),
-    fetchedAt
-  };
-}
-function gmailAttachmentInventory(part) {
-  if (!part)
-    return { count: 0, bytes: 0, lines: [] };
-  const filename = part.filename?.trim();
-  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
-  let count = filename ? 1 : 0;
-  let bytes = size ?? 0;
-  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
-  for (const child of part.parts ?? []) {
-    const nested = gmailAttachmentInventory(child);
-    count += nested.count;
-    bytes += nested.bytes;
-    lines.push(...nested.lines);
-  }
-  return { count, bytes, lines };
-}
-function gmailAttachmentLine(filename, part, size) {
-  const details = [
-    part.mimeType?.trim() || undefined,
-    size !== undefined ? `${size} bytes` : undefined,
-    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined
-  ].filter((value) => Boolean(value));
-  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
-}
-function metadataCount(metadata, key) {
-  const value = metadata[key];
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
-function extractMessageText(message) {
   const plain = [];
   const html = [];
-  collectPartText(message.payload, plain, html);
-  const selected = plain.length > 0 ? plain.join(`
+  if (!metadataOnly)
+    collectPartText(message.payload, plain, html);
+  const messageId = bareMessageId(headers.get("message-id"));
+  return {
+    id: message.id,
+    ...message.threadId ? { threadId: message.threadId } : {},
+    ...message.historyId ? { historyId: message.historyId, sourceVersion: message.historyId } : {},
+    ...message.internalDate ? { internalDate: message.internalDate } : {},
+    labelIds: message.labelIds ?? [],
+    headers: {
+      ...headers.get("subject") ? { subject: headers.get("subject") } : {},
+      ...headers.get("from") ? { from: headers.get("from") } : {},
+      ...headers.get("to") ? { to: headers.get("to") } : {},
+      ...headers.get("date") ? { date: headers.get("date") } : {},
+      ...messageId ? { messageId } : {}
+    },
+    ...message.snippet && !metadataOnly ? { snippet: message.snippet } : {},
+    body: plain.length > 0 ? plain.join(`
 
 `) : html.map(stripHtml).join(`
 
-`);
-  return [headersSummary(message.payload), message.snippet, selected].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
-
-`);
+`),
+    metadataOnly,
+    attachments: gmailAttachments(message.id, message.payload, false)
+  };
+}
+function bareMessageId(value) {
+  const trimmed = value?.trim();
+  if (!trimmed)
+    return;
+  const inner = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
+  return inner || undefined;
+}
+function gmailPartLocator(messageId, partId) {
+  return `${GMAIL_PART_LOCATOR_PREFIX}${messageId}:${partId}`;
+}
+function parseGmailPartLocator(locator) {
+  if (!locator.startsWith(GMAIL_PART_LOCATOR_PREFIX))
+    return;
+  const rest = locator.slice(GMAIL_PART_LOCATOR_PREFIX.length);
+  const split = rest.indexOf(":");
+  if (split <= 0)
+    return;
+  const messageId = rest.slice(0, split);
+  const partId = rest.slice(split + 1);
+  return /^[A-Za-z0-9_-]{1,128}$/.test(messageId) && /^[0-9.]{0,64}$/.test(partId) ? { messageId, partId } : undefined;
+}
+function gmailAttachments(messageId, part, inside) {
+  if (!part)
+    return [];
+  const filename = part.filename?.trim();
+  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
+  const partId = part.partId?.trim() ?? "";
+  const found = filename ? [{
+    partId,
+    filename,
+    ...part.mimeType?.trim() ? { mimeType: part.mimeType.trim() } : {},
+    ...size !== undefined ? { size } : {},
+    ...part.partId !== undefined ? { locator: gmailPartLocator(messageId, partId) } : {},
+    ...inside ? { nested: true } : {}
+  }] : [];
+  for (const child of part.parts ?? [])
+    found.push(...gmailAttachments(messageId, child, inside || Boolean(filename)));
+  return found;
+}
+function gmailPartAt(part, partId) {
+  if (!part)
+    return;
+  if ((part.partId?.trim() ?? "") === partId)
+    return part;
+  for (const child of part.parts ?? []) {
+    const found = gmailPartAt(child, partId);
+    if (found)
+      return found;
+  }
+  return;
 }
 function collectPartText(part, plain, html) {
   if (!part)
@@ -15978,34 +16363,12 @@ function headersFromPart(part) {
   }
   return headers;
 }
-function headersSummary(part) {
-  const headers = headersFromPart(part);
-  return [
-    headers.get("subject") ? `Subject: ${headers.get("subject")}` : undefined,
-    headers.get("from") ? `From: ${headers.get("from")}` : undefined,
-    headers.get("to") ? `To: ${headers.get("to")}` : undefined,
-    headers.get("date") ? `Date: ${headers.get("date")}` : undefined
-  ].filter(Boolean).join(`
-`);
-}
 function decodeBase64Url(value) {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
   return Buffer.from(normalized, "base64").toString("utf8");
 }
 function stripHtml(value) {
   return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-}
-function parsedDate(value) {
-  if (!value)
-    return;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-}
-function internalDateIso(value) {
-  if (!value)
-    return;
-  const ms = Number.parseInt(value, 10);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
 }
 function normalizeGmailMaxMessages(value) {
   if (value === undefined || !Number.isFinite(value))
@@ -16028,22 +16391,27 @@ function optionalStringProp(record2, key) {
 function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
-function hashString(value) {
-  return createHash8("sha256").update(value).digest("hex");
+function metadataCount(metadata, key) {
+  const value = metadata[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
-var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+function hashString2(value) {
+  return createHash9("sha256").update(value).digest("hex");
+}
+var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
   init_olympus_layout();
   init_mail_source_scope();
   init_sender_rules();
   init_credential_broker();
   init_ingest_filter();
+  init_gmail_mail_record();
   init_request_budget();
-  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
+  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date", "Message-ID"];
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -16159,7 +16527,7 @@ class GoogleDriveSourceConnector {
   async fetchItem(localItemId) {
     const item = this.itemsByLocalId.get(localItemId);
     if (!item) {
-      throw new Error(`Google Drive connector cannot fetch unknown item ${hashString2(localItemId).slice(0, 16)}.`);
+      throw new Error(`Google Drive connector cannot fetch unknown item ${hashString3(localItemId).slice(0, 16)}.`);
     }
     return item;
   }
@@ -16229,7 +16597,7 @@ class GoogleDriveSourceConnector {
         content: text2?.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
         metadata: Object.freeze({
           ...metadata,
-          ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString2(`${file.version ?? ""}:${text2 ?? title}`) }
+          ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString3(`${file.version ?? ""}:${text2 ?? title}`) }
         }),
         fetchedAt: new Date().toISOString()
       }
@@ -16608,8 +16976,8 @@ function optionalStringProp2(record2, key) {
 function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
-function hashString2(value) {
-  return createHash9("sha256").update(value).digest("hex");
+function hashString3(value) {
+  return createHash10("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -17215,7 +17583,7 @@ var init_delphi_scorer = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
   const intro = pass === "metadata" ? "Each item below is the NAMES of one file, message or note: title, folder path, labels and sender." : "Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.";
   const lines = items.map((item) => JSON.stringify(pass === "metadata" ? { i: item.i, names: item.material } : { i: item.i, document: item.material }));
@@ -17282,8 +17650,8 @@ var init_sniffer = __esm(() => {
     `{"verdicts":[{"i":1,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map((c) => `"${c}"`).join("|")},"ownRecord":true|false,"privateKind":${SNIFFER_PRIVATE_KINDS.map((c) => `"${c}"`).join("|")},"confidence":<number from 0 to 1>}]}`
   ].join(`
 `);
-  SNIFFER_PROMPT_VERSION = `p-${createHash10("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash10("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash11("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash11("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 });
 
 // src/workers/file-extraction/job-names.ts
@@ -19600,7 +19968,7 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", DASHBOARD_SUPPORTED_SOURCES;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -19670,6 +20038,153 @@ var init_source_dashboard = __esm(() => {
       }
     ]
   };
+  DASHBOARD_SUPPORTED_SOURCES = [
+    {
+      source_id: "gmail.email",
+      primary_corpus_id: "internal.email",
+      corpus_source_ids: ["gmail.email"],
+      ingestion_ledger_source_id: "email",
+      label: "Gmail",
+      provider: "gmail",
+      family: "email",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "gmail" }
+    },
+    {
+      source_id: "google_drive.docs",
+      primary_corpus_id: "internal.drive.docs",
+      corpus_source_ids: ["google_drive.docs"],
+      ingestion_ledger_source_id: "google_drive",
+      label: "Google Drive",
+      provider: "google_drive",
+      family: "file",
+      trust_domain: "internal",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "google-drive" }
+    },
+    {
+      source_id: "dropbox.files",
+      primary_corpus_id: "secure_local.dropbox.files",
+      corpus_source_ids: ["dropbox.files"],
+      ingestion_ledger_source_id: "dropbox",
+      label: "Dropbox",
+      provider: "dropbox",
+      family: "file",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "dropbox" }
+    },
+    {
+      source_id: "local.files",
+      primary_corpus_id: "secure_local.local.files",
+      corpus_source_ids: ["local.files"],
+      ingestion_ledger_source_id: "local_files",
+      label: "Files on this computer",
+      provider: "local_files",
+      family: "file",
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      sync_name: { mid: "your files", start: "Your files", plural: true },
+      connect_action: { kind: "this_computer", source: "local.files" }
+    },
+    {
+      source_id: "archive.imports",
+      primary_corpus_id: "secure_local.archive.email",
+      corpus_source_ids: ["archive.imports"],
+      owns_corpus: (corpus) => corpus.corpus_id.split(".")[1] === "archive" || isArchiveProvider(corpus.provider),
+      ingestion_ledger_source_id: "archive_imports",
+      label: "Archives",
+      provider: ARCHIVE_NEUTRAL_PROVIDER,
+      family: "email",
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    },
+    {
+      source_id: "x.bookmarks",
+      primary_corpus_id: "internal.x.bookmarks",
+      corpus_source_ids: ["x.bookmarks"],
+      ingestion_ledger_source_id: "x",
+      label: "X bookmarks",
+      provider: "x",
+      family: "x",
+      trust_domain: "internal",
+      connect_kind: "oauth",
+      content_arrives_extracted: true,
+      connect_action: { kind: "oauth", source: "x" }
+    },
+    {
+      source_id: "telegram.messages",
+      primary_corpus_id: "internal.telegram.messages",
+      corpus_source_ids: ["telegram.messages"],
+      ingestion_ledger_source_id: "telegram",
+      label: "Telegram",
+      provider: "telegram",
+      family: "chat",
+      trust_domain: "internal",
+      connect_kind: "pairing",
+      content_arrives_extracted: true,
+      raw_message_copies: "messages",
+      connect_action: {
+        kind: "guided_session",
+        source: "telegram",
+        instructions: [
+          "Telegram pairs with a phone-number login on this computer.",
+          "Ask your agent to start Telegram pairing; this card updates once the login completes."
+        ]
+      }
+    },
+    {
+      source_id: "whatsapp.personal.messages",
+      primary_corpus_id: "secure_local.whatsapp.messages",
+      corpus_source_ids: ["whatsapp.personal.messages"],
+      ingestion_ledger_source_id: "whatsapp",
+      label: "WhatsApp",
+      provider: "whatsapp_personal",
+      family: "chat",
+      trust_domain: "secure_local",
+      connect_kind: "pairing",
+      content_arrives_extracted: true,
+      raw_message_copies: "messages_and_media",
+      connect_action: {
+        kind: "guided_session",
+        source: "whatsapp",
+        instructions: [
+          "WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).",
+          WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
+          "Ask your agent to start WhatsApp pairing; this card updates once the scan completes."
+        ]
+      }
+    },
+    {
+      source_id: "readwise.library",
+      primary_corpus_id: "internal.readwise.library",
+      corpus_source_ids: ["readwise.library"],
+      ingestion_ledger_source_id: "readwise",
+      label: "Readwise",
+      provider: "readwise",
+      family: "readwise",
+      trust_domain: "internal",
+      connect_kind: "api_token",
+      content_arrives_extracted: true,
+      connect_action: { kind: "api_key", source: "readwise" }
+    },
+    ...archiveSourceCards().map((card) => ({
+      source_id: card.id,
+      primary_corpus_id: card.id,
+      corpus_source_ids: [],
+      owns_corpus: () => false,
+      ingestion_ledger_source_id: card.id,
+      public_source_id: ARCHIVE_IMPORTS_CARD_ID,
+      label: card.label,
+      provider: card.formats[0].provider,
+      family: card.formats[0].family,
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    }))
+  ];
 });
 
 // src/workers/google-connectors/gmail-live-control.ts
@@ -23761,7 +24276,7 @@ function asRecord7(value) {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
@@ -27712,7 +28227,7 @@ init_consult_transport_zkapi();
 
 // src/core/consult-gate.ts
 init_owner_config_read();
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 import { existsSync as existsSync18, readFileSync as readFileSync30, statSync as statSync19 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 import { basename as basename7, dirname as dirname29, join as join38 } from "node:path";
@@ -27963,7 +28478,7 @@ function verifiedPackFile(path, sha256) {
     if (statSync19(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync30(path);
-    return createHash11("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
+    return createHash12("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
@@ -33341,7 +33856,7 @@ function sourceWatchRouteFromToolContext(context2) {
   const ownerSeed = context2.requesterSenderId?.trim() || context2.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId2 = `owner:${createHash12("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId2 = `owner:${createHash13("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context2.deliveryContext?.channel || context2.messageChannel)?.trim().toLowerCase();
   const target = context2.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

@@ -54,6 +54,9 @@ function archives() {
     remove() { reached.push('remove'); return { ok: true }; },
     stop() { reached.push('stop'); return { ok: true }; },
     sourceImports: () => [],
+    archiveSources: () => [],
+    cardViews: () => [],
+    presentCards: () => ({}),
     approveRemoval() { reached.push('remove'); return { ok: true }; },
     // The agent's side only records requests (archive-import-agent.test.ts); nothing here reaches it.
     agent: {} as ArchiveImportDashboard['agent'],
@@ -249,6 +252,51 @@ describe('the panel\'s archive tools', () => {
       { path: '/dashboard/archive-import/remove', grade: 'local' },
       { path: '/dashboard/archive-import/stop', grade: 'local' },
     ]);
+  });
+});
+
+describe('a source\'s own Import an archive names its card', () => {
+  test('the panel forwards source_id with a chosen key, and refuses it alone or with a request', async () => {
+    const bodies: unknown[] = [];
+    const tools = createDashboardPanelTools({
+      workerFetch: async (request: Request) => {
+        bodies.push(await request.json());
+        return Response.json({ ok: true, status: 'started', archive_id: ARCHIVE_ID, name: 'result.json' });
+      },
+    } as unknown as Parameters<typeof createDashboardPanelTools>[0]);
+    const context = { origin: ORIGIN, localSession: true };
+    expect((await tools.call(ARCHIVE_APPROVE_TOOL_NAME, { key: '/Users/someone/result.json', source_id: 'telegram.messages' }, context)).isError).toBeUndefined();
+    expect(bodies).toEqual([{ key: '/Users/someone/result.json', source_id: 'telegram.messages' }]);
+    for (const args of [{ source_id: 'telegram.messages' }, { request_id: REQUEST_ID, source_id: 'telegram.messages' }, { key: '/Users/someone/result.json', source_id: 7 }]) {
+      const refused = await tools.call(ARCHIVE_APPROVE_TOOL_NAME, args, context);
+      expect(refused.isError).toBe(true);
+    }
+    expect(bodies).toHaveLength(1);
+  });
+
+  test('the route hands the card to the approval; with a request id it is refused', async () => {
+    const seen: unknown[] = [];
+    const { dashboard } = archives();
+    dashboard.approve = async (request) => { seen.push(request); return { ok: true, status: 'started', archive_id: ARCHIVE_ID, name: 'result.json' }; };
+    const worker = createEmailSourceWorker({
+      sourceDashboard: { sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})), archiveImports: dashboard },
+    });
+    const fetch = withWorkerBearerAuth((request: Request) => worker.fetch(request), {
+      authToken: TOKEN,
+      now: () => Date.parse('2026-10-23T12:00:00.000Z'),
+      launchTickets: new DashboardLaunchTickets({ now: () => Date.parse('2026-10-23T12:00:00.000Z') }),
+    });
+    const mint = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
+    recordRequestPeer(mint, '127.0.0.1');
+    const minted = await fetch(mint);
+    const session = { Cookie: cookieOf(minted), 'X-Olympus-CSRF': ((await minted.json()) as { csrf_token: string }).csrf_token };
+    const approve = (body: unknown) => fetch(new Request(`${ORIGIN}/dashboard/archive-import/approve`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: ORIGIN, ...session }, body: JSON.stringify(body),
+    }));
+    expect((await approve({ key: '/Users/someone/result.json', source_id: 'telegram.messages' })).status).toBe(200);
+    expect(seen).toEqual([{ key: '/Users/someone/result.json', sourceId: 'telegram.messages' }]);
+    expect((await approve({ request_id: REQUEST_ID, source_id: 'telegram.messages' })).status).toBe(400);
+    expect(seen).toHaveLength(1);
   });
 });
 

@@ -129,7 +129,7 @@ export function entryFor(fx: LegFixture, over: Partial<ComputerArchiveEntry> = {
  * given, and the Needs you items are rebuilt from it the way the engine derives them (the same sentences, from the product's own words).
  */
 export function dashboardAnswer(archives: ComputerArchiveEntry[], requests: ComputerArchivesMeta['requests'] = [], privateModel: ComputerArchivesMeta['privateModel'] = 'ready') {
-  // The card around the list is a preview state: with nothing imported "Import an archive" is the row's own button, with something imported it moves into the ⋯ menu.
+  // The card around the list is a preview state: "Import another archive" is the Other archives section's own button, with or without archives imported.
   const result = previewDashboardToolResult(archives.length === 0 ? 'archives-none' : 'archives-imported', false) as { _meta: Record<string, any>; structuredContent: Record<string, any> };
   const meta = { ...result._meta[COMPUTER_META_KEY], archives: { sourceId: 'archive.imports', archives, requests, privateModel } };
   const fix = { tool: 'olympus_dashboard', args: {}, href: 'https://olympusplugin.ai/open/archives/', openHref: true };

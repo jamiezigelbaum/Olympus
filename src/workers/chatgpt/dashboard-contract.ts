@@ -531,6 +531,31 @@ export interface ComputerDashboardMeta {
    * Archives row lists only the imports that stay under Archives.
    */
   sourceImports?: ComputerSourceImportsMeta[];
+  /**
+   * The sources an archive can be imported into from their own card (owner,
+   * 2026-10-25): each card here gets Import an archive in its ⋯ menu, which
+   * opens the picker for that source's exports only and approves with
+   * `source_id`. A source is listed once its connector reads archives as
+   * inputs (archive-import/source-targets.ts); every other export goes
+   * through Import another archive, under Other archives.
+   */
+  archiveSources?: ComputerArchiveSourceMeta[];
+  /**
+   * Each import-only source's card (Reflect, Roam: a format no live connector
+   * reads names its card in the format registry): the imports of its formats,
+   * listed as the Archives row lists its own, with Remove. `sourceId` is the card.
+   */
+  archiveCards?: ComputerArchivesMeta[];
+}
+
+/** One source whose card imports its own exports. */
+export interface ComputerArchiveSourceMeta {
+  /** The dashboard row (the source's card), and the `source_id` the approval names. */
+  sourceId: string;
+  /** What the owner calls the source ("Telegram"). */
+  label: string;
+  /** The picker's opening sentence: the exports this source reads, and how to choose one. */
+  intro: string;
 }
 
 /** The imports that joined one source, and the history that source's inputs cover. */
@@ -744,7 +769,9 @@ export const ARCHIVE_BROWSE_TOOL_NAME = 'olympus_archive_browse';
  * `confirm_account` (an export of a source that cannot be matched to the
  * connected account) imports nothing: the call is made again with
  * `{confirm_account: true}` to add it to that account, or `{keep_apart: true}`
- * to keep it under Archives.
+ * to keep it under Archives. With `{key, source_id}` (a source's own Import an
+ * archive, `ComputerArchiveSourceMeta`) only that source's formats are
+ * recognised: any other export is refused with a route to Import another archive.
  */
 export const ARCHIVE_APPROVE_TOOL_NAME = 'olympus_archive_approve';
 /** Computer only: decline an agent's request (to import or to remove), or dismiss a finished check (`{request_id}`). */

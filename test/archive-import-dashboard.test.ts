@@ -520,7 +520,7 @@ describe('what the imports need from the person', () => {
       expect(archives.connection.label).not.toBe('no archives imported yet');
       const row = buildChatGptDashboardViewModel(card, {}).sources.find((source) => source.id === 'archive.imports')!;
       expect(row.status).toBe('Needs you');
-      expect([row.primary, ...(row.menu ?? [])].filter(Boolean).map((fix) => fix!.label)).not.toContain('Import an archive');
+      expect([row.primary, ...(row.menu ?? [])].filter(Boolean).map((fix) => fix!.label)).not.toContain('Import another archive');
     });
   }
 });

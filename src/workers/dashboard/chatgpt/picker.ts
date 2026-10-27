@@ -131,6 +131,8 @@ export interface ChatGptArchivePicked {
   name: string;
   status: 'started' | 'checking' | 'already_imported';
   archiveName?: string;
+  /** The source a started import joined (its name), when it joined one. */
+  source?: { label: string };
 }
 
 /** The folder picked in pick mode: its opaque key and its name, for the caller's own view only. */
@@ -152,8 +154,10 @@ export interface ChatGptPicker {
    * Computer only: browse this computer's files and folders and import one.
    * The picker asks the engine to approve the choice and stays open on a
    * refusal, saying why; `done` gets what came of an approval, or null on Back.
+   * `sourceId` (a source's own Import an archive) asks the engine to take only
+   * that source's exports.
    */
-  pickArchive(words: ChatGptArchivePickWords, done: (picked: ChatGptArchivePicked | null) => void): void;
+  pickArchive(words: ChatGptArchivePickWords, done: (picked: ChatGptArchivePicked | null) => void, sourceId?: string): void;
   active(): boolean;
   view(): HTMLElement;
   afterRender(): void;
@@ -389,12 +393,12 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     openScope(sourceId, sourceLabel, words.title, '', '', undefined, { words, taken: taken.slice(), done });
   }
 
-  function pickArchive(words: ChatGptArchivePickWords, done: (picked: ChatGptArchivePicked | null) => void): void {
+  function pickArchive(words: ChatGptArchivePickWords, done: (picked: ChatGptArchivePicked | null) => void, sourceId?: string): void {
     stopTimer();
     session++;
     if (kit.compact()) kit.fullscreen();
     // Back hands null to `done`; an approval hands what came of it (approveArchive).
-    openScope('', words.source, words.title, '', '', undefined, { words, taken: [], done: () => done(null), archive: { done } });
+    openScope('', words.source, words.title, '', '', undefined, { words, taken: [], done: () => done(null), archive: { done, sourceId: sourceId || '' } });
   }
 
   /** Archive mode: the files and folders of this computer, one choice, approved by the engine. */
@@ -432,7 +436,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       p.saveAccess = access && typeof access.message === 'string' && access.message ? access : null;
       kit.render('picker:archive-error');
     };
-    kit.call(T.archiveApprove, answer ? { key, ...answer } : { key }).then((result) => {
+    // A source's own Import an archive names the source on every approval, the account answer's included.
+    const only = p.pick.archive.sourceId ? { source_id: p.pick.archive.sourceId } : {};
+    kit.call(T.archiveApprove, answer ? { key, ...only, ...answer } : { key, ...only }).then((result) => {
       if (mine !== session || !p) return;
       const content = result && result.structuredContent && typeof result.structuredContent === 'object' ? result.structuredContent : null;
       const status = content ? content.status : '';
@@ -452,6 +458,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       const done = p.pick.archive.done;
       const picked: ChatGptArchivePicked = { name: typeof content.name === 'string' && content.name ? content.name : name, status };
       if (typeof content.archive_name === 'string' && content.archive_name) picked.archiveName = content.archive_name;
+      if (status === 'started' && content.source && typeof content.source.label === 'string' && content.source.label) picked.source = { label: content.source.label };
       stopTimer();
       p = null;
       session++;
