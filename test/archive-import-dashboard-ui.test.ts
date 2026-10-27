@@ -176,7 +176,14 @@ async function mount(serve: Serve, options: {
         });
       } else if (message.method === 'tools/call') {
         const handler = serve[message.params.name];
-        if (handler) reply(message.id, handler(message.params.arguments ?? {}));
+        // A handler may answer later, or fail (a JSON-RPC error), as the host does.
+        const id = message.id;
+        if (handler) {
+          Promise.resolve().then(() => handler(message.params.arguments ?? {})).then(
+            (result) => reply(id, result),
+            (error) => setTimeout(() => dispatch({ jsonrpc: '2.0', id, error: { code: -32000, message: String(error) } }), 0),
+          );
+        }
       } else if (message.method === 'ui/open-link') reply(message.id, {});
       else if (message.method === 'olympus/upload-file') {
         const progress = (loaded: number) => dispatch({ jsonrpc: '2.0', method: 'olympus/upload-progress', params: { request: message.id, loaded } });
@@ -531,6 +538,50 @@ describe('Import an archive on the computer', () => {
     // What arrived is deleted.
     expect(page.calls(ARCHIVE_UPLOAD_CANCEL_TOOL_NAME)).toHaveLength(1);
     expect(page.doc.querySelector('[data-key="picker:drop:zone"]')).not.toBeNull();
+  });
+
+  test('the first file that fails stops the others at once and says why, without waiting for them', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+    }, {
+      // a.json fails; b.json never answers until the page aborts it (a long file, or one waiting for disk space).
+      upload: (params) => (params.path.endsWith('a.json') ? { ok: false, message: 'This computer has no space left for it.' } : new Promise(() => undefined)),
+    });
+    page.button(A.importAction).click();
+    await settle();
+    choose(page, 'picker:drop:folder-input', [{ path: 'Export/a.json' }, { path: 'Export/b.json' }]);
+    await until(() => page.doc.querySelector('[role="alert"]') !== null);
+    expect(page.doc.querySelector('[role="alert"]')!.textContent).toBe('This computer has no space left for it.');
+    expect(page.aborts()).toEqual([page.uploads()[0]!.upload_id]);
+    expect(page.calls(ARCHIVE_UPLOAD_CANCEL_TOOL_NAME)).toHaveLength(1);
+  });
+
+  test('a start that fails after it was cancelled leaves the next upload alone', async () => {
+    let failFirst: (error: Error) => void = () => undefined;
+    let starts = 0;
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+      [ARCHIVE_UPLOAD_START_TOOL_NAME]: () => {
+        starts += 1;
+        if (starts === 1) return new Promise((_, reject) => { failFirst = reject; });
+        return { content: [{ type: 'text', text: 'Ready.' }], structuredContent: { status: 'started', upload_id: previewArchiveUploads.start() } };
+      },
+    }, { upload: () => new Promise(() => undefined) });
+    page.button(A.importAction).click();
+    await settle();
+    choose(page, 'picker:drop:file-input', [{ path: 'first.mbox' }]);
+    await until(() => starts === 1);
+    page.button(A.pick.cancel).click();
+    await settle();
+    choose(page, 'picker:drop:file-input', [{ path: 'second.mbox' }]);
+    await until(() => page.uploads().length > 0);
+    failFirst(new Error('timed out'));
+    await settle(50);
+    expect(page.doc.querySelector('[role="alert"]')).toBeNull();
+    expect(page.aborts()).toEqual([]);
+    expect(page.doc.querySelector('[role="progressbar"]')).not.toBeNull();
   });
 
   test('an upload that cannot reach Olympus says it stopped and nothing was imported', async () => {

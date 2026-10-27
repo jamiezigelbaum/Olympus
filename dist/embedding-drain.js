@@ -41290,7 +41290,10 @@ function chatgptPickerProgram(kit) {
         drop.poll = setInterval(() => pollUpload(mine, attempt), UPLOAD_STATUS_MS);
         kit.render("picker:drop:cancel");
         sendAll(mine, attempt, content.upload_id, items);
-      }, () => dropFail(""));
+      }, () => {
+        if (dropLive(mine, attempt))
+          dropFail("");
+      });
     }, () => {
       if (dropLive(mine, attempt))
         dropFail(drop.words.unreadable);
@@ -41338,8 +41341,11 @@ function chatgptPickerProgram(kit) {
       }).then((outcome) => {
         delete inflight[at];
         if (!outcome || outcome.ok !== true) {
-          if (!failure)
-            failure = outcome || {};
+          if (failure)
+            return;
+          failure = outcome || {};
+          if (!failure.cancelled && dropLive(mine, attempt))
+            dropFail(typeof failure.message === "string" ? failure.message : "");
           return;
         }
         finished += item.file.size || 0;
@@ -41355,14 +41361,8 @@ function chatgptPickerProgram(kit) {
     for (let lane = 0;lane < Math.min(UPLOAD_PARALLEL, items.length); lane++)
       lanes.push(worker());
     Promise.all(lanes).then(() => {
-      if (!dropLive(mine, attempt))
+      if (!dropLive(mine, attempt) || failure)
         return;
-      if (failure) {
-        if (failure.cancelled)
-          return;
-        dropFail(typeof failure.message === "string" ? failure.message : "");
-        return;
-      }
       if (drop.paint) {
         clearTimeout(drop.paint);
         drop.paint = null;

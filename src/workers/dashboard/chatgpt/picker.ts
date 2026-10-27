@@ -644,7 +644,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
         drop.poll = setInterval(() => pollUpload(mine, attempt), UPLOAD_STATUS_MS);
         kit.render('picker:drop:cancel');
         sendAll(mine, attempt, content.upload_id, items);
-      }, () => dropFail(''));
+      }, () => {
+        if (dropLive(mine, attempt)) dropFail('');
+      });
     }, () => {
       if (dropLive(mine, attempt)) dropFail(drop.words.unreadable);
     });
@@ -689,7 +691,11 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       }).then((outcome: Any) => {
         delete inflight[at];
         if (!outcome || outcome.ok !== true) {
-          if (!failure) failure = outcome || {};
+          if (failure) return undefined;
+          failure = outcome || {};
+          // The first failure ends the drop now (dropFail aborts the other files): they never copy on for nothing, or
+          // wait for disk space with the failure unsaid.
+          if (!failure.cancelled && dropLive(mine, attempt)) dropFail(typeof failure.message === 'string' ? failure.message : '');
           return undefined;
         }
         finished += item.file.size || 0;
@@ -704,12 +710,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const lanes: Array<Promise<void>> = [];
     for (let lane = 0; lane < Math.min(UPLOAD_PARALLEL, items.length); lane++) lanes.push(worker());
     Promise.all(lanes).then(() => {
-      if (!dropLive(mine, attempt)) return;
-      if (failure) {
-        if (failure.cancelled) return;
-        dropFail(typeof failure.message === 'string' ? failure.message : '');
-        return;
-      }
+      if (!dropLive(mine, attempt) || failure) return;
       if (drop.paint) {
         clearTimeout(drop.paint);
         drop.paint = null;
