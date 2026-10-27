@@ -17,7 +17,8 @@ import { secretLocationsPathForStore } from '../src/workers/classification/tier-
 import { createArchiveImportDashboard } from '../src/workers/archive-import/dashboard.ts';
 import { createArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
 import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
-import { createLocalFilesArchiveBrowser } from '../src/workers/local-files/scope-browser.ts';
+import { createArchivePathResolver } from '../src/workers/local-files/scope-browser.ts';
+import { approveStaged } from './support/stage-upload.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { reflectJson, reflectNotes } from './support/archive-fixtures-reflect.ts';
 import { roamJson, roamPages } from './support/archive-fixtures-roam.ts';
@@ -50,8 +51,8 @@ function fixture() {
   });
   const volumes = new VolumeResolver({ platform: 'darwin', home, readMounts: () => '/dev/disk3s1s1 on / (apfs, local)', diskutilPlist: () => undefined });
   const permissions = new MacPermissions({ home, memoryPath: join(base, 'folder-access.json'), platform: 'linux' });
-  const browser = createLocalFilesArchiveBrowser({ volumes, home, permissions });
-  const dashboard = createArchiveImportDashboard({ runtime, browser, refreshScheduler: () => undefined, privateModel: () => 'ready', home });
+  const resolver = createArchivePathResolver({ volumes, home, permissions });
+  const dashboard = createArchiveImportDashboard({ runtime, resolver, refreshScheduler: () => undefined, privateModel: () => 'ready', home });
   cleanups.push(() => dashboard.close());
   const write = (name: string, text: string): string => {
     const path = join(exports, name);
@@ -102,7 +103,7 @@ describe('an import-only source\'s card', () => {
     expect(reflect.intro).not.toContain('mail export');
 
     const path = f.write('Reflect notes.json', reflectJson(reflectNotes(3)));
-    const started = await f.dashboard.approve({ key: path, sourceId: 'reflect.archive' });
+    const started = await approveStaged(f.dashboard, path, { sourceId: 'reflect.archive' });
     expect(started).toMatchObject({ ok: true, status: 'started', source: { id: 'reflect.archive', label: 'Reflect' } });
     // Stored under Archives as before (no source target), one account scope of its own.
     const record = f.runtime.state.list()[0]!;
@@ -128,7 +129,7 @@ describe('an import-only source\'s card', () => {
     ];
     const ids: string[] = [];
     for (const path of files) {
-      const started = await f.dashboard.approve({ key: path });
+      const started = await approveStaged(f.dashboard, path);
       if (!started.ok || started.status !== 'started') throw new Error(`not started: ${path}`);
       ids.push(started.archive_id);
     }
@@ -144,14 +145,14 @@ describe('an import-only source\'s card', () => {
   test('Import another archive sends the same file to the same card', async () => {
     const f = fixture();
     const path = f.write('Reflect notes.json', reflectJson(reflectNotes(2)));
-    const started = await f.dashboard.approve({ key: path });
+    const started = await approveStaged(f.dashboard, path);
     expect(started).toMatchObject({ ok: true, status: 'started', source: { id: 'reflect.archive', label: 'Reflect' } });
     expect(f.dashboard.cardViews().find((entry) => entry.sourceId === 'reflect.archive')!.archives).toHaveLength(1);
   });
 
   test('another kind of export is refused from the card, and nothing is recorded', async () => {
     const f = fixture();
-    const refused = await f.dashboard.approve({ key: f.mbox('Takeout.mbox'), sourceId: 'roam.archive' });
+    const refused = await approveStaged(f.dashboard, f.mbox('Takeout.mbox'), { sourceId: 'roam.archive' });
     expect(refused).toMatchObject({ ok: false, code: 'not_this_source' });
     expect(refused.ok ? '' : refused.message).toContain("This isn't a Roam export.");
     expect(f.runtime.state.list()).toEqual([]);
@@ -160,7 +161,7 @@ describe('an import-only source\'s card', () => {
   test('an import of the card keeps its Remove, as under Archives', async () => {
     const f = fixture();
     const path = f.write('Reflect notes.json', reflectJson(reflectNotes(2)));
-    const started = await f.dashboard.approve({ key: path, sourceId: 'reflect.archive' });
+    const started = await approveStaged(f.dashboard, path, { sourceId: 'reflect.archive' });
     if (!started.ok || started.status !== 'started') throw new Error('not started');
     expect(f.dashboard.remove(started.archive_id)).toEqual({ ok: true });
     expect(f.runtime.state.get(started.archive_id)?.status).toBe('removing');
@@ -168,7 +169,7 @@ describe('an import-only source\'s card', () => {
 
   test('the card reads its own imports on the dashboard; Other archives does not count them', async () => {
     const f = fixture();
-    await f.dashboard.approve({ key: f.write('Reflect notes.json', reflectJson(reflectNotes(2))) });
+    await approveStaged(f.dashboard, f.write('Reflect notes.json', reflectJson(reflectNotes(2))));
     const view = buildSourceDashboardViewModel({
       sourceIndexStatus: { kind: 'source_index_status', generated_at: new Date().toISOString(), corpora: [], policy: {} } as never,
       sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
