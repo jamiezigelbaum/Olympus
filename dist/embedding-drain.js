@@ -19599,9 +19599,6 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
-// src/core/child-item-id.ts
-var CHILD_ITEM_ID_SEPARATOR = "#child:";
-
 // src/workers/connector-store/child-visibility.ts
 function parentIdentityOf(child) {
   const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
