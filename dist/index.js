@@ -5477,8 +5477,8 @@ function readsJsonExport(entry, format) {
   return notesJsonFormat(entry) === format;
 }
 function looksLikeEnex(head) {
-  const text2 = archiveHeadText(head).replace(/^\ufeff/, "");
-  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text2);
+  const text = archiveHeadText(head).replace(/^\ufeff/, "");
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text);
   return start !== null && (start[1] ?? start[2]) === "en-export";
 }
 function isTelegramJsonHead(head) {

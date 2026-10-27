@@ -26913,12 +26913,12 @@ var init_secrets_disposition = __esm(() => {
 });
 
 // src/core/child-item-id.ts
-function childProviderItemId(parentProviderItemId, key2) {
+function childProviderItemId(parentProviderItemId, key) {
   if (!parentProviderItemId)
     throw new TypeError("A child needs its parent's id.");
-  if (!key2 || key2.includes(CHILD_ITEM_ID_SEPARATOR))
+  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
     throw new TypeError("A child's key must be plain text.");
-  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key2}`;
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
 }
 var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
@@ -138120,9 +138120,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(main, sourceImportList(joined));
     add(row, main);
     const controls = el("div", "source-actions");
-    const context2 = { id, label: String(source.label || id) };
+    const context = { id, label: String(source.label || id) };
     const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary, id);
-    const isSync = (entry) => !!entry && entry.tool === config2.syncTool;
+    const isSync = (entry) => !!entry && entry.tool === config.syncTool;
     if (fix && !(checking && isSync(fix)))
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context));
     if (checking)
@@ -138140,9 +138140,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const unpair = unpairEntry(id);
     if (unpair)
       menu.push(unpair);
-    const own3 = archiveSourceMeta(id);
-    const ownImport = (entry) => !!entry && entry.archiveImport === true && entry.archiveSource === (own3 && own3.sourceId);
-    if (own3 && !ownImport(fix) && !menu.some(ownImport)) {
+    const own = archiveSourceMeta(id);
+    const ownImport = (entry) => !!entry && entry.archiveImport === true && entry.archiveSource === (own && own.sourceId);
+    if (own && !ownImport(fix) && !menu.some(ownImport)) {
       const destructive = menu.findIndex((entry) => !!entry && entry.destructive === true);
       menu.splice(destructive < 0 ? menu.length : destructive, 0, { label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own.sourceId });
     }
@@ -138172,10 +138172,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return row;
   }
   function archiveGroups() {
-    const meta2 = state.computerMeta;
-    if (!onComputer() || !meta2)
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta)
       return [];
-    const groups = [meta2.archives].concat(Array.isArray(meta2.archiveCards) ? meta2.archiveCards : []);
+    const groups = [meta.archives].concat(Array.isArray(meta.archiveCards) ? meta.archiveCards : []);
     return groups.filter((group) => !!group && typeof group === "object" && typeof group.sourceId === "string" && Array.isArray(group.archives) && Array.isArray(group.requests));
   }
   function archivesMeta(id) {
@@ -138186,8 +138186,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return fix;
     if (archives && archives === state.computerMeta.archives && fix.label === H.copy.archives.importAction)
       return { label: fix.label, archiveImport: true };
-    const own3 = archiveSourceMeta(id);
-    return own3 && fix.label === H.copy.archives.sourceImport.action ? { label: fix.label, archiveImport: true, archiveSource: own3.sourceId } : fix;
+    const own = archiveSourceMeta(id);
+    return own && fix.label === H.copy.archives.sourceImport.action ? { label: fix.label, archiveImport: true, archiveSource: own.sourceId } : fix;
   }
   function archiveNeedFix(item) {
     const fix = item && item.fix;
@@ -138273,7 +138273,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
     if (joined.some((group) => !!group && !archiveSetting(group) && Array.isArray(group.imports) && group.imports.some((entry) => !!entry && entry.status === "importing")))
       return true;
-    return archiveGroups().some((meta2) => !archiveSetting(meta2) && meta2.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta2.requests.some((entry) => !!entry && entry.status === "checking"));
+    return archiveGroups().some((meta) => !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking"));
   }
   function startArchivePick(key, sourceId) {
     supersede();
@@ -138312,7 +138312,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const asked = args && args.request_id && meta && Array.isArray(meta.requests) ? meta.requests.filter((entry) => entry && entry.id === args.request_id)[0] : null;
       const target = asked ? asked.archiveId : args && args.archive_id;
       const removed = archiveGroups().flatMap((group) => group.archives).filter((entry) => entry && entry.id === target)[0] || null;
-      return removed && typeof removed.name === "string" ? fill2(A.removing, { name: removed.name }) : "";
+      return removed && typeof removed.name === "string" ? fill(A.removing, { name: removed.name }) : "";
     }
     if (name === H.archiveStopTool) {
       const groups = state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
@@ -163774,10 +163774,10 @@ var init_connector9 = __esm(() => {
 });
 
 // src/workers/archive-import/xml-stream.ts
-function decodeXmlEntities2(text4) {
-  if (!text4.includes("&"))
-    return text4;
-  return text4.replace(/&(#x[0-9a-fA-F]{1,6}|#[0-9]{1,7}|[A-Za-z][A-Za-z0-9._-]*);/g, (whole, ref) => {
+function decodeXmlEntities2(text) {
+  if (!text.includes("&"))
+    return text;
+  return text.replace(/&(#x[0-9a-fA-F]{1,6}|#[0-9]{1,7}|[A-Za-z][A-Za-z0-9._-]*);/g, (whole, ref) => {
     if (ref.startsWith("#")) {
       const code = ref[1] === "x" ? Number.parseInt(ref.slice(2), 16) : Number.parseInt(ref.slice(1), 10);
       return Number.isInteger(code) && code > 0 && code <= 1114111 && !(code >= 55296 && code <= 57343) ? String.fromCodePoint(code) : whole;
@@ -163786,21 +163786,21 @@ function decodeXmlEntities2(text4) {
   });
 }
 function parseXmlTag(inner) {
-  let text4 = inner;
-  const empty = text4.endsWith("/");
+  let text = inner;
+  const empty = text.endsWith("/");
   if (empty)
-    text4 = text4.slice(0, -1);
-  const nameMatch = /^[^\s/>]+/.exec(text4);
+    text = text.slice(0, -1);
+  const nameMatch = /^[^\s/>]+/.exec(text);
   if (!nameMatch || !NAME.test(nameMatch[0]))
     return;
   const attributes = {};
   let at = nameMatch[0].length;
   ATTRIBUTE.lastIndex = at;
   for (;; ) {
-    if (/^\s*$/.test(text4.slice(at)))
+    if (/^\s*$/.test(text.slice(at)))
       break;
     ATTRIBUTE.lastIndex = at;
-    const match = ATTRIBUTE.exec(text4);
+    const match = ATTRIBUTE.exec(text);
     if (!match)
       return;
     attributes[match[1]] = decodeXmlEntities2(match[2] ?? match[3] ?? "");
@@ -163853,8 +163853,8 @@ class XmlStreamReader {
   get offset() {
     return this.chunkStart + this.index;
   }
-  fail(code, message2, offset = this.offset) {
-    throw new XmlStreamError(code, message2, offset);
+  fail(code, message, offset = this.offset) {
+    throw new XmlStreamError(code, message, offset);
   }
   fill() {
     if (this.index < this.chunk.length)
@@ -163895,35 +163895,35 @@ class XmlStreamReader {
     return this.building[this.building.length - 1];
   }
   flushText() {
-    const open6 = this.top();
-    if (!open6 || open6.pending.length === 0)
+    const open = this.top();
+    if (!open || open.pending.length === 0)
       return;
-    const total = open6.pending.reduce((sum2, part) => sum2 + part.length, 0);
+    const total = open.pending.reduce((sum, part) => sum + part.length, 0);
     const bytes = new Uint8Array(total);
     let at = 0;
-    for (const part of open6.pending) {
+    for (const part of open.pending) {
       bytes.set(part, at);
       at += part.length;
     }
-    const text4 = this.decoder.decode(bytes);
-    open6.element.children.push(open6.pendingCdata ? text4 : decodeXmlEntities2(text4));
-    open6.pending = [];
+    const text = this.decoder.decode(bytes);
+    open.element.children.push(open.pendingCdata ? text : decodeXmlEntities2(text));
+    open.pending = [];
   }
   keepText(bytes, cdata) {
     if (!this.keeping() || bytes.length === 0)
       return;
-    const open6 = this.top();
-    if (!open6)
+    const open = this.top();
+    if (!open)
       return;
-    if (open6.pending.length > 0 && open6.pendingCdata !== cdata)
+    if (open.pending.length > 0 && open.pendingCdata !== cdata)
       this.flushText();
-    open6.pendingCdata = cdata;
-    open6.pending.push(bytes.slice());
+    open.pendingCdata = cdata;
+    open.pending.push(bytes.slice());
     this.count(bytes.length);
   }
   inRange() {
-    const open6 = this.top();
-    return !!open6 && this.rangeNames.has(open6.element.name);
+    const open = this.top();
+    return !!open && this.rangeNames.has(open.element.name);
   }
   matchRecord() {
     return this.recordPaths.find((path) => path.length === this.stack.length && path.every((name, at) => name === this.stack[at]));
@@ -163951,10 +163951,10 @@ class XmlStreamReader {
           if (end > this.index) {
             const piece = chunk.subarray(this.index, end);
             if (this.inRange() && this.keeping()) {
-              const open6 = this.top();
+              const open = this.top();
               if (piece.includes(AMP))
-                open6.element.rangeEntities = true;
-              this.addRange(open6, this.offset, piece.length);
+                open.element.rangeEntities = true;
+              this.addRange(open, this.offset, piece.length);
             } else if (this.keeping()) {
               this.keepText(piece, false);
             } else if (!this.inRecord() && this.stack.length === 0 && this.rootSeenName !== undefined) {
@@ -164069,34 +164069,34 @@ class XmlStreamReader {
           break;
         }
         case "cdata": {
-          let view3 = chunk.subarray(this.index);
+          let view = chunk.subarray(this.index);
           let base = this.offset;
           if (this.cdataHeld.length > 0) {
-            const joined = new Uint8Array(this.cdataHeld.length + view3.length);
+            const joined = new Uint8Array(this.cdataHeld.length + view.length);
             joined.set(this.cdataHeld, 0);
-            joined.set(view3, this.cdataHeld.length);
+            joined.set(view, this.cdataHeld.length);
             base -= this.cdataHeld.length;
-            view3 = joined;
+            view = joined;
             this.cdataHeld = [];
           }
           let close = -1;
-          for (let at = 0;at + 2 < view3.length; at += 1) {
-            if (view3[at] === 93 && view3[at + 1] === 93 && view3[at + 2] === GT2) {
+          for (let at = 0;at + 2 < view.length; at += 1) {
+            if (view[at] === 93 && view[at + 1] === 93 && view[at + 2] === GT2) {
               close = at;
               break;
             }
           }
           if (close >= 0) {
-            this.cdataText(view3.subarray(0, close), base);
-            this.index = chunk.length - (view3.length - (close + 3));
+            this.cdataText(view.subarray(0, close), base);
+            this.index = chunk.length - (view.length - (close + 3));
             this.mode = "text";
             break;
           }
           let tail = 0;
-          while (tail < 2 && tail < view3.length && view3[view3.length - 1 - tail] === 93)
+          while (tail < 2 && tail < view.length && view[view.length - 1 - tail] === 93)
             tail += 1;
-          this.cdataText(view3.subarray(0, view3.length - tail), base);
-          this.cdataHeld = Array.from(view3.subarray(view3.length - tail));
+          this.cdataText(view.subarray(0, view.length - tail), base);
+          this.cdataHeld = Array.from(view.subarray(view.length - tail));
           this.index = chunk.length;
           break;
         }
@@ -164115,8 +164115,8 @@ class XmlStreamReader {
     }
     this.keepText(bytes, true);
   }
-  addRange(open6, start, length) {
-    const ranges = open6.element.ranges;
+  addRange(open, start, length) {
+    const ranges = open.element.ranges;
     const last = ranges[ranges.length - 1];
     if (last && last.end === start) {
       last.end = start + length;
@@ -164138,17 +164138,17 @@ class XmlStreamReader {
     this.mode = "text";
     const tagStart = this.markupStart;
     const tagEnd = this.offset;
-    const text4 = this.decoder.decode(bytes);
-    if (text4.startsWith("/")) {
-      const name = text4.slice(1).trim();
+    const text = this.decoder.decode(bytes);
+    if (text.startsWith("/")) {
+      const name = text.slice(1).trim();
       const expected = this.stack[this.stack.length - 1];
       if (expected === undefined || name !== expected)
         this.fail("invalid_xml", "An end tag does not close the open element.", tagStart);
       return this.close(tagEnd, tagEnd - tagStart);
     }
-    if (text4.startsWith("!"))
+    if (text.startsWith("!"))
       this.fail("invalid_xml", "Markup that is not XML.", tagStart);
-    const parsed = parseXmlTag(text4);
+    const parsed = parseXmlTag(text);
     if (!parsed)
       this.fail("invalid_xml", "A tag that is not XML.", tagStart);
     if (this.stack.length === 0) {
@@ -164190,12 +164190,12 @@ class XmlStreamReader {
       this.flushText();
       this.count(tagBytes);
     }
-    const depth2 = this.stack.length;
+    const depth = this.stack.length;
     this.stack.pop();
     if (!this.inRecord())
       return;
     if (this.discarding) {
-      if (depth2 !== this.recordDepth)
+      if (depth !== this.recordDepth)
         return;
       this.recordDepth = -1;
       this.discarding = false;
@@ -164203,7 +164203,7 @@ class XmlStreamReader {
       return { kind: "oversize", path: this.recordPath, start: this.recordStart, end };
     }
     const done = this.building.pop();
-    if (depth2 !== this.recordDepth || !done)
+    if (depth !== this.recordDepth || !done)
       return;
     this.recordDepth = -1;
     this.building = [];
@@ -164228,8 +164228,8 @@ var init_xml_stream = __esm(() => {
   XmlStreamError = class XmlStreamError extends Error {
     code;
     offset;
-    constructor(code, message2, offset) {
-      super(message2);
+    constructor(code, message, offset) {
+      super(message);
       this.name = "XmlStreamError";
       this.code = code;
       this.offset = offset;
@@ -164247,7 +164247,7 @@ function attribute3(attributes, name) {
 }
 function enmlToText(enml) {
   const lines = [];
-  let line2 = "";
+  let line = "";
   let pre = 0;
   let silent = 0;
   let crypt = 0;
@@ -164255,16 +164255,16 @@ function enmlToText(enml) {
   let media = 0;
   let cell = 0;
   const endLine = () => {
-    const done = pre > 0 ? line2.replace(/\s+$/, "") : line2.replace(/[ \t ]+/g, " ").trim();
+    const done = pre > 0 ? line.replace(/\s+$/, "") : line.replace(/[ \t ]+/g, " ").trim();
     if (done !== "")
       lines.push(done);
-    line2 = "";
+    line = "";
     cell = 0;
   };
-  const write = (text4) => {
-    if (silent > 0 || crypt > 0 || text4 === "")
+  const write = (text) => {
+    if (silent > 0 || crypt > 0 || text === "")
       return;
-    line2 += pre > 0 ? text4 : text4.replace(/\s+/g, " ");
+    line += pre > 0 ? text : text.replace(/\s+/g, " ");
   };
   for (const match of enml.matchAll(TOKEN)) {
     const token = match[0];
@@ -164333,7 +164333,7 @@ function enmlToText(enml) {
       continue;
     }
     if (BLOCKS.has(name)) {
-      if (line2.trim() !== "")
+      if (line.trim() !== "")
         endLine();
       if (name === "pre" && !empty)
         pre += 1;
@@ -164394,11 +164394,11 @@ var init_enml = __esm(() => {
 
 // src/workers/archive-import/evernote/connector.ts
 import { createHash as createHash84 } from "node:crypto";
-function sha25611(value2) {
-  return createHash84("sha256").update(value2).digest("hex");
+function sha25611(value) {
+  return createHash84("sha256").update(value).digest("hex");
 }
-function enexTime(value2) {
-  const match = /^\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\s*$/.exec(value2 ?? "");
+function enexTime(value) {
+  const match = /^\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\s*$/.exec(value ?? "");
   if (!match)
     return;
   const ms = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]));
@@ -164423,8 +164423,8 @@ function decodeBase64Range(reader, start, end, cap) {
   let count = 0;
   let padded = false;
   outer:
-    for (let at2 = start;at2 < end; at2 += FETCH_SLICE_BYTES) {
-      const slice = reader.readAt(at2, Math.min(FETCH_SLICE_BYTES, end - at2));
+    for (let at = start;at < end; at += FETCH_SLICE_BYTES) {
+      const slice = reader.readAt(at, Math.min(FETCH_SLICE_BYTES, end - at));
       for (let index = 0;index < slice.length; index += 1) {
         const byte = slice[index];
         if (byte === 32 || byte === 10 || byte === 13 || byte === 9)
@@ -164433,10 +164433,10 @@ function decodeBase64Range(reader, start, end, cap) {
           padded = true;
           continue;
         }
-        const value2 = BASE64[byte];
-        if (value2 < 0 || padded)
+        const value = BASE64[byte];
+        if (value < 0 || padded)
           throw new FileExtractionSourceError("source_content_unavailable");
-        quad = quad << 6 | value2;
+        quad = quad << 6 | value;
         count += 1;
         if (count === 4) {
           if (push(quad >> 16 & 255) || push(quad >> 8 & 255) || push(quad & 255))
@@ -164472,22 +164472,22 @@ function createEvernoteArchiveConnector(input) {
   const byteBudget = Math.max(1, input.maxBytesPerListing ?? EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING);
   const tag = input.manifestSha256.slice(0, 16);
   const prefix = `${EVERNOTE_CURSOR_PREFIX}${tag}:`;
-  const DONE2 = { file: input.files.length, offset: 0, from: 0, done: true };
-  const startOfFile = (file) => file >= input.files.length ? DONE2 : { file, offset: 0, from: 0, done: false };
-  const invalid4 = (message2) => new ArchiveImportStoppedError("resume_point_invalid", message2);
-  const encode3 = (cursor) => cursor.done ? `${prefix}done` : `${prefix}${cursor.file}:${cursor.offset}:${cursor.from}`;
-  const decode3 = (text4) => {
-    if (!text4)
+  const DONE = { file: input.files.length, offset: 0, from: 0, done: true };
+  const startOfFile = (file) => file >= input.files.length ? DONE : { file, offset: 0, from: 0, done: false };
+  const invalid = (message) => new ArchiveImportStoppedError("resume_point_invalid", message);
+  const encode = (cursor) => cursor.done ? `${prefix}done` : `${prefix}${cursor.file}:${cursor.offset}:${cursor.from}`;
+  const decode = (text) => {
+    if (!text)
       return startOfFile(0);
-    if (!text4.startsWith(prefix))
-      throw invalid4("The resume point belongs to other files than this archive's.");
-    const rest = text4.slice(prefix.length);
+    if (!text.startsWith(prefix))
+      throw invalid("The resume point belongs to other files than this archive's.");
+    const rest = text.slice(prefix.length);
     if (rest === "done")
-      return DONE2;
+      return DONE;
     const parts = rest.split(":").map(Number);
     const [file, offset, from] = parts;
     if (parts.length !== 3 || !parts.every((part) => Number.isSafeInteger(part) && part >= 0) || file >= input.files.length || offset > input.files[file].version.size) {
-      throw invalid4("The resume point is not a position in this archive.");
+      throw invalid("The resume point is not a position in this archive.");
     }
     return { file, offset, from, done: false };
   };
@@ -164521,16 +164521,16 @@ function createEvernoteArchiveConnector(input) {
     const items = [parent];
     const positions = [start];
     resources.forEach((resource, index) => {
-      const data2 = xmlChild(resource, "data");
-      const mime2 = textOf(xmlChild(resource, "mime")) || "application/octet-stream";
+      const data = xmlChild(resource, "data");
+      const mime = textOf(xmlChild(resource, "mime")) || "application/octet-stream";
       const attributes = xmlChild(resource, "resource-attributes");
       const fileName = textOf(attributes ? xmlChild(attributes, "file-name") : undefined);
-      const name = (fileName || `Attachment ${index + 1} (${mime2})`).slice(0, 500);
-      const ranges = data2?.ranges ?? [];
-      const encoding = (data2?.attributes["encoding"] ?? "base64").toLowerCase();
-      const readable = data2 !== undefined && encoding === "base64" && data2.rangeEntities !== true && ranges.length === 1;
+      const name = (fileName || `Attachment ${index + 1} (${mime})`).slice(0, 500);
+      const ranges = data?.ranges ?? [];
+      const encoding = (data?.attributes["encoding"] ?? "base64").toLowerCase();
+      const readable = data !== undefined && encoding === "base64" && data.rangeEntities !== true && ranges.length === 1;
       const range = readable ? ranges[0] : undefined;
-      const locator = range ? `${prefix}${fileIndex}:${range.start}:${range.end}:${Buffer.from(mime2).toString("base64url")}` : `${prefix}none`;
+      const locator = range ? `${prefix}${fileIndex}:${range.start}:${range.end}:${Buffer.from(mime).toString("base64url")}` : `${prefix}none`;
       const providerItemId = childProviderItemId(parent.identity.providerItemId, `resource-${index}`);
       const authoredAt = parent.metadata["authoredAt"];
       items.push({
@@ -164543,12 +164543,12 @@ function createEvernoteArchiveConnector(input) {
           sourceVersion: sha25611(`${locator}\x00${name}`).slice(0, 32),
           parent: { providerItemId: parent.identity.providerItemId, localItemId: parent.identity.localItemId }
         },
-        mimeType: mime2,
+        mimeType: mime,
         content: { kind: "metadata_only" },
         metadata: Object.freeze({
           title: name,
           name,
-          mimeType: mime2,
+          mimeType: mime,
           ...typeof authoredAt === "string" ? { authoredAt } : {}
         }),
         fetchedAt: new Date().toISOString(),
@@ -164566,8 +164566,8 @@ function createEvernoteArchiveConnector(input) {
     let reader;
     try {
       reader = input.root.openFile(file.relPath, { expected: file.version });
-    } catch (error2) {
-      throw archiveStopFromScopeError(error2, file.relPath);
+    } catch (error) {
+      throw archiveStopFromScopeError(error, file.relPath);
     }
     try {
       const savedAt = new Date(Number.isFinite(file.version.mtimeMs) ? file.version.mtimeMs : 0).toISOString();
@@ -164575,8 +164575,8 @@ function createEvernoteArchiveConnector(input) {
         let head;
         try {
           head = reader.readAt(0, ARCHIVE_PROBE_HEAD_BYTES);
-        } catch (error2) {
-          throw archiveStopFromScopeError(error2, file.relPath);
+        } catch (error) {
+          throw archiveStopFromScopeError(error, file.relPath);
         }
         if (!looksLikeEnex(head)) {
           report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", cursor.file, 0);
@@ -164596,7 +164596,7 @@ function createEvernoteArchiveConnector(input) {
         },
         unread: (count) => inner.unread(count)
       };
-      const xml2 = new XmlStreamReader(watched, {
+      const xml = new XmlStreamReader(watched, {
         recordPaths: [RECORD_PATH],
         rangeElements: ["data", "recognition"],
         maxRecordBytes: NOTE_MAX_RECORD_BYTES,
@@ -164611,29 +164611,29 @@ function createEvernoteArchiveConnector(input) {
         }
         let event;
         try {
-          event = xml2.next();
-        } catch (error2) {
-          if (error2 instanceof ReadInterrupted2) {
+          event = xml.next();
+        } catch (error) {
+          if (error instanceof ReadInterrupted2) {
             segment.stopped = true;
             break;
           }
-          if (error2 instanceof XmlStreamError) {
-            report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, error2.offset);
+          if (error instanceof XmlStreamError) {
+            report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, error.offset);
             segment.next = startOfFile(cursor.file + 1);
             break;
           }
-          throw archiveStopFromScopeError(error2, file.relPath);
+          throw archiveStopFromScopeError(error, file.relPath);
         } finally {
           segment.bytes = inner.position - cursor.offset;
         }
         if (!event) {
-          if (xml2.rootName === undefined)
+          if (xml.rootName === undefined)
             report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, 0);
           segment.next = startOfFile(cursor.file + 1);
           break;
         }
         if (cursor.offset > 0 && event.start < cursor.offset)
-          throw invalid4("Nothing starts where this import was to resume.");
+          throw invalid("Nothing starts where this import was to resume.");
         segment.consumed += 1;
         if (event.kind === "oversize") {
           report(NOTE_FINDINGS.tooLarge, "gap", cursor.file, event.start);
@@ -164654,8 +164654,8 @@ function createEvernoteArchiveConnector(input) {
       }
       try {
         reader.assertCurrent();
-      } catch (error2) {
-        throw archiveStopFromScopeError(error2, file.relPath);
+      } catch (error) {
+        throw archiveStopFromScopeError(error, file.relPath);
       }
       return segment;
     } finally {
@@ -164675,7 +164675,7 @@ function createEvernoteArchiveConnector(input) {
     const file = input.files[fileIndex];
     if (!file || !(start < end) || end > file.version.size)
       throw new FileExtractionSourceError("source_version_gone");
-    const mime2 = Buffer.from(match[5], "base64url").toString("utf8") || "application/octet-stream";
+    const mime = Buffer.from(match[5], "base64url").toString("utf8") || "application/octet-stream";
     const reader = input.root.openFile(file.relPath, { expected: file.version });
     try {
       const bytes = decodeBase64Range(reader, start, end, cap);
@@ -164690,8 +164690,8 @@ function createEvernoteArchiveConnector(input) {
           providerItemId,
           localItemId
         },
-        mimeType: mime2,
-        content: { kind: "bytes", mimeType: mime2, bytes },
+        mimeType: mime,
+        content: { kind: "bytes", mimeType: mime, bytes },
         metadata: Object.freeze({}),
         fetchedAt: new Date().toISOString()
       };
@@ -164705,27 +164705,27 @@ function createEvernoteArchiveConnector(input) {
     async authenticate() {},
     listItems(options) {
       return async function* () {
-        let cursor = decode3(options?.cursor);
+        let cursor = decode(options?.cursor);
         if (cursor.done) {
-          yield { items: [], nextCursor: encode3(DONE2), done: true };
+          yield { items: [], nextCursor: encode(DONE), done: true };
           return;
         }
         const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
         let emitted = 0;
         let bytesRead = 0;
-        let page2 = [];
+        let page = [];
         let positions = [];
         let units = 0;
         let pending = false;
         const send = (done) => {
           input.reportPosition?.({ fileIndex: Math.min(cursor.file, input.files.length - 1), offset: cursor.done ? input.files[input.files.length - 1]?.version.size ?? 0 : cursor.offset });
           input.reportItemPositions?.(positions);
-          return done ? { items: page2, nextCursor: encode3(DONE2), done: true } : { items: page2, nextCursor: encode3(cursor), done: false };
+          return done ? { items: page, nextCursor: encode(DONE), done: true } : { items: page, nextCursor: encode(cursor), done: false };
         };
         for (;; ) {
-          const room = Math.max(1, Math.min(pageSizeDefault, limit - emitted) - page2.length);
-          const segment = readSegment(cursor, room, Math.max(1, byteBudget - bytesRead), bytesRead > 0 || emitted > 0 || page2.length > 0 || units > 0);
-          page2.push(...segment.items);
+          const room = Math.max(1, Math.min(pageSizeDefault, limit - emitted) - page.length);
+          const segment = readSegment(cursor, room, Math.max(1, byteBudget - bytesRead), bytesRead > 0 || emitted > 0 || page.length > 0 || units > 0);
+          page.push(...segment.items);
           positions.push(...segment.positions);
           cursor = segment.next;
           units += segment.consumed;
@@ -164742,11 +164742,11 @@ function createEvernoteArchiveConnector(input) {
             return;
           }
           const spentBudget = segment.budgetHit || bytesRead >= byteBudget;
-          const full = page2.length >= Math.min(pageSizeDefault, limit - emitted);
+          const full = page.length >= Math.min(pageSizeDefault, limit - emitted);
           if (full || spentBudget || units >= EVERNOTE_MAX_UNITS_PER_PAGE) {
             yield send(false);
-            emitted += page2.length;
-            page2 = [];
+            emitted += page.length;
+            page = [];
             positions = [];
             units = 0;
             pending = false;
@@ -165658,18 +165658,18 @@ function createArchiveImportDashboard(options) {
       console.warn(`[archive-import] the scheduler was not woken: ${error instanceof Error ? error.name : "error"}`);
     }
   };
-  const refusal3 = (code, message2) => ({ ok: false, code, message: message2 });
-  const joinedSource = (record5) => {
-    const card = cardOf(record5);
+  const refusal = (code, message) => ({ ok: false, code, message });
+  const joinedSource = (record) => {
+    const card = cardOf(record);
     if (card)
       return { source: { id: card.id, label: named(card.label) } };
-    if (!record5.target)
+    if (!record.target)
       return {};
     const target = options.runtime.targets.forSource(record.target.source_id);
     return { source: { id: target?.cardId ?? record.target.source_id, label: named(target?.label ?? record.target.source_id) } };
   };
-  const cardOf = (record5) => record5.target ? undefined : archiveSourceCardOf(record5.format);
-  const underArchives = (record5) => !record5.target && cardOf(record5) === undefined;
+  const cardOf = (record) => record.target ? undefined : archiveSourceCardOf(record.format);
+  const underArchives = (record) => !record.target && cardOf(record) === undefined;
   const sourceFormats = (target) => target.formats.flatMap((formatId) => {
     const format = getArchiveFormat(formatId);
     return format ? [format] : [];
@@ -166092,30 +166092,30 @@ function createArchiveImportDashboard(options) {
     let records;
     try {
       records = state.list();
-    } catch (error2) {
-      return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error2), file: shown(state.path), list: "archives" } };
+    } catch (error) {
+      return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error), file: shown(state.path), list: "archives" } };
     }
     const apart = records.filter(shownHere);
     let asked;
     try {
       asked = requests.list();
-    } catch (error2) {
+    } catch (error) {
       return {
         ...base,
         archives: apart.map(entryOf),
         requests: [],
-        unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path), list: "requests" }
+        unreadable: { reason: recordUnreadableReason(error), file: shown(requests.path), list: "requests" }
       };
     }
     const setting = scheduling();
     return {
       ...base,
       archives: apart.map(entryOf),
-      requests: askingNow(asked, records).map((request) => requestOf2(request, records)),
+      requests: askingNow(asked, records).map((request) => requestOf(request, records)),
       ...setting !== "on" && records.length > 0 ? { notRunning: setting } : {}
     };
   };
-  const api2 = {
+  const api = {
     agent: createArchiveImportAgent({ state, requests, view: () => listing(() => true) }),
     async browse(request) {
       const page = await options.browser.browse(request);
@@ -166248,13 +166248,13 @@ function createArchiveImportDashboard(options) {
       const model = options.privateModel();
       const setting = scheduling();
       return archiveSourceCards().map((card) => {
-        const own3 = records.filter((record5) => cardOf(record5)?.id === card.id);
+        const own = records.filter((record) => cardOf(record)?.id === card.id);
         return {
           sourceId: card.id,
           privateModel: model,
-          archives: own3.map(entryOf),
+          archives: own.map(entryOf),
           requests: [],
-          ...setting !== "on" && own3.length > 0 ? { notRunning: setting } : {}
+          ...setting !== "on" && own.length > 0 ? { notRunning: setting } : {}
         };
       });
     },
@@ -166262,23 +166262,23 @@ function createArchiveImportDashboard(options) {
       let records;
       try {
         records = state.list();
-      } catch (error2) {
-        const unreadable = { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: recordUnreadableReason(error2) }] };
+      } catch (error) {
+        const unreadable = { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: recordUnreadableReason(error) }] };
         return Object.fromEntries(archiveSourceCards().map((card) => [card.id, unreadable]));
       }
       const setting = scheduling();
       return Object.fromEntries(archiveSourceCards().map((card) => {
-        const own3 = records.filter((record5) => cardOf(record5)?.id === card.id);
+        const own = records.filter((record) => cardOf(record)?.id === card.id);
         const attention = [];
-        for (const record5 of own3) {
-          if (record5.status === "stopped" && record5.stop?.code !== "stopped_by_owner")
-            attention.push({ kind: "stopped", id: record5.archive_id, name: record5.label });
-          else if (record5.status !== "removing" && !counts(record5))
-            attention.push({ kind: "counts", id: record5.archive_id, name: record5.label });
+        for (const record of own) {
+          if (record.status === "stopped" && record.stop?.code !== "stopped_by_owner")
+            attention.push({ kind: "stopped", id: record.archive_id, name: record.label });
+          else if (record.status !== "removing" && !counts(record))
+            attention.push({ kind: "counts", id: record.archive_id, name: record.label });
         }
         return [card.id, {
-          archives: own3.length,
-          importing: setting === "on" && own3.some((record5) => record5.status === "importing" || record5.status === "removing"),
+          archives: own.length,
+          importing: setting === "on" && own.some((record) => record.status === "importing" || record.status === "removing"),
           ...attention.length > 0 ? { attention } : {}
         }];
       }));
@@ -166304,11 +166304,11 @@ function createArchiveImportDashboard(options) {
       } catch (error) {
         attention.push({ kind: "unreadable", reason: recordUnreadableReason(error) });
       }
-      for (const record5 of records) {
-        if (cardOf(record5))
+      for (const record of records) {
+        if (cardOf(record))
           continue;
-        if (record5.status === "stopped" && record5.stop?.code !== "stopped_by_owner")
-          attention.push({ kind: "stopped", id: record5.archive_id, name: record5.label });
+        if (record.status === "stopped" && record.stop?.code !== "stopped_by_owner")
+          attention.push({ kind: "stopped", id: record.archive_id, name: record.label });
       }
       const setting = scheduling();
       if (setting !== "on" && stuck(records))
@@ -166319,9 +166319,9 @@ function createArchiveImportDashboard(options) {
           continue;
         const tally = counts(record);
         if (tally)
-          counted.set(record5.archive_id, tally);
-        else if (!cardOf(record5))
-          attention.push({ kind: "counts", id: record5.archive_id, name: record5.label });
+          counted.set(record.archive_id, tally);
+        else if (!cardOf(record))
+          attention.push({ kind: "counts", id: record.archive_id, name: record.label });
       }
       for (const request of askingNow(asked, records)) {
         if (request.origin !== "agent" || request.status !== "pending")
@@ -167724,8 +167724,8 @@ function labelFor2(mountPoint) {
     return "Macintosh HD";
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
-function shortHash(value2) {
-  return createHash86("sha256").update(value2).digest("hex").slice(0, 16);
+function shortHash(value) {
+  return createHash86("sha256").update(value).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -170133,7 +170133,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash87("sha256").update(`${accessToken}
+    const key = createHash87("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key);
     if (known !== undefined)
@@ -170191,8 +170191,8 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash87("sha256").update(session.token).digest("hex");
-    const known = verified.get(key2);
+    const key = createHash87("sha256").update(session.token).digest("hex");
+    const known = verified.get(key);
     if (known)
       return known;
     try {
@@ -172303,8 +172303,8 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     const credentials = dashboardCredentialProblem(scrubbed, degraded);
     const imports = scrubbed.connection.imports_attention ?? [];
     const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) || imports.length > 0 || definition.public_source_id !== undefined ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
-    const progress2 = measured?.progress;
-    let status = connecting || credentials || missingScope(scrubbed) ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress2);
+    const progress = measured?.progress;
+    let status = connecting || credentials || missingScope(scrubbed) ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress);
     if (imports.length > 0)
       status = "Needs you";
     else if (!connecting && !credentials && (status === "Needs you" || status === "Failing") && progress && progress.stage !== "done" && !progress.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress).fix)) {
@@ -172317,7 +172317,7 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync, options.remote !== undefined),
     index
   })).sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index).map(({ entry }) => entry);
-  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").flatMap(({ definition, card, actionKind, connecting, progress: progress2, sync }) => card.connection.imports_attention?.length ? card.connection.imports_attention.map(importAttentionItem) : [attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync)]).filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index);
+  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").flatMap(({ definition, card, actionKind, connecting, progress, sync }) => card.connection.imports_attention?.length ? card.connection.imports_attention.map(importAttentionItem) : [attentionItem(definition, card, actionKind, degraded, connecting, progress, sync)]).filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index);
   if (embedding.state === "failed") {
     needsYou.push({
       id: "model:embedding",
@@ -185950,16 +185950,6 @@ var init_redirect_uris = __esm(() => {
 });
 
 // src/workers/remote-oauth/handler.ts
-var exports_handler = {};
-__export(exports_handler, {
-  withRemoteOAuthRoutes: () => withRemoteOAuthRoutes,
-  protectedResourceMetadata: () => protectedResourceMetadata,
-  isRemoteOAuthRequest: () => isRemoteOAuthRequest,
-  createRemoteOAuthHandler: () => createRemoteOAuthHandler,
-  authorizationServerMetadata: () => authorizationServerMetadata,
-  REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
-  CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
-});
 import { createHash as createHash88, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
@@ -186311,8 +186301,8 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash2 = sha25612(code);
-      const issued = codes.get(hash2);
+      const hash = sha25612(code);
+      const issued = codes.get(hash);
       if (!issued || issued.expiresAt <= now()) {
         codes.delete(hash);
         return oauthError(400, "invalid_grant", "The authorization code is invalid or expired.");
@@ -186329,7 +186319,7 @@ function createRemoteOAuthHandler(options) {
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
       if (!constantTimeEqual(createHash88("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
-        codes.delete(hash2);
+        codes.delete(hash);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
       if (resource !== undefined && resource !== issued.resource) {
@@ -186594,8 +186584,8 @@ function constantTimeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
-function sha25612(value2) {
-  return createHash88("sha256").update(value2).digest("hex");
+function sha25612(value) {
+  return createHash88("sha256").update(value).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -188662,17 +188652,6 @@ var init_remote_private_part = __esm(() => {
 });
 
 // src/workers/remote-openapi.ts
-var exports_remote_openapi = {};
-__export(exports_remote_openapi, {
-  withRemoteOpenApiRoutes: () => withRemoteOpenApiRoutes,
-  isRemoteOpenApiRequest: () => isRemoteOpenApiRequest,
-  createRemoteOpenApiHandler: () => createRemoteOpenApiHandler,
-  buildRemoteOpenApiSpec: () => buildRemoteOpenApiSpec,
-  REMOTE_OPENAPI_TOOLS_PREFIX: () => REMOTE_OPENAPI_TOOLS_PREFIX,
-  REMOTE_OPENAPI_SPEC_PATH: () => REMOTE_OPENAPI_SPEC_PATH,
-  REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
-  REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
-});
 import { createHash as createHash89 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
@@ -188689,8 +188668,8 @@ function createRemoteOpenApiHandler(options) {
   const currentSpec = () => {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
-      const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash89("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      const text = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
+      spec = { serverUrl, text, etag: `"${createHash89("sha256").update(text).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -189051,12 +189030,6 @@ var init_handoff = __esm(() => {
 });
 
 // src/workers/chatgpt/setup-backend.ts
-var exports_setup_backend = {};
-__export(exports_setup_backend, {
-  readChatGptPrivacySettings: () => readChatGptPrivacySettings,
-  privacyRevision: () => privacyRevision,
-  createChatGptSetupBackend: () => createChatGptSetupBackend
-});
 import { createHash as createHash90 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
@@ -189081,8 +189054,8 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest4 = createHash90("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
-  return `prv1.${digest4.slice(0, 32)}`;
+  const digest = createHash90("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  return `prv1.${digest.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
