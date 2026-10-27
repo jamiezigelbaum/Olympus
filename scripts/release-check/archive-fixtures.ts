@@ -21,10 +21,13 @@ import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { reflectNoteRecord } from '../../test/support/archive-fixtures-reflect.ts';
 import { roamJson, roamJsonZip } from '../../test/support/archive-fixtures-roam.ts';
+import { RECO_INDEX, enexExport, pngBytes } from '../../test/support/archive-fixtures-evernote.ts';
 import {
   telegramChat, telegramFullExport, telegramJson, telegramPhoto, telegramService, telegramText,
 } from '../../test/support/archive-fixtures-telegram.ts';
 import { chatText, chatZip, mediaNames, notice, type SyntheticMessage } from '../../test/support/archive-fixtures-whatsapp.ts';
+import { apiMessage as gmailApiMessage, mail as gmailMail, takeoutMbox } from '../../test/support/archive-fixtures-gmail.ts';
+import type { GmailMessage } from '../../src/workers/google-connectors/gmail.ts';
 
 /** The folder under the home directory the archives are written to, and the picker's first press. */
 export const FIXTURE_FOLDER = 'rc-archives';
@@ -552,6 +555,57 @@ export const ROAM_FIXTURES: ArchiveFixtureSpec = {
   small: roamSmall,
 };
 
+// ---------------------------------------------------------------------------
+// Evernote export (.enex)
+
+const EVERNOTE_FORMAT = 'evernote-enex';
+const EVERNOTE_LABEL = 'Evernote export (.enex)';
+const EVERNOTE_CITATION = 'Evernote';
+
+/**
+ * An Evernote notebook export, one .enex file: four readable notes (one with a photo attached, which is an item of its own, read later,
+ * with Evernote's own reading of it; one with encrypted text, which is never read, so the rest of the note is kept and the part is said
+ * not to be read), and one note with nothing in it, which is left out. The empty note is the earliest by date and one note was updated
+ * after the last was written, so a date range that counts either is wrong. The word is in note bodies only, never in a title.
+ */
+function evernoteSmall(token: string): BuiltArchive {
+  const text = enexExport([
+    { title: 'Untitled', enml: '', created: '20240530T120000Z', updated: '20240530T120000Z' },
+    { title: 'Lake trip packing list', enml: `<div>Packing for the lake trip: tent, stove, two jackets.</div><div>The reference word for this trip is ${token}.</div>`,
+      tags: ['trips'], created: '20240603T120000Z', updated: '20240603T123000Z' },
+    { title: 'Whiteboard from Tuesday', enml: `<div>Same reference word as before: ${token}.</div><en-media type="image/png" hash="00"/>`,
+      created: '20240604T120000Z', updated: '20240604T120000Z',
+      resources: [{ mime: 'image/png', fileName: 'whiteboard.png', bytes: pngBytes(7), recognition: RECO_INDEX }] },
+    { title: 'Lentil soup', enml: '<ul><li>onion</li><li>carrot</li><li>lentils</li></ul><div>Forty minutes.</div>', created: '20240606T120000Z', updated: '20240720T120000Z' },
+    { title: 'Locker', enml: '<div>The harbour walk is flat and takes an hour.</div><en-crypt cipher="AES" length="128">U2FtcGxlQ2lwaGVy</en-crypt>',
+      created: '20240609T120000Z', updated: '20240609T130000Z' },
+  ]);
+  return {
+    bytes: bytesOf(text),
+    expect: {
+      label: EVERNOTE_LABEL,
+      citationLabel: EVERNOTE_CITATION,
+      family: 'note',
+      // Four notes and the photo, an item of its own.
+      messages: 5,
+      earliest: '2024-06-03',
+      latest: '2024-06-09',
+      notImported: [{ kind: 'note_content_unsupported', count: 1 }],
+      howRead: [{ kind: 'note_empty', count: 1 }],
+    },
+  };
+}
+
+export const EVERNOTE_FIXTURES: ArchiveFixtureSpec = {
+  format: EVERNOTE_FORMAT,
+  label: EVERNOTE_LABEL,
+  citationLabel: EVERNOTE_CITATION,
+  extension: '.enex',
+  family: 'note',
+  provider: 'evernote',
+  small: evernoteSmall,
+};
+
 /** Every format the leg imports by the agent path. A later format adds its entry here. */
 export const ARCHIVE_FORMATS: Readonly<Record<string, ArchiveFixtureSpec>> = {
   mbox: MBOX_FIXTURES,
@@ -559,10 +613,82 @@ export const ARCHIVE_FORMATS: Readonly<Record<string, ArchiveFixtureSpec>> = {
   [WHATSAPP_FORMAT]: WHATSAPP_FIXTURES,
   [REFLECT_FORMAT]: REFLECT_FIXTURES,
   [ROAM_FORMAT]: ROAM_FIXTURES,
+  [EVERNOTE_FORMAT]: EVERNOTE_FIXTURES,
 };
 
 /** The formats whose exports are imported beside their source's live input as well. */
 export const BESIDE_LIVE_FORMATS: readonly string[] = Object.keys(ARCHIVE_FORMATS).filter((format) => ARCHIVE_FORMATS[format]!.besideLive !== undefined);
+
+// ---------------------------------------------------------------------------
+// Import beside live: a source's own export joins its live data
+// (docs/design/archive-live-one-dataset.md). The case's data, run through the product by
+// test/release-check-source-input-fixtures.test.ts. The leg runs it on a machine once the mbox entry's `besideLive` names a seed hook
+// that connects a synthetic Gmail live input (archive-live-seeds.ts); until then it is not in ARCHIVE_FORMATS.
+
+/** An import beside live: the export, the live records the source already holds, and what the source must hold after. */
+export interface SourceInputFixtureSpec {
+  /** The id the report uses. */
+  id: string;
+  /** The archive format the export is. */
+  format: string;
+  /** The source it joins, and its card's label. */
+  sourceId: string;
+  label: string;
+  extension: string;
+  /** The export, and the live input's records (in the live reader's own shape) that are there before it is imported. */
+  small(token: string): BuiltArchive & {
+    live: readonly GmailMessage[];
+    /** What the import's own run counts: what it read, and how much of that the source already held. */
+    read: number;
+    alreadyThere: number;
+    /** The distinct items the source holds after the import: each once. */
+    items: number;
+  };
+}
+
+/**
+ * A Google Takeout mbox of the owner's Gmail account: four messages Takeout names by Gmail's id, one of them already held live and
+ * one held live by name only (older than the content window), and one Spam message left out. The token is in the bodies of the two
+ * messages only the export brings in full.
+ */
+function gmailTakeoutSmall(token: string): ReturnType<SourceInputFixtureSpec['small']> {
+  const held = gmailMail(101, { date: '2024-03-04T12:00:00.000Z', body: 'Packing for the lake trip: tent, stove, two jackets.' });
+  const namesOnly = gmailMail(102, { date: '2015-03-05T12:00:00.000Z', body: `The old ferry timetable, kept since 2015. Reference word: ${token}.` });
+  const fresh = gmailMail(103, { date: '2024-03-06T12:00:00.000Z', body: `Lentil soup: onion, carrot, lentils. Same reference word: ${token}.` });
+  const other = gmailMail(104, { date: '2024-03-09T12:00:00.000Z', body: 'The photos are in the shared album.' });
+  const spam = gmailMail(105, { date: '2023-12-30T12:00:00.000Z', labels: ['Spam', 'Unread'], labelIds: ['SPAM', 'UNREAD'], body: 'A synthetic offer.' });
+  return {
+    bytes: bytesOf(takeoutMbox([held, namesOnly, fresh, other, spam])),
+    live: [gmailApiMessage(held), gmailApiMessage(namesOnly)],
+    read: 4,
+    alreadyThere: 2,
+    items: 4,
+    expect: {
+      label: 'Gmail',
+      citationLabel: 'Gmail',
+      family: 'email',
+      messages: 4,
+      earliest: '2015-03-05',
+      latest: '2024-03-09',
+      notImported: [{ kind: 'spam_or_trash', count: 1 }],
+      howRead: [],
+    },
+  };
+}
+
+export const GMAIL_TAKEOUT_FIXTURES: SourceInputFixtureSpec = {
+  id: 'gmail_takeout',
+  format: 'mbox',
+  sourceId: 'gmail.email',
+  label: 'Gmail',
+  extension: '.mbox',
+  small: gmailTakeoutSmall,
+};
+
+/** Every import-beside-live case. A later source adds its entry here. */
+export const SOURCE_INPUT_FORMATS: Readonly<Record<string, SourceInputFixtureSpec>> = {
+  [GMAIL_TAKEOUT_FIXTURES.id]: GMAIL_TAKEOUT_FIXTURES,
+};
 
 /** The format the picker, model-off and changed-file stages use. */
 export const STRESS_FORMAT = 'mbox';

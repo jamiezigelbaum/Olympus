@@ -49,7 +49,7 @@ import {
 import { tryHoldFileFlock } from './data-owner-lock.ts';
 import { isFileLeaseSidecarName, withFileLeaseSync } from './file-lease.ts';
 import { decideAccountLayout, hasFolderLayout, isInsideAccountFolder, legacyPinFor, storageAccountForCorpus } from './source-placement.ts';
-import { compareProviderAccounts, mergeProviderAccountIds } from './provider-account-identity.ts';
+import { compareAddressToRecord, compareProviderAccounts, mergeProviderAccountIds, namesAccountByAddressOnly } from './provider-account-identity.ts';
 import { placedStoreHolder } from './store-identity.ts';
 import {
   DEFAULT_ACCOUNT_SLOT,
@@ -447,9 +447,14 @@ export function resolveImportAccount(
     return { match: written === 'same' ? 'same' : 'new', account };
   }
   const recorded = entry.provider_account_hash;
-  const match = recorded !== undefined && importAccountId !== undefined
-    ? compareProviderAccounts(recorded, importAccountId)
+  // An import known by an address alone proves nothing by itself: the export's author wrote the address, and an
+  // address can pass to another account. It joins only an entry that carries that address, at the owner's yes; an
+  // entry that carries another address is another account.
+  const addressOnly = importAccountId !== undefined && namesAccountByAddressOnly(importAccountId);
+  const compared = recorded !== undefined && importAccountId !== undefined
+    ? addressOnly ? compareAddressToRecord(recorded, importAccountId) : compareProviderAccounts(recorded, importAccountId)
     : 'unproven';
+  const match = addressOnly && compared === 'same' ? 'unproven' : compared;
   if (match === 'different') return { match };
   if (match === 'unproven' && options.ownerConfirmed !== true) return { match, account };
   // Proved, or confirmed by the owner: an entry that named no account takes the

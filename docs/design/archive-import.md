@@ -17,6 +17,10 @@ same way, with the same privacy and the same status.
 ## Owner decisions (2026-10-23)
 
 - **One entry point.** One "Import an archive" action, not a row per format.
+  (Superseded 2026-10-25 by the owner: each source whose connector reads its
+  exports has Import an archive in its own card, and the general one is Import
+  another archive under Other archives; see archive-live-one-dataset.md,
+  "Built, per-card Import". Olympus still detects the format either way.)
 - **Olympus detects the format.** The user picks a file or folder; they never
   say "this is Roam".
 - **Mail archives first** (mbox), because old mail is the largest gap and no
