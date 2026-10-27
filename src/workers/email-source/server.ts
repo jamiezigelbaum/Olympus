@@ -407,6 +407,11 @@ import {
 } from '../whatsapp/index.ts';
 import { createWhatsAppArchiveTarget } from '../whatsapp/archive-target.ts';
 import { whatsAppChildReader, whatsAppExtractionSourceFactory } from '../whatsapp/extraction-factory.ts';
+import {
+  TELEGRAM_MEDIA_EXTRACTION_BATCH_SIZE,
+  TELEGRAM_MEDIA_EXTRACTION_PLAN_LIMIT,
+  telegramMediaLanes,
+} from '../telegram-messages/media-extraction.ts';
 import { readArchiveInputMedia } from '../archive-import/input-media.ts';
 import { SqliteSourceDashboardHistory, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
 import type { DashboardPanelTools } from './dashboard-panel-tools.ts';
@@ -3975,6 +3980,15 @@ export async function main(): Promise<void> {
     }
     return runtime;
   };
+  // Telegram's media children, kept by live capture or carried by an export: one extraction roster entry over the
+  // Telegram stores whose one reader takes a file from where its locator says (telegram-messages/media-extraction.ts).
+  // Built on first use.
+  let telegramMedia: ReturnType<TelegramConnectorStoreSyncHandler['mediaExtraction']> | undefined;
+  const telegramMediaRuntime = () => telegramMedia ??= telegramConnectorStoreSync?.mediaExtraction({
+    imports: () => ({ state: archiveImports.state, bindings: archiveImports.media }),
+    env: process.env,
+    extractors: fileExtractionExtractors,
+  });
   // Every constructed canonical store gets its embedding and retrieval lane.
   if (xBookmarksConnectorStore && xBookmarksEmbeddingProvider) {
     registerConnectorStoreEmbeddingLane({
@@ -5052,6 +5066,23 @@ export async function main(): Promise<void> {
           lane,
           planLimit: GMAIL_ATTACHMENT_EXTRACTION_PLAN_LIMIT,
           batchSize: GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE,
+        }))],
+      };
+    }
+    // Telegram's media children are read by its source.
+    const telegramSourceAt = sources.findIndex((source) => source.sourceId === SCHEDULER_SOURCE_IDS.telegram);
+    const telegramMediaRunner = telegramSourceAt >= 0 ? telegramMediaRuntime()?.runner : undefined;
+    if (telegramSourceAt >= 0 && telegramMediaRunner && telegramConnectorStores) {
+      const telegramSource = sources[telegramSourceAt]!;
+      const corpusIds = [telegramConnectorStores.internal.corpusId, telegramConnectorStores.secureLocal.corpusId];
+      sources[telegramSourceAt] = {
+        ...telegramSource,
+        tasks: [...telegramSource.tasks, ...telegramMediaLanes(corpusIds, TELEGRAM_PERSONAL_ACCOUNT_SCOPE).map((lane) => fileExtractionSchedulerTask({
+          id: `telegram.media.${lane.corpusId}`,
+          runner: telegramMediaRunner,
+          lane,
+          planLimit: TELEGRAM_MEDIA_EXTRACTION_PLAN_LIMIT,
+          batchSize: TELEGRAM_MEDIA_EXTRACTION_BATCH_SIZE,
         }))],
       };
     }

@@ -53,6 +53,8 @@ import {
   type TelegramCaptureSpoolRecord,
 } from './capture-spool-connector.ts';
 import { telegramArchiveTarget } from './archive-target.ts';
+import type { FileExtractionRuntime } from '../email-source/file-extraction-runtime.ts';
+import { createTelegramMediaExtractionRuntime } from './media-extraction.ts';
 import { telegramRecordBuilder } from './record-builder.ts';
 
 export const TELEGRAM_MESSAGES_SOURCE_ID = 'telegram.messages';
@@ -161,6 +163,12 @@ export interface TelegramConnectorStoreSyncHandler {
    * these stores through this lane's own set (archive-target.ts).
    */
   archiveTarget(): ArchiveSourceTarget;
+  /**
+   * Reading the media children both inputs list (a photo or file live capture kept, a file an export
+   * carries): the shared child extraction over these stores, placed by this lane's own set
+   * (media-extraction.ts). Undefined when extraction is off.
+   */
+  mediaExtraction(input: Omit<Parameters<typeof createTelegramMediaExtractionRuntime>[0], 'stores' | 'set' | 'account' | 'spoolDir'>): FileExtractionRuntime | undefined;
 }
 
 // The placement and content options every input of the connector writes with.
@@ -537,6 +545,16 @@ export function createTelegramConnectorStoreSyncHandler(options: {
         account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
         sync: TELEGRAM_LANE_SYNC.internal,
         liveSince: () => telegramCaptureSince(spoolDir),
+      });
+    },
+
+    mediaExtraction(input) {
+      return createTelegramMediaExtractionRuntime({
+        ...input,
+        stores: [options.stores.internal, options.stores.secureLocal],
+        set: tierSet,
+        account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
+        spoolDir,
       });
     },
   };

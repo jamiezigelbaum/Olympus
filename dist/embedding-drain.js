@@ -34505,9 +34505,1747 @@ var init_archive_target = __esm(() => {
   PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 });
 
+// src/workers/archive-import/state.ts
+var ARCHIVE_IMPORTS_SOURCE_ID2 = "archive.imports";
+var init_state = __esm(() => {
+  init_source_placement();
+  init_source_storage();
+  init_atomic_file();
+  init_archive_formats();
+  init_file_lease();
+});
+
+// src/workers/archive-import/media-bindings.ts
+var init_media_bindings = __esm(() => {
+  init_sqlite_migrations();
+  init_scope_safe_fs();
+  init_source_placement();
+  init_source_storage();
+  init_state();
+  init_olympus_layout();
+});
+
+// node_modules/fflate/esm/browser.js
+var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
+  var b = new u16(31);
+  for (var i = 0;i < 31; ++i) {
+    b[i] = start += 1 << eb[i - 1];
+  }
+  var r = new i32(b[30]);
+  for (var i = 1;i < 30; ++i) {
+    for (var j = b[i];j < b[i + 1]; ++j) {
+      r[j] = j - b[i] << 5 | i;
+    }
+  }
+  return { b, r };
+}, _a2, fl, revfl, _b, fd, revfd, rev, x, i, hMap = function(cd, mb, r) {
+  var s = cd.length;
+  var i2 = 0;
+  var l = new u16(mb);
+  for (;i2 < s; ++i2) {
+    if (cd[i2])
+      ++l[cd[i2] - 1];
+  }
+  var le = new u16(mb);
+  for (i2 = 1;i2 < mb; ++i2) {
+    le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
+  }
+  var co;
+  if (r) {
+    co = new u16(1 << mb);
+    var rvb = 15 - mb;
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        var sv = i2 << 4 | cd[i2];
+        var r_1 = mb - cd[i2];
+        var v = le[cd[i2] - 1]++ << r_1;
+        for (var m = v | (1 << r_1) - 1;v <= m; ++v) {
+          co[rev[v] >> rvb] = sv;
+        }
+      }
+    }
+  } else {
+    co = new u16(s);
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
+      }
+    }
+  }
+  return co;
+}, flt, i, i, i, i, fdt, i, flrm, fdrm, max = function(a) {
+  var m = a[0];
+  for (var i2 = 1;i2 < a.length; ++i2) {
+    if (a[i2] > m)
+      m = a[i2];
+  }
+  return m;
+}, bits = function(d, p, m) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
+}, bits16 = function(d, p) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
+}, shft = function(p) {
+  return (p + 7) / 8 | 0;
+}, slc = function(v, s, e) {
+  if (s == null || s < 0)
+    s = 0;
+  if (e == null || e > v.length)
+    e = v.length;
+  return new u8(v.subarray(s, e));
+}, ec, err = function(ind, msg, nt) {
+  var e = new Error(msg || ec[ind]);
+  e.code = ind;
+  if (Error.captureStackTrace)
+    Error.captureStackTrace(e, err);
+  if (!nt)
+    throw e;
+  return e;
+}, inflt = function(dat, st, buf, dict) {
+  var sl = dat.length, dl = dict ? dict.length : 0;
+  if (!sl || st.f && !st.l)
+    return buf || new u8(0);
+  var noBuf = !buf;
+  var resize = noBuf || st.i != 2;
+  var noSt = st.i;
+  if (noBuf)
+    buf = new u8(sl * 3);
+  var cbuf = function(l2) {
+    var bl = buf.length;
+    if (l2 > bl) {
+      var nbuf = new u8(Math.max(bl * 2, l2));
+      nbuf.set(buf);
+      buf = nbuf;
+    }
+  };
+  var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
+  var tbts = sl * 8;
+  do {
+    if (!lm) {
+      final = bits(dat, pos, 1);
+      var type = bits(dat, pos + 1, 3);
+      pos += 3;
+      if (!type) {
+        var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
+        if (t > sl) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + l);
+        buf.set(dat.subarray(s, t), bt);
+        st.b = bt += l, st.p = pos = t * 8, st.f = final;
+        continue;
+      } else if (type == 1)
+        lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
+      else if (type == 2) {
+        var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
+        var tl = hLit + bits(dat, pos + 5, 31) + 1;
+        pos += 14;
+        var ldt = new u8(tl);
+        var clt = new u8(19);
+        for (var i2 = 0;i2 < hcLen; ++i2) {
+          clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
+        }
+        pos += hcLen * 3;
+        var clb = max(clt), clbmsk = (1 << clb) - 1;
+        var clm = hMap(clt, clb, 1);
+        for (var i2 = 0;i2 < tl; ) {
+          var r = clm[bits(dat, pos, clbmsk)];
+          pos += r & 15;
+          var s = r >> 4;
+          if (s < 16) {
+            ldt[i2++] = s;
+          } else {
+            var c = 0, n = 0;
+            if (s == 16)
+              n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
+            else if (s == 17)
+              n = 3 + bits(dat, pos, 7), pos += 3;
+            else if (s == 18)
+              n = 11 + bits(dat, pos, 127), pos += 7;
+            while (n--)
+              ldt[i2++] = c;
+          }
+        }
+        var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
+        lbt = max(lt);
+        dbt = max(dt);
+        lm = hMap(lt, lbt, 1);
+        dm = hMap(dt, dbt, 1);
+      } else
+        err(1);
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+    }
+    if (resize)
+      cbuf(bt + 131072);
+    var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
+    var lpos = pos;
+    for (;; lpos = pos) {
+      var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
+      pos += c & 15;
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+      if (!c)
+        err(2);
+      if (sym < 256)
+        buf[bt++] = sym;
+      else if (sym == 256) {
+        lpos = pos, lm = null;
+        break;
+      } else {
+        var add = sym - 254;
+        if (sym > 264) {
+          var i2 = sym - 257, b = fleb[i2];
+          add = bits(dat, pos, (1 << b) - 1) + fl[i2];
+          pos += b;
+        }
+        var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
+        if (!d)
+          err(3);
+        pos += d & 15;
+        var dt = fd[dsym];
+        if (dsym > 3) {
+          var b = fdeb[dsym];
+          dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
+        }
+        if (pos > tbts) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + 131072);
+        var end = bt + add;
+        if (bt < dt) {
+          var shift = dl - dt, dend = Math.min(dt, end);
+          if (shift + bt < 0)
+            err(3);
+          for (;bt < dend; ++bt)
+            buf[bt] = dict[shift + bt];
+        }
+        for (;bt < end; ++bt)
+          buf[bt] = buf[bt - dt];
+      }
+    }
+    st.l = lm, st.p = lpos, st.b = bt, st.f = final;
+    if (lm)
+      final = 1, st.m = lbt, st.d = dm, st.n = dbt;
+  } while (!final);
+  return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
+}, et, Inflate, td, tds = 0;
+var init_browser = __esm(() => {
+  u8 = Uint8Array;
+  u16 = Uint16Array;
+  i32 = Int32Array;
+  fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
+  fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
+  clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+  _a2 = freb(fleb, 2);
+  fl = _a2.b;
+  revfl = _a2.r;
+  fl[28] = 258, revfl[258] = 28;
+  _b = freb(fdeb, 0);
+  fd = _b.b;
+  revfd = _b.r;
+  rev = new u16(32768);
+  for (i = 0;i < 32768; ++i) {
+    x = (i & 43690) >> 1 | (i & 21845) << 1;
+    x = (x & 52428) >> 2 | (x & 13107) << 2;
+    x = (x & 61680) >> 4 | (x & 3855) << 4;
+    rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
+  }
+  flt = new u8(288);
+  for (i = 0;i < 144; ++i)
+    flt[i] = 8;
+  for (i = 144;i < 256; ++i)
+    flt[i] = 9;
+  for (i = 256;i < 280; ++i)
+    flt[i] = 7;
+  for (i = 280;i < 288; ++i)
+    flt[i] = 8;
+  fdt = new u8(32);
+  for (i = 0;i < 32; ++i)
+    fdt[i] = 5;
+  flrm = /* @__PURE__ */ hMap(flt, 9, 1);
+  fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
+  ec = [
+    "unexpected EOF",
+    "invalid block type",
+    "invalid length/literal",
+    "invalid distance",
+    "stream finished",
+    "no stream handler",
+    ,
+    "no callback",
+    "invalid UTF-8 data",
+    "extra field too long",
+    "date not in range 1980-2099",
+    "filename too long",
+    "stream finishing",
+    "invalid zip data"
+  ];
+  et = /* @__PURE__ */ new u8(0);
+  Inflate = /* @__PURE__ */ function() {
+    function Inflate2(opts, cb) {
+      if (typeof opts == "function")
+        cb = opts, opts = {};
+      this.ondata = cb;
+      var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
+      this.s = { i: 0, b: dict ? dict.length : 0 };
+      this.o = new u8(32768);
+      this.p = new u8(0);
+      if (dict)
+        this.o.set(dict);
+    }
+    Inflate2.prototype.e = function(c) {
+      if (!this.ondata)
+        err(5);
+      if (this.d)
+        err(4);
+      if (!this.p.length)
+        this.p = c;
+      else if (c.length) {
+        var n = new u8(this.p.length + c.length);
+        n.set(this.p), n.set(c, this.p.length), this.p = n;
+      }
+    };
+    Inflate2.prototype.c = function(final) {
+      this.s.i = +(this.d = final || false);
+      var bts = this.s.b;
+      var dt = inflt(this.p, this.s, this.o);
+      this.ondata(slc(dt, bts, this.s.b), this.d);
+      this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
+      this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
+    };
+    Inflate2.prototype.push = function(chunk, final) {
+      this.e(chunk), this.c(final);
+    };
+    return Inflate2;
+  }();
+  td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder;
+  try {
+    td.decode(et, { stream: true });
+    tds = 1;
+  } catch (e) {}
+});
+
+// src/workers/archive-import/zip-reader.ts
+function readExact(source, offset, length) {
+  if (length < 0 || offset < 0 || offset + length > source.size)
+    throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+  if (length <= ZIP_READ_CHUNK_BYTES) {
+    const bytes = source.readAt(offset, length);
+    if (bytes.length !== length)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    return bytes;
+  }
+  const out = new Uint8Array(length);
+  for (let done = 0;done < length; ) {
+    const part = source.readAt(offset + done, Math.min(ZIP_READ_CHUNK_BYTES, length - done));
+    if (part.length === 0)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    out.set(part, done);
+    done += part.length;
+  }
+  return out;
+}
+function memberKey(entry) {
+  return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
+}
+
+class ZipMemberReader {
+  entry;
+  archive;
+  dataStart;
+  startAt;
+  pos = 0;
+  runningCrc = 0;
+  crcKnown;
+  out = [];
+  lastChunk = new Uint8Array(0);
+  crcBeforeLast = 0;
+  heldLast = 0;
+  closed = false;
+  result;
+  storedNext = 0;
+  inflate;
+  compressedNext = 0;
+  compressedBlock = new Uint8Array(0);
+  compressedOffset = 0;
+  inflateFinished = false;
+  failure;
+  replayed = 0;
+  replayStep;
+  catchUpEnded = false;
+  constructor(archive, entry, dataStart, options) {
+    this.archive = archive;
+    this.entry = entry;
+    this.dataStart = dataStart;
+    const start = options.start ?? 0;
+    if (!Number.isSafeInteger(start) || start < 0 || start > entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
+    }
+    this.startAt = start;
+    if (options.replayStepBytes !== undefined && (!Number.isSafeInteger(options.replayStepBytes) || options.replayStepBytes < 1)) {
+      throw new RangeError("replayStepBytes must be a positive whole number");
+    }
+    this.replayStep = options.replayStepBytes;
+    this.crcKnown = start === 0;
+    if (entry.isDirectory || entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0)) {
+      this.inflateFinished = true;
+      this.pos = start;
+      this.crcKnown = true;
+      return;
+    }
+    if (entry.method === 0) {
+      this.storedNext = start;
+      this.pos = start;
+      if (start > 0 && options.startCrc !== undefined) {
+        this.runningCrc = options.startCrc >>> 0;
+        this.crcKnown = true;
+      }
+      return;
+    }
+    const kept = options.continuation;
+    if (kept && kept.memberKey === memberKey(entry) && kept.position === start) {
+      this.inflate = this.bind(kept.inflate);
+      this.compressedNext = kept.compressedNext;
+      this.compressedBlock = kept.compressedBlock;
+      this.compressedOffset = 0;
+      this.out = [...kept.out];
+      this.inflateFinished = kept.inflateFinished;
+      this.pos = kept.reached;
+      this.runningCrc = kept.crc;
+      this.crcKnown = kept.crcKnown;
+      return;
+    }
+    this.inflate = this.bind(new Inflate(() => {
+      return;
+    }));
+    this.crcKnown = true;
+  }
+  bind(inflate) {
+    inflate.ondata = (chunk) => {
+      if (chunk.length > 0)
+        this.out.push(chunk);
+    };
+    return inflate;
+  }
+  static open(archive, entry, options = {}) {
+    if (entry.encrypted)
+      throw new ZipMemberError("encrypted", entry.name, "This member is encrypted.");
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new ZipMemberError("unsupported_method", entry.name, `This member uses compression method ${entry.method}.`);
+    }
+    if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
+    }
+    const dataStart = entry.isDirectory ? 0 : archive.dataStart(entry);
+    return new ZipMemberReader(archive, entry, dataStart, options);
+  }
+  get position() {
+    return Math.max(this.pos, this.startAt);
+  }
+  get crc32() {
+    return this.crcKnown && this.pos >= this.startAt ? this.runningCrc : undefined;
+  }
+  get catchingUp() {
+    return this.pos < this.startAt && !this.closed && !this.failure && !this.catchUpEnded;
+  }
+  get replayedBytes() {
+    return this.replayed;
+  }
+  get end() {
+    return this.result;
+  }
+  next() {
+    this.assertUsable();
+    if (!this.replay()) {
+      this.heldLast = 0;
+      this.lastChunk = new Uint8Array(0);
+      return this.lastChunk;
+    }
+    for (;; ) {
+      const chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (!this.fillOrFail()) {
+          this.conclude();
+          return;
+        }
+        continue;
+      }
+      this.crcBeforeLast = this.runningCrc;
+      if (this.crcKnown)
+        this.runningCrc = crc32Update(this.runningCrc, chunk);
+      this.lastChunk = chunk;
+      this.heldLast = chunk.length;
+      this.pos += chunk.length;
+      return chunk;
+    }
+  }
+  catchUp() {
+    this.assertUsable();
+    return this.replay();
+  }
+  assertUsable() {
+    if (this.closed)
+      throw new Error("This member reader was suspended or closed.");
+    if (this.failure)
+      throw this.failure;
+  }
+  replay() {
+    const stepFrom = this.replayed;
+    while (this.pos < this.startAt && !this.catchUpEnded) {
+      const chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (this.replayStep !== undefined && this.replayed - stepFrom >= this.replayStep)
+          return false;
+        if (!this.fillOrFail()) {
+          this.catchUpEnded = true;
+          break;
+        }
+        continue;
+      }
+      const skip = this.startAt - this.pos;
+      const head = chunk.length <= skip ? chunk : chunk.subarray(0, skip);
+      this.runningCrc = crc32Update(this.runningCrc, head);
+      this.pos += head.length;
+      this.replayed += head.length;
+      if (head.length < chunk.length)
+        this.out.unshift(chunk.subarray(head.length));
+    }
+    return true;
+  }
+  unread(count) {
+    if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
+      throw new RangeError("unread past the last chunk");
+    if (count === 0)
+      return;
+    this.heldLast -= count;
+    this.pos -= count;
+    if (this.crcKnown)
+      this.runningCrc = crc32Update(this.crcBeforeLast, this.lastChunk.subarray(0, this.heldLast));
+    this.out.unshift(this.lastChunk.subarray(this.heldLast));
+    this.lastChunk = this.lastChunk.subarray(0, this.heldLast);
+    this.result = undefined;
+  }
+  suspend() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
+      return;
+    const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
+    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES)
+      return;
+    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
+    const state = {
+      position: Math.max(this.pos, this.startAt),
+      reached: this.pos,
+      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
+      memberKey: memberKey(this.entry),
+      crc: this.runningCrc,
+      crcKnown: this.crcKnown,
+      inflate: this.inflate,
+      compressedNext: this.compressedNext,
+      compressedBlock: this.compressedBlock.slice(this.compressedOffset),
+      out: [...this.out],
+      inflateFinished: this.inflateFinished
+    };
+    this.inflate = undefined;
+    this.out = [];
+    return state;
+  }
+  close() {
+    this.closed = true;
+    this.inflate = undefined;
+    this.out = [];
+  }
+  fillOrFail() {
+    try {
+      return this.fill();
+    } catch (error) {
+      if (error instanceof ZipMemberError) {
+        this.failure = error;
+        this.out = [];
+        this.inflateFinished = true;
+      }
+      throw error;
+    }
+  }
+  fill() {
+    if (this.entry.method === 0) {
+      if (this.storedNext >= this.entry.uncompressedSize)
+        return false;
+      const length = Math.min(ZIP_READ_CHUNK_BYTES, this.entry.uncompressedSize - this.storedNext);
+      const bytes = this.archive.source.readAt(this.dataStart + this.storedNext, length);
+      if (bytes.length === 0)
+        throw new ZipMemberError("damaged", this.entry.name, "A stored member ends early.");
+      this.storedNext += bytes.length;
+      this.out.push(bytes);
+      return true;
+    }
+    if (this.inflateFinished || !this.inflate)
+      return false;
+    if (this.compressedOffset >= this.compressedBlock.length && this.compressedNext < this.entry.compressedSize) {
+      const length = Math.min(ZIP_COMPRESSED_BLOCK_BYTES, this.entry.compressedSize - this.compressedNext);
+      this.compressedBlock = readBlock(this.archive.source, this.dataStart + this.compressedNext, length, this.entry.name);
+      this.compressedOffset = 0;
+      this.compressedNext += length;
+    }
+    const slice = this.compressedBlock.subarray(this.compressedOffset, this.compressedOffset + ZIP_INFLATE_PUSH_BYTES);
+    this.compressedOffset += slice.length;
+    const final = this.compressedOffset >= this.compressedBlock.length && this.compressedNext >= this.entry.compressedSize;
+    try {
+      this.inflate.push(slice, final);
+    } catch (error) {
+      if (error instanceof ZipMemberError)
+        throw error;
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
+    }
+    const progress = inflaterProgress(this.inflate);
+    if (progress.ended) {
+      const pushed = this.compressedNext - (this.compressedBlock.length - this.compressedOffset);
+      const consumed = pushed - progress.unconsumed;
+      if (consumed < this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends before the size the zip gives it.");
+      }
+      if (consumed > this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data runs past the size the zip gives it.");
+      }
+      this.inflateFinished = true;
+    } else if (final) {
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends without a complete stream.");
+    }
+    return true;
+  }
+  conclude() {
+    if (this.result)
+      return;
+    const sizeOk = this.pos === this.entry.uncompressedSize;
+    this.result = {
+      bytes: this.pos,
+      sizeOk,
+      crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
+    };
+  }
+}
+function inflaterProgress(inflate) {
+  const internal = inflate;
+  const state = internal.s;
+  if (typeof state !== "object" || state === null || !(internal.p instanceof Uint8Array) || state.p !== undefined && typeof state.p !== "number") {
+    throw new Error("The installed inflater does not expose the state this reader reads; the zip reader must be updated with it.");
+  }
+  const ended = Boolean(state.f) && !state.l;
+  const partialByte = typeof state.p === "number" && (state.p & 7) !== 0 ? 1 : 0;
+  return { ended, unconsumed: Math.max(0, internal.p.length - partialByte) };
+}
+function readBlock(source, offset, length, name) {
+  try {
+    return readExact(source, offset, length);
+  } catch (error) {
+    if (error instanceof ZipFormatError)
+      throw new ZipMemberError("damaged", name, error.message);
+    throw error;
+  }
+}
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_REPLAY_STEP_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
+var init_zip_reader = __esm(() => {
+  init_browser();
+  init_archive_formats();
+  init_stop_errors();
+  init_byte_source();
+  ZIP_READ_CHUNK_BYTES = 1024 * 1024;
+  ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
+  ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
+  ZIP_REPLAY_STEP_BYTES = 16 * 1024 * 1024;
+  ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+  ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
+  ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
+  MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
+  ZipFormatError = class ZipFormatError extends Error {
+    code;
+    constructor(code, message2) {
+      super(message2);
+      this.name = "ZipFormatError";
+      this.code = code;
+    }
+  };
+  ZipMemberError = class ZipMemberError extends Error {
+    code;
+    memberName;
+    constructor(code, memberName, message2) {
+      super(message2);
+      this.name = "ZipMemberError";
+      this.code = code;
+      this.memberName = memberName;
+    }
+  };
+  strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+  lenientUtf8 = new TextDecoder("utf-8");
+});
+
+// src/workers/archive-import/input-media.ts
+var init_input_media = __esm(() => {
+  init_file_extraction_source();
+  init_scope_safe_fs();
+  init_media_bindings();
+  init_zip_reader();
+});
+// src/workers/file-extraction/spool.ts
+var EXTRACTION_SPOOL_STALE_MS;
+var init_spool = __esm(() => {
+  EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
+});
+
+// src/workers/dropbox-files/extraction-source.ts
+import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
+import { relative as relative5, resolve as resolve9, sep as sep5 } from "node:path";
+
+class DropboxExtractionSource {
+  id;
+  corpusId;
+  provider;
+  candidates;
+  scopes;
+  token;
+  locators;
+  localRoots;
+  fetchImpl;
+  contentBaseUrl;
+  downloadTimeoutMs;
+  canonicalRootCache = new Map;
+  constructor(options) {
+    this.id = requireNonEmpty2(options.id, "Dropbox extraction source id");
+    this.corpusId = requireNonEmpty2(options.corpusId, "Dropbox extraction source corpus id");
+    this.provider = requireNonEmpty2(options.provider, "Dropbox extraction source provider");
+    this.token = requireNonEmpty2(options.token, "Dropbox content token");
+    this.candidates = options.candidates;
+    this.locators = options.locators;
+    this.scopes = options.scopes.map((scope) => resolveScope(scope));
+    this.localRoots = (options.localRoots ?? []).map((root) => normalizeRootConfig(root)).filter((root) => Boolean(root));
+    this.fetchImpl = options.fetch ?? ((url, init) => fetch(url, init));
+    this.contentBaseUrl = options.contentBaseUrl?.replace(/\/+$/, "") || DROPBOX_CONTENT_BASE_URL;
+    this.downloadTimeoutMs = options.downloadTimeoutMs ?? DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
+  }
+  async listCandidates(options) {
+    const scopes = this.scopesFor(options.approvedScopeKeys);
+    if (scopes.length === 0)
+      return { candidates: [], done: true };
+    const readerOptions = {
+      limit: options.limit,
+      withoutChunksOnly: true,
+      includeStaleChunks: true
+    };
+    if (options.cursor !== undefined)
+      readerOptions.cursor = options.cursor;
+    if (options.mimeTypes)
+      readerOptions.mimeTypes = options.mimeTypes;
+    const sharedAccount = singleAccount(scopes);
+    if (sharedAccount)
+      readerOptions.accountScope = sharedAccount;
+    const page = await this.candidates.extractionCandidates(readerOptions);
+    const candidates = [];
+    for (const row of page.candidates) {
+      const ref = this.refFromRow(row, scopes);
+      if (ref)
+        candidates.push(ref);
+    }
+    return {
+      candidates,
+      ...page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {},
+      done: page.done
+    };
+  }
+  async fetch(ref, options) {
+    const local = await this.readFromLocalMount(ref, options.maxBytes);
+    if (local)
+      return local;
+    return this.downloadFromProvider(ref, options.maxBytes);
+  }
+  verifyBytes(ref, bytes) {
+    if (!ref.contentHash)
+      return false;
+    return computeDropboxContentHash(bytes) === ref.contentHash;
+  }
+  scopesFor(approvedScopeKeys) {
+    if (!approvedScopeKeys)
+      return this.scopes;
+    const wanted = new Set(approvedScopeKeys);
+    return this.scopes.filter((scope) => wanted.has(scope.approvedScopeKey));
+  }
+  refFromRow(row, scopes) {
+    const split = splitScopedLocalItemId(row.localItemId);
+    const accountScope = row.accountScope ?? split?.accountScope;
+    const providerItemId = row.providerItemId ?? split?.providerItemId;
+    if (!accountScope || !providerItemId)
+      return;
+    const scope = matchScope(scopes, accountScope, row.locatorUri);
+    if (!scope)
+      return;
+    const name = row.name ?? row.title;
+    return {
+      corpusId: this.corpusId,
+      provider: this.provider,
+      accountScope,
+      approvedScopeKey: scope.approvedScopeKey,
+      providerItemId,
+      localItemId: row.localItemId,
+      ...row.sourceVersion ? { sourceVersion: row.sourceVersion } : {},
+      ...row.contentHash ? { contentHash: row.contentHash } : {},
+      ...name ? { name } : {},
+      ...row.mimeType ? { mimeType: row.mimeType } : {},
+      ...row.sizeBytes !== undefined ? { sizeBytes: row.sizeBytes } : {}
+    };
+  }
+  async readFromLocalMount(ref, maxBytes) {
+    if (this.localRoots.length === 0)
+      return;
+    if (!ref.contentHash)
+      return;
+    const roots = this.localRoots.filter((root) => rootMatchesRef(root, ref));
+    if (roots.length === 0)
+      return;
+    const dropboxPath = await this.dropboxPathFor(ref);
+    if (!dropboxPath)
+      return;
+    for (const root of roots) {
+      const candidatePath = await this.candidatePath(root, dropboxPath);
+      if (!candidatePath)
+        continue;
+      const bytes = await readVerifiedCandidate({
+        candidatePath,
+        contentHash: ref.contentHash,
+        ...maxBytes !== undefined ? { maxBytes } : {},
+        ...ref.sizeBytes !== undefined ? { declaredSizeBytes: ref.sizeBytes } : {}
+      });
+      if (!bytes)
+        continue;
+      return {
+        bytes,
+        ...ref.mimeType ? { mimeType: ref.mimeType } : {},
+        sizeBytes: bytes.byteLength
+      };
+    }
+    return;
+  }
+  async dropboxPathFor(ref) {
+    if (!this.locators)
+      return;
+    const content = await this.locators.localContent(ref.localItemId, LOCATOR_LOOKUP_MAX_CHARS);
+    return content?.locatorUri;
+  }
+  async candidatePath(root, dropboxPath) {
+    const relativePath = dropboxRelativePath(root.dropboxPathPrefix, dropboxPath);
+    if (relativePath === undefined)
+      return;
+    const rootRealPath = await this.canonicalRoot(root.rootPath);
+    if (!rootRealPath)
+      return;
+    const candidatePath = resolve9(rootRealPath, relativePath);
+    const relativeToRoot = relative5(rootRealPath, candidatePath);
+    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep5}`)) {
+      return;
+    }
+    return candidatePath;
+  }
+  canonicalRoot(rootPath) {
+    let cached2 = this.canonicalRootCache.get(rootPath);
+    if (!cached2) {
+      cached2 = realpath(rootPath).catch(() => {
+        return;
+      });
+      this.canonicalRootCache.set(rootPath, cached2);
+    }
+    return cached2;
+  }
+  async downloadFromProvider(ref, maxBytes) {
+    let response;
+    try {
+      const fetchImpl = (url, init) => this.fetchImpl(url, init);
+      response = await fetchWithBodyDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Dropbox-API-Arg": JSON.stringify(dropboxDownloadArg(ref))
+        }
+      }, this.downloadTimeoutMs);
+    } catch {
+      throw new FileExtractionSourceError("network_unreachable");
+    }
+    if (!response.ok)
+      throw await downloadFailure(response);
+    const declaredSize = parsePositiveInteger(response.headers.get("content-length") ?? undefined);
+    if (maxBytes !== undefined && declaredSize !== undefined && declaredSize > maxBytes) {
+      throw new FileExtractionSourceError("source_too_large");
+    }
+    let bytes;
+    try {
+      bytes = new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      if (isAbortError(error))
+        throw new FileExtractionSourceError("network_socket_closed");
+      throw error;
+    }
+    if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
+      throw new FileExtractionSourceError("source_too_large");
+    }
+    const contentType = response.headers.get("content-type");
+    return {
+      bytes,
+      ...contentType ? { mimeType: contentType } : {},
+      sizeBytes: declaredSize ?? bytes.byteLength
+    };
+  }
+}
+function dropboxDownloadArg(ref) {
+  if (ref.sourceVersion) {
+    return {
+      path: ref.sourceVersion.startsWith("rev:") ? ref.sourceVersion : `rev:${ref.sourceVersion}`
+    };
+  }
+  return { path: ref.providerItemId };
+}
+function matchScope(scopes, accountScope, locatorUri) {
+  const path = normalizeDropboxPath2(locatorUri);
+  if (!path)
+    return;
+  const lowerPath = path.toLowerCase();
+  let best;
+  for (const scope of scopes) {
+    if (scope.account !== accountScope)
+      continue;
+    const prefix = scope.pathPrefix.toLowerCase();
+    const contains = prefix === "/" ? lowerPath.length > 1 : lowerPath.startsWith(`${prefix}/`);
+    if (!contains)
+      continue;
+    if (!best || scope.pathPrefix.length > best.pathPrefix.length)
+      best = scope;
+  }
+  return best;
+}
+function resolveScope(scope) {
+  const approvedScopeKey = scope.approvedScopeKey?.trim();
+  if (!approvedScopeKey) {
+    throw new Error("Dropbox extraction scope requires an approvedScopeKey.");
+  }
+  const separator = approvedScopeKey.indexOf(":");
+  const parsedAccount = approvedScopeKey.startsWith(DROPBOX_SCOPE_KEY_PROVIDER_PREFIX) && separator > 0 ? approvedScopeKey.slice(DROPBOX_SCOPE_KEY_PROVIDER_PREFIX.length, separator) : undefined;
+  const account = scope.account?.trim() || parsedAccount;
+  if (!account) {
+    throw new Error(`Dropbox extraction scope ${approvedScopeKey} needs an account it cannot parse from its key.`);
+  }
+  const parsedPath = separator > 0 ? approvedScopeKey.slice(separator + 1) : undefined;
+  const rawPrefix = scope.pathPrefix?.trim() || (parsedPath && !parsedPath.startsWith(DROPBOX_FOLDER_ID_SCOPE_PREFIX) ? parsedPath : undefined);
+  const pathPrefix = normalizeDropboxPath2(rawPrefix);
+  if (!pathPrefix) {
+    throw new Error(`Dropbox extraction scope ${approvedScopeKey} requires an explicit pathPrefix.`);
+  }
+  return { approvedScopeKey, account, pathPrefix };
+}
+function singleAccount(scopes) {
+  const accounts = new Set(scopes.map((scope) => scope.account));
+  return accounts.size === 1 ? [...accounts][0] : undefined;
+}
+async function readVerifiedCandidate(input) {
+  let fileStat;
+  try {
+    fileStat = await stat2(input.candidatePath);
+  } catch {
+    return;
+  }
+  if (!fileStat.isFile())
+    return;
+  if (input.maxBytes !== undefined && fileStat.size > input.maxBytes) {
+    throw new FileExtractionSourceError("source_too_large");
+  }
+  if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
+    return;
+  }
+  const bytes = new Uint8Array(await readFile3(input.candidatePath));
+  if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
+    throw new FileExtractionSourceError("source_too_large");
+  }
+  if (computeDropboxContentHash(bytes) !== input.contentHash)
+    return;
+  return bytes;
+}
+function normalizeRootConfig(root) {
+  const rootPath = root.rootPath.trim();
+  if (!rootPath)
+    return;
+  const normalized = { rootPath };
+  if (root.account?.trim())
+    normalized.account = root.account.trim();
+  if (root.approvedScopeKey?.trim())
+    normalized.approvedScopeKey = root.approvedScopeKey.trim();
+  const dropboxPathPrefix = normalizeDropboxPath2(root.dropboxPathPrefix ?? "/");
+  if (dropboxPathPrefix)
+    normalized.dropboxPathPrefix = dropboxPathPrefix;
+  if (root.rootId?.trim())
+    normalized.rootId = root.rootId.trim();
+  return normalized;
+}
+function rootMatchesRef(root, ref) {
+  if (root.account && root.account !== ref.accountScope)
+    return false;
+  if (root.approvedScopeKey && root.approvedScopeKey !== ref.approvedScopeKey)
+    return false;
+  return true;
+}
+function dropboxRelativePath(prefix, dropboxPath) {
+  const normalizedPath = normalizeDropboxPath2(dropboxPath);
+  if (!normalizedPath)
+    return;
+  const normalizedPrefix = normalizeDropboxPath2(prefix ?? "/");
+  if (!normalizedPrefix || normalizedPrefix === "/") {
+    return normalizedPath.slice(1);
+  }
+  if (normalizedPath.toLowerCase() === normalizedPrefix.toLowerCase()) {
+    return;
+  }
+  if (!normalizedPath.toLowerCase().startsWith(`${normalizedPrefix.toLowerCase()}/`)) {
+    return;
+  }
+  return normalizedPath.slice(normalizedPrefix.length + 1);
+}
+function normalizeDropboxPath2(path) {
+  const trimmed = path?.trim().replace(/\\/g, "/").replace(/\/+/g, "/");
+  if (!trimmed)
+    return;
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+async function downloadFailure(response) {
+  let detail = "";
+  try {
+    detail = (await response.text()).slice(0, MAX_PROVIDER_DETAIL_CHARS);
+  } catch {
+    detail = "";
+  }
+  const options = { detailForHash: `${response.status}:${detail}` };
+  if (response.status === 401)
+    return new FileExtractionSourceError("source_auth_expired", options);
+  if (response.status === 403)
+    return new FileExtractionSourceError("source_permission_denied", options);
+  if (response.status === 429)
+    return new FileExtractionSourceError("source_rate_limited", options);
+  if (response.status === 404 || response.status === 409) {
+    return new FileExtractionSourceError("source_item_not_found", options);
+  }
+  if (response.status >= 500)
+    return new FileExtractionSourceError("source_unavailable", options);
+  if (response.status >= 400)
+    return new FileExtractionSourceError("source_request_rejected", options);
+  return new FileExtractionSourceError("source_unavailable", options);
+}
+function parsePositiveInteger(value) {
+  if (!value)
+    return;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+function requireNonEmpty2(value, label) {
+  const trimmed = value?.trim();
+  if (!trimmed)
+    throw new Error(`${label} is required.`);
+  return trimmed;
+}
+var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2", DROPBOX_SCOPE_KEY_PROVIDER_PREFIX = "dropbox.", DROPBOX_FOLDER_ID_SCOPE_PREFIX = "folder_id:", MAX_PROVIDER_DETAIL_CHARS = 500, LOCATOR_LOOKUP_MAX_CHARS = 1;
+var init_extraction_source = __esm(() => {
+  init_dropbox_content_hash();
+  init_provider_client();
+  init_http_timeout();
+  init_file_extraction_source();
+});
+
+// src/workers/google-connectors/drive-extraction-source.ts
+var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES;
+var init_drive_extraction_source = __esm(() => {
+  init_file_extraction_source();
+  init_drive();
+  init_request_budget();
+  GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/tiff",
+    "image/webp",
+    "image/heic",
+    "image/heif"
+  ]);
+});
+
+// src/workers/file-extraction/connector-source.ts
+var init_connector_source = __esm(() => {
+  init_spool();
+  init_file_extraction_source();
+});
+
+// src/workers/whatsapp/child-media.ts
+var COPY_CHUNK_BYTES;
+var init_child_media = __esm(() => {
+  init_file_extraction_source();
+  init_input_media();
+  COPY_CHUNK_BYTES = 1024 * 1024;
+});
+
+// src/workers/whatsapp/extraction-source.ts
+var init_extraction_source2 = __esm(() => {
+  init_spool();
+  init_child_media();
+  init_input_media();
+  init_file_extraction_source();
+});
+
+// src/workers/whatsapp/reaction-index.ts
+var init_reaction_index = __esm(() => {
+  init_reactions();
+});
+
+// src/workers/whatsapp/spool-index.ts
+var init_spool_index = __esm(() => {
+  init_spool_file_identity();
+  init_reaction_index();
+});
+
+// src/workers/whatsapp/spool-resets.ts
+var init_spool_resets = () => {};
+
+// src/workers/whatsapp/match-keys.ts
+var init_match_keys = __esm(() => {
+  init_reaction_index();
+});
+
+// src/workers/whatsapp/spool-reader.ts
+var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES2, FINISH_STEP_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
+var init_spool_reader = __esm(() => {
+  init_spool_file_identity();
+  WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
+  CHUNK_BYTES2 = 256 * 1024;
+  FINISH_STEP_BYTES = 4 * 1024;
+  NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
+  CAPTURE_STATUS_MAX_BYTES = 64 * 1024;
+});
+
+// src/workers/whatsapp/live-connector.ts
+var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, WHATSAPP_FETCHED_MEDIA_TYPES, MEDIA_TEMP_MAX_AGE_MS;
+var init_live_connector = __esm(() => {
+  init_source_inputs();
+  init_capture_spool_secrets();
+  init_reaction_index();
+  init_spool_index();
+  init_spool_resets();
+  init_child_media();
+  init_match_keys();
+  init_spool_reader();
+  DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
+  TARGET_READ_CHUNK_BYTES = 4 * 1024;
+  CHILD_MEDIA_TYPES = new Set(["image", "video", "video_note"]);
+  WHATSAPP_FETCHED_MEDIA_TYPES = new Set([...CHILD_MEDIA_TYPES, "audio"]);
+  MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
+});
+
+// src/workers/whatsapp/media-fetch.ts
+var DISK_FLOOR_MIN_BYTES, ANSWER_HEAD_MAX_BYTES;
+var init_media_fetch = __esm(() => {
+  init_source_inputs();
+  init_secrets_disposition();
+  init_tier_rejudge();
+  init_child_media();
+  init_live_connector();
+  init_spool_reader();
+  DISK_FLOOR_MIN_BYTES = 5 * 1024 * 1024 * 1024;
+  ANSWER_HEAD_MAX_BYTES = 64 * 1024;
+});
+
+// src/workers/whatsapp/store-sync.ts
+var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT, WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES, CLEARED_FILES_KEY;
+var init_store_sync = __esm(() => {
+  init_olympus_layout();
+  init_source_placement();
+  init_source_storage();
+  init_tiered_store_set();
+  init_capture_spool_secrets();
+  init_capture_freshness();
+  init_live_connector();
+  init_spool_reader();
+  init_spool_file_identity();
+  init_spool_index();
+  init_media_fetch();
+  init_child_media();
+  WHATSAPP_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local"
+  });
+  WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
+  CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
+});
+
+// src/workers/whatsapp/extraction-factory.ts
+var init_extraction_factory = __esm(() => {
+  init_source_placement();
+  init_connector_source();
+  init_child_media();
+  init_extraction_source2();
+  init_store_sync();
+});
+
+// src/workers/file-extraction/job-store.ts
+var NETWORK_ERROR_KINDS, POLICY_DECISIONS, TERMINAL_STATUSES;
+var init_job_store = __esm(() => {
+  init_sqlite_migrations();
+  init_job_names();
+  NETWORK_ERROR_KINDS = new Set([
+    "network_unreachable",
+    "network_socket_closed"
+  ]);
+  POLICY_DECISIONS = new Set([
+    "index_allowed",
+    "index_redacted",
+    "metadata_only",
+    "blocked_sensitive",
+    "needs_review"
+  ]);
+  TERMINAL_STATUSES = new Set([
+    "indexed",
+    "metadata_only",
+    "skipped_unsupported",
+    "skipped_too_large",
+    "blocked_policy",
+    "failed_retryable",
+    "failed_terminal"
+  ]);
+});
+
+// src/workers/file-extraction/extractors/bounded-text.ts
+var TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, GENERIC_MIME_TYPES;
+var init_bounded_text = __esm(() => {
+  TEXT_MIME_TYPES = new Set([
+    "application/json",
+    "application/x-ndjson",
+    "application/xml",
+    "text/csv",
+    "text/html",
+    "text/markdown",
+    "text/plain",
+    "text/tab-separated-values",
+    "text/xml"
+  ]);
+  TABLE_MIME_TYPES = new Set([
+    "text/csv",
+    "text/tab-separated-values"
+  ]);
+  IMAGE_MIME_TYPES = new Set([
+    "image/bmp",
+    "image/gif",
+    "image/heic",
+    "image/heif",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp"
+  ]);
+  GENERIC_MIME_TYPES = new Set([
+    "application/octet-stream",
+    "binary/octet-stream",
+    "application/binary"
+  ]);
+});
+
+// src/workers/file-extraction/extractors/document-formats.ts
+var init_document_formats = __esm(() => {
+  init_bounded_text();
+});
+
+// src/workers/file-extraction/extractors/input-limits.ts
+var DOCUMENT_READER_MAX_INPUT_BYTES, IMAGE_READER_MAX_INPUT_BYTES;
+var init_input_limits = __esm(() => {
+  DOCUMENT_READER_MAX_INPUT_BYTES = 256 * 1024 * 1024;
+  IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/file-extraction/extractors/image-prepare.ts
+var init_image_prepare = __esm(() => {
+  init_media_cache();
+  init_still_image_formats();
+  init_command_runner();
+  init_image_preparers();
+  init_ocr();
+  init_input_limits();
+});
+
+// src/workers/file-extraction/extractors/text.ts
+var init_text = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  init_document_formats();
+  init_image_prepare();
+  init_media_cache();
+  init_still_image_formats();
+  init_input_limits();
+});
+
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+var init_apple_vision_ocr = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+});
+
+// src/workers/file-extraction/extractors/ocr-probe-fixture.ts
+var OCR_PROBE_IMAGE_BASE64;
+var init_ocr_probe_fixture = __esm(() => {
+  OCR_PROBE_IMAGE_BASE64 = [
+    "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"
+  ].join("");
+});
+
+// src/workers/file-extraction/extractors/ocr-capability.ts
+var OCR_READY_TTL_MS;
+var init_ocr_capability = __esm(() => {
+  init_command_runner();
+  init_ocr_probe_fixture();
+  OCR_READY_TTL_MS = 10 * 60000;
+});
+
+// src/workers/file-extraction/extractors/pdf-raster-ocr.ts
+var init_pdf_raster_ocr = __esm(() => {
+  init_bounded_text();
+  init_apple_vision_ocr();
+  init_command_runner();
+  init_ocr_capability();
+  init_pdf_render();
+});
+
+// src/workers/file-extraction/extractors/ocr.ts
+var init_ocr = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  init_text();
+  init_apple_vision_ocr();
+  init_ocr_capability();
+  init_pdf_raster_ocr();
+  init_input_limits();
+});
+
+// src/workers/file-extraction/extractors/remote-vlm.ts
+var DEFAULT_REMOTE_EXTRACTION_PROMPT;
+var init_remote_vlm = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  init_pdf_render();
+  init_text();
+  init_input_limits();
+  init_zkapi_consult_settings();
+  init_engine();
+  DEFAULT_REMOTE_EXTRACTION_PROMPT = [
+    "Extract concise evidence text from this secure-local document for private indexing.",
+    "Return only visible or directly readable content.",
+    "For tables, reports, receipts, screenshots, or scans, preserve labels, values, dates, units, and row context.",
+    "Do not infer private facts beyond the document."
+  ].join(" ");
+});
+
+// src/workers/source-index/built-in-reasoning/manifest.ts
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+function ggmlOrgAsrFile(name, bytes, sha256) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
+var init_manifest2 = __esm(() => {
+  GIB = 1024 ** 3;
+  QWEN35_2B = {
+    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+    displayName: "Qwen3.5 2B",
+    sizeClass: "small",
+    baseRepository: "Qwen/Qwen3.5-2B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-2B-GGUF",
+    revision: QWEN35_2B_REVISION,
+    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_4B = {
+    modelId: "qwen3.5-4b-q4_k_m-e87f176",
+    displayName: "Qwen3.5 4B",
+    sizeClass: "standard",
+    baseRepository: "Qwen/Qwen3.5-4B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-4B-GGUF",
+    revision: QWEN35_4B_REVISION,
+    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_9B = {
+    modelId: "qwen3.5-9b-q4_k_m-3885219",
+    displayName: "Qwen3.5 9B",
+    sizeClass: "large",
+    baseRepository: "Qwen/Qwen3.5-9B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-9B-GGUF",
+    revision: QWEN35_9B_REVISION,
+    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+  LLAMA_SERVER_RUNTIME = {
+    release: LLAMA_CPP_RELEASE,
+    license: "MIT",
+    archives: [
+      {
+        platform: "darwin-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        bytes: 11827796,
+        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+        gpu: true
+      },
+      {
+        platform: "linux-x64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        bytes: 17544875,
+        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+        gpu: false
+      },
+      {
+        platform: "linux-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        bytes: 13590823,
+        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+        gpu: false
+      }
+    ]
+  };
+  QWEN3_ASR_06B = {
+    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+    displayName: "Qwen3-ASR 0.6B",
+    baseRepository: "Qwen/Qwen3-ASR-0.6B",
+    license: "Apache-2.0",
+    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+    revision: QWEN3_ASR_06B_REVISION,
+    files: [
+      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+    ],
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 4096
+  };
+});
+
+// src/workers/source-index/built-in-reasoning/install.ts
+var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
+var init_install = __esm(() => {
+  init_pinned_download();
+  init_olympus_layout();
+  init_manifest2();
+  STALE_LOCK_MS2 = 60 * 60000;
+  BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+  SPACE_BACKOFF_MS = 15 * 60000;
+  DOWNLOAD_STALL_MS2 = 2 * 60000;
+  VERIFY_TIMEOUT_MS = 15 * 60000;
+  EXTRACT_TIMEOUT_MS = 5 * 60000;
+});
+
+// src/workers/source-index/built-in-reasoning/server.ts
+var init_server = __esm(() => {
+  init_model_transport();
+});
+
+// src/workers/source-index/built-in-reasoning/transcription-model.ts
+var init_transcription_model = __esm(() => {
+  init_olympus_layout();
+  init_install();
+  init_manifest2();
+});
+
+// src/workers/file-extraction/extractors/audio-wav.ts
+var init_audio_wav = () => {};
+
+// src/workers/file-extraction/extractors/built-in-transcriber.ts
+var DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS;
+var init_built_in_transcriber = __esm(() => {
+  init_model_transport();
+  init_install();
+  init_manifest2();
+  init_server();
+  init_transcription_model();
+  init_audio_wav();
+  init_command_runner();
+  DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
+  DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
+  DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
+  DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
+  DEFAULT_VERIFY_WAIT_MS = 5 * 60000;
+});
+
+// src/workers/file-extraction/extractors/transcription.ts
+var init_transcription = __esm(() => {
+  init_built_in_transcriber();
+  init_bounded_text();
+  init_command_runner();
+  init_text();
+});
+
+// src/workers/file-extraction/extractors/vlm.ts
+function stripDataUrlPrefix(dataUrl) {
+  return dataUrl.replace(/^data:[^,]+,/, "");
+}
+var DEFAULT_VLM_PROMPT, DEFAULT_VLM_PDF_PROMPT, VLM_PDF_PROBE_IMAGE_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", VLM_PDF_PROBE_IMAGE_BASE64;
+var init_vlm = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  init_pdf_render();
+  init_text();
+  init_input_limits();
+  init_model_transport();
+  DEFAULT_VLM_PROMPT = [
+    "Describe the visible content for secure-local retrieval.",
+    "Focus on document layout, headings, labels, diagrams, tables, handwriting, screenshots, and any clearly legible text.",
+    "Do not infer private facts beyond what is visible."
+  ].join(" ");
+  DEFAULT_VLM_PDF_PROMPT = [
+    "Faithfully transcribe this scanned PDF page for secure-local indexing.",
+    "Return visible text only. Preserve headings, table rows, amounts, dates, identifiers, labels, and row/column relationships.",
+    "Do not summarize, omit low-confidence visible text, or infer facts that are not visible."
+  ].join(" ");
+  VLM_PDF_PROBE_IMAGE_BASE64 = stripDataUrlPrefix(VLM_PDF_PROBE_IMAGE_DATA_URL);
+});
+
+// src/workers/file-extraction/registry.ts
+var init_registry = __esm(() => {
+  init_ocr();
+  init_apple_vision_ocr();
+  init_ocr_capability();
+  init_remote_vlm();
+  init_text();
+  init_image_prepare();
+  init_image_preparers();
+  init_still_image_readiness();
+  init_transcription();
+  init_vlm();
+});
+
+// src/core/log-redaction.ts
+function redactLogLine(line) {
+  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+function boundedLogErrorMessage(error) {
+  const message2 = error instanceof Error ? error.message : String(error);
+  const oneLine = message2.replace(/\s+/g, " ").trim();
+  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
+
+// src/workers/file-extraction/store-sink.ts
+var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued", EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets", EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = "store_item_source_version_stale", EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
+var init_store_sink = __esm(() => {
+  init_engine();
+  init_tier_classifier();
+  init_secrets_disposition();
+  init_source_ingestion_exclusions();
+  init_connector_store();
+});
+
+// src/workers/file-extraction/runner.ts
+var SINK_SKIP_SETTLEMENTS, ITEM_REF_FIELDS, PDF_MIME_TYPES;
+var init_runner = __esm(() => {
+  init_media_cache();
+  init_operation_error();
+  init_model_transport();
+  init_types();
+  init_file_extraction_source();
+  init_command_runner();
+  init_tier_classifier();
+  init_bounded_text();
+  init_job_store();
+  init_store_sink();
+  SINK_SKIP_SETTLEMENTS = Object.freeze({
+    [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
+    [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",
+    [EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE]: "failed_terminal",
+    [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: "blocked_policy",
+    [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: "blocked_policy",
+    [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: "blocked_policy",
+    [EXTRACTION_SINK_SKIPPED_SECRETS]: "blocked_policy",
+    [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: "metadata_only",
+    [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only",
+    [EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY]: "metadata_only"
+  });
+  ITEM_REF_FIELDS = new Set([
+    "corpusId",
+    "provider",
+    "accountScope",
+    "approvedScopeKey",
+    "providerItemId",
+    "localItemId",
+    "sourceVersion",
+    "contentHash",
+    "name",
+    "mimeType",
+    "sizeBytes"
+  ]);
+  PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
+});
+
+// src/workers/file-extraction/tiered-store-sink.ts
+var init_tiered_store_sink = __esm(() => {
+  init_types();
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_parent_context();
+  init_tier_placement();
+  init_secrets_disposition();
+  init_tiered_store_set();
+  init_store_sink();
+});
+
+// src/workers/connector-store/tiered-extraction.ts
+var init_tiered_extraction = __esm(() => {
+  init_tier_ledger();
+  init_tiered_store_set();
+});
+
+// src/workers/email-source/file-extraction-runtime.ts
+var init_file_extraction_runtime = __esm(() => {
+  init_credential_broker();
+  init_types();
+  init_file_extraction_source();
+  init_media_cache();
+  init_olympus_layout();
+  init_source_placement();
+  init_spool();
+  init_connector_store2();
+  init_extraction_source();
+  init_scope();
+  init_store();
+  init_drive();
+  init_drive_extraction_source();
+  init_extraction_factory();
+  init_store_sync();
+  init_job_store();
+  init_registry();
+  init_runner();
+  init_store_sink();
+  init_tiered_store_sink();
+  init_tiered_extraction();
+  init_tiered_store_set();
+});
+
+// src/workers/email-source/child-extraction-runtime.ts
+var init_child_extraction_runtime = __esm(() => {
+  init_tier_ledger();
+  init_child_visibility();
+  init_file_extraction_runtime();
+  init_connector_source();
+});
+
+// src/workers/telegram-messages/media-extraction.ts
+var init_media_extraction = __esm(() => {
+  init_file_extraction_source();
+  init_input_media();
+  init_child_extraction_runtime();
+  init_spool();
+  init_media_child();
+});
+
 // src/workers/telegram-messages/store-sync.ts
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY;
-var init_store_sync = __esm(() => {
+var init_store_sync2 = __esm(() => {
   init_media_child();
   init_source_placement();
   init_spool_file_identity();
@@ -34520,6 +36258,7 @@ var init_store_sync = __esm(() => {
   init_corpus_adapter4();
   init_capture_spool_connector();
   init_archive_target();
+  init_media_extraction();
   init_record_builder();
   TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
 });
@@ -34528,7 +36267,7 @@ var init_store_sync = __esm(() => {
 var init_telegram_messages = __esm(() => {
   init_corpus_adapter4();
   init_capture_spool_connector();
-  init_store_sync();
+  init_store_sync2();
 });
 
 // src/workers/source-index/status.ts
@@ -35887,129 +37626,6 @@ var init_waiting_private_questions = __esm(() => {
   });
 });
 
-// src/workers/source-index/built-in-reasoning/manifest.ts
-function unslothQwen(size, revision, bytes, sha256) {
-  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
-  return {
-    name,
-    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
-    bytes,
-    sha256
-  };
-}
-function ggmlOrgAsrFile(name, bytes, sha256) {
-  return {
-    name,
-    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
-    bytes,
-    sha256
-  };
-}
-var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
-var init_manifest2 = __esm(() => {
-  GIB = 1024 ** 3;
-  QWEN35_2B = {
-    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
-    displayName: "Qwen3.5 2B",
-    sizeClass: "small",
-    baseRepository: "Qwen/Qwen3.5-2B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-2B-GGUF",
-    revision: QWEN35_2B_REVISION,
-    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_4B = {
-    modelId: "qwen3.5-4b-q4_k_m-e87f176",
-    displayName: "Qwen3.5 4B",
-    sizeClass: "standard",
-    baseRepository: "Qwen/Qwen3.5-4B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-4B-GGUF",
-    revision: QWEN35_4B_REVISION,
-    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_9B = {
-    modelId: "qwen3.5-9b-q4_k_m-3885219",
-    displayName: "Qwen3.5 9B",
-    sizeClass: "large",
-    baseRepository: "Qwen/Qwen3.5-9B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-9B-GGUF",
-    revision: QWEN35_9B_REVISION,
-    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-  LLAMA_SERVER_RUNTIME = {
-    release: LLAMA_CPP_RELEASE,
-    license: "MIT",
-    archives: [
-      {
-        platform: "darwin-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        bytes: 11827796,
-        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
-        gpu: true
-      },
-      {
-        platform: "linux-x64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        bytes: 17544875,
-        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
-        gpu: false
-      },
-      {
-        platform: "linux-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        bytes: 13590823,
-        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
-        gpu: false
-      }
-    ]
-  };
-  QWEN3_ASR_06B = {
-    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
-    displayName: "Qwen3-ASR 0.6B",
-    baseRepository: "Qwen/Qwen3-ASR-0.6B",
-    license: "Apache-2.0",
-    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
-    revision: QWEN3_ASR_06B_REVISION,
-    files: [
-      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
-      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
-    ],
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 4096
-  };
-});
-
-// src/workers/source-index/built-in-reasoning/install.ts
-var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
-var init_install = __esm(() => {
-  init_pinned_download();
-  init_olympus_layout();
-  init_manifest2();
-  STALE_LOCK_MS2 = 60 * 60000;
-  BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
-  SPACE_BACKOFF_MS = 15 * 60000;
-  DOWNLOAD_STALL_MS2 = 2 * 60000;
-  VERIFY_TIMEOUT_MS = 15 * 60000;
-  EXTRACT_TIMEOUT_MS = 5 * 60000;
-});
-
-// src/workers/source-index/built-in-reasoning/server.ts
-var init_server = __esm(() => {
-  init_model_transport();
-});
-
 // src/core/analyst-built-in.ts
 var GAP_GENERIC_WORDS, utf82;
 var init_analyst_built_in = __esm(() => {
@@ -36399,12 +38015,12 @@ function sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath) {
 }
 function inspectLinuxPath(path) {
   try {
-    const stat2 = lstatSync10(path);
+    const stat3 = lstatSync10(path);
     return {
-      kind: stat2.isDirectory() ? "directory" : stat2.isFile() ? "file" : stat2.isSocket() ? "socket" : "other",
-      uid: stat2.uid,
-      mode: stat2.mode,
-      symbolicLink: stat2.isSymbolicLink()
+      kind: stat3.isDirectory() ? "directory" : stat3.isFile() ? "file" : stat3.isSocket() ? "socket" : "other",
+      uid: stat3.uid,
+      mode: stat3.mode,
+      symbolicLink: stat3.isSymbolicLink()
     };
   } catch {
     return;
@@ -36422,9 +38038,9 @@ function isTrustedExecutable(path) {
     return false;
   try {
     accessSync3(path, fsConstants2.X_OK);
-    const stat2 = lstatSync10(path);
+    const stat3 = lstatSync10(path);
     const uid = typeof process.getuid === "function" ? process.getuid() : -1;
-    return stat2.isFile() && !stat2.isSymbolicLink() && (stat2.uid === 0 || stat2.uid === uid) && (stat2.mode & 18) === 0;
+    return stat3.isFile() && !stat3.isSymbolicLink() && (stat3.uid === 0 || stat3.uid === uid) && (stat3.mode & 18) === 0;
   } catch {
     return false;
   }
@@ -36442,7 +38058,7 @@ function runCommandSync(argv, timeoutMs) {
   };
 }
 function runCommand2(argv, options) {
-  return new Promise((resolve9) => {
+  return new Promise((resolve10) => {
     execFile(argv[0], argv.slice(1), {
       encoding: "utf8",
       timeout: options.timeoutMs,
@@ -36452,12 +38068,12 @@ function runCommand2(argv, options) {
     }, (error, stdout, stderr) => {
       const failure = error;
       const status = typeof failure?.code === "number" ? failure.code : failure ? null : 0;
-      resolve9({ status, stdout, stderr, ...failure?.killed === true ? { timedOut: true } : {} });
+      resolve10({ status, stdout, stderr, ...failure?.killed === true ? { timedOut: true } : {} });
     });
   });
 }
 function launchInUserScope(argv, options) {
-  return new Promise((resolve9) => {
+  return new Promise((resolve10) => {
     let settled = false;
     let exited = false;
     let overallTimer;
@@ -36474,7 +38090,7 @@ function launchInUserScope(argv, options) {
       if (overallTimer)
         clearTimeout(overallTimer);
       child.unref();
-      resolve9(result);
+      resolve10(result);
     };
     child.once("error", (error) => finish({ established: false, stderr: error.message }));
     child.once("exit", (code) => {
@@ -36526,10 +38142,10 @@ async function openLinuxOwnerTicketFile(path, dependencies = {}) {
   const runtime = readiness.environment.XDG_RUNTIME_DIR;
   if (!runtime || dirname25(path) !== `${runtime}/olympus` || !/^owner-ticket-[a-f0-9]{32}\.html$/.test(path.slice(dirname25(path).length + 1)))
     throw new Error("Invalid owner ticket path.");
-  const stat2 = lstatSync10(path);
+  const stat3 = lstatSync10(path);
   const parent = lstatSync10(dirname25(path));
   const uid = dependencies.uid ?? process.getuid?.();
-  if (realpathSync6(path) !== path || !stat2.isFile() || stat2.isSymbolicLink() || stat2.uid !== uid || (stat2.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
+  if (realpathSync6(path) !== path || !stat3.isFile() || stat3.isSymbolicLink() || stat3.uid !== uid || (stat3.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
     throw new Error("Unsafe owner ticket file.");
   const dispatch = async (opener) => {
     const scopeUnit = dependencies.scopeUnit?.() ?? `olympus-open-${process.pid}-${randomBytes2(8).toString("hex")}`;
@@ -36898,29 +38514,29 @@ function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
 function inspectRecordNode(path) {
-  let stat2;
+  let stat3;
   try {
-    stat2 = lstatSync11(path);
+    stat3 = lstatSync11(path);
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
       return { kind: "missing" };
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
   }
-  if (stat2.isSymbolicLink())
+  if (stat3.isSymbolicLink())
     return { kind: "unreadable", reason: "record path is a symbolic link" };
-  if (!stat2.isFile())
+  if (!stat3.isFile())
     return { kind: "unreadable", reason: "record path is not a regular file" };
-  return { kind: "file", stat: stat2 };
+  return { kind: "file", stat: stat3 };
 }
 function readRecordText(path) {
   const node = inspectRecordNode(path);
   if (node.kind !== "file")
     return node;
   const flags = constants4.O_RDONLY | (constants4.O_NOFOLLOW ?? 0) | (constants4.O_NONBLOCK ?? 0);
-  let fd;
+  let fd2;
   try {
-    fd = openSync11(path, flags);
+    fd2 = openSync11(path, flags);
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
@@ -36928,17 +38544,17 @@ function readRecordText(path) {
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
   }
   try {
-    const opened = fstatSync2(fd);
+    const opened = fstatSync2(fd2);
     if (!opened.isFile() || opened.dev !== node.stat.dev || opened.ino !== node.stat.ino) {
       return { kind: "unreadable", reason: "record path changed between inspection and opening" };
     }
-    return { kind: "ok", text: readFileSync18(fd, "utf8") };
+    return { kind: "ok", text: readFileSync18(fd2, "utf8") };
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
   } finally {
     try {
-      closeSync11(fd);
+      closeSync11(fd2);
     } catch {}
   }
 }
@@ -37116,936 +38732,6 @@ var init_remote_open = __esm(() => {
   init_worker_transport();
   init_open_targets();
 });
-
-// src/workers/file-extraction/spool.ts
-var EXTRACTION_SPOOL_STALE_MS;
-var init_spool = __esm(() => {
-  EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
-});
-
-// src/workers/archive-import/state.ts
-var ARCHIVE_IMPORTS_SOURCE_ID2 = "archive.imports";
-var init_state = __esm(() => {
-  init_source_placement();
-  init_source_storage();
-  init_atomic_file();
-  init_archive_formats();
-  init_file_lease();
-});
-
-// src/workers/archive-import/media-bindings.ts
-var init_media_bindings = __esm(() => {
-  init_sqlite_migrations();
-  init_scope_safe_fs();
-  init_source_placement();
-  init_source_storage();
-  init_state();
-  init_olympus_layout();
-});
-
-// node_modules/fflate/esm/browser.js
-var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
-  var b = new u16(31);
-  for (var i = 0;i < 31; ++i) {
-    b[i] = start += 1 << eb[i - 1];
-  }
-  var r = new i32(b[30]);
-  for (var i = 1;i < 30; ++i) {
-    for (var j = b[i];j < b[i + 1]; ++j) {
-      r[j] = j - b[i] << 5 | i;
-    }
-  }
-  return { b, r };
-}, _a2, fl, revfl, _b, fd, revfd, rev, x, i, hMap = function(cd, mb, r) {
-  var s = cd.length;
-  var i2 = 0;
-  var l = new u16(mb);
-  for (;i2 < s; ++i2) {
-    if (cd[i2])
-      ++l[cd[i2] - 1];
-  }
-  var le = new u16(mb);
-  for (i2 = 1;i2 < mb; ++i2) {
-    le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
-  }
-  var co;
-  if (r) {
-    co = new u16(1 << mb);
-    var rvb = 15 - mb;
-    for (i2 = 0;i2 < s; ++i2) {
-      if (cd[i2]) {
-        var sv = i2 << 4 | cd[i2];
-        var r_1 = mb - cd[i2];
-        var v = le[cd[i2] - 1]++ << r_1;
-        for (var m = v | (1 << r_1) - 1;v <= m; ++v) {
-          co[rev[v] >> rvb] = sv;
-        }
-      }
-    }
-  } else {
-    co = new u16(s);
-    for (i2 = 0;i2 < s; ++i2) {
-      if (cd[i2]) {
-        co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
-      }
-    }
-  }
-  return co;
-}, flt, i, i, i, i, fdt, i, flrm, fdrm, max = function(a) {
-  var m = a[0];
-  for (var i2 = 1;i2 < a.length; ++i2) {
-    if (a[i2] > m)
-      m = a[i2];
-  }
-  return m;
-}, bits = function(d, p, m) {
-  var o = p / 8 | 0;
-  return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
-}, bits16 = function(d, p) {
-  var o = p / 8 | 0;
-  return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
-}, shft = function(p) {
-  return (p + 7) / 8 | 0;
-}, slc = function(v, s, e) {
-  if (s == null || s < 0)
-    s = 0;
-  if (e == null || e > v.length)
-    e = v.length;
-  return new u8(v.subarray(s, e));
-}, ec, err = function(ind, msg, nt) {
-  var e = new Error(msg || ec[ind]);
-  e.code = ind;
-  if (Error.captureStackTrace)
-    Error.captureStackTrace(e, err);
-  if (!nt)
-    throw e;
-  return e;
-}, inflt = function(dat, st, buf, dict) {
-  var sl = dat.length, dl = dict ? dict.length : 0;
-  if (!sl || st.f && !st.l)
-    return buf || new u8(0);
-  var noBuf = !buf;
-  var resize = noBuf || st.i != 2;
-  var noSt = st.i;
-  if (noBuf)
-    buf = new u8(sl * 3);
-  var cbuf = function(l2) {
-    var bl = buf.length;
-    if (l2 > bl) {
-      var nbuf = new u8(Math.max(bl * 2, l2));
-      nbuf.set(buf);
-      buf = nbuf;
-    }
-  };
-  var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
-  var tbts = sl * 8;
-  do {
-    if (!lm) {
-      final = bits(dat, pos, 1);
-      var type = bits(dat, pos + 1, 3);
-      pos += 3;
-      if (!type) {
-        var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
-        if (t > sl) {
-          if (noSt)
-            err(0);
-          break;
-        }
-        if (resize)
-          cbuf(bt + l);
-        buf.set(dat.subarray(s, t), bt);
-        st.b = bt += l, st.p = pos = t * 8, st.f = final;
-        continue;
-      } else if (type == 1)
-        lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
-      else if (type == 2) {
-        var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
-        var tl = hLit + bits(dat, pos + 5, 31) + 1;
-        pos += 14;
-        var ldt = new u8(tl);
-        var clt = new u8(19);
-        for (var i2 = 0;i2 < hcLen; ++i2) {
-          clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
-        }
-        pos += hcLen * 3;
-        var clb = max(clt), clbmsk = (1 << clb) - 1;
-        var clm = hMap(clt, clb, 1);
-        for (var i2 = 0;i2 < tl; ) {
-          var r = clm[bits(dat, pos, clbmsk)];
-          pos += r & 15;
-          var s = r >> 4;
-          if (s < 16) {
-            ldt[i2++] = s;
-          } else {
-            var c = 0, n = 0;
-            if (s == 16)
-              n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
-            else if (s == 17)
-              n = 3 + bits(dat, pos, 7), pos += 3;
-            else if (s == 18)
-              n = 11 + bits(dat, pos, 127), pos += 7;
-            while (n--)
-              ldt[i2++] = c;
-          }
-        }
-        var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
-        lbt = max(lt);
-        dbt = max(dt);
-        lm = hMap(lt, lbt, 1);
-        dm = hMap(dt, dbt, 1);
-      } else
-        err(1);
-      if (pos > tbts) {
-        if (noSt)
-          err(0);
-        break;
-      }
-    }
-    if (resize)
-      cbuf(bt + 131072);
-    var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
-    var lpos = pos;
-    for (;; lpos = pos) {
-      var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
-      pos += c & 15;
-      if (pos > tbts) {
-        if (noSt)
-          err(0);
-        break;
-      }
-      if (!c)
-        err(2);
-      if (sym < 256)
-        buf[bt++] = sym;
-      else if (sym == 256) {
-        lpos = pos, lm = null;
-        break;
-      } else {
-        var add = sym - 254;
-        if (sym > 264) {
-          var i2 = sym - 257, b = fleb[i2];
-          add = bits(dat, pos, (1 << b) - 1) + fl[i2];
-          pos += b;
-        }
-        var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
-        if (!d)
-          err(3);
-        pos += d & 15;
-        var dt = fd[dsym];
-        if (dsym > 3) {
-          var b = fdeb[dsym];
-          dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
-        }
-        if (pos > tbts) {
-          if (noSt)
-            err(0);
-          break;
-        }
-        if (resize)
-          cbuf(bt + 131072);
-        var end = bt + add;
-        if (bt < dt) {
-          var shift = dl - dt, dend = Math.min(dt, end);
-          if (shift + bt < 0)
-            err(3);
-          for (;bt < dend; ++bt)
-            buf[bt] = dict[shift + bt];
-        }
-        for (;bt < end; ++bt)
-          buf[bt] = buf[bt - dt];
-      }
-    }
-    st.l = lm, st.p = lpos, st.b = bt, st.f = final;
-    if (lm)
-      final = 1, st.m = lbt, st.d = dm, st.n = dbt;
-  } while (!final);
-  return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
-}, et, Inflate, td, tds = 0;
-var init_browser = __esm(() => {
-  u8 = Uint8Array;
-  u16 = Uint16Array;
-  i32 = Int32Array;
-  fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
-  fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
-  clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
-  _a2 = freb(fleb, 2);
-  fl = _a2.b;
-  revfl = _a2.r;
-  fl[28] = 258, revfl[258] = 28;
-  _b = freb(fdeb, 0);
-  fd = _b.b;
-  revfd = _b.r;
-  rev = new u16(32768);
-  for (i = 0;i < 32768; ++i) {
-    x = (i & 43690) >> 1 | (i & 21845) << 1;
-    x = (x & 52428) >> 2 | (x & 13107) << 2;
-    x = (x & 61680) >> 4 | (x & 3855) << 4;
-    rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
-  }
-  flt = new u8(288);
-  for (i = 0;i < 144; ++i)
-    flt[i] = 8;
-  for (i = 144;i < 256; ++i)
-    flt[i] = 9;
-  for (i = 256;i < 280; ++i)
-    flt[i] = 7;
-  for (i = 280;i < 288; ++i)
-    flt[i] = 8;
-  fdt = new u8(32);
-  for (i = 0;i < 32; ++i)
-    fdt[i] = 5;
-  flrm = /* @__PURE__ */ hMap(flt, 9, 1);
-  fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
-  ec = [
-    "unexpected EOF",
-    "invalid block type",
-    "invalid length/literal",
-    "invalid distance",
-    "stream finished",
-    "no stream handler",
-    ,
-    "no callback",
-    "invalid UTF-8 data",
-    "extra field too long",
-    "date not in range 1980-2099",
-    "filename too long",
-    "stream finishing",
-    "invalid zip data"
-  ];
-  et = /* @__PURE__ */ new u8(0);
-  Inflate = /* @__PURE__ */ function() {
-    function Inflate2(opts, cb) {
-      if (typeof opts == "function")
-        cb = opts, opts = {};
-      this.ondata = cb;
-      var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
-      this.s = { i: 0, b: dict ? dict.length : 0 };
-      this.o = new u8(32768);
-      this.p = new u8(0);
-      if (dict)
-        this.o.set(dict);
-    }
-    Inflate2.prototype.e = function(c) {
-      if (!this.ondata)
-        err(5);
-      if (this.d)
-        err(4);
-      if (!this.p.length)
-        this.p = c;
-      else if (c.length) {
-        var n = new u8(this.p.length + c.length);
-        n.set(this.p), n.set(c, this.p.length), this.p = n;
-      }
-    };
-    Inflate2.prototype.c = function(final) {
-      this.s.i = +(this.d = final || false);
-      var bts = this.s.b;
-      var dt = inflt(this.p, this.s, this.o);
-      this.ondata(slc(dt, bts, this.s.b), this.d);
-      this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
-      this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
-    };
-    Inflate2.prototype.push = function(chunk, final) {
-      this.e(chunk), this.c(final);
-    };
-    return Inflate2;
-  }();
-  td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder;
-  try {
-    td.decode(et, { stream: true });
-    tds = 1;
-  } catch (e) {}
-});
-
-// src/workers/archive-import/zip-reader.ts
-function readExact(source, offset, length) {
-  if (length < 0 || offset < 0 || offset + length > source.size)
-    throw new ZipFormatError("damaged", "The zip ends before its own records do.");
-  if (length <= ZIP_READ_CHUNK_BYTES) {
-    const bytes = source.readAt(offset, length);
-    if (bytes.length !== length)
-      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
-    return bytes;
-  }
-  const out = new Uint8Array(length);
-  for (let done = 0;done < length; ) {
-    const part = source.readAt(offset + done, Math.min(ZIP_READ_CHUNK_BYTES, length - done));
-    if (part.length === 0)
-      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
-    out.set(part, done);
-    done += part.length;
-  }
-  return out;
-}
-function memberKey(entry) {
-  return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
-}
-
-class ZipMemberReader {
-  entry;
-  archive;
-  dataStart;
-  startAt;
-  pos = 0;
-  runningCrc = 0;
-  crcKnown;
-  out = [];
-  lastChunk = new Uint8Array(0);
-  crcBeforeLast = 0;
-  heldLast = 0;
-  closed = false;
-  result;
-  storedNext = 0;
-  inflate;
-  compressedNext = 0;
-  compressedBlock = new Uint8Array(0);
-  compressedOffset = 0;
-  inflateFinished = false;
-  failure;
-  replayed = 0;
-  replayStep;
-  catchUpEnded = false;
-  constructor(archive, entry, dataStart, options) {
-    this.archive = archive;
-    this.entry = entry;
-    this.dataStart = dataStart;
-    const start = options.start ?? 0;
-    if (!Number.isSafeInteger(start) || start < 0 || start > entry.uncompressedSize) {
-      throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
-    }
-    this.startAt = start;
-    if (options.replayStepBytes !== undefined && (!Number.isSafeInteger(options.replayStepBytes) || options.replayStepBytes < 1)) {
-      throw new RangeError("replayStepBytes must be a positive whole number");
-    }
-    this.replayStep = options.replayStepBytes;
-    this.crcKnown = start === 0;
-    if (entry.isDirectory || entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0)) {
-      this.inflateFinished = true;
-      this.pos = start;
-      this.crcKnown = true;
-      return;
-    }
-    if (entry.method === 0) {
-      this.storedNext = start;
-      this.pos = start;
-      if (start > 0 && options.startCrc !== undefined) {
-        this.runningCrc = options.startCrc >>> 0;
-        this.crcKnown = true;
-      }
-      return;
-    }
-    const kept = options.continuation;
-    if (kept && kept.memberKey === memberKey(entry) && kept.position === start) {
-      this.inflate = this.bind(kept.inflate);
-      this.compressedNext = kept.compressedNext;
-      this.compressedBlock = kept.compressedBlock;
-      this.compressedOffset = 0;
-      this.out = [...kept.out];
-      this.inflateFinished = kept.inflateFinished;
-      this.pos = kept.reached;
-      this.runningCrc = kept.crc;
-      this.crcKnown = kept.crcKnown;
-      return;
-    }
-    this.inflate = this.bind(new Inflate(() => {
-      return;
-    }));
-    this.crcKnown = true;
-  }
-  bind(inflate) {
-    inflate.ondata = (chunk) => {
-      if (chunk.length > 0)
-        this.out.push(chunk);
-    };
-    return inflate;
-  }
-  static open(archive, entry, options = {}) {
-    if (entry.encrypted)
-      throw new ZipMemberError("encrypted", entry.name, "This member is encrypted.");
-    if (entry.method !== 0 && entry.method !== 8) {
-      throw new ZipMemberError("unsupported_method", entry.name, `This member uses compression method ${entry.method}.`);
-    }
-    if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
-      throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
-    }
-    const dataStart = entry.isDirectory ? 0 : archive.dataStart(entry);
-    return new ZipMemberReader(archive, entry, dataStart, options);
-  }
-  get position() {
-    return Math.max(this.pos, this.startAt);
-  }
-  get crc32() {
-    return this.crcKnown && this.pos >= this.startAt ? this.runningCrc : undefined;
-  }
-  get catchingUp() {
-    return this.pos < this.startAt && !this.closed && !this.failure && !this.catchUpEnded;
-  }
-  get replayedBytes() {
-    return this.replayed;
-  }
-  get end() {
-    return this.result;
-  }
-  next() {
-    this.assertUsable();
-    if (!this.replay()) {
-      this.heldLast = 0;
-      this.lastChunk = new Uint8Array(0);
-      return this.lastChunk;
-    }
-    for (;; ) {
-      const chunk = this.out.shift();
-      if (chunk === undefined) {
-        if (!this.fillOrFail()) {
-          this.conclude();
-          return;
-        }
-        continue;
-      }
-      this.crcBeforeLast = this.runningCrc;
-      if (this.crcKnown)
-        this.runningCrc = crc32Update(this.runningCrc, chunk);
-      this.lastChunk = chunk;
-      this.heldLast = chunk.length;
-      this.pos += chunk.length;
-      return chunk;
-    }
-  }
-  catchUp() {
-    this.assertUsable();
-    return this.replay();
-  }
-  assertUsable() {
-    if (this.closed)
-      throw new Error("This member reader was suspended or closed.");
-    if (this.failure)
-      throw this.failure;
-  }
-  replay() {
-    const stepFrom = this.replayed;
-    while (this.pos < this.startAt && !this.catchUpEnded) {
-      const chunk = this.out.shift();
-      if (chunk === undefined) {
-        if (this.replayStep !== undefined && this.replayed - stepFrom >= this.replayStep)
-          return false;
-        if (!this.fillOrFail()) {
-          this.catchUpEnded = true;
-          break;
-        }
-        continue;
-      }
-      const skip = this.startAt - this.pos;
-      const head = chunk.length <= skip ? chunk : chunk.subarray(0, skip);
-      this.runningCrc = crc32Update(this.runningCrc, head);
-      this.pos += head.length;
-      this.replayed += head.length;
-      if (head.length < chunk.length)
-        this.out.unshift(chunk.subarray(head.length));
-    }
-    return true;
-  }
-  unread(count) {
-    if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
-      throw new RangeError("unread past the last chunk");
-    if (count === 0)
-      return;
-    this.heldLast -= count;
-    this.pos -= count;
-    if (this.crcKnown)
-      this.runningCrc = crc32Update(this.crcBeforeLast, this.lastChunk.subarray(0, this.heldLast));
-    this.out.unshift(this.lastChunk.subarray(this.heldLast));
-    this.lastChunk = this.lastChunk.subarray(0, this.heldLast);
-    this.result = undefined;
-  }
-  suspend() {
-    if (this.closed)
-      return;
-    this.closed = true;
-    if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
-      return;
-    const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
-    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES)
-      return;
-    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
-    const state = {
-      position: Math.max(this.pos, this.startAt),
-      reached: this.pos,
-      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
-      memberKey: memberKey(this.entry),
-      crc: this.runningCrc,
-      crcKnown: this.crcKnown,
-      inflate: this.inflate,
-      compressedNext: this.compressedNext,
-      compressedBlock: this.compressedBlock.slice(this.compressedOffset),
-      out: [...this.out],
-      inflateFinished: this.inflateFinished
-    };
-    this.inflate = undefined;
-    this.out = [];
-    return state;
-  }
-  close() {
-    this.closed = true;
-    this.inflate = undefined;
-    this.out = [];
-  }
-  fillOrFail() {
-    try {
-      return this.fill();
-    } catch (error) {
-      if (error instanceof ZipMemberError) {
-        this.failure = error;
-        this.out = [];
-        this.inflateFinished = true;
-      }
-      throw error;
-    }
-  }
-  fill() {
-    if (this.entry.method === 0) {
-      if (this.storedNext >= this.entry.uncompressedSize)
-        return false;
-      const length = Math.min(ZIP_READ_CHUNK_BYTES, this.entry.uncompressedSize - this.storedNext);
-      const bytes = this.archive.source.readAt(this.dataStart + this.storedNext, length);
-      if (bytes.length === 0)
-        throw new ZipMemberError("damaged", this.entry.name, "A stored member ends early.");
-      this.storedNext += bytes.length;
-      this.out.push(bytes);
-      return true;
-    }
-    if (this.inflateFinished || !this.inflate)
-      return false;
-    if (this.compressedOffset >= this.compressedBlock.length && this.compressedNext < this.entry.compressedSize) {
-      const length = Math.min(ZIP_COMPRESSED_BLOCK_BYTES, this.entry.compressedSize - this.compressedNext);
-      this.compressedBlock = readBlock(this.archive.source, this.dataStart + this.compressedNext, length, this.entry.name);
-      this.compressedOffset = 0;
-      this.compressedNext += length;
-    }
-    const slice = this.compressedBlock.subarray(this.compressedOffset, this.compressedOffset + ZIP_INFLATE_PUSH_BYTES);
-    this.compressedOffset += slice.length;
-    const final = this.compressedOffset >= this.compressedBlock.length && this.compressedNext >= this.entry.compressedSize;
-    try {
-      this.inflate.push(slice, final);
-    } catch (error) {
-      if (error instanceof ZipMemberError)
-        throw error;
-      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
-    }
-    const progress = inflaterProgress(this.inflate);
-    if (progress.ended) {
-      const pushed = this.compressedNext - (this.compressedBlock.length - this.compressedOffset);
-      const consumed = pushed - progress.unconsumed;
-      if (consumed < this.entry.compressedSize) {
-        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends before the size the zip gives it.");
-      }
-      if (consumed > this.entry.compressedSize) {
-        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data runs past the size the zip gives it.");
-      }
-      this.inflateFinished = true;
-    } else if (final) {
-      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends without a complete stream.");
-    }
-    return true;
-  }
-  conclude() {
-    if (this.result)
-      return;
-    const sizeOk = this.pos === this.entry.uncompressedSize;
-    this.result = {
-      bytes: this.pos,
-      sizeOk,
-      crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
-    };
-  }
-}
-function inflaterProgress(inflate) {
-  const internal = inflate;
-  const state = internal.s;
-  if (typeof state !== "object" || state === null || !(internal.p instanceof Uint8Array) || state.p !== undefined && typeof state.p !== "number") {
-    throw new Error("The installed inflater does not expose the state this reader reads; the zip reader must be updated with it.");
-  }
-  const ended = Boolean(state.f) && !state.l;
-  const partialByte = typeof state.p === "number" && (state.p & 7) !== 0 ? 1 : 0;
-  return { ended, unconsumed: Math.max(0, internal.p.length - partialByte) };
-}
-function readBlock(source, offset, length, name) {
-  try {
-    return readExact(source, offset, length);
-  } catch (error) {
-    if (error instanceof ZipFormatError)
-      throw new ZipMemberError("damaged", name, error.message);
-    throw error;
-  }
-}
-var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_REPLAY_STEP_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
-var init_zip_reader = __esm(() => {
-  init_browser();
-  init_archive_formats();
-  init_stop_errors();
-  init_byte_source();
-  ZIP_READ_CHUNK_BYTES = 1024 * 1024;
-  ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
-  ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
-  ZIP_REPLAY_STEP_BYTES = 16 * 1024 * 1024;
-  ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
-  ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
-  ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
-  MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
-  ZipFormatError = class ZipFormatError extends Error {
-    code;
-    constructor(code, message2) {
-      super(message2);
-      this.name = "ZipFormatError";
-      this.code = code;
-    }
-  };
-  ZipMemberError = class ZipMemberError extends Error {
-    code;
-    memberName;
-    constructor(code, memberName, message2) {
-      super(message2);
-      this.name = "ZipMemberError";
-      this.code = code;
-      this.memberName = memberName;
-    }
-  };
-  strictUtf8 = new TextDecoder("utf-8", { fatal: true });
-  lenientUtf8 = new TextDecoder("utf-8");
-});
-
-// src/workers/archive-import/input-media.ts
-var init_input_media = __esm(() => {
-  init_file_extraction_source();
-  init_scope_safe_fs();
-  init_media_bindings();
-  init_zip_reader();
-});
-
-// src/workers/whatsapp/child-media.ts
-var COPY_CHUNK_BYTES;
-var init_child_media = __esm(() => {
-  init_file_extraction_source();
-  init_input_media();
-  COPY_CHUNK_BYTES = 1024 * 1024;
-});
-
-// src/workers/whatsapp/reaction-index.ts
-var init_reaction_index = __esm(() => {
-  init_reactions();
-});
-
-// src/workers/whatsapp/spool-index.ts
-var init_spool_index = __esm(() => {
-  init_spool_file_identity();
-  init_reaction_index();
-});
-
-// src/workers/whatsapp/spool-resets.ts
-var init_spool_resets = () => {};
-
-// src/workers/whatsapp/match-keys.ts
-var init_match_keys = __esm(() => {
-  init_reaction_index();
-});
-
-// src/workers/whatsapp/spool-reader.ts
-var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES2, FINISH_STEP_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
-var init_spool_reader = __esm(() => {
-  init_spool_file_identity();
-  WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
-  CHUNK_BYTES2 = 256 * 1024;
-  FINISH_STEP_BYTES = 4 * 1024;
-  NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
-  CAPTURE_STATUS_MAX_BYTES = 64 * 1024;
-});
-
-// src/workers/whatsapp/live-connector.ts
-var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, WHATSAPP_FETCHED_MEDIA_TYPES, MEDIA_TEMP_MAX_AGE_MS;
-var init_live_connector = __esm(() => {
-  init_source_inputs();
-  init_capture_spool_secrets();
-  init_reaction_index();
-  init_spool_index();
-  init_spool_resets();
-  init_child_media();
-  init_match_keys();
-  init_spool_reader();
-  DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
-  TARGET_READ_CHUNK_BYTES = 4 * 1024;
-  CHILD_MEDIA_TYPES = new Set(["image", "video", "video_note"]);
-  WHATSAPP_FETCHED_MEDIA_TYPES = new Set([...CHILD_MEDIA_TYPES, "audio"]);
-  MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
-});
-
-// src/workers/whatsapp/media-fetch.ts
-var DISK_FLOOR_MIN_BYTES, ANSWER_HEAD_MAX_BYTES;
-var init_media_fetch = __esm(() => {
-  init_source_inputs();
-  init_secrets_disposition();
-  init_tier_rejudge();
-  init_child_media();
-  init_live_connector();
-  init_spool_reader();
-  DISK_FLOOR_MIN_BYTES = 5 * 1024 * 1024 * 1024;
-  ANSWER_HEAD_MAX_BYTES = 64 * 1024;
-});
-
-// src/workers/whatsapp/store-sync.ts
-var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT, WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES, CLEARED_FILES_KEY;
-var init_store_sync2 = __esm(() => {
-  init_olympus_layout();
-  init_source_placement();
-  init_source_storage();
-  init_tiered_store_set();
-  init_capture_spool_secrets();
-  init_capture_freshness();
-  init_live_connector();
-  init_spool_reader();
-  init_spool_file_identity();
-  init_spool_index();
-  init_media_fetch();
-  init_child_media();
-  WHATSAPP_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S4",
-    trustDomain: "secure_local"
-  });
-  WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
-  CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
-});
-
-// src/workers/file-extraction/extractors/bounded-text.ts
-var TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, GENERIC_MIME_TYPES;
-var init_bounded_text = __esm(() => {
-  TEXT_MIME_TYPES = new Set([
-    "application/json",
-    "application/x-ndjson",
-    "application/xml",
-    "text/csv",
-    "text/html",
-    "text/markdown",
-    "text/plain",
-    "text/tab-separated-values",
-    "text/xml"
-  ]);
-  TABLE_MIME_TYPES = new Set([
-    "text/csv",
-    "text/tab-separated-values"
-  ]);
-  IMAGE_MIME_TYPES = new Set([
-    "image/bmp",
-    "image/gif",
-    "image/heic",
-    "image/heif",
-    "image/jpeg",
-    "image/png",
-    "image/tiff",
-    "image/webp"
-  ]);
-  GENERIC_MIME_TYPES = new Set([
-    "application/octet-stream",
-    "binary/octet-stream",
-    "application/binary"
-  ]);
-});
-
-// src/workers/file-extraction/extractors/apple-vision-ocr.ts
-var init_apple_vision_ocr = __esm(() => {
-  init_bounded_text();
-  init_command_runner();
-});
-
-// src/workers/file-extraction/extractors/ocr-probe-fixture.ts
-var OCR_PROBE_IMAGE_BASE64;
-var init_ocr_probe_fixture = __esm(() => {
-  OCR_PROBE_IMAGE_BASE64 = [
-    "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"
-  ].join("");
-});
-
-// src/workers/file-extraction/extractors/ocr-capability.ts
-var OCR_READY_TTL_MS;
-var init_ocr_capability = __esm(() => {
-  init_command_runner();
-  init_ocr_probe_fixture();
-  OCR_READY_TTL_MS = 10 * 60000;
-});
-
-// src/core/log-redaction.ts
-function redactLogLine(line) {
-  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
-}
-function boundedLogErrorMessage(error) {
-  const message2 = error instanceof Error ? error.message : String(error);
-  const oneLine = message2.replace(/\s+/g, " ").trim();
-  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
-}
-var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
 
 // src/workers/file-extraction/unreadable-files.ts
 var TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
@@ -45150,17 +45836,17 @@ var CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'sel
 function randomOwnerHostname() {
   const bytes = randomBytes3(16);
   const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
-  let bits = 0, value = 0, text3 = "";
+  let bits2 = 0, value = 0, text3 = "";
   for (const byte of bytes) {
     value = value << 8 | byte;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      text3 += alphabet[value >>> bits & 31];
+    bits2 += 8;
+    while (bits2 >= 5) {
+      bits2 -= 5;
+      text3 += alphabet[value >>> bits2 & 31];
     }
   }
-  if (bits)
-    text3 += alphabet[value << 5 - bits & 31];
+  if (bits2)
+    text3 += alphabet[value << 5 - bits2 & 31];
   return `${text3}.localhost`;
 }
 var secret = () => randomBytes3(32).toString("base64url");
@@ -45413,11 +46099,11 @@ class LinuxOwnerBridge {
  location.replace(${JSON.stringify(url)});
  }catch{message.textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. The private ticket was not sent. " + DESKTOP_BRIDGE_REMEDY)};}
 })();</script>`;
-    const fd = openSync10(path, "wx", 384);
+    const fd2 = openSync10(path, "wx", 384);
     try {
-      writeFileSync5(fd, html2);
+      writeFileSync5(fd2, html2);
     } finally {
-      closeSync10(fd);
+      closeSync10(fd2);
     }
     const ticket = { value, challenge, target, path, expires: this.now() + TICKET_MS };
     this.tickets.set(lane, ticket);
@@ -45645,13 +46331,7 @@ init_worker_transport();
 init_analyst_built_in();
 init_manifest();
 init_assets();
-
-// src/workers/source-index/built-in-reasoning/transcription-model.ts
-init_olympus_layout();
-init_install();
-init_manifest2();
-
-// src/core/linux-model-readiness.ts
+init_transcription_model();
 init_manifest2();
 
 // src/workers/email-source/server.ts
@@ -45824,8 +46504,8 @@ async function observeChildExit(child, timeoutMs) {
   let timeout;
   const observed = await Promise.race([
     child.exited.then(() => true, () => true),
-    new Promise((resolve9) => {
-      timeout = setTimeout(() => resolve9(false), timeoutMs);
+    new Promise((resolve10) => {
+      timeout = setTimeout(() => resolve10(false), timeoutMs);
     })
   ]);
   if (timeout)
@@ -45941,609 +46621,8 @@ init_remote_open();
 init_atomic_file();
 init_worker_auth();
 
-// src/workers/email-source/file-extraction-runtime.ts
-init_credential_broker();
-init_types();
-init_file_extraction_source();
-init_media_cache();
-init_olympus_layout();
-init_source_placement();
-init_spool();
-init_connector_store2();
-
-// src/workers/dropbox-files/extraction-source.ts
-init_dropbox_content_hash();
-init_provider_client();
-init_http_timeout();
-init_file_extraction_source();
-import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
-import { relative as relative5, resolve as resolve9, sep as sep5 } from "node:path";
-var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2";
-var DROPBOX_SCOPE_KEY_PROVIDER_PREFIX = "dropbox.";
-var DROPBOX_FOLDER_ID_SCOPE_PREFIX = "folder_id:";
-var MAX_PROVIDER_DETAIL_CHARS = 500;
-var LOCATOR_LOOKUP_MAX_CHARS = 1;
-
-class DropboxExtractionSource {
-  id;
-  corpusId;
-  provider;
-  candidates;
-  scopes;
-  token;
-  locators;
-  localRoots;
-  fetchImpl;
-  contentBaseUrl;
-  downloadTimeoutMs;
-  canonicalRootCache = new Map;
-  constructor(options) {
-    this.id = requireNonEmpty2(options.id, "Dropbox extraction source id");
-    this.corpusId = requireNonEmpty2(options.corpusId, "Dropbox extraction source corpus id");
-    this.provider = requireNonEmpty2(options.provider, "Dropbox extraction source provider");
-    this.token = requireNonEmpty2(options.token, "Dropbox content token");
-    this.candidates = options.candidates;
-    this.locators = options.locators;
-    this.scopes = options.scopes.map((scope) => resolveScope(scope));
-    this.localRoots = (options.localRoots ?? []).map((root) => normalizeRootConfig(root)).filter((root) => Boolean(root));
-    this.fetchImpl = options.fetch ?? ((url, init) => fetch(url, init));
-    this.contentBaseUrl = options.contentBaseUrl?.replace(/\/+$/, "") || DROPBOX_CONTENT_BASE_URL;
-    this.downloadTimeoutMs = options.downloadTimeoutMs ?? DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
-  }
-  async listCandidates(options) {
-    const scopes = this.scopesFor(options.approvedScopeKeys);
-    if (scopes.length === 0)
-      return { candidates: [], done: true };
-    const readerOptions = {
-      limit: options.limit,
-      withoutChunksOnly: true,
-      includeStaleChunks: true
-    };
-    if (options.cursor !== undefined)
-      readerOptions.cursor = options.cursor;
-    if (options.mimeTypes)
-      readerOptions.mimeTypes = options.mimeTypes;
-    const sharedAccount = singleAccount(scopes);
-    if (sharedAccount)
-      readerOptions.accountScope = sharedAccount;
-    const page2 = await this.candidates.extractionCandidates(readerOptions);
-    const candidates = [];
-    for (const row of page2.candidates) {
-      const ref = this.refFromRow(row, scopes);
-      if (ref)
-        candidates.push(ref);
-    }
-    return {
-      candidates,
-      ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
-      done: page2.done
-    };
-  }
-  async fetch(ref, options) {
-    const local = await this.readFromLocalMount(ref, options.maxBytes);
-    if (local)
-      return local;
-    return this.downloadFromProvider(ref, options.maxBytes);
-  }
-  verifyBytes(ref, bytes) {
-    if (!ref.contentHash)
-      return false;
-    return computeDropboxContentHash(bytes) === ref.contentHash;
-  }
-  scopesFor(approvedScopeKeys) {
-    if (!approvedScopeKeys)
-      return this.scopes;
-    const wanted = new Set(approvedScopeKeys);
-    return this.scopes.filter((scope) => wanted.has(scope.approvedScopeKey));
-  }
-  refFromRow(row, scopes) {
-    const split = splitScopedLocalItemId(row.localItemId);
-    const accountScope = row.accountScope ?? split?.accountScope;
-    const providerItemId = row.providerItemId ?? split?.providerItemId;
-    if (!accountScope || !providerItemId)
-      return;
-    const scope = matchScope(scopes, accountScope, row.locatorUri);
-    if (!scope)
-      return;
-    const name = row.name ?? row.title;
-    return {
-      corpusId: this.corpusId,
-      provider: this.provider,
-      accountScope,
-      approvedScopeKey: scope.approvedScopeKey,
-      providerItemId,
-      localItemId: row.localItemId,
-      ...row.sourceVersion ? { sourceVersion: row.sourceVersion } : {},
-      ...row.contentHash ? { contentHash: row.contentHash } : {},
-      ...name ? { name } : {},
-      ...row.mimeType ? { mimeType: row.mimeType } : {},
-      ...row.sizeBytes !== undefined ? { sizeBytes: row.sizeBytes } : {}
-    };
-  }
-  async readFromLocalMount(ref, maxBytes) {
-    if (this.localRoots.length === 0)
-      return;
-    if (!ref.contentHash)
-      return;
-    const roots = this.localRoots.filter((root) => rootMatchesRef(root, ref));
-    if (roots.length === 0)
-      return;
-    const dropboxPath = await this.dropboxPathFor(ref);
-    if (!dropboxPath)
-      return;
-    for (const root of roots) {
-      const candidatePath = await this.candidatePath(root, dropboxPath);
-      if (!candidatePath)
-        continue;
-      const bytes = await readVerifiedCandidate({
-        candidatePath,
-        contentHash: ref.contentHash,
-        ...maxBytes !== undefined ? { maxBytes } : {},
-        ...ref.sizeBytes !== undefined ? { declaredSizeBytes: ref.sizeBytes } : {}
-      });
-      if (!bytes)
-        continue;
-      return {
-        bytes,
-        ...ref.mimeType ? { mimeType: ref.mimeType } : {},
-        sizeBytes: bytes.byteLength
-      };
-    }
-    return;
-  }
-  async dropboxPathFor(ref) {
-    if (!this.locators)
-      return;
-    const content = await this.locators.localContent(ref.localItemId, LOCATOR_LOOKUP_MAX_CHARS);
-    return content?.locatorUri;
-  }
-  async candidatePath(root, dropboxPath) {
-    const relativePath = dropboxRelativePath(root.dropboxPathPrefix, dropboxPath);
-    if (relativePath === undefined)
-      return;
-    const rootRealPath = await this.canonicalRoot(root.rootPath);
-    if (!rootRealPath)
-      return;
-    const candidatePath = resolve9(rootRealPath, relativePath);
-    const relativeToRoot = relative5(rootRealPath, candidatePath);
-    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep5}`)) {
-      return;
-    }
-    return candidatePath;
-  }
-  canonicalRoot(rootPath) {
-    let cached2 = this.canonicalRootCache.get(rootPath);
-    if (!cached2) {
-      cached2 = realpath(rootPath).catch(() => {
-        return;
-      });
-      this.canonicalRootCache.set(rootPath, cached2);
-    }
-    return cached2;
-  }
-  async downloadFromProvider(ref, maxBytes) {
-    let response;
-    try {
-      const fetchImpl = (url, init) => this.fetchImpl(url, init);
-      response = await fetchWithBodyDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          "Dropbox-API-Arg": JSON.stringify(dropboxDownloadArg(ref))
-        }
-      }, this.downloadTimeoutMs);
-    } catch {
-      throw new FileExtractionSourceError("network_unreachable");
-    }
-    if (!response.ok)
-      throw await downloadFailure(response);
-    const declaredSize = parsePositiveInteger(response.headers.get("content-length") ?? undefined);
-    if (maxBytes !== undefined && declaredSize !== undefined && declaredSize > maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
-    }
-    let bytes;
-    try {
-      bytes = new Uint8Array(await response.arrayBuffer());
-    } catch (error) {
-      if (isAbortError(error))
-        throw new FileExtractionSourceError("network_socket_closed");
-      throw error;
-    }
-    if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
-    }
-    const contentType = response.headers.get("content-type");
-    return {
-      bytes,
-      ...contentType ? { mimeType: contentType } : {},
-      sizeBytes: declaredSize ?? bytes.byteLength
-    };
-  }
-}
-function dropboxDownloadArg(ref) {
-  if (ref.sourceVersion) {
-    return {
-      path: ref.sourceVersion.startsWith("rev:") ? ref.sourceVersion : `rev:${ref.sourceVersion}`
-    };
-  }
-  return { path: ref.providerItemId };
-}
-function matchScope(scopes, accountScope, locatorUri) {
-  const path = normalizeDropboxPath2(locatorUri);
-  if (!path)
-    return;
-  const lowerPath = path.toLowerCase();
-  let best;
-  for (const scope of scopes) {
-    if (scope.account !== accountScope)
-      continue;
-    const prefix = scope.pathPrefix.toLowerCase();
-    const contains = prefix === "/" ? lowerPath.length > 1 : lowerPath.startsWith(`${prefix}/`);
-    if (!contains)
-      continue;
-    if (!best || scope.pathPrefix.length > best.pathPrefix.length)
-      best = scope;
-  }
-  return best;
-}
-function resolveScope(scope) {
-  const approvedScopeKey = scope.approvedScopeKey?.trim();
-  if (!approvedScopeKey) {
-    throw new Error("Dropbox extraction scope requires an approvedScopeKey.");
-  }
-  const separator = approvedScopeKey.indexOf(":");
-  const parsedAccount = approvedScopeKey.startsWith(DROPBOX_SCOPE_KEY_PROVIDER_PREFIX) && separator > 0 ? approvedScopeKey.slice(DROPBOX_SCOPE_KEY_PROVIDER_PREFIX.length, separator) : undefined;
-  const account = scope.account?.trim() || parsedAccount;
-  if (!account) {
-    throw new Error(`Dropbox extraction scope ${approvedScopeKey} needs an account it cannot parse from its key.`);
-  }
-  const parsedPath = separator > 0 ? approvedScopeKey.slice(separator + 1) : undefined;
-  const rawPrefix = scope.pathPrefix?.trim() || (parsedPath && !parsedPath.startsWith(DROPBOX_FOLDER_ID_SCOPE_PREFIX) ? parsedPath : undefined);
-  const pathPrefix = normalizeDropboxPath2(rawPrefix);
-  if (!pathPrefix) {
-    throw new Error(`Dropbox extraction scope ${approvedScopeKey} requires an explicit pathPrefix.`);
-  }
-  return { approvedScopeKey, account, pathPrefix };
-}
-function singleAccount(scopes) {
-  const accounts = new Set(scopes.map((scope) => scope.account));
-  return accounts.size === 1 ? [...accounts][0] : undefined;
-}
-async function readVerifiedCandidate(input) {
-  let fileStat;
-  try {
-    fileStat = await stat2(input.candidatePath);
-  } catch {
-    return;
-  }
-  if (!fileStat.isFile())
-    return;
-  if (input.maxBytes !== undefined && fileStat.size > input.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
-  }
-  if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
-    return;
-  }
-  const bytes = new Uint8Array(await readFile3(input.candidatePath));
-  if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
-  }
-  if (computeDropboxContentHash(bytes) !== input.contentHash)
-    return;
-  return bytes;
-}
-function normalizeRootConfig(root) {
-  const rootPath = root.rootPath.trim();
-  if (!rootPath)
-    return;
-  const normalized = { rootPath };
-  if (root.account?.trim())
-    normalized.account = root.account.trim();
-  if (root.approvedScopeKey?.trim())
-    normalized.approvedScopeKey = root.approvedScopeKey.trim();
-  const dropboxPathPrefix = normalizeDropboxPath2(root.dropboxPathPrefix ?? "/");
-  if (dropboxPathPrefix)
-    normalized.dropboxPathPrefix = dropboxPathPrefix;
-  if (root.rootId?.trim())
-    normalized.rootId = root.rootId.trim();
-  return normalized;
-}
-function rootMatchesRef(root, ref) {
-  if (root.account && root.account !== ref.accountScope)
-    return false;
-  if (root.approvedScopeKey && root.approvedScopeKey !== ref.approvedScopeKey)
-    return false;
-  return true;
-}
-function dropboxRelativePath(prefix, dropboxPath) {
-  const normalizedPath = normalizeDropboxPath2(dropboxPath);
-  if (!normalizedPath)
-    return;
-  const normalizedPrefix = normalizeDropboxPath2(prefix ?? "/");
-  if (!normalizedPrefix || normalizedPrefix === "/") {
-    return normalizedPath.slice(1);
-  }
-  if (normalizedPath.toLowerCase() === normalizedPrefix.toLowerCase()) {
-    return;
-  }
-  if (!normalizedPath.toLowerCase().startsWith(`${normalizedPrefix.toLowerCase()}/`)) {
-    return;
-  }
-  return normalizedPath.slice(normalizedPrefix.length + 1);
-}
-function normalizeDropboxPath2(path) {
-  const trimmed = path?.trim().replace(/\\/g, "/").replace(/\/+/g, "/");
-  if (!trimmed)
-    return;
-  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-}
-async function downloadFailure(response) {
-  let detail = "";
-  try {
-    detail = (await response.text()).slice(0, MAX_PROVIDER_DETAIL_CHARS);
-  } catch {
-    detail = "";
-  }
-  const options = { detailForHash: `${response.status}:${detail}` };
-  if (response.status === 401)
-    return new FileExtractionSourceError("source_auth_expired", options);
-  if (response.status === 403)
-    return new FileExtractionSourceError("source_permission_denied", options);
-  if (response.status === 429)
-    return new FileExtractionSourceError("source_rate_limited", options);
-  if (response.status === 404 || response.status === 409) {
-    return new FileExtractionSourceError("source_item_not_found", options);
-  }
-  if (response.status >= 500)
-    return new FileExtractionSourceError("source_unavailable", options);
-  if (response.status >= 400)
-    return new FileExtractionSourceError("source_request_rejected", options);
-  return new FileExtractionSourceError("source_unavailable", options);
-}
-function parsePositiveInteger(value) {
-  if (!value)
-    return;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
-}
-function requireNonEmpty2(value, label) {
-  const trimmed = value?.trim();
-  if (!trimmed)
-    throw new Error(`${label} is required.`);
-  return trimmed;
-}
-
-// src/workers/email-source/file-extraction-runtime.ts
-init_scope();
-init_store();
-init_drive();
-
-// src/workers/google-connectors/drive-extraction-source.ts
-init_file_extraction_source();
-init_drive();
-init_request_budget();
-var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
-  "application/pdf",
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/tiff",
-  "image/webp",
-  "image/heic",
-  "image/heif"
-]);
-
-// src/workers/whatsapp/extraction-factory.ts
-init_source_placement();
-
-// src/workers/file-extraction/connector-source.ts
-init_spool();
-init_file_extraction_source();
-
-// src/workers/whatsapp/extraction-factory.ts
-init_child_media();
-
-// src/workers/whatsapp/extraction-source.ts
-init_spool();
-init_child_media();
-init_input_media();
-init_file_extraction_source();
-
-// src/workers/whatsapp/extraction-factory.ts
-init_store_sync2();
-
-// src/workers/email-source/file-extraction-runtime.ts
-init_store_sync2();
-
-// src/workers/file-extraction/job-store.ts
-init_sqlite_migrations();
-init_job_names();
-var NETWORK_ERROR_KINDS = new Set([
-  "network_unreachable",
-  "network_socket_closed"
-]);
-var POLICY_DECISIONS = new Set([
-  "index_allowed",
-  "index_redacted",
-  "metadata_only",
-  "blocked_sensitive",
-  "needs_review"
-]);
-var TERMINAL_STATUSES = new Set([
-  "indexed",
-  "metadata_only",
-  "skipped_unsupported",
-  "skipped_too_large",
-  "blocked_policy",
-  "failed_retryable",
-  "failed_terminal"
-]);
-
-// src/workers/file-extraction/extractors/ocr.ts
-init_bounded_text();
-init_command_runner();
-
-// src/workers/file-extraction/extractors/text.ts
-init_bounded_text();
-init_command_runner();
-
-// src/workers/file-extraction/extractors/document-formats.ts
-init_bounded_text();
-
-// src/workers/file-extraction/extractors/image-prepare.ts
-init_media_cache();
-init_still_image_formats();
-init_command_runner();
-init_image_preparers();
-
-// src/workers/file-extraction/extractors/input-limits.ts
-var DOCUMENT_READER_MAX_INPUT_BYTES = 256 * 1024 * 1024;
-var IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
-
-// src/workers/file-extraction/extractors/text.ts
-init_media_cache();
-init_still_image_formats();
-
-// src/workers/file-extraction/extractors/ocr.ts
-init_apple_vision_ocr();
-init_ocr_capability();
-
-// src/workers/file-extraction/extractors/pdf-raster-ocr.ts
-init_bounded_text();
-init_apple_vision_ocr();
-init_command_runner();
-init_ocr_capability();
-init_pdf_render();
-
-// src/workers/file-extraction/registry.ts
-init_apple_vision_ocr();
-init_ocr_capability();
-
-// src/workers/file-extraction/extractors/remote-vlm.ts
-init_bounded_text();
-init_command_runner();
-init_pdf_render();
-init_zkapi_consult_settings();
-init_engine();
-var DEFAULT_REMOTE_EXTRACTION_PROMPT = [
-  "Extract concise evidence text from this secure-local document for private indexing.",
-  "Return only visible or directly readable content.",
-  "For tables, reports, receipts, screenshots, or scans, preserve labels, values, dates, units, and row context.",
-  "Do not infer private facts beyond the document."
-].join(" ");
-
-// src/workers/file-extraction/registry.ts
-init_image_preparers();
-init_still_image_readiness();
-
-// src/workers/file-extraction/extractors/built-in-transcriber.ts
-init_model_transport();
-init_install();
-init_manifest2();
-init_server();
-init_command_runner();
-var DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
-var DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
-var DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
-var DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
-var DEFAULT_VERIFY_WAIT_MS = 5 * 60000;
-
-// src/workers/file-extraction/extractors/transcription.ts
-init_bounded_text();
-init_command_runner();
-
-// src/workers/file-extraction/extractors/vlm.ts
-init_bounded_text();
-init_command_runner();
-init_pdf_render();
-init_model_transport();
-var DEFAULT_VLM_PROMPT = [
-  "Describe the visible content for secure-local retrieval.",
-  "Focus on document layout, headings, labels, diagrams, tables, handwriting, screenshots, and any clearly legible text.",
-  "Do not infer private facts beyond what is visible."
-].join(" ");
-var DEFAULT_VLM_PDF_PROMPT = [
-  "Faithfully transcribe this scanned PDF page for secure-local indexing.",
-  "Return visible text only. Preserve headings, table rows, amounts, dates, identifiers, labels, and row/column relationships.",
-  "Do not summarize, omit low-confidence visible text, or infer facts that are not visible."
-].join(" ");
-var VLM_PDF_PROBE_IMAGE_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-var VLM_PDF_PROBE_IMAGE_BASE64 = stripDataUrlPrefix(VLM_PDF_PROBE_IMAGE_DATA_URL);
-function stripDataUrlPrefix(dataUrl) {
-  return dataUrl.replace(/^data:[^,]+,/, "");
-}
-
-// src/workers/file-extraction/runner.ts
-init_media_cache();
-init_operation_error();
-init_model_transport();
-init_types();
-init_file_extraction_source();
-init_command_runner();
-init_tier_classifier();
-init_bounded_text();
-
-// src/workers/file-extraction/store-sink.ts
-init_engine();
-init_tier_classifier();
-init_secrets_disposition();
-init_source_ingestion_exclusions();
-init_connector_store();
-var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing";
-var EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible";
-var EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere";
-var EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty";
-var EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous";
-var EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only";
-var EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued";
-var EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets";
-var EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = "store_item_source_version_stale";
-var EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
-
-// src/workers/file-extraction/runner.ts
-var SINK_SKIP_SETTLEMENTS = Object.freeze({
-  [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
-  [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",
-  [EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE]: "failed_terminal",
-  [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: "blocked_policy",
-  [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: "blocked_policy",
-  [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: "blocked_policy",
-  [EXTRACTION_SINK_SKIPPED_SECRETS]: "blocked_policy",
-  [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: "metadata_only",
-  [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only",
-  [EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY]: "metadata_only"
-});
-var ITEM_REF_FIELDS = new Set([
-  "corpusId",
-  "provider",
-  "accountScope",
-  "approvedScopeKey",
-  "providerItemId",
-  "localItemId",
-  "sourceVersion",
-  "contentHash",
-  "name",
-  "mimeType",
-  "sizeBytes"
-]);
-var PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
-
-// src/workers/file-extraction/tiered-store-sink.ts
-init_types();
-init_engine();
-init_tier_classifier();
-init_tier_ledger();
-init_parent_context();
-init_tier_placement();
-init_secrets_disposition();
-init_tiered_store_set();
-
-// src/workers/connector-store/tiered-extraction.ts
-init_tier_ledger();
-init_tiered_store_set();
-
-// src/workers/email-source/file-extraction-runtime.ts
-init_tiered_store_set();
+// src/workers/email-source/server.ts
+init_file_extraction_runtime();
 
 // src/workers/file-extraction/readiness-ledger.ts
 init_answer_ready_coverage();
@@ -46878,11 +46957,14 @@ init_venice_models();
 init_sovereignty();
 init_model_transport();
 init_bounded_text();
+init_remote_vlm();
 
 // src/workers/file-extraction/extractors/openai-compatible-client.ts
 init_bounded_text();
+init_remote_vlm();
 init_local_model_policy();
 init_model_transport();
+init_vlm();
 
 // src/workers/email-source/server.ts
 init_apple_vision_ocr();
@@ -46928,6 +47010,11 @@ init_messaging_capture_grant_file();
 init_olympus_layout();
 init_source_registry();
 init_unpaired_sources();
+
+// src/workers/email-source/index.ts
+init_text();
+init_transcription();
+init_runner();
 
 // src/workers/source-index/answer-latency-log.ts
 init_olympus_layout();
@@ -47776,6 +47863,8 @@ init_analyst_answer();
 init_status();
 init_http();
 init_analyst();
+init_transcription_model();
+init_built_in_transcriber();
 init_analyst_built_in();
 
 // src/core/analyst-delphi.ts
@@ -48171,19 +48260,22 @@ init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
-import { createHash as createHash24 } from "node:crypto";
+init_drive_extraction_source();
 init_connector_store();
 init_google_connectors();
 init_readwise();
 init_embeddings();
 init_x_bookmarks();
 init_live_control2();
+import { createHash as createHash24 } from "node:crypto";
 
 // src/workers/whatsapp/index.ts
 init_live_connector();
-init_store_sync2();
+init_store_sync();
+init_extraction_source2();
 
 // src/workers/source-scheduler.ts
+init_transcription();
 init_telegram_messages();
 init_source_scheduler_state();
 init_credential_broker();
@@ -50371,12 +50463,14 @@ init_store2();
 init_state();
 
 // src/workers/archive-import/extraction-runtime.ts
+init_file_extraction_runtime();
 init_store2();
 
 // src/workers/archive-import/extraction-source.ts
 init_archive_formats();
 init_file_extraction_source();
 init_scope_safe_fs();
+init_connector_source();
 init_spool();
 init_manifest3();
 init_media_bindings();
@@ -50698,6 +50792,7 @@ function plistString(plist, key2) {
 
 // src/workers/email-source/server.ts
 init_local_open();
+init_connector_source();
 
 // src/workers/local-files/scope-browser.ts
 init_remote_access();
@@ -51151,6 +51246,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
 registerFileScopeBrowserFactory(LOCAL_FILES_SOURCE_ID, (_context) => createLocalFilesFolderScopeBrowser());
 
 // src/workers/email-source/server.ts
+init_tiered_extraction();
 init_source_ingestion_exclusions();
 init_telegram_messages();
 init_connector_store();
@@ -51295,7 +51391,7 @@ var DAY_MS2 = 24 * 3600000;
 
 // src/workers/whatsapp/archive-target.ts
 init_live_connector();
-init_store_sync2();
+init_store_sync();
 var WHATSAPP_LANE_SYNC = Object.freeze({
   placement: WHATSAPP_STORE_PLACEMENT,
   fetchContent: true,
@@ -51303,6 +51399,8 @@ var WHATSAPP_LANE_SYNC = Object.freeze({
 });
 
 // src/workers/email-source/server.ts
+init_extraction_factory();
+init_media_extraction();
 init_source_dashboard();
 init_source_ingestion_ledger();
 init_connected_handles();
@@ -51353,8 +51451,7 @@ init_manifest3();
 init_gmail_mail_record();
 
 // src/workers/google-connectors/gmail-attachment-extraction.ts
-init_tier_ledger();
-init_child_visibility();
+init_child_extraction_runtime();
 init_gmail();
 
 // src/workers/email-source/server.ts
