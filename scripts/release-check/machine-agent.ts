@@ -1620,6 +1620,15 @@ function archiveHost(): ArchiveHost {
     search: archiveSearch,
     readStores: readArchiveStores,
     restartEngine,
+    async awaitEngine(timeoutMs: number) {
+      const started = Date.now();
+      try {
+        await waitForEngine(timeoutMs);
+        return { ok: true, ms: Date.now() - started };
+      } catch (error) {
+        return { ok: false, ms: Date.now() - started, detail: error instanceof Error ? error.message : String(error) };
+      }
+    },
     seedLive: (hook) => liveSeedHook(hook).seed({ env: process.env, home: homedir() }),
     readSourceStores,
     deleteSourceData(sourceId) {
@@ -1650,8 +1659,12 @@ async function archiveSeedLiveCommand(format: string): Promise<never> {
   emit({ ...(await seedLiveStage(archiveHost(), { format })) });
 }
 
-async function archiveBesideLiveCommand(args: { format: string; seed: string; settleS?: number }): Promise<never> {
-  emit({ ...(await besideLiveStage(archiveHost(), { format: args.format, seed: args.seed, ...(args.settleS !== undefined ? { settleS: args.settleS } : {}) })) });
+async function archiveBesideLiveCommand(args: { format: string; seed: string; settleS?: number; drainS?: number }): Promise<never> {
+  emit({ ...(await besideLiveStage(archiveHost(), {
+    format: args.format, seed: args.seed,
+    ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
+    ...(args.drainS !== undefined ? { drainS: args.drainS } : {}),
+  })) });
 }
 
 async function archiveDrainCommand(args: { role: string; format: string; seed: string; search: boolean; boundS?: number }): Promise<never> {
@@ -1931,6 +1944,7 @@ async function main(): Promise<void> {
     case 'archive-beside-live': return await archiveBesideLiveCommand({
       format: flag('--format'), seed: flag('--seed'),
       ...(rest.includes('--settle-s') ? { settleS: Number(flag('--settle-s')) } : {}),
+      ...(rest.includes('--drain-s') ? { drainS: Number(flag('--drain-s')) } : {}),
     });
     case 'archive-drain': return await archiveDrainCommand({
       role: flag('--role'), format: flag('--format', STRESS_FORMAT), seed: flag('--seed'), search: rest.includes('--search'),

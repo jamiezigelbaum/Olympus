@@ -23,7 +23,7 @@
  * machine-agent.ts does the pressing, the waiting, the store reading and the egress watch, and hands back the observations below.
  * Nothing here holds message text: a row is the dashboard's own sentences, counts and names, which are the fixture's.
  */
-import { DASHBOARD_ARCHIVE_COPY as A, DASHBOARD_CHATGPT_PAGE_COPY as PANEL, dashboardArchiveNouns } from '../../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_ARCHIVE_COPY as A, DASHBOARD_CHATGPT_PAGE_COPY as PANEL, DASHBOARD_DISCONNECTED_DATA_KEPT, dashboardArchiveNouns } from '../../src/workers/dashboard/vocabulary.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, type ArchiveExpectation, type BesideLiveExpectation, type LegFixture } from './archive-fixtures.ts';
 import { egressVerdict, type EgressView } from './inbox.ts';
 import { journeyChecks, type Journey, type JourneyTrace } from './journey.ts';
@@ -414,8 +414,21 @@ export interface BesideLiveObservation {
   /** The source's own stores once the import settled. */
   stores: StoreView[];
   search?: SearchView;
-  /** The source's Delete, and what is left after it. */
-  deleted?: { ok: boolean; detail?: string; stores: StoreView[]; rowGone: boolean };
+  /**
+   * The source's Delete, and what is left after it. `unpaired`: the source was unpaired on the dashboard first, as the owner must
+   * (the engine refuses to delete a paired source's data).
+   */
+  deleted?: {
+    ok: boolean;
+    unpaired: boolean;
+    detail?: string;
+    stores: StoreView[];
+    rowGone: boolean;
+    /** The engine came back ready after the restart the Delete asked for (absent: not waited for). */
+    engineBack?: boolean;
+    /** How long the source's stores took to be cleared, from the Delete. */
+    goneMs?: number;
+  };
 }
 
 export interface ModelObservation {
@@ -449,9 +462,37 @@ export function approveRequestSteps(fx: LegFixture, fullPath: string, startS = 1
       ],
       timeoutMs: openS * 1_000,
     },
-    {
+    ...(fx.accountQuestion ? accountQuestionSteps(fx, startS) : [{
       name: 'Press Import on the agent\'s request',
-      do: { click: { role: 'button', name: A.approve, within: { css: 'li.archive.request[data-request="pending"]' } }, frame: 'panel' },
+      do: { click: { role: 'button', name: A.approve, within: { css: 'li.archive.request[data-request="pending"]' } }, frame: 'panel' as const },
+      expect: [{ present: rowTarget(fx.fileName), frame: 'panel' as const }],
+      timeoutMs: startS * 1_000,
+    }]),
+  ];
+}
+
+/**
+ * For an export that does not name its account: Import, then the dashboard asks whether it is the connected account's, and the
+ * journey answers: "Add to <source>" (it joins the source) or "Keep it under Archives" (it stays apart). Either way the row follows.
+ */
+function accountQuestionSteps(fx: LegFixture, startS: number): Journey['steps'] {
+  const question = fx.accountQuestion!;
+  const pending = { css: 'li.archive.request[data-request="pending"]' };
+  const [askedBefore = ''] = A.account.line.split('{name}');
+  const answer = question.answer === 'add' ? fill(A.account.add, { source: question.sourceLabel }) : A.account.apart;
+  return [
+    {
+      name: 'Press Import on the agent\'s request: the dashboard asks which account the export is of',
+      do: { click: { role: 'button', name: A.approve, within: pending }, frame: 'panel' },
+      expect: [
+        { text: new RegExp(`${escapeRe(askedBefore)}${escapeRe(fx.fileName)}`), frame: 'panel' },
+        { present: { role: 'button', name: answer, within: pending }, frame: 'panel' },
+      ],
+      timeoutMs: startS * 1_000,
+    },
+    {
+      name: question.answer === 'add' ? `Answer ${answer}: the export joins the source` : `Answer ${answer}: the export stays apart`,
+      do: { click: { role: 'button', name: answer, within: pending }, frame: 'panel' },
       expect: [{ present: rowTarget(fx.fileName), frame: 'panel' }],
       timeoutMs: startS * 1_000,
     },
@@ -555,6 +596,43 @@ export function removeJourney(role: string, fileName: string, removeS: number = 
         do: { click: { role: 'button', name: confirm }, frame: 'panel' },
         expect: [{ absent: rowTarget(fileName), frame: 'panel' }],
         timeoutMs: removeS * 1_000,
+      },
+    ],
+  };
+}
+
+/**
+ * Unpair, the way the owner ends a pairing before deleting a chat source's data: the source's ⋯ menu, Unpair <source>, the engine's
+ * own confirmation, then the row says it is disconnected with its data kept, and offers Unpair no more.
+ */
+export function unpairJourney(sourceId: string, label: string, bounds: { unpairS?: number; openS?: number } = {}): Journey {
+  const unpair = `Unpair ${label}`;
+  const confirm = fill(PANEL.confirm, { label: unpair.toLowerCase() });
+  return {
+    id: `archive-beside-unpair-${sourceId}`,
+    title: `The owner unpairs ${label} before deleting its data`,
+    source: 'a paired chat source\'s Delete: the engine refuses it until the source is unpaired, so the owner unpairs it first',
+    mutates: true,
+    steps: [
+      { name: 'Open the dashboard: the source has its menu', do: { go: '/dashboard' }, expect: [{ present: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' }], timeoutMs: (bounds.openS ?? OPEN_S) * 1_000 },
+      {
+        name: `Open the source's menu: it offers ${unpair}`,
+        do: { click: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' },
+        expect: [{ present: { role: 'button', name: unpair }, frame: 'panel' }],
+      },
+      {
+        name: `Press ${unpair}: it asks first`,
+        do: { click: { role: 'button', name: unpair }, frame: 'panel' },
+        expect: [{ present: { role: 'button', name: confirm }, frame: 'panel' }],
+      },
+      {
+        name: 'Confirm: the source reads disconnected, its data kept',
+        do: { click: { role: 'button', name: confirm }, frame: 'panel' },
+        expect: [
+          { present: { css: 'li.row.source', text: DASHBOARD_DISCONNECTED_DATA_KEPT, contains: true }, frame: 'panel' },
+          { absent: { role: 'button', name: unpair }, frame: 'panel' },
+        ],
+        timeoutMs: (bounds.unpairS ?? 60) * 1_000,
       },
     ],
   };
@@ -936,7 +1014,9 @@ export function besideLiveChecks(obs: BesideLiveObservation | undefined, fx: Leg
   const gone: string[] = [];
   if (!deleted) gone.push('the source\'s Delete was not run');
   else {
+    if (!deleted.unpaired) gone.push('the source was not unpaired before its Delete (the engine refuses to delete a paired source\'s data)');
     if (!deleted.ok) gone.push(`the source's Delete failed${deleted.detail ? `: ${deleted.detail}` : ''}`);
+    if (deleted.ok && deleted.engineBack === false) gone.push(deleted.detail ?? 'the engine was not ready after the Delete\'s restart');
     for (const store of deleted.stores) {
       if (store.error) gone.push(`the ${store.tier} store could not be read: ${store.error}`);
       if (store.tokenRows > 0) gone.push(`the ${store.tier} store still holds ${store.tokenRows} row(s) with the archive's content`);
