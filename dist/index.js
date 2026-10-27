@@ -15459,6 +15459,16 @@ function metadataStringArray(metadata, key) {
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
 
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
 // src/core/classification-signals.ts
 function namesOnlyContentScopeMetadata() {
   return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
@@ -15616,7 +15626,7 @@ function gmailClassificationSignals(item) {
     ...labels.length > 0 ? { labels } : {}
   };
 }
-var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => `${messageId}#child:${partId}`, gmailId = (record2) => !record2.id.startsWith(GMAIL_OWN_ID_PREFIX);
+var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record2) => !record2.id.startsWith(GMAIL_OWN_ID_PREFIX);
 var init_gmail_mail_record = __esm(() => {
   init_sender_rules();
 });
@@ -17657,6 +17667,7 @@ var init_secrets_disposition = __esm(() => {
   init_sniffer_store();
   init_job_names();
 });
+
 // src/workers/connector-store/child-visibility.ts
 var init_child_visibility = __esm(() => {
   init_tier_ledger();

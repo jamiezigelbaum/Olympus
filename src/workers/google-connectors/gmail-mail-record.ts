@@ -23,6 +23,7 @@
  *   name only.
  */
 import { createHash } from 'node:crypto';
+import { childProviderItemId } from '../../core/child-item-id.ts';
 import type { RawItem, SourceClassificationSignals } from '../../core/contracts.ts';
 import { namesOnlyContentScopeMetadata } from '../../core/classification-signals.ts';
 import { MAX_FROM_HEADER_CHARS } from '../../core/sender-rules.ts';
@@ -74,7 +75,7 @@ export interface GmailMailRecord {
   sourceVersion?: string;
 }
 
-export const gmailChildProviderId = (messageId: string, partId: string): string => `${messageId}#child:${partId}`;
+export const gmailChildProviderId = (messageId: string, partId: string): string => childProviderItemId(messageId, partId || 'root');
 
 const gmailId = (record: GmailMailRecord): boolean => !record.id.startsWith(GMAIL_OWN_ID_PREFIX);
 

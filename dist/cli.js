@@ -54134,7 +54134,7 @@ function gmailClassificationSignals(item) {
     ...labels.length > 0 ? { labels } : {}
   };
 }
-var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => `${messageId}#child:${partId}`, gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX), compareGmailMailVersions = (_a3, _b2) => 0;
+var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX), compareGmailMailVersions = (_a3, _b2) => 0;
 var init_gmail_mail_record = __esm(() => {
   init_sender_rules();
 });
