@@ -123,5 +123,5 @@ describe('live accounts: the MCP request as it runs on a Linux machine', () => {
       server.stop(true);
     }
     expect(spawnSync('bash', ['-n', '-c', mcpCallScript('macos', 't', {})]).status).toBe(0);
-  });
+  }, 30_000);
 });

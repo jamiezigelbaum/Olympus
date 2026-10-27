@@ -60,6 +60,8 @@ interface State {
   deepPressed?: boolean;
   /** A sign-in button that keeps a blank tab while its address comes, as the product does, then sends it on to the provider, leaves it blank, or closes it. */
   signInTab?: 'provider' | 'blank' | 'closes';
+  /** A Connect that opens a sheet whose sign-in starts at once, as Drive and Dropbox do: the tab goes on to the provider, or stays blank, and the page redraws with the sheet closed. */
+  signInSheet?: 'provider' | 'blank';
   /** The Ask form: the local model answers on the machine, Venice sends the question out. */
   ask?: boolean;
   asked?: string;
@@ -105,6 +107,7 @@ class PagesDriver implements JourneyDriver {
       ${s.sections ? '<details><summary>Add it yourself instead</summary><button type="button" class="btn">Copy the address</button></details><details open><summary>Advanced</summary><button type="button" class="btn">Show advanced</button></details>' : ''}
       ${s.reloadingSection ? `<details data-zk-section ${s.zkOpen ? 'open' : ''}><summary>Set up zkAPI</summary><button type="button" class="btn" data-zk-add>Add zkAPI to Olympus</button>${s.zkAdded ? '<p>zkAPI added.</p>' : ''}</details>` : ''}
       ${s.signInTab ? '<button type="button" class="btn" data-sign-in>Connect Drive</button>' : ''}
+      ${s.signInSheet ? '<button type="button" class="btn" aria-expanded="false" data-sheet-toggle="#dropbox-sheet" data-sign-in-sheet>Connect</button><div id="dropbox-sheet" hidden><p>Connecting…</p></div>' : ''}
       ${s.nested ? `<details data-level="1" ${(s.nestedOpen ?? 0) >= 1 ? 'open' : ''}><summary>Level one</summary><details data-level="2" ${(s.nestedOpen ?? 0) >= 2 ? 'open' : ''}><summary>Level two</summary><details data-level="3" ${(s.nestedOpen ?? 0) >= 3 ? 'open' : ''}><summary>Level three</summary><button type="button" class="btn" data-deep>Deep button</button>${s.deepPressed ? '<p>Deep button pressed.</p>' : ''}</details></details></details>` : ''}
       ${s.ask ? `<form data-pa-ask><textarea name="question" aria-label="Your question"></textarea><button type="submit" data-pa-destination="computer" data-pa-action="ask_computer">Ask the local model</button><button type="submit" data-pa-destination="venice" data-pa-action="ask_venice">Ask Venice</button>${s.asked ? `<p>${s.asked}</p>` : ''}</form>` : ''}
       ${s.secret ? secret : ''}
@@ -127,7 +130,7 @@ class PagesDriver implements JourneyDriver {
       if (!form.checkValidity()) return;
       this.events.requests.push({ url: '/dashboard/connect/api-key', status: 500, text: 'POST /dashboard/connect/api-key -> 500' });
     });
-    on('[data-sheet-toggle]', () => { this.state.sheetOpen = !this.state.sheetOpen; this.render(); });
+    on('[data-sheet-toggle]:not([data-sign-in-sheet])', () => { this.state.sheetOpen = !this.state.sheetOpen; this.render(); });
     on('form[data-agent-kind="remote-on"] button', () => { this.pressed.push('remote-on'); });
     on('form[data-agent-kind="revoke"] button', (el) => {
       this.pressed.push('revoke');
@@ -159,6 +162,11 @@ class PagesDriver implements JourneyDriver {
       const tab = (this.host as any).open('', '_blank');
       if (this.state.signInTab === 'provider') tab.gone = true;
       if (this.state.signInTab === 'closes') tab.closed = true;
+    });
+    on('[data-sign-in-sheet]', () => {
+      const tab = (this.host as any).open('', '_blank');
+      if (this.state.signInSheet === 'provider') tab.gone = true;
+      this.render();
     });
     on('form[data-control-session-kind="lock"] button', () => { this.pressed.push('lock'); this.state.locked = true; this.render(); });
     on('button[data-copy-target]', () => { this.pressed.push('copy'); });
@@ -366,6 +374,12 @@ describe('exploring the other pages', () => {
     const blank = await step('blank');
     expect(blank.ok).toBe(false);
     expect(blank.findings).toContain('a window was opened and left blank');
+  });
+
+  test('a Connect whose sheet starts the sign-in at once opened something when the tab goes on to the provider, though the page redraws closed', async () => {
+    const step = async (signInSheet: NonNullable<State['signInSheet']>) => (await run(new PagesDriver({ signInSheet }), [PAGES[0]!])).steps.find((entry) => entry.name === 'Connect' && entry.expected === 'a control that opens something shows it')!;
+    expect(await step('provider')).toMatchObject({ ok: true, actual: 'it opened the sign-in in a new window', findings: [] });
+    expect(await step('blank')).toMatchObject({ ok: false, actual: 'nothing opened' });
   });
 
   test('when the last page has no Lock, Lock is pressed once at the end, back on a page that has it', async () => {
