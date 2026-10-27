@@ -25,7 +25,9 @@ var INDEX_FASTER_TOOL_NAME = "olympus_index_faster";
 var UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source";
 var OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file";
 var UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files";
-var ARCHIVE_BROWSE_TOOL_NAME = "olympus_archive_browse";
+var ARCHIVE_UPLOAD_START_TOOL_NAME = "olympus_archive_upload_start";
+var ARCHIVE_UPLOAD_STATUS_TOOL_NAME = "olympus_archive_upload_status";
+var ARCHIVE_UPLOAD_CANCEL_TOOL_NAME = "olympus_archive_upload_cancel";
 var ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve";
 var ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline";
 var ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove";
@@ -49,7 +51,9 @@ var COMPUTER_HOST_TOOL_NAMES = [
   UNPAIR_SOURCE_TOOL_NAME,
   OPEN_UNREADABLE_FILE_TOOL_NAME,
   UNREADABLE_FILES_PAGE_TOOL_NAME,
-  ARCHIVE_BROWSE_TOOL_NAME,
+  ARCHIVE_UPLOAD_START_TOOL_NAME,
+  ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
+  ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
   ARCHIVE_APPROVE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
@@ -132,6 +136,22 @@ function dashboardHostBridge(config, io) {
     }
     io.callTool(name, args).then((result) => reply(id, result), () => reply(id, refused("Could not reach Olympus.")));
   }
+  function uploadFile(id, params) {
+    const uploadId = params && typeof params.upload_id === "string" ? params.upload_id : "";
+    const path = params && typeof params.path === "string" ? params.path : "";
+    const file = params ? params.file : undefined;
+    const modified = params && typeof params.modified === "number" && Number.isFinite(params.modified) ? params.modified : 0;
+    const blob = !!file && typeof file === "object" && typeof file.size === "number" && typeof file.slice === "function";
+    if (config.kind !== "computer" || !io.uploadFile || readOnly || !/^[0-9a-f]{32}$/.test(uploadId) || !path || path.length > 4096 || !blob) {
+      reply(id, { ok: false });
+      return;
+    }
+    const progress = (loaded) => {
+      if (typeof loaded === "number" && Number.isFinite(loaded))
+        post({ jsonrpc: "2.0", method: "olympus/upload-progress", params: { request: id, loaded } });
+    };
+    io.uploadFile({ uploadId, path, modified, file }, progress).then((outcome) => reply(id, outcome && typeof outcome === "object" ? outcome : { ok: false }), () => reply(id, { ok: false }));
+  }
   function onMessage(event) {
     if (event.source !== io.frame.contentWindow)
       return;
@@ -151,6 +171,13 @@ function dashboardHostBridge(config, io) {
         return;
       case "tools/call":
         callTool(id, params);
+        return;
+      case "olympus/upload-file":
+        uploadFile(id, params);
+        return;
+      case "olympus/upload-abort":
+        if (io.abortUpload && params && typeof params.upload_id === "string")
+          io.abortUpload(params.upload_id);
         return;
       case "ui/open-link":
         if (openLink(params && params.url))

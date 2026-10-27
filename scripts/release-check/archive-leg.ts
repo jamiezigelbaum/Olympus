@@ -532,13 +532,15 @@ export function agentImportJourney(fx: LegFixture, fullPath: string, bounds: { s
   };
 }
 
-export function pickerImportJourney(fx: LegFixture, bounds: { startS?: number; settleS?: number; openS?: number } = {}): Journey {
+/** The drop zone's own file input: the system's file dialog cannot be driven, so the journey hands the file to the input the dialog would fill. */
+export const DROP_FILE_INPUT = { css: 'input[data-key="picker:drop:file-input"]' } as const;
+
+export function pickerImportJourney(fx: LegFixture, path: string, bounds: { startS?: number; settleS?: number; openS?: number } = {}): Journey {
   const hasGaps = expectedGapLines(fx.expect).length > 0;
-  const importFile = fill(A.pick.makePrivateFor, { name: fx.fileName });
   return {
     id: `archive-${fx.role}-${fx.format}-import`,
-    title: `The owner chooses an archive in the picker and imports it, and the import settles (${fx.format}, ${fx.role})`,
-    source: 'archive import: the owner\'s picker (Import an archive, the folder, Import on the file)',
+    title: `The owner drops an archive on Import an archive and it imports, and the import settles (${fx.format}, ${fx.role})`,
+    source: 'archive import: the owner\'s drop zone (Import an archive, Upload folder, or choose a file)',
     mutates: true,
     steps: [
       {
@@ -548,19 +550,13 @@ export function pickerImportJourney(fx: LegFixture, bounds: { startS?: number; s
         timeoutMs: (bounds.openS ?? OPEN_S) * 1_000,
       },
       {
-        name: 'Press Import an archive: the picker lists the computer\'s folders',
+        name: 'Press Import an archive: the drop zone opens',
         do: { click: { role: 'button', name: A.importAction }, frame: 'panel' },
-        // The listing arrives after the picker opens; the next press waits for it.
-        expect: [{ text: A.pick.intro, frame: 'panel' }, { present: { css: 'button[data-key^="picker:open:"]', text: FIXTURE_FOLDER, contains: true }, frame: 'panel' }],
+        expect: [{ text: A.pick.intro, frame: 'panel' }, { present: { role: 'button', name: A.pick.zoneLabel }, frame: 'panel' }, { present: { role: 'button', name: A.pick.chooseFile }, frame: 'panel' }],
       },
       {
-        name: `Open the folder ${FIXTURE_FOLDER}`,
-        do: { click: { css: 'button[data-key^="picker:open:"]', text: FIXTURE_FOLDER, contains: true }, frame: 'panel' },
-        expect: [{ present: { role: 'button', name: importFile }, frame: 'panel' }],
-      },
-      {
-        name: 'Press Import on the file',
-        do: { click: { role: 'button', name: importFile }, frame: 'panel' },
+        name: `Choose the file ${fx.fileName}`,
+        do: { attach: { into: DROP_FILE_INPUT, paths: [path] }, frame: 'panel' },
         expect: [{ text: fill(A.started, { name: fx.fileName }), frame: 'panel' }, { present: rowTarget(fx.fileName), frame: 'panel' }],
         timeoutMs: (bounds.startS ?? ARCHIVE_BOUNDS.startS) * 1_000,
       },
@@ -707,11 +703,12 @@ const sameSet = (a: readonly string[], b: readonly string[]): boolean => a.lengt
 const prefixOf = (fx: { role: string; format: string }): string => `archive.${fx.role}.${fx.format}`;
 
 /** Everything about a settled row that differs from what the fixture holds; empty when it is as expected. */
-export function rowProblems(row: RowView, expect: ArchiveExpectation): string[] {
+export function rowProblems(row: RowView, expect: ArchiveExpectation, via: 'request' | 'picker' = 'request'): string[] {
   const problems: string[] = [];
   if (row.status !== 'imported' || row.tag !== A.status.imported) problems.push(`the row reads "${row.tag || row.status}", not ${A.status.imported}`);
   if (!row.facts.includes(expect.label)) problems.push(`the format is not "${expect.label}" (facts line: "${row.facts.slice(0, 80)}")`);
-  if (!row.facts.includes(FIXTURE_FOLDER)) problems.push(`the folder ${FIXTURE_FOLDER} is not on the facts line ("${row.facts.slice(0, 80)}")`);
+  // An agent's request names a place on the computer; a dropped upload has none to name (it is read from Olympus's own copy).
+  if (via === 'request' && !row.facts.includes(FIXTURE_FOLDER)) problems.push(`the folder ${FIXTURE_FOLDER} is not on the facts line ("${row.facts.slice(0, 80)}")`);
   if (!row.facts.includes(datesWord(expect))) problems.push(`the days are not "${datesWord(expect)}" (facts line: "${row.facts.slice(0, 80)}")`);
   if (!row.text.includes(messagesWord(expect.messages, expect.family))) problems.push(`the row does not say "${messagesWord(expect.messages, expect.family)}"`);
   const expected = expectedLists(expect);
@@ -794,7 +791,7 @@ function importCoreChecks(obs: ImportObservation, fx: LegFixture): CheckResult[]
   out.push(check(`${prefix}.imported`, `The import settles: the row reads ${A.status.imported}`, obs.settled && obs.row?.status === 'imported',
     obs.settled && obs.row ? `${obs.row.name} reads ${obs.row.tag} after ${secs(obs.settleMs)}` : `the row did not read ${A.status.imported}${obs.row ? ` (it reads "${obs.row.tag || obs.row.status}")` : ''}`, obs.settleMs));
   if (obs.row) {
-    const problems = rowProblems(obs.row, fx.expect);
+    const problems = rowProblems(obs.row, fx.expect, obs.via);
     out.push(check(`${prefix}.dashboard`, 'The dashboard row shows the format, the messages, the days, what was not imported and how it was read', problems.length === 0,
       problems.length === 0 ? `${messagesWord(fx.expect.messages, fx.expect.family)}, ${datesWord(fx.expect)}, ${fx.expect.label}${expectedGapLines(fx.expect).length > 0 ? `, ${expectedGapLines(fx.expect).join('; ')}` : ', nothing unread'}` : problems.join('; ')));
     const view = obs.status?.archives.find((archive) => archive.name === fx.fileName);

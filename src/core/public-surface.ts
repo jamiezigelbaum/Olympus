@@ -259,9 +259,13 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/disconnect' },
   { method: 'POST', path: '/dashboard/delete-source-data' },
   { method: 'POST', path: '/dashboard/unpair' },
-  // Importing an archive: the picker's listing, approval, Decline and Remove
+  // Importing an archive: the upload of a dropped file or folder (start, one
+  // request per file, status, cancel), approval, Decline, Remove and Stop
   // (archive-import/dashboard.ts). Control session only.
-  { method: 'POST', path: '/dashboard/archive-import/browse' },
+  { method: 'POST', path: '/dashboard/archive-import/upload-start' },
+  { method: 'POST', path: '/dashboard/archive-import/upload-file' },
+  { method: 'POST', path: '/dashboard/archive-import/upload-status' },
+  { method: 'POST', path: '/dashboard/archive-import/upload-cancel' },
   { method: 'POST', path: '/dashboard/archive-import/approve' },
   { method: 'POST', path: '/dashboard/archive-import/decline' },
   { method: 'POST', path: '/dashboard/archive-import/remove' },

@@ -756,20 +756,31 @@ export const OPEN_UNREADABLE_FILE_TOOL_NAME = 'olympus_open_unreadable_file';
 export const UNREADABLE_FILES_PAGE_TOOL_NAME = 'olympus_unreadable_files';
 
 /**
- * Computer only, never listed to ChatGPT: the archive picker's listing
- * (`{parent_key?, cursor?}`), files and folders, with the names in
- * `_meta[SCOPE_UI_META_KEY]` only (ArchiveBrowseList).
+ * Computer only, never listed to ChatGPT: begin an upload (`{}`). The dashboard
+ * is a browser page, so a dropped archive reaches Olympus as file contents,
+ * never as paths: the panel begins an upload, the host page streams each file
+ * to the engine (`/dashboard/archive-import/upload-file`, not a tool: its body
+ * is the file), and the approval then names the upload. Answers `{status:
+ * 'started', upload_id}`.
  */
-export const ARCHIVE_BROWSE_TOOL_NAME = 'olympus_archive_browse';
+export const ARCHIVE_UPLOAD_START_TOOL_NAME = 'olympus_archive_upload_start';
 /**
- * Computer only: import the chosen file or folder (`{key}`, a picker key), or
+ * Computer only: how an upload stands (`{upload_id}`): `{status: 'receiving' |
+ * 'paused_disk_full' | 'idle', files, bytes}`. `paused_disk_full` is the
+ * engine waiting for free space on this computer; it goes on by itself.
+ */
+export const ARCHIVE_UPLOAD_STATUS_TOOL_NAME = 'olympus_archive_upload_status';
+/** Computer only: cancel an upload (`{upload_id}`); what was received is deleted. */
+export const ARCHIVE_UPLOAD_CANCEL_TOOL_NAME = 'olympus_archive_upload_cancel';
+/**
+ * Computer only: import the uploaded file or folder (`{upload_id}`), or
  * an agent's waiting request (`{request_id}`). Answers `{status: 'started' |
  * 'checking' | 'already_imported' | 'confirm_account'}`; a check reads the
  * files whole and its outcome arrives with a later dashboard read.
  * `confirm_account` (an export of a source that cannot be matched to the
  * connected account) imports nothing: the call is made again with
  * `{confirm_account: true}` to add it to that account, or `{keep_apart: true}`
- * to keep it under Archives. With `{key, source_id}` (a source's own Import an
+ * to keep it under Archives. With `{upload_id, source_id}` (a source's own Import an
  * archive, `ComputerArchiveSourceMeta`) only that source's formats are
  * recognised: any other export is refused with a route to Import another archive.
  */
@@ -793,19 +804,14 @@ export const ARCHIVE_STOP_TOOL_NAME = 'olympus_archive_stop';
  * opens that session (the local unlock) before the first of them.
  */
 export const COMPUTER_LOCAL_SESSION_TOOL_NAMES: readonly string[] = [
-  ARCHIVE_BROWSE_TOOL_NAME,
+  ARCHIVE_UPLOAD_START_TOOL_NAME,
+  ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
+  ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
   ARCHIVE_APPROVE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
   ARCHIVE_STOP_TOOL_NAME,
 ];
-
-/** One level of the archive picker. */
-export interface ArchiveBrowseList {
-  nodes: ScopeFolderNode[];
-  next_cursor?: string;
-  access?: ScopeFolderAccess;
-}
 
 /**
  * Every tool the panel calls, and so the only tools an Olympus host runs for
@@ -836,7 +842,9 @@ export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [
   UNPAIR_SOURCE_TOOL_NAME,
   OPEN_UNREADABLE_FILE_TOOL_NAME,
   UNREADABLE_FILES_PAGE_TOOL_NAME,
-  ARCHIVE_BROWSE_TOOL_NAME,
+  ARCHIVE_UPLOAD_START_TOOL_NAME,
+  ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
+  ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
   ARCHIVE_APPROVE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
@@ -895,7 +903,7 @@ export interface ScopeFolderNode {
   key: string;
   parent_key?: string;
   name: string;
-  /** A file only in the archive picker (ARCHIVE_BROWSE_TOOL_NAME); a source's scope lists folders. */
+  /** `file` is for listings that offer files; a source's scope lists folders. */
   kind: 'folder' | 'file';
   has_children: boolean;
   selectable: boolean;

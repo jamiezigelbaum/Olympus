@@ -1256,12 +1256,15 @@ Which button to use is decided by where the export came from, and the page
 says so.
 
 - **A source's own card.** Every source whose connector reads its exports as
-  inputs (a registered `ArchiveSourceTarget`) gets **Import an archive** in its
-  ⋯ menu, before Disconnect and Delete. It opens the picker titled "Import an
-  archive into Telegram", whose opening sentence names only that source's exports.
+  inputs (a registered `ArchiveSourceTarget`) gets **Import an archive** on its
+  own row, to the left of Connect (or Sync now), on the same line and never
+  inside ⋯ (owner, 2026-10-26; it was in ⋯ until then). It opens the drop zone
+  titled "Import an archive into Telegram" (an **Upload folder** zone, since
+  2026-10-26: see archive-import.md, "Drop zone"), whose opening sentence names
+  only that source's exports.
   The approval names the card (`source_id`), and the engine recognises only that
   source's formats (`prepareArchiveImport` with the target's formats). Any other
-  export is refused in the picker: "This isn't a Telegram export. From the
+  export is refused on that screen: "This isn't a Telegram export. From the
   Telegram card, Olympus imports only these: … For any other export, use Import
   another archive under Other archives." A card gets the entry only once its
   source registers (steps 4 to 7), so no card offers an import that would land
@@ -1272,14 +1275,14 @@ says so.
   your sources above." and the button **Import another archive**, always in
   sight (never in ⋯). It still sends an export to its source when one reads
   it (`forFormat`, as before), and lists only the archives that cannot join a
-  source. Its picker says so: "An export from one of your sources joins that
+  source. Its screen says so: "An export from one of your sources joins that
   source; any other is kept under Other archives."
 - **Where it shows.** A start says where the import is: "Importing result.json
   into Telegram. It shows in Telegram as it is read." or "… It shows under Other
   archives as it is read." (`started.source` on the approval).
 - **ChatGPT.** The section is there too; its button opens the computer's
-  dashboard. A card's own Import an archive is on the computer only (the picker
-  is the computer's).
+  dashboard. A card's own Import an archive is on the computer only (the drop
+  zone is the computer's).
 
 ## Built, step 7
 

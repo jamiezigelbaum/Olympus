@@ -12,9 +12,9 @@
 
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { isV04PublicDashboardRoute } from '../src/core/public-surface.ts';
 import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
@@ -44,7 +44,8 @@ import {
 import { configWithEnvironmentOverrides, defaultConfig } from '../src/core/config.ts';
 import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
 import { ScopeFileReader } from '../src/core/scope-safe-fs.ts';
-import { defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
+import { ArchiveImportStateStore, defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
+import { forgetSourceArchiveImports } from '../src/workers/archive-import/forget.ts';
 import { runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath, type ArchiveImportApproval } from '../src/workers/archive-import/requests.ts';
 import { archiveManifestSha256 } from '../src/workers/archive-import/manifest.ts';
@@ -52,8 +53,10 @@ import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../src/wo
 import { archiveConnectorStoreDbPath, withArchiveImportCorpora } from '../src/workers/archive-import/store.ts';
 import { pullArchiveImport } from '../src/workers/archive-import/sync.ts';
 import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
-import { createLocalFilesArchiveBrowser, createLocalFilesFolderScopeBrowser } from '../src/workers/local-files/scope-browser.ts';
+import { createArchivePathResolver, createLocalFilesFolderScopeBrowser } from '../src/workers/local-files/scope-browser.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
+import { approveStaged, stageUpload } from './support/stage-upload.ts';
+import { archiveStateSiblingPath, olympusDataRoot } from '../src/core/olympus-layout.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -159,7 +162,7 @@ function fixture(options: { model?: ArchivePrivateModelState } = {}) {
   });
   // Off a Mac the Mac's privacy rules do not apply; a Mac's are covered by the scope browser's own tests.
   const permissions = new MacPermissions({ home, memoryPath: join(base, 'folder-access.json'), platform: 'linux' });
-  const browser = createLocalFilesArchiveBrowser({ volumes, home, permissions });
+  const resolver = createArchivePathResolver({ volumes, home, permissions });
   const folders = createLocalFilesFolderScopeBrowser({ volumes, home, permissions });
   let refreshes = 0;
   let model: ArchivePrivateModelState = options.model ?? 'ready';
@@ -179,7 +182,7 @@ function fixture(options: { model?: ArchivePrivateModelState } = {}) {
   const open = () => {
     const opened = createArchiveImportDashboard({
       runtime: counting,
-      browser,
+      resolver,
       refreshScheduler: () => { refreshes += 1; },
       privateModel: () => model,
       scheduling: () => scheduling,
@@ -196,7 +199,7 @@ function fixture(options: { model?: ArchivePrivateModelState } = {}) {
     return path;
   };
   return {
-    base, home, exports, env, runtime, browser, folders, dashboard, write,
+    base, home, exports, env, runtime, resolver, folders, dashboard, write,
     refreshes: () => refreshes,
     setModel: (next: ArchivePrivateModelState) => { model = next; },
     holdChecks: () => { hold = new Promise<void>((resolve) => { release = resolve; }); },
@@ -234,7 +237,7 @@ function fakeApproval(name: string): ArchiveImportApproval {
 }
 
 async function approveKey(f: ReturnType<typeof fixture>, path: string) {
-  return f.dashboard.approve({ key: path });
+  return approveStaged(f.dashboard, path);
 }
 
 const REQUESTS_MODULE = join(import.meta.dir, '..', 'src', 'workers', 'archive-import', 'requests.ts');
@@ -259,33 +262,20 @@ function holdApprovals(statePath: string, marker: string, holdMs: number, then: 
   });
 }
 
-describe('the archive picker', () => {
-  test('offers files beside folders, an Apple Mail .mbox folder as one choice, never a link, a hidden file or a hidden folder; folder mode is unchanged', async () => {
+describe('a path an agent names', () => {
+  test('is checked before anything of it is read: a link, or nothing, is refused; a file and a folder are fine', async () => {
     const f = fixture();
     f.write('Takeout.mbox', mbox([mail(0)]));
-    f.write('.hidden.mbox', mbox([mail(1)]));
-    mkdirSync(join(f.exports, '.cache'));
     mkdirSync(join(f.exports, 'Inbox.mbox'));
     f.write('mbox', mbox([mail(2)]), join(f.exports, 'Inbox.mbox'));
     symlinkSync(join(f.exports, 'Takeout.mbox'), join(f.exports, 'link.mbox'));
     symlinkSync(join(f.exports, 'Inbox.mbox'), join(f.exports, 'link-folder'));
 
-    const listed = await f.dashboard.browse({ parentKey: f.exports });
-    const byName = new Map(listed.nodes.map((node) => [node.name, node]));
-    expect([...byName.keys()].sort()).toEqual(['Inbox.mbox', 'Takeout.mbox']);
-    expect(byName.get('Takeout.mbox')).toMatchObject({ kind: 'file', has_children: false, selectable: true, size_bytes: mbox([mail(0)]).length });
-    expect(byName.get('Inbox.mbox')).toMatchObject({ kind: 'folder', has_children: true, selectable: true });
-
-    // The folder picker for Files on this computer still lists folders only.
-    const folders = await f.folders.browse({ parentKey: f.exports });
-    expect(folders.nodes.map((node) => node.name)).toEqual(['Inbox.mbox', '.cache']);
-    expect(folders.nodes.every((node) => node.kind === 'folder')).toBe(true);
-
-    // A key that names a link, or nothing, is refused before anything of it is read.
-    expect(await f.browser.resolve(join(f.exports, 'link.mbox'))).toMatchObject({ ok: false, code: 'link' });
-    expect(await f.browser.resolve(join(f.exports, 'link-folder'))).toMatchObject({ ok: false, code: 'link' });
-    expect(await f.browser.resolve(join(f.exports, 'gone.mbox'))).toMatchObject({ ok: false, code: 'not_found' });
-    expect(await f.dashboard.approve({ key: join(f.exports, 'link.mbox') })).toMatchObject({ ok: false, code: 'link' });
+    expect(await f.resolver.resolvePath(join(f.exports, 'link.mbox'))).toMatchObject({ ok: false, code: 'link' });
+    expect(await f.resolver.resolvePath(join(f.exports, 'link-folder'))).toMatchObject({ ok: false, code: 'link' });
+    expect(await f.resolver.resolvePath(join(f.exports, 'gone.mbox'))).toMatchObject({ ok: false, code: 'not_found' });
+    expect(await f.resolver.resolvePath(join(f.exports, 'Takeout.mbox'))).toMatchObject({ ok: true });
+    expect(await f.resolver.resolvePath(join(f.exports, 'Inbox.mbox'))).toMatchObject({ ok: true });
     expect(f.runtime.state.list()).toEqual([]);
   });
 });
@@ -323,10 +313,7 @@ describe('approving an import', () => {
     f.holdChecks();
     const checking = await approveKey(f, join(f.home, 'Desktop', 'Big copy.mbox'));
     expect(checking).toMatchObject({ ok: true, status: 'checking', name: 'Big copy.mbox' });
-    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ name: 'Big copy.mbox', where: '~/Desktop', origin: 'dashboard', status: 'checking' })]);
-    // A second press while it checks is the same check.
-    expect(await approveKey(f, join(f.home, 'Desktop', 'Big copy.mbox'))).toMatchObject({ status: 'checking' });
-    expect(f.dashboard.view().requests).toHaveLength(1);
+    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ name: 'Big copy.mbox', where: '', origin: 'dashboard', status: 'checking' })]);
 
     f.releaseChecks();
     await f.dashboard.idle();
@@ -385,7 +372,7 @@ describe('the Archives row\'s list', () => {
     let view = f.dashboard.view();
     expect(view).toMatchObject({ sourceId: 'archive.imports', privateModel: 'off', requests: [] });
     expect(view.archives).toEqual([expect.objectContaining({
-      id: started.archive_id, name: 'Takeout.mbox', format: 'Mail (mbox)', where: '~/Mail exports', status: 'importing', items: 0, percent: 0,
+      id: started.archive_id, name: 'Takeout.mbox', format: 'Mail (mbox)', where: '', status: 'importing', items: 0, percent: 0,
     })]);
     expect(f.dashboard.present()).toEqual({ archives: 1, importing: true });
 
@@ -420,7 +407,9 @@ describe('the Archives row\'s list', () => {
     const path = f.write('Takeout.mbox', mbox([mail(0), mail(1)]));
     const started = await approveKey(f, path);
     if (!started.ok || started.status !== 'started') throw new Error('expected a start');
-    writeFileSync(path, mbox([mail(0), mail(1), mail(2)]));
+    // The file Olympus reads is its own copy; changing it stands for the file changing under the import.
+    const record = f.runtime.state.get(started.archive_id)!;
+    writeFileSync(join(record.root_path, record.chosen_rel_path), mbox([mail(0), mail(1), mail(2)]));
     await importAll(f.runtime, started.archive_id);
     expect(f.dashboard.view().archives[0]).toMatchObject({ status: 'stopped', stop: { code: 'file_changed', file: 'Takeout.mbox' } });
     // And the card has it as the person's to answer, by name.
@@ -581,7 +570,8 @@ describe('a check of a possible copy', () => {
     f.releaseChecks();
     await f.dashboard.idle();
     expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ id: checking.request_id, status: 'checking' })]);
-    writeFileSync(copy, mbox([mail(5, { tag: 'other' })]));
+    // The file a check reads is Olympus's own copy of the dropped one.
+    writeFileSync(f.dashboard.view().requests[0]!.path!, mbox([mail(5, { tag: 'other' })]));
 
     const restarted = f.reopen();
     restarted.resume();
@@ -713,13 +703,16 @@ describe('a check resumed after a restart', () => {
     f.releaseChecks();
     await f.dashboard.idle();
 
-    // Meanwhile the folder is swapped for another of the same name holding
-    // the same file, and the file beside the export for a same-named copy.
-    renameSync(desktop, join(f.home, 'Desktop before'));
-    mkdirSync(desktop);
-    copyFileSync(join(f.exports, 'Big.mbox'), inFolder);
-    copyFileSync(inPlace, join(f.exports, 'swap'));
-    renameSync(join(f.exports, 'swap'), inPlace);
+    // Meanwhile the folder Olympus keeps one dropped file in is swapped for another of the same name holding
+    // the same file, and the other dropped file for a same-named copy.
+    const copyOf = (name: string): string => f.dashboard.view().requests.find((request) => request.name === name)!.path!;
+    const folderCopy = copyOf('Big copy.mbox');
+    const fileCopy = copyOf('Big again.mbox');
+    renameSync(dirname(folderCopy), `${dirname(folderCopy)} before`);
+    mkdirSync(dirname(folderCopy));
+    copyFileSync(join(f.exports, 'Big.mbox'), folderCopy);
+    copyFileSync(fileCopy, `${fileCopy}.swap`);
+    renameSync(`${fileCopy}.swap`, fileCopy);
 
     const reads = spyOn(ScopeFileReader.prototype, 'readAt');
     try {
@@ -831,6 +824,8 @@ describe('counts that cannot be read', () => {
 });
 
 describe('the dashboard routes', () => {
+  const REQUEST_ID_FOR_ROUTES = '11111111-1111-4111-8111-111111111111';
+  const staging = (f: ReturnType<typeof fixture>): string => archiveStateSiblingPath(defaultArchiveImportStatePath(f.env), 'archive-staging');
   test('only a control session reaches them, never the read-only token; Remove must be confirmed', async () => {
     const f = fixture();
     f.write('Takeout.mbox', mbox([mail(0)]));
@@ -847,21 +842,35 @@ describe('the dashboard routes', () => {
       headers: { 'Content-Type': 'application/json', Origin: origin, ...headers },
       body: JSON.stringify(body),
     }));
-    for (const route of ['browse', 'approve', 'decline', 'remove']) {
+    for (const route of ['upload-start', 'upload-file', 'upload-status', 'upload-cancel', 'approve', 'decline', 'remove']) {
       expect(isV04PublicDashboardRoute('POST', `/dashboard/archive-import/${route}`)).toBe(true);
       expect(isV04PublicDashboardRoute('GET', `/dashboard/archive-import/${route}`)).toBe(false);
     }
-    const key = join(f.exports, 'Takeout.mbox');
-    // No session, or only the read-only view token: refused, and nothing recorded.
-    expect((await post('/dashboard/archive-import/approve', { key })).status).toBe(401);
-    expect((await post('/dashboard/archive-import/browse', {})).status).toBe(401);
+    // The folder browser is gone: nothing lists this computer's folders for a page.
+    expect(isV04PublicDashboardRoute('POST', '/dashboard/archive-import/browse')).toBe(false);
+    const sendFile = (headers: Record<string, string>, text: string, query = '') => guarded(new Request(`${origin}/dashboard/archive-import/upload-file${query}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', Origin: origin, ...headers },
+      body: text,
+    }));
+    const mboxText = mbox([mail(0)]);
+    const where = (uploadId: string, path: string, modified = 1_700_000_000_000) => ({
+      'X-Olympus-Upload-Id': uploadId, 'X-Olympus-Upload-Path': encodeURIComponent(path), 'X-Olympus-Upload-Modified': String(modified),
+    });
+    // No session, or only the read-only view token: refused, and nothing recorded or received.
+    expect((await post('/dashboard/archive-import/upload-start', {})).status).toBe(401);
+    expect((await sendFile(where('0'.repeat(32), 'Takeout.mbox'), mboxText)).status).toBe(401);
+    expect((await post('/dashboard/archive-import/approve', { upload_id: '0'.repeat(32) })).status).toBe(401);
     const viewToken = dashboardQueryTokenFromWorkerAuthToken('worker-secret')!;
-    expect((await post(`/dashboard/archive-import/approve?token=${viewToken}`, { key })).status).toBe(401);
+    expect((await post(`/dashboard/archive-import/upload-start?token=${viewToken}`, {})).status).toBe(401);
+    expect((await sendFile(where('0'.repeat(32), 'Takeout.mbox'), mboxText, `?token=${viewToken}`)).status).toBe(401);
+    expect((await post(`/dashboard/archive-import/approve?token=${viewToken}`, { upload_id: '0'.repeat(32) })).status).toBe(401);
     expect(f.dashboard.view().archives).toEqual([]);
-    // The worker bearer alone (an agent holds it) cannot list this computer's folders either.
-    const bearerBrowse = await post('/dashboard/archive-import/browse', { parent_key: f.exports }, { Authorization: 'Bearer worker-secret' });
-    expect(bearerBrowse.status).toBe(403);
-    expect(JSON.stringify(await bearerBrowse.json())).not.toContain('Takeout.mbox');
+    // The worker bearer alone (an agent holds it) cannot hand over files either: only the person at the dashboard does.
+    const bearer = { Authorization: 'Bearer worker-secret' };
+    expect((await post('/dashboard/archive-import/upload-start', {}, bearer)).status).toBe(403);
+    expect((await sendFile({ ...bearer, ...where('0'.repeat(32), 'Takeout.mbox') }, mboxText)).status).toBe(403);
+    expect(existsSync(staging(f))).toBe(false);
 
     // This computer's own session (the local unlock; archive-import-local-session.test.ts
     // has the refusals of every other kind).
@@ -872,16 +881,55 @@ describe('the dashboard routes', () => {
       Cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!,
       'X-Olympus-CSRF': (await mint.json() as { csrf_token: string }).csrf_token,
     };
-    const listed = await post('/dashboard/archive-import/browse', { parent_key: f.exports }, control);
-    expect(listed.status).toBe(200);
-    expect((await listed.json() as { nodes: Array<{ name: string }> }).nodes.map((node) => node.name)).toContain('Takeout.mbox');
-    const approved = await post('/dashboard/archive-import/approve', { key }, control);
+    // A session without the CSRF proof is not enough to write a file.
+    expect((await sendFile({ Cookie: control.Cookie, ...where('0'.repeat(32), 'Takeout.mbox') }, mboxText)).status).toBe(403);
+    const begun = await post('/dashboard/archive-import/upload-start', {}, control);
+    expect(begun.status).toBe(200);
+    const { upload_id: uploadId } = await begun.json() as { upload_id: string };
+    expect(uploadId).toMatch(/^[0-9a-f]{32}$/);
+    // A path that leaves the upload's folder is refused and nothing is written outside it.
+    for (const bad of ['../Takeout.mbox', '/etc/Takeout.mbox', 'a/../../b']) {
+      const refused = await sendFile({ ...control, ...where(uploadId, bad) }, mboxText);
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toMatchObject({ error: { code: 'bad_path' } });
+    }
+    expect((await sendFile({ ...control, ...where(uploadId, 'x'), 'X-Olympus-Upload-Path': '%E0%A4%A' }, mboxText)).status).toBe(400);
+    expect((await sendFile({ ...control, ...where('f'.repeat(32), 'Takeout.mbox') }, mboxText)).status).toBe(404);
+    expect(existsSync(join(f.exports, '..', 'Takeout.mbox'))).toBe(false);
+    const sent = await sendFile({ ...control, ...where(uploadId, 'Takeout.mbox') }, mboxText);
+    expect(sent.status).toBe(200);
+    expect(await sent.json()).toEqual({ ok: true, bytes: Buffer.byteLength(mboxText) });
+    const same = await sendFile({ ...control, ...where(uploadId, 'Takeout.mbox') }, mboxText);
+    expect(same.status).toBe(409);
+    const status = await post('/dashboard/archive-import/upload-status', { upload_id: uploadId }, control);
+    expect(await status.json()).toEqual({ ok: true, state: 'idle', files: 1, bytes: Buffer.byteLength(mboxText) });
+
+    const approved = await post('/dashboard/archive-import/approve', { upload_id: uploadId }, control);
     expect(approved.status).toBe(200);
     const started = await approved.json() as { status: string; archive_id: string };
     expect(started.status).toBe('started');
     expect(f.refreshes()).toBe(1);
-    // Either a choice or a request, never both or neither.
+    // A large file comes as pieces, in order, each at the place the earlier ones ended; a piece out of order is refused.
+    const second = await (await post('/dashboard/archive-import/upload-start', {}, control)).json() as { upload_id: string };
+    const piece = (offset: number, final: boolean, text: string) => sendFile({
+      ...control, ...where(second.upload_id, 'Big.mbox'), 'X-Olympus-Upload-Offset': String(offset), 'X-Olympus-Upload-Final': final ? '1' : '0',
+    }, text);
+    expect((await piece(0, false, 'abc')).status).toBe(200);
+    const skipped = await piece(5, false, 'zz');
+    expect(skipped.status).toBe(409);
+    expect(await skipped.json()).toMatchObject({ error: { code: 'bad_offset' } });
+    expect((await piece(3, true, 'def')).status).toBe(200);
+    expect(await (await post('/dashboard/archive-import/upload-status', { upload_id: second.upload_id }, control)).json()).toEqual({ ok: true, state: 'idle', files: 1, bytes: 6 });
+    expect(readdirSync(join(staging(f), second.upload_id, 'files'))).toEqual(['Big.mbox']);
+    expect(readFileSync(join(staging(f), second.upload_id, 'files', 'Big.mbox'), 'utf8')).toBe('abcdef');
+    expect(await (await post('/dashboard/archive-import/upload-cancel', { upload_id: second.upload_id }, control)).json()).toEqual({ ok: true, cancelled: true });
+    expect(existsSync(join(staging(f), second.upload_id))).toBe(false);
+    // Either an upload or a request, never both or neither.
     expect((await post('/dashboard/archive-import/approve', {}, control)).status).toBe(400);
+    expect((await post('/dashboard/archive-import/approve', { upload_id: uploadId, request_id: REQUEST_ID_FOR_ROUTES }, control)).status).toBe(400);
+    // The old way, naming a place on this computer, is not an approval any more, and the folder browser is not a route.
+    expect((await post('/dashboard/archive-import/approve', { key: join(f.exports, 'Takeout.mbox') }, control)).status).toBe(400);
+    expect((await post('/dashboard/archive-import/browse', {}, control)).status).toBe(401);
 
     const unconfirmed = await post('/dashboard/archive-import/remove', { archive_id: started.archive_id }, control);
     expect(unconfirmed.status).toBe(400);
@@ -901,9 +949,7 @@ describe('one archive from the picker to a cited answer and back out', () => {
       mail(0, { subject: 'Lighthouse keeper rota for March', body: 'The lighthouse keeper rota for March is on the board.' }),
       mail(1),
     ]));
-    const listed = await f.dashboard.browse({ parentKey: f.exports });
-    const chosen = listed.nodes.find((node) => node.name === 'Takeout.mbox')!;
-    const started = await f.dashboard.approve({ key: chosen.key });
+    const started = await approveStaged(f.dashboard, path);
     if (!started.ok || started.status !== 'started') throw new Error('expected a start');
     await importAll(f.runtime, started.archive_id);
     expect(f.dashboard.view().archives[0]).toMatchObject({ status: 'imported', items: 2 });
@@ -1082,5 +1128,167 @@ describe('held counts against the engine', () => {
     expect(f.dashboard.present().attention).toBeUndefined();
     // Judged Private, the content stays where it was: nothing Personal or Public.
     expect(outside()).toEqual({ text: 0, embedded: 0 });
+  });
+});
+
+describe('a dropped archive', () => {
+  // Where Olympus keeps the copy it reads a dropped file from.
+  const staging = (f: ReturnType<typeof fixture>): string => archiveStateSiblingPath(defaultArchiveImportStatePath(f.env), 'archive-staging');
+  const copies = (f: ReturnType<typeof fixture>): string[] => (existsSync(staging(f)) ? readdirSync(staging(f)) : []);
+
+  test('is imported from Olympus\'s own copy, never changing the original, and the copy stays until the import is removed', async () => {
+    const f = fixture();
+    const text = mbox([mail(0), mail(1)]);
+    const path = f.write('Takeout.mbox', text);
+    const before = statSync(path);
+    const uploadId = await stageUpload(f.dashboard, path);
+    expect(copies(f)).toEqual([uploadId]);
+    const started = await f.dashboard.approve({ uploadId });
+    if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+    expect(started.name).toBe('Takeout.mbox');
+
+    // Importing: the copy is what is being read, so the page's reads do not remove it.
+    f.dashboard.view();
+    expect(copies(f)).toEqual([uploadId]);
+
+    await importAll(f.runtime, started.archive_id);
+    // Finished, the copy stays: the import's attachments are read from it later.
+    const row = f.dashboard.view().archives[0]!;
+    expect(row).toMatchObject({ status: 'imported', items: 2, name: 'Takeout.mbox' });
+    expect(copies(f)).toEqual([uploadId]);
+    // The copy is not the person's folder: no place is named for it.
+    expect(row.where).toBe('');
+    // The original is exactly as it was.
+    expect(readFileSync(path, 'utf8')).toBe(text);
+    expect(statSync(path).mtimeMs).toBe(before.mtimeMs);
+    // Remove is what ends it: the next read removes the copy.
+    expect(f.dashboard.remove(started.archive_id)).toEqual({ ok: true });
+    f.dashboard.view();
+    expect(copies(f)).toEqual([]);
+  });
+
+  test('in a legacy layout, deleting the source\'s data takes the copies beside the record, with the worker stopped', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'archive-staging-legacy-')));
+    cleanups.push(() => rmSync(base, { recursive: true, force: true }));
+    const home = join(base, 'home');
+    const env = { HOME: home, XDG_DATA_HOME: join(base, 'xdg') };
+    // A legacy record, readable and empty: its folder is the data root, not an account folder.
+    mkdirSync(olympusDataRoot(env), { recursive: true });
+    writeFileSync(join(olympusDataRoot(env), 'archive-imports.json'), JSON.stringify({ version: 1, archives: [] }));
+    expect(defaultArchiveImportStatePath(env)).toBe(join(olympusDataRoot(env), 'archive-imports.json'));
+    // An upload left when the worker stopped: nothing sweeps it now, so only the lifecycle's own list can find it.
+    const copy = join(archiveStateSiblingPath(defaultArchiveImportStatePath(env), 'archive-staging'), 'upload-1', 'files', 'Takeout.mbox');
+    mkdirSync(dirname(copy), { recursive: true });
+    writeFileSync(copy, mbox([mail(0)]));
+    const result = deleteOlympusDataWithCustody({ sourceId: 'archive.imports', homeDir: home, env, connectedRegistry: { version: 1, handles: [] } });
+    expect(result.removed).toContain(join(olympusDataRoot(env), 'archive-staging'));
+    expect(existsSync(copy)).toBe(false);
+  });
+
+  test('deleting the source an import joined takes that import\'s copy, with the worker stopped; another import\'s stays', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'archive-staging-forget-')));
+    cleanups.push(() => rmSync(base, { recursive: true, force: true }));
+    const env = { HOME: join(base, 'home'), XDG_DATA_HOME: join(base, 'xdg') };
+    const statePath = defaultArchiveImportStatePath(env);
+    const state = new ArchiveImportStateStore({ path: statePath, env });
+    const copy = (uploadId: string): string => {
+      const files = join(archiveStateSiblingPath(statePath, 'archive-staging'), uploadId, 'files');
+      mkdirSync(files, { recursive: true });
+      writeFileSync(join(files, 'Takeout.mbox'), mbox([mail(0)]));
+      return files;
+    };
+    const record = (root: string, target?: { source_id: string; slot: string }) => state.create({
+      format: 'mbox', provider: 'google', family: 'mail', label: 'Takeout.mbox', root_path: root,
+      root_identity: { dev: '1', ino: '1' }, chosen_rel_path: 'Takeout.mbox', manifest_sha256: 'x',
+      files: [{ rel_path: 'Takeout.mbox', dev: '1', ino: '2', size: 1, mtime_ms: 0, fingerprint: { head_sha256: 'x', tail_sha256: 'x' } }],
+      ...(target ? { target } : {}),
+    });
+    const joined = copy('upload-joined');
+    const own = copy('upload-own');
+    record(joined, { source_id: 'gmail.mail', slot: '1' });
+    record(own);
+    expect(forgetSourceArchiveImports(env, ['gmail.mail'], { dryRun: true })).toBe(1);
+    expect(existsSync(joined)).toBe(true);
+    expect(forgetSourceArchiveImports(env, ['gmail.mail'])).toBe(1);
+    expect(existsSync(dirname(joined))).toBe(false);
+    expect(existsSync(own)).toBe(true);
+  });
+
+  test('a folder is imported as one archive from the copy of the whole folder', async () => {
+    const f = fixture();
+    const folder = join(f.exports, 'Inbox.mbox');
+    mkdirSync(folder);
+    f.write('mbox', mbox([mail(0)]), folder);
+    const started = await approveStaged(f.dashboard, folder);
+    expect(started).toMatchObject({ ok: true, status: 'started', name: 'Inbox.mbox' });
+    expect(f.runtime.state.list()).toHaveLength(1);
+  });
+
+  test('a file Olympus cannot import leaves no copy behind, and the refusal is the same as for a path', async () => {
+    const f = fixture();
+    const notes = f.write('notes.txt', 'shopping list');
+    expect(await approveStaged(f.dashboard, notes)).toMatchObject({ ok: false, code: 'unsupported' });
+    expect(copies(f)).toEqual([]);
+    expect(f.runtime.state.list()).toEqual([]);
+  });
+
+  test('the same export dropped again, while the first is still importing or after, starts nothing new and leaves no second copy', async () => {
+    const f = fixture();
+    const path = f.write('Takeout.mbox', mbox([mail(0), mail(1)]));
+    const first = await approveStaged(f.dashboard, path);
+    if (!first.ok || first.status !== 'started') throw new Error('expected a start');
+    // The copy is a new file each time, so only what it holds can say it is the same.
+    expect(await approveStaged(f.dashboard, path)).toMatchObject({ ok: true, status: 'already_imported' });
+    expect(f.runtime.state.list()).toHaveLength(1);
+    expect(copies(f)).toHaveLength(1);
+    await importAll(f.runtime, first.archive_id);
+    // Once it is imported a fresh copy of it is a possible copy: its files are read whole, then it reads as imported.
+    expect(await approveStaged(f.dashboard, path)).toMatchObject({ ok: true, status: 'checking' });
+    await f.dashboard.idle();
+    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ status: 'already_imported', archiveId: first.archive_id })]);
+    expect(f.runtime.state.list()).toHaveLength(1);
+    // Only the import's own copy is left.
+    expect(copies(f)).toHaveLength(1);
+  });
+
+  test('an upload that was never approved: Cancel removes the copy; an id nothing was made under is refused', async () => {
+    const f = fixture();
+    const path = f.write('Takeout.mbox', mbox([mail(0)]));
+    const uploadId = await stageUpload(f.dashboard, path);
+    expect(copies(f)).toEqual([uploadId]);
+    expect(f.dashboard.upload.cancel(uploadId)).toEqual({ cancelled: true });
+    expect(copies(f)).toEqual([]);
+    expect(await f.dashboard.approve({ uploadId })).toMatchObject({ ok: false, code: 'unknown_upload' });
+    expect(await f.dashboard.approve({ uploadId: 'f'.repeat(32) })).toMatchObject({ ok: false, code: 'unknown_upload' });
+    expect(f.runtime.state.list()).toEqual([]);
+  });
+
+  test('Cancel after the import began stops nothing that is being read: the copy stays and the import goes on', async () => {
+    const f = fixture();
+    const path = f.write('Takeout.mbox', mbox([mail(0), mail(1)]));
+    const uploadId = await stageUpload(f.dashboard, path);
+    const started = await f.dashboard.approve({ uploadId });
+    if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+    expect(f.dashboard.upload.cancel(uploadId)).toEqual({ cancelled: false });
+    expect(copies(f)).toEqual([uploadId]);
+    await importAll(f.runtime, started.archive_id);
+    expect(f.dashboard.view().archives[0]).toMatchObject({ status: 'imported', items: 2 });
+    expect(copies(f)).toEqual([uploadId]);
+  });
+
+  test('a new upload begins by clearing copies nothing reads; one an import reads stays', async () => {
+    const f = fixture();
+    const walkedAway = await stageUpload(f.dashboard, f.write('a.mbox', mbox([mail(0)])));
+    // Not idle for long enough to be called abandoned: still there.
+    f.dashboard.upload.start();
+    expect(copies(f)).toContain(walkedAway);
+    // A restarted Olympus has no upload in progress: whatever no import reads is cleared.
+    const importing = await approveStaged(f.dashboard, f.write('b.mbox', mbox([mail(1, { tag: 'b' })])));
+    if (!importing.ok || importing.status !== 'started') throw new Error('expected a start');
+    const restarted = f.reopen();
+    restarted.resume();
+    const left = copies(f);
+    expect(left).not.toContain(walkedAway);
+    expect(left).toHaveLength(1);
   });
 });

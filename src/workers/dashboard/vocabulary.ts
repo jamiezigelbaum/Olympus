@@ -2055,13 +2055,15 @@ export const DASHBOARD_HOST_GATE_COPY = {
  * beside these words, on the computer.
  */
 /**
- * The picker's opening sentence, from what each registered format says about
- * the export it reads, so a new format is offered without editing this file.
+ * The drop screen's opening sentence, from what each registered format says
+ * about the export it reads, so a new format is offered without editing this
+ * file. Olympus copies what is dropped into its own storage to read it, and
+ * says so.
  */
 export function archivePickIntro(formats: readonly { label: string; chooseHint?: string }[] = ARCHIVE_FORMATS): string {
-  return `Choose a file or folder on this computer: ${
+  return `Drop a file or folder from this computer: ${
     formats.map((format) => format.chooseHint ?? format.label).join('; or ')
-  }. Olympus reads it where it is and never changes it.`;
+  }. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
 
 const ARCHIVE_PICK_INTRO = archivePickIntro();
@@ -2104,18 +2106,33 @@ export const DASHBOARD_ARCHIVE_COPY = {
    * (`ComputerArchiveSourceMeta`). {source} is the source's name.
    */
   sourceImport: { action: 'Import an archive', title: 'Import an archive into {source}' },
-  /** The picker in archive mode: one file or folder, no save step. */
+  /**
+   * The Import screen: a drop zone for one folder (or one file), uploaded to
+   * Olympus's own storage and imported from there (owner decision 2026-10-26).
+   * No size limit; the upload waits when this computer runs low on space.
+   */
   pick: {
     back: 'Back to Olympus',
     title: 'Import another archive',
     /** Any export: one of a source's own still joins that source (start.ts), so the line says where each goes. */
     intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
-    source: 'This computer',
-    makePrivate: 'Import',
-    makePrivateFor: 'Import {name}',
-    alreadyPrivate: 'Imported',
-    busy: 'Starting…',
-    chooseAnother: 'Choose another',
+    zone: 'Upload folder',
+    over: 'Drop to import',
+    hint: 'Drag a folder here, or click to choose one.',
+    zoneLabel: 'Upload folder: choose a folder, or drop one here',
+    chooseFile: 'or choose a file',
+    reading: 'Reading the folder…',
+    uploading: 'Uploading {name}',
+    progress: '{sent} of {total}',
+    progressFiles: '{sent} of {total} · {files} of {of} files',
+    paused: 'This computer is low on space. The upload waits and goes on by itself when space is free.',
+    cancel: 'Cancel',
+    starting: 'Starting…',
+    empty: 'There was no file in that. Drop a folder or a file from this computer.',
+    unreadable: 'Olympus could not read what you dropped. Try again.',
+    failed: 'The upload stopped before it finished. Nothing was imported. Try again.',
+    several: '{n} items',
+    chooseAnother: 'Start over',
   },
   listLabel: 'Imported archives',
   status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing', notRunning: 'Not running' },

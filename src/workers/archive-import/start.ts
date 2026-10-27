@@ -33,6 +33,7 @@ import {
   archiveManifestSha256,
   buildArchiveManifest,
   findProbableCopies,
+  findSameInProgressImport,
   findSameVersionImport,
   isCopyOf,
   probeArchivePath,
@@ -134,7 +135,7 @@ export function prepareArchiveImport(input: {
     };
     const files = buildArchiveManifest(root, relPaths);
     const records = input.state.list();
-    const same = findSameVersionImport(records, files);
+    const same = findSameVersionImport(records, files) ?? findSameInProgressImport(records, files);
     if (same) return { kind: 'already_imported', archive: same };
     // The source that reads this format as one of its inputs, and what the export says of its account.
     const sourceTarget = input.targets?.forFormat(detection.format.id);
@@ -300,7 +301,8 @@ export function commitArchiveImport(
     if (error instanceof ScopeSafeError) return { kind: 'unreadable', code: error.code };
     throw error;
   }
-  const same = findSameVersionImport(state.list(), prepared.record.files);
+  const list = state.list();
+  const same = findSameVersionImport(list, prepared.record.files) ?? findSameInProgressImport(list, prepared.record.files);
   if (same) return { kind: 'already_imported', archive: same };
   return { kind: 'started', archive: state.create(prepared.record) };
 }

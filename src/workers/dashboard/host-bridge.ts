@@ -52,6 +52,14 @@ export interface DashboardHostBridgeIo {
   openUrl(url: string): void;
   /** The panel's content height changed (the host sizes the frame to it). */
   resize?(height: number): void;
+  /**
+   * Streams one file of an archive upload (the computer's Import an archive) to
+   * Olympus; `progress` gets the bytes sent so far. Only the computer's own
+   * page offers it. `ok: false` carries the engine's own sentence when it gave one.
+   */
+  uploadFile?(upload: { uploadId: string; path: string; modified: number; file: Blob }, progress: (loaded: number) => void): Promise<{ ok: boolean; message?: string; cancelled?: boolean }>;
+  /** Stops every file of an upload still sending. */
+  abortUpload?(uploadId: string): void;
 }
 
 export interface DashboardHostBridge {
@@ -155,6 +163,30 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
     );
   }
 
+  /**
+   * One file of an upload, handed over by the panel (`olympus/upload-file`):
+   * the panel is sandboxed and cannot reach Olympus, so this page sends it.
+   * Only the computer's own page, and only while its controls are unlocked.
+   */
+  function uploadFile(id: Any, params: Any): void {
+    const uploadId = params && typeof params.upload_id === 'string' ? params.upload_id : '';
+    const path = params && typeof params.path === 'string' ? params.path : '';
+    const file = params ? params.file : undefined;
+    const modified = params && typeof params.modified === 'number' && Number.isFinite(params.modified) ? params.modified : 0;
+    const blob = !!file && typeof file === 'object' && typeof file.size === 'number' && typeof file.slice === 'function';
+    if (config.kind !== 'computer' || !io.uploadFile || readOnly || !/^[0-9a-f]{32}$/.test(uploadId) || !path || path.length > 4096 || !blob) {
+      reply(id, { ok: false });
+      return;
+    }
+    const progress = (loaded: number): void => {
+      if (typeof loaded === 'number' && Number.isFinite(loaded)) post({ jsonrpc: '2.0', method: 'olympus/upload-progress', params: { request: id, loaded } });
+    };
+    io.uploadFile({ uploadId, path, modified, file }, progress).then(
+      (outcome) => reply(id, outcome && typeof outcome === 'object' ? outcome : { ok: false }),
+      () => reply(id, { ok: false }),
+    );
+  }
+
   function onMessage(event: MessageEvent): void {
     if (event.source !== io.frame.contentWindow) return;
     const message = event.data;
@@ -172,6 +204,12 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
         return;
       case 'tools/call':
         callTool(id, params);
+        return;
+      case 'olympus/upload-file':
+        uploadFile(id, params);
+        return;
+      case 'olympus/upload-abort':
+        if (io.abortUpload && params && typeof params.upload_id === 'string') io.abortUpload(params.upload_id);
         return;
       case 'ui/open-link':
         if (openLink(params && params.url)) reply(id, {});

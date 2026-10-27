@@ -254,7 +254,7 @@ import { VolumeResolver } from '../local-files/volume-identity.ts';
 import { WatchHub, watchIgnoreGlobs } from '../local-files/watch-hub.ts';
 import { localOpenArguments } from '../../core/local-open.ts';
 import { createConnectorFileExtractionSource } from '../file-extraction/connector-source.ts';
-import { createLocalFilesArchiveBrowser } from '../local-files/scope-browser.ts';
+import { createArchivePathResolver } from '../local-files/scope-browser.ts';
 import { tieredExtractionView } from '../connector-store/tiered-extraction.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
@@ -5154,13 +5154,13 @@ export async function main(): Promise<void> {
     })
     : undefined;
   // Importing an archive from the dashboard (archive-import/dashboard.ts):
-  // the picker lists files as well as folders, only the dashboard's own
-  // routes approve, and every started or removed import is handed to the
-  // scheduler at once. How the private model stands is read off the
+  // what the person drops is uploaded into Olympus's own storage, only the
+  // dashboard's own routes approve, and every started or removed import is
+  // handed to the scheduler at once. How the private model stands is read off the
   // sniffer, bound once it runs further down.
   const archiveImportDashboard = createArchiveImportDashboard({
     runtime: archiveImports,
-    browser: createLocalFilesArchiveBrowser(),
+    resolver: createArchivePathResolver(),
     refreshScheduler: () => {
       sourceScheduler?.updateSources(schedulerSourcesForHandles(
         activeLaneHandles(readActiveConnectedHandles(process.env), process.env),

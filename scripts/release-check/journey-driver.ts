@@ -184,6 +184,25 @@ export class CdpJourneyDriver implements JourneyDriver {
     return true;
   }
 
+  /**
+   * Chooses files in a file input the way the system's dialog does (the dialog itself cannot be driven): DevTools hands the browser's
+   * own file paths to the input and fires its change. The input is found by the page-side script, hidden or not.
+   */
+  async attach(frame: 'host' | 'panel', target: WireTarget, paths: string[]): Promise<boolean> {
+    if (!this.mainFrameId) await this.refreshMainFrame();
+    const contextId = this.contextOf(frame);
+    if (frame === 'panel' && contextId === undefined) return false;
+    const found = await this.cdp.send('Runtime.evaluate', {
+      expression: `${PROBE_SOURCE};\n__rc.element(${JSON.stringify(target)})`,
+      returnByValue: false,
+      ...(contextId === undefined ? {} : { contextId }),
+    });
+    const objectId = found.result?.objectId;
+    if (!objectId) return false;
+    await this.cdp.send('DOM.setFileInputFiles', { objectId, files: paths });
+    return true;
+  }
+
   // --- the owner's way in, and moving about
 
   private async waitFor(frame: 'host' | 'panel', expression: string, timeoutMs: number): Promise<boolean> {

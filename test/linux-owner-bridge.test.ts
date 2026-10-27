@@ -236,6 +236,40 @@ function allowsInline(policy: string, script: string): boolean {
   return list.includes("'unsafe-inline'");
 }
 
+test('a proven upload piece reaches the worker byte for byte, however large; an unproven one is refused unread', async () => {
+  let received: Uint8Array | undefined; let type = null as string | null;
+  const f = fixture(async r => { received = new Uint8Array(await r.arrayBuffer()); type = r.headers.get('content-type'); return Response.json({ ok: true }); });
+  const owner = await prove(f);
+  // 8 MiB (a whole piece) that is not text: four bytes no UTF-8 reader accepts, then binary noise.
+  const piece = new Uint8Array(8 * 1024 * 1024);
+  piece.set([0xff, 0xfe, 0xc3, 0x28]);
+  for (let at = 4; at < piece.length; at += 4096) piece[at] = at % 251;
+  const upload = (headers: Record<string, string>) => f.bridge.handle(f.request('/dashboard/archive-import/upload-file', {
+    method: 'POST', body: piece, headers: { Origin: f.bridge.origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/octet-stream', ...headers },
+  }));
+  expect((await upload({ Cookie: owner.cookie })).status).toBe(403);
+  expect(received).toBeUndefined();
+  const response = await upload({ Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof });
+  expect(response.status).toBe(200);
+  expect(type).toBe('application/octet-stream');
+  expect(received!.length).toBe(piece.length);
+  expect(Buffer.from(received!).equals(Buffer.from(piece))).toBe(true);
+});
+
+test('an upload piece whose sender goes away ends at the worker too', async () => {
+  let forwarded: AbortSignal | undefined;
+  const f = fixture(async r => { forwarded = r.signal; return Response.json({ ok: true }); });
+  const owner = await prove(f);
+  const sender = new AbortController();
+  await f.bridge.handle(f.request('/dashboard/archive-import/upload-file', {
+    method: 'POST', body: new Uint8Array([1, 2, 3]), signal: sender.signal,
+    headers: { Origin: f.bridge.origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/octet-stream', Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof },
+  }));
+  expect(forwarded?.aborted).toBe(false);
+  sender.abort();
+  expect(forwarded?.aborted).toBe(true);
+});
+
 test('bridged pages keep every inline script the worker allowed, and the bootstrap always runs', async () => {
   const pageScript = 'window.controls=1';
   const pageHash = `'sha256-${new Bun.CryptoHasher('sha256').update(pageScript).digest('base64')}'`;

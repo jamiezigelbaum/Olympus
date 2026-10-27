@@ -115,7 +115,7 @@ export interface ArchiveFormatDefinition {
   provider: string;
   /**
    * How the person is told to choose this kind of export, in the sentence
-   * "Choose a file or folder on this computer: <hint>." ("a mail export (an
+   * "Drop a file or folder from this computer: <hint>." ("a mail export (an
    * .mbox file ...)"). Absent: the format's label.
    */
   chooseHint?: string;

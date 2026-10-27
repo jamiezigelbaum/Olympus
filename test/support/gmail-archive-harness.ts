@@ -20,7 +20,8 @@ import { createArchiveImportDashboard, type ArchiveImportDashboard } from '../..
 import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../../src/workers/archive-import/runtime.ts';
 import { ArchiveSourceTargets } from '../../src/workers/archive-import/source-targets.ts';
 import { pullArchiveImport, type ArchiveImportPullOptions } from '../../src/workers/archive-import/sync.ts';
-import { createLocalFilesArchiveBrowser } from '../../src/workers/local-files/scope-browser.ts';
+import { createArchivePathResolver } from '../../src/workers/local-files/scope-browser.ts';
+import { approveStaged } from './stage-upload.ts';
 import { MacPermissions } from '../../src/workers/local-files/mac-permissions.ts';
 import { VolumeResolver } from '../../src/workers/local-files/volume-identity.ts';
 import { createExclusiveRunner } from '../../src/workers/source-account-guard.ts';
@@ -166,8 +167,8 @@ export function gmailArchiveHarness(
   });
   const volumes = new VolumeResolver({ platform: 'darwin', home, readMounts: () => '/dev/disk3s1s1 on / (apfs, local)', diskutilPlist: () => undefined });
   const permissions = new MacPermissions({ home, memoryPath: join(base, 'folder-access.json'), platform: 'linux' });
-  const browser = createLocalFilesArchiveBrowser({ volumes, home, permissions });
-  const dashboard = createArchiveImportDashboard({ runtime, browser, refreshScheduler: () => undefined, privateModel: () => 'ready', home });
+  const resolver = createArchivePathResolver({ volumes, home, permissions });
+  const dashboard = createArchiveImportDashboard({ runtime, resolver, refreshScheduler: () => undefined, privateModel: () => 'ready', home });
 
   let closed = false;
   const close = (): void => {
@@ -249,7 +250,7 @@ export function gmailArchiveHarness(
       return path;
     },
     approve(name, text, answer = {}) {
-      return dashboard.approve({ key: harness.writeExport(name, text), ...answer });
+      return approveStaged(dashboard, harness.writeExport(name, text), answer);
     },
     async importAll(archiveId, pull = {}) {
       for (let attempt = 0; attempt < 100; attempt += 1) {

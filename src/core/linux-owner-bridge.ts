@@ -78,6 +78,18 @@ window.fetch=async function(input,init){
  if(destination){location.replace(destination);throw new Error('Navigating');}
  return response;
 };
+// An upload's pieces go by XMLHttpRequest (for its progress): same-origin ones carry the proof too. A proven request is
+// never redirected (handle() turns its Location into a header), so the proof cannot follow one elsewhere. The proof
+// page writes the document into its own window, so this runs twice there: a header set twice is joined, and refused.
+const sameOrigin=new WeakSet(), sent=Symbol.for('olympus-owner-proof'), nativeOpen=XMLHttpRequest.prototype.open, nativeSend=XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.open=function(method,url){
+ if(new URL(url,location.href).origin===location.origin)sameOrigin.add(this);else sameOrigin.delete(this);
+ return nativeOpen.apply(this,arguments);
+};
+XMLHttpRequest.prototype.send=function(body){
+ const proof=localStorage.getItem(key);if(proof&&sameOrigin.has(this)&&!this[sent]){this[sent]=true;this.setRequestHeader(header,proof);}
+ return nativeSend.call(this,body);
+};
 document.addEventListener('submit',function(event){
  const form=event.target;if(!(form instanceof HTMLFormElement))return;
  if(new URL(form.action,location.href).origin!==location.origin){event.preventDefault();return;}
@@ -379,8 +391,11 @@ export class LinuxOwnerBridge {
     if (this.sessions.some(s => s.expires <= this.now())) this.sessions = this.sessions.filter(s => s.expires > this.now()).slice(-15);
     const session = this.sessions.find(s => equalHash(cookie, s.cookieHash));
     let proof = request.headers.get(PROOF_HEADER);
-    let body: string | undefined;
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
+    let body: string | ReadableStream<Uint8Array> | undefined;
+    // Binary bodies (a dropped archive's pieces, up to the upload route's own cap) are never text: once the owner is
+    // proven they stream to the worker byte for byte, and the worker's route bounds them. Their proof is the header.
+    const binary = request.headers.get('content-type')?.split(';', 1)[0]!.trim().toLowerCase() === 'application/octet-stream';
+    if (request.method !== 'GET' && request.method !== 'HEAD' && !binary) {
       try { body = await boundedBody(request, 1_048_576); } catch { return refusal(413); }
       if (request.headers.get('content-type')?.startsWith('application/x-www-form-urlencoded')) {
         const form = new URLSearchParams(body);
@@ -393,6 +408,7 @@ export class LinuxOwnerBridge {
       return refusal();
     }
     if (!this.live()) return refusal(503);
+    if (binary && request.body) body = request.body;
     // The worker permits long-running owner operations. Only a proven
     // request may disable the TCP idle timeout; public traffic keeps it.
     ownerRequestAdmitted?.();
@@ -407,8 +423,10 @@ export class LinuxOwnerBridge {
     headers.set('Cookie', (headers.get('cookie') ?? '').split(';').filter(v => !v.trim().startsWith(COOKIE + '=')).join(';'));
     let response: Response;
     try { response = await this.options.fetchSocket(new Request(this.entryOrigin + url.pathname + url.search, {
-      method: request.method, headers, ...(body !== undefined ? { body } : {}), redirect: 'manual',
-    })); } catch { return this.live() ? restarting() : refusal(503); }
+      method: request.method, headers, ...(body !== undefined ? { body, duplex: 'half' } : {}), redirect: 'manual',
+      // A streamed upload's sender going away ends the hop too, so the worker does not wait on a body nobody sends.
+      ...(typeof body === 'object' ? { signal: request.signal } : {}),
+    } as RequestInit)); } catch { return this.live() ? restarting() : refusal(503); }
     if (!this.live()) return refusal(503);
     const outgoing = new Headers(response.headers);
     outgoing.delete('access-control-allow-origin'); outgoing.delete('access-control-allow-credentials');

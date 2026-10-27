@@ -21,22 +21,15 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //                picks the Agents fixture.
 //   &picker=open[,everything|folder:<Name>...]  with a local-files-* state: opens
 //                the folder picker (and clicks on) as soon as the panel loads.
-//   &picker=import[,folder:<Name>...]  with an archives-* state: opens the
-//                archive picker (Other archives' Import another archive) the same way.
-//   &picker=key:summary:menu:telegram.messages,key:menu:telegram.messages:import-an-archive
-//                with an archives-* or sources-import-* state: a source's own
-//                Import an archive (its ⋯ menu), the picker for its exports only;
-//                then folder:Telegram exports,pick:Telegram exports/result.json
-//                starts it, and pick:Telegram exports/Takeout-2026-10.mbox is
-//                refused as not a Telegram export.
-//   &picker=import,folder:Mail exports,pick:Mail exports/Takeout-2026-10.mbox
-//                with archives-account-confirm: picks that file, and the sheet asks
-//                which account it is of. pick:<path under the fake home> clicks
-//                that file's Import; key:<data-key> clicks any control by its key
-//                (sources-import-delete: &picker=key:summary:menu:gmail.email,
+//   &picker=import  with an archives-* state: opens the Other archives drop zone as
+//                soon as the panel loads. key:<data-key> clicks any control by its key
+//                (key:import:telegram.messages opens Telegram's own drop zone;
+//                sources-import-delete: &picker=key:summary:menu:gmail.email,
 //                key:menu:gmail.email:delete-indexed-data shows the confirmation;
 //                archives-account-request: &picker=key:archive-request:5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f:approve
 //                presses Import on the agent's request, and its row asks which account).
+//                A drop zone takes files from the browser's own dialog or a drop; the preview
+//                only keeps their names and sizes (nothing is written).
 //
 // Only the dashboard read answers; every other panel tool says it needs a
 // worker.
@@ -60,7 +53,9 @@ import {
 } from '../src/workers/dashboard/index.ts';
 import {
   ARCHIVE_APPROVE_TOOL_NAME,
-  ARCHIVE_BROWSE_TOOL_NAME,
+  ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
+  ARCHIVE_UPLOAD_START_TOOL_NAME,
+  ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
   DELETE_SOURCE_DATA_TOOL_NAME,
@@ -715,9 +710,11 @@ function localFilesPreview(state: string) {
  * the computer's own (previewArchivesMeta), so these states show it on the
  * computer only.
  *   archives-none        nothing imported yet: Import an archive
- *   archives-picker      the same row; opening Import an archive lists files
- *                        and folders (previewArchiveBrowse), Downloads needing
- *                        the Mac's permission, and Import starts an import
+ *   archives-picker      the same row; Import an archive opens the drop zone (a dropped
+ *                        or chosen folder or file is "uploaded" to this preview,
+ *                        previewArchiveUploads) and an .mbox starts an import
+ *   archives-upload-slow the same, the upload paced slowly so its progress can be seen
+ *                        and cancelled
  *   archives-checking    an approval reading its files once to tell a copy apart
  *   archives-already     that check found the archive already imported
  *   archives-failed      a choice that was not imported, and why
@@ -747,7 +744,7 @@ function localFilesPreview(state: string) {
  * messages no private model can judge are each a Needs you line too.
  */
 const ARCHIVE_STATES = [
-  'archives-none', 'archives-picker', 'archives-checking', 'archives-already', 'archives-failed', 'archives-request',
+  'archives-none', 'archives-picker', 'archives-upload-slow', 'archives-checking', 'archives-already', 'archives-failed', 'archives-request',
   'archives-remove-request', 'archives-request-hidden',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
   'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty', 'archives-chat',
@@ -1216,10 +1213,35 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
 }
 
 /**
- * The archive picker's answers (local-files/scope-browser.ts archive mode),
- * with a fake home: files beside folders, Downloads needing the Mac's
- * permission, and an Apple Mail export folder chosen as one archive.
+ * The uploads of dropped files in the preview: what the engine's upload routes
+ * (archive-import/staging.ts) keep of one, here only the names and sizes, so
+ * the approval can say what was dropped. Nothing is written to disk.
  */
+export const previewArchiveUploads = {
+  uploads: new Map<string, { top: Set<string>; files: number; bytes: number }>(),
+  start(): string {
+    const id = crypto.randomUUID().replaceAll('-', '');
+    this.uploads.set(id, { top: new Set(), files: 0, bytes: 0 });
+    return id;
+  },
+  /** One file arrived: its path (the first segment is what was dropped) and its size. */
+  receive(id: string, path: string, bytes: number, last = true): boolean {
+    const upload = this.uploads.get(id);
+    if (!upload) return false;
+    upload.top.add(path.split('/')[0] ?? path);
+    // A file larger than a piece arrives as several requests: it counts once, with its last.
+    if (last) upload.files += 1;
+    upload.bytes += bytes;
+    return true;
+  },
+  /** The name the approval is about: the one thing dropped, or the first. */
+  nameOf(id: string): string {
+    const upload = this.uploads.get(id);
+    return upload ? [...upload.top][0] ?? '' : '';
+  },
+  cancel(id: string): void { this.uploads.delete(id); },
+};
+
 export function previewArchiveBrowse(args: { parent_key?: unknown }) {
   const parent = typeof args.parent_key === 'string' ? args.parent_key : '';
   const folder = (name: string, extra: Record<string, unknown> = {}, under = LOCAL_FILES_HOME) => ({
@@ -1303,9 +1325,10 @@ export function previewArchiveSources(state: string): ComputerArchiveSourceMeta[
  * refused in the engine's words. In archives-account-* states an export that
  * does not prove its account is asked about first, and the answer starts it.
  */
-export function previewArchiveApprove(args: { key?: unknown; request_id?: unknown; confirm_account?: unknown; keep_apart?: unknown; source_id?: unknown }, state = '') {
+export function previewArchiveApprove(args: { key?: unknown; upload_id?: unknown; request_id?: unknown; confirm_account?: unknown; keep_apart?: unknown; source_id?: unknown }, state = '') {
   const key = typeof args.key === 'string' ? args.key : '';
-  const name = typeof args.request_id === 'string' ? 'Takeout-2026-10.mbox' : key.split('/').pop() ?? '';
+  const name = typeof args.request_id === 'string' ? 'Takeout-2026-10.mbox'
+    : typeof args.upload_id === 'string' ? previewArchiveUploads.nameOf(args.upload_id) : key.split('/').pop() ?? '';
   // A source's own Import an archive only narrows which exports are taken (archive-import/dashboard.ts
   // not_this_source); where a taken export goes, and the account question, are the same for both buttons.
   if (typeof args.source_id === 'string') {
@@ -1882,12 +1905,36 @@ if (import.meta.main) {
       if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
       return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>, waitingCount);
     }
+    // One file of an upload: the body is read (slowly in archives-upload-slow, so progress and Cancel can be seen) and only its size kept.
+    if (request.method === 'POST' && url.pathname === '/dashboard/archive-import/upload-file') {
+      const slow = state === 'archives-upload-slow';
+      let bytes = 0;
+      const reader = request.body?.getReader();
+      for (let chunk = await reader?.read(); chunk && !chunk.done; chunk = await reader?.read()) {
+        bytes += chunk.value.byteLength;
+        // About 400 KB a second, whatever size the chunks come in.
+        if (slow) await new Promise((resolve) => setTimeout(resolve, Math.max(120, chunk.value.byteLength / 400)));
+      }
+      const path = decodeURIComponent(request.headers.get('X-Olympus-Upload-Path') ?? '');
+      const kept = previewArchiveUploads.receive(request.headers.get('X-Olympus-Upload-Id') ?? '', path, bytes, request.headers.get('X-Olympus-Upload-Final') !== '0');
+      return kept ? Response.json({ ok: true, bytes }) : Response.json({ error: { code: 'upload_unknown', message: 'This upload is no longer there. Drop it again.' } }, { status: 404 });
+    }
     if (request.method === 'POST' && url.pathname === '/dashboard/tools/call') {
       const body = await request.json().catch(() => ({})) as { name?: unknown; arguments?: { source_id?: unknown; parent_key?: unknown } };
       if (body.name === SCOPE_LIST_TOOL_NAME && body.arguments?.source_id === 'local.files' && state.startsWith('local-files')) {
         return Response.json(previewScopeList(state, body.arguments));
       }
-      if (body.name === ARCHIVE_BROWSE_TOOL_NAME && (state.startsWith('archives-') || isSourceImportState(state))) return Response.json(previewArchiveBrowse(body.arguments ?? {}));
+      if (body.name === ARCHIVE_UPLOAD_START_TOOL_NAME && (state.startsWith('archives-') || isSourceImportState(state))) {
+        return Response.json({ content: [{ type: 'text', text: 'Ready.' }], structuredContent: { status: 'started', upload_id: previewArchiveUploads.start() } });
+      }
+      if (body.name === ARCHIVE_UPLOAD_STATUS_TOOL_NAME) {
+        const upload = previewArchiveUploads.uploads.get(String((body.arguments as { upload_id?: unknown } | undefined)?.upload_id ?? ''));
+        return Response.json({ content: [{ type: 'text', text: 'Receiving.' }], structuredContent: { status: 'receiving', files: upload?.files ?? 0, bytes: upload?.bytes ?? 0 } });
+      }
+      if (body.name === ARCHIVE_UPLOAD_CANCEL_TOOL_NAME) {
+        previewArchiveUploads.cancel(String((body.arguments as { upload_id?: unknown } | undefined)?.upload_id ?? ''));
+        return Response.json({ content: [{ type: 'text', text: 'Cancelled.' }], structuredContent: { status: 'cancelled' } });
+      }
       if (body.name === ARCHIVE_APPROVE_TOOL_NAME && (state.startsWith('archives-') || isSourceImportState(state))) return Response.json(previewArchiveApprove((body.arguments ?? {}) as Parameters<typeof previewArchiveApprove>[0], state));
       if (body.name === DELETE_SOURCE_DATA_TOOL_NAME && state === 'delete-data') {
         previewDataDeleted = true;

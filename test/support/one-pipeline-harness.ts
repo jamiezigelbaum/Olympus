@@ -38,11 +38,12 @@ import {
   type ArchiveSourceTarget,
 } from '../../src/workers/archive-import/source-targets.ts';
 import { pullArchiveImport, type ArchiveImportPullOptions } from '../../src/workers/archive-import/sync.ts';
-import { createLocalFilesArchiveBrowser } from '../../src/workers/local-files/scope-browser.ts';
+import { createArchivePathResolver } from '../../src/workers/local-files/scope-browser.ts';
 import { MacPermissions } from '../../src/workers/local-files/mac-permissions.ts';
 import { VolumeResolver } from '../../src/workers/local-files/volume-identity.ts';
 import { FIXTURE_PLACEMENT } from '../helpers/tier-fixtures.ts';
 import { archiveConnectorId } from '../../src/workers/archive-import/state.ts';
+import { approveStaged } from './stage-upload.ts';
 
 /** A source id the data lifecycle knows, so a whole-source delete runs through the real lifecycle. */
 export const FIXTURE_SOURCE_ID = 'dropbox.files';
@@ -350,10 +351,10 @@ export function onePipelineHarness(cleanups: Array<() => void>, options: Fixture
   });
   const volumes = new VolumeResolver({ platform: 'darwin', home, readMounts: () => '/dev/disk3s1s1 on / (apfs, local)', diskutilPlist: () => undefined });
   const permissions = new MacPermissions({ home, memoryPath: join(base, 'folder-access.json'), platform: 'linux' });
-  const browser = createLocalFilesArchiveBrowser({ volumes, home, permissions });
+  const resolver = createArchivePathResolver({ volumes, home, permissions });
   const dashboard = createArchiveImportDashboard({
     runtime,
-    browser,
+    resolver,
     refreshScheduler: () => undefined,
     privateModel: () => 'ready',
     home,
@@ -405,7 +406,7 @@ export function onePipelineHarness(cleanups: Array<() => void>, options: Fixture
     },
     async startImport(name, records, answer = {}) {
       const path = harness.writeExport(name, records);
-      const result = await dashboard.approve({ key: path, ...answer });
+      const result = await approveStaged(dashboard, path, answer);
       if (!result.ok || result.status !== 'started') throw new Error(`expected a start, got ${JSON.stringify(result)}`);
       return result.archive_id;
     },

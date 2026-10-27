@@ -228,6 +228,30 @@ export function chatgptDashboardClient(
     return (window as Any).openai || null;
   }
 
+  // A file of an upload (the computer's Import an archive) is handed to the host page, which streams it to
+  // Olympus: the files themselves never go through a tool call. The host answers once the file has arrived
+  // (or failed), and tells how far it has got on the way.
+  const uploadProgress: Record<number, (loaded: number) => void> = {};
+  function uploadFile(uploadId: string, path: string, file: File, modified: number, progress: (loaded: number) => void): Promise<Any> {
+    const id = nextId++;
+    uploadProgress[id] = progress;
+    const finish = (value: Any) => {
+      delete uploadProgress[id];
+      return value;
+    };
+    post({ jsonrpc: '2.0', id, method: 'olympus/upload-file', params: { upload_id: uploadId, path, modified, file } });
+    return new Promise((resolve) => {
+      pending[id] = {
+        resolve: (result: Any) => resolve(finish(result && typeof result === 'object' ? result : { ok: false })),
+        reject: () => resolve(finish({ ok: false })),
+        timer: null,
+      };
+    });
+  }
+  function abortUpload(uploadId: string): void {
+    notify('olympus/upload-abort', { upload_id: uploadId });
+  }
+
   window.addEventListener('message', (event: MessageEvent) => {
     if (event.source !== window.parent) return;
     const message = event.data;
@@ -238,6 +262,11 @@ export function chatgptDashboardClient(
       if (entry.timer) clearTimeout(entry.timer);
       if (message.error) entry.reject(message.error);
       else entry.resolve(message.result);
+      return;
+    }
+    if (message.method === 'olympus/upload-progress') {
+      const params = message.params;
+      if (params && typeof params.request === 'number' && typeof params.loaded === 'number' && uploadProgress[params.request]) uploadProgress[params.request]!(params.loaded);
       return;
     }
     if (message.method === 'ui/notifications/tool-result') {
@@ -820,14 +849,10 @@ export function chatgptDashboardClient(
       // Tell Olympus what's private, and the Privacy row's Edit, open the Privacy screen in place.
       action = () => openPrivacy(key);
     } else if (fix.archiveImport === true && picker) {
-      // Import an archive (computer only): the picker over this computer's files, in place; from a
-      // source's ⋯ menu, for that source's exports only.
+      // Import an archive (computer only): the drop zone, in place; from a source's own Import button,
+      // for that source's exports only.
       action = () => {
-        // Back on the dashboard after the picker, the ⋯ menu it came from is closed, and focus returns to
-        // the menu's own button, which is in sight (the entry inside the closed menu is not).
-        const fromMenu = key.indexOf('menu:') === 0;
-        if (fromMenu && source) state.open['menu:' + source.id] = false;
-        startArchivePick(fromMenu ? 'summary:' + key.slice(0, key.lastIndexOf(':')) : key, typeof fix.archiveSource === 'string' ? fix.archiveSource : '');
+        startArchivePick(key, typeof fix.archiveSource === 'string' ? fix.archiveSource : '');
       };
     } else if (typeof fix.archiveFocus === 'string' && fix.archiveFocus) {
       // A Needs you line about one archive or request (computer only): straight to it, in place.
@@ -1139,7 +1164,16 @@ export function chatgptDashboardClient(
     // One fix per row: the Needs-you fix when there is one, else the source's own.
     const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary, id);
     const isSync = (entry: Any) => !!entry && entry.tool === config.syncTool;
-    if (fix && !(checking && isSync(fix))) add(controls, fixControl(fix, 'primary:' + id, 'plain', true, context));
+    // A source that reads its own exports has its Import an archive on the row itself, left of Connect
+    // or Sync now (never stacked under it, never inside ⋯), on the computer only.
+    const own = archiveSourceMeta(id);
+    if (own) {
+      add(controls, fixControl({ label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own.sourceId }, 'import:' + id, 'plain', true, context));
+      row.className += ' has-import';
+    }
+    // An import-only source's fix is its own Import an archive, already on the row: never twice.
+    const ownFix = !!own && !!fix && fix.archiveImport === true && fix.archiveSource === own.sourceId;
+    if (fix && !ownFix && !(checking && isSync(fix))) add(controls, fixControl(fix, 'primary:' + id, 'plain', true, context));
     // A press still checking: its button says so, disabled, in the row's place.
     if (checking) add(controls, checkingControl('primary:' + id));
     // The ⋯ menu keeps only secondary actions, never a copy of the row's fix,
@@ -1156,14 +1190,6 @@ export function chatgptDashboardClient(
     // Unpair for a paired chat app, on the computer only: the pairing lives here.
     const unpair = unpairEntry(id);
     if (unpair) menu.push(unpair);
-    // A source that reads its own exports imports them from its ⋯ menu (computer only).
-    const own = archiveSourceMeta(id);
-    // It sits before Disconnect and Delete, which stay last; never twice (an import-only source's card has it as its own fix).
-    const ownImport = (entry: Any) => !!entry && entry.archiveImport === true && entry.archiveSource === (own && own.sourceId);
-    if (own && !ownImport(fix) && !menu.some(ownImport)) {
-      const destructive = menu.findIndex((entry: Any) => !!entry && entry.destructive === true);
-      menu.splice(destructive < 0 ? menu.length : destructive, 0, { label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own.sourceId });
-    }
     let menuBox: HTMLElement | null = null;
     if (menu.length) {
       const glyph = el('span', '', '⋯');
@@ -1334,10 +1360,10 @@ export function chatgptDashboardClient(
   }
 
   /**
-   * Import an archive: the picker over this computer's files; its one line says
-   * what came of the choice. From a source's ⋯ menu (`sourceId`) the picker is
-   * titled for that source, says which of its exports to choose, and the engine
-   * takes only those.
+   * Import an archive: a drop zone for a folder or a file from this computer;
+   * its one line says what came of it. From a source's own Import button
+   * (`sourceId`) the screen is titled for that source, says which of its
+   * exports to drop, and the engine takes only those.
    */
   function startArchivePick(key: string, sourceId: string): void {
     supersede();
@@ -2627,6 +2653,8 @@ export function chatgptDashboardClient(
     fill,
     count,
     call: callRaw,
+    upload: uploadFile,
+    abortUpload,
     render,
     reportHeight,
     openLink,

@@ -601,6 +601,22 @@ export function findSameVersionImport<T extends { status: string; files: readonl
 }
 
 /**
+ * An import still running (or stopped) of files that look the same: the same
+ * sizes, the same first and last bytes and the same modified time (a dropped
+ * file keeps the date it had). A dropped archive is a new copy each time, with
+ * a new identity, and an unfinished import holds no whole-file digest to
+ * compare, so dropping the same export twice must be told by this. A copy made
+ * by hand has a date of its own and goes through the whole-file check instead.
+ */
+export function findSameInProgressImport<T extends { status: string; files: readonly ArchiveManifestFile[] }>(
+  records: readonly T[],
+  files: readonly ArchiveManifestFile[],
+): T | undefined {
+  return comparable(records, files).find((record) => (record.status === 'importing' || record.status === 'stopped')
+    && record.files.every((file, index) => sameSample(file, files[index]!) && Math.abs(file.mtime_ms - files[index]!.mtime_ms) <= 2));
+}
+
+/**
  * Completed imports these files may be a copy of: the same size and the same
  * first and last bytes in every file. Only a whole-file SHA-256 says whether
  * one is (`isCopyOf`); this only picks the imports worth reading the files for.

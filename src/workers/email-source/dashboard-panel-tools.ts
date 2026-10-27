@@ -34,9 +34,10 @@
  *   also counts the private questions waiting here (`waitingPrivateQuestions`),
  *   the computer's one Needs you line. Never for the Gateway bearer, a session
  *   the bearer minted or a launch ticket redeemed, and never to ChatGPT.
- * - the computer imports archives: `olympus_archive_browse` lists files and
- *   folders for the picker (names in the picker's `_meta` only),
- *   `olympus_archive_approve`, `olympus_archive_decline` and
+ * - the computer imports archives: `olympus_archive_upload_start`, `_status`
+ *   and `_cancel` open, watch and cancel the upload of a dropped file or folder
+ *   (the files themselves travel on the worker's upload-file route, from the
+ *   host page, never through a tool), `olympus_archive_approve`, `olympus_archive_decline` and
  *   `olympus_archive_remove` and `olympus_archive_stop` reach the worker's archive routes, which run
  *   under the dashboard grant guard, and `_meta['olympus/computer']
  *   archives` lists the imported archives and the imports waiting on the
@@ -44,10 +45,12 @@
  */
 import {
   ARCHIVE_APPROVE_TOOL_NAME,
-  ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
   ARCHIVE_STOP_TOOL_NAME,
+  ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
+  ARCHIVE_UPLOAD_START_TOOL_NAME,
+  ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_META_KEY,
   COMPUTER_UNREADABLE_FILES_LIMIT,
@@ -55,7 +58,6 @@ import {
   INDEX_FASTER_TOOL_NAME,
   OPEN_UNREADABLE_FILE_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
-  SCOPE_UI_META_KEY,
   UNREADABLE_FILES_PAGE_TOOL_NAME,
   unreadableNames,
   type ComputerArchivesMeta,
@@ -238,7 +240,7 @@ function archiveArg(value: unknown): value is string {
  */
 async function archiveRoute(
   options: DashboardPanelToolsOptions,
-  route: 'browse' | 'approve' | 'decline' | 'remove' | 'stop',
+  route: 'upload-start' | 'upload-status' | 'upload-cancel' | 'approve' | 'decline' | 'remove' | 'stop',
   body: Record<string, unknown>,
   context: DashboardPanelCallContext,
 ): Promise<{ ok: true; parsed: Record<string, unknown> } | { ok: false; result: ChatGptToolResult }> {
@@ -276,41 +278,51 @@ async function archiveRoute(
   };
 }
 
-/** One level of the archive picker: files and folders, the names in the picker's `_meta` only. */
-async function archiveBrowse(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
-  const keys = Object.keys(args);
-  if (keys.some((key) => key !== 'parent_key' && key !== 'cursor')
-    || (args.parent_key !== undefined && !archiveArg(args.parent_key))
-    || (args.cursor !== undefined && !archiveArg(args.cursor))) {
-    return refused('parent_key and cursor must be from the picker.', 'invalid_params');
-  }
-  const answer = await archiveRoute(options, 'browse', args, context);
+/** Begin an upload: the panel then hands the host page the files, one request each. */
+async function archiveUploadStart(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
+  if (Object.keys(args).length > 0) return refused('An upload takes no arguments.', 'invalid_params');
+  const answer = await archiveRoute(options, 'upload-start', {}, context);
   if (!answer.ok) return answer.result;
-  const nodes = Array.isArray(answer.parsed.nodes) ? answer.parsed.nodes : [];
+  const uploadId = answer.parsed.upload_id;
+  if (typeof uploadId !== 'string' || !uploadId) return refused('Olympus could not do that. Try again.', 'internal');
+  return { content: [{ type: 'text', text: 'Ready.' }], structuredContent: { status: 'started', upload_id: uploadId } };
+}
+
+/** How an upload stands (receiving, waiting for free space), or that it is gone. */
+async function archiveUploadStatus(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  if (keys.length !== 1 || keys[0] !== 'upload_id' || !archiveArg(args.upload_id)) return refused('upload_id is required.', 'invalid_params');
+  const answer = await archiveRoute(options, 'upload-status', args, context);
+  if (!answer.ok) return answer.result;
+  const state = answer.parsed.state;
+  if (state !== 'receiving' && state !== 'paused_disk_full' && state !== 'idle') return refused('Olympus could not do that. Try again.', 'internal');
+  const count = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0);
   return {
-    content: [{ type: 'text', text: 'Listed.' }],
-    structuredContent: { status: 'listed', count: nodes.length },
-    _meta: {
-      [SCOPE_UI_META_KEY]: {
-        nodes,
-        ...(typeof answer.parsed.next_cursor === 'string' ? { next_cursor: answer.parsed.next_cursor } : {}),
-        ...(answer.parsed.access && typeof answer.parsed.access === 'object' ? { access: answer.parsed.access } : {}),
-      },
-    },
+    content: [{ type: 'text', text: state === 'paused_disk_full' ? 'Waiting for free space.' : 'Receiving.' }],
+    structuredContent: { status: state, files: count(answer.parsed.files), bytes: count(answer.parsed.bytes) },
   };
 }
 
-/** Import the chosen file or folder, or approve an agent's request: answered at once (started, checking, already imported). */
+/** Cancel an upload: what was received is deleted (unless an import already reads it). */
+async function archiveUploadCancel(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  if (keys.length !== 1 || keys[0] !== 'upload_id' || !archiveArg(args.upload_id)) return refused('upload_id is required.', 'invalid_params');
+  const answer = await archiveRoute(options, 'upload-cancel', args, context);
+  if (!answer.ok) return answer.result;
+  return { content: [{ type: 'text', text: 'Cancelled.' }], structuredContent: { status: 'cancelled' } };
+}
+
+/** Import the uploaded file or folder, or approve an agent's request: answered at once (started, checking, already imported). */
 async function archiveApprove(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
-  // The chosen key or the request, and at most one answer to "which account is this export of": add it to
+  // The upload or the request, and at most one answer to "which account is this export of": add it to
   // the connected account, or keep it under Archives.
-  // A source's own Import an archive also names its card (`source_id`), with a chosen key only.
+  // A source's own Import an archive also names its card (`source_id`), with an upload only.
   const keys = Object.keys(args).filter((key) => key !== 'confirm_account' && key !== 'keep_apart' && key !== 'source_id');
-  const byKey = keys.length === 1 && keys[0] === 'key' && archiveArg(args.key);
-  if (args.source_id !== undefined && !(byKey && archiveArg(args.source_id))) return refused('source_id goes with a chosen key.', 'invalid_params');
+  const byKey = keys.length === 1 && keys[0] === 'upload_id' && archiveArg(args.upload_id);
+  if (args.source_id !== undefined && !(byKey && archiveArg(args.source_id))) return refused('source_id goes with an upload.', 'invalid_params');
   const byRequest = keys.length === 1 && keys[0] === 'request_id' && archiveArg(args.request_id);
   const answers = [args.confirm_account, args.keep_apart];
-  if (!byKey && !byRequest) return refused('Give the chosen key or a request id.', 'invalid_params');
+  if (!byKey && !byRequest) return refused('Give the upload or a request id.', 'invalid_params');
   if (answers.some((value) => value !== undefined && value !== true) || answers.filter((value) => value === true).length > 1) {
     return refused('Say either confirm_account or keep_apart, as true.', 'invalid_params');
   }
@@ -550,7 +562,9 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (name === UNPAIR_SOURCE_TOOL_NAME) return await unpairSource(options, args);
       if (name === OPEN_UNREADABLE_FILE_TOOL_NAME) return await openUnreadableFile(options, args, context);
       if (name === UNREADABLE_FILES_PAGE_TOOL_NAME) return await unreadableFilesPage(options, args, context);
-      if (name === ARCHIVE_BROWSE_TOOL_NAME) return await archiveBrowse(options, args, context);
+      if (name === ARCHIVE_UPLOAD_START_TOOL_NAME) return await archiveUploadStart(options, args, context);
+      if (name === ARCHIVE_UPLOAD_STATUS_TOOL_NAME) return await archiveUploadStatus(options, args, context);
+      if (name === ARCHIVE_UPLOAD_CANCEL_TOOL_NAME) return await archiveUploadCancel(options, args, context);
       if (name === ARCHIVE_APPROVE_TOOL_NAME) return await archiveApprove(options, args, context);
       if (name === ARCHIVE_DECLINE_TOOL_NAME) return await archiveDecline(options, args, context);
       if (name === ARCHIVE_REMOVE_TOOL_NAME) return await archiveRemove(options, args, context);

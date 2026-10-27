@@ -591,15 +591,18 @@ function isDashboardPrivateAnswersRoute(request: Request): boolean {
 }
 
 /**
- * Choosing an archive (the picker lists this computer's folders), importing
+ * Uploading an archive the person dropped on the dashboard, importing
  * it, declining an agent's request for one, and removing one
  * (archive-import/dashboard.ts): only the person at this computer's dashboard
- * looks through and approves what Olympus reads, so these take the consult
+ * hands over and approves what Olympus reads, so these take the consult
  * routes' grade too. Holding the worker bearer (an agent, the Gateway) is not
  * enough.
  */
 export const DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS: readonly string[] = [
-  '/dashboard/archive-import/browse',
+  '/dashboard/archive-import/upload-start',
+  '/dashboard/archive-import/upload-file',
+  '/dashboard/archive-import/upload-status',
+  '/dashboard/archive-import/upload-cancel',
   '/dashboard/archive-import/approve',
   '/dashboard/archive-import/decline',
   '/dashboard/archive-import/remove',
@@ -663,7 +666,10 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/disconnect',
     '/dashboard/delete-source-data',
     '/dashboard/unpair',
-    '/dashboard/archive-import/browse',
+    '/dashboard/archive-import/upload-start',
+    '/dashboard/archive-import/upload-file',
+    '/dashboard/archive-import/upload-status',
+    '/dashboard/archive-import/upload-cancel',
     '/dashboard/archive-import/approve',
     '/dashboard/archive-import/decline',
     '/dashboard/archive-import/remove',

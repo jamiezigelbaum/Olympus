@@ -48,6 +48,7 @@ import { normalizeVeniceAnalystModelId } from '../../core/venice-models.ts';
 import { isV04PublicDashboardRoute } from '../../core/public-surface.ts';
 import type { ArchiveImportAgent } from '../archive-import/agent.ts';
 import type { ArchiveImportDashboard } from '../archive-import/dashboard.ts';
+import { ArchiveUploadError } from '../archive-import/staging.ts';
 import { NativeMessagingCaptureOwnerError } from '../../core/messaging-capture.ts';
 import {
   artifactPresence,
@@ -2833,11 +2834,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           });
         }
 
-        // Importing an archive (archive-import/dashboard.ts): the picker's
-        // listing, the person's approval, Decline of an agent's request, and
-        // Remove. Control routes only (workers/http.ts), never the dash_ read
-        // token: the listing is made of file names, and only the person at
-        // the dashboard approves or removes. Approve, Decline and Remove take
+        // Importing an archive (archive-import/dashboard.ts): the upload of
+        // what the person dropped, their approval, Decline of an agent's
+        // request, and Remove. Control routes only (workers/http.ts), never
+        // the dash_ read token: only the person at the dashboard hands over,
+        // approves or removes. Approve, Decline and Remove take
         // a local-grade session alone, whose grade the boundary injects and
         // nothing else can set: never the worker bearer, nor a session a
         // bearer minted. Every change runs under the grant guard, and hands
@@ -2854,22 +2855,58 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.',
             );
           }
+          // One piece of a file of an upload (a file that fits in one piece is one request): the body IS the piece, streamed to
+          // the staging folder as it arrives (archive-import/staging.ts). Same session, origin and CSRF proof as every route here.
+          if (url.pathname === '/dashboard/archive-import/upload-file') {
+            const header = (name: string): string => request.headers.get(name) ?? '';
+            let relPath: string;
+            try {
+              relPath = decodeURIComponent(header('X-Olympus-Upload-Path'));
+            } catch {
+              throw new EmailSourceWorkerError(400, 'bad_path', 'The name of the file could not be read.');
+            }
+            const modified = Number(header('X-Olympus-Upload-Modified'));
+            const declared = Number(header('Content-Length'));
+            // A large file comes as pieces (staging.ts ARCHIVE_UPLOAD_CHUNK_BYTES): where this one begins, and whether it is the last.
+            const offsetHeader = header('X-Olympus-Upload-Offset');
+            const offset = offsetHeader === '' ? 0 : Number(offsetHeader);
+            const final = header('X-Olympus-Upload-Final') !== '0';
+            try {
+              const received = await archiveImports.upload.receive(header('X-Olympus-Upload-Id'), relPath, request.body, {
+                ...(Number.isFinite(modified) && modified > 0 ? { modified } : {}),
+                ...(Number.isFinite(declared) && declared > 0 ? { declaredBytes: declared } : {}),
+                offset,
+                final,
+                signal: request.signal,
+              });
+              return json({ ok: true, bytes: received.bytes });
+            } catch (error) {
+              if (error instanceof ArchiveUploadError) throw new EmailSourceWorkerError(error.status, error.code, error.message);
+              throw error;
+            }
+          }
           const record = await parseObjectBody(request);
-          if (url.pathname === '/dashboard/archive-import/browse') {
-            const parentKey = asOptionalString(record.parent_key);
-            const cursor = asOptionalString(record.cursor);
-            return json({
-              ok: true,
-              ...(await archiveImports.browse({ ...(parentKey ? { parentKey } : {}), ...(cursor ? { cursor } : {}) })),
-            });
+          if (url.pathname === '/dashboard/archive-import/upload-start') {
+            return await withDashboardGrantMutation(async () => json({ ok: true, upload_id: archiveImports.upload.start().uploadId }));
+          }
+          if (url.pathname === '/dashboard/archive-import/upload-status' || url.pathname === '/dashboard/archive-import/upload-cancel') {
+            const uploadId = asOptionalString(record.upload_id);
+            if (!uploadId) throw new EmailSourceWorkerError(400, 'invalid_request', 'upload_id is required.');
+            try {
+              if (url.pathname.endsWith('-cancel')) return json({ ok: true, ...archiveImports.upload.cancel(uploadId) });
+              return json({ ok: true, ...archiveImports.upload.status(uploadId) });
+            } catch (error) {
+              if (error instanceof ArchiveUploadError) throw new EmailSourceWorkerError(error.status, error.code, error.message);
+              throw error;
+            }
           }
           if (url.pathname === '/dashboard/archive-import/approve') {
             return await withDashboardGrantMutation(async () => {
               assertDashboardModelsReady();
-              const key = asOptionalString(record.key);
+              const uploadId = asOptionalString(record.upload_id);
               const requestId = asOptionalString(record.request_id);
-              if ((key === undefined) === (requestId === undefined)) {
-                throw new EmailSourceWorkerError(400, 'invalid_request', 'Give either key or request_id.');
+              if ((uploadId === undefined) === (requestId === undefined)) {
+                throw new EmailSourceWorkerError(400, 'invalid_request', 'Give either upload_id or request_id.');
               }
               // The owner's answer to "which account is this export of", when asked: at most one.
               const confirmAccount = asOptionalBoolean(record.confirm_account) === true;
@@ -2880,10 +2917,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               const answer = { ...(confirmAccount ? { confirmAccount: true as const } : {}), ...(keepApart ? { keepApart: true as const } : {}) };
               // A source's own Import an archive names its card: only that source's exports are taken.
               const sourceId = asOptionalString(record.source_id);
-              if (sourceId !== undefined && key === undefined) {
-                throw new EmailSourceWorkerError(400, 'invalid_request', 'source_id goes with a chosen key.');
+              if (sourceId !== undefined && uploadId === undefined) {
+                throw new EmailSourceWorkerError(400, 'invalid_request', 'source_id goes with an upload.');
               }
-              return json(await archiveImports.approve(key !== undefined ? { key, ...(sourceId !== undefined ? { sourceId } : {}), ...answer } : { requestId: requestId!, ...answer }));
+              return json(await archiveImports.approve(uploadId !== undefined ? { uploadId, ...(sourceId !== undefined ? { sourceId } : {}), ...answer } : { requestId: requestId!, ...answer }));
             });
           }
           if (url.pathname === '/dashboard/archive-import/stop') {

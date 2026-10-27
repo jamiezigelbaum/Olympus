@@ -4,10 +4,12 @@
  * Archives row's list.
  *
  * Only the dashboard approves. The worker's /dashboard/archive-import/
- * routes call this under the dashboard grant guard, and the chosen key is
- * checked here before anything of it is read (local-files/scope-browser.ts
- * archive mode: real path, no link, a file or a folder, the Mac's own
- * permission for a guarded folder).
+ * routes call this under the dashboard grant guard. A dropped file or folder
+ * arrives as an upload into a staging folder in Olympus's own storage
+ * (staging.ts) and is approved by its upload id; the path an agent names is
+ * checked, once the person approves its request, before anything of it is read
+ * (local-files/scope-browser.ts: real path, no link, a file or a folder, the
+ * Mac's own permission for a guarded folder).
  *
  * An approval answers at once. Metadata and the first and last bytes of
  * every file say whether it may be a copy of an earlier import; when it may,
@@ -20,8 +22,8 @@ import { homedir } from 'node:os';
 import { posix } from 'node:path';
 import { archiveSourceCardOf, archiveSourceCards, getArchiveFormat, type ArchiveFormatDefinition } from '../../core/archive-formats.ts';
 import { ScopeRoot, ScopeSafeError } from '../../core/scope-safe-fs.ts';
+import { realpathSync } from 'node:fs';
 import type {
-  ArchiveBrowseList,
   ComputerArchiveEntry,
   ComputerArchiveRequest,
   ComputerArchiveSourceMeta,
@@ -30,13 +32,15 @@ import type {
   ComputerSourceImportsMeta,
 } from '../chatgpt/dashboard-contract.ts';
 import { SourceStorageUnavailableError } from '../../core/source-storage.ts';
-import type { LocalFilesArchiveBrowser } from '../local-files/scope-browser.ts';
+import type { ArchivePathResolver } from '../local-files/scope-browser.ts';
 import { archivePickIntro } from '../dashboard/vocabulary.ts';
 import type { ArchiveSourceTarget } from './source-targets.ts';
 import { createArchiveImportAgent, type ArchiveImportAgent } from './agent.ts';
 import { SCHEDULER_SOURCE_IDS } from '../source-scheduler.ts';
 import { archiveFileDigestSteps, findProbableCopies, verifyArchiveManifest } from './manifest.ts';
 import { requestArchiveRemoval } from './removal.ts';
+import { archiveStateSiblingPath } from '../../core/olympus-layout.ts';
+import { ArchiveUploadError, createArchiveUploads, type ArchiveUploads, type ArchiveUploadStatus } from './staging.ts';
 import type { ArchiveImportRuntime } from './runtime.ts';
 import {
   commitArchiveImport,
@@ -119,14 +123,30 @@ export interface ArchiveAccountAnswer {
   keepApart?: true;
 }
 
+/**
+ * What the person dropped on the dashboard, as it reaches the engine: files
+ * streamed into a staging folder in Olympus's own storage (staging.ts), then
+ * approved by `uploadId`. Cancel removes the staging copy; so does an approval
+ * that imports nothing, and an import's finish when nothing reads the copy any
+ * more.
+ */
+export interface ArchiveImportUploads {
+  start(): { uploadId: string };
+  // One file of the upload: its body is streamed to disk, never held.
+  receive: ArchiveUploads['receive'];
+  status(uploadId: string): ArchiveUploadStatus;
+  // Removes the copy unless an import already reads it.
+  cancel(uploadId: string): { cancelled: boolean };
+}
+
 export interface ArchiveImportDashboard {
-  browse(request: { parentKey?: string; cursor?: string }): Promise<ArchiveBrowseList>;
   /**
    * `sourceId` (a source's card, as `archiveSources` lists it) is that card's
    * own Import an archive: only the source's formats are recognised, and any
    * other export is refused with the route to Import another archive.
    */
-  approve(request: ({ key: string; sourceId?: string } | { requestId: string }) & ArchiveAccountAnswer): Promise<ArchiveApproveResult>;
+  approve(request: ({ uploadId: string; sourceId?: string } | { requestId: string }) & ArchiveAccountAnswer): Promise<ArchiveApproveResult>;
+  readonly upload: ArchiveImportUploads;
   decline(requestId: string): ArchiveSimpleResult;
   remove(archiveId: string): ArchiveSimpleResult;
   /**
@@ -187,7 +207,13 @@ export interface ArchiveImportDashboard {
 
 export interface ArchiveImportDashboardOptions {
   runtime: ArchiveImportRuntime;
-  browser: LocalFilesArchiveBrowser;
+  // Checks a path an agent named, once the person approves its request.
+  resolver: ArchivePathResolver;
+  /**
+   * Test seam: where dropped files are received (default beside the archive
+   * record), and the disk headroom they leave.
+   */
+  uploads?: ArchiveUploads;
   /**
    * Hands the scheduler the current archive tasks (its updateSources).
    */
@@ -299,6 +325,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   });
   const pause = options.pause ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
   const home = options.home ?? homedir();
+  // What the person dropped is received here, beside the archive record (staging.ts).
+  const uploads = options.uploads ?? createArchiveUploads({ root: archiveStateSiblingPath(state.path, 'archive-staging') });
   let closed = false;
   // One check at a time: each reads whole files.
   let checks: Promise<void> = Promise.resolve();
@@ -338,7 +366,18 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   // asked for by whoever chose it, so every character that cannot be seen is written out
   // (display-text.ts). The stored path is untouched, and is what the disk is asked for.
   const named = (text: string): string => displayText(text);
-  const where = (path: string): string => named(shown(posix.dirname(path)));
+  // An upload has no place on this computer to name: the copy Olympus read it from is its own storage, so no place is shown.
+  const stagingFolder = archiveStateSiblingPath(state.path, 'archive-staging');
+  const inStaging = (path: string): boolean => {
+    let canonical = stagingFolder;
+    try {
+      canonical = realpathSync.native(stagingFolder);
+    } catch {
+      // Nothing was ever uploaded: no folder to be inside.
+    }
+    return path.startsWith(`${canonical}/`) || path.startsWith(`${stagingFolder}/`);
+  };
+  const where = (path: string): string => (inStaging(path) ? '' : named(shown(posix.dirname(path))));
 
   const refresh = (): void => {
     try {
@@ -360,6 +399,33 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   };
 
   const refusal = (code: string, message: string): ArchiveApproveResult => ({ ok: false, code, message });
+
+  // Whether an import may still read files of its staging copy: every one until it is removed. A finished import's
+  // attachments (an mbox's parts, an .enex's resources, a zip's members) and bound media are read later from the
+  // same copy, so deleting it on finish would lose them.
+  const stillReads = (record: ArchiveImportRecord): boolean => record.status !== 'removing';
+  // Whether anything still reads the staging folder `dir`: an import (its root is inside it), a check of a possible copy, or a check to try again.
+  const stagingNeeded = (dir: string): boolean => {
+    const inside = (path: string): boolean => path === dir || path.startsWith(`${dir}/`);
+    try {
+      // A check reads the copy; one that ended without importing is retried ("Try again") on the same copy, until it is dismissed.
+      if (requests.list().some((request) => (request.status === 'checking' || request.status === 'failed') && (inside(request.path) || (request.approved !== undefined && inside(request.approved.root_path))))) return true;
+      return state.list().some((record) => inside(record.root_path) && stillReads(record));
+    } catch {
+      // A list that cannot be read says nothing is finished.
+      return true;
+    }
+  };
+  // Staging copies nothing reads any more are deleted: an upload walked away from, an approval that imported nothing,
+  // an import that finished (or was removed).
+  const sweepStaging = (): void => {
+    if (closed) return;
+    try {
+      uploads.sweep(stagingNeeded);
+    } catch (error) {
+      console.warn(`[archive-import] staging was not tidied: ${error instanceof Error ? error.name : 'error'}`);
+    }
+  };
 
   // The card an import joined, for the line that says where it shows.
   const joinedSource = (record: ArchiveImportRecord): { source?: { id: string; label: string } } => {
@@ -914,23 +980,15 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   const api: ArchiveImportDashboard = {
     agent: createArchiveImportAgent({ state, requests, view: () => listing(() => true) }),
 
-    async browse(request) {
-      const page = await options.browser.browse(request);
-      return {
-        nodes: page.nodes.map((node) => ({
-          key: node.key,
-          ...(node.parent_key !== undefined ? { parent_key: node.parent_key } : {}),
-          name: node.name,
-          kind: node.kind,
-          has_children: node.has_children,
-          selectable: node.selectable,
-          ...(node.size_bytes !== undefined ? { size_bytes: node.size_bytes } : {}),
-          ...(node.access ? { access: node.access } : {}),
-          ...(node.is_disk ? { is_disk: true as const } : {}),
-        })),
-        ...(page.nextCursor ? { next_cursor: page.nextCursor } : {}),
-        ...(page.access ? { access: page.access } : {}),
-      } as ArchiveBrowseList;
+    upload: {
+      start: () => {
+        // An upload nobody finished goes before a new one starts.
+        sweepStaging();
+        return uploads.begin();
+      },
+      receive: (uploadId, relPath, body, receiveOptions) => uploads.receive(uploadId, relPath, body, receiveOptions),
+      status: (uploadId) => uploads.status(uploadId),
+      cancel: (uploadId) => ({ cancelled: uploads.cancel(uploadId, stagingNeeded) }),
     },
 
     async approve(request) {
@@ -946,14 +1004,14 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         if (waiting?.status === 'failed') {
           // Try again on a check that ended without importing: a fresh
           // approval of the same path, the old outcome kept until it starts.
-          const resolved = await options.browser.resolvePath(waiting.path);
+          const resolved = await options.resolver.resolvePath(waiting.path);
           if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
           return approvePath(resolved.path, { requestId: waiting.request_id, status: 'failed' }, answer);
         }
         if (!waiting || waiting.status !== 'pending') return refusal('not_waiting', ARCHIVE_APPROVE_COPY.not_waiting);
         // A request to remove an archive is answered by approveRemoval, never read as a path.
         if (waiting.kind !== 'import') return refusal('not_an_import', ARCHIVE_APPROVE_COPY.not_an_import);
-        const resolved = await options.browser.resolvePath(waiting.path);
+        const resolved = await options.resolver.resolvePath(waiting.path);
         if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
         return approvePath(resolved.path, { requestId: waiting.request_id, status: 'pending' }, answer);
       }
@@ -962,9 +1020,25 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         only = targetOfCard(request.sourceId);
         if (!only) return refusal('unknown_source', ARCHIVE_APPROVE_COPY.unknown_source);
       }
-      const resolved = await options.browser.resolve(request.key);
-      if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
-      return approvePath(resolved.path, undefined, answer, only);
+      // What the person dropped, now on disk in the staging folder: the same detection and import as any path.
+      let staged: string;
+      try {
+        staged = uploads.chosenPath(request.uploadId);
+      } catch (error) {
+        if (error instanceof ArchiveUploadError) return refusal(error.code, error.message);
+        throw error;
+      }
+      const result = await approvePath(staged, undefined, answer, only);
+      // Nothing imported and nothing asked (not supported, already imported, unreadable): no reason to keep the copy.
+      const kept = result.ok ? result.status === 'started' || result.status === 'checking' || result.status === 'confirm_account' : result.code === 'imports_not_running';
+      // An import that began (or a check of a possible copy) now owns the copy; a question for the person (which account)
+      // is answered by approving the same upload again, so that upload stays.
+      if (result.ok && result.status === 'confirm_account') {
+        // Stays an upload in progress.
+      } else if (kept) uploads.handOver(request.uploadId);
+      else uploads.release(request.uploadId, stagingNeeded);
+      sweepStaging();
+      return result;
     },
 
     decline(requestId) {
@@ -1013,6 +1087,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     },
 
     view() {
+      // The page reads this every few seconds: a finished import's copy is gone by the next read.
+      sweepStaging();
       return listing(underArchives);
     },
 
@@ -1160,6 +1236,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     },
 
     resume() {
+      // After a restart no upload is in progress: every copy nothing reads goes.
+      sweepStaging();
       let waiting: ArchiveImportRequest[];
       try {
         waiting = requests.list().filter((request) => request.status === 'checking' && !running.has(request.request_id));
@@ -1179,6 +1257,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
 
     close() {
       closed = true;
+      uploads.close();
     },
   };
   return api;

@@ -50,6 +50,8 @@ export type Action =
   | { open: OpenPlace }
   | { click: Target; frame?: FrameName }
   | { type: { into: Target; text: string }; frame?: FrameName }
+  /** Files chosen in a file input, as the system's file dialog would hand them (paths on the machine the browser runs on). */
+  | { attach: { into: Target; paths: string[] }; frame?: FrameName }
   /** Another page of the dashboard, in the signed-in browser (a path such as /dashboard?keys). */
   | { go: string }
   | { reload: true }
@@ -179,6 +181,8 @@ export interface JourneyDriver {
   click(frame: 'host' | 'panel', target: WireTarget): Promise<ElementInfo | null>;
   /** Focuses the field (a real press), selects what it holds and types the text; false when no field matches. */
   type(frame: 'host' | 'panel', target: WireTarget, text: string): Promise<boolean>;
+  /** Sets the files of a file input the way a chosen dialog does, and fires its change; false when no input matches. */
+  attach?(frame: 'host' | 'panel', target: WireTarget, paths: string[]): Promise<boolean>;
   open(place: OpenPlace): Promise<void>;
   go(path: string): Promise<void>;
   reload(): Promise<void>;
@@ -339,6 +343,7 @@ function describeAction(action: Action): string {
   if ('open' in action) return `open the ${action.open} page the owner's way (opening link, then Unlock where it is offered)`;
   if ('click' in action) return `click ${describeTarget(action.click)}`;
   if ('type' in action) return `type "${action.type.text}" into ${describeTarget(action.type.into)}`;
+  if ('attach' in action) return `choose ${action.attach.paths.length === 1 ? 'a file' : `${action.attach.paths.length} files`} in ${describeTarget(action.attach.into)}`;
   if ('go' in action) return `go to ${action.go}`;
   if ('reload' in action) return 'reload the page';
   if ('viewport' in action) return `resize to ${action.viewport.width} px wide${action.viewport.theme ? `, ${action.viewport.theme}` : ''}`;
@@ -361,6 +366,12 @@ async function perform(action: Action, driver: JourneyDriver): Promise<{ ok: boo
       if (info) return info.disabled ? { ok: false, detail: `${describeTarget(action.click)} is there but disabled` } : { ok: true, detail: `pressed ${info.role || info.tag} "${info.name.slice(0, 50)}"` };
     }
     return { ok: false, detail: `${describeTarget(action.click)} is not on the page` };
+  }
+  if ('attach' in action) {
+    for (const name of frames(action.frame, panel)) {
+      if (driver.attach && await driver.attach(name, wireTarget(action.attach.into), action.attach.paths)) return { ok: true, detail: 'chose the file' };
+    }
+    return { ok: false, detail: `${describeTarget(action.attach.into)} is not on the page` };
   }
   for (const name of frames(action.frame, panel)) {
     if (await driver.type(name, wireTarget(action.type.into), action.type.text)) return { ok: true, detail: 'typed' };

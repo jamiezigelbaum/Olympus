@@ -15,10 +15,12 @@ import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaun
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import {
   ARCHIVE_APPROVE_TOOL_NAME,
-  ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
   ARCHIVE_STOP_TOOL_NAME,
+  ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
+  ARCHIVE_UPLOAD_START_TOOL_NAME,
+  ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
   COMPUTER_LOCAL_SESSION_TOOL_NAMES,
   DASHBOARD_TOOL_NAME,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
@@ -37,6 +39,7 @@ const TOKEN = 'archive-boundary-worker-secret';
 const ORIGIN = 'http://127.0.0.1:28191';
 const ARCHIVE_ID = '6a1f0e2d-4c3b-4a59-8e7d-1b2c3d4e5f60';
 const REQUEST_ID = '8c3b2a1f-6e5d-4c7b-8a9f-3d4e5f6a7b82';
+const UPLOAD_ID = '5d4c3b2a1f0e4d9c8b7a6f5e4d3c2b1a';
 
 const windows: Window[] = [];
 afterEach(async () => {
@@ -48,7 +51,12 @@ const settle = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 function archives() {
   const reached: string[] = [];
   const dashboard: ArchiveImportDashboard = {
-    async browse() { reached.push('browse'); return { nodes: [] }; },
+    upload: {
+      start() { reached.push('upload-start'); return { uploadId: UPLOAD_ID }; },
+      async receive(_uploadId, _path, body) { reached.push('upload-file'); await new Response(body).arrayBuffer(); return { bytes: 1 }; },
+      status() { reached.push('upload-status'); return { state: 'idle', files: 0, bytes: 0 }; },
+      cancel() { reached.push('upload-cancel'); return { cancelled: true }; },
+    },
     async approve() { reached.push('approve'); return { ok: true, status: 'started', archive_id: ARCHIVE_ID, name: 'Takeout.mbox' }; },
     decline() { reached.push('decline'); return { ok: true }; },
     remove() { reached.push('remove'); return { ok: true }; },
@@ -93,14 +101,26 @@ function cookieOf(response: Response): string {
 }
 
 const BODIES: Record<string, unknown> = {
-  '/dashboard/archive-import/browse': { parent_key: '/Users/someone' },
-  '/dashboard/archive-import/approve': { key: '/Users/someone/Mail exports/Takeout.mbox' },
+  '/dashboard/archive-import/upload-start': {},
+  // The file's own bytes are the body of this one (post() below); the JSON here is never read.
+  '/dashboard/archive-import/upload-file': {},
+  '/dashboard/archive-import/upload-status': { upload_id: UPLOAD_ID },
+  '/dashboard/archive-import/upload-cancel': { upload_id: UPLOAD_ID },
+  '/dashboard/archive-import/approve': { upload_id: UPLOAD_ID },
   '/dashboard/archive-import/decline': { request_id: REQUEST_ID },
   '/dashboard/archive-import/remove': { archive_id: ARCHIVE_ID, acknowledge: true },
   '/dashboard/archive-import/stop': { archive_id: ARCHIVE_ID },
 };
 
 function post(path: string, headers: Record<string, string>): Request {
+  // One file of an upload is its own bytes, with its place under the dropped folder in a header.
+  if (path === '/dashboard/archive-import/upload-file') {
+    return new Request(`${ORIGIN}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', Origin: ORIGIN, 'X-Olympus-Upload-Id': UPLOAD_ID, 'X-Olympus-Upload-Path': encodeURIComponent('Export/a.json'), ...headers },
+      body: 'the file',
+    });
+  }
   return new Request(`${ORIGIN}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: ORIGIN, ...headers },
@@ -159,9 +179,9 @@ describe('approving, declining and removing an archive take this computer\'s own
     expect(f.reached).toEqual([]);
   });
 
-  test('a session the bearer minted, or its launch ticket redeemed, is refused, the picker\'s listing included', async () => {
+  test('a session the bearer minted, or its launch ticket redeemed, is refused, an upload included', async () => {
     const f = fixture();
-    expect(DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS).toContain('/dashboard/archive-import/browse');
+    expect(DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS).toContain('/dashboard/archive-import/upload-file');
     for (const session of [await bearerSession(f), await launchSession(f)]) {
       for (const path of DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS) {
         const refused = await f.fetch(post(path, session));
@@ -193,7 +213,7 @@ describe('approving, declining and removing an archive take this computer\'s own
       const allowed = await f.fetch(post(path, session));
       expect(allowed.status).toBe(200);
     }
-    expect(f.reached).toEqual(['browse', 'approve', 'decline', 'remove', 'stop']);
+    expect(f.reached).toEqual(['upload-start', 'upload-file', 'upload-status', 'upload-cancel', 'approve', 'decline', 'remove', 'stop']);
   });
 
   test('the worker route itself refuses a call that carries no local grade (an in-process caller)', async () => {
@@ -216,14 +236,17 @@ describe('the panel\'s archive tools', () => {
         const path = new URL(request.url).pathname;
         return Response.json(path.endsWith('/approve')
           ? { ok: true, status: 'started', archive_id: ARCHIVE_ID, name: 'Takeout.mbox' }
-          : path.endsWith('/browse') ? { ok: true, nodes: [] } : { ok: true });
+          : path.endsWith('/upload-start') ? { ok: true, upload_id: UPLOAD_ID }
+            : path.endsWith('/upload-status') ? { ok: true, state: 'receiving', files: 1, bytes: 5 } : { ok: true });
       },
     } as unknown as Parameters<typeof createDashboardPanelTools>[0]);
     return { tools, seen };
   }
   const calls: Array<[string, Record<string, unknown>]> = [
-    [ARCHIVE_BROWSE_TOOL_NAME, { parent_key: '/Users/someone' }],
-    [ARCHIVE_APPROVE_TOOL_NAME, { key: '/Users/someone/Mail exports/Takeout.mbox' }],
+    [ARCHIVE_UPLOAD_START_TOOL_NAME, {}],
+    [ARCHIVE_UPLOAD_STATUS_TOOL_NAME, { upload_id: UPLOAD_ID }],
+    [ARCHIVE_UPLOAD_CANCEL_TOOL_NAME, { upload_id: UPLOAD_ID }],
+    [ARCHIVE_APPROVE_TOOL_NAME, { upload_id: UPLOAD_ID }],
     [ARCHIVE_DECLINE_TOOL_NAME, { request_id: REQUEST_ID }],
     [ARCHIVE_REMOVE_TOOL_NAME, { archive_id: ARCHIVE_ID }],
     [ARCHIVE_STOP_TOOL_NAME, { archive_id: ARCHIVE_ID }],
@@ -246,7 +269,9 @@ describe('the panel\'s archive tools', () => {
       expect((await tools.call(name, args, { origin: ORIGIN, localSession: true })).isError).toBeUndefined();
     }
     expect(seen).toEqual([
-      { path: '/dashboard/archive-import/browse', grade: 'local' },
+      { path: '/dashboard/archive-import/upload-start', grade: 'local' },
+      { path: '/dashboard/archive-import/upload-status', grade: 'local' },
+      { path: '/dashboard/archive-import/upload-cancel', grade: 'local' },
       { path: '/dashboard/archive-import/approve', grade: 'local' },
       { path: '/dashboard/archive-import/decline', grade: 'local' },
       { path: '/dashboard/archive-import/remove', grade: 'local' },
@@ -256,7 +281,7 @@ describe('the panel\'s archive tools', () => {
 });
 
 describe('a source\'s own Import an archive names its card', () => {
-  test('the panel forwards source_id with a chosen key, and refuses it alone or with a request', async () => {
+  test('the panel forwards source_id with an upload, and refuses it alone or with a request', async () => {
     const bodies: unknown[] = [];
     const tools = createDashboardPanelTools({
       workerFetch: async (request: Request) => {
@@ -265,9 +290,11 @@ describe('a source\'s own Import an archive names its card', () => {
       },
     } as unknown as Parameters<typeof createDashboardPanelTools>[0]);
     const context = { origin: ORIGIN, localSession: true };
-    expect((await tools.call(ARCHIVE_APPROVE_TOOL_NAME, { key: '/Users/someone/result.json', source_id: 'telegram.messages' }, context)).isError).toBeUndefined();
-    expect(bodies).toEqual([{ key: '/Users/someone/result.json', source_id: 'telegram.messages' }]);
-    for (const args of [{ source_id: 'telegram.messages' }, { request_id: REQUEST_ID, source_id: 'telegram.messages' }, { key: '/Users/someone/result.json', source_id: 7 }]) {
+    expect((await tools.call(ARCHIVE_APPROVE_TOOL_NAME, { upload_id: UPLOAD_ID, source_id: 'telegram.messages' }, context)).isError).toBeUndefined();
+    expect(bodies).toEqual([{ upload_id: UPLOAD_ID, source_id: 'telegram.messages' }]);
+    // A path on this computer is not something the panel can name any more.
+    expect((await tools.call(ARCHIVE_APPROVE_TOOL_NAME, { key: '/Users/someone/result.json' }, context)).isError).toBe(true);
+    for (const args of [{ source_id: 'telegram.messages' }, { request_id: REQUEST_ID, source_id: 'telegram.messages' }, { upload_id: UPLOAD_ID, source_id: 7 }]) {
       const refused = await tools.call(ARCHIVE_APPROVE_TOOL_NAME, args, context);
       expect(refused.isError).toBe(true);
     }
@@ -293,8 +320,10 @@ describe('a source\'s own Import an archive names its card', () => {
     const approve = (body: unknown) => fetch(new Request(`${ORIGIN}/dashboard/archive-import/approve`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Origin: ORIGIN, ...session }, body: JSON.stringify(body),
     }));
-    expect((await approve({ key: '/Users/someone/result.json', source_id: 'telegram.messages' })).status).toBe(200);
-    expect(seen).toEqual([{ key: '/Users/someone/result.json', sourceId: 'telegram.messages' }]);
+    expect((await approve({ upload_id: UPLOAD_ID, source_id: 'telegram.messages' })).status).toBe(200);
+    expect(seen).toEqual([{ uploadId: UPLOAD_ID, sourceId: 'telegram.messages' }]);
+    // A path is not an approval any more: the worker takes an upload or a request.
+    expect((await approve({ key: '/Users/someone/result.json' })).status).toBe(400);
     expect((await approve({ request_id: REQUEST_ID, source_id: 'telegram.messages' })).status).toBe(400);
     expect(seen).toHaveLength(1);
   });
@@ -334,25 +363,53 @@ describe('the computer\'s host page', () => {
       history: { replaceState: () => undefined },
       open: () => null,
     };
-    new Function('window', 'document', 'fetch', 'navigator', script)(fakeWindow, win.document, fakeFetch, win.navigator);
+    // The browser's XMLHttpRequest, as far as one upload uses it: what was sent, and the means to answer or break it.
+    interface FakeXhr { method?: string; url?: string; headers: Record<string, string>; body?: unknown; status: number; responseText: string; aborted: boolean }
+    const xhrs: Array<FakeXhr & { progress(loaded: number): void; finish(status: number, text?: string): void; fail(): void }> = [];
+    class FakeXMLHttpRequest {
+      headers: Record<string, string> = {};
+      status = 0;
+      responseText = '';
+      aborted = false;
+      method?: string;
+      url?: string;
+      body?: unknown;
+      upload: { onprogress?: (event: { loaded: number }) => void } = {};
+      onload?: () => void;
+      onerror?: () => void;
+      onabort?: () => void;
+      constructor() {
+        const self = this;
+        xhrs.push(Object.assign(this, {
+          progress: (loaded: number) => self.upload.onprogress?.({ loaded }),
+          finish: (status: number, text = '{}') => { self.status = status; self.responseText = text; self.onload?.(); },
+          fail: () => self.onerror?.(),
+        }) as never);
+      }
+      open(method: string, url: string) { this.method = method; this.url = url; }
+      setRequestHeader(name: string, value: string) { this.headers[name] = value; }
+      send(body: unknown) { this.body = body; }
+      abort() { this.aborted = true; this.onabort?.(); }
+    }
+    new Function('window', 'document', 'fetch', 'navigator', 'XMLHttpRequest', script)(fakeWindow, win.document, fakeFetch, win.navigator, FakeXMLHttpRequest);
     const send = (message: Record<string, unknown>) => win.dispatchEvent(new win.MessageEvent('message', { data: { jsonrpc: '2.0', ...message }, source: child as any }));
-    return { fetched, received, send };
+    return { fetched, received, send, xhrs };
   }
 
-  test('a launch-link session opens the local session (no bearer) before the picker first lists, then uses it', async () => {
+  test('a launch-link session opens the local session (no bearer) before the first upload begins, then uses it', async () => {
     const page = hostPage(false);
     page.send({ id: 1, method: 'tools/call', params: { name: DASHBOARD_TOOL_NAME, arguments: {} } });
     await settle();
-    page.send({ id: 2, method: 'tools/call', params: { name: ARCHIVE_BROWSE_TOOL_NAME, arguments: {} } });
+    page.send({ id: 2, method: 'tools/call', params: { name: ARCHIVE_UPLOAD_START_TOOL_NAME, arguments: {} } });
     await settle();
-    page.send({ id: 3, method: 'tools/call', params: { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { key: '/x/Takeout.mbox' } } });
+    page.send({ id: 3, method: 'tools/call', params: { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { upload_id: UPLOAD_ID } } });
     await settle();
     page.send({ id: 4, method: 'tools/call', params: { name: ARCHIVE_REMOVE_TOOL_NAME, arguments: { archive_id: ARCHIVE_ID } } });
     await settle();
     expect(page.fetched.map(({ url, csrf, tool, authorization }) => ({ url, csrf, tool, authorization }))).toEqual([
       { url: '/dashboard/tools/call', csrf: 'bearer-csrf', tool: DASHBOARD_TOOL_NAME, authorization: undefined },
       { url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: undefined, tool: undefined, authorization: undefined },
-      { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_BROWSE_TOOL_NAME, authorization: undefined },
+      { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_UPLOAD_START_TOOL_NAME, authorization: undefined },
       { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_APPROVE_TOOL_NAME, authorization: undefined },
       { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_REMOVE_TOOL_NAME, authorization: undefined },
     ]);
@@ -361,7 +418,7 @@ describe('the computer\'s host page', () => {
 
   test('a local session already open asks for nothing more; a refused unlock still sends the call, which the tool refuses itself', async () => {
     const local = hostPage(true);
-    local.send({ id: 1, method: 'tools/call', params: { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { key: '/x/Takeout.mbox' } } });
+    local.send({ id: 1, method: 'tools/call', params: { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { upload_id: UPLOAD_ID } } });
     await settle();
     expect(local.fetched.map((entry) => entry.url)).toEqual(['/dashboard/tools/call']);
     const refused = hostPage(false, 'refused');
@@ -371,5 +428,145 @@ describe('the computer\'s host page', () => {
       [DASHBOARD_LOCAL_CONTROL_SESSION_PATH, undefined],
       ['/dashboard/tools/call', 'bearer-csrf'],
     ]);
+  });
+
+  const FILE = { size: 8, slice: () => undefined, name: 'a.json' };
+  const uploadRequest = (id: number, over: Record<string, unknown> = {}) => ({
+    id, method: 'olympus/upload-file',
+    params: { upload_id: UPLOAD_ID, path: 'Export 2026/ü chat/a.json', modified: 1_760_000_000_123.4, file: FILE, ...over },
+  });
+
+  test('a file the panel hands over is sent to the upload route as its own request: the file is the body, the path travels encoded in a header, and progress goes back', async () => {
+    const page = hostPage(true);
+    page.send(uploadRequest(7));
+    await settle();
+    expect(page.xhrs).toHaveLength(1);
+    const sent = page.xhrs[0]!;
+    expect(sent.method).toBe('POST');
+    expect(sent.url).toBe('/dashboard/archive-import/upload-file');
+    expect(sent.body).toBe(FILE);
+    expect(sent.headers).toEqual({
+      'X-Olympus-CSRF': 'bearer-csrf',
+      'X-Olympus-Upload-Id': UPLOAD_ID,
+      'X-Olympus-Upload-Path': encodeURIComponent('Export 2026/ü chat/a.json'),
+      'X-Olympus-Upload-Modified': '1760000000123',
+      // A file that fits in one piece is the whole file, begun and ended in one request.
+      'X-Olympus-Upload-Offset': '0',
+      'X-Olympus-Upload-Final': '1',
+      'Content-Type': 'application/octet-stream',
+    });
+    sent.progress(5);
+    sent.finish(200, '{"ok":true,"bytes":8}');
+    await settle();
+    expect(page.received.filter((message) => message.method === 'olympus/upload-progress')).toEqual([
+      { jsonrpc: '2.0', method: 'olympus/upload-progress', params: { request: 7, loaded: 5 } },
+    ]);
+    expect(page.received.find((message) => message.id === 7)!.result).toEqual({ ok: true });
+  });
+
+  test('a file larger than a piece goes as pieces, one request at a time in order, each written before the next is sent, with progress counted across them', async () => {
+    const MIB = 1024 * 1024;
+    const pieces: Array<[number, number]> = [];
+    const big = { size: 20 * MIB, slice: (from: number, to: number) => { pieces.push([from, to]); return { from, to }; }, name: 'big.json' };
+    const page = hostPage(true);
+    page.send(uploadRequest(30, { file: big }));
+    await settle();
+    // Only the first piece is out; the others wait for it.
+    expect(page.xhrs).toHaveLength(1);
+    expect(page.xhrs[0]!.body).toEqual({ from: 0, to: 8 * MIB });
+    expect([page.xhrs[0]!.headers['X-Olympus-Upload-Offset'], page.xhrs[0]!.headers['X-Olympus-Upload-Final']]).toEqual(['0', '0']);
+    page.xhrs[0]!.progress(3 * MIB);
+    page.xhrs[0]!.finish(200, '{"ok":true}');
+    await settle();
+    expect(page.xhrs).toHaveLength(2);
+    expect(page.xhrs[1]!.body).toEqual({ from: 8 * MIB, to: 16 * MIB });
+    expect([page.xhrs[1]!.headers['X-Olympus-Upload-Offset'], page.xhrs[1]!.headers['X-Olympus-Upload-Final']]).toEqual([String(8 * MIB), '0']);
+    page.xhrs[1]!.progress(MIB);
+    page.xhrs[1]!.finish(200, '{"ok":true}');
+    await settle();
+    expect(page.xhrs).toHaveLength(3);
+    expect(page.xhrs[2]!.body).toEqual({ from: 16 * MIB, to: 20 * MIB });
+    expect([page.xhrs[2]!.headers['X-Olympus-Upload-Offset'], page.xhrs[2]!.headers['X-Olympus-Upload-Final']]).toEqual([String(16 * MIB), '1']);
+    // Every piece names the same file.
+    expect(new Set(page.xhrs.map((entry) => entry.headers['X-Olympus-Upload-Path'])).size).toBe(1);
+    // Not answered until the last piece is.
+    expect(page.received.find((message) => message.id === 30)).toBeUndefined();
+    page.xhrs[2]!.finish(200, '{"ok":true}');
+    await settle();
+    expect(page.received.find((message) => message.id === 30)!.result).toEqual({ ok: true });
+    // Progress is the bytes of the whole file: earlier pieces and what the current one has sent.
+    expect(page.received.filter((message) => message.method === 'olympus/upload-progress').map((message) => (message.params as { loaded: number }).loaded)).toEqual([3 * MIB, 9 * MIB]);
+  });
+
+  test('a piece the engine refuses ends the file, and no further piece is sent; an abort between pieces sends none', async () => {
+    const MIB = 1024 * 1024;
+    const big = (name: string) => ({ size: 20 * MIB, slice: () => ({}), name });
+    const page = hostPage(true);
+    page.send(uploadRequest(31, { file: big('a.json') }));
+    await settle();
+    page.xhrs[0]!.finish(409, JSON.stringify({ error: { code: 'bad_offset', message: 'A part of a file arrived out of order. Choose the folder again.' } }));
+    await settle();
+    expect(page.xhrs).toHaveLength(1);
+    expect(page.received.find((message) => message.id === 31)!.result).toEqual({ ok: false, message: 'A part of a file arrived out of order. Choose the folder again.' });
+    page.send(uploadRequest(32, { file: big('b.json'), path: 'b.json' }));
+    await settle();
+    expect(page.xhrs).toHaveLength(2);
+    // The first piece is written and the second is on its way when the person cancels: it is stopped, and no third is sent.
+    page.xhrs[1]!.finish(200, '{"ok":true}');
+    await settle();
+    expect(page.xhrs).toHaveLength(3);
+    page.send({ method: 'olympus/upload-abort', params: { upload_id: UPLOAD_ID } });
+    await settle();
+    expect(page.xhrs).toHaveLength(3);
+    expect(page.xhrs[2]!.aborted).toBe(true);
+    expect(page.received.find((message) => message.id === 32)!.result).toEqual({ ok: false, cancelled: true });
+  });
+
+  test('a launch-link session opens the local session first, and the file goes out under that session\'s token', async () => {
+    const page = hostPage(false);
+    page.send(uploadRequest(8));
+    await settle();
+    expect(page.fetched.map((entry) => entry.url)).toEqual([DASHBOARD_LOCAL_CONTROL_SESSION_PATH]);
+    expect(page.xhrs[0]!.headers['X-Olympus-CSRF']).toBe('local-csrf');
+  });
+
+  test('the engine\'s own sentence for a refused file goes back to the panel; a dropped connection is a plain failure', async () => {
+    const page = hostPage(true);
+    page.send(uploadRequest(9));
+    page.send(uploadRequest(10, { path: 'b.json' }));
+    await settle();
+    page.xhrs[0]!.finish(507, JSON.stringify({ error: { code: 'disk_full', message: 'This computer has no space left for it.' } }));
+    page.xhrs[1]!.fail();
+    await settle();
+    expect(page.received.find((message) => message.id === 9)!.result).toEqual({ ok: false, message: 'This computer has no space left for it.' });
+    expect(page.received.find((message) => message.id === 10)!.result).toEqual({ ok: false });
+  });
+
+  test('an abort stops every file of that upload in flight, answers them as cancelled, and sends none after it', async () => {
+    const page = hostPage(true);
+    page.send(uploadRequest(11));
+    page.send(uploadRequest(12, { path: 'b.json' }));
+    await settle();
+    page.send({ method: 'olympus/upload-abort', params: { upload_id: UPLOAD_ID } });
+    await settle();
+    expect(page.xhrs.map((entry) => entry.aborted)).toEqual([true, true]);
+    expect(page.received.filter((message) => message.id === 11 || message.id === 12).map((message) => message.result)).toEqual([
+      { ok: false, cancelled: true }, { ok: false, cancelled: true },
+    ]);
+    page.send(uploadRequest(13, { path: 'c.json' }));
+    await settle();
+    expect(page.xhrs).toHaveLength(2);
+    expect(page.received.find((message) => message.id === 13)!.result).toEqual({ ok: false, cancelled: true });
+  });
+
+  test('a request that is not a file of an upload is refused and sends nothing: no id, a path too long, no file, or an id that is not an upload\'s', async () => {
+    const page = hostPage(true);
+    page.send(uploadRequest(14, { upload_id: '../../etc' }));
+    page.send(uploadRequest(15, { path: '' }));
+    page.send(uploadRequest(16, { path: 'x'.repeat(5000) }));
+    page.send(uploadRequest(17, { file: 'a string' }));
+    await settle();
+    expect(page.xhrs).toEqual([]);
+    for (const id of [14, 15, 16, 17]) expect(page.received.find((message) => message.id === id)!.result).toEqual({ ok: false });
   });
 });

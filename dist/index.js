@@ -2642,6 +2642,7 @@ var init_olympus_layout = __esm(() => {
     "archive-imports.json": ARCHIVE_IMPORTS,
     "archive-import-requests.json": ARCHIVE_IMPORTS,
     "archive-media-bindings.sqlite": ARCHIVE_IMPORTS,
+    "archive-staging": ARCHIVE_IMPORTS,
     ...messagingRawOwners()
   };
   MESSAGING_RAW_NAMES = [
@@ -14269,7 +14270,7 @@ function syncMid(name) {
   return typeof name === "string" ? name : name.mid;
 }
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
-  return `Choose a file or folder on this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus reads it where it is and never changes it.`;
+  return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
 var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
@@ -14526,12 +14527,23 @@ var init_vocabulary = __esm(() => {
       back: "Back to Olympus",
       title: "Import another archive",
       intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
-      source: "This computer",
-      makePrivate: "Import",
-      makePrivateFor: "Import {name}",
-      alreadyPrivate: "Imported",
-      busy: "Starting…",
-      chooseAnother: "Choose another"
+      zone: "Upload folder",
+      over: "Drop to import",
+      hint: "Drag a folder here, or click to choose one.",
+      zoneLabel: "Upload folder: choose a folder, or drop one here",
+      chooseFile: "or choose a file",
+      reading: "Reading the folder…",
+      uploading: "Uploading {name}",
+      progress: "{sent} of {total}",
+      progressFiles: "{sent} of {total} · {files} of {of} files",
+      paused: "This computer is low on space. The upload waits and goes on by itself when space is free.",
+      cancel: "Cancel",
+      starting: "Starting…",
+      empty: "There was no file in that. Drop a folder or a file from this computer.",
+      unreadable: "Olympus could not read what you dropped. Try again.",
+      failed: "The upload stopped before it finished. Nothing was imported. Try again.",
+      several: "{n} items",
+      chooseAnother: "Start over"
     },
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
@@ -21633,6 +21645,7 @@ var init_continuation_cache = __esm(() => {
 
 // src/workers/archive-import/forget.ts
 var init_forget = __esm(() => {
+  init_olympus_layout();
   init_continuation_cache();
   init_media_bindings();
   init_state();
@@ -25968,6 +25981,18 @@ window.fetch=async function(input,init){
  if(destination){location.replace(destination);throw new Error('Navigating');}
  return response;
 };
+// An upload's pieces go by XMLHttpRequest (for its progress): same-origin ones carry the proof too. A proven request is
+// never redirected (handle() turns its Location into a header), so the proof cannot follow one elsewhere. The proof
+// page writes the document into its own window, so this runs twice there: a header set twice is joined, and refused.
+const sameOrigin=new WeakSet(), sent=Symbol.for('olympus-owner-proof'), nativeOpen=XMLHttpRequest.prototype.open, nativeSend=XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.open=function(method,url){
+ if(new URL(url,location.href).origin===location.origin)sameOrigin.add(this);else sameOrigin.delete(this);
+ return nativeOpen.apply(this,arguments);
+};
+XMLHttpRequest.prototype.send=function(body){
+ const proof=localStorage.getItem(key);if(proof&&sameOrigin.has(this)&&!this[sent]){this[sent]=true;this.setRequestHeader(header,proof);}
+ return nativeSend.call(this,body);
+};
 document.addEventListener('submit',function(event){
  const form=event.target;if(!(form instanceof HTMLFormElement))return;
  if(new URL(form.action,location.href).origin!==location.origin){event.preventDefault();return;}
@@ -26292,7 +26317,8 @@ class LinuxOwnerBridge {
     const session = this.sessions.find((s) => equalHash(cookie, s.cookieHash));
     let proof = request.headers.get(PROOF_HEADER);
     let body;
-    if (request.method !== "GET" && request.method !== "HEAD") {
+    const binary = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() === "application/octet-stream";
+    if (request.method !== "GET" && request.method !== "HEAD" && !binary) {
       try {
         body = await boundedBody(request, 1048576);
       } catch {
@@ -26312,6 +26338,8 @@ class LinuxOwnerBridge {
     }
     if (!this.live())
       return refusal(503);
+    if (binary && request.body)
+      body = request.body;
     ownerRequestAdmitted?.();
     const headers = new Headers(request.headers);
     headers.delete(PROOF_HEADER);
@@ -26328,8 +26356,9 @@ class LinuxOwnerBridge {
       response = await this.options.fetchSocket(new Request(this.entryOrigin + url.pathname + url.search, {
         method: request.method,
         headers,
-        ...body !== undefined ? { body } : {},
-        redirect: "manual"
+        ...body !== undefined ? { body, duplex: "half" } : {},
+        redirect: "manual",
+        ...typeof body === "object" ? { signal: request.signal } : {}
       }));
     } catch {
       return this.live() ? restarting() : refusal(503);

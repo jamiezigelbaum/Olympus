@@ -17,7 +17,8 @@ import { createArchiveImportDashboard, type ArchiveImportDashboard } from '../..
 import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../../src/workers/archive-import/runtime.ts';
 import { ArchiveSourceTargets } from '../../src/workers/archive-import/source-targets.ts';
 import { pullArchiveImport, type ArchiveImportPullOptions } from '../../src/workers/archive-import/sync.ts';
-import { createLocalFilesArchiveBrowser } from '../../src/workers/local-files/scope-browser.ts';
+import { createArchivePathResolver } from '../../src/workers/local-files/scope-browser.ts';
+import { approveStaged } from './stage-upload.ts';
 import { MacPermissions } from '../../src/workers/local-files/mac-permissions.ts';
 import { VolumeResolver } from '../../src/workers/local-files/volume-identity.ts';
 import {
@@ -87,8 +88,8 @@ export function telegramOneDatasetHarness(cleanups: Array<() => void>): Telegram
   });
   const volumes = new VolumeResolver({ platform: 'darwin', home, readMounts: () => '/dev/disk3s1s1 on / (apfs, local)', diskutilPlist: () => undefined });
   const permissions = new MacPermissions({ home, memoryPath: join(base, 'folder-access.json'), platform: 'linux' });
-  const browser = createLocalFilesArchiveBrowser({ volumes, home, permissions });
-  const dashboard = createArchiveImportDashboard({ runtime, browser, refreshScheduler: () => undefined, privateModel: () => 'ready', home });
+  const resolver = createArchivePathResolver({ volumes, home, permissions });
+  const dashboard = createArchiveImportDashboard({ runtime, resolver, refreshScheduler: () => undefined, privateModel: () => 'ready', home });
   let closed = false;
   const close = (): void => {
     if (closed) return;
@@ -125,7 +126,7 @@ export function telegramOneDatasetHarness(cleanups: Array<() => void>): Telegram
       return dir;
     },
     async startImport(path, answer = {}) {
-      return dashboard.approve({ key: path, ...answer });
+      return approveStaged(dashboard, path, answer);
     },
     async importAll(archiveId, options = {}) {
       for (let attempt = 0; attempt < 200; attempt += 1) {

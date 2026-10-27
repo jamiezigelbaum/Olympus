@@ -174,9 +174,10 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
       break;
     case 'archive.imports':
       // The record of each import and the imports asked for but not yet
-      // recorded; and the media files each import bound, by name. The
-      // person's own export files are never touched.
-      files.raw.push(rawPath('archive-imports.json'), rawPath('archive-import-requests.json'));
+      // recorded; the media files each import bound, by name; and the
+      // copies of dropped exports (staging.ts). The person's own export
+      // files are never touched.
+      files.raw.push(rawPath('archive-imports.json'), rawPath('archive-import-requests.json'), rawPath('archive-staging'));
       files.rawDatabases.push({ path: rawPath('archive-media-bindings.sqlite'), storeId: ARCHIVE_MEDIA_BINDINGS_STORE_ID });
       break;
     case 'x.bookmarks':
