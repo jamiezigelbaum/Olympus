@@ -23,11 +23,11 @@
  *   name only.
  */
 import { createHash } from 'node:crypto';
-import { childProviderItemId } from '../../core/child-item-id.ts';
 import type { RawItem, SourceClassificationSignals } from '../../core/contracts.ts';
 import { namesOnlyContentScopeMetadata } from '../../core/classification-signals.ts';
 import { MAX_FROM_HEADER_CHARS } from '../../core/sender-rules.ts';
 import type { SourceRecordEntry } from '../../core/source-inputs.ts';
+import { childProviderItemId } from '../../core/child-item-id.ts';
 import { metadataString, metadataStringArray } from './classification.ts';
 
 export const GMAIL_MAIL_PROVIDER = 'gmail';
@@ -75,6 +75,13 @@ export interface GmailMailRecord {
   sourceVersion?: string;
 }
 
+/**
+ * An attachment's child id (core/child-item-id.ts): the message's id and the
+ * part's MIME path, which live Gmail (`partId`) and an export's MIME tree give
+ * alike for the same message, so both inputs name one child. The whole-message
+ * part (a message whose body is the file) has the empty path, keyed `root`.
+ * Never the file name: two parts may share one, and a name is the sender's.
+ */
 export const gmailChildProviderId = (messageId: string, partId: string): string => childProviderItemId(messageId, partId || 'root');
 
 const gmailId = (record: GmailMailRecord): boolean => !record.id.startsWith(GMAIL_OWN_ID_PREFIX);
@@ -89,9 +96,49 @@ export interface GmailMailBuild {
   children?: boolean;
 }
 
-/** The children a record lists: parts with a file name (not inside another), of mail whose content is in scope. */
+/** How deep in a message's MIME tree a part may sit and still be a child (a forward inside a forward, and so on). */
+export const GMAIL_CHILD_MAX_DEPTH = 8;
+
+/**
+ * Whether a MIME part is an attachment (a child of its message) rather than a
+ * container or the message's own text. The one rule both inputs apply to the
+ * same part:
+ *
+ * - a multipart is a container, never a child;
+ * - a part with a file name is a child;
+ * - a forwarded message (`message/rfc822`) is a child: its text is its own,
+ *   never folded into the message's body;
+ * - text (plain or HTML) without a file name and not marked an attachment is
+ *   the message's own body;
+ * - any other part (an inline image, a calendar invite) is a child, named by
+ *   its content id or its type.
+ */
+export function isGmailAttachmentPart(part: { mimeType?: string; filename?: string; disposition?: string }): boolean {
+  const type = (part.mimeType ?? '').trim().toLowerCase();
+  if (type.startsWith('multipart/')) return false;
+  if (part.filename?.trim()) return true;
+  if (type === 'message/rfc822') return true;
+  if ((type === '' || type === 'text/plain' || type === 'text/html') && part.disposition?.trim().toLowerCase() !== 'attachment') return false;
+  return true;
+}
+
+/** An attachment's name: its file name, else its content id, else its type and place. */
+export function gmailAttachmentPartName(part: { filename?: string; contentId?: string; mimeType?: string; partId: string }): string {
+  const filename = part.filename?.trim();
+  if (filename) return filename;
+  const type = (part.mimeType ?? '').trim().toLowerCase() || 'application/octet-stream';
+  if (type === 'message/rfc822') return `forwarded-message-${part.partId || 'root'}.eml`;
+  const contentId = part.contentId?.trim().replace(/^<|>$/g, '').replace(/[^A-Za-z0-9._@-]/g, '_').slice(0, 128);
+  if (contentId) return `cid-${contentId}`;
+  return `${type.replace(/[^a-z0-9.+-]/g, '-')}-part-${part.partId || 'root'}`;
+}
+
+/** The children a record lists: its attachments within the depth bound, of mail whose content is in scope. */
 function childrenOf(record: GmailMailRecord, build: GmailMailBuild): readonly GmailMailAttachment[] {
-  return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.nested !== true && attachment.filename.trim() !== '');
+  return record.metadataOnly || build.children !== true
+    ? []
+    : record.attachments.filter((attachment) => attachment.filename.trim() !== ''
+      && (attachment.partId === '' ? 0 : attachment.partId.split('.').length) <= GMAIL_CHILD_MAX_DEPTH);
 }
 
 function hashString(value: string): string {
@@ -240,6 +287,9 @@ function gmailChildItem(record: GmailMailRecord, account: string, attachment: Gm
       ...(gmailId(record) ? { locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(record.id)}` } : {}),
     }),
     fetchedAt,
+    // An attachment's text is the file's own, read later: held Private until the private model has judged it,
+    // whichever input listed it (the shared per-item hold, contract 2.2.0), exactly as an import's items are.
+    holdContentUntilJudged: true,
     deferredBytes: {
       locator: attachment.locator ?? '',
       available: attachment.locator !== undefined,

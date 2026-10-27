@@ -2108,6 +2108,25 @@ export function createGmailConnectorStoreSchedulerSource(input: {
           } catch (error) { throw gmailSchedulerFailure(error); }
         },
       }] : []),
+      // Once: attachment children for mail stored before attachments were children. Each pass asks Gmail for a
+      // bounded number of messages under the same day budget, and resumes where the last one stopped.
+      ...(input.sync.backfillChildren ? [{
+        id: 'gmail.email_children_backfill_v1', kind: 'sync' as const, writer: true as const,
+        intervalMs: liveConfig.storePullIntervalMs,
+        freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
+        run: async (context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult> => {
+          try {
+            const result = await input.sync!.backfillChildren!({
+              ...(context?.provenance === 'operator' ? { provenance: 'operator' as const } : {}),
+            });
+            return {
+              status: result.listed > 0 ? 'progress' : 'idle',
+              counts: { items_seen: result.examined, items_changed: result.listed },
+              ...(!result.done ? { continueSoon: true } : {}),
+            };
+          } catch (error) { throw gmailSchedulerFailure(error); }
+        },
+      }] : []),
     ],
     lastSyncCompletedAt: lastCompletedAt,
   };
