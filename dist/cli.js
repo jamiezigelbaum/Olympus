@@ -102921,7 +102921,7 @@ var WHATSAPP_SPOOL_RESET_FILE = "spool-reset.sqlite";
 var init_spool_resets = () => {};
 
 // src/workers/whatsapp/match-keys.ts
-import { createHash as createHash65 } from "node:crypto";
+import { createHash as createHash69 } from "node:crypto";
 function nameKey(name) {
   return name.normalize("NFKC").replace(/[‎‏‪-‮⁦-⁩]/gu, "").replace(/\s+/gu, " ").trim().toLowerCase();
 }
@@ -102931,7 +102931,7 @@ function textKey(text3) {
 `).trim();
 }
 function keyDigest(...parts) {
-  return createHash65("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
+  return createHash69("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
 }
 function timeSlot(ms, precision) {
   return precision === "second" ? `s${Math.floor(ms / 1000)}` : `m${Math.floor(ms / 60000)}`;
@@ -103340,7 +103340,7 @@ function createRecordBuilder(account, fetchItem, authenticate2, readChild) {
           bringsContent: recordBringsContent(record2) || record2.reactions !== undefined,
           authoredAt: record2.timestamp
         },
-        ...(record2.children ?? []).map((child) => ({ identity: childIdentity(own3, child), bringsContent: child.available && child.locator !== undefined }))
+        ...(record2.children ?? []).map((child2) => ({ identity: childIdentity(own3, child2), bringsContent: child2.available && child2.locator !== undefined }))
       ];
     },
     compareVersions: compareWhatsAppVersions,
@@ -103350,8 +103350,8 @@ function createRecordBuilder(account, fetchItem, authenticate2, readChild) {
       const own3 = rawItemFromSpoolMessage(record2, account, fetchedAt, record2.reactions);
       if (wanted.has(own3.identity.localItemId))
         items.push(own3);
-      for (const child of record2.children ?? []) {
-        const item = rawItemFromChild(record2, child, account, fetchedAt);
+      for (const child2 of record2.children ?? []) {
+        const item = rawItemFromChild(record2, child2, account, fetchedAt);
         if (wanted.has(item.identity.localItemId))
           items.push(item);
       }
@@ -103381,11 +103381,11 @@ function createWhatsAppRecordBuilder(options) {
   const live = createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account });
   return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), () => live.authenticate(), options.readChild);
 }
-function childIdentity(parent, child) {
+function childIdentity(parent, child2) {
   return {
     ...parent,
-    providerItemId: childProviderItemId(parent.providerItemId, child.key),
-    localItemId: childProviderItemId(parent.localItemId, child.key),
+    providerItemId: childProviderItemId(parent.providerItemId, child2.key),
+    localItemId: childProviderItemId(parent.localItemId, child2.key),
     parent: { providerItemId: parent.providerItemId, localItemId: parent.localItemId }
   };
 }
@@ -103900,17 +103900,17 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
     fetchedAt
   };
 }
-function rawItemFromChild(message2, child, account, fetchedAt) {
+function rawItemFromChild(message2, child2, account, fetchedAt) {
   const parent = recordIdentity(message2, account);
   const status = isWhatsAppStatusBroadcast(message2.chatJid);
   const senderName = message2.senderContactName || message2.senderName;
   return {
-    identity: childIdentity(parent, child),
-    mimeType: child.mimeType,
+    identity: childIdentity(parent, child2),
+    mimeType: child2.mimeType,
     content: { kind: "metadata_only" },
     metadata: Object.freeze({
-      name: child.name,
-      title: child.name,
+      name: child2.name,
+      title: child2.name,
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || message2.chatJid,
       sender: senderName || message2.senderJid,
       senderLabel: senderName || message2.senderJid || undefined,
@@ -103921,9 +103921,9 @@ function rawItemFromChild(message2, child, account, fetchedAt) {
     }),
     fetchedAt,
     deferredBytes: {
-      locator: child.locator ?? "",
-      available: child.available && child.locator !== undefined,
-      ...child.sizeBytes !== undefined ? { sizeBytes: child.sizeBytes } : {}
+      locator: child2.locator ?? "",
+      available: child2.available && child2.locator !== undefined,
+      ...child2.sizeBytes !== undefined ? { sizeBytes: child2.sizeBytes } : {}
     }
   };
 }
@@ -104865,7 +104865,7 @@ __export(exports_tier_migration_cli, {
   runTierMigrateCommand: () => runTierMigrateCommand,
   TIER_MIGRATE_USAGE: () => TIER_MIGRATE_USAGE
 });
-import { createHash as createHash66 } from "node:crypto";
+import { createHash as createHash70 } from "node:crypto";
 async function runTierMigrateCommand(args, context2 = {}) {
   const [command, ...rest] = args;
   const flags = parseFlags(rest);
@@ -105034,7 +105034,7 @@ async function withLanes(context2, env, mode, inputs, run) {
 }
 async function installedInputs(env, options) {
   const rules = loadOwnerTierRules({ env, allowMissing: true });
-  const rulesDigest = createHash66("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
+  const rulesDigest = createHash70("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
   const revision = `map:${TIER_MAP_REVISION};rules:${rules.length > 0 ? rulesDigest : "none"}`;
   const base = {
     ...rules.length > 0 ? { rules } : {},
@@ -124024,7 +124024,7 @@ __export(exports_source_answer_jobs, {
   SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
   SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS: () => SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS
 });
-import { createHash as createHash67, randomBytes as randomBytes20, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash71, randomBytes as randomBytes20, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
   limits;
@@ -124528,8 +124528,8 @@ class SourceAnswerJobRegistry {
   }
 }
 function sameOwner(a, b) {
-  const left = createHash67("sha256").update(a).digest();
-  const right = createHash67("sha256").update(b).digest();
+  const left = createHash71("sha256").update(a).digest();
+  const right = createHash71("sha256").update(b).digest();
   return timingSafeEqual6(left, right);
 }
 function callerAbortError(message2) {
@@ -124800,7 +124800,7 @@ var init_server4 = __esm(() => {
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash68, createPublicKey, randomBytes as randomBytes21, sign, verify } from "node:crypto";
+import { createHash as createHash72, createPublicKey, randomBytes as randomBytes21, sign, verify } from "node:crypto";
 function parseSurfacesMessage(message2) {
   if (message2.type !== "surfaces" || message2.v !== 1 || !Array.isArray(message2.entries))
     return;
@@ -124852,7 +124852,7 @@ function base32(data2) {
   return out;
 }
 function installIdForPublicKey(spkiDer) {
-  return base32(createHash68("sha256").update(spkiDer).digest().subarray(0, 20));
+  return base32(createHash72("sha256").update(spkiDer).digest().subarray(0, 20));
 }
 function spkiOf(key2) {
   return key2.export({ format: "der", type: "spki" });
@@ -124866,7 +124866,7 @@ function signInstallMessage(privateKey, kind, nonce, installId, relayHost, schem
   return base64url2(sign(null, signedPayload(kind, nonce, installId, relayHost, scheme), privateKey));
 }
 function powDigest(nonce, installId, relayHost, counter) {
-  return createHash68("sha256").update(`${POW_DOMAIN}
+  return createHash72("sha256").update(`${POW_DOMAIN}
 ${nonce}
 ${installId}
 ${relayHost.toLowerCase()}
@@ -125827,7 +125827,7 @@ var init_manifest3 = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/install.ts
 import { spawnSync as spawnSync18 } from "node:child_process";
-import { createHash as createHash69, randomUUID as randomUUID26 } from "node:crypto";
+import { createHash as createHash73, randomUUID as randomUUID26 } from "node:crypto";
 import {
   closeSync as closeSync24,
   createReadStream as createReadStream3,
@@ -126208,7 +126208,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
   });
 }
 async function sha256File3(path, timeoutMs, onProgress) {
-  const hash = createHash69("sha256");
+  const hash = createHash73("sha256");
   await hashInto(path, hash, timeoutMs, onProgress);
   return hash.digest("hex");
 }
@@ -129068,7 +129068,7 @@ var init_dashboard_session_secret = __esm(() => {
 });
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash70 } from "node:crypto";
+import { createHash as createHash74 } from "node:crypto";
 function isFileExtractionSourceError(value2) {
   if (!value2 || typeof value2 !== "object")
     return false;
@@ -129111,7 +129111,7 @@ var init_file_extraction_source = __esm(() => {
       this.errorKind = errorKind;
       this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
       this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash70("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      const errorHash = options.detailForHash === undefined ? undefined : createHash74("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
     }
@@ -129733,8 +129733,8 @@ var init_extraction_source2 = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync31, mkdirSync as mkdirSync53 } from "node:fs";
-import { createHash as createHash71, randomUUID as randomUUID27 } from "node:crypto";
-import { dirname as dirname78 } from "node:path";
+import { createHash as createHash75, randomUUID as randomUUID27 } from "node:crypto";
+import { dirname as dirname79 } from "node:path";
 import { Database as Database22 } from "bun:sqlite";
 function settleUnreadable(candidates, classify2) {
   const items = [];
@@ -131077,7 +131077,7 @@ function makeJobId() {
   return `fx_${randomUUID27()}`;
 }
 function hashString6(value2) {
-  return createHash71("sha256").update(value2).digest("hex");
+  return createHash75("sha256").update(value2).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -134372,9 +134372,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer6 } from "node:buffer";
-import { createHash as createHash72 } from "node:crypto";
+import { createHash as createHash76 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash72("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash76("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -135133,8 +135133,8 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash73 } from "node:crypto";
-import { dirname as dirname80 } from "node:path";
+import { createHash as createHash77 } from "node:crypto";
+import { dirname as dirname81 } from "node:path";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
     return { allowed: true };
@@ -135841,7 +135841,7 @@ function retryable(errorKind, error2) {
 }
 function hashError(error2) {
   const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
-  return createHash73("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash77("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error2) {
   const message2 = error2 instanceof Error ? error2.message : "";
@@ -135977,7 +135977,7 @@ function logPlanRefusal(corpusId, extractorKind, reason, count, error2) {
   console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${corpusId} extractor_kind=${extractorKind} ` + `reason_kind=${reason}${field} candidates=${count} reason=${boundedLogErrorMessage(error2)}`);
 }
 function hashToken(value2) {
-  return createHash73("sha256").update(value2).digest("hex");
+  return createHash77("sha256").update(value2).digest("hex");
 }
 function isScopeApprovalRefusal(error2) {
   return error2 instanceof OperationError && error2.code === "source_index_policy_violation";
@@ -135989,7 +135989,7 @@ async function drainPdfExtraction(input) {
     const result = {
       corpusId: lane.corpusId,
       provider: lane.provider,
-      scopeKeyHash: createHash73("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
+      scopeKeyHash: createHash77("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
       candidatesRequeued: 0,
       jobsProcessed: 0,
       jobsIndexed: 0,
@@ -137131,7 +137131,7 @@ var init_readiness_ledger = __esm(() => {
 });
 
 // src/workers/file-extraction/unreadable-files.ts
-import { createHash as createHash74, randomBytes as randomBytes25 } from "node:crypto";
+import { createHash as createHash78, randomBytes as randomBytes25 } from "node:crypto";
 function createUnreadableVerdict(input) {
   return (item) => {
     const located = input.locate(item.ref);
@@ -137182,8 +137182,8 @@ function createUnreadableFiles(options) {
       return "blocked_policy";
     }
   }
-  function placeOf(item) {
-    return { at: item.failedAt, id: createHash74("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
+  function placeOf2(item) {
+    return { at: item.failedAt, id: createHash78("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
   }
   function cursorOf(item) {
     const place = placeOf2(item);
@@ -138963,7 +138963,7 @@ var init_locator_result_projector2 = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash75 } from "node:crypto";
+import { createHash as createHash79 } from "node:crypto";
 import { readFileSync as readFileSync69 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir41 } from "node:os";
@@ -139455,8 +139455,8 @@ function compareHits(left, right) {
 function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
-function sha2566(value2) {
-  return createHash75("sha256").update(value2, "utf8").digest("hex");
+function sha2568(value2) {
+  return createHash79("sha256").update(value2, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -140935,7 +140935,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash76 } from "node:crypto";
+import { createHash as createHash80 } from "node:crypto";
 function escapeHtml2(value2) {
   return value2.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -140986,14 +140986,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash76("sha256").update(normalised).digest("hex");
+  return createHash80("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml2(input.title) : `<a class="lead" href="${escapeHtml2(leadHref)}">${escapeHtml2(input.title)}</a> <span class="crumb">/</span> ${escapeHtml2(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash76("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash80("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -149810,9 +149810,9 @@ __export(exports_dashboard_resource, {
   DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
   DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
 });
-import { createHash as createHash77 } from "node:crypto";
+import { createHash as createHash81 } from "node:crypto";
 function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash77("sha256").update(html2).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash81("sha256").update(html2).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -151021,7 +151021,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash78 } from "node:crypto";
+import { createHash as createHash82 } from "node:crypto";
 function parseStructuredChatScope(value2) {
   const parts = value2.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -151049,7 +151049,7 @@ function unresolvedChatTitleResolution(value2) {
   };
 }
 function safeDigest(value2) {
-  return createHash78("sha256").update(value2).digest("hex");
+  return createHash82("sha256").update(value2).digest("hex");
 }
 function conversationTitleTerms(value2) {
   const seen = new Set;
@@ -151336,7 +151336,7 @@ function safeDetail(value2) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash79, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHash as createHash83, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { readFileSync as readFileSync71, statSync as statSync36 } from "node:fs";
 import { homedir as homedir42 } from "node:os";
 import { join as join112, resolve as resolve21 } from "node:path";
@@ -154986,7 +154986,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual8(createHash79("sha256").update(expected).digest(), createHash79("sha256").update(state).digest());
+  return timingSafeEqual8(createHash83("sha256").update(expected).digest(), createHash83("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -155238,7 +155238,7 @@ function dashboardOAuthClientSecretRequired(source) {
 }
 function dashboardPanelOpener(request) {
   const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return csrf ? `session:${createHash79("sha256").update(csrf).digest("base64url")}` : "bearer";
+  return csrf ? `session:${createHash83("sha256").update(csrf).digest("base64url")}` : "bearer";
 }
 function dashboardPanelCallContext(url, request) {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
@@ -156310,8 +156310,8 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash80, randomUUID as randomUUID29 } from "node:crypto";
-import { realpathSync as realpathSync18, rmSync as rmSync26, readdirSync as readdirSync21 } from "node:fs";
+import { createHash as createHash84, randomUUID as randomUUID29 } from "node:crypto";
+import { realpathSync as realpathSync18, rmSync as rmSync26, readdirSync as readdirSync22 } from "node:fs";
 import { join as join114, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
@@ -156325,7 +156325,7 @@ function nameAsOnDisk(scopeRoot, rel) {
   return dir;
 }
 function localFilesItemId(scopePath) {
-  return `f1.${createHash80("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
+  return `f1.${createHash84("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
 }
 function identityFor(scopePath, version2) {
   const providerItemId = localFilesItemId(scopePath);
@@ -156882,7 +156882,7 @@ var init_connector5 = __esm(() => {
 });
 
 // src/workers/local-files/provider-store-sync.ts
-import { createHash as createHash81 } from "node:crypto";
+import { createHash as createHash85 } from "node:crypto";
 function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   const prefix = `${LOCAL_FILES_POLICY_SOURCE}:`;
   if (!approvedScopeKey.startsWith(prefix))
@@ -156892,7 +156892,7 @@ function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   return root;
 }
 function localFilesConnectorIdForScope(approvedScopeKey, scope) {
-  const hash = createHash81("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const hash = createHash85("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `local.files.${hash}`;
 }
 function localFilesStoreView(store, tierSet) {
@@ -157056,7 +157056,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash81("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash85("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: scopedCheckpoint(sync.cursor, connectorId)
       };
@@ -157254,7 +157254,7 @@ var init_whatsapp = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash82 } from "node:crypto";
+import { createHash as createHash86 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -158188,7 +158188,7 @@ function fileExtractionSchedulerTask(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash82("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash86("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -158887,7 +158887,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value2) {
-  return createHash82("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash86("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -164697,9 +164697,9 @@ var init_postal_mime = __esm(() => {
 });
 
 // src/workers/archive-import/mbox/parse.ts
-import { createHash as createHash83 } from "node:crypto";
-function sha2567(value2) {
-  return createHash83("sha256").update(value2).digest("hex");
+import { createHash as createHash87 } from "node:crypto";
+function sha2569(value2) {
+  return createHash87("sha256").update(value2).digest("hex");
 }
 function headerValue(email2, key2) {
   const value2 = email2.headers.find((header) => header.key === key2)?.value?.trim();
@@ -165751,9 +165751,9 @@ var init_place = __esm(() => {
 });
 
 // src/workers/archive-import/whatsapp/connector.ts
-import { createHash as createHash84 } from "node:crypto";
-function sha2568(value2) {
-  return createHash84("sha256").update(value2).digest("hex");
+import { createHash as createHash88 } from "node:crypto";
+function sha25610(value2) {
+  return createHash88("sha256").update(value2).digest("hex");
 }
 function stoppedFrom2(error2, relPath) {
   if (error2 instanceof WhatsAppFormatError) {
@@ -166408,7 +166408,7 @@ var init_resume_crc = __esm(() => {
 });
 
 // src/workers/archive-import/notes/note.ts
-import { createHash as createHash85 } from "node:crypto";
+import { createHash as createHash89 } from "node:crypto";
 function isRecord12(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
@@ -166461,8 +166461,8 @@ function cleanTags(tags) {
   }
   return out;
 }
-function sha2569(value2) {
-  return createHash85("sha256").update(value2).digest("hex");
+function sha25611(value2) {
+  return createHash89("sha256").update(value2).digest("hex");
 }
 function buildNoteItem(input, draft, place, savedAt) {
   const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
@@ -167716,691 +167716,6 @@ var init_connector9 = __esm(() => {
   };
 });
 
-// src/workers/archive-import/telegram/json-repair.ts
-function isHex(byte) {
-  return byte !== undefined && (byte >= 48 && byte <= 57 || byte >= 65 && byte <= 70 || byte >= 97 && byte <= 102);
-}
-function telegramJsonSource(source) {
-  let carry = new Uint8Array(0);
-  let position = source.position;
-  let last = new Uint8Array(0);
-  let held = 0;
-  let pending;
-  let ended = false;
-  const rewrite = (input) => {
-    let out = input;
-    let copied = false;
-    let escaped = false;
-    let hold = input.length;
-    for (let index = 0;index < input.length; index += 1) {
-      const byte = input[index];
-      if (escaped) {
-        escaped = false;
-        if (byte !== LOWER_X)
-          continue;
-        const first = input[index + 1];
-        const second = input[index + 2];
-        if (first === undefined || second === undefined) {
-          hold = index - 1;
-          break;
-        }
-        if (isHex(first) && isHex(second)) {
-          if (!copied) {
-            out = input.slice();
-            copied = true;
-          }
-          out.fill(SPACE, index - 1, index - 1 + ESCAPE_LENGTH);
-          index += 2;
-        }
-      } else if (byte === BACKSLASH) {
-        escaped = true;
-      }
-    }
-    if (hold === input.length && escaped)
-      hold = input.length - 1;
-    return { out, hold };
-  };
-  return {
-    get position() {
-      return position;
-    },
-    next() {
-      if (pending) {
-        const chunk = pending;
-        pending = undefined;
-        last = chunk;
-        held = chunk.length;
-        position += chunk.length;
-        return chunk;
-      }
-      for (;; ) {
-        let input;
-        if (ended) {
-          if (carry.length === 0)
-            return;
-          input = carry;
-          carry = new Uint8Array(0);
-          last = input;
-          held = input.length;
-          position += input.length;
-          return input;
-        }
-        const chunk = source.next();
-        if (chunk === undefined) {
-          ended = true;
-          continue;
-        }
-        if (carry.length > 0) {
-          const joined = new Uint8Array(carry.length + chunk.length);
-          joined.set(carry);
-          joined.set(chunk, carry.length);
-          input = joined;
-        } else {
-          input = chunk;
-        }
-        const { out, hold } = rewrite(input);
-        carry = hold < input.length ? input.slice(hold) : new Uint8Array(0);
-        const given = hold < input.length ? out.subarray(0, hold) : out;
-        if (given.length === 0)
-          continue;
-        last = given;
-        held = given.length;
-        position += given.length;
-        return given;
-      }
-    },
-    unread(count) {
-      if (!Number.isInteger(count) || count < 0 || count > held)
-        throw new RangeError("unread past the last chunk");
-      if (count === 0)
-        return;
-      held -= count;
-      position -= count;
-      pending = last.subarray(held);
-    }
-  };
-}
-var BACKSLASH = 92, LOWER_X = 120, SPACE = 32, ESCAPE_LENGTH = 4;
-
-// src/workers/archive-import/telegram/account.ts
-function accountTitle(section) {
-  return `Telegram account: ${section.label}`;
-}
-function scalarText(value2) {
-  if (typeof value2 === "string")
-    return value2.trim() === "" ? undefined : value2;
-  if (typeof value2 === "number" && Number.isFinite(value2))
-    return String(value2);
-  if (typeof value2 === "boolean")
-    return value2 ? "yes" : "no";
-  return;
-}
-function labelOf(key2) {
-  const words2 = key2.replace(/_/g, " ").trim();
-  return words2 === "" ? key2 : words2.charAt(0).toUpperCase() + words2.slice(1);
-}
-function unixTimeText(value2) {
-  const seconds2 = typeof value2 === "number" ? value2 : typeof value2 === "string" && /^\d{1,12}$/.test(value2.trim()) ? Number(value2) : NaN;
-  if (!Number.isFinite(seconds2) || seconds2 <= 0 || seconds2 >= LATEST_PLAUSIBLE_SECONDS2)
-    return;
-  return new Date(seconds2 * 1000).toISOString();
-}
-function appendFields(lines, indent, record5, skip, depth2) {
-  for (const [key2, value2] of Object.entries(record5)) {
-    if (skip.has(key2) || value2 === null || value2 === undefined)
-      continue;
-    if (key2.endsWith("_unixtime")) {
-      const base = key2.slice(0, -"_unixtime".length);
-      if (base !== "" && scalarText(record5[base]) !== undefined)
-        continue;
-      const iso2 = unixTimeText(value2);
-      if (iso2) {
-        lines.push(`${indent}${labelOf(base === "" ? key2 : base)}: ${iso2}`);
-        continue;
-      }
-    }
-    appendValue(lines, indent, key2, value2, depth2);
-  }
-}
-function appendValue(lines, indent, key2, value2, depth2) {
-  const label = labelOf(key2);
-  const scalar = scalarText(value2);
-  if (scalar !== undefined) {
-    lines.push(`${indent}${label}: ${scalar}`);
-    return;
-  }
-  if (Array.isArray(value2)) {
-    const items = value2.filter((item) => item !== null && item !== undefined);
-    if (items.length === 0)
-      return;
-    if (items.every((item) => scalarText(item) !== undefined)) {
-      lines.push(`${indent}${label}: ${items.map((item) => scalarText(item)).join(", ")}`);
-      return;
-    }
-    if (depth2 >= MAX_INDENT_DEPTH) {
-      lines.push(`${indent}${label}: ${JSON.stringify(items)}`);
-      return;
-    }
-    lines.push(`${indent}${label}:`);
-    for (const item of items) {
-      const plain = scalarText(item);
-      if (plain !== undefined) {
-        lines.push(`${indent}  - ${plain}`);
-      } else if (isRecord5(item)) {
-        lines.push(`${indent}  -`);
-        appendFields(lines, `${indent}    `, item, new Set, depth2 + 1);
-      } else {
-        lines.push(`${indent}  - ${JSON.stringify(item)}`);
-      }
-    }
-    return;
-  }
-  if (isRecord5(value2)) {
-    if (Object.keys(value2).length === 0)
-      return;
-    if (depth2 >= MAX_INDENT_DEPTH) {
-      lines.push(`${indent}${label}: ${JSON.stringify(value2)}`);
-      return;
-    }
-    lines.push(`${indent}${label}:`);
-    appendFields(lines, `${indent}  `, value2, new Set, depth2 + 1);
-  }
-}
-function nameOf(record5) {
-  const name = [text2(record5.first_name), text2(record5.last_name)].filter(Boolean).join(" ").trim();
-  return name === "" ? undefined : name;
-}
-function headline(section, record5) {
-  switch (section.name) {
-    case "personal_information": {
-      const name = nameOf(record5);
-      const user = text2(record5.username);
-      return `Telegram profile${name || user ? `: ${[name, user ? `(${user})` : undefined].filter(Boolean).join(" ")}` : ""}`;
-    }
-    case "contacts":
-      return `Contact: ${nameOf(record5) ?? text2(record5.phone_number) ?? "no name or number in the export"}`;
-    case "frequent_contacts": {
-      const category = text2(record5.category)?.replace(/_/g, " ");
-      return `Frequent contact: ${text2(record5.name) ?? "unnamed"}${category ? ` (${category})` : ""}`;
-    }
-    case "sessions": {
-      const app = [text2(record5.application_name), text2(record5.application_version)].filter(Boolean).join(" ");
-      const device = text2(record5.device_model) ?? text2(record5.platform);
-      return `Telegram session: ${[app || undefined, device ? `on ${device}` : undefined].filter(Boolean).join(" ") || "device not named in the export"}`;
-    }
-    case "web_sessions": {
-      const site = text2(record5.domain_name) ?? text2(record5.bot_username);
-      const browser = text2(record5.browser);
-      return `Web session: ${[site, browser].filter(Boolean).join(", ") || "site not named in the export"}`;
-    }
-    case "profile_pictures":
-      return "Profile picture";
-    case "stories":
-      return "Story";
-    case "profile_music":
-      return "Profile music";
-    default:
-      return "Other Telegram account data";
-  }
-}
-function accountEntryContent(section, value2) {
-  if (!isRecord5(value2)) {
-    const plain = scalarText(value2);
-    const lines2 = [headline(section, {})];
-    if (plain !== undefined)
-      lines2.push(plain);
-    else if (value2 !== null && value2 !== undefined)
-      appendValue(lines2, "", "value", value2, 0);
-    return { text: lines2.join(`
-`), mediaFiles: 0, attachments: [] };
-  }
-  const own3 = telegramMediaLines(value2);
-  const nested = isRecord5(value2.media) ? telegramMediaLines(value2.media) : { lines: [], mediaFiles: 0, attachments: [] };
-  const skip = new Set;
-  if (own3.lines.length > 0)
-    for (const key2 of TELEGRAM_MEDIA_KEYS)
-      skip.add(key2);
-  if (nested.lines.length > 0)
-    skip.add("media");
-  const lines = [headline(section, value2), ...own3.lines, ...nested.lines];
-  appendFields(lines, "", value2, skip, 0);
-  return {
-    text: lines.join(`
-`),
-    mediaFiles: own3.mediaFiles + nested.mediaFiles,
-    attachments: [...own3.attachments, ...nested.attachments]
-  };
-}
-var ACCOUNT_SECTIONS, MAX_INDENT_DEPTH = 8, LATEST_PLAUSIBLE_SECONDS2 = 4102444800;
-var init_account = __esm(() => {
-  init_message();
-  ACCOUNT_SECTIONS = [
-    { name: "personal_information", path: ["personal_information"], label: "profile", whole: true },
-    { name: "profile_pictures", path: ["profile_pictures"], label: "profile pictures", whole: false },
-    { name: "stories", path: ["stories"], label: "stories", whole: false },
-    { name: "profile_music", path: ["profile_music"], label: "profile music", whole: false },
-    { name: "contacts", path: ["contacts", "list"], label: "contacts", whole: false },
-    { name: "frequent_contacts", path: ["frequent_contacts", "list"], label: "frequent contacts", whole: false },
-    { name: "sessions", path: ["sessions", "list"], label: "sessions", whole: false },
-    { name: "web_sessions", path: ["web_sessions", "list"], label: "web sessions", whole: false },
-    { name: "other_data", path: ["other_data"], label: "other data", whole: true }
-  ];
-});
-
-// src/workers/archive-import/telegram/connector.ts
-import { createHash as createHash86 } from "node:crypto";
-function manifestTag3(input) {
-  return input.manifestSha256.slice(0, 16);
-}
-function slimResume(point) {
-  return {
-    offset: point.offset,
-    levels: point.levels.map((level) => {
-      const frame = {};
-      for (const key2 of ["name", "type", "id"]) {
-        if (Object.prototype.hasOwnProperty.call(level.frame, key2))
-          frame[key2] = level.frame[key2];
-      }
-      return { kind: level.kind, pointer: level.pointer, frame };
-    })
-  };
-}
-function cursorAt2(input, point, assumedZone) {
-  return `${TELEGRAM_CURSOR_PREFIX}${manifestTag3(input)}:${assumedZone ? 1 : 0}:${serializeJsonResume(slimResume(point))}`;
-}
-function doneCursor3(input) {
-  return `${TELEGRAM_CURSOR_PREFIX}${manifestTag3(input)}:done`;
-}
-function isIndex(value2) {
-  return typeof value2 === "number" && Number.isSafeInteger(value2) && value2 >= 0;
-}
-function afterMessage(point) {
-  const levels = point.levels;
-  if (levels.length === 2) {
-    return levels[0].kind === "object" && levels[0].pointer === "messages" && levels[1].kind === "array" && isIndex(levels[1].pointer);
-  }
-  if (levels.length === 5) {
-    return levels[0].kind === "object" && (levels[0].pointer === "chats" || levels[0].pointer === "left_chats") && levels[1].kind === "object" && levels[1].pointer === "list" && levels[2].kind === "array" && isIndex(levels[2].pointer) && levels[3].kind === "object" && levels[3].pointer === "messages" && levels[4].kind === "array" && isIndex(levels[4].pointer);
-  }
-  return false;
-}
-function sectionOfResume(point) {
-  const levels = point.levels;
-  const root = levels[0];
-  if (!root || root.kind !== "object" || typeof root.pointer !== "string" || !SECTION_ROOTS.has(root.pointer))
-    return;
-  if (LISTED_SECTIONS.has(root.pointer)) {
-    return levels.length === 3 && levels[1].kind === "object" && levels[1].pointer === "list" && levels[2].kind === "array" && isIndex(levels[2].pointer) ? root.pointer : undefined;
-  }
-  if (levels.length !== 2)
-    return;
-  const entry = levels[1];
-  return entry.kind === "object" && typeof entry.pointer === "string" || entry.kind === "array" && isIndex(entry.pointer) ? root.pointer : undefined;
-}
-function parseCursor3(input, cursor) {
-  if (!cursor)
-    return { resume: undefined, assumedZone: false, done: false };
-  const prefix = `${TELEGRAM_CURSOR_PREFIX}${manifestTag3(input)}:`;
-  if (!cursor.startsWith(prefix)) {
-    throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point belongs to other files than this archive's.");
-  }
-  const rest = cursor.slice(prefix.length);
-  if (rest === "done")
-    return { resume: undefined, assumedZone: false, done: true };
-  const flag = rest.slice(0, 2);
-  const resume = flag === "0:" || flag === "1:" ? parseJsonResume(rest.slice(2)) : undefined;
-  if (!resume || !(afterMessage(resume) || sectionOfResume(resume)) || resume.offset > input.files[0].version.size) {
-    throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point is not a position in this archive.");
-  }
-  return { resume, assumedZone: flag === "1:", done: false };
-}
-function sha25610(value2) {
-  return createHash86("sha256").update(value2).digest("hex");
-}
-function placeOf(event) {
-  const path = event.path;
-  if (event.pathIndex === 2)
-    return { section: "chat", chatIndex: 0, ordinal: Number(path[1]) };
-  return { section: path[0] === "left_chats" ? "left_chats" : "chats", chatIndex: Number(path[2]), ordinal: Number(path[4]) };
-}
-function chatTitle(name, type, place) {
-  if (name)
-    return name;
-  if (type && CHAT_TYPE_TITLES[type])
-    return CHAT_TYPE_TITLES[type];
-  return place.section === "chat" ? "Unnamed Telegram chat" : `Unnamed Telegram chat ${place.chatIndex + 1}`;
-}
-function messageOutcome2(input, event, fetchedAt) {
-  const message2 = event.value;
-  if (typeof message2 !== "object" || message2 === null || Array.isArray(message2))
-    return { kind: "gap", reason: TELEGRAM_FINDINGS.unreadable };
-  const record5 = message2;
-  const service = record5.type === "service";
-  const content = service ? telegramServiceContent(record5) : telegramMessageContent(record5);
-  if (!content.hasContent) {
-    return content.unsupported ? { kind: "gap", reason: TELEGRAM_FINDINGS.unsupported } : { kind: "skipped", reason: TELEGRAM_FINDINGS.withoutText };
-  }
-  const findings = [];
-  if (content.unsupported)
-    findings.push({ kind: TELEGRAM_FINDINGS.unsupported });
-  const body = content.text;
-  if (content.mediaFiles > 0)
-    findings.push({ kind: ARCHIVE_COMMON_FINDINGS.mediaNotImported, count: content.mediaFiles });
-  const place = placeOf(event);
-  const frame = event.frame;
-  const name = typeof frame.name === "string" && frame.name.trim() !== "" ? frame.name : undefined;
-  const type = typeof frame.type === "string" ? frame.type : undefined;
-  const chatId = telegramScalar(frame.id);
-  const title = chatTitle(name, type, place);
-  const conversationId = place.section === "chat" ? "chat" : `${place.section}:${place.chatIndex}`;
-  const sent = telegramTime(record5, "date");
-  const edited = telegramTime(record5, "edited");
-  const named = (value2) => typeof value2 === "string" && value2.trim() !== "" ? value2 : undefined;
-  const sender = service ? named(record5.actor) : named(record5.from) ?? named(record5.author);
-  const senderId = telegramScalar(service ? record5.actor_id : record5.from_id);
-  const serviceAction = service ? named(record5.action) : undefined;
-  const messageId = telegramScalar(record5.id);
-  const reply = telegramScalar(record5.reply_to_message_id);
-  const forwarded = typeof record5.forwarded_from === "string" && record5.forwarded_from.trim() !== "" ? record5.forwarded_from : undefined;
-  const providerItemId = sha25610(`${place.section}\x00${place.chatIndex}\x00${place.ordinal}\x00${messageId ?? ""}`).slice(0, 32);
-  const item = {
-    identity: {
-      family: input.format.family,
-      provider: input.format.provider,
-      accountScope: input.accountScope,
-      providerItemId,
-      providerThreadId: conversationId,
-      providerConversationId: conversationId,
-      localItemId: `${input.accountScope}:${providerItemId}`,
-      sourceVersion: sha25610(body).slice(0, 32)
-    },
-    mimeType: "text/plain; charset=utf-8",
-    content: { kind: "text", text: body },
-    metadata: Object.freeze({
-      title,
-      chat: title,
-      ...chatId ? { chatId } : {},
-      ...type ? { chatType: type } : {},
-      ...place.section === "left_chats" ? { leftChat: true } : {},
-      ...sender ? { sender, senderLabel: sender, senderDisplayName: sender } : {},
-      ...senderId ? { senderId } : {},
-      ...sent.iso ? { sentAt: sent.iso, authoredAt: sent.iso } : {},
-      ...edited.iso ? { editedAt: edited.iso } : {},
-      ...service ? { serviceMessage: true } : {},
-      ...serviceAction ? { serviceAction } : {},
-      ...messageId ? { telegramMessageId: messageId } : {},
-      ...reply ? { replyToMessageId: reply } : {},
-      ...forwarded ? { forwardSource: forwarded } : {},
-      ...content.attachments.length > 0 ? { attachments: content.attachments } : {},
-      attachmentsNotIngested: content.mediaFiles,
-      contentHash: sha25610(body)
-    }),
-    fetchedAt
-  };
-  return { kind: "item", item, findings, assumedZone: sent.assumedZone };
-}
-function accountItem(input, section, ordinal, value2, fetchedAt) {
-  const content = accountEntryContent(section, value2);
-  const title = accountTitle(section);
-  const conversationId = `account:${section.name}`;
-  const providerItemId = sha25610(`account\x00${section.name}\x00${ordinal}`).slice(0, 32);
-  const item = {
-    identity: {
-      family: input.format.family,
-      provider: input.format.provider,
-      accountScope: input.accountScope,
-      providerItemId,
-      providerThreadId: conversationId,
-      providerConversationId: conversationId,
-      localItemId: `${input.accountScope}:${providerItemId}`,
-      sourceVersion: sha25610(content.text).slice(0, 32)
-    },
-    mimeType: "text/plain; charset=utf-8",
-    content: { kind: "text", text: content.text },
-    metadata: Object.freeze({
-      title,
-      chat: title,
-      accountSection: section.name,
-      ...content.attachments.length > 0 ? { attachments: content.attachments } : {},
-      attachmentsNotIngested: content.mediaFiles,
-      contentHash: sha25610(content.text)
-    }),
-    fetchedAt
-  };
-  return { item, mediaFiles: content.mediaFiles };
-}
-function isDamage(error2) {
-  return error2 instanceof JsonStreamError && error2.code !== "resume_invalid";
-}
-function createTelegramArchiveConnector(input) {
-  const pageSizeDefault = Math.max(1, input.pageSize ?? TELEGRAM_DEFAULT_PAGE_SIZE);
-  const byteBudget = Math.max(1, input.maxBytesPerListing ?? TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING);
-  const file = input.files[0];
-  if (!file || input.files.length !== 1)
-    throw new Error("A Telegram export is one result.json.");
-  return {
-    id: input.connectorId,
-    family: input.format.family,
-    async authenticate() {},
-    listItems(options) {
-      return async function* () {
-        const start = parseCursor3(input, options?.cursor);
-        if (start.done) {
-          yield { items: [], nextCursor: doneCursor3(input), done: true };
-          return;
-        }
-        const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
-        let reader;
-        try {
-          reader = input.root.openFile(file.relPath, { expected: file.version });
-        } catch (error2) {
-          throw archiveStopFromReaderError(error2, file.relPath);
-        }
-        const current2 = () => {
-          try {
-            reader.assertCurrent();
-          } catch (error2) {
-            throw archiveStopFromReaderError(error2, file.relPath);
-          }
-        };
-        try {
-          const origin = start.resume?.offset ?? 0;
-          let json2;
-          try {
-            json2 = new JsonStreamReader(telegramJsonSource(fileByteSource(reader, { start: origin })), {
-              itemPaths: ITEM_PATHS,
-              maxItemBytes: TELEGRAM_MAX_MESSAGE_BYTES,
-              ...start.resume ? { resume: start.resume } : {}
-            });
-          } catch (error2) {
-            throw archiveStopFromReaderError(error2, file.relPath);
-          }
-          const fetchedAt = new Date().toISOString();
-          let assumedZone = start.assumedZone;
-          let page2 = [];
-          let after;
-          let unsent = false;
-          let emitted = 0;
-          let whole;
-          let held;
-          const report = (kind, findingClass, offset, count) => {
-            input.report({ kind, class: findingClass, fileIndex: 0, offset, ...count !== undefined ? { count } : {} });
-          };
-          const finishWhole = () => {
-            const part = whole;
-            whole = undefined;
-            if (!part.dropped && part.fields.length > 0) {
-              const built = accountItem(input, part.section, 0, Object.fromEntries(part.fields), fetchedAt);
-              page2.push(built.item);
-              if (built.mediaFiles > 0)
-                report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", part.start, built.mediaFiles);
-            }
-            after = part.last;
-            unsent = true;
-          };
-          for (;; ) {
-            if (!input.shouldContinue()) {
-              if (after && unsent) {
-                current2();
-                input.reportPosition?.({ fileIndex: 0, offset: after.offset });
-                yield { items: page2, nextCursor: cursorAt2(input, after, assumedZone), done: false };
-              }
-              return;
-            }
-            let event;
-            if (held) {
-              event = held.event;
-              held = undefined;
-            } else {
-              try {
-                event = json2.next();
-              } catch (error2) {
-                if (!isDamage(error2))
-                  throw archiveStopFromReaderError(error2, file.relPath);
-                if (whole)
-                  finishWhole();
-                report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", file.version.size);
-                break;
-              }
-            }
-            if (whole && (!event || event.pathIndex !== whole.pathIndex)) {
-              finishWhole();
-              held = { event };
-            } else {
-              if (!event)
-                break;
-              if (event.pathIndex >= MESSAGE_PATHS.length) {
-                const section = ACCOUNT_SECTIONS[event.pathIndex - MESSAGE_PATHS.length];
-                if (section.whole) {
-                  whole ??= { section, pathIndex: event.pathIndex, start: event.start, fields: [], bytes: 0, dropped: false, last: event.resume };
-                  whole.last = event.resume;
-                  if (event.kind === "oversize") {
-                    report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", event.start);
-                  } else if (!whole.dropped) {
-                    whole.bytes += event.end - event.start;
-                    if (whole.bytes > TELEGRAM_MAX_MESSAGE_BYTES) {
-                      whole.dropped = true;
-                      whole.fields = [];
-                      report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", whole.start);
-                    } else {
-                      whole.fields.push([String(event.path[event.path.length - 1]), event.value]);
-                    }
-                  }
-                  continue;
-                }
-                if (event.kind === "oversize") {
-                  report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", event.start);
-                } else {
-                  const built = accountItem(input, section, Number(event.path[event.path.length - 1]), event.value, fetchedAt);
-                  page2.push(built.item);
-                  if (built.mediaFiles > 0)
-                    report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", event.start, built.mediaFiles);
-                }
-              } else if (event.kind === "oversize") {
-                report(TELEGRAM_FINDINGS.tooLarge, "gap", event.start);
-              } else {
-                const outcome = messageOutcome2(input, event, fetchedAt);
-                if (outcome.kind === "gap") {
-                  report(outcome.reason, "gap", event.start);
-                } else if (outcome.kind === "skipped") {
-                  report(outcome.reason, "skipped", event.start);
-                } else {
-                  page2.push(outcome.item);
-                  for (const finding of outcome.findings)
-                    report(finding.kind, "gap", event.start, finding.count);
-                  if (outcome.assumedZone && !assumedZone) {
-                    assumedZone = true;
-                    report(ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, "gap", event.start);
-                  }
-                }
-              }
-              after = event.resume;
-              unsent = true;
-            }
-            const budgetLeft = limit - emitted;
-            if (page2.length >= Math.min(pageSizeDefault, budgetLeft) || json2.position - origin >= byteBudget) {
-              const point = after;
-              current2();
-              input.reportPosition?.({ fileIndex: 0, offset: point.offset });
-              yield { items: page2, nextCursor: cursorAt2(input, point, assumedZone), done: false };
-              emitted += page2.length;
-              page2 = [];
-              unsent = false;
-              if (emitted >= limit || json2.position - origin >= byteBudget)
-                return;
-            }
-          }
-          current2();
-          yield { items: page2, nextCursor: doneCursor3(input), done: true };
-        } finally {
-          reader.close();
-        }
-      }();
-    },
-    async fetchItem() {
-      throw new Error("An imported message is read only while its archive is listed.");
-    },
-    classificationSignals(item) {
-      const title = typeof item.metadata.title === "string" ? item.metadata.title : undefined;
-      const sender = typeof item.metadata.senderLabel === "string" && item.metadata.senderLabel ? item.metadata.senderLabel : undefined;
-      const chatType = typeof item.metadata.chatType === "string" ? item.metadata.chatType : undefined;
-      const conversationKind = chatType ? CHAT_TYPE_KINDS[chatType] : undefined;
-      const conversation = item.identity.providerConversationId;
-      return {
-        ...title ? { title } : {},
-        ...sender ? { sender } : {},
-        ...conversationKind ? { conversationKind } : {},
-        ...conversation ? { folderKeys: [conversation] } : {}
-      };
-    }
-  };
-}
-function registerTelegramArchiveConnector() {
-  registerArchiveFormatConnector("telegram_json", createTelegramArchiveConnector);
-}
-var TELEGRAM_CURSOR_PREFIX = "tg1:", TELEGRAM_DEFAULT_PAGE_SIZE = 200, TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING, TELEGRAM_MAX_MESSAGE_BYTES, TELEGRAM_FINDINGS, MESSAGE_PATHS, ITEM_PATHS, CHAT_TYPE_KINDS, CHAT_TYPE_TITLES, SECTION_ROOTS, LISTED_SECTIONS;
-var init_connector9 = __esm(() => {
-  init_archive_formats();
-  init_byte_source();
-  init_json_stream();
-  init_account();
-  init_message();
-  TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-  TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
-  TELEGRAM_FINDINGS = {
-    tooLarge: "message_too_large",
-    unreadable: "message_unreadable",
-    unsupported: "message_content_unsupported",
-    serviceMessage: "service_message",
-    withoutText: "message_without_text"
-  };
-  MESSAGE_PATHS = [
-    ["chats", "list", "*", "messages"],
-    ["left_chats", "list", "*", "messages"],
-    ["messages"]
-  ];
-  ITEM_PATHS = [...MESSAGE_PATHS, ...ACCOUNT_SECTIONS.map((section) => section.path)];
-  CHAT_TYPE_KINDS = {
-    saved_messages: "direct",
-    replies: "direct",
-    verification_codes: "direct",
-    personal_chat: "direct",
-    bot_chat: "direct",
-    private_group: "group",
-    private_supergroup: "group",
-    public_supergroup: "group",
-    private_channel: "channel",
-    public_channel: "channel"
-  };
-  CHAT_TYPE_TITLES = {
-    saved_messages: "Saved Messages",
-    replies: "Replies",
-    verification_codes: "Telegram verification codes"
-  };
-  SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
-  LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
-});
-
 // src/workers/archive-import/xml-stream.ts
 function decodeXmlEntities2(text4) {
   if (!text4.includes("&"))
@@ -169021,9 +168336,9 @@ var init_enml = __esm(() => {
 });
 
 // src/workers/archive-import/evernote/connector.ts
-import { createHash as createHash87 } from "node:crypto";
-function sha25611(value2) {
-  return createHash87("sha256").update(value2).digest("hex");
+import { createHash as createHash90 } from "node:crypto";
+function sha25612(value2) {
+  return createHash90("sha256").update(value2).digest("hex");
 }
 function enexTime(value2) {
   const match = /^\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\s*$/.exec(value2 ?? "");
@@ -171487,60 +170802,8 @@ var init_extraction_runtime = __esm(() => {
   init_lane();
 });
 
-// src/workers/archive-import/source-input.ts
-function bindInputToFiles(input, manifestSha256) {
-  const prefix = `${manifestSha256}|`;
-  return {
-    inputId: input.inputId,
-    kind: input.kind,
-    records(options) {
-      let inner;
-      if (options?.cursor !== undefined) {
-        if (!options.cursor.startsWith(prefix)) {
-          throw new ArchiveImportStoppedError("resume_point_invalid", "This import's resume point does not belong to its files.");
-        }
-        inner = options.cursor.slice(prefix.length);
-      }
-      const pages = input.records({
-        ...inner !== undefined ? { cursor: inner } : {},
-        ...options?.limit !== undefined ? { limit: options.limit } : {}
-      });
-      return async function* () {
-        for await (const page2 of pages) {
-          yield page2.nextCursor !== undefined ? { ...page2, nextCursor: `${prefix}${page2.nextCursor}` } : page2;
-        }
-      }();
-    }
-  };
-}
-function withInputs(connector, builder) {
-  const withMethod = Object.create(connector);
-  withMethod.forInput = (input) => inputConnector(builder, input);
-  return withMethod;
-}
-function observingIntake(input, observe) {
-  return { inputId: input.inputId, kind: input.kind, records: (options) => input.records(options), observeIntake: observe };
-}
-function holdingItems(connector) {
-  const held = Object.create(connector);
-  held.listItems = (options) => {
-    const pages = connector.listItems(options);
-    return async function* () {
-      for await (const page2 of pages) {
-        yield { ...page2, items: page2.items.map((item) => ({ ...item, holdContentUntilJudged: true })) };
-      }
-    }();
-  };
-  held.fetchItem = async (localItemId, options) => ({ ...await connector.fetchItem(localItemId, options), holdContentUntilJudged: true });
-  return held;
-}
-var init_source_input = __esm(() => {
-  init_archive_formats();
-  init_source_inputs();
-});
-
 // src/workers/archive-import/sync.ts
-import { createHash as createHash88 } from "node:crypto";
+import { createHash as createHash91 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -171566,7 +170829,7 @@ function receiptOf(record5, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash88("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash91("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -172206,7 +171469,7 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash89 } from "node:crypto";
+import { createHash as createHash92 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { existsSync as existsSync88, lstatSync as lstatSync43, readFileSync as readFileSync74, readdirSync as readdirSync23, realpathSync as realpathSync22 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
@@ -172370,7 +171633,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash89("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash92("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -175240,11 +174503,11 @@ var init_export_zone = __esm(() => {
 });
 
 // src/workers/whatsapp/archive-input.ts
-import { createHash as createHash90 } from "node:crypto";
+import { createHash as createHash93 } from "node:crypto";
 import { existsSync as existsSync90 } from "node:fs";
 import { posix as posix7 } from "node:path";
 function hash2(value2) {
-  return createHash90("sha256").update(value2).digest("hex").slice(0, 24);
+  return createHash93("sha256").update(value2).digest("hex").slice(0, 24);
 }
 function encodeCursor4(state, inner) {
   return `${CURSOR_PREFIX}${Buffer.from(JSON.stringify(state)).toString("base64url")}~${inner ?? ""}`;
@@ -175660,7 +174923,7 @@ var init_archive_input = __esm(() => {
   init_archive_formats();
   init_state();
   init_input_media();
-  init_connector6();
+  init_connector7();
   init_grammar();
   init_zip_reader();
   init_match_keys();
@@ -175740,10 +175003,10 @@ function createWhatsAppArchiveTarget(options) {
   };
 }
 var WHATSAPP_LANE_SYNC;
-var init_archive_target = __esm(() => {
+var init_archive_target2 = __esm(() => {
   init_olympus_layout();
   init_source_input();
-  init_connector6();
+  init_connector7();
   init_archive_input();
   init_live_connector();
   init_store_sync2();
@@ -176290,7 +175553,7 @@ var init_gmail_header_match = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash91 } from "node:crypto";
+import { createHash as createHash94 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -176326,7 +175589,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash91("sha256").update(`${accessToken}
+    const key2 = createHash94("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -176384,7 +175647,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash91("sha256").update(session.token).digest("hex");
+    const key2 = createHash94("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -192224,7 +191487,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash92, randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash95, randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -192575,7 +191838,7 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash3 = sha25612(code);
+      const hash3 = sha25613(code);
       const issued = codes.get(hash3);
       if (!issued || issued.expiresAt <= now()) {
         codes.delete(hash3);
@@ -192592,7 +191855,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash92("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash95("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -192858,8 +192121,8 @@ function constantTimeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
-function sha25612(value2) {
-  return createHash92("sha256").update(value2).digest("hex");
+function sha25613(value2) {
+  return createHash95("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -194974,7 +194237,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash93 } from "node:crypto";
+import { createHash as createHash96 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -194991,7 +194254,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash93("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash96("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -195367,7 +194630,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash94 } from "node:crypto";
+import { createHash as createHash97 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -195391,7 +194654,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest4 = createHash94("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest4 = createHash97("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest4.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -196877,7 +196140,7 @@ __export(exports_server2, {
 });
 import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync93 } from "node:fs";
-import { dirname as dirname91, isAbsolute as isAbsolute36, join as join121 } from "node:path";
+import { dirname as dirname92, isAbsolute as isAbsolute36, join as join121 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -201705,8 +200968,7 @@ var init_server5 = __esm(async () => {
   init_source_watch();
   init_source_watch_runtime();
   init_whatsapp();
-  init_archive_target();
-  init_source_targets();
+  init_archive_target2();
   init_input_media();
   init_source_dashboard();
   init_embedding_runtime();

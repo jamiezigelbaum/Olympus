@@ -50628,6 +50628,7 @@ init_source_watch();
 
 // src/workers/whatsapp/archive-target.ts
 init_olympus_layout();
+init_source_input();
 
 // src/workers/whatsapp/archive-input.ts
 init_archive_formats();
