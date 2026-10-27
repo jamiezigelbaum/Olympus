@@ -83,10 +83,10 @@ import { buildPageInventory } from './explore-pages-inventory.ts';
 import { exploreChecks, type ExploreResult } from './explore.ts';
 import { SCREENS, compareScreens, currentApprovalDigest, visualChecks, type VisualResult } from './visual.ts';
 import { SCREEN_THEMES, SCREEN_WIDTHS, screenName } from './visual-capture.ts';
-import { EXTRA_FORMATS, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
+import { BESIDE_LIVE_FORMATS, EXTRA_FORMATS, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, BULK_SIZES, changedChecks, drainBoundS, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks,
-  type ChangedObservation, type ImportObservation, type ModelObservation, type RemoveObservation,
+  ARCHIVE_BOUNDS, BULK_SIZES, besideLiveChecks, changedChecks, drainBoundS, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, seedLiveChecks,
+  type BesideLiveObservation, type ChangedObservation, type ImportObservation, type ModelObservation, type RemoveObservation, type SeedLiveObservation,
 } from './archive-leg.ts';
 
 export interface RunConfigFile {
@@ -1056,11 +1056,34 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
       addAll(importChecks(agent, agentFx, os));
     }
 
+    // 2a. Each source that reads an export as one of its inputs gets its account and a live input first, as pairing or connecting
+    // leaves them, so its format's archive of ANOTHER account below stays under Archives, and its own account's export joins it (2c).
+    const seeded = new Set<string>();
+    for (const format of BESIDE_LIVE_FORMATS) {
+      if (outOfTime(`seeding the ${format} source's live input`)) break;
+      const seed = await call<SeedLiveObservation>('archive-seed-live', `--format ${format}`, 600);
+      addAll(seedLiveChecks(seed, format));
+      if (seed?.ok === true) seeded.add(format);
+    }
+
     // 2b. The same for each other format: a request, the owner's approval, the judge, a search cited with the format's own label.
     for (const extraFx of extraFxs) {
       if (outOfTime(`the ${extraFx.format} archive import`)) break;
       const extra = await call<ImportObservation>('archive-import', `${flags(extraFx)} --via request --drain-s ${drainS} --search`, stepS + drainS);
       addAll(importChecks(extra, extraFx, os));
+    }
+
+    // 2c. Each seeded source's own account's export, beside its live input: it joins the source, is found, and goes with the
+    // source's Delete, which the stage runs last.
+    for (const format of BESIDE_LIVE_FORMATS) {
+      const besideFx = legFixture('beside', seed, format);
+      if (!seeded.has(format)) {
+        run.add({ id: `archive.beside.${format}.ran`, title: `The ${format} export was imported beside its source's live input`, status: 'fail', detail: 'not run: the source\'s live input could not be set up' });
+        continue;
+      }
+      if (outOfTime(`the ${format} import beside its live input`)) break;
+      const beside = await call<BesideLiveObservation>('archive-beside-live', `--format ${format} --seed ${sh(seed)}`, stepS + 600);
+      addAll(besideLiveChecks(beside, besideFx));
     }
 
     // 3. The private model off: the archive stays held Private and nothing leaves the machine.

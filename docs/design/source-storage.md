@@ -259,7 +259,9 @@ ledger, and they converge with the live items rather than sit beside them.
 Storage's part (step 4e):
 
 - **Imports for a live source get no stores of their own.** `archive.imports`
-  stays the source for archive-only formats (Reflect, Roam, Evernote), for mail
+  stays the storage source for archive-only formats (Reflect, Roam, Evernote:
+  each shown as a source of its own on the dashboard since step 7 of
+  archive-live-one-dataset.md, its imports still stored here), for mail
   that matches no Gmail account, and for an archive of another account than the
   connected one. Its `<family>.<tier>` stores, account scopes and per-import
   Remove are unchanged. Archive import never shipped in a release, so nothing
@@ -296,6 +298,11 @@ Storage's part (step 4e):
     import sheet;
   - `different`: not this account; the import stays under `archive.imports` (a
     second slot once slots exist).
+  - An import known by an address alone (an mbox's delivered-to address) is
+    never proof: the export's author wrote it, and an address can change
+    hands. It is `unproven` against an entry that carries the same address
+    or none, so the owner confirms, and `different` against an entry that
+    carries another address (step 6 of the archive design).
 - **Connect and pairing check the entry.** A different account over a history
   that names its account is refused until the owner deletes that history:
   - A file source's account guard reads the entry's account as the binding's

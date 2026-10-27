@@ -15,11 +15,12 @@ import {
   type FixtureRole, type LegFixture,
 } from './archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed,
+  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed,
   shownPath, startViewOf, statusViewOf, stoppedJourney,
-  type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
-  type SearchView, type StatusView, type StoreView,
+  type BesideLiveObservation, type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
+  type SearchView, type SeedLiveObservation, type StatusView, type StoreView,
 } from './archive-leg.ts';
+import type { LiveSeedResult } from './archive-live-seeds.ts';
 import { requestsOutsideMachine } from './egress.ts';
 import type { EgressView } from './inbox.ts';
 import { runJourney, type Journey, type JourneyDriver, type JourneyTrace } from './journey.ts';
@@ -56,6 +57,12 @@ export interface ArchiveHost {
   readStores(archive: { family: string; provider: string }, archiveId: string | undefined, token: string): StoreView[];
   /** `olympus engine restart`, then until the engine is ready (models included). */
   restartEngine(timeoutMs: number): Promise<{ ok: boolean; ms: number; detail?: string }>;
+  /** Runs a source's live seed hook (archive-live-seeds.ts). Only the import beside a live input needs it. */
+  seedLive?(hook: string): Promise<LiveSeedResult>;
+  /** The source's own stores, read for the archive's word, through its hook. */
+  readSourceStores?(hook: string, token: string): StoreView[];
+  /** `olympus data delete --source <id>`: the same custody-checked delete the dashboard's Delete runs. */
+  deleteSourceData?(sourceId: string): CliAnswer;
 }
 
 const SETTLE_POLL_MS = 2_000;
@@ -174,6 +181,77 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
         }
         browserPid = undefined;
       }
+    });
+    obs.ok = true;
+  } catch (error) {
+    obs.detail = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
+  }
+  return obs;
+}
+
+// ---------------------------------------------------------------------------
+// An export imported beside its source's live input
+
+/** The source's account and live input, set up by its hook before anything is imported for it. */
+export async function seedLiveStage(host: ArchiveHost, args: { format: string }): Promise<SeedLiveObservation> {
+  const obs: SeedLiveObservation = { ok: false, format: args.format, liveItems: 0 };
+  try {
+    const beside = formatSpec(args.format).besideLive;
+    if (!beside) throw new Error(`the "${args.format}" fixtures have no import beside a live input`);
+    if (!host.seedLive) throw new Error('this machine cannot run a live seed hook');
+    const seeded = await host.seedLive(beside.seedHook);
+    obs.liveItems = seeded.liveItems;
+    obs.detail = seeded.detail;
+    obs.ok = seeded.ok;
+    host.say(`seed ${args.format}: ${seeded.ok ? 'ok' : 'FAILED'} (${seeded.liveItems} live record(s))`);
+  } catch (error) {
+    obs.detail = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
+  }
+  return obs;
+}
+
+/**
+ * The export of a seeded source's own account, on the agent path: it must join the source (listed in its card, with what it read and
+ * how much was already there, and no Remove), be found by a search, and go with the source's Delete, which ends the stage.
+ */
+export async function besideLiveStage(host: ArchiveHost, args: { format: string; seed: string; settleS?: number; startS?: number; openS?: number }): Promise<BesideLiveObservation> {
+  const fx = legFixture('beside', args.seed, args.format);
+  const obs: BesideLiveObservation = { ok: false, format: fx.format, fileName: fx.fileName, token: fx.token, traces: [], settled: false, settleMs: 0, stores: [] };
+  try {
+    const beside = formatSpec(args.format).besideLive;
+    if (!beside) throw new Error(`the "${args.format}" fixtures have no import beside a live input`);
+    if (!host.readSourceStores || !host.deleteSourceData) throw new Error('this machine cannot read or delete a source\'s stores');
+    const path = writeFixture(host.home, fx);
+    await host.withBrowser(async (session) => {
+      const driver = session.driver;
+      const started = host.cli(['start', '--path', path]);
+      obs.start = startViewOf(started.json, fx.token);
+      host.say(`start: ${obs.start.code || `exit ${started.code}`}`);
+      const journey = besideLiveJourney(fx, shownPath(host.home, path), {
+        ...(args.startS !== undefined ? { startS: args.startS } : {}),
+        ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
+        ...(args.openS !== undefined ? { openS: args.openS } : {}),
+      });
+      const trace = await runJourney(driver, journey);
+      obs.traces.push(trace);
+      const settle = stepMs(trace, 'The import settles');
+      obs.settled = settle.ok;
+      obs.settleMs = settle.ms;
+      host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
+      obs.row = await rowNow(host, driver, fx.fileName, 5_000);
+      obs.stores = host.readSourceStores!(beside.seedHook, fx.token);
+      obs.search = await searchFor(host, { ...fx, expect: { ...fx.expect, citationLabel: fx.beside!.citationLabel } });
+      // The history goes only with the source: its Delete, then nothing of the archive in its stores or on the page.
+      const deleted = host.deleteSourceData!(beside.sourceId);
+      const deleteOk = deleted.code === 0 && (deleted.json === undefined || (deleted.json as { ok?: unknown }).ok !== false);
+      await driver.go('/dashboard');
+      const panel = await until(host, () => readPanel(driver), 15_000, 500);
+      obs.deleted = {
+        ok: deleteOk,
+        ...(deleteOk ? {} : { detail: (deleted.stderr || JSON.stringify(deleted.json ?? null)).slice(0, 200) }),
+        stores: host.readSourceStores!(beside.seedHook, fx.token),
+        rowGone: panel !== undefined && rowNamed(panel, fx.fileName) === undefined,
+      };
     });
     obs.ok = true;
   } catch (error) {
@@ -332,7 +410,8 @@ async function listedArchives(host: ArchiveHost, driver: JourneyDriver, token: s
   if (!status) return { unreadable: 'the agent\'s status of the archives could not be read, so what is left is not known' };
   const panel = await until(host, () => readPanel(driver), waitMs, 500);
   if (!panel) return { unreadable: 'the dashboard could not be read, so what is left is not known' };
-  return { names: [...new Set([...status.archives.map((archive) => archive.name), ...panel.rows.map((row) => row.name)])] };
+  // An import inside a source's card has no Remove: it goes with the source's Delete, not from here.
+  return { names: [...new Set([...status.archives.map((archive) => archive.name), ...panel.rows.filter((row) => !row.sourceImport).map((row) => row.name)])] };
 }
 
 /**

@@ -8,6 +8,7 @@ import { registerWhatsAppArchiveConnector } from './whatsapp/connector.ts';
 import { registerReflectArchiveConnectors } from './reflect/connector.ts';
 import { registerRoamArchiveConnector } from './roam/connector.ts';
 import { registerTelegramArchiveConnector } from './telegram/connector.ts';
+import { registerEvernoteArchiveConnector } from './evernote/connector.ts';
 
 export function registerArchiveFormatConnectors(): void {
   registerMboxArchiveConnector();
@@ -15,4 +16,5 @@ export function registerArchiveFormatConnectors(): void {
   registerReflectArchiveConnectors();
   registerRoamArchiveConnector();
   registerTelegramArchiveConnector();
+  registerEvernoteArchiveConnector();
 }
