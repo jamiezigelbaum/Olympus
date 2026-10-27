@@ -412,13 +412,18 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         return { status: 200, body: { ok: true, status: marked ? 'read' : 'kept' } };
       }
       if (action === 'delete' || action === 'delete_all') {
+        // Success only for what was removed: a store that cannot be opened, or an answer it does not hold, is
+        // said as such, so the page never shows a deletion that did not happen.
+        const answers = store();
+        if (!answers) return refused(503, 'unavailable', W.deleteUnavailable);
         try {
-          const removed = action === 'delete_all' ? store()?.dismissAll() ?? 0 : typeof body.id === 'string' && store()?.dismiss(body.id) ? 1 : 0;
+          const removed = action === 'delete_all' ? answers.dismissAll() : typeof body.id === 'string' && answers.dismiss(body.id) ? 1 : 0;
           // Tokens minted from an answer that was deleted cannot outlive its row.
           if (action === 'delete_all') opens.clear();
           else for (const [id, entry] of opens) if (entry.ref?.id === body.id) opens.delete(id);
+          if (action === 'delete' && removed === 0) return refused(410, 'not_found', W.deleteNotFound);
           return { status: 200, body: { ok: true, status: 'deleted', removed } };
-        } catch { return refused(503, 'unavailable', 'Private answers cannot be changed right now.'); }
+        } catch { return refused(503, 'unavailable', W.deleteUnavailable); }
       }
       if (action === 'open') {
         sweep();

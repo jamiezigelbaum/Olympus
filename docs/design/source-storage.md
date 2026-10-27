@@ -957,9 +957,13 @@ No re-embed and no rescan: stores, cursors (`sync_runs.cursor`), tiers,
 embeddings and watch snapshots move as files. Embedding changes stay
 owner-gated and this plan makes none.
 
-The pass is behind `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker's
-environment. With it off, no move starts and the registry and every file are
-byte-identical to 4b's.
+The pass runs at every worker boot by default (since 2026-10-26, owner
+direction 2026-10-25). `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0` in the worker's
+environment turns it off, and so does any value but unset, empty, `1`, `true`,
+`on` and `yes` (the switch exists to stop moves, so a typo stops them): no move
+starts, the boot says so in one `[storage]` line, and the registry and every
+file are byte-identical to 4b's. A move already under way is finished or
+undone either way.
 
 ## What must not break
 
@@ -1083,9 +1087,9 @@ touch the store path (`eval/`).
      until 4d. No existing file moves; the Go bridge's own session lock moves
      to 4d.
    - **4c, the boot migration of existing non-messaging accounts (done,
-     #508)**, behind
-     `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker environment (off by
-     default), with the tests in "What must not break". Built on two changes
+     #508)**, behind `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` until 2026-10-26 and
+     on by default since (`=0` turns it off), with the tests in "What must not
+     break". Built on two changes
      that came first, so that moving a store is only renaming files: media-cache
      holds name a store by its identity (not its path), and a tiered set's
      stores find their ledger by the ledger's id. Built: the pass in "Migration
@@ -1099,8 +1103,9 @@ touch the store path (`eval/`).
      a destination, a media-cache sweep at every step, Delete mid-move and the
      unreadable registry, on isolated homes, plus a real worker booted on a
      legacy home with the switch off and on (and, on Linux, through a real
-     install receipt). Retirement: default
-     on, then delete the switch, once release testing records, on Mac
+     install receipt). Retirement: default on (done 2026-10-26, at the owner's
+     direction of 2026-10-25, with the end-to-end proof below), then delete
+     the switch, once release testing records, on Mac
      OpenClaw-hosted, Mac engine and standalone Linux with both receipt
      roots: every source migrated with real data; paired WhatsApp and
      Telegram on Mac and Linux; one store over 1 GB migrated within the
@@ -1211,6 +1216,28 @@ Done when: no `src/` module outside the layout module builds a data path;
 no store is opened outside the storage service; `data-lifecycle.ts` names no
 source; deleting a source removes exactly its folder plus its shared rows,
 proven on Mac, standalone Linux and OpenClaw-hosted.
+
+**End-to-end proof, standalone Linux (2026-10-26).**
+`test/source-storage-end-to-end.test.ts` runs the real worker on isolated homes
+with the boot migration on by default. (a) A fresh install: the worker boots,
+status answers, every folder-layout source's stores resolve inside
+`sources/<source_id>/1/`, nothing is made at any legacy place, and every
+registry entry is `folder`. (b) An install a pre-folder build left (stores
+with content for Gmail, Drive, Dropbox, local files, Readwise, X and an
+imported archive family; local files' watch snapshots; X's reconcile state;
+the archive record; Telegram's stores, login, gateway state, spool and drain
+cursor; WhatsApp's stores and bridge state with session, spool and media; and
+rows of both a deleted and a kept source in every shared file): the first boot
+moves all nine accounts into their folders before the worker listens; the
+status route answers and a search reads Gmail's moved store; no file is left
+at a legacy place; the seven content stores' item counts match; and every raw
+file seeded (Telegram's login, gateway state, spool and cursor, WhatsApp's
+session, spool and media, X's reconcile state, the watch snapshot, the archive
+record) is at its place in the folder. A Delete of Dropbox then removes its folder and its rows in
+every shared file, and leaves every other folder's files in place and the
+other source's rows as they were; the next worker's boot reopens nothing of the deleted account (a
+lane it mounts again starts a new, empty store). Run on
+this host (Sparta, Linux, Bun 1.3.14).
 
 **Status (2026-10-26): built.** The first three hold mechanically
 (`test/data-path-guard.test.ts`, `test/store-open-guard.test.ts`,
