@@ -160,8 +160,16 @@ describe('v0.4 positive public surface', () => {
   });
 
   test('dashboard and connection rosters are exactly the seven declared sources', () => {
-    expect(DASHBOARD_SUPPORTED_SOURCES.map((source) => source.source_id))
+    // Every card that is a source of its own is a declared public source, exactly. A card that is a view of
+    // one (an import-only source's card: Reflect, Roam, Evernote, whose imports the Archives source holds)
+    // names that public source, and is no source of its own.
+    expect(DASHBOARD_SUPPORTED_SOURCES.filter((source) => source.public_source_id === undefined).map((source) => source.source_id))
       .toEqual([...V0_4_PUBLIC_SOURCE_IDS]);
+    for (const view of DASHBOARD_SUPPORTED_SOURCES.filter((source) => source.public_source_id !== undefined)) {
+      expect(V0_4_PUBLIC_SOURCE_IDS as readonly string[]).toContain(view.public_source_id!);
+      expect(V0_4_PUBLIC_SOURCE_IDS as readonly string[]).not.toContain(view.source_id);
+      expect(view.corpus_source_ids).toEqual([]);
+    }
     expect(V0_4_PUBLIC_CONNECT_SOURCES).not.toContain('gcp');
     expect(V0_4_PUBLIC_CONNECT_SOURCES).not.toContain('notion');
     expect(V0_4_PUBLIC_CONNECT_SOURCES).not.toContain('x');

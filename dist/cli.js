@@ -278,6 +278,11 @@ function readsJsonExport(entry, format) {
   }
   return notesJsonFormat(entry) === format;
 }
+function looksLikeEnex(head) {
+  const text = archiveHeadText(head).replace(/^\ufeff/, "");
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text);
+  return start !== null && (start[1] ?? start[2]) === "en-export";
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
@@ -286,6 +291,21 @@ function isTelegramJsonHead(head) {
 }
 function getArchiveFormat(formatId) {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
+}
+function archiveSourceCards(formats = ARCHIVE_FORMATS) {
+  const cards = new Map;
+  for (const format of formats) {
+    if (!format.sourceCard)
+      continue;
+    const card = cards.get(format.sourceCard.id) ?? { id: format.sourceCard.id, label: format.sourceCard.label, formats: [] };
+    card.formats.push(format);
+    cards.set(card.id, card);
+  }
+  return [...cards.values()];
+}
+function archiveSourceCardOf(formatId, formats = ARCHIVE_FORMATS) {
+  const card = formats.find((format) => format.id === formatId)?.sourceCard;
+  return card ? archiveSourceCards(formats).find((entry) => entry.id === card.id) : undefined;
 }
 function archiveFormatForProvider(provider, formats = ARCHIVE_FORMATS) {
   return formats.find((format) => format.provider === provider);
@@ -426,7 +446,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -487,6 +507,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
@@ -497,6 +518,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export as Markdown (the .zip file)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*, *, ????.md"]),
     detect: (probe) => detectFile(probe, (entry) => {
       if (!entry.members || /^roam/i.test(entry.name))
@@ -517,8 +539,25 @@ var init_archive_formats = __esm(() => {
     provider: "roam",
     chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
     citationLabel: "Roam",
+    sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
+    id: "evernote-enex",
+    label: "Evernote export (.enex)",
+    family: "note",
+    provider: "evernote",
+    chooseHint: "an Evernote export (the .enex file, or a folder of them)",
+    citationLabel: "Evernote",
+    sourceCard: Object.freeze({ id: "evernote.archive", label: "Evernote" }),
+    probeNames: Object.freeze(["*.enex"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
+      const files = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && looksLikeEnex(entry.head)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      return files.length > 0 ? files : undefined;
+    }
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
@@ -568,7 +607,8 @@ var init_archive_formats = __esm(() => {
     REFLECT_JSON_ARCHIVE_FORMAT,
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
-    TELEGRAM_JSON_ARCHIVE_FORMAT
+    TELEGRAM_JSON_ARCHIVE_FORMAT,
+    EVERNOTE_ENEX_ARCHIVE_FORMAT
   ]);
   ARCHIVE_COMMON_FINDINGS = {
     mediaNotImported: "media_not_imported",
@@ -9432,7 +9472,8 @@ var init_credential_broker = __esm(() => {
     "whatsapp_business",
     "apple_messages",
     "reflect",
-    "roam"
+    "roam",
+    "evernote"
   ];
   CREDENTIAL_PROVIDERS = [
     ...PUBLIC_CREDENTIAL_PROVIDERS,
@@ -9799,6 +9840,25 @@ var init_credential_broker = __esm(() => {
         backendState: {
           kind: "archive_path",
           archiveRootAlias: "roam_archive",
+          readerWorker: "archive_import_reader",
+          contentBounds: "approved_archive_root",
+          backendLabel: "local_private:archive_import"
+        }
+      },
+      {
+        handle: "evernote.archive",
+        provider: "evernote",
+        sessionKind: "archive_path",
+        accountRole: "archive",
+        trustDomain: "internal",
+        allowedCapabilities: ["evernote.archive.import"],
+        scopes: [],
+        tokenEnvNames: [],
+        statusEnvNames: ["OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY"],
+        expiresInSeconds: 3600,
+        backendState: {
+          kind: "archive_path",
+          archiveRootAlias: "evernote_archive",
           readerWorker: "archive_import_reader",
           contentBounds: "approved_archive_root",
           backendLabel: "local_private:archive_import"
@@ -16994,6 +17054,9 @@ function determineBranch(decodeTree, current2, nodeIndex, char) {
     }
   }
   return -1;
+}
+function decodeHTML(htmlString, mode = DecodingMode.Legacy) {
+  return htmlDecoder(htmlString, mode);
 }
 function decodeHTMLStrict(htmlString) {
   return htmlDecoder(htmlString, DecodingMode.Strict);
@@ -26945,6 +27008,16 @@ var init_secrets_disposition = __esm(() => {
   init_sniffer_store();
   init_job_names();
 });
+
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key2) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key2 || key2.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key2}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/workers/connector-store/child-visibility.ts
 function parentIdentityOf(child) {
@@ -51383,13 +51456,13 @@ function dashboardSubLine(source, options) {
     case "Failing":
       return dashboardAttentionLine(source, options);
     case "Working":
-      return workingLine(source);
+      return source.connection.action.kind === "archive_import" && source.coverage.indexed_items === 0 && source.connection.label ? source.connection.label : workingLine(source);
     case "Waiting":
       return waitingLine(source);
     case "Fresh":
       return freshLine(source, options?.now ?? new Date);
     case "Off":
-      return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && !dashboardUnsettledWithData(source) ? DASHBOARD_DISCONNECTED_DATA_KEPT : source.connection.label;
+      return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && source.connection.action.kind !== "archive_import" && !dashboardUnsettledWithData(source) ? DASHBOARD_DISCONNECTED_DATA_KEPT : source.connection.label;
   }
 }
 function dashboardIsUnconnectedState(source) {
@@ -52106,6 +52179,7 @@ var init_vocabulary = __esm(() => {
     sourcesCloud: "Accounts",
     notConnected: "Not connected",
     noSources: "No sources yet.",
+    otherArchives: { title: "Other archives", line: "For an export that isn't from one of your sources above." },
     progress: "Progress",
     progressInitial: "First index",
     progressRefresh: "Catching up",
@@ -52273,11 +52347,12 @@ var init_vocabulary = __esm(() => {
     other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
   };
   DASHBOARD_ARCHIVE_COPY = {
-    importAction: "Import an archive",
+    importAction: "Import another archive",
+    sourceImport: { action: "Import an archive", title: "Import an archive into {source}" },
     pick: {
       back: "Back to Olympus",
-      title: "Import an archive",
-      intro: ARCHIVE_PICK_INTRO,
+      title: "Import another archive",
+      intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
       source: "This computer",
       makePrivate: "Import",
       makePrivateFor: "Import {name}",
@@ -52338,11 +52413,11 @@ var init_vocabulary = __esm(() => {
     thisFile: "A file of this archive",
     account: {
       line: "{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?",
-      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.",
+      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Other archives, it stays apart, with its own Remove.",
       add: "Add to {source}",
-      apart: "Keep it under Archives",
+      apart: "Keep it under Other archives",
       addFor: "Add {name} to {source}",
-      apartFor: "Keep {name} under Archives",
+      apartFor: "Keep {name} under Other archives",
       sourceFallback: "this source",
       reconfirm: {
         line: "{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?",
@@ -52485,7 +52560,8 @@ var init_vocabulary = __esm(() => {
     },
     tryAgain: "Try again",
     dismiss: "Dismiss",
-    started: "Importing {name}. It shows under Archives as it is read.",
+    started: "Importing {name}. It shows under Other archives as it is read.",
+    startedIn: "Importing {name} into {source}. It shows in {source} as it is read.",
     checking: "Checking whether {name} is already imported…",
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
@@ -52519,7 +52595,7 @@ var init_vocabulary = __esm(() => {
         permission: "Your user account is not allowed to open {file}.",
         other: "Olympus could not open {file}."
       },
-      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, no archive can be imported, so nothing overwrites it.",
       fix: {
         damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
         unknown_form: "Update Olympus, then open this page again.",
@@ -76646,7 +76722,7 @@ function buildSourceDashboardViewModel(options) {
     for (const corpus of corpora)
       claimedCorpusIds.add(corpus.corpus_id);
     const captureRuntime = options.captureRuntime?.[definition.source_id];
-    const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false, options.importedArchives, captureRuntime?.paired_at);
+    const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false, definition.source_id === ARCHIVE_IMPORTS_CARD_ID ? options.importedArchives : options.importedArchivesByCard?.[definition.source_id], captureRuntime?.paired_at);
     const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
     const manualSync = dashboardLiveManualSync(options.manualSyncs?.[definition.source_id], built.last_sync_at, now);
     const unreadableFiles = unreadableFilesFor(built, corpora, options.unreadableFileNames);
@@ -76891,7 +76967,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     provider: definition.provider,
     family: definition.family,
     trust_domain: trustDomain,
-    capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id),
+    capabilities: renderPublicSourceCapabilityForDashboard(definition.public_source_id ?? definition.source_id),
     ...fileSourceScopeStatus !== undefined ? {
       scope_selection: {
         required: true,
@@ -76962,7 +77038,7 @@ function dashboardSourceSetupStatus(card) {
     return {
       stage: pairing ? "credential_or_pairing" : dependenciesReady ? "credential_or_pairing" : "dependency_check",
       condition: "blocked",
-      next_action: pairing ? action.kind === "guided_session" ? action.instructions.join(" ") : `Finish pairing ${card.label}.` : action.kind === "needs_setup" ? `Open Set up for ${card.label}, register the provider app, then start authorization.` : action.kind === "archive_import" ? "Import an archive from this page: choose a mail export on this computer." : `Connect one ${card.label} account from this page.`,
+      next_action: pairing ? action.kind === "guided_session" ? action.instructions.join(" ") : `Finish pairing ${card.label}.` : action.kind === "needs_setup" ? `Open Set up for ${card.label}, register the provider app, then start authorization.` : action.kind === "archive_import" ? `${action.label} from this page: choose an export on this computer.` : `Connect one ${card.label} account from this page.`,
       dependencies
     };
   }
@@ -77566,8 +77642,9 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       return { kind: "none" };
     return { kind: "this_computer", source: definition.connect_action.source, label: "Connect" };
   }
-  if (definition.connect_action.kind === "archive_import")
-    return { kind: "archive_import", label: "Import an archive" };
+  if (definition.connect_action.kind === "archive_import") {
+    return { kind: "archive_import", label: definition.source_id === ARCHIVE_IMPORTS_CARD_ID ? "Import another archive" : "Import an archive" };
+  }
   if (definition.connect_action.kind === "api_key") {
     if (connected && !reauthRequired && !providerRefusing)
       return { kind: "none" };
@@ -78474,7 +78551,7 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -78747,7 +78824,21 @@ var init_source_dashboard = __esm(() => {
       connect_kind: "api_token",
       content_arrives_extracted: true,
       connect_action: { kind: "api_key", source: "readwise" }
-    }
+    },
+    ...archiveSourceCards().map((card) => ({
+      source_id: card.id,
+      primary_corpus_id: card.id,
+      corpus_source_ids: [],
+      owns_corpus: () => false,
+      ingestion_ledger_source_id: card.id,
+      public_source_id: ARCHIVE_IMPORTS_CARD_ID,
+      label: card.label,
+      provider: card.formats[0].provider,
+      family: card.formats[0].family,
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    }))
   ];
   VENICE_ANSWER_LANE = {
     source_id: "venice.api",
@@ -138984,7 +139075,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (privacy && privacy.handles(fix)) {
       action = () => openPrivacy(key2);
     } else if (fix.archiveImport === true && picker) {
-      action = () => startArchivePick(key2);
+      action = () => {
+        const fromMenu = key2.indexOf("menu:") === 0;
+        if (fromMenu && source)
+          state.open["menu:" + source.id] = false;
+        startArchivePick(fromMenu ? "summary:" + key2.slice(0, key2.lastIndexOf(":")) : key2, typeof fix.archiveSource === "string" ? fix.archiveSource : "");
+      };
     } else if (typeof fix.archiveFocus === "string" && fix.archiveFocus) {
       action = () => focusArchive(String(fix.archiveFocus));
     } else if (fix.archiveModels === true) {
@@ -139196,7 +139292,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const label = typeof source.label === "string" ? source.label : "";
     return !!label && typeof item.sentence === "string" && item.sentence.indexOf(label + " — ") === 0;
   }
-  function sourceRow(source) {
+  function sourceRow(source, other) {
     const id = String(source.id || source.label);
     const status = String(source.status || "");
     const archives = archivesMeta(id);
@@ -139206,7 +139302,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const main = el("div", "source-main");
     const dot2 = el("span", "dot tone-" + tone);
     dot2.setAttribute("aria-hidden", "true");
-    const head = add(el("p", "source-head"), dot2, el("span", "source-name", String(source.label || "")));
+    const head = add(el("p", "source-head"), dot2, other ? add(el("span", "source-name source-for", P.otherArchives.line), el("span", "sr", " — " + String(source.label || ""))) : el("span", "source-name", String(source.label || "")));
     const off = status === "Off" && !item;
     if (!off)
       add(head, el("span", "sr", " — " + (item ? P.needsYou : status)));
@@ -139254,16 +139350,31 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(row, main);
     const controls = el("div", "source-actions");
     const context2 = { id, label: String(source.label || id) };
-    const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary);
+    const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary, id);
     const isSync = (entry) => !!entry && entry.tool === config2.syncTool;
     if (fix && !(checking && isSync(fix)))
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context2));
     if (checking)
       add(controls, checkingControl("primary:" + id));
-    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry, id)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    if (other) {
+      const importing = (entry) => !!entry && (entry.archiveImport === true || entry.label === H.copy.archives.importAction);
+      const shown2 = menu.filter(importing)[0];
+      if (shown2 && !importing(fix))
+        add(controls, fixControl(shown2, "import:" + id, "plain", true, context2));
+      for (let at = menu.length - 1;at >= 0; at -= 1)
+        if (importing(menu[at]))
+          menu.splice(at, 1);
+    }
     const unpair = unpairEntry(id);
     if (unpair)
       menu.push(unpair);
+    const own3 = archiveSourceMeta(id);
+    const ownImport = (entry) => !!entry && entry.archiveImport === true && entry.archiveSource === (own3 && own3.sourceId);
+    if (own3 && !ownImport(fix) && !menu.some(ownImport)) {
+      const destructive = menu.findIndex((entry) => !!entry && entry.destructive === true);
+      menu.splice(destructive < 0 ? menu.length : destructive, 0, { label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own3.sourceId });
+    }
     let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "⋯");
@@ -139289,21 +139400,28 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     return row;
   }
-  function archivesMeta(id) {
+  function archiveGroups() {
     const meta2 = state.computerMeta;
-    if (!onComputer() || !meta2 || !meta2.archives || typeof meta2.archives !== "object")
-      return null;
-    const archives = meta2.archives;
-    return archives.sourceId === id && Array.isArray(archives.archives) && Array.isArray(archives.requests) ? archives : null;
+    if (!onComputer() || !meta2)
+      return [];
+    const groups = [meta2.archives].concat(Array.isArray(meta2.archiveCards) ? meta2.archiveCards : []);
+    return groups.filter((group) => !!group && typeof group === "object" && typeof group.sourceId === "string" && Array.isArray(group.archives) && Array.isArray(group.requests));
   }
-  function archiveFix(archives, fix) {
-    return archives && fix && fix.openHref === true && fix.label === H.copy.archives.importAction ? { label: fix.label, archiveImport: true } : fix;
+  function archivesMeta(id) {
+    return archiveGroups().filter((group) => group.sourceId === id)[0] || null;
+  }
+  function archiveFix(archives, fix, id) {
+    if (!fix || fix.openHref !== true)
+      return fix;
+    if (archives && archives === state.computerMeta.archives && fix.label === H.copy.archives.importAction)
+      return { label: fix.label, archiveImport: true };
+    const own3 = archiveSourceMeta(id);
+    return own3 && fix.label === H.copy.archives.sourceImport.action ? { label: fix.label, archiveImport: true, archiveSource: own3.sourceId } : fix;
   }
   function archiveNeedFix(item) {
     const fix = item && item.fix;
-    const meta2 = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
     const id = item && typeof item.id === "string" ? item.id : "";
-    if (!fix || typeof fix.label !== "string" || !meta2 || typeof meta2 !== "object")
+    if (!fix || typeof fix.label !== "string" || archiveGroups().length === 0)
       return fix;
     if (id === "archives:held")
       return { label: fix.label, archiveModels: true };
@@ -139384,16 +139502,22 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
     if (joined.some((group) => !!group && !archiveSetting(group) && Array.isArray(group.imports) && group.imports.some((entry) => !!entry && entry.status === "importing")))
       return true;
-    const meta2 = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
-    if (!meta2 || typeof meta2 !== "object")
-      return false;
-    return !archiveSetting(meta2) && Array.isArray(meta2.archives) && meta2.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || Array.isArray(meta2.requests) && meta2.requests.some((entry) => !!entry && entry.status === "checking");
+    return archiveGroups().some((meta2) => !archiveSetting(meta2) && meta2.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta2.requests.some((entry) => !!entry && entry.status === "checking"));
   }
-  function startArchivePick(key2) {
+  function startArchivePick(key2, sourceId) {
     supersede();
     state.notice = "";
     state.confirming = "";
-    picker.pickArchive({ ...H.copy.archives.pick, account: H.copy.archives.account }, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2));
+    const A = H.copy.archives;
+    const own3 = sourceId ? archiveSourceMeta(sourceId) : null;
+    const words2 = own3 ? { ...A.pick, title: fill2(A.sourceImport.title, { source: String(own3.label) }), intro: String(own3.intro), account: A.account } : { ...A.pick, account: A.account };
+    picker.pickArchive(words2, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2), own3 ? String(own3.sourceId) : "");
+  }
+  function archiveSourceMeta(id) {
+    const meta2 = state.computerMeta;
+    if (!onComputer() || !meta2 || !Array.isArray(meta2.archiveSources))
+      return null;
+    return meta2.archiveSources.filter((entry) => !!entry && entry.sourceId === id && typeof entry.label === "string" && !!entry.label && typeof entry.intro === "string" && !!entry.intro)[0] || null;
   }
   function archiveOutcome(outcome) {
     const A = H.copy.archives;
@@ -139405,7 +139529,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return fill2(A.checking, { name });
     if (outcome.status === "already_imported")
       return archive ? fill2(A.already, { name, archive }) : fill2(A.alreadyUnnamed, { name });
-    return outcome.status === "started" ? fill2(A.started, { name }) : "";
+    const source = outcome.source && typeof outcome.source.label === "string" ? outcome.source.label : "";
+    if (outcome.status === "started")
+      return source ? fill2(A.startedIn, { name, source }) : fill2(A.started, { name });
+    return "";
   }
   function archiveNotice(name, args, result) {
     const A = H.copy.archives;
@@ -139413,7 +139540,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (name === H.archiveRemoveTool) {
       const asked = args && args.request_id && meta2 && Array.isArray(meta2.requests) ? meta2.requests.filter((entry) => entry && entry.id === args.request_id)[0] : null;
       const target = asked ? asked.archiveId : args && args.archive_id;
-      const removed = meta2 && Array.isArray(meta2.archives) ? meta2.archives.filter((entry) => entry && entry.id === target)[0] : null;
+      const removed = archiveGroups().flatMap((group) => group.archives).filter((entry) => entry && entry.id === target)[0] || null;
       return removed && typeof removed.name === "string" ? fill2(A.removing, { name: removed.name }) : "";
     }
     if (name === H.archiveStopTool) {
@@ -140041,6 +140168,15 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function capitalise(text2) {
     return text2 ? text2.charAt(0).toUpperCase() + text2.slice(1) : text2;
   }
+  function isArchivesCard(source) {
+    return !!source && String(source.id) === config2.archivesSourceId;
+  }
+  function otherArchivesSection(source) {
+    if (!source)
+      return null;
+    const section = add(el("section", "section other-archives"), el("h2", "", P.otherArchives.title));
+    return add(section, add(el("ul", "rows"), sourceRow(source, true)));
+  }
   function sourcesSection(sources) {
     const section = add(el("section", "section"), el("h2", "", P.sources));
     if (!sources.length)
@@ -140377,7 +140513,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(page2, staleLine());
     const listed = Array.isArray(data2.sources) ? data2.sources : [];
     add(page2, needsYouSection((Array.isArray(data2.needsYou) ? data2.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
-    add(page2, sourcesSection(Array.isArray(data2.sources) ? data2.sources : []));
+    const allSources = Array.isArray(data2.sources) ? data2.sources : [];
+    add(page2, sourcesSection(allSources.filter((source) => !isArchivesCard(source))));
+    add(page2, otherArchivesSection(allSources.filter(isArchivesCard)[0]));
     add(page2, privacySection(data2));
     const sourceList = Array.isArray(data2.sources) ? data2.sources : [];
     add(page2, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data2.progress, true));
@@ -141208,12 +141346,12 @@ function chatgptPickerProgram(kit) {
       kit.fullscreen();
     openScope(sourceId, sourceLabel4, words2.title, "", "", undefined, { words: words2, taken: taken.slice(), done });
   }
-  function pickArchive(words2, done) {
+  function pickArchive(words2, done, sourceId) {
     stopTimer();
     session++;
     if (kit.compact())
       kit.fullscreen();
-    openScope("", words2.source, words2.title, "", "", undefined, { words: words2, taken: [], done: () => done(null), archive: { done } });
+    openScope("", words2.source, words2.title, "", "", undefined, { words: words2, taken: [], done: () => done(null), archive: { done, sourceId: sourceId || "" } });
   }
   function archiveMode() {
     return !!p && !!p.pick && !!p.pick.archive;
@@ -141242,7 +141380,8 @@ function chatgptPickerProgram(kit) {
       p.saveAccess = access && typeof access.message === "string" && access.message ? access : null;
       kit.render("picker:archive-error");
     };
-    kit.call(T.archiveApprove, answer ? { key: key2, ...answer } : { key: key2 }).then((result) => {
+    const only = p.pick.archive.sourceId ? { source_id: p.pick.archive.sourceId } : {};
+    kit.call(T.archiveApprove, answer ? { key: key2, ...only, ...answer } : { key: key2, ...only }).then((result) => {
       if (mine !== session || !p)
         return;
       const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
@@ -141263,6 +141402,8 @@ function chatgptPickerProgram(kit) {
       const picked = { name: typeof content.name === "string" && content.name ? content.name : name, status };
       if (typeof content.archive_name === "string" && content.archive_name)
         picked.archiveName = content.archive_name;
+      if (status === "started" && content.source && typeof content.source.label === "string" && content.source.label)
+        picked.source = { label: content.source.label };
       stopTimer();
       p = null;
       session++;
@@ -143274,6 +143415,7 @@ function chatgptDashboardPageHtml(options = {}) {
     syncTool: SYNC_SOURCE_TOOL_NAME,
     deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
+    archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
@@ -143339,7 +143481,7 @@ function privacyProgramSource() {
 function scriptJson(value2) {
   return JSON.stringify(value2).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_DASHBOARD_LANDED_MS = 4000;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_ARCHIVES_SOURCE_ID = "archive.imports", CHATGPT_DASHBOARD_LANDED_MS = 4000;
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
@@ -143455,6 +143597,7 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .source-main{min-width:0}
 .source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .source-name{font-weight:600}
+.source-head .source-for{flex:1 1 0;min-width:0;font-weight:400}
 .status{color:var(--muted);font-size:0.875rem}
 .source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
@@ -143629,7 +143772,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
 });
@@ -148827,7 +148970,11 @@ function createEmailSourceWorker(options = {}) {
                 throw new EmailSourceWorkerError(400, "invalid_request", "Give either confirm_account or keep_apart.");
               }
               const answer = { ...confirmAccount ? { confirmAccount: true } : {}, ...keepApart ? { keepApart: true } : {} };
-              return json(await archiveImports.approve(key2 !== undefined ? { key: key2, ...answer } : { requestId, ...answer }));
+              const sourceId = asOptionalString(record5.source_id);
+              if (sourceId !== undefined && key2 === undefined) {
+                throw new EmailSourceWorkerError(400, "invalid_request", "source_id goes with a chosen key.");
+              }
+              return json(await archiveImports.approve(key2 !== undefined ? { key: key2, ...sourceId !== undefined ? { sourceId } : {}, ...answer } : { requestId, ...answer }));
             });
           }
           if (url.pathname === "/dashboard/archive-import/stop") {
@@ -150657,10 +150804,16 @@ function sourceWatchNotSupported() {
 function dashboardImportedArchives(archiveImports) {
   if (!archiveImports)
     return {};
+  let importedArchives;
   try {
-    return { importedArchives: archiveImports.present() };
+    importedArchives = archiveImports.present();
   } catch {
-    return { importedArchives: { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: "other" }] } };
+    importedArchives = { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: "other" }] };
+  }
+  try {
+    return { importedArchives, importedArchivesByCard: archiveImports.presentCards() };
+  } catch {
+    return { importedArchives };
   }
 }
 function asOptionalString(value2) {
@@ -164956,6 +165109,1028 @@ var init_connector9 = __esm(() => {
   LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
 });
 
+// src/workers/archive-import/xml-stream.ts
+function decodeXmlEntities2(text4) {
+  if (!text4.includes("&"))
+    return text4;
+  return text4.replace(/&(#x[0-9a-fA-F]{1,6}|#[0-9]{1,7}|[A-Za-z][A-Za-z0-9._-]*);/g, (whole, ref) => {
+    if (ref.startsWith("#")) {
+      const code = ref[1] === "x" ? Number.parseInt(ref.slice(2), 16) : Number.parseInt(ref.slice(1), 10);
+      return Number.isInteger(code) && code > 0 && code <= 1114111 && !(code >= 55296 && code <= 57343) ? String.fromCodePoint(code) : whole;
+    }
+    return PREDEFINED[ref] ?? whole;
+  });
+}
+function parseXmlTag(inner) {
+  let text4 = inner;
+  const empty = text4.endsWith("/");
+  if (empty)
+    text4 = text4.slice(0, -1);
+  const nameMatch = /^[^\s/>]+/.exec(text4);
+  if (!nameMatch || !NAME.test(nameMatch[0]))
+    return;
+  const attributes = {};
+  let at = nameMatch[0].length;
+  ATTRIBUTE.lastIndex = at;
+  for (;; ) {
+    if (/^\s*$/.test(text4.slice(at)))
+      break;
+    ATTRIBUTE.lastIndex = at;
+    const match = ATTRIBUTE.exec(text4);
+    if (!match)
+      return;
+    attributes[match[1]] = decodeXmlEntities2(match[2] ?? match[3] ?? "");
+    at = ATTRIBUTE.lastIndex;
+  }
+  return { name: nameMatch[0], attributes, empty };
+}
+
+class XmlStreamReader {
+  source;
+  recordPaths;
+  rangeNames;
+  maxRecordBytes;
+  decoder = new TextDecoder("utf-8");
+  chunk = new Uint8Array(0);
+  chunkStart = 0;
+  index = 0;
+  ended = false;
+  stack;
+  mode = "text";
+  markup = [];
+  markupStart = 0;
+  doctypeDepth = 0;
+  doctypeQuote = 0;
+  markupQuote = 0;
+  recordDepth = -1;
+  recordPath = [];
+  recordStart = 0;
+  recordBytes = 0;
+  discarding = false;
+  building = [];
+  cdataHeld = [];
+  rootSeenName;
+  constructor(source, options) {
+    this.source = source;
+    this.recordPaths = options.recordPaths;
+    this.rangeNames = new Set(options.rangeElements ?? []);
+    this.maxRecordBytes = Math.max(1, options.maxRecordBytes);
+    this.stack = [...options.open ?? []];
+    if (this.stack.length > 0)
+      this.rootSeenName = this.stack[0];
+    this.chunkStart = source.position;
+  }
+  get rootName() {
+    return this.rootSeenName;
+  }
+  get open() {
+    return this.stack;
+  }
+  get offset() {
+    return this.chunkStart + this.index;
+  }
+  fail(code, message2, offset = this.offset) {
+    throw new XmlStreamError(code, message2, offset);
+  }
+  fill() {
+    if (this.index < this.chunk.length)
+      return true;
+    if (this.ended)
+      return false;
+    for (;; ) {
+      const position = this.source.position;
+      const next = this.source.next();
+      if (next === undefined) {
+        this.ended = true;
+        return false;
+      }
+      if (next.length === 0)
+        continue;
+      this.chunkStart = position;
+      this.chunk = next;
+      this.index = 0;
+      return true;
+    }
+  }
+  inRecord() {
+    return this.recordDepth >= 0;
+  }
+  keeping() {
+    return this.inRecord() && !this.discarding;
+  }
+  count(bytes) {
+    if (!this.keeping())
+      return;
+    this.recordBytes += bytes;
+    if (this.recordBytes > this.maxRecordBytes) {
+      this.discarding = true;
+      this.building = [];
+    }
+  }
+  top() {
+    return this.building[this.building.length - 1];
+  }
+  flushText() {
+    const open6 = this.top();
+    if (!open6 || open6.pending.length === 0)
+      return;
+    const total = open6.pending.reduce((sum2, part) => sum2 + part.length, 0);
+    const bytes = new Uint8Array(total);
+    let at = 0;
+    for (const part of open6.pending) {
+      bytes.set(part, at);
+      at += part.length;
+    }
+    const text4 = this.decoder.decode(bytes);
+    open6.element.children.push(open6.pendingCdata ? text4 : decodeXmlEntities2(text4));
+    open6.pending = [];
+  }
+  keepText(bytes, cdata) {
+    if (!this.keeping() || bytes.length === 0)
+      return;
+    const open6 = this.top();
+    if (!open6)
+      return;
+    if (open6.pending.length > 0 && open6.pendingCdata !== cdata)
+      this.flushText();
+    open6.pendingCdata = cdata;
+    open6.pending.push(bytes.slice());
+    this.count(bytes.length);
+  }
+  inRange() {
+    const open6 = this.top();
+    return !!open6 && this.rangeNames.has(open6.element.name);
+  }
+  matchRecord() {
+    return this.recordPaths.find((path) => path.length === this.stack.length && path.every((name, at) => name === this.stack[at]));
+  }
+  next() {
+    for (;; ) {
+      if (!this.fill()) {
+        if (this.mode !== "text" || this.stack.length > 0) {
+          this.fail("truncated", "The document ends inside an element.");
+        }
+        return;
+      }
+      const event = this.step();
+      if (event)
+        return event;
+    }
+  }
+  step() {
+    const chunk = this.chunk;
+    while (this.index < chunk.length) {
+      switch (this.mode) {
+        case "text": {
+          const lt = chunk.indexOf(LT, this.index);
+          const end = lt < 0 ? chunk.length : lt;
+          if (end > this.index) {
+            const piece = chunk.subarray(this.index, end);
+            if (this.inRange() && this.keeping()) {
+              const open6 = this.top();
+              if (piece.includes(AMP))
+                open6.element.rangeEntities = true;
+              this.addRange(open6, this.offset, piece.length);
+            } else if (this.keeping()) {
+              this.keepText(piece, false);
+            } else if (!this.inRecord() && this.stack.length === 0 && this.rootSeenName !== undefined) {
+              if (piece.some((byte) => byte !== 32 && byte !== 10 && byte !== 13 && byte !== 9)) {
+                this.fail("invalid_xml", "Text after the document's root element.");
+              }
+            }
+            this.index = end;
+          }
+          if (lt >= 0) {
+            this.mode = "markup";
+            this.markup = [];
+            this.markupStart = this.offset;
+            this.markupQuote = 0;
+            this.index += 1;
+          }
+          break;
+        }
+        case "markup": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          this.markup.push(byte);
+          if (this.markup.length > XML_STREAM_MAX_MARKUP_BYTES)
+            this.fail("invalid_xml", "A tag is too long.", this.markupStart);
+          if (this.markup.length === 3 && this.markup[0] === 33 && this.markup[1] === 45 && this.markup[2] === 45) {
+            this.mode = "comment";
+            this.markup = [];
+            break;
+          }
+          if (this.markup.length === 8 && String.fromCharCode(...this.markup) === "![CDATA[") {
+            if (!this.inRecord() && this.stack.length === 0)
+              this.fail("invalid_xml", "A CDATA section outside the document's root element.", this.markupStart);
+            this.mode = "cdata";
+            this.markup = [];
+            this.cdataHeld = [];
+            break;
+          }
+          if (this.markup.length === 8 && String.fromCharCode(...this.markup).toUpperCase() === "!DOCTYPE") {
+            this.mode = "doctype";
+            this.doctypeDepth = 0;
+            this.doctypeQuote = 0;
+            break;
+          }
+          if (this.markup.length === 1 && byte === 63) {
+            this.mode = "pi";
+            this.markup = [];
+            break;
+          }
+          if (byte === 34 || byte === 39) {
+            if (this.markupQuote === 0)
+              this.markupQuote = byte;
+            else if (this.markupQuote === byte)
+              this.markupQuote = 0;
+          }
+          if (byte === GT2 && this.markupQuote === 0) {
+            const event = this.tag();
+            if (event)
+              return event;
+          }
+          break;
+        }
+        case "comment": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (byte === GT2 && this.markup.length >= 2 && this.markup[this.markup.length - 1] === 45 && this.markup[this.markup.length - 2] === 45) {
+            this.mode = "text";
+            this.markup = [];
+            this.chargeSkipped();
+            break;
+          }
+          this.markup.push(byte);
+          if (this.markup.length > 2)
+            this.markup.shift();
+          this.countMarkupLength();
+          break;
+        }
+        case "pi": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (byte === GT2 && this.markup[this.markup.length - 1] === 63) {
+            this.mode = "text";
+            this.markup = [];
+            this.chargeSkipped();
+            break;
+          }
+          this.markup.push(byte);
+          if (this.markup.length > 1)
+            this.markup.shift();
+          this.countMarkupLength();
+          break;
+        }
+        case "doctype": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (this.inRecord() || this.stack.length > 0)
+            this.fail("invalid_xml", "A document type declaration inside an element.", this.markupStart);
+          if (this.doctypeQuote !== 0) {
+            if (byte === this.doctypeQuote)
+              this.doctypeQuote = 0;
+          } else if (byte === 34 || byte === 39)
+            this.doctypeQuote = byte;
+          else if (byte === 91)
+            this.doctypeDepth += 1;
+          else if (byte === 93)
+            this.doctypeDepth = Math.max(0, this.doctypeDepth - 1);
+          else if (byte === GT2 && this.doctypeDepth === 0) {
+            this.mode = "text";
+            this.markup = [];
+            break;
+          }
+          this.countMarkupLength();
+          break;
+        }
+        case "cdata": {
+          let view3 = chunk.subarray(this.index);
+          let base = this.offset;
+          if (this.cdataHeld.length > 0) {
+            const joined = new Uint8Array(this.cdataHeld.length + view3.length);
+            joined.set(this.cdataHeld, 0);
+            joined.set(view3, this.cdataHeld.length);
+            base -= this.cdataHeld.length;
+            view3 = joined;
+            this.cdataHeld = [];
+          }
+          let close = -1;
+          for (let at = 0;at + 2 < view3.length; at += 1) {
+            if (view3[at] === 93 && view3[at + 1] === 93 && view3[at + 2] === GT2) {
+              close = at;
+              break;
+            }
+          }
+          if (close >= 0) {
+            this.cdataText(view3.subarray(0, close), base);
+            this.index = chunk.length - (view3.length - (close + 3));
+            this.mode = "text";
+            break;
+          }
+          let tail = 0;
+          while (tail < 2 && tail < view3.length && view3[view3.length - 1 - tail] === 93)
+            tail += 1;
+          this.cdataText(view3.subarray(0, view3.length - tail), base);
+          this.cdataHeld = Array.from(view3.subarray(view3.length - tail));
+          this.index = chunk.length;
+          break;
+        }
+        default:
+          this.index = chunk.length;
+      }
+    }
+    return;
+  }
+  cdataText(bytes, start) {
+    if (bytes.length === 0)
+      return;
+    if (this.inRange() && this.keeping()) {
+      this.addRange(this.top(), start, bytes.length);
+      return;
+    }
+    this.keepText(bytes, true);
+  }
+  addRange(open6, start, length) {
+    const ranges = open6.element.ranges;
+    const last = ranges[ranges.length - 1];
+    if (last && last.end === start) {
+      last.end = start + length;
+      return;
+    }
+    ranges.push({ start, end: start + length });
+    this.count(XML_STREAM_RANGE_COST);
+  }
+  chargeSkipped() {
+    this.count(this.offset - this.markupStart);
+  }
+  countMarkupLength() {
+    if (this.offset - this.markupStart > XML_STREAM_MAX_MARKUP_BYTES)
+      this.fail("invalid_xml", "Markup is too long.", this.markupStart);
+  }
+  tag() {
+    const bytes = Uint8Array.from(this.markup.slice(0, -1));
+    this.markup = [];
+    this.mode = "text";
+    const tagStart = this.markupStart;
+    const tagEnd = this.offset;
+    const text4 = this.decoder.decode(bytes);
+    if (text4.startsWith("/")) {
+      const name = text4.slice(1).trim();
+      const expected = this.stack[this.stack.length - 1];
+      if (expected === undefined || name !== expected)
+        this.fail("invalid_xml", "An end tag does not close the open element.", tagStart);
+      return this.close(tagEnd, tagEnd - tagStart);
+    }
+    if (text4.startsWith("!"))
+      this.fail("invalid_xml", "Markup that is not XML.", tagStart);
+    const parsed = parseXmlTag(text4);
+    if (!parsed)
+      this.fail("invalid_xml", "A tag that is not XML.", tagStart);
+    if (this.stack.length === 0) {
+      if (this.rootSeenName !== undefined)
+        this.fail("invalid_xml", "A second root element.", tagStart);
+      this.rootSeenName = parsed.name;
+    }
+    this.stack.push(parsed.name);
+    if (this.stack.length > XML_STREAM_MAX_DEPTH)
+      this.fail("too_deep", "Elements are nested too deeply.", tagStart);
+    if (!this.inRecord()) {
+      const path = this.matchRecord();
+      if (path) {
+        this.recordDepth = this.stack.length;
+        this.recordPath = path;
+        this.recordStart = tagStart;
+        this.recordBytes = 0;
+        this.discarding = false;
+        this.building = [];
+      }
+    }
+    if (this.keeping()) {
+      this.flushText();
+      const element = { name: parsed.name, attributes: parsed.attributes, children: [] };
+      if (this.rangeNames.has(parsed.name))
+        element.ranges = [];
+      const parent = this.top();
+      if (parent)
+        parent.element.children.push(element);
+      this.building.push({ element, pending: [], pendingCdata: false });
+      this.count(tagEnd - tagStart);
+    }
+    if (parsed.empty)
+      return this.close(tagEnd, 0);
+    return;
+  }
+  close(end, tagBytes) {
+    if (this.keeping()) {
+      this.flushText();
+      this.count(tagBytes);
+    }
+    const depth2 = this.stack.length;
+    this.stack.pop();
+    if (!this.inRecord())
+      return;
+    if (this.discarding) {
+      if (depth2 !== this.recordDepth)
+        return;
+      this.recordDepth = -1;
+      this.discarding = false;
+      this.building = [];
+      return { kind: "oversize", path: this.recordPath, start: this.recordStart, end };
+    }
+    const done = this.building.pop();
+    if (depth2 !== this.recordDepth || !done)
+      return;
+    this.recordDepth = -1;
+    this.building = [];
+    return { kind: "record", path: this.recordPath, element: done.element, start: this.recordStart, end };
+  }
+}
+function xmlText(element) {
+  return element.children.map((child) => typeof child === "string" ? child : xmlText(child)).join("");
+}
+function xmlChild(element, name) {
+  for (const child of element.children)
+    if (typeof child !== "string" && child.name === name)
+      return child;
+  return;
+}
+function xmlChildren(element, name) {
+  return element.children.filter((child) => typeof child !== "string" && child.name === name);
+}
+var XML_STREAM_MAX_DEPTH = 256, XML_STREAM_MAX_MARKUP_BYTES, XML_STREAM_RANGE_COST = 32, XmlStreamError, LT = 60, GT2 = 62, AMP = 38, PREDEFINED, NAME, ATTRIBUTE;
+var init_xml_stream = __esm(() => {
+  XML_STREAM_MAX_MARKUP_BYTES = 1024 * 1024;
+  XmlStreamError = class XmlStreamError extends Error {
+    code;
+    offset;
+    constructor(code, message2, offset) {
+      super(message2);
+      this.name = "XmlStreamError";
+      this.code = code;
+      this.offset = offset;
+    }
+  };
+  PREDEFINED = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
+  NAME = /^[A-Za-z_:À-￿][\w.:\-·À-￿]*$/;
+  ATTRIBUTE = /\s*([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/y;
+});
+
+// src/workers/archive-import/evernote/enml.ts
+function attribute3(attributes, name) {
+  const match = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i").exec(attributes);
+  return match ? decodeHTML(match[1] ?? match[2] ?? match[3] ?? "") : undefined;
+}
+function enmlToText(enml) {
+  const lines = [];
+  let line2 = "";
+  let pre = 0;
+  let silent = 0;
+  let crypt = 0;
+  let unsupported = 0;
+  let media = 0;
+  let cell = 0;
+  const endLine = () => {
+    const done = pre > 0 ? line2.replace(/\s+$/, "") : line2.replace(/[ \t ]+/g, " ").trim();
+    if (done !== "")
+      lines.push(done);
+    line2 = "";
+    cell = 0;
+  };
+  const write = (text4) => {
+    if (silent > 0 || crypt > 0 || text4 === "")
+      return;
+    line2 += pre > 0 ? text4 : text4.replace(/\s+/g, " ");
+  };
+  for (const match of enml.matchAll(TOKEN)) {
+    const token = match[0];
+    if (token.startsWith("<!--") || token.startsWith("<?") || token.startsWith("<!") && !token.startsWith("<![CDATA["))
+      continue;
+    if (token.startsWith("<![CDATA[")) {
+      write(match[1] ?? "");
+      continue;
+    }
+    const tag = token.startsWith("<") ? TAG.exec(token) : null;
+    if (!tag) {
+      write(token === "<" ? "<" : decodeHTML(token));
+      continue;
+    }
+    const closing = tag[1] === "/";
+    const name = tag[2].toLowerCase();
+    const attributes = tag[3] ?? "";
+    const empty = tag[4] === "/";
+    if (name === "en-crypt") {
+      if (closing) {
+        crypt = Math.max(0, crypt - 1);
+      } else {
+        unsupported += 1;
+        write("[Encrypted text, not read]");
+        if (!empty)
+          crypt += 1;
+      }
+      continue;
+    }
+    if (SILENT.has(name)) {
+      if (!empty)
+        silent = Math.max(0, silent + (closing ? -1 : 1));
+      continue;
+    }
+    if (closing) {
+      if (BLOCKS.has(name))
+        endLine();
+      if (name === "pre")
+        pre = Math.max(0, pre - 1);
+      continue;
+    }
+    if (name === "br") {
+      endLine();
+      continue;
+    }
+    if (name === "en-todo") {
+      write(attribute3(attributes, "checked")?.toLowerCase() === "true" ? "[x] " : "[ ] ");
+      continue;
+    }
+    if (name === "en-media") {
+      media += 1;
+      const type = attribute3(attributes, "type");
+      write(` [Attachment${type ? `: ${type}` : ""}] `);
+      continue;
+    }
+    if (name === "td" || name === "th") {
+      if (cell > 0)
+        write(" | ");
+      cell += 1;
+      continue;
+    }
+    if (name === "img") {
+      const alt = attribute3(attributes, "alt");
+      if (alt)
+        write(` [Image: ${alt}] `);
+      continue;
+    }
+    if (BLOCKS.has(name)) {
+      if (line2.trim() !== "")
+        endLine();
+      if (name === "pre" && !empty)
+        pre += 1;
+      if (name === "li")
+        write("- ");
+      if (name === "hr" || empty)
+        endLine();
+    }
+  }
+  endLine();
+  return { text: lines.join(`
+`), unsupported, media };
+}
+var BLOCKS, SILENT, TOKEN, TAG;
+var init_enml = __esm(() => {
+  init_esm();
+  BLOCKS = new Set([
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "dd",
+    "details",
+    "div",
+    "dl",
+    "dt",
+    "en-note",
+    "figcaption",
+    "figure",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "tfoot",
+    "thead",
+    "tr",
+    "ul"
+  ]);
+  SILENT = new Set(["script", "style", "head", "title", "object", "embed", "applet"]);
+  TOKEN = /<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[([\s\S]*?)(?:\]\]>|$)|<![^>]*>?|<\?[\s\S]*?(?:\?>|$)|<\/?[A-Za-z][^>]*>?|[^<]+|</g;
+  TAG = /^<(\/?)([A-Za-z][\w:-]*)([^>]*?)(\/?)>?$/;
+});
+
+// src/workers/archive-import/evernote/connector.ts
+import { createHash as createHash85 } from "node:crypto";
+function sha25611(value2) {
+  return createHash85("sha256").update(value2).digest("hex");
+}
+function enexTime(value2) {
+  const match = /^\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\s*$/.exec(value2 ?? "");
+  if (!match)
+    return;
+  const ms = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]));
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function decodeBase64Range(reader, start, end, cap) {
+  const out = [];
+  let total = 0;
+  let pending = new Uint8Array(Math.min(cap, 64 * 1024) + 3);
+  let used = 0;
+  const push = (byte) => {
+    if (used === pending.length) {
+      out.push(pending.subarray(0, used));
+      pending = new Uint8Array(Math.min(Math.max(64 * 1024, pending.length * 2), 16 * 1024 * 1024));
+      used = 0;
+    }
+    pending[used++] = byte;
+    total += 1;
+    return total >= cap;
+  };
+  let quad = 0;
+  let count = 0;
+  let padded = false;
+  outer:
+    for (let at2 = start;at2 < end; at2 += FETCH_SLICE_BYTES) {
+      const slice = reader.readAt(at2, Math.min(FETCH_SLICE_BYTES, end - at2));
+      for (let index = 0;index < slice.length; index += 1) {
+        const byte = slice[index];
+        if (byte === 32 || byte === 10 || byte === 13 || byte === 9)
+          continue;
+        if (byte === 61) {
+          padded = true;
+          continue;
+        }
+        const value2 = BASE64[byte];
+        if (value2 < 0 || padded)
+          throw new FileExtractionSourceError("source_content_unavailable");
+        quad = quad << 6 | value2;
+        count += 1;
+        if (count === 4) {
+          if (push(quad >> 16 & 255) || push(quad >> 8 & 255) || push(quad & 255))
+            break outer;
+          quad = 0;
+          count = 0;
+        }
+      }
+    }
+  if (total < cap) {
+    if (count === 2)
+      push(quad >> 4 & 255);
+    else if (count === 3) {
+      if (!push(quad >> 10 & 255))
+        push(quad >> 2 & 255);
+    } else if (count === 1)
+      throw new FileExtractionSourceError("source_content_unavailable");
+  }
+  out.push(pending.subarray(0, used));
+  const bytes = new Uint8Array(Math.min(total, cap));
+  let at = 0;
+  for (const part of out) {
+    const take = Math.min(part.length, bytes.length - at);
+    bytes.set(part.subarray(0, take), at);
+    at += take;
+    if (at >= bytes.length)
+      break;
+  }
+  return bytes;
+}
+function createEvernoteArchiveConnector(input) {
+  const pageSizeDefault = Math.max(1, input.pageSize ?? EVERNOTE_DEFAULT_PAGE_SIZE);
+  const byteBudget = Math.max(1, input.maxBytesPerListing ?? EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING);
+  const tag = input.manifestSha256.slice(0, 16);
+  const prefix = `${EVERNOTE_CURSOR_PREFIX}${tag}:`;
+  const DONE2 = { file: input.files.length, offset: 0, from: 0, done: true };
+  const startOfFile = (file) => file >= input.files.length ? DONE2 : { file, offset: 0, from: 0, done: false };
+  const invalid4 = (message2) => new ArchiveImportStoppedError("resume_point_invalid", message2);
+  const encode3 = (cursor) => cursor.done ? `${prefix}done` : `${prefix}${cursor.file}:${cursor.offset}:${cursor.from}`;
+  const decode3 = (text4) => {
+    if (!text4)
+      return startOfFile(0);
+    if (!text4.startsWith(prefix))
+      throw invalid4("The resume point belongs to other files than this archive's.");
+    const rest = text4.slice(prefix.length);
+    if (rest === "done")
+      return DONE2;
+    const parts = rest.split(":").map(Number);
+    const [file, offset, from] = parts;
+    if (parts.length !== 3 || !parts.every((part) => Number.isSafeInteger(part) && part >= 0) || file >= input.files.length || offset > input.files[file].version.size) {
+      throw invalid4("The resume point is not a position in this archive.");
+    }
+    return { file, offset, from, done: false };
+  };
+  const report = (kind, findingClass, fileIndex, offset, count) => {
+    input.report({ kind, class: findingClass, fileIndex, offset, ...count !== undefined ? { count } : {} });
+  };
+  const buildNote = (note, fileIndex, start, savedAt) => {
+    const title = textOf(xmlChild(note, "title"));
+    const contentElement = xmlChild(note, "content");
+    const body = contentElement ? enmlToText(xmlText(contentElement)) : { text: "", unsupported: 0, media: 0 };
+    const resources = xmlChildren(note, "resource");
+    if (body.text === "" && resources.length === 0) {
+      report(NOTE_FINDINGS.empty, "skipped", fileIndex, start);
+      return { items: [], positions: [] };
+    }
+    const createdAt = enexTime(textOf(xmlChild(note, "created")));
+    const updatedAt = enexTime(textOf(xmlChild(note, "updated")));
+    const built = buildNoteItem(input, {
+      title,
+      body: body.text,
+      tags: cleanTags(xmlChildren(note, "tag").map((element) => textOf(element))),
+      ...createdAt ? { createdAt } : {},
+      ...updatedAt ? { updatedAt } : {},
+      ...body.unsupported > 0 ? { unsupported: body.unsupported } : {}
+    }, { fileIndex, member: -1, ordinal: start }, savedAt);
+    if (body.unsupported > 0)
+      report(NOTE_FINDINGS.unsupported, "gap", fileIndex, start);
+    if (built.dateAssumed)
+      report(NOTE_FINDINGS.dateAssumed, "gap", fileIndex, start);
+    const parent = built.item;
+    const items = [parent];
+    const positions = [start];
+    resources.forEach((resource, index) => {
+      const data2 = xmlChild(resource, "data");
+      const mime2 = textOf(xmlChild(resource, "mime")) || "application/octet-stream";
+      const attributes = xmlChild(resource, "resource-attributes");
+      const fileName = textOf(attributes ? xmlChild(attributes, "file-name") : undefined);
+      const name = (fileName || `Attachment ${index + 1} (${mime2})`).slice(0, 500);
+      const ranges = data2?.ranges ?? [];
+      const encoding = (data2?.attributes["encoding"] ?? "base64").toLowerCase();
+      const readable = data2 !== undefined && encoding === "base64" && data2.rangeEntities !== true && ranges.length === 1;
+      const range = readable ? ranges[0] : undefined;
+      const locator = range ? `${prefix}${fileIndex}:${range.start}:${range.end}:${Buffer.from(mime2).toString("base64url")}` : `${prefix}none`;
+      const providerItemId = childProviderItemId(parent.identity.providerItemId, `resource-${index}`);
+      const authoredAt = parent.metadata["authoredAt"];
+      items.push({
+        identity: {
+          family: input.format.family,
+          provider: input.format.provider,
+          accountScope: input.accountScope,
+          providerItemId,
+          localItemId: `${input.accountScope}:${providerItemId}`,
+          sourceVersion: sha25611(`${locator}\x00${name}`).slice(0, 32),
+          parent: { providerItemId: parent.identity.providerItemId, localItemId: parent.identity.localItemId }
+        },
+        mimeType: mime2,
+        content: { kind: "metadata_only" },
+        metadata: Object.freeze({
+          title: name,
+          name,
+          mimeType: mime2,
+          ...typeof authoredAt === "string" ? { authoredAt } : {}
+        }),
+        fetchedAt: new Date().toISOString(),
+        deferredBytes: { locator, available: readable }
+      });
+      positions.push(start + 1 + index);
+      if (!readable)
+        report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", fileIndex, start + 1 + index);
+    });
+    return { items, positions };
+  };
+  const readSegment = (cursor, room, bytesLeft, started) => {
+    const file = input.files[cursor.file];
+    const segment = { items: [], positions: [], next: cursor, consumed: 0, bytes: 0, stopped: false, budgetHit: false };
+    let reader;
+    try {
+      reader = input.root.openFile(file.relPath, { expected: file.version });
+    } catch (error2) {
+      throw archiveStopFromScopeError(error2, file.relPath);
+    }
+    try {
+      const savedAt = new Date(Number.isFinite(file.version.mtimeMs) ? file.version.mtimeMs : 0).toISOString();
+      if (cursor.offset === 0) {
+        let head;
+        try {
+          head = reader.readAt(0, ARCHIVE_PROBE_HEAD_BYTES);
+        } catch (error2) {
+          throw archiveStopFromScopeError(error2, file.relPath);
+        }
+        if (!looksLikeEnex(head)) {
+          report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", cursor.file, 0);
+          segment.next = startOfFile(cursor.file + 1);
+          return segment;
+        }
+      }
+      const inner = fileByteSource(reader, { start: cursor.offset });
+      const watched = {
+        get position() {
+          return inner.position;
+        },
+        next() {
+          if (!input.shouldContinue())
+            throw new ReadInterrupted2;
+          return inner.next();
+        },
+        unread: (count) => inner.unread(count)
+      };
+      const xml2 = new XmlStreamReader(watched, {
+        recordPaths: [RECORD_PATH],
+        rangeElements: ["data", "recognition"],
+        maxRecordBytes: NOTE_MAX_RECORD_BYTES,
+        ...cursor.offset > 0 ? { open: [RECORD_PATH[0]] } : {}
+      });
+      for (;; ) {
+        if (segment.items.length >= room || segment.consumed >= EVERNOTE_MAX_UNITS_PER_PAGE)
+          break;
+        if (segment.bytes >= bytesLeft && (segment.consumed > 0 || started)) {
+          segment.budgetHit = true;
+          break;
+        }
+        let event;
+        try {
+          event = xml2.next();
+        } catch (error2) {
+          if (error2 instanceof ReadInterrupted2) {
+            segment.stopped = true;
+            break;
+          }
+          if (error2 instanceof XmlStreamError) {
+            report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, error2.offset);
+            segment.next = startOfFile(cursor.file + 1);
+            break;
+          }
+          throw archiveStopFromScopeError(error2, file.relPath);
+        } finally {
+          segment.bytes = inner.position - cursor.offset;
+        }
+        if (!event) {
+          if (xml2.rootName === undefined)
+            report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, 0);
+          segment.next = startOfFile(cursor.file + 1);
+          break;
+        }
+        if (cursor.offset > 0 && event.start < cursor.offset)
+          throw invalid4("Nothing starts where this import was to resume.");
+        segment.consumed += 1;
+        if (event.kind === "oversize") {
+          report(NOTE_FINDINGS.tooLarge, "gap", cursor.file, event.start);
+          segment.next = { file: cursor.file, offset: event.end, from: 0, done: false };
+          continue;
+        }
+        const built = buildNote(event.element, cursor.file, event.start, savedAt);
+        const skip = event.start === cursor.offset ? Math.min(cursor.from, built.items.length) : 0;
+        const left = built.items.length - skip;
+        const take = Math.min(left, room - segment.items.length);
+        segment.items.push(...built.items.slice(skip, skip + take));
+        segment.positions.push(...built.positions.slice(skip, skip + take).map((offset) => ({ fileIndex: cursor.file, offset })));
+        if (take < left) {
+          segment.next = { file: cursor.file, offset: event.start, from: skip + take, done: false };
+          break;
+        }
+        segment.next = { file: cursor.file, offset: event.end, from: 0, done: false };
+      }
+      try {
+        reader.assertCurrent();
+      } catch (error2) {
+        throw archiveStopFromScopeError(error2, file.relPath);
+      }
+      return segment;
+    } finally {
+      reader.close();
+    }
+  };
+  const readAttachment = (localItemId, options, cap) => {
+    const locator = options?.deferredBytes?.locator;
+    if (!locator)
+      throw new FileExtractionSourceError("source_item_not_found");
+    const match = /^enex1:([0-9a-f]{16}):(\d+):(\d+):(\d+):([A-Za-z0-9_-]*)$/.exec(locator);
+    if (!match || match[1] !== tag)
+      throw new FileExtractionSourceError("source_version_gone");
+    const fileIndex = Number(match[2]);
+    const start = Number(match[3]);
+    const end = Number(match[4]);
+    const file = input.files[fileIndex];
+    if (!file || !(start < end) || end > file.version.size)
+      throw new FileExtractionSourceError("source_version_gone");
+    const mime2 = Buffer.from(match[5], "base64url").toString("utf8") || "application/octet-stream";
+    const reader = input.root.openFile(file.relPath, { expected: file.version });
+    try {
+      const bytes = decodeBase64Range(reader, start, end, cap);
+      reader.assertCurrent();
+      const scopePrefix = `${input.accountScope}:`;
+      const providerItemId = localItemId.startsWith(scopePrefix) ? localItemId.slice(scopePrefix.length) : localItemId;
+      return {
+        identity: {
+          family: input.format.family,
+          provider: input.format.provider,
+          accountScope: input.accountScope,
+          providerItemId,
+          localItemId
+        },
+        mimeType: mime2,
+        content: { kind: "bytes", mimeType: mime2, bytes },
+        metadata: Object.freeze({}),
+        fetchedAt: new Date().toISOString()
+      };
+    } finally {
+      reader.close();
+    }
+  };
+  const connector = {
+    id: input.connectorId,
+    family: input.format.family,
+    async authenticate() {},
+    listItems(options) {
+      return async function* () {
+        let cursor = decode3(options?.cursor);
+        if (cursor.done) {
+          yield { items: [], nextCursor: encode3(DONE2), done: true };
+          return;
+        }
+        const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
+        let emitted = 0;
+        let bytesRead = 0;
+        let page2 = [];
+        let positions = [];
+        let units = 0;
+        let pending = false;
+        const send = (done) => {
+          input.reportPosition?.({ fileIndex: Math.min(cursor.file, input.files.length - 1), offset: cursor.done ? input.files[input.files.length - 1]?.version.size ?? 0 : cursor.offset });
+          input.reportItemPositions?.(positions);
+          return done ? { items: page2, nextCursor: encode3(DONE2), done: true } : { items: page2, nextCursor: encode3(cursor), done: false };
+        };
+        for (;; ) {
+          const room = Math.max(1, Math.min(pageSizeDefault, limit - emitted) - page2.length);
+          const segment = readSegment(cursor, room, Math.max(1, byteBudget - bytesRead), bytesRead > 0 || emitted > 0 || page2.length > 0 || units > 0);
+          page2.push(...segment.items);
+          positions.push(...segment.positions);
+          cursor = segment.next;
+          units += segment.consumed;
+          bytesRead += segment.bytes;
+          if (segment.consumed > 0 || segment.items.length > 0)
+            pending = true;
+          if (segment.stopped) {
+            if (pending)
+              yield send(false);
+            return;
+          }
+          if (cursor.done) {
+            yield send(true);
+            return;
+          }
+          const spentBudget = segment.budgetHit || bytesRead >= byteBudget;
+          const full = page2.length >= Math.min(pageSizeDefault, limit - emitted);
+          if (full || spentBudget || units >= EVERNOTE_MAX_UNITS_PER_PAGE) {
+            yield send(false);
+            emitted += page2.length;
+            page2 = [];
+            positions = [];
+            units = 0;
+            pending = false;
+            if (emitted >= limit || spentBudget)
+              return;
+          }
+        }
+      }();
+    },
+    async fetchItem(localItemId, options) {
+      return readAttachment(localItemId, options, Number.MAX_SAFE_INTEGER);
+    },
+    async fetchItemWithin(localItemId, options) {
+      const cap = options.maxBytes !== undefined ? options.maxBytes + 1 : Number.MAX_SAFE_INTEGER;
+      return readAttachment(localItemId, options.deferredBytes ? { deferredBytes: options.deferredBytes } : undefined, cap);
+    },
+    classificationSignals(item) {
+      return noteClassificationSignals(item);
+    }
+  };
+  return connector;
+}
+function registerEvernoteArchiveConnector() {
+  registerArchiveFormatConnector("evernote-enex", createEvernoteArchiveConnector);
+}
+var EVERNOTE_CURSOR_PREFIX = "enex1:", EVERNOTE_DEFAULT_PAGE_SIZE = 100, EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING, EVERNOTE_MAX_UNITS_PER_PAGE = 5000, FETCH_SLICE_BYTES, RECORD_PATH, ReadInterrupted2, textOf = (element) => element ? xmlText(element).trim() : "", BASE64;
+var init_connector10 = __esm(() => {
+  init_archive_formats();
+  init_file_extraction_source();
+  init_byte_source();
+  init_stop_errors();
+  init_xml_stream();
+  init_note();
+  init_enml();
+  EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  FETCH_SLICE_BYTES = 1024 * 1024;
+  RECORD_PATH = ["en-export", "note"];
+  ReadInterrupted2 = class ReadInterrupted2 extends Error {
+  };
+  BASE64 = (() => {
+    const table = new Int16Array(256).fill(-1);
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (let index = 0;index < alphabet.length; index += 1)
+      table[alphabet.charCodeAt(index)] = index;
+    return table;
+  })();
+});
+
 // src/workers/archive-import/format-connectors.ts
 function registerArchiveFormatConnectors() {
   registerMboxArchiveConnector();
@@ -164963,6 +166138,7 @@ function registerArchiveFormatConnectors() {
   registerReflectArchiveConnectors();
   registerRoamArchiveConnector();
   registerTelegramArchiveConnector();
+  registerEvernoteArchiveConnector();
 }
 var init_format_connectors = __esm(() => {
   init_connector5();
@@ -164970,6 +166146,7 @@ var init_format_connectors = __esm(() => {
   init_connector7();
   init_connector8();
   init_connector9();
+  init_connector10();
 });
 
 // src/workers/archive-import/source-targets.ts
@@ -165586,7 +166763,7 @@ var init_agent = __esm(() => {
   init_state();
   ARCHIVE_AGENT_COPY = {
     invalidPath: "Give the full path of the file or folder, starting with /. Olympus does not look at it until the person approves.",
-    tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Archives on their computer's dashboard first.",
+    tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Other archives on their computer's dashboard first.",
     archivesUnreadable: "Olympus cannot read its list of imported archives right now, so it cannot tell what is imported. Nothing was deleted. Ask the person to open Archives on their computer's dashboard and choose See why.",
     requestsUnreadable: "Olympus cannot read its list of imports waiting for an answer right now, so it did not record the request. Ask the person to open Archives on their computer's dashboard and choose See why.",
     unknownArchive: "No archive with that id is imported. Call archive_import with status to list them.",
@@ -165818,6 +166995,30 @@ function createArchiveImportDashboard(options) {
     }
   };
   const refusal3 = (code, message2) => ({ ok: false, code, message: message2 });
+  const joinedSource = (record5) => {
+    const card = cardOf(record5);
+    if (card)
+      return { source: { id: card.id, label: named(card.label) } };
+    if (!record5.target)
+      return {};
+    const target = options.runtime.targets.forSource(record5.target.source_id);
+    return { source: { id: target?.cardId ?? record5.target.source_id, label: named(target?.label ?? record5.target.source_id) } };
+  };
+  const cardOf = (record5) => record5.target ? undefined : archiveSourceCardOf(record5.format);
+  const underArchives = (record5) => !record5.target && cardOf(record5) === undefined;
+  const sourceFormats = (target) => target.formats.flatMap((formatId) => {
+    const format = getArchiveFormat(formatId);
+    return format ? [format] : [];
+  });
+  const targetOfCard = (cardId) => {
+    for (const sourceId of options.runtime.targets.sourceIds()) {
+      const target = options.runtime.targets.forSource(sourceId);
+      if (target && (target.cardId ?? target.sourceId) === cardId)
+        return { label: target.label, formats: sourceFormats(target) };
+    }
+    const card = archiveSourceCards().find((entry) => entry.id === cardId);
+    return card ? { label: card.label, formats: [...card.formats] } : undefined;
+  };
   const outcome = (requestId, result) => {
     if (result.kind === "started") {
       requests.remove(requestId);
@@ -165917,14 +167118,21 @@ function createArchiveImportDashboard(options) {
       reopened.root.close();
     }
   };
-  const approvePath = async (path, from, answer = {}) => {
+  const approvePath = async (path, from, answer = {}, only) => {
     const name = named(posix6.basename(path));
     const requestId = from?.status === "pending" ? from.requestId : undefined;
     const answered = () => {
       if (from)
         requests.remove(from.requestId);
     };
-    const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets });
+    const formats = only ? only.formats : undefined;
+    const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets, ...formats ? { formats } : {} });
+    if (prepared.kind === "unsupported" && only && formats) {
+      return refusal3("not_this_source", fill3(ARCHIVE_APPROVE_COPY.not_this_source, {
+        source: named(only.label),
+        formats: formats.map((format) => format.label).join(", ")
+      }));
+    }
     if (prepared.kind === "unsupported") {
       const said = fill3(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(", ") });
       return refusal3("unsupported", prepared.advice ? `${said} ${prepared.advice}` : said);
@@ -165959,7 +167167,7 @@ function createArchiveImportDashboard(options) {
         answered();
         if (again) {
           refresh();
-          return { ok: true, status: "started", archive_id: again.archive_id, name };
+          return { ok: true, status: "started", archive_id: again.archive_id, name, ...joinedSource(again) };
         }
         return { ok: true, status: "already_imported", archive_id: archive.archive_id, name, archive_name: named(archive.label) };
       }
@@ -165967,7 +167175,7 @@ function createArchiveImportDashboard(options) {
       const resumed = resumeStopped(prepared.archive);
       if (resumed) {
         refresh();
-        return { ok: true, status: "started", archive_id: resumed.archive_id, name };
+        return { ok: true, status: "started", archive_id: resumed.archive_id, name, ...joinedSource(resumed) };
       }
       return { ok: true, status: "already_imported", archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
@@ -166002,7 +167210,7 @@ function createArchiveImportDashboard(options) {
           if (result.kind === "started") {
             answered();
             refresh();
-            return { ok: true, status: "started", archive_id: result.archive.archive_id, name };
+            return { ok: true, status: "started", archive_id: result.archive.archive_id, name, ...joinedSource(result.archive) };
           }
           if (result.kind === "already_imported") {
             answered();
@@ -166214,8 +167422,37 @@ function createArchiveImportDashboard(options) {
     wakeScheduler();
     return { ok: true };
   };
+  const listing = (shownHere) => {
+    const model = options.privateModel();
+    const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID2, privateModel: model };
+    let records;
+    try {
+      records = state.list();
+    } catch (error2) {
+      return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error2), file: shown(state.path), list: "archives" } };
+    }
+    const apart = records.filter(shownHere);
+    let asked;
+    try {
+      asked = requests.list();
+    } catch (error2) {
+      return {
+        ...base,
+        archives: apart.map(entryOf),
+        requests: [],
+        unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path), list: "requests" }
+      };
+    }
+    const setting = scheduling();
+    return {
+      ...base,
+      archives: apart.map(entryOf),
+      requests: askingNow(asked, records).map((request) => requestOf2(request, records)),
+      ...setting !== "on" && records.length > 0 ? { notRunning: setting } : {}
+    };
+  };
   const api2 = {
-    agent: createArchiveImportAgent({ state, requests, view: () => api2.view() }),
+    agent: createArchiveImportAgent({ state, requests, view: () => listing(() => true) }),
     async browse(request) {
       const page2 = await options.browser.browse(request);
       return {
@@ -166259,10 +167496,16 @@ function createArchiveImportDashboard(options) {
           return { ok: false, code: resolved2.code, message: resolved2.message, ...resolved2.access ? { access: resolved2.access } : {} };
         return approvePath(resolved2.path, { requestId: waiting.request_id, status: "pending" }, answer);
       }
+      let only;
+      if (request.sourceId !== undefined) {
+        only = targetOfCard(request.sourceId);
+        if (!only)
+          return refusal3("unknown_source", ARCHIVE_APPROVE_COPY.unknown_source);
+      }
       const resolved = await options.browser.resolve(request.key);
       if (!resolved.ok)
         return { ok: false, code: resolved.code, message: resolved.message, ...resolved.access ? { access: resolved.access } : {} };
-      return approvePath(resolved.path, undefined, answer);
+      return approvePath(resolved.path, undefined, answer, only);
     },
     decline(requestId) {
       const request = requests.get(requestId);
@@ -166313,33 +167556,68 @@ function createArchiveImportDashboard(options) {
       return result;
     },
     view() {
+      return listing(underArchives);
+    },
+    archiveSources() {
+      try {
+        state.list();
+      } catch {
+        return [];
+      }
+      const live = options.runtime.targets.sourceIds().flatMap((sourceId) => {
+        const target = options.runtime.targets.forSource(sourceId);
+        const formats = target ? sourceFormats(target) : [];
+        if (!target || formats.length === 0)
+          return [];
+        return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats) }];
+      });
+      const imported = archiveSourceCards().filter((card) => !live.some((entry) => entry.sourceId === card.id)).map((card) => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats) }));
+      return [...live, ...imported];
+    },
+    cardViews() {
+      let records;
+      try {
+        records = state.list();
+      } catch {
+        return [];
+      }
       const model = options.privateModel();
-      const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID2, privateModel: model };
+      const setting = scheduling();
+      return archiveSourceCards().map((card) => {
+        const own3 = records.filter((record5) => cardOf(record5)?.id === card.id);
+        return {
+          sourceId: card.id,
+          privateModel: model,
+          archives: own3.map(entryOf),
+          requests: [],
+          ...setting !== "on" && own3.length > 0 ? { notRunning: setting } : {}
+        };
+      });
+    },
+    presentCards() {
       let records;
       try {
         records = state.list();
       } catch (error2) {
-        return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error2), file: shown(state.path), list: "archives" } };
-      }
-      const apart = records.filter((record5) => !record5.target);
-      let asked;
-      try {
-        asked = requests.list();
-      } catch (error2) {
-        return {
-          ...base,
-          archives: apart.map(entryOf),
-          requests: [],
-          unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path), list: "requests" }
-        };
+        const unreadable = { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: recordUnreadableReason(error2) }] };
+        return Object.fromEntries(archiveSourceCards().map((card) => [card.id, unreadable]));
       }
       const setting = scheduling();
-      return {
-        ...base,
-        archives: apart.map(entryOf),
-        requests: askingNow(asked, records).map((request) => requestOf2(request, records)),
-        ...setting !== "on" && records.length > 0 ? { notRunning: setting } : {}
-      };
+      return Object.fromEntries(archiveSourceCards().map((card) => {
+        const own3 = records.filter((record5) => cardOf(record5)?.id === card.id);
+        const attention = [];
+        for (const record5 of own3) {
+          if (record5.status === "stopped" && record5.stop?.code !== "stopped_by_owner")
+            attention.push({ kind: "stopped", id: record5.archive_id, name: record5.label });
+          else if (record5.status !== "removing" && !counts(record5))
+            attention.push({ kind: "counts", id: record5.archive_id, name: record5.label });
+        }
+        return [card.id, {
+          archives: own3.length,
+          importing: setting === "on" && own3.some((record5) => record5.status === "importing" || record5.status === "removing"),
+          ...attention.length > 0 ? { attention } : {}
+        }];
+      }));
     },
     sourceImports() {
       try {
@@ -166363,6 +167641,8 @@ function createArchiveImportDashboard(options) {
         attention.push({ kind: "unreadable", reason: recordUnreadableReason(error2) });
       }
       for (const record5 of records) {
+        if (cardOf(record5))
+          continue;
         if (record5.status === "stopped" && record5.stop?.code !== "stopped_by_owner")
           attention.push({ kind: "stopped", id: record5.archive_id, name: record5.label });
         if (record5.status === "importing" && record5.waiting?.minimum !== undefined) {
@@ -166379,7 +167659,7 @@ function createArchiveImportDashboard(options) {
         const tally = counts(record5);
         if (tally)
           counted.set(record5.archive_id, tally);
-        else
+        else if (!cardOf(record5))
           attention.push({ kind: "counts", id: record5.archive_id, name: record5.label });
       }
       for (const request of askingNow(asked, records)) {
@@ -166402,7 +167682,7 @@ function createArchiveImportDashboard(options) {
         if (held > 0)
           attention.push({ kind: "held", count: held, model });
       }
-      const apart = records.filter((record5) => !record5.target);
+      const apart = records.filter(underArchives);
       return {
         archives: apart.length,
         importing: setting === "on" && apart.some((record5) => record5.status === "importing" || record5.status === "removing"),
@@ -166434,6 +167714,7 @@ var init_dashboard2 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
   init_source_storage();
+  init_vocabulary();
   init_agent();
   init_source_scheduler();
   init_manifest2();
@@ -166458,7 +167739,9 @@ var init_dashboard2 = __esm(() => {
     part_of_source: "This import's items are held together with what the source reads live, so it has no Remove of its own. Deleting the whole source from its card deletes them.",
     not_an_input: "Only an import that is part of a source can be stopped. Remove stops and deletes an archive.",
     not_importing: "This import is not running.",
-    source_unavailable: "The source this export belongs to is being deleted or moved. Try again once that has finished."
+    source_unavailable: "The source this export belongs to is being deleted or moved. Try again once that has finished.",
+    not_this_source: "This isn't a {source} export. From the {source} card, Olympus imports only these: {formats}. For any other export, use Import another archive under Other archives.",
+    unknown_source: "Olympus can't import archives into this source. Use Import another archive."
   };
   ARCHIVE_NOT_RUNNING_COPY = {
     disabled: "Background syncing is turned off in Olympus's settings, so imports and removals can't run. The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it.",
@@ -167193,7 +168476,7 @@ var init_source_input = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash85 } from "node:crypto";
+import { createHash as createHash86 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -167219,7 +168502,7 @@ function receiptOf(record5, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash85("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash86("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -167859,7 +169142,7 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash86 } from "node:crypto";
+import { createHash as createHash87 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { existsSync as existsSync86, lstatSync as lstatSync43, readFileSync as readFileSync76, readdirSync as readdirSync20, realpathSync as realpathSync22 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
@@ -168023,7 +169306,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash86("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash87("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -171504,7 +172787,7 @@ var init_gmail_attachment_extraction = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash87 } from "node:crypto";
+import { createHash as createHash88 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -171540,7 +172823,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash87("sha256").update(`${accessToken}
+    const key2 = createHash88("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -171598,7 +172881,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash87("sha256").update(session.token).digest("hex");
+    const key2 = createHash88("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -173709,7 +174992,7 @@ function buildChatGptDashboardViewModel(view3, options = {}) {
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...degraded ? { degradedCredentials: degraded } : {} });
     const credentials = dashboardCredentialProblem(scrubbed, degraded);
     const imports = scrubbed.connection.imports_attention ?? [];
-    const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) || imports.length > 0 ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
+    const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) || imports.length > 0 || definition.public_source_id !== undefined ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
     const progress2 = measured?.progress;
     let status = connecting || credentials || missingScope(scrubbed) ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress2);
     if (imports.length > 0)
@@ -173724,7 +175007,7 @@ function buildChatGptDashboardViewModel(view3, options = {}) {
     entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress2, now, sync, options.remote !== undefined),
     index
   })).sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index).map(({ entry }) => entry);
-  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").flatMap(({ definition, card, actionKind, connecting, progress: progress2, sync }) => card.connection.imports_attention?.length ? card.connection.imports_attention.map(importAttentionItem) : [attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync)]);
+  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").flatMap(({ definition, card, actionKind, connecting, progress: progress2, sync }) => card.connection.imports_attention?.length ? card.connection.imports_attention.map(importAttentionItem) : [attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync)]).filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index);
   if (embedding.state === "failed") {
     needsYou.push({
       id: "model:embedding",
@@ -174159,7 +175442,8 @@ function oauthSource(definition) {
 }
 function connectFix(definition) {
   if (definition.connect_action.kind === "archive_import") {
-    return helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.importArchive, openPageUrl({ kind: "dashboard" }));
+    const label = definition.source_id === OPEN_ARCHIVES_SOURCE_ID ? DASHBOARD_CHATGPT_SETUP_LABELS.importArchive : DASHBOARD_ARCHIVE_COPY.sourceImport.action;
+    return helpLinkFix(label, openPageUrl({ kind: "dashboard" }));
   }
   const source = oauthSource(definition);
   return source ? { label: DASHBOARD_CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.connect, openOnComputer(definition, "connect"));
@@ -174388,7 +175672,7 @@ function scrubCard(definition, card) {
     connection: {
       state: card.connection.state,
       label: connectionLabel,
-      action: card.connection.action.kind === "archive_import" ? { kind: "archive_import", label: "Import an archive" } : { kind: "none" },
+      action: card.connection.action.kind === "archive_import" ? { kind: "archive_import", label: card.connection.action.label === "Import an archive" ? "Import an archive" : "Import another archive" } : { kind: "none" },
       handles: [],
       ...pending && finite(pending.expires_in_minutes) ? { pending: { started_at: "", expires_at: "", expires_in_minutes: count(pending.expires_in_minutes) } } : {},
       ...refusal3 ? { provider_refusal: { code: KNOWN_REFUSAL_CODES.has(refusal3.code) ? refusal3.code : "", reason: "" } } : {},
@@ -187437,7 +188721,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash88, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash89, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -187563,7 +188847,7 @@ function createRemoteOAuthHandler(options) {
       return fail("invalid_target", "This app connects to Olympus at its /mcp address.");
     }
     sweep();
-    const transaction = sha25611(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
+    const transaction = sha25612(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
     if (u.installId && !demo) {
       if ([...completed.values()].some((receipt) => receipt.transaction === transaction && liveReceipt(receipt)))
         return receiptPage(true);
@@ -187609,7 +188893,7 @@ function createRemoteOAuthHandler(options) {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
     const code = u.installId ? mintCredential("code", u.installId) : randomBytes28(32).toString("base64url");
-    codes.set(sha25611(code), {
+    codes.set(sha25612(code), {
       ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
@@ -187788,7 +189072,7 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash2 = sha25611(code);
+      const hash2 = sha25612(code);
       const issued = codes.get(hash2);
       if (!issued || issued.expiresAt <= now()) {
         codes.delete(hash2);
@@ -187805,7 +189089,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash88("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash89("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -188071,8 +189355,8 @@ function constantTimeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
-function sha25611(value2) {
-  return createHash88("sha256").update(value2).digest("hex");
+function sha25612(value2) {
+  return createHash89("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -190187,7 +191471,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash89 } from "node:crypto";
+import { createHash as createHash90 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -190204,7 +191488,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash89("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash90("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -190580,7 +191864,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash90 } from "node:crypto";
+import { createHash as createHash91 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -190604,7 +191888,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest4 = createHash90("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest4 = createHash91("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest4.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -191752,8 +193036,10 @@ async function archiveBrowse(options, args, context3) {
   };
 }
 async function archiveApprove(options, args, context3) {
-  const keys = Object.keys(args).filter((key2) => key2 !== "confirm_account" && key2 !== "keep_apart");
+  const keys = Object.keys(args).filter((key2) => key2 !== "confirm_account" && key2 !== "keep_apart" && key2 !== "source_id");
   const byKey = keys.length === 1 && keys[0] === "key" && archiveArg(args.key);
+  if (args.source_id !== undefined && !(byKey && archiveArg(args.source_id)))
+    return refused2("source_id goes with a chosen key.", "invalid_params");
   const byRequest = keys.length === 1 && keys[0] === "request_id" && archiveArg(args.request_id);
   const answers = [args.confirm_account, args.keep_apart];
   if (!byKey && !byRequest)
@@ -191782,7 +193068,7 @@ async function archiveApprove(options, args, context3) {
       status,
       name,
       ...archiveName ? { archive_name: archiveName } : {},
-      ...status === "confirm_account" && sourceId ? { source: { id: sourceId, label: sourceLabel5 } } : {},
+      ...(status === "confirm_account" || status === "started") && sourceId ? { source: { id: sourceId, label: sourceLabel5 } } : {},
       ...status === "confirm_account" && answer.parsed.reconfirm === true ? { reconfirm: true } : {}
     }
   };
@@ -191815,6 +193101,22 @@ async function archiveStop(options, args, context3) {
   if (!answer.ok)
     return answer.result;
   return { content: [{ type: "text", text: "Stopped." }], structuredContent: { status: "stopped" } };
+}
+function archiveCardsMeta(options) {
+  try {
+    const cards = (options.archiveCards?.() ?? []).filter((card) => card.archives.length > 0);
+    return cards.length > 0 ? cards : undefined;
+  } catch {
+    return;
+  }
+}
+function archiveSourcesMeta(options) {
+  try {
+    const sources = options.archiveSources?.();
+    return sources && sources.length > 0 ? sources : undefined;
+  } catch {
+    return;
+  }
 }
 function sourceImportsMeta(options) {
   try {
@@ -191978,7 +193280,9 @@ function createDashboardPanelTools(options) {
       const waiting = context3.localSession === true ? waitingCount(options) : 0;
       const archives = archivesMeta(options);
       const sourceImports = sourceImportsMeta(options);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports)
+      const archiveSources = archiveSourcesMeta(options);
+      const archiveCards = archiveCardsMeta(options);
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
         return result;
       const meta2 = {
         ...missingFolders.length ? { missingFolders } : {},
@@ -191988,7 +193292,9 @@ function createDashboardPanelTools(options) {
         ...unreadable.length > 0 ? { unreadable } : {},
         ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {},
         ...archives ? { archives } : {},
-        ...sourceImports ? { sourceImports } : {}
+        ...sourceImports ? { sourceImports } : {},
+        ...archiveSources ? { archiveSources } : {},
+        ...archiveCards ? { archiveCards } : {}
       };
       const existing = result._meta && typeof result._meta === "object" ? result._meta : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta2 } };
@@ -196066,7 +197372,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     unreadableFiles: () => unreadableFiles,
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
     archives: () => archiveImportDashboard.view(),
-    sourceImports: () => archiveImportDashboard.sourceImports()
+    sourceImports: () => archiveImportDashboard.sourceImports(),
+    archiveSources: () => archiveImportDashboard.archiveSources(),
+    archiveCards: () => archiveImportDashboard.cardViews()
   });
   const socketPath = prepareWorkerSocket();
   const serverOptions = {
