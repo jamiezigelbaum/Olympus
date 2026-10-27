@@ -8,7 +8,10 @@
 // - the lane option is set (an object property, shorthand, assignment or
 //   string key) only under ARCHIVE_IMPORT_LANE_DIR, apart from its one
 //   declaration and the one pass-through that carries a lane's own option
-//   through the merged inputs;
+//   through the merged inputs, and one item-level exception: a Gmail
+//   attachment child, held whichever input listed it (live or imported), so
+//   a file attached to live mail is never Personal before its own judgment
+//   (docs/design/child-items.md, "Mail attachments");
 // - the classifier input is set only by the shared call sites listed below,
 //   so no connector or format module sets it directly; and
 // - the stored hold reason is spelled out only by the classifier.
@@ -36,6 +39,11 @@ const LANE_OPTION_SHARED: ReadonlyArray<{ path: string; snippet: string; why: st
     path: PLACEMENT,
     snippet: 'explicit.holdContentUntilJudged === true ? { holdContentUntilJudged: true as const } : {}',
     why: 'resolveStoreTierClassification carries the lane\'s own option through the merged inputs',
+  },
+  {
+    path: 'src/workers/google-connectors/gmail-mail-record.ts',
+    snippet: 'holdContentUntilJudged: true,\n    deferredBytes: {',
+    why: 'a Gmail attachment child is held until judged, live or imported (child-items.md, "Mail attachments"): stricter, never looser',
   },
   {
     path: 'src/workers/connector-store/local-index.ts',

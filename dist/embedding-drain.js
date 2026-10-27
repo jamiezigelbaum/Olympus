@@ -9963,6 +9963,51 @@ var init_sender_rules = __esm(() => {
   DOMAIN_CHAR = /[a-z0-9.-]/i;
 });
 
+// src/core/file-extraction-source.ts
+import { createHash as createHash4 } from "node:crypto";
+function splitScopedLocalItemId(localItemId) {
+  const separator = localItemId.indexOf(":");
+  if (separator <= 0 || separator === localItemId.length - 1)
+    return;
+  return {
+    accountScope: localItemId.slice(0, separator),
+    providerItemId: localItemId.slice(separator + 1)
+  };
+}
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, ERROR_HASH_CHARS = 32, FileExtractionSourceError;
+var init_file_extraction_source = __esm(() => {
+  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+    source_item_not_found: "failed_terminal",
+    source_permission_denied: "failed_terminal",
+    source_version_gone: "failed_terminal",
+    source_content_unavailable: "skipped_unsupported",
+    source_request_rejected: "failed_terminal",
+    source_too_large: "skipped_too_large",
+    source_rate_limited: "failed_retryable",
+    source_unavailable: "failed_retryable",
+    source_auth_expired: "failed_retryable",
+    source_budget_exhausted: "failed_retryable",
+    network_unreachable: "failed_retryable",
+    network_socket_closed: "failed_retryable"
+  });
+  FileExtractionSourceError = class FileExtractionSourceError extends Error {
+    errorKind;
+    settleAs;
+    retryable;
+    errorHash;
+    constructor(errorKind, options = {}) {
+      super(errorKind);
+      this.name = "FileExtractionSourceError";
+      this.errorKind = errorKind;
+      this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
+      this.retryable = this.settleAs === "failed_retryable";
+      const errorHash = options.detailForHash === undefined ? undefined : createHash4("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      if (errorHash)
+        this.errorHash = errorHash;
+    }
+  };
+});
+
 // src/workers/email-source/ingest-filter.ts
 function classifyEmailIngestSkip(candidate, options = {}) {
   const skipOtp = options.skipOtp ?? true;
@@ -10034,6 +10079,15 @@ function metadataStringArray(metadata, key) {
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
 
+// src/core/classification-signals.ts
+function namesOnlyContentScopeMetadata() {
+  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
+}
+function itemContentKeptNamesOnly(item) {
+  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
+}
+var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
+
 // src/core/child-item-id.ts
 function childProviderItemId(parentProviderItemId, key) {
   if (!parentProviderItemId)
@@ -10044,22 +10098,37 @@ function childProviderItemId(parentProviderItemId, key) {
 }
 var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
-// src/core/classification-signals.ts
-function namesOnlyContentScopeMetadata() {
-  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
-}
-function itemContentKeptNamesOnly(item) {
-  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
-}
-var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
-
 // src/workers/google-connectors/gmail-mail-record.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
+function isGmailAttachmentPart(part) {
+  const type = (part.mimeType ?? "").trim().toLowerCase();
+  if (type.startsWith("multipart/"))
+    return false;
+  if (part.filename?.trim())
+    return true;
+  if (type === "message/rfc822")
+    return true;
+  if ((type === "" || type === "text/plain" || type === "text/html") && part.disposition?.trim().toLowerCase() !== "attachment")
+    return false;
+  return true;
+}
+function gmailAttachmentPartName(part) {
+  const filename = part.filename?.trim();
+  if (filename)
+    return filename;
+  const type = (part.mimeType ?? "").trim().toLowerCase() || "application/octet-stream";
+  if (type === "message/rfc822")
+    return `forwarded-message-${part.partId || "root"}.eml`;
+  const contentId = part.contentId?.trim().replace(/^<|>$/g, "").replace(/[^A-Za-z0-9._@-]/g, "_").slice(0, 128);
+  if (contentId)
+    return `cid-${contentId}`;
+  return `${type.replace(/[^a-z0-9.+-]/g, "-")}-part-${part.partId || "root"}`;
+}
 function childrenOf(record, build) {
-  return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.nested !== true && attachment.filename.trim() !== "");
+  return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.filename.trim() !== "" && (attachment.partId === "" ? 0 : attachment.partId.split(".").length) <= GMAIL_CHILD_MAX_DEPTH);
 }
 function hashString(value) {
-  return createHash4("sha256").update(value).digest("hex");
+  return createHash5("sha256").update(value).digest("hex");
 }
 function parsedDate(value) {
   if (!value)
@@ -10174,6 +10243,7 @@ function gmailChildItem(record, account, attachment, fetchedAt) {
       ...gmailId(record) ? { locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(record.id)}` } : {}
     }),
     fetchedAt,
+    holdContentUntilJudged: true,
     deferredBytes: {
       locator: attachment.locator ?? "",
       available: attachment.locator !== undefined,
@@ -10204,7 +10274,7 @@ function gmailClassificationSignals(item) {
     ...labels.length > 0 ? { labels } : {}
   };
 }
-var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX);
+var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX), GMAIL_CHILD_MAX_DEPTH = 8;
 var init_gmail_mail_record = __esm(() => {
   init_sender_rules();
 });
@@ -10239,7 +10309,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -10270,6 +10340,7 @@ class GoogleGmailSourceConnector {
   ingestFilterOptions;
   itemsByLocalId = new Map;
   build;
+  beforeEachRequest;
   messagesById = new Map;
   constructor(options = {}) {
     const env = options.env ?? process.env;
@@ -10291,6 +10362,7 @@ class GoogleGmailSourceConnector {
     this.scope = options.scope;
     this.now = options.now ?? (() => Date.now());
     this.build = options.build ?? {};
+    this.beforeEachRequest = options.beforeEachRequest;
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
     if (this.scope?.skippedLabelIds?.length) {
@@ -10403,7 +10475,7 @@ class GoogleGmailSourceConnector {
           this.itemsSkippedStored += 1;
           continue;
         }
-        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff });
+        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff, children: this.build.children === true });
         const [item, ...children] = gmailMailItems(record, this.account, this.build);
         this.attachmentsDeclared += metadataCount(item.metadata, "attachmentCount");
         this.attachmentBytesDeclared += metadataCount(item.metadata, "attachmentBytesDeclared");
@@ -10513,38 +10585,68 @@ class GoogleGmailSourceConnector {
     this.fetchItemCacheHits += 1;
     return item;
   }
-  async fetchAttachment(localItemId, locator) {
+  async fetchItemWithin(localItemId, options) {
+    if (!options.deferredBytes)
+      return this.fetchItem(localItemId);
+    return this.fetchAttachment(localItemId, options.deferredBytes.locator, options.maxBytes);
+  }
+  async fetchAttachment(localItemId, locator, maxBytes) {
     const where = parseGmailPartLocator(locator);
     if (!where)
-      throw new Error("This Gmail attachment cannot be found from what Olympus kept.");
+      throw new FileExtractionSourceError("source_content_unavailable");
+    const wanted = `${this.account}:${gmailChildProviderId(where.messageId, where.partId)}`;
+    if (localItemId !== wanted && `${this.account}:${localItemId}` !== wanted)
+      throw new FileExtractionSourceError("source_content_unavailable");
     const client = await this.clientForRequest();
+    const gone = (error) => {
+      if (error instanceof Error && /Gmail API request failed \(404\)/.test(error.message))
+        throw new FileExtractionSourceError("source_item_not_found");
+      throw error;
+    };
     let message2 = this.messagesById.get(where.messageId);
-    if (!message2) {
+    if (message2) {
+      this.beforeEachRequest?.();
       this.providerRequests += 1;
-      message2 = await client.getMessage(where.messageId);
+      const current2 = await client.getMessage(where.messageId, { format: "metadata", metadataHeaders: ["From"] }).catch(gone);
+      if (this.scope && !gmailMessageInScope(current2, this.scope))
+        throw new FileExtractionSourceError("source_permission_denied");
+    } else {
+      this.beforeEachRequest?.();
+      this.providerRequests += 1;
+      message2 = await client.getMessage(where.messageId).catch(gone);
       this.messagesById.set(where.messageId, message2);
     }
+    if (this.scope && !gmailMessageInScope(message2, this.scope))
+      throw new FileExtractionSourceError("source_permission_denied");
     const part = gmailPartAt(message2.payload, where.partId);
-    const record = gmailMailRecordFromMessage(message2);
-    const child = gmailMailItems(record, this.account, { children: true }).find((item) => item.identity.localItemId === localItemId || item.identity.localItemId === `${this.account}:${localItemId}`);
+    const record = gmailMailRecordFromMessage(message2, { children: true });
+    const child = gmailMailItems(record, this.account, { children: true }).find((item) => item.identity.localItemId === wanted);
     if (!part || !child)
-      throw new Error("This Gmail attachment is no longer in its message.");
+      throw new FileExtractionSourceError("source_version_gone");
+    const declared = part.body?.size;
+    if (maxBytes !== undefined && typeof declared === "number" && declared > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
     let data = part.body?.data;
     if (!data && part.body?.attachmentId) {
       if (!client.getAttachment)
-        throw new Error("This Gmail client cannot read attachments.");
+        throw new FileExtractionSourceError("source_content_unavailable");
+      this.beforeEachRequest?.();
       this.providerRequests += 1;
       data = (await client.getAttachment(where.messageId, part.body.attachmentId)).data;
     }
     if (data === undefined)
-      throw new Error("Gmail returned no bytes for this attachment.");
+      throw new FileExtractionSourceError("source_content_unavailable");
+    if (maxBytes !== undefined && Math.floor(data.length * 3 / 4) > maxBytes + 3)
+      throw new FileExtractionSourceError("source_too_large");
     const bytes = new Uint8Array(Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+    if (maxBytes !== undefined && bytes.byteLength > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
     return { ...child, content: { kind: "bytes", mimeType: child.mimeType, bytes } };
   }
   async attachmentsFrom(client, at, room) {
     const message2 = await client.getMessage(at.id);
     this.messagesById.set(at.id, message2);
-    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message2), this.account, this.build);
+    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message2, { children: this.build.children === true }), this.account, this.build);
     const items = children.slice(at.from, at.from + Math.max(1, room));
     for (const item of items)
       this.itemsByLocalId.set(item.identity.localItemId, item);
@@ -10596,7 +10698,8 @@ class GoogleGmailSourceConnector {
       ...this.requestBudget ? { requestBudget: this.requestBudget } : {},
       provenance: this.provenance,
       ...this.maxRetries !== undefined ? { maxRetries: this.maxRetries } : {},
-      ...this.sleepImpl ? { sleep: this.sleepImpl } : {}
+      ...this.sleepImpl ? { sleep: this.sleepImpl } : {},
+      ...this.beforeEachRequest ? { beforeEachAttempt: this.beforeEachRequest } : {}
     });
   }
   queryForWatermark(watermarkMs) {
@@ -10740,7 +10843,9 @@ class RestGmailApiClient {
   sleep;
   requestBudget;
   provenance;
+  beforeEachAttempt;
   constructor(options) {
+    this.beforeEachAttempt = options.beforeEachAttempt;
     this.token = options.token;
     this.fetchImpl = options.fetch;
     this.baseUrl = options.baseUrl;
@@ -10801,6 +10906,7 @@ class RestGmailApiClient {
   async getJson(path) {
     let attempt = 0;
     for (;; ) {
+      this.beforeEachAttempt?.();
       this.requestBudget?.reserve(this.provenance);
       const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
         headers: {
@@ -10849,10 +10955,11 @@ function gmailLabelFromJson(record) {
 function gmailMailRecordFromMessage(message2, options = {}) {
   const headers = headersFromPart(message2.payload);
   const metadataOnly = options.metadataOnly === true;
+  const children = options.children === true;
   const plain = [];
   const html = [];
   if (!metadataOnly)
-    collectPartText(message2.payload, plain, html);
+    collectPartText(message2.payload, plain, html, children);
   const messageId = bareMessageId(headers.get("message-id"));
   return {
     id: message2.id,
@@ -10874,7 +10981,7 @@ function gmailMailRecordFromMessage(message2, options = {}) {
 
 `),
     metadataOnly,
-    attachments: gmailAttachments(message2.id, message2.payload, false)
+    attachments: gmailAttachments(message2.id, message2.payload, false, children)
   };
 }
 function bareMessageId(value) {
@@ -10883,6 +10990,22 @@ function bareMessageId(value) {
     return;
   const inner = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
   return inner || undefined;
+}
+function gmailMessageInScope(message2, scope) {
+  const labels = new Set((message2.labelIds ?? []).map((label) => label.toUpperCase()));
+  if (labels.has("SPAM") || labels.has("TRASH"))
+    return false;
+  for (const skipped of [...scope.skippedCategoryLabelIds ?? [], ...scope.skippedLabelIds ?? []]) {
+    if (labels.has(skipped.toUpperCase()))
+      return false;
+  }
+  const received = internalDateNumber({ internalDate: message2.internalDate });
+  if (scope.contentAfterMs !== undefined && (received === undefined || received < scope.contentAfterMs))
+    return false;
+  const from = headersFromPart(message2.payload).get("from");
+  if (scope.skipSenders?.some((rule) => senderMatchesRule(from, rule)))
+    return false;
+  return true;
 }
 function gmailPartLocator(messageId, partId) {
   return `${GMAIL_PART_LOCATOR_PREFIX}${messageId}:${partId}`;
@@ -10898,22 +11021,25 @@ function parseGmailPartLocator(locator) {
   const partId = rest.slice(split + 1);
   return /^[A-Za-z0-9_-]{1,128}$/.test(messageId) && /^[0-9.]{0,64}$/.test(partId) ? { messageId, partId } : undefined;
 }
-function gmailAttachments(messageId, part, inside) {
+function gmailAttachments(messageId, part, inside, children = false) {
   if (!part)
     return [];
+  const headers = headersFromPart(part);
+  const disposition = headers.get("content-disposition")?.split(";")[0]?.trim();
   const filename = part.filename?.trim();
-  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
   const partId = part.partId?.trim() ?? "";
-  const found = filename ? [{
+  const attachment = children ? isGmailAttachmentPart({ ...part.mimeType ? { mimeType: part.mimeType } : {}, ...filename ? { filename } : {}, ...disposition ? { disposition } : {} }) : Boolean(filename);
+  const size = attachment && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
+  const found = attachment ? [{
     partId,
-    filename,
+    filename: children ? gmailAttachmentPartName({ partId, ...filename ? { filename } : {}, ...headers.get("content-id") ? { contentId: headers.get("content-id") } : {}, ...part.mimeType ? { mimeType: part.mimeType } : {} }) : filename,
     ...part.mimeType?.trim() ? { mimeType: part.mimeType.trim() } : {},
     ...size !== undefined ? { size } : {},
     ...part.partId !== undefined ? { locator: gmailPartLocator(messageId, partId) } : {},
     ...inside ? { nested: true } : {}
   }] : [];
   for (const child of part.parts ?? [])
-    found.push(...gmailAttachments(messageId, child, inside || Boolean(filename)));
+    found.push(...gmailAttachments(messageId, child, inside || attachment, children));
   return found;
 }
 function gmailPartAt(part, partId) {
@@ -10928,9 +11054,14 @@ function gmailPartAt(part, partId) {
   }
   return;
 }
-function collectPartText(part, plain, html) {
+function collectPartText(part, plain, html, children = false) {
   if (!part)
     return;
+  if (children) {
+    const disposition = headersFromPart(part).get("content-disposition")?.split(";")[0]?.trim();
+    if (isGmailAttachmentPart({ ...part.mimeType ? { mimeType: part.mimeType } : {}, ...part.filename?.trim() ? { filename: part.filename } : {}, ...disposition ? { disposition } : {} }))
+      return;
+  }
   if (part.filename?.trim())
     return;
   const decoded = part.body?.data ? decodeBase64Url(part.body.data) : undefined;
@@ -10939,7 +11070,7 @@ function collectPartText(part, plain, html) {
   if (decoded && part.mimeType === "text/html")
     html.push(decoded);
   for (const child of part.parts ?? [])
-    collectPartText(child, plain, html);
+    collectPartText(child, plain, html, children);
 }
 function headersFromPart(part) {
   const headers = new Map;
@@ -10984,13 +11115,14 @@ function metadataCount(metadata, key) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 function hashString2(value) {
-  return createHash5("sha256").update(value).digest("hex");
+  return createHash6("sha256").update(value).digest("hex");
 }
 var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
   init_olympus_layout();
   init_mail_source_scope();
   init_sender_rules();
+  init_file_extraction_source();
   init_credential_broker();
   init_ingest_filter();
   init_gmail_mail_record();
@@ -10999,7 +11131,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -11565,7 +11697,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash6("sha256").update(value).digest("hex");
+  return createHash7("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -12700,7 +12832,7 @@ var init_secret_patterns = __esm(() => {
 });
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text2 = input.text?.trim() ?? "";
   if (!text2) {
@@ -12769,7 +12901,7 @@ function dedupeFindings(findings) {
   return unique;
 }
 function hashFinding(type, matchedText) {
-  return createHash7("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash8("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-10-13", REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -13230,7 +13362,7 @@ function pathPrefixMatches(path, prefix) {
 }
 
 // src/workers/classification/tier-classifier.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 function tierRank(tier) {
   return TIER_RANK[tier];
 }
@@ -13241,7 +13373,7 @@ function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
 }
 function contentDigestReason(text2) {
-  return `content:sha256:${createHash8("sha256").update(text2.trim()).digest("hex")}`;
+  return `content:sha256:${createHash9("sha256").update(text2.trim()).digest("hex")}`;
 }
 function snifferContentMaterial(names, excerpt, parentContext) {
   const trimmed = names.trim();
@@ -13273,7 +13405,7 @@ function splitParentContext(material) {
 }
 function tierSnifferInputHash(pass, signals, text2, parentContext) {
   const context = parentContext?.replace(/\s+/g, " ").trim().slice(0, PARENT_CONTEXT_MAX_CHARS);
-  return createHash8("sha256").update(JSON.stringify([
+  return createHash9("sha256").update(JSON.stringify([
     pass,
     signals.title ?? null,
     signals.path ?? null,
@@ -13823,7 +13955,7 @@ var init_tier_classifier = __esm(() => {
 
 // src/workers/classification/secret-locations.ts
 import { Database } from "bun:sqlite";
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 import { chmodSync as chmodSync2, closeSync as closeSync7, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync7 } from "node:fs";
 import { dirname as dirname14 } from "node:path";
 function screenedSecretLocator(locator) {
@@ -13869,7 +14001,7 @@ class SecretLocationsIndex {
     const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
     const locator = screenedSecretLocator(input.locator);
     const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
-    const contentHash = input.text !== undefined ? createHash9("sha256").update(input.text, "utf8").digest("hex") : null;
+    const contentHash = input.text !== undefined ? createHash10("sha256").update(input.text, "utf8").digest("hex") : null;
     const existing = this.get(input.identity);
     if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
       return false;
@@ -13956,7 +14088,7 @@ class SecretLocationsIndex {
   }
 }
 function secretLocationRef(location) {
-  return `secret:${createHash9("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+  return `secret:${createHash10("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
 }
 function secretLocationWithinScope(location, scope) {
   if (scope.accountScope && location.accountScope !== scope.accountScope)
@@ -14089,11 +14221,11 @@ var init_secret_locations = __esm(() => {
 
 // src/workers/classification/sniffer-store.ts
 import { Database as Database2 } from "bun:sqlite";
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 import { chmodSync as chmodSync3, existsSync as existsSync11, mkdirSync as mkdirSync10 } from "node:fs";
 import { dirname as dirname15 } from "node:path";
 function snifferMaterialHash(pass, material) {
-  return createHash10("sha256").update(`${pass}
+  return createHash11("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
 
@@ -18506,7 +18638,7 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash11, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash12, randomUUID as randomUUID4 } from "node:crypto";
 import {
   chmodSync as chmodSync5,
   closeSync as closeSync9,
@@ -18738,7 +18870,7 @@ function refsDir(path) {
   return join18(dirname18(path), `${basename4(path)}.refs`);
 }
 function holderDigest(name) {
-  return createHash11("sha256").update(name).digest("hex").slice(0, 32);
+  return createHash12("sha256").update(name).digest("hex").slice(0, 32);
 }
 function holderName(holder) {
   const digest = holderDigest(mediaHolderName(holder));
@@ -18953,7 +19085,7 @@ var init_delphi_scorer = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 function snifferTierKey(verdict) {
   if (verdict.failSafe || verdict.tier === "private" || recordRequiresPrivate(verdict))
     return "secure";
@@ -19031,7 +19163,7 @@ function snifferCacheModelId(lane) {
   return lane.cacheModelId ?? lane.modelId;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
-  const model = createHash12("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
+  const model = createHash13("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
   return `${lane.kind}:${promptVersion}.m${model}`;
 }
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
@@ -19054,7 +19186,7 @@ function snifferPromptVersions(ownerContext) {
   const context2 = boundedOwnerContext(ownerContext);
   if (!context2)
     return { approval: SNIFFER_PROMPT_VERSION, cache: SNIFFER_PROMPT_VERSION };
-  const digest = createHash12("sha256").update(context2).digest("hex").slice(0, 8);
+  const digest = createHash13("sha256").update(context2).digest("hex").slice(0, 8);
   return { approval: SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, cache: `${SNIFFER_OWNER_CONTEXT_PROMPT_VERSION}.o${digest}` };
 }
 function parseSnifferBatchResponse(text2, expected) {
@@ -19239,8 +19371,8 @@ var init_sniffer = __esm(() => {
     `{"verdicts":[{"i":1,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map((c) => `"${c}"`).join("|")},"ownRecord":true|false,"privateKind":${SNIFFER_PRIVATE_KINDS.map((c) => `"${c}"`).join("|")},"confidence":<number from 0 to 1>}]}`
   ].join(`
 `);
-  SNIFFER_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash13("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash13("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
   SNIFFER_CATEGORY_SYNONYMS = {
     insurance: "financial",
     money: "financial",
@@ -20225,7 +20357,7 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -20984,7 +21116,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString4(value) {
-  return createHash13("sha256").update(value).digest("hex");
+  return createHash14("sha256").update(value).digest("hex");
 }
 var SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
 var init_embeddings = __esm(() => {
@@ -21130,7 +21262,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash14, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash15, randomUUID as randomUUID5 } from "node:crypto";
 import { existsSync as existsSync18, lstatSync as lstatSync9, mkdirSync as mkdirSync13, statSync as statSync11 } from "node:fs";
 import { dirname as dirname20 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
@@ -21777,7 +21909,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString5(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash14("sha256");
+  const digest = createHash15("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -21870,7 +22002,7 @@ function namesOnlyKept(db, itemPks) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash14("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash15("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -23261,7 +23393,7 @@ function requireNonEmpty(value, label) {
   return text2;
 }
 function hashString5(value) {
-  return createHash14("sha256").update(value).digest("hex");
+  return createHash15("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -25560,7 +25692,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash14("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash15("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -26454,8 +26586,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash14("sha256");
-      const outputDigest = createHash14("sha256");
+      const inputDigest = createHash15("sha256");
+      const outputDigest = createHash15("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -26525,8 +26657,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash14("sha256");
-      const outputDigest = createHash14("sha256");
+      const inputDigest = createHash15("sha256");
+      const outputDigest = createHash15("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -26926,7 +27058,7 @@ var init_local_index = __esm(() => {
               tallyExclusion(metadataOnlyTally, exclusion);
             let itemForStorage = item;
             let contentFetchFailed = false;
-            if (!metadataOnly && !deferMetadataOnlyContent && classification && fetchContent && item.content.kind === "metadata_only") {
+            if (!metadataOnly && !deferMetadataOnlyContent && item.deferredBytes === undefined && classification && fetchContent && item.content.kind === "metadata_only") {
               try {
                 itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
                 consecutiveContentFetchFailures = 0;
@@ -27023,7 +27155,7 @@ var init_local_index = __esm(() => {
             const sourceScopeObservation = options?.sourceScopeObservation ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) : undefined;
             let upsert;
             try {
-              upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined);
+              upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", false, (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined);
             } catch (error) {
               if (!(error instanceof ConnectorStoreTierWriteRefusedError))
                 throw error;
@@ -27033,7 +27165,7 @@ var init_local_index = __esm(() => {
             itemsIndexed += 1;
             let itemChanged = upsert.contentChanged;
             let ftsContentChanged = false;
-            if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!deferMetadataOnlyContent || itemForStorage.content.kind !== "metadata_only")) {
+            if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== "metadata_only")) {
               const indexed = await this.indexItemContent(connector, (fetched) => routedLayer !== undefined ? sensitivity : classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain), (fetched, fetchedSensitivity) => routedLayer !== undefined ? undefined : this.recordTierDecision(connector, fetched, fetchedSensitivity, tierClassification, tierRun, itemContentKeptNamesOnly(fetched)), itemForStorage, upsert.itemPk, maxChunkChars, gaps, () => {
                 consecutiveContentFetchFailures += 1;
                 assertContentFetchFailureBudget(consecutiveContentFetchFailures);
@@ -28937,6 +29069,27 @@ var init_local_index = __esm(() => {
     holdsAnyItem() {
       return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
     }
+    parentsAwaitingChildren(provider, needle, afterPk, limit) {
+      if (!this.childItemColumnsPresent)
+        return [];
+      const rows = this.db.query(`
+      SELECT i.item_pk AS itemPk, i.provider_item_id AS providerItemId, i.account_scope AS accountScope, i.local_item_id AS localItemId
+      FROM items i
+      WHERE i.provider = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL AND i.item_pk > ?
+        AND instr(i.provider_item_id, ?) = 0
+        AND instr(COALESCE(i.search_text, ''), ?) > 0
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM items k WHERE k.parent_local_item_id = i.local_item_id)
+      ORDER BY i.item_pk
+      LIMIT ?
+    `).all(provider, afterPk, CHILD_ITEM_ID_SEPARATOR, needle, Math.max(1, Math.floor(limit)));
+      return rows;
+    }
+    hasChildRowsOf(localItemId) {
+      if (!this.childItemColumnsPresent)
+        return false;
+      return this.db.query("SELECT 1 AS present FROM items WHERE parent_local_item_id = ? LIMIT 1").get(localItemId) !== null;
+    }
     holdsItemsMatching(filters) {
       const scoped = connectorStoreFilterSql(filters);
       return this.db.query(`SELECT 1 AS present FROM items i WHERE i.tombstoned = 0 ${scoped.sql} LIMIT 1`).get(...scoped.params) !== null;
@@ -30124,7 +30277,7 @@ var init_embedding_ledger = __esm(() => {
 });
 
 // src/workers/connector-store/tier-move.ts
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 function rowRehomeReceiptId(ledger, identity, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
 }
@@ -30418,7 +30571,7 @@ function readVerifiedMove(ledger, identity) {
   return receipt;
 }
 function copyFingerprint(copy, layers) {
-  return createHash15("sha256").update(JSON.stringify({
+  return createHash16("sha256").update(JSON.stringify({
     identity: copy.identity,
     columns: copy.columns,
     chunks: layers === "metadata" ? [] : copy.chunks
@@ -31047,7 +31200,7 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash16 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 import { readFileSync as readFileSync17 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname23, join as join23 } from "node:path";
@@ -31096,7 +31249,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash16("sha256").update(JSON.stringify({
+    this.configHash = createHash17("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -31984,7 +32137,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash17 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -32124,7 +32277,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash17("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash18("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function readState(raw) {
   if (!raw)
@@ -33563,14 +33716,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash18 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash18("sha256").update(block).digest());
+    blockDigests.push(createHash19("sha256").update(block).digest());
   }
-  return createHash18("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash19("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -36545,7 +36698,7 @@ var init_open_targets = __esm(() => {
 });
 
 // src/core/dashboard-launch.ts
-import { createHash as createHash20, randomBytes as randomBytes4 } from "node:crypto";
+import { createHash as createHash21, randomBytes as randomBytes4 } from "node:crypto";
 
 class DashboardLaunchTickets {
   tickets = new Map;
@@ -36608,7 +36761,7 @@ class DashboardLaunchTickets {
   }
 }
 function dashboardLaunchOriginTag(origin) {
-  return createHash20("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+  return createHash21("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
 }
 function isWellFormedDashboardLaunchTicket(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
@@ -42615,6 +42768,7 @@ var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
   init_tier_rules_sweep();
   init_embeddings();
+  init_gmail_mail_record();
   init_gmail();
   init_gmail_live_control();
   GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
@@ -44472,7 +44626,7 @@ init_local_private_answers();
 init_linux_desktop_opener();
 
 // src/core/linux-owner-bridge.ts
-import { createHmac, createHash as createHash19, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
+import { createHmac, createHash as createHash20, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync10, openSync as openSync10, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
 import { dirname as dirname26, join as join27 } from "node:path";
 init_worker_transport();
@@ -44560,7 +44714,7 @@ document.addEventListener('submit',function(event){
 },true);
 })();</script>`;
 function documentPolicy(policy) {
-  const hash = "'sha256-" + createHash19("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
+  const hash = "'sha256-" + createHash20("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
   const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
   const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
   const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
@@ -44653,7 +44807,7 @@ function proofPage() {
   response.headers.set("Access-Control-Allow-Origin", "*");
   return response;
 }
-var hashSecret = (value) => createHash19("sha256").update(value).digest("hex");
+var hashSecret = (value) => createHash20("sha256").update(value).digest("hex");
 function equalHash(value, hash) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(hashSecret(value), "hex"), Buffer.from(hash, "hex"));
 }
@@ -45268,52 +45422,7 @@ init_worker_auth();
 // src/workers/email-source/file-extraction-runtime.ts
 init_credential_broker();
 init_types();
-
-// src/core/file-extraction-source.ts
-import { createHash as createHash21 } from "node:crypto";
-var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
-  source_item_not_found: "failed_terminal",
-  source_permission_denied: "failed_terminal",
-  source_version_gone: "failed_terminal",
-  source_content_unavailable: "skipped_unsupported",
-  source_request_rejected: "failed_terminal",
-  source_too_large: "skipped_too_large",
-  source_rate_limited: "failed_retryable",
-  source_unavailable: "failed_retryable",
-  source_auth_expired: "failed_retryable",
-  source_budget_exhausted: "failed_retryable",
-  network_unreachable: "failed_retryable",
-  network_socket_closed: "failed_retryable"
-});
-var ERROR_HASH_CHARS = 32;
-
-class FileExtractionSourceError extends Error {
-  errorKind;
-  settleAs;
-  retryable;
-  errorHash;
-  constructor(errorKind, options = {}) {
-    super(errorKind);
-    this.name = "FileExtractionSourceError";
-    this.errorKind = errorKind;
-    this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
-    this.retryable = this.settleAs === "failed_retryable";
-    const errorHash = options.detailForHash === undefined ? undefined : createHash21("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
-    if (errorHash)
-      this.errorHash = errorHash;
-  }
-}
-function splitScopedLocalItemId(localItemId) {
-  const separator = localItemId.indexOf(":");
-  if (separator <= 0 || separator === localItemId.length - 1)
-    return;
-  return {
-    accountScope: localItemId.slice(0, separator),
-    providerItemId: localItemId.slice(separator + 1)
-  };
-}
-
-// src/workers/email-source/file-extraction-runtime.ts
+init_file_extraction_source();
 init_media_cache();
 init_olympus_layout();
 init_source_placement();
@@ -45324,6 +45433,7 @@ init_connector_store2();
 init_dropbox_content_hash();
 init_provider_client();
 init_http_timeout();
+init_file_extraction_source();
 import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
 import { relative as relative5, resolve as resolve9, sep as sep5 } from "node:path";
 var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2";
@@ -45687,6 +45797,7 @@ init_store();
 init_drive();
 
 // src/workers/google-connectors/drive-extraction-source.ts
+init_file_extraction_source();
 init_drive();
 init_request_budget();
 var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
@@ -45699,6 +45810,9 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
   "image/heic",
   "image/heif"
 ]);
+
+// src/workers/whatsapp/extraction-source.ts
+init_file_extraction_source();
 
 // src/workers/email-source/file-extraction-runtime.ts
 init_store_sync2();
@@ -45826,6 +45940,7 @@ init_media_cache();
 init_operation_error();
 init_model_transport();
 init_types();
+init_file_extraction_source();
 init_command_runner();
 init_tier_classifier();
 init_bounded_text();
@@ -47150,6 +47265,10 @@ init_store();
 
 // src/workers/local-files/own-roots-cleanup.ts
 init_tiered_store_set();
+
+// src/workers/local-files/connector.ts
+init_file_extraction_source();
+
 // src/core/file-mime.ts
 var MIME_BY_EXTENSION = Object.freeze({
   pdf: "application/pdf",
@@ -49080,6 +49199,7 @@ init_connector4();
 
 // src/workers/archive-import/evernote/connector.ts
 init_archive_formats();
+init_file_extraction_source();
 init_byte_source();
 init_stop_errors();
 
@@ -49706,10 +49826,12 @@ init_store2();
 
 // src/workers/archive-import/extraction-source.ts
 init_archive_formats();
+init_file_extraction_source();
 init_scope_safe_fs();
 
 // src/workers/file-extraction/connector-source.ts
 init_spool();
+init_file_extraction_source();
 
 // src/workers/archive-import/extraction-source.ts
 init_spool();
@@ -50537,6 +50659,7 @@ init_gmail_mail_record();
 init_state();
 
 // src/workers/archive-import/mbox/mime-parts.ts
+init_gmail_mail_record();
 var MAX_HEADER_BYTES2 = 256 * 1024;
 
 // src/workers/archive-import/mbox/gmail-input.ts
@@ -50667,6 +50790,22 @@ init_request_budget();
 // src/workers/email-source/server.ts
 init_source_registry();
 init_gmail_live_sync();
+
+// src/workers/google-connectors/gmail-attachment-extraction.ts
+init_file_extraction_source();
+
+// src/workers/archive-import/mbox/part-reader.ts
+init_file_extraction_source();
+init_scope_safe_fs();
+init_manifest3();
+init_gmail_mail_record();
+
+// src/workers/google-connectors/gmail-attachment-extraction.ts
+init_tier_ledger();
+init_child_visibility();
+init_gmail();
+
+// src/workers/email-source/server.ts
 init_tiered_store_set();
 
 // src/workers/source-account-guard.ts
@@ -52019,6 +52158,7 @@ init_embedding_ledger();
 init_http();
 
 // src/workers/email-source/server.ts
+var GMAIL_ATTACHMENT_READER_REUSE_MS = 5 * 60000;
 function requireSourceEmbeddingDimension(options) {
   const configuredKey = options.envKeys.find((key2) => Boolean(options.env[key2]?.trim()));
   if (options.envKeys.every((key2) => options.env[key2] === undefined)) {
