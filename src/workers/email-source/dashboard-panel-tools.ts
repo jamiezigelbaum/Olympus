@@ -60,6 +60,7 @@ import {
   unreadableNames,
   type ComputerArchivesMeta,
   type ComputerDashboardMeta,
+  type ComputerArchiveSourceMeta,
   type ComputerSourceImportsMeta,
   type ComputerUnpairEntry,
   type ComputerUnreadableEntry,
@@ -132,6 +133,8 @@ export interface DashboardPanelToolsOptions {
    * only ever in the computer meta.
    */
   sourceImports?: () => ComputerSourceImportsMeta[] | undefined;
+  /** The cards that import their own exports (archive-import/dashboard.ts archiveSources). */
+  archiveSources?: () => ComputerArchiveSourceMeta[] | undefined;
 }
 
 /** Why an archive control did nothing for a session that is not this computer's own. */
@@ -299,8 +302,10 @@ async function archiveBrowse(options: DashboardPanelToolsOptions, args: Record<s
 async function archiveApprove(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
   // The chosen key or the request, and at most one answer to "which account is this export of": add it to
   // the connected account, or keep it under Archives.
-  const keys = Object.keys(args).filter((key) => key !== 'confirm_account' && key !== 'keep_apart');
+  // A source's own Import an archive also names its card (`source_id`), with a chosen key only.
+  const keys = Object.keys(args).filter((key) => key !== 'confirm_account' && key !== 'keep_apart' && key !== 'source_id');
   const byKey = keys.length === 1 && keys[0] === 'key' && archiveArg(args.key);
+  if (args.source_id !== undefined && !(byKey && archiveArg(args.source_id))) return refused('source_id goes with a chosen key.', 'invalid_params');
   const byRequest = keys.length === 1 && keys[0] === 'request_id' && archiveArg(args.request_id);
   const answers = [args.confirm_account, args.keep_apart];
   if (!byKey && !byRequest) return refused('Give the chosen key or a request id.', 'invalid_params');
@@ -327,7 +332,8 @@ async function archiveApprove(options: DashboardPanelToolsOptions, args: Record<
       status,
       name,
       ...(archiveName ? { archive_name: archiveName } : {}),
-      ...(status === 'confirm_account' && sourceId ? { source: { id: sourceId, label: sourceLabel } } : {}),
+      // Which source asks about its account, or which source a started import joined.
+      ...((status === 'confirm_account' || status === 'started') && sourceId ? { source: { id: sourceId, label: sourceLabel } } : {}),
       ...(status === 'confirm_account' && answer.parsed.reconfirm === true ? { reconfirm: true } : {}),
     },
   };
@@ -364,6 +370,16 @@ async function archiveStop(options: DashboardPanelToolsOptions, args: Record<str
   const answer = await archiveRoute(options, 'stop', args, context);
   if (!answer.ok) return answer.result;
   return { content: [{ type: 'text', text: 'Stopped.' }], structuredContent: { status: 'stopped' } };
+}
+
+/** The cards that import their own exports, or undefined when none does: Import another archive is then the only way in. */
+function archiveSourcesMeta(options: DashboardPanelToolsOptions): ComputerArchiveSourceMeta[] | undefined {
+  try {
+    const sources = options.archiveSources?.();
+    return sources && sources.length > 0 ? sources : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The imports that joined a source, or undefined when they cannot be read: a card then shows without them. */
@@ -550,7 +566,8 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       const waiting = context.localSession === true ? waitingCount(options) : 0;
       const archives = archivesMeta(options);
       const sourceImports = sourceImportsMeta(options);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports) return result;
+      const archiveSources = archiveSourcesMeta(options);
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources) return result;
       const meta: ComputerDashboardMeta = {
         ...(missingFolders.length ? { missingFolders } : {}),
         ...(permissionSettings.length ? { permissionSettings } : {}),
@@ -560,6 +577,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
         ...(waiting > 0 ? { waitingPrivateQuestions: waiting } : {}),
         ...(archives ? { archives } : {}),
         ...(sourceImports ? { sourceImports } : {}),
+        ...(archiveSources ? { archiveSources } : {}),
       };
       const existing = result._meta && typeof result._meta === 'object' ? result._meta as Record<string, unknown> : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta } };

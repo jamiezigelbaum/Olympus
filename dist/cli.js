@@ -52043,6 +52043,7 @@ var init_vocabulary = __esm(() => {
     sourcesCloud: "Accounts",
     notConnected: "Not connected",
     noSources: "No sources yet.",
+    otherArchives: { title: "Other archives", line: "For an export that isn't from one of your sources above." },
     progress: "Progress",
     progressInitial: "First index",
     progressRefresh: "Catching up",
@@ -52210,11 +52211,12 @@ var init_vocabulary = __esm(() => {
     other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
   };
   DASHBOARD_ARCHIVE_COPY = {
-    importAction: "Import an archive",
+    importAction: "Import another archive",
+    sourceImport: { action: "Import an archive", title: "Import an archive into {source}" },
     pick: {
       back: "Back to Olympus",
-      title: "Import an archive",
-      intro: ARCHIVE_PICK_INTRO,
+      title: "Import another archive",
+      intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
       source: "This computer",
       makePrivate: "Import",
       makePrivateFor: "Import {name}",
@@ -52275,11 +52277,11 @@ var init_vocabulary = __esm(() => {
     thisFile: "A file of this archive",
     account: {
       line: "{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?",
-      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.",
+      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Other archives, it stays apart, with its own Remove.",
       add: "Add to {source}",
-      apart: "Keep it under Archives",
+      apart: "Keep it under Other archives",
       addFor: "Add {name} to {source}",
-      apartFor: "Keep {name} under Archives",
+      apartFor: "Keep {name} under Other archives",
       sourceFallback: "this source",
       reconfirm: {
         line: "{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?",
@@ -52409,7 +52411,8 @@ var init_vocabulary = __esm(() => {
     },
     tryAgain: "Try again",
     dismiss: "Dismiss",
-    started: "Importing {name}. It shows under Archives as it is read.",
+    started: "Importing {name}. It shows under Other archives as it is read.",
+    startedIn: "Importing {name} into {source}. It shows in {source} as it is read.",
     checking: "Checking whether {name} is already imported…",
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
@@ -52439,7 +52442,7 @@ var init_vocabulary = __esm(() => {
         permission: "Your user account is not allowed to open {file}.",
         other: "Olympus could not open {file}."
       },
-      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, no archive can be imported, so nothing overwrites it.",
       fix: {
         damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
         unknown_form: "Update Olympus, then open this page again.",
@@ -76975,7 +76978,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
     return { kind: "this_computer", source: definition.connect_action.source, label: "Connect" };
   }
   if (definition.connect_action.kind === "archive_import")
-    return { kind: "archive_import", label: "Import an archive" };
+    return { kind: "archive_import", label: "Import another archive" };
   if (definition.connect_action.kind === "api_key") {
     if (connected && !reauthRequired && !providerRefusing)
       return { kind: "none" };
@@ -138443,7 +138446,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (privacy && privacy.handles(fix)) {
       action = () => openPrivacy(key2);
     } else if (fix.archiveImport === true && picker) {
-      action = () => startArchivePick(key2);
+      action = () => {
+        const fromMenu = key2.indexOf("menu:") === 0;
+        if (fromMenu && source)
+          state.open["menu:" + source.id] = false;
+        startArchivePick(fromMenu ? "summary:" + key2.slice(0, key2.lastIndexOf(":")) : key2, typeof fix.archiveSource === "string" ? fix.archiveSource : "");
+      };
     } else if (typeof fix.archiveFocus === "string" && fix.archiveFocus) {
       action = () => focusArchive(String(fix.archiveFocus));
     } else if (fix.archiveModels === true) {
@@ -138655,7 +138663,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const label = typeof source.label === "string" ? source.label : "";
     return !!label && typeof item.sentence === "string" && item.sentence.indexOf(label + " — ") === 0;
   }
-  function sourceRow(source) {
+  function sourceRow(source, other) {
     const id = String(source.id || source.label);
     const status = String(source.status || "");
     const archives = archivesMeta(id);
@@ -138665,7 +138673,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const main = el("div", "source-main");
     const dot2 = el("span", "dot tone-" + tone);
     dot2.setAttribute("aria-hidden", "true");
-    const head = add(el("p", "source-head"), dot2, el("span", "source-name", String(source.label || "")));
+    const head = add(el("p", "source-head"), dot2, other ? add(el("span", "source-name source-for", P.otherArchives.line), el("span", "sr", " — " + String(source.label || ""))) : el("span", "source-name", String(source.label || "")));
     const off = status === "Off" && !item;
     if (!off)
       add(head, el("span", "sr", " — " + (item ? P.needsYou : status)));
@@ -138720,9 +138728,23 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (checking)
       add(controls, checkingControl("primary:" + id));
     const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    if (other) {
+      const importing = (entry) => !!entry && (entry.archiveImport === true || entry.label === H.copy.archives.importAction);
+      const shown2 = menu.filter(importing)[0];
+      if (shown2 && !importing(fix))
+        add(controls, fixControl(shown2, "import:" + id, "plain", true, context2));
+      for (let at = menu.length - 1;at >= 0; at -= 1)
+        if (importing(menu[at]))
+          menu.splice(at, 1);
+    }
     const unpair = unpairEntry(id);
     if (unpair)
       menu.push(unpair);
+    const own3 = archiveSourceMeta(id);
+    if (own3) {
+      const destructive = menu.findIndex((entry) => !!entry && entry.destructive === true);
+      menu.splice(destructive < 0 ? menu.length : destructive, 0, { label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own3.sourceId });
+    }
     let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "⋯");
@@ -138848,11 +138870,20 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return false;
     return !archiveSetting(meta2) && Array.isArray(meta2.archives) && meta2.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || Array.isArray(meta2.requests) && meta2.requests.some((entry) => !!entry && entry.status === "checking");
   }
-  function startArchivePick(key2) {
+  function startArchivePick(key2, sourceId) {
     supersede();
     state.notice = "";
     state.confirming = "";
-    picker.pickArchive({ ...H.copy.archives.pick, account: H.copy.archives.account }, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2));
+    const A = H.copy.archives;
+    const own3 = sourceId ? archiveSourceMeta(sourceId) : null;
+    const words2 = own3 ? { ...A.pick, title: fill2(A.sourceImport.title, { source: String(own3.label) }), intro: String(own3.intro), account: A.account } : { ...A.pick, account: A.account };
+    picker.pickArchive(words2, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key2), own3 ? String(own3.sourceId) : "");
+  }
+  function archiveSourceMeta(id) {
+    const meta2 = state.computerMeta;
+    if (!onComputer() || !meta2 || !Array.isArray(meta2.archiveSources))
+      return null;
+    return meta2.archiveSources.filter((entry) => !!entry && entry.sourceId === id && typeof entry.label === "string" && !!entry.label && typeof entry.intro === "string" && !!entry.intro)[0] || null;
   }
   function archiveOutcome(outcome) {
     const A = H.copy.archives;
@@ -138864,7 +138895,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return fill2(A.checking, { name });
     if (outcome.status === "already_imported")
       return archive ? fill2(A.already, { name, archive }) : fill2(A.alreadyUnnamed, { name });
-    return outcome.status === "started" ? fill2(A.started, { name }) : "";
+    const source = outcome.source && typeof outcome.source.label === "string" ? outcome.source.label : "";
+    if (outcome.status === "started")
+      return source ? fill2(A.startedIn, { name, source }) : fill2(A.started, { name });
+    return "";
   }
   function archiveNotice(name, args, result) {
     const A = H.copy.archives;
@@ -139500,6 +139534,15 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function capitalise(text2) {
     return text2 ? text2.charAt(0).toUpperCase() + text2.slice(1) : text2;
   }
+  function isArchivesCard(source) {
+    return !!source && String(source.id) === config2.archivesSourceId;
+  }
+  function otherArchivesSection(source) {
+    if (!source)
+      return null;
+    const section = add(el("section", "section other-archives"), el("h2", "", P.otherArchives.title));
+    return add(section, add(el("ul", "rows"), sourceRow(source, true)));
+  }
   function sourcesSection(sources) {
     const section = add(el("section", "section"), el("h2", "", P.sources));
     if (!sources.length)
@@ -139836,7 +139879,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(page2, staleLine());
     const listed = Array.isArray(data2.sources) ? data2.sources : [];
     add(page2, needsYouSection((Array.isArray(data2.needsYou) ? data2.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
-    add(page2, sourcesSection(Array.isArray(data2.sources) ? data2.sources : []));
+    const allSources = Array.isArray(data2.sources) ? data2.sources : [];
+    add(page2, sourcesSection(allSources.filter((source) => !isArchivesCard(source))));
+    add(page2, otherArchivesSection(allSources.filter(isArchivesCard)[0]));
     add(page2, privacySection(data2));
     const sourceList = Array.isArray(data2.sources) ? data2.sources : [];
     add(page2, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data2.progress, true));
@@ -140667,12 +140712,12 @@ function chatgptPickerProgram(kit) {
       kit.fullscreen();
     openScope(sourceId, sourceLabel4, words2.title, "", "", undefined, { words: words2, taken: taken.slice(), done });
   }
-  function pickArchive(words2, done) {
+  function pickArchive(words2, done, sourceId) {
     stopTimer();
     session++;
     if (kit.compact())
       kit.fullscreen();
-    openScope("", words2.source, words2.title, "", "", undefined, { words: words2, taken: [], done: () => done(null), archive: { done } });
+    openScope("", words2.source, words2.title, "", "", undefined, { words: words2, taken: [], done: () => done(null), archive: { done, sourceId: sourceId || "" } });
   }
   function archiveMode() {
     return !!p && !!p.pick && !!p.pick.archive;
@@ -140701,7 +140746,8 @@ function chatgptPickerProgram(kit) {
       p.saveAccess = access && typeof access.message === "string" && access.message ? access : null;
       kit.render("picker:archive-error");
     };
-    kit.call(T.archiveApprove, answer ? { key: key2, ...answer } : { key: key2 }).then((result) => {
+    const only = p.pick.archive.sourceId ? { source_id: p.pick.archive.sourceId } : {};
+    kit.call(T.archiveApprove, answer ? { key: key2, ...only, ...answer } : { key: key2, ...only }).then((result) => {
       if (mine !== session || !p)
         return;
       const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
@@ -140722,6 +140768,8 @@ function chatgptPickerProgram(kit) {
       const picked = { name: typeof content.name === "string" && content.name ? content.name : name, status };
       if (typeof content.archive_name === "string" && content.archive_name)
         picked.archiveName = content.archive_name;
+      if (status === "started" && content.source && typeof content.source.label === "string" && content.source.label)
+        picked.source = { label: content.source.label };
       stopTimer();
       p = null;
       session++;
@@ -142733,6 +142781,7 @@ function chatgptDashboardPageHtml(options = {}) {
     syncTool: SYNC_SOURCE_TOOL_NAME,
     deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
+    archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
@@ -142798,7 +142847,7 @@ function privacyProgramSource() {
 function scriptJson(value2) {
   return JSON.stringify(value2).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_DASHBOARD_LANDED_MS = 4000;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_ARCHIVES_SOURCE_ID = "archive.imports", CHATGPT_DASHBOARD_LANDED_MS = 4000;
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
@@ -142914,6 +142963,7 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .source-main{min-width:0}
 .source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .source-name{font-weight:600}
+.source-head .source-for{flex:1 1 0;min-width:0;font-weight:400}
 .status{color:var(--muted);font-size:0.875rem}
 .source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
@@ -143088,7 +143138,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
 });
@@ -148286,7 +148336,11 @@ function createEmailSourceWorker(options = {}) {
                 throw new EmailSourceWorkerError(400, "invalid_request", "Give either confirm_account or keep_apart.");
               }
               const answer = { ...confirmAccount ? { confirmAccount: true } : {}, ...keepApart ? { keepApart: true } : {} };
-              return json(await archiveImports.approve(key2 !== undefined ? { key: key2, ...answer } : { requestId, ...answer }));
+              const sourceId = asOptionalString(record5.source_id);
+              if (sourceId !== undefined && key2 === undefined) {
+                throw new EmailSourceWorkerError(400, "invalid_request", "source_id goes with a chosen key.");
+              }
+              return json(await archiveImports.approve(key2 !== undefined ? { key: key2, ...sourceId !== undefined ? { sourceId } : {}, ...answer } : { requestId, ...answer }));
             });
           }
           if (url.pathname === "/dashboard/archive-import/stop") {
@@ -164958,7 +165012,7 @@ var init_agent = __esm(() => {
   init_state();
   ARCHIVE_AGENT_COPY = {
     invalidPath: "Give the full path of the file or folder, starting with /. Olympus does not look at it until the person approves.",
-    tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Archives on their computer's dashboard first.",
+    tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Other archives on their computer's dashboard first.",
     archivesUnreadable: "Olympus cannot read its list of imported archives right now, so it cannot tell what is imported. Nothing was deleted. Ask the person to open Archives on their computer's dashboard and choose See why.",
     requestsUnreadable: "Olympus cannot read its list of imports waiting for an answer right now, so it did not record the request. Ask the person to open Archives on their computer's dashboard and choose See why.",
     unknownArchive: "No archive with that id is imported. Call archive_import with status to list them.",
@@ -165190,6 +165244,24 @@ function createArchiveImportDashboard(options) {
     }
   };
   const refusal3 = (code, message2) => ({ ok: false, code, message: message2 });
+  const joinedSource = (record5) => {
+    if (!record5.target)
+      return {};
+    const target = options.runtime.targets.forSource(record5.target.source_id);
+    return { source: { id: target?.cardId ?? record5.target.source_id, label: named(target?.label ?? record5.target.source_id) } };
+  };
+  const sourceFormats = (target) => target.formats.flatMap((formatId) => {
+    const format = getArchiveFormat(formatId);
+    return format ? [format] : [];
+  });
+  const targetOfCard = (cardId) => {
+    for (const sourceId of options.runtime.targets.sourceIds()) {
+      const target = options.runtime.targets.forSource(sourceId);
+      if (target && (target.cardId ?? target.sourceId) === cardId)
+        return target;
+    }
+    return;
+  };
   const outcome = (requestId, result) => {
     if (result.kind === "started") {
       requests.remove(requestId);
@@ -165289,14 +165361,21 @@ function createArchiveImportDashboard(options) {
       reopened.root.close();
     }
   };
-  const approvePath = async (path, from, answer = {}) => {
+  const approvePath = async (path, from, answer = {}, only) => {
     const name = named(posix6.basename(path));
     const requestId = from?.status === "pending" ? from.requestId : undefined;
     const answered = () => {
       if (from)
         requests.remove(from.requestId);
     };
-    const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets });
+    const formats = only ? sourceFormats(only) : undefined;
+    const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets, ...formats ? { formats } : {} });
+    if (prepared.kind === "unsupported" && only && formats) {
+      return refusal3("not_this_source", fill3(ARCHIVE_APPROVE_COPY.not_this_source, {
+        source: named(only.label),
+        formats: formats.map((format) => format.label).join(", ")
+      }));
+    }
     if (prepared.kind === "unsupported") {
       const said = fill3(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(", ") });
       return refusal3("unsupported", prepared.advice ? `${said} ${prepared.advice}` : said);
@@ -165331,7 +165410,7 @@ function createArchiveImportDashboard(options) {
         answered();
         if (again) {
           refresh();
-          return { ok: true, status: "started", archive_id: again.archive_id, name };
+          return { ok: true, status: "started", archive_id: again.archive_id, name, ...joinedSource(again) };
         }
         return { ok: true, status: "already_imported", archive_id: archive.archive_id, name, archive_name: named(archive.label) };
       }
@@ -165339,7 +165418,7 @@ function createArchiveImportDashboard(options) {
       const resumed = resumeStopped(prepared.archive);
       if (resumed) {
         refresh();
-        return { ok: true, status: "started", archive_id: resumed.archive_id, name };
+        return { ok: true, status: "started", archive_id: resumed.archive_id, name, ...joinedSource(resumed) };
       }
       return { ok: true, status: "already_imported", archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
@@ -165374,7 +165453,7 @@ function createArchiveImportDashboard(options) {
           if (result.kind === "started") {
             answered();
             refresh();
-            return { ok: true, status: "started", archive_id: result.archive.archive_id, name };
+            return { ok: true, status: "started", archive_id: result.archive.archive_id, name, ...joinedSource(result.archive) };
           }
           if (result.kind === "already_imported") {
             answered();
@@ -165631,10 +165710,16 @@ function createArchiveImportDashboard(options) {
           return { ok: false, code: resolved2.code, message: resolved2.message, ...resolved2.access ? { access: resolved2.access } : {} };
         return approvePath(resolved2.path, { requestId: waiting.request_id, status: "pending" }, answer);
       }
+      let only;
+      if (request.sourceId !== undefined) {
+        only = targetOfCard(request.sourceId);
+        if (!only)
+          return refusal3("unknown_source", ARCHIVE_APPROVE_COPY.unknown_source);
+      }
       const resolved = await options.browser.resolve(request.key);
       if (!resolved.ok)
         return { ok: false, code: resolved.code, message: resolved.message, ...resolved.access ? { access: resolved.access } : {} };
-      return approvePath(resolved.path, undefined, answer);
+      return approvePath(resolved.path, undefined, answer, only);
     },
     decline(requestId) {
       const request = requests.get(requestId);
@@ -165712,6 +165797,20 @@ function createArchiveImportDashboard(options) {
         requests: askingNow(asked, records).map((request) => requestOf2(request, records)),
         ...setting !== "on" && records.length > 0 ? { notRunning: setting } : {}
       };
+    },
+    archiveSources() {
+      try {
+        state.list();
+      } catch {
+        return [];
+      }
+      return options.runtime.targets.sourceIds().flatMap((sourceId) => {
+        const target = options.runtime.targets.forSource(sourceId);
+        const formats = target ? sourceFormats(target) : [];
+        if (!target || formats.length === 0)
+          return [];
+        return [{ sourceId: target.cardId ?? target.sourceId, label: target.label, intro: archivePickIntro(formats) }];
+      });
     },
     sourceImports() {
       try {
@@ -165803,6 +165902,7 @@ var init_dashboard2 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
   init_source_storage();
+  init_vocabulary();
   init_agent();
   init_source_scheduler();
   init_manifest2();
@@ -165827,7 +165927,9 @@ var init_dashboard2 = __esm(() => {
     part_of_source: "This import's items are held together with what the source reads live, so it has no Remove of its own. Deleting the whole source from its card deletes them.",
     not_an_input: "Only an import that is part of a source can be stopped. Remove stops and deletes an archive.",
     not_importing: "This import is not running.",
-    source_unavailable: "The source this export belongs to is being deleted or moved. Try again once that has finished."
+    source_unavailable: "The source this export belongs to is being deleted or moved. Try again once that has finished.",
+    not_this_source: "This isn't a {source} export. From the {source} card, Olympus imports only these: {formats}. For any other export, use Import another archive under Other archives.",
+    unknown_source: "Olympus can't import archives into this source. Use Import another archive."
   };
   ARCHIVE_NOT_RUNNING_COPY = {
     disabled: "Background syncing is turned off in Olympus's settings, so imports and removals can't run. The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it.",
@@ -172402,7 +172504,7 @@ function scrubCard(definition, card) {
     connection: {
       state: card.connection.state,
       label: connectionLabel,
-      action: card.connection.action.kind === "archive_import" ? { kind: "archive_import", label: "Import an archive" } : { kind: "none" },
+      action: card.connection.action.kind === "archive_import" ? { kind: "archive_import", label: "Import another archive" } : { kind: "none" },
       handles: [],
       ...pending && finite(pending.expires_in_minutes) ? { pending: { started_at: "", expires_at: "", expires_in_minutes: count(pending.expires_in_minutes) } } : {},
       ...refusal3 ? { provider_refusal: { code: KNOWN_REFUSAL_CODES.has(refusal3.code) ? refusal3.code : "", reason: "" } } : {},
@@ -189766,8 +189868,10 @@ async function archiveBrowse(options, args, context3) {
   };
 }
 async function archiveApprove(options, args, context3) {
-  const keys = Object.keys(args).filter((key2) => key2 !== "confirm_account" && key2 !== "keep_apart");
+  const keys = Object.keys(args).filter((key2) => key2 !== "confirm_account" && key2 !== "keep_apart" && key2 !== "source_id");
   const byKey = keys.length === 1 && keys[0] === "key" && archiveArg(args.key);
+  if (args.source_id !== undefined && !(byKey && archiveArg(args.source_id)))
+    return refused2("source_id goes with a chosen key.", "invalid_params");
   const byRequest = keys.length === 1 && keys[0] === "request_id" && archiveArg(args.request_id);
   const answers = [args.confirm_account, args.keep_apart];
   if (!byKey && !byRequest)
@@ -189796,7 +189900,7 @@ async function archiveApprove(options, args, context3) {
       status,
       name,
       ...archiveName ? { archive_name: archiveName } : {},
-      ...status === "confirm_account" && sourceId ? { source: { id: sourceId, label: sourceLabel5 } } : {},
+      ...(status === "confirm_account" || status === "started") && sourceId ? { source: { id: sourceId, label: sourceLabel5 } } : {},
       ...status === "confirm_account" && answer.parsed.reconfirm === true ? { reconfirm: true } : {}
     }
   };
@@ -189829,6 +189933,14 @@ async function archiveStop(options, args, context3) {
   if (!answer.ok)
     return answer.result;
   return { content: [{ type: "text", text: "Stopped." }], structuredContent: { status: "stopped" } };
+}
+function archiveSourcesMeta(options) {
+  try {
+    const sources = options.archiveSources?.();
+    return sources && sources.length > 0 ? sources : undefined;
+  } catch {
+    return;
+  }
 }
 function sourceImportsMeta(options) {
   try {
@@ -189992,7 +190104,8 @@ function createDashboardPanelTools(options) {
       const waiting = context3.localSession === true ? waitingCount(options) : 0;
       const archives = archivesMeta(options);
       const sourceImports = sourceImportsMeta(options);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports)
+      const archiveSources = archiveSourcesMeta(options);
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources)
         return result;
       const meta2 = {
         ...missingFolders.length ? { missingFolders } : {},
@@ -190002,7 +190115,8 @@ function createDashboardPanelTools(options) {
         ...unreadable.length > 0 ? { unreadable } : {},
         ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {},
         ...archives ? { archives } : {},
-        ...sourceImports ? { sourceImports } : {}
+        ...sourceImports ? { sourceImports } : {},
+        ...archiveSources ? { archiveSources } : {}
       };
       const existing = result._meta && typeof result._meta === "object" ? result._meta : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta2 } };
@@ -193847,7 +193961,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     unreadableFiles: () => unreadableFiles,
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
     archives: () => archiveImportDashboard.view(),
-    sourceImports: () => archiveImportDashboard.sourceImports()
+    sourceImports: () => archiveImportDashboard.sourceImports(),
+    archiveSources: () => archiveImportDashboard.archiveSources()
   });
   const socketPath = prepareWorkerSocket();
   const serverOptions = {
