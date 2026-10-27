@@ -52,6 +52,7 @@ whatsapp-live/
   qr.txt              # pairing QR (ASCII), present only while pairing
   spool/
     2026-06-11.jsonl  # one JSON object per message, named by receive date (UTC)
+    capture-status.json  # connected or not, last connected time, dropped-message count
 ```
 
 Spool line shape (field names are a contract with the TypeScript connector):
@@ -70,9 +71,11 @@ are byte-bounded (256/1024/1024 respectively); `preview_url` is the protocol's
 matched text, not a network-resolved canonical URL. The bridge never fetches
 preview URLs or thumbnail/binary preview payloads.
 
-Non-text payloads keep `"text":""` and add `"media_type":"image"` (or
+Non-text payloads add `"media_type":"image"` (or
 `video`, `audio`, `document`, `sticker`, `contact`, `location`, `poll`,
-`reaction`, `event`, `video_note`). Only the newest spool file ever grows;
+`reaction`, `event`, `video_note`). A photo, video, video note or document
+carries its caption as `"text"` (empty when it has none, and on every other
+media type). Only the newest spool file ever grows;
 the daemon fsyncs after every batch. `session.db` holds the device keys —
 treat the whole state dir as secret (`0700`).
 
@@ -191,6 +194,12 @@ replaced, spool write failure) — the daemon is deliberately crash-only.
 - Reconnects: transient drops are retried by whatsmeow's built-in
   auto-reconnect with backoff; initial connection failures retry with
   exponential backoff (2s → 5m cap).
+- `spool/capture-status.json` is rewritten every minute and on each connect
+  or disconnect: `connected`, `connected_through` (the last time capture knew
+  it was connected) and `dropped_messages` (messages a full spool queue
+  dropped, carried across restarts) with `last_dropped_at`. It holds counts
+  and times only. Olympus reads it to tell a quiet account from a stopped
+  capture and to report drops.
 - Restarts may re-deliver recent offline messages, producing duplicate spool
   lines. Downstream ingest upserts on the WhatsApp message id, so duplicates
   collapse harmlessly.

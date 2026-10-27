@@ -1,7 +1,7 @@
 import { ensurePrivateRootDirectorySync, ensurePrivateDirectoryTreeSync } from './atomic-file.ts';
 import { telegramPythonExecutable, TELEGRAM_DEPENDENCY_HINT } from './messaging-runtime.ts';
 import { Database } from 'bun:sqlite';
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync } from 'node:fs';
 import { spawn as spawnChild } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -468,6 +468,11 @@ function whatsappBridgeFingerprint(sourceDir: string): string {
     if (!existsSync(path)) throw new Error(`The packaged WhatsApp bridge source is incomplete: missing ${name}.`);
     hash.update(name).update('\0').update(readFileSync(path)).update('\0');
   }
+  // Every other source file the bridge is built from: a change to any of them is a new bridge.
+  const others = readdirSync(sourceDir)
+    .filter((name) => name.endsWith('.go') && !name.endsWith('_test.go') && name !== 'main.go')
+    .sort();
+  for (const name of others) hash.update(name).update('\0').update(readFileSync(join(sourceDir, name))).update('\0');
   return hash.digest('hex').slice(0, 16);
 }
 

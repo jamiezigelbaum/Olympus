@@ -104,29 +104,14 @@ export function createWhatsAppReactionIndexBuilder(): WhatsAppReactionIndexBuild
     add(line: WhatsAppReactionSpoolLine): boolean {
       if (!isWhatsAppReactionLine(line)) return false;
       reactionLines += 1;
-      const targetId = trimmed(line.reactionTargetId);
+      const found = whatsAppReactionEntryOf(line);
       // Lines spooled before the daemon captured reaction targets carry no
       // target at all. They are still consumed (no junk item), but there is
       // nothing to attach them to.
-      if (targetId === undefined) return true;
-      const actors = byTarget.get(targetId) ?? new Map<string, WhatsAppReactionEntry>();
-      byTarget.set(targetId, actors);
-      const targetChatJid = trimmed(line.reactionTargetChatJid);
-      const actorKey = reactionActorKey(line);
-      const actorId = trimmed(line.senderJid);
-      const label = trimmed(line.senderName) ?? actorId;
-      const key = trimmed(line.reactionKey);
-      actors.set(actorKey, {
-        ...(targetChatJid === undefined ? {} : { targetChatJid }),
-        chatJid: line.chatJid,
-        actorKey,
-        ...(actorId === undefined ? {} : { actorId }),
-        ...(label === undefined ? {} : { actorLabel: label }),
-        ...(key === undefined ? {} : { key }),
-        // A line with no token at all says nothing an aggregate can carry,
-        // so it is treated as this actor having no live reaction.
-        removed: line.reactionRemoved === true || key === undefined,
-      });
+      if (found === undefined) return true;
+      const actors = byTarget.get(found.targetId) ?? new Map<string, WhatsAppReactionEntry>();
+      byTarget.set(found.targetId, actors);
+      actors.set(found.entry.actorKey, found.entry);
       return true;
     },
 
@@ -138,6 +123,36 @@ export function createWhatsAppReactionIndexBuilder(): WhatsAppReactionIndexBuild
         },
         reactionLines,
       };
+    },
+  };
+}
+
+/**
+ * What one reaction line says: the message it is about and the actor's
+ * current reaction to it. Undefined for a line that is not a reaction or names
+ * no target (spooled before the daemon captured targets).
+ */
+export function whatsAppReactionEntryOf(line: WhatsAppReactionSpoolLine): { targetId: string; entry: WhatsAppReactionEntry } | undefined {
+  if (!isWhatsAppReactionLine(line)) return undefined;
+  const targetId = trimmed(line.reactionTargetId);
+  if (targetId === undefined) return undefined;
+  const targetChatJid = trimmed(line.reactionTargetChatJid);
+  const actorKey = reactionActorKey(line);
+  const actorId = trimmed(line.senderJid);
+  const label = trimmed(line.senderName) ?? actorId;
+  const key = trimmed(line.reactionKey);
+  return {
+    targetId,
+    entry: {
+      ...(targetChatJid === undefined ? {} : { targetChatJid }),
+      chatJid: line.chatJid,
+      actorKey,
+      ...(actorId === undefined ? {} : { actorId }),
+      ...(label === undefined ? {} : { actorLabel: label }),
+      ...(key === undefined ? {} : { key }),
+      // A line with no token at all says nothing an aggregate can carry,
+      // so it is treated as this actor having no live reaction.
+      removed: line.reactionRemoved === true || key === undefined,
     },
   };
 }
