@@ -14305,6 +14305,7 @@ var init_vocabulary = __esm(() => {
     sourcesCloud: "Accounts",
     notConnected: "Not connected",
     noSources: "No sources yet.",
+    otherArchives: { title: "Other archives", line: "For an export that isn't from one of your sources above." },
     progress: "Progress",
     progressInitial: "First index",
     progressRefresh: "Catching up",
@@ -14453,11 +14454,12 @@ var init_vocabulary = __esm(() => {
     other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
   };
   DASHBOARD_ARCHIVE_COPY = {
-    importAction: "Import an archive",
+    importAction: "Import another archive",
+    sourceImport: { action: "Import an archive", title: "Import an archive into {source}" },
     pick: {
       back: "Back to Olympus",
-      title: "Import an archive",
-      intro: ARCHIVE_PICK_INTRO,
+      title: "Import another archive",
+      intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
       source: "This computer",
       makePrivate: "Import",
       makePrivateFor: "Import {name}",
@@ -14518,11 +14520,11 @@ var init_vocabulary = __esm(() => {
     thisFile: "A file of this archive",
     account: {
       line: "{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?",
-      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.",
+      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Other archives, it stays apart, with its own Remove.",
       add: "Add to {source}",
-      apart: "Keep it under Archives",
+      apart: "Keep it under Other archives",
       addFor: "Add {name} to {source}",
-      apartFor: "Keep {name} under Archives",
+      apartFor: "Keep {name} under Other archives",
       sourceFallback: "this source",
       reconfirm: {
         line: "{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?",
@@ -14665,7 +14667,8 @@ var init_vocabulary = __esm(() => {
     },
     tryAgain: "Try again",
     dismiss: "Dismiss",
-    started: "Importing {name}. It shows under Archives as it is read.",
+    started: "Importing {name}. It shows under Other archives as it is read.",
+    startedIn: "Importing {name} into {source}. It shows in {source} as it is read.",
     checking: "Checking whether {name} is already imported…",
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
@@ -14699,7 +14702,7 @@ var init_vocabulary = __esm(() => {
         permission: "Your user account is not allowed to open {file}.",
         other: "Olympus could not open {file}."
       },
-      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, no archive can be imported, so nothing overwrites it.",
       fix: {
         damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
         unknown_form: "Update Olympus, then open this page again.",

@@ -1314,7 +1314,7 @@ export type DashboardSourceAction =
     // Imported archives: no account and nothing to sign in to; the person
     // chooses an export on this computer (archive-import/dashboard.ts).
     kind: 'archive_import';
-    label: 'Import an archive';
+    label: 'Import another archive';
   }
   | {
     kind: 'none';
@@ -4113,7 +4113,7 @@ function sourceAction(
     return { kind: 'this_computer', source: definition.connect_action.source, label: 'Connect' };
   }
   // Another archive can always be imported.
-  if (definition.connect_action.kind === 'archive_import') return { kind: 'archive_import', label: 'Import an archive' };
+  if (definition.connect_action.kind === 'archive_import') return { kind: 'archive_import', label: 'Import another archive' };
   if (definition.connect_action.kind === 'api_key') {
     if (connected && !reauthRequired && !providerRefusing) return { kind: 'none' };
     return {

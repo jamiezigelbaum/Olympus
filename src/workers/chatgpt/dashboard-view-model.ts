@@ -1350,7 +1350,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       // Instructions, redirect URIs and client ids stay on the Mac. Import an
       // archive carries none of them, and its kind words the row's line.
       action: card.connection.action.kind === 'archive_import'
-        ? { kind: 'archive_import', label: 'Import an archive' }
+        ? { kind: 'archive_import', label: 'Import another archive' }
         : { kind: 'none' },
       handles: [],
       ...(pending && finite(pending.expires_in_minutes)
