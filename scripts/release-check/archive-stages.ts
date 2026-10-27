@@ -242,9 +242,10 @@ export async function besideLiveStage(host: ArchiveHost, args: { format: string;
       host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
       obs.row = await rowNow(host, driver, fx.fileName, 5_000);
       // An imported record is held Private until the private model has judged it, so the search waits for that, within
-      // the leg's own drain bound for this machine, as the agent path's import does before its search.
+      // the leg's own drain bound for this machine, as the agent path's import does before its search. A source that keeps
+      // its records Private is asked through the whole bound, and any answer carrying the word is the one judged.
       const cited = { ...fx, expect: { ...fx.expect, citationLabel: fx.beside!.citationLabel } };
-      obs.search = await searchWhenJudged(host, cited, (args.drainS ?? drainBoundS(host.os)) * 1_000);
+      obs.search = await searchWhenJudged(host, cited, (args.drainS ?? drainBoundS(host.os)) * 1_000, fx.beside!.search ?? 'cited');
       obs.stores = host.readSourceStores!(beside.seedHook, fx.token);
       // The history goes only with the source: the owner unpairs it (the engine refuses to delete a paired source's data), then
       // its Delete, then nothing of the archive in its stores or on the page.
@@ -329,15 +330,19 @@ async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView>
 /**
  * The search for an import inside a source's card, once what it imported has been judged: the source's import is not in the
  * agent's archive status (its records are the source's), so the wait is on the search itself, asked again every ten seconds until it
- * is cited with the archive's word or the bound runs out; the last answer is what the check judges.
+ * is cited with the archive's word or the bound runs out; the last answer is what the check judges. `withheld` (a source that keeps
+ * its records Private): asked through the whole bound, and the first answer carrying the word, if any, is the one judged.
  */
-export async function searchWhenJudged(host: ArchiveHost, fx: LegFixture, boundMs: number): Promise<SearchView> {
+export async function searchWhenJudged(host: ArchiveHost, fx: LegFixture, boundMs: number, mode: 'cited' | 'withheld' = 'cited'): Promise<SearchView> {
   const started = host.now();
   for (;;) {
     const search = await searchFor(host, fx);
+    const carries = search.ok && search.evidence.some((item) => item.hasToken);
     const cited = search.ok && search.evidence.some((item) => item.source === fx.expect.citationLabel && item.hasToken);
-    if (cited || host.now() - started >= boundMs) {
-      host.say(`search beside live: ${cited ? 'cited' : 'NOT cited'} after ${Math.round((host.now() - started) / 1000)} s`);
+    const done = mode === 'cited' ? cited : carries;
+    if (done || host.now() - started >= boundMs) {
+      const said = mode === 'cited' ? (cited ? 'cited' : 'NOT cited') : (carries ? 'the word LEAKED' : 'withheld');
+      host.say(`search beside live: ${said} after ${Math.round((host.now() - started) / 1000)} s`);
       return search;
     }
     await host.sleep(10_000);
