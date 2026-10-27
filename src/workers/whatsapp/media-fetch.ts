@@ -675,6 +675,9 @@ export function bridgeMediaCall(stateDir: string): WhatsAppMediaCall {
     let fd: number | undefined;
     let written = 0;
     const socket = createConnection({ path: socketPath });
+    // A disk error while the part is opened, written or synced ends the call as a passing failure: thrown from a
+    // socket callback it would escape the promise and the engine, and the waiting row would never be tried again.
+    const diskFailed: WhatsAppMediaAnswer = { status: 'failed', permanent: false, reason: 'write_failed' };
     const finish = (outcome: WhatsAppMediaAnswer): void => {
       if (settled) return;
       settled = true;
@@ -682,8 +685,13 @@ export function bridgeMediaCall(stateDir: string): WhatsAppMediaCall {
       if (fd !== undefined) {
         try {
           if (outcome.status === 'ok') fsyncSync(fd);
-        } finally {
+        } catch {
+          outcome = diskFailed;
+        }
+        try {
           closeSync(fd);
+        } catch {
+          outcome = diskFailed;
         }
       }
       resolve(outcome);
@@ -700,7 +708,7 @@ export function bridgeMediaCall(stateDir: string): WhatsAppMediaCall {
     socket.on('connect', () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on('error', () => finish(answer ? { status: 'failed', permanent: false, reason: 'cut_off' } : { status: 'unavailable' }));
     socket.on('close', () => finish({ status: 'failed', permanent: false, reason: 'cut_off' }));
-    socket.on('data', (data: Buffer) => {
+    const onData = (data: Buffer): void => {
       if (answer) {
         take(data);
         return;
@@ -742,6 +750,13 @@ export function bridgeMediaCall(stateDir: string): WhatsAppMediaCall {
         return;
       }
       take(head.subarray(newline + 1));
+    };
+    socket.on('data', (data: Buffer) => {
+      try {
+        onData(data);
+      } catch {
+        finish(diskFailed);
+      }
     });
   });
 }

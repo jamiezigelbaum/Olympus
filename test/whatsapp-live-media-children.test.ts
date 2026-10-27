@@ -1248,6 +1248,14 @@ describe('review round 9 on #558: Olympus asks the bridge for the exact version,
       expect(existsSync(part)).toBe(false);
     });
 
+    test('a part that cannot be written ends the call as a passing failure, never an uncaught throw', async () => {
+      const { stateDir } = await serve(() => Buffer.concat([Buffer.from(`${JSON.stringify({ status: 'ok', size: 3 })}\n`), Buffer.from('abc')]));
+      // The part's folder is missing, so opening it throws inside the socket's data callback.
+      const part = join(stateDir, 'missing', 'out.part');
+      expect(await bridgeMediaCall(stateDir)(request, part, () => true)).toEqual({ status: 'failed', permanent: false, reason: 'write_failed' });
+      expect(existsSync(part)).toBe(false);
+    });
+
     test('a bridge that is not running is unavailable', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'wa-call-'));
       roots.push(stateDir);
