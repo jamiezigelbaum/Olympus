@@ -19901,6 +19901,306 @@ var init_protection_claims = __esm(() => {
   init_record_builder();
 });
 
+// src/workers/archive-import/byte-source.ts
+import * as zlib from "node:zlib";
+function tableCrc32(data, value) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0;n < 256; n += 1) {
+      let c = n;
+      for (let k = 0;k < 8; k += 1)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let crc = ~value;
+  for (let index = 0;index < data.length; index += 1) {
+    crc = crcTable[(crc ^ data[index]) & 255] ^ crc >>> 8;
+  }
+  return ~crc >>> 0;
+}
+function crc32Update(value, data) {
+  if (data.length === 0)
+    return value >>> 0;
+  return nativeCrc32 ? nativeCrc32(data, value) >>> 0 : tableCrc32(data, value);
+}
+var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var init_byte_source = __esm(() => {
+  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
+  nativeCrc32 = zlib.crc32;
+});
+// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
+var TokenType;
+var init_tokenType = __esm(() => {
+  (function(TokenType2) {
+    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType2[TokenType2["COLON"] = 4] = "COLON";
+    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
+    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
+    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
+    TokenType2[TokenType2["NULL"] = 8] = "NULL";
+    TokenType2[TokenType2["STRING"] = 9] = "STRING";
+    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
+    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  })(TokenType || (TokenType = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
+var charset;
+var init_utf_8 = __esm(() => {
+  (function(charset2) {
+    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
+    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
+    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
+    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset2[charset2["TAB"] = 9] = "TAB";
+    charset2[charset2["SPACE"] = 32] = "SPACE";
+    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
+    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
+    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset2[charset2["COMMA"] = 44] = "COMMA";
+    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
+    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
+    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset2[charset2["COLON"] = 58] = "COLON";
+    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
+    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
+    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset2[charset2["TILDE"] = 126] = "TILDE";
+  })(charset || (charset = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/tokenizer.js
+var TokenizerStates;
+var init_tokenizer = __esm(() => {
+  init_tokenType();
+  init_utf_8();
+  (function(TokenizerStates2) {
+    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
+    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
+    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
+    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
+    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
+    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
+    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  })(TokenizerStates || (TokenizerStates = {}));
+});
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire5 } from "node:module";
+var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
+var init_scope_safe_fs = __esm(() => {
+  runtimeRequire4 = createRequire5(import.meta.url);
+  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/archive-import/stop-errors.ts
+var init_stop_errors = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+});
+
+// src/workers/archive-import/json-stream.ts
+var EMPTY_FRAME, MAX_SAFE_DIGITS;
+var init_json_stream = __esm(() => {
+  init_tokenizer();
+  init_tokenType();
+  init_archive_formats();
+  init_stop_errors();
+  EMPTY_FRAME = Object.freeze({});
+  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
+});
+
+// src/workers/archive-import/source-input.ts
+var init_source_input = __esm(() => {
+  init_archive_formats();
+  init_source_inputs();
+});
+// src/workers/archive-import/telegram/account.ts
+var ACCOUNT_SECTIONS;
+var init_account = __esm(() => {
+  init_message();
+  ACCOUNT_SECTIONS = [
+    { name: "personal_information", path: ["personal_information"], label: "profile", whole: true },
+    { name: "profile_pictures", path: ["profile_pictures"], label: "profile pictures", whole: false },
+    { name: "stories", path: ["stories"], label: "stories", whole: false },
+    { name: "profile_music", path: ["profile_music"], label: "profile music", whole: false },
+    { name: "contacts", path: ["contacts", "list"], label: "contacts", whole: false },
+    { name: "frequent_contacts", path: ["frequent_contacts", "list"], label: "frequent contacts", whole: false },
+    { name: "sessions", path: ["sessions", "list"], label: "sessions", whole: false },
+    { name: "web_sessions", path: ["web_sessions", "list"], label: "web sessions", whole: false },
+    { name: "other_data", path: ["other_data"], label: "other data", whole: true }
+  ];
+});
+
+// src/workers/archive-import/telegram/connector.ts
+var TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING, TELEGRAM_MAX_MESSAGE_BYTES, MESSAGE_PATHS, ITEM_PATHS, SECTION_ROOTS, LISTED_SECTIONS;
+var init_connector4 = __esm(() => {
+  init_archive_formats();
+  init_byte_source();
+  init_json_stream();
+  init_account();
+  init_message();
+  TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+  MESSAGE_PATHS = [
+    ["chats", "list", "*", "messages"],
+    ["left_chats", "list", "*", "messages"],
+    ["messages"]
+  ];
+  ITEM_PATHS = [...MESSAGE_PATHS, ...ACCOUNT_SECTIONS.map((section) => section.path)];
+  SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
+  LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
+});
+// src/workers/telegram-messages/export-facts.ts
+var SCAN_CHUNK_BYTES, remembered;
+var init_export_facts = __esm(() => {
+  init_byte_source();
+  init_json_stream();
+  init_message();
+  SCAN_CHUNK_BYTES = 1 << 20;
+  remembered = new Map;
+});
+
+// src/workers/telegram-messages/export-records.ts
+var init_export_records = __esm(() => {
+  init_message();
+  init_account();
+  init_corpus_adapter4();
+  init_capture_spool_connector();
+  init_export_facts();
+});
+
+// src/workers/telegram-messages/export-input.ts
+var init_export_input = __esm(() => {
+  init_archive_formats();
+  init_connector4();
+  init_export_records();
+  init_export_facts();
+});
+
+// src/workers/telegram-messages/archive-target.ts
+var PROFILE_SCAN_BYTES;
+var init_archive_target = __esm(() => {
+  init_olympus_layout();
+  init_byte_source();
+  init_json_stream();
+  init_source_input();
+  init_message();
+  init_corpus_adapter4();
+  init_export_input();
+  PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
+});
+
 // src/workers/telegram-messages/store-sync.ts
 var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY;
 var init_store_sync = __esm(() => {
@@ -19914,6 +20214,8 @@ var init_store_sync = __esm(() => {
   init_capture_freshness();
   init_corpus_adapter4();
   init_capture_spool_connector();
+  init_archive_target();
+  init_record_builder();
   TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
 });
 
@@ -20392,14 +20694,6 @@ var init_store2 = __esm(() => {
   });
 });
 
-// src/core/scope-safe-fs.ts
-import { createRequire as createRequire5 } from "node:module";
-var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
-var init_scope_safe_fs = __esm(() => {
-  runtimeRequire4 = createRequire5(import.meta.url);
-  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
-});
-
 // src/workers/archive-import/media-bindings.ts
 var init_media_bindings = __esm(() => {
   init_sqlite_migrations();
@@ -20429,217 +20723,6 @@ var init_account_files = __esm(() => {
   SOURCE_ALIASES = {
     [WHATSAPP_SOURCE_ID]: ["whatsapp.messages"]
   };
-});
-
-// src/workers/archive-import/byte-source.ts
-import * as zlib from "node:zlib";
-function tableCrc32(data, value) {
-  if (!crcTable) {
-    crcTable = new Int32Array(256);
-    for (let n = 0;n < 256; n += 1) {
-      let c = n;
-      for (let k = 0;k < 8; k += 1)
-        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
-      crcTable[n] = c;
-    }
-  }
-  let crc = ~value;
-  for (let index = 0;index < data.length; index += 1) {
-    crc = crcTable[(crc ^ data[index]) & 255] ^ crc >>> 8;
-  }
-  return ~crc >>> 0;
-}
-function crc32Update(value, data) {
-  if (data.length === 0)
-    return value >>> 0;
-  return nativeCrc32 ? nativeCrc32(data, value) >>> 0 : tableCrc32(data, value);
-}
-var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
-var init_byte_source = __esm(() => {
-  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
-  nativeCrc32 = zlib.crc32;
-});
-// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
-var TokenType;
-var init_tokenType = __esm(() => {
-  (function(TokenType2) {
-    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
-    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
-    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
-    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
-    TokenType2[TokenType2["COLON"] = 4] = "COLON";
-    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
-    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
-    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
-    TokenType2[TokenType2["NULL"] = 8] = "NULL";
-    TokenType2[TokenType2["STRING"] = 9] = "STRING";
-    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
-    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
-  })(TokenType || (TokenType = {}));
-});
-
-// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
-var charset;
-var init_utf_8 = __esm(() => {
-  (function(charset2) {
-    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
-    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
-    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
-    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
-    charset2[charset2["TAB"] = 9] = "TAB";
-    charset2[charset2["SPACE"] = 32] = "SPACE";
-    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
-    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
-    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
-    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
-    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
-    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
-    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
-    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
-    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
-    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
-    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
-    charset2[charset2["COMMA"] = 44] = "COMMA";
-    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
-    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
-    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
-    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
-    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
-    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
-    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
-    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
-    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
-    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
-    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
-    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
-    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
-    charset2[charset2["COLON"] = 58] = "COLON";
-    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
-    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
-    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
-    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
-    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
-    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
-    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
-    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
-    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
-    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
-    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
-    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
-    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
-    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
-    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
-    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
-    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
-    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
-    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
-    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
-    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
-    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
-    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
-    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
-    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
-    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
-    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
-    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
-    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
-    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
-    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
-    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
-    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
-    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
-    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
-    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
-    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
-    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
-    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
-    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
-    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
-    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
-    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
-    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
-    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
-    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
-    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
-    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
-    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
-    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
-    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
-    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
-    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
-    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
-    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
-    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
-    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
-    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
-    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
-    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
-    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
-    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
-    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
-    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
-    charset2[charset2["TILDE"] = 126] = "TILDE";
-  })(charset || (charset = {}));
-});
-
-// node_modules/@streamparser/json/dist/mjs/tokenizer.js
-var TokenizerStates;
-var init_tokenizer = __esm(() => {
-  init_tokenType();
-  init_utf_8();
-  (function(TokenizerStates2) {
-    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
-    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
-    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
-    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
-    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
-    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
-    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
-    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
-    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
-    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
-    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
-    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
-    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
-    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
-    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
-    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
-    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
-    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
-    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
-  })(TokenizerStates || (TokenizerStates = {}));
-});
-
-// src/workers/archive-import/stop-errors.ts
-var init_stop_errors = __esm(() => {
-  init_archive_formats();
-  init_scope_safe_fs();
-});
-
-// src/workers/archive-import/json-stream.ts
-var EMPTY_FRAME, MAX_SAFE_DIGITS;
-var init_json_stream = __esm(() => {
-  init_tokenizer();
-  init_tokenType();
-  init_archive_formats();
-  init_stop_errors();
-  EMPTY_FRAME = Object.freeze({});
-  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
 });
 
 // src/workers/archive-import/record-probe.ts
@@ -29884,10 +29967,10 @@ function parseConsultSettings(value) {
   }
   let standardInstruction;
   if (Object.hasOwn(value, "standardInstruction")) {
-    const text2 = value.standardInstruction;
-    if (typeof text2 !== "string" || text2.trim().length === 0 || text2.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS || /\u0000/.test(text2))
+    const text3 = value.standardInstruction;
+    if (typeof text3 !== "string" || text3.trim().length === 0 || text3.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS || /\u0000/.test(text3))
       return;
-    standardInstruction = text2;
+    standardInstruction = text3;
   }
   if (standardMode === "custom" !== (standardInstruction !== undefined))
     return;
@@ -29947,14 +30030,14 @@ function parseConsultWriterChoice(value) {
     ...typeof timeoutMs === "number" ? { timeoutMs } : {}
   });
 }
-function parseConsultSettingsText(text2) {
+function parseConsultSettingsText(text3) {
   let parsed;
   try {
-    parsed = JSON.parse(text2);
+    parsed = JSON.parse(text3);
   } catch {
     return invalid("malformed_json");
   }
-  if (hasDuplicateObjectKey(text2))
+  if (hasDuplicateObjectKey(text3))
     return invalid("duplicate_key");
   const settings = parseConsultSettings(parsed);
   return settings ? { state: "valid", settings } : invalid("invalid_shape");
@@ -29998,13 +30081,13 @@ function readConsultSettings(location = {}) {
       __consultSettingsTestHooks.afterRead?.(length);
       if (length > CONSULT_SETTINGS_MAX_BYTES)
         return invalid("too_large");
-      let text2;
+      let text3;
       try {
-        text2 = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length));
+        text3 = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length));
       } catch {
         return invalid("invalid_utf8");
       }
-      return parseConsultSettingsText(text2);
+      return parseConsultSettingsText(text3);
     } finally {
       closeSync8(descriptor);
     }
@@ -30018,10 +30101,10 @@ function consultGateOptionsFromSettings(settings) {
 function invalid(reason) {
   return { state: "invalid", reason, settings: DEFAULT_CONSULT_SETTINGS };
 }
-function hasDuplicateObjectKey(text2) {
+function hasDuplicateObjectKey(text3) {
   const frames = [];
-  for (let index = 0;index < text2.length; index += 1) {
-    const char = text2[index];
+  for (let index = 0;index < text3.length; index += 1) {
+    const char = text3[index];
     if (char === "{") {
       frames.push({ keys: new Set, expectKey: true });
     } else if (char === "[") {
@@ -30034,11 +30117,11 @@ function hasDuplicateObjectKey(text2) {
         top.expectKey = true;
     } else if (char === '"') {
       let end = index + 1;
-      while (text2[end] !== '"')
-        end += text2[end] === "\\" ? 2 : 1;
+      while (text3[end] !== '"')
+        end += text3[end] === "\\" ? 2 : 1;
       const top = frames.at(-1);
       if (top?.keys && top.expectKey) {
-        const key = JSON.parse(text2.slice(index, end + 1));
+        const key = JSON.parse(text3.slice(index, end + 1));
         if (top.keys.has(key))
           return true;
         top.keys.add(key);
@@ -31645,9 +31728,9 @@ function ocrmypdfArguments(input) {
 function tesseractArguments(inputPath) {
   return [inputPath, "stdout", "-l", "eng", "--psm", "3"];
 }
-function probeWordRead(text2) {
+function probeWordRead(text3) {
   let letters = "";
-  for (const char of text2.toUpperCase()) {
+  for (const char of text3.toUpperCase()) {
     if (char >= "A" && char <= "Z" || char >= "0" && char <= "9")
       letters += char;
   }
@@ -31800,8 +31883,8 @@ async function probeOcrCapability(options = {}) {
 var ARCH_IDS2 = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
 var DEBIAN_IDS2 = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
 var FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
-function osReleaseValue2(text2, key) {
-  for (const line of text2.split(`
+function osReleaseValue2(text3, key) {
+  for (const line of text3.split(`
 `)) {
     const trimmed = line.trim();
     if (!trimmed.startsWith(`${key}=`))
@@ -31812,12 +31895,12 @@ function osReleaseValue2(text2, key) {
   }
   return "";
 }
-function linuxFamilyFromOsRelease2(text2) {
-  if (!text2)
+function linuxFamilyFromOsRelease2(text3) {
+  if (!text3)
     return "other";
   const words = [
-    osReleaseValue2(text2, "ID"),
-    ...osReleaseValue2(text2, "ID_LIKE").split(" ")
+    osReleaseValue2(text3, "ID"),
+    ...osReleaseValue2(text3, "ID_LIKE").split(" ")
   ].filter((word) => word.length > 0);
   for (const word of words) {
     if (ARCH_IDS2.includes(word))
@@ -32974,7 +33057,7 @@ function parseDashboardToolParams(value) {
   const record2 = exactRecord(value, ["name", "arguments"]);
   const name = enumValue(record2.name, OLYMPUS_TAB_TOOL_NAMES, "name");
   const args = record2.arguments === undefined ? {} : record2.arguments;
-  if (!isRecord3(args))
+  if (!isRecord4(args))
     throw new DashboardGatewayInvalidRequestError("Dashboard tool arguments must be an object.");
   return { name, arguments: args };
 }
@@ -32984,7 +33067,7 @@ async function requestDashboardTool(input) {
   if (Buffer.byteLength(encoded, "utf8") > DASHBOARD_TOOL_REQUEST_MAX_BYTES) {
     throw new DashboardGatewayInvalidRequestError("Dashboard tool request is too large.");
   }
-  const { response, text: text2 } = await boundedWorkerRequest({
+  const { response, text: text3 } = await boundedWorkerRequest({
     fetchImpl: input.fetchImpl ?? fetch,
     url: workerRootUrl(input.config, "/dashboard/tools/call"),
     init: {
@@ -32999,14 +33082,14 @@ async function requestDashboardTool(input) {
   });
   let body;
   try {
-    body = JSON.parse(text2);
+    body = JSON.parse(text3);
   } catch {
     throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
   }
-  if (!isRecord3(body))
+  if (!isRecord4(body))
     throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
   if (response.status < 200 || response.status >= 300) {
-    const error = isRecord3(body.error) ? body.error : {};
+    const error = isRecord4(body.error) ? body.error : {};
     const message = typeof error.message === "string" ? error.message.slice(0, 400) : "Olympus could not do that.";
     return { isError: true, content: [{ type: "text", text: message }], structuredContent: { error: typeof error.code === "string" ? error.code : "internal" } };
   }
@@ -33020,16 +33103,16 @@ function registerPanelRoute(api, config, fetchImpl) {
   let pending;
   async function readPanel() {
     const authToken = requireWorkerAuthToken(config);
-    const { response: worker, text: text2 } = await boundedWorkerRequest({
+    const { response: worker, text: text3 } = await boundedWorkerRequest({
       fetchImpl,
       url: workerRootUrl(config, "/dashboard/panel"),
       init: { method: "GET", headers: workerHeaders(authToken), redirect: "error" },
       timeoutMs: dashboardTimeoutMs(config),
       maxResponseBytes: DASHBOARD_PANEL_MAX_BYTES
     });
-    if (worker.status !== 200 || !text2.startsWith("<!doctype html>"))
+    if (worker.status !== 200 || !text3.startsWith("<!doctype html>"))
       throw new DashboardGatewayUnavailableError("panel unavailable");
-    return text2;
+    return text3;
   }
   api.registerHttpRoute({
     path: OLYMPUS_DASHBOARD_PANEL_PATH,
@@ -33076,8 +33159,8 @@ function registerPanelRoute(api, config, fetchImpl) {
   });
 }
 function resolveGatewayPublicOrigin(value) {
-  const root = isRecord3(value) ? value : undefined;
-  const gateway = isRecord3(root?.gateway) ? root.gateway : undefined;
+  const root = isRecord4(value) ? value : undefined;
+  const gateway = isRecord4(root?.gateway) ? root.gateway : undefined;
   const raw = typeof gateway?.publicOrigin === "string" ? gateway.publicOrigin.trim() : "";
   if (!raw)
     return;
@@ -33102,7 +33185,7 @@ function resolveNativeOAuthOrigin(openClawConfig, browserOrigin) {
   return resolveGatewayPublicOrigin(openClawConfig) ?? localLoopbackBrowserOrigin(browserOrigin);
 }
 function localLoopbackBrowserOrigin(value) {
-  if (!isRecord3(value) || value.isLocalClient !== true)
+  if (!isRecord4(value) || value.isLocalClient !== true)
     return;
   const origin = loopbackHttpOrigin(value.origin);
   if (!origin || typeof value.requestHost !== "string")
@@ -33354,8 +33437,8 @@ async function boundedWorkerRequest(input) {
   const timer = setTimeout(() => controller.abort(new Error("dashboard timeout")), input.timeoutMs);
   try {
     const response = await input.fetchImpl(input.url, { ...input.init, signal: controller.signal });
-    const text2 = await readBoundedResponseText(response, input.maxResponseBytes, controller.signal);
-    return { response, text: text2 };
+    const text3 = await readBoundedResponseText(response, input.maxResponseBytes, controller.signal);
+    return { response, text: text3 };
   } catch (error) {
     if (error instanceof DashboardGatewayUnavailableError)
       throw error;
@@ -33371,7 +33454,7 @@ async function readBoundedResponseText(response, maxBytes, signal) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder;
   let total = 0;
-  let text2 = "";
+  let text3 = "";
   try {
     while (true) {
       const { done, value } = await untilAborted(reader.read(), signal);
@@ -33384,9 +33467,9 @@ async function readBoundedResponseText(response, maxBytes, signal) {
         });
         throw new DashboardGatewayUnavailableError("Olympus dashboard worker response is too large.");
       }
-      text2 += decoder.decode(value, { stream: true });
+      text3 += decoder.decode(value, { stream: true });
     }
-    return text2 + decoder.decode();
+    return text3 + decoder.decode();
   } catch (error) {
     if (signal.aborted && error === signal.reason) {
       throw new DashboardGatewayUnavailableError("Olympus dashboard worker is unavailable.");
@@ -33409,11 +33492,11 @@ function exactRecord(value, keys) {
   return record2;
 }
 function recordValue(value) {
-  if (!isRecord3(value))
+  if (!isRecord4(value))
     throw new DashboardGatewayInvalidRequestError("Dashboard request must be an object.");
   return value;
 }
-function isRecord3(value) {
+function isRecord4(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function enumValue(value, values, label) {

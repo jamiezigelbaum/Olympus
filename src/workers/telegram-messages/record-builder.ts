@@ -41,7 +41,7 @@ export function telegramCaptureVersion(version: string, order: { capturedAt: str
  * order (`telegramCaptureVersion`). A version with no capture mark (an export's, a row
  * stored before captures were marked) is older than a marked one at the same
  * time, so a tie between an export and live keeps live's copy. A version with
- * no time (an entry of the account export, an old record) orders as a tie.
+ * no time is older than every other (equal only to itself).
  */
 export function compareTelegramVersions(a: string, b: string): number {
   if (a === b) return 0;
@@ -49,10 +49,17 @@ export function compareTelegramVersions(a: string, b: string): number {
   const [rightVersion = '', rightMark] = b.split(CAPTURE_MARK);
   const left = VERSION_TIME.exec(leftVersion);
   const right = VERSION_TIME.exec(rightVersion);
-  if (!left || !right) return 0;
-  const difference = Date.parse(left[1]!) - Date.parse(right[1]!);
-  if (!Number.isFinite(difference)) return 0;
-  if (difference !== 0) return Math.sign(difference);
+  // A version with no time (an account entry from an export that holds none) is never newer than another: it is
+  // strictly older than any timed version, and two untimed versions are the same only when they are equal, so an
+  // untimed snapshot only ever fills an empty slot and never replaces anything (#553 review).
+  if (!left || !right) {
+    // Two captures of one untimed version are still ordered by when they were captured.
+    if (left || right || leftVersion !== rightVersion) return !left && right ? -1 : left && !right ? 1 : -1;
+  } else {
+    const difference = Date.parse(left[1]!) - Date.parse(right[1]!);
+    if (!Number.isFinite(difference)) return 0;
+    if (difference !== 0) return Math.sign(difference);
+  }
   if (leftMark === rightMark) return 0;
   if (leftMark === undefined) return -1;
   if (rightMark === undefined) return 1;
@@ -125,7 +132,8 @@ export function telegramRecordBuilder(options: {
       const authoredAt = index === 0 ? item.metadata['sentAt'] : undefined;
       return {
         identity: item.identity,
-        bringsContent: item.content.kind !== 'metadata_only',
+        // A child whose bytes can be read brings its content (it is read later), over a version of it that could not.
+        bringsContent: item.content.kind !== 'metadata_only' || item.deferredBytes?.available === true,
         ...(typeof authoredAt === 'string' ? { authoredAt } : {}),
       };
     }),
