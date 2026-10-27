@@ -80,6 +80,11 @@ for (const kind of ['chromium', 'firefox']) {
       expect(await owner.locator('h1').textContent()).toBe('PRIVATE OWNER DASHBOARD');
       expect(browserErrors).toEqual([]);
       expect(windowEvents).toEqual([]); expect(context.pages()).toHaveLength(pagesBeforeOpen);
+      // An XMLHttpRequest (an upload piece, for its progress) carries the proof as fetch does.
+      expect(await owner.evaluate((query: string) => new Promise<number>((resolve) => {
+        const request = new XMLHttpRequest(); request.open('GET', '/dashboard.json?token=' + query);
+        request.onload = () => resolve(request.status); request.onerror = () => resolve(0); request.send();
+      }), dashboardQueryTokenFromWorkerAuthToken(token))).toBe(200);
       expect(await owner.evaluate(async (ticket: string) => (await fetch('/owner-proof', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }),
       })).status, ticket)).toBe(403);

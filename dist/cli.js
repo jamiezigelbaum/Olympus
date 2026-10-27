@@ -5334,7 +5334,8 @@ class LinuxOwnerBridge {
     const session = this.sessions.find((s) => equalHash(cookie, s.cookieHash));
     let proof = request.headers.get(PROOF_HEADER);
     let body;
-    if (request.method !== "GET" && request.method !== "HEAD") {
+    const binary = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() === "application/octet-stream";
+    if (request.method !== "GET" && request.method !== "HEAD" && !binary) {
       try {
         body = await boundedBody(request, 1048576);
       } catch {
@@ -5354,6 +5355,8 @@ class LinuxOwnerBridge {
     }
     if (!this.live())
       return refusal(503);
+    if (binary && request.body)
+      body = request.body;
     ownerRequestAdmitted?.();
     const headers = new Headers(request.headers);
     headers.delete(PROOF_HEADER);
@@ -5370,7 +5373,7 @@ class LinuxOwnerBridge {
       response = await this.options.fetchSocket(new Request(this.entryOrigin + url.pathname + url.search, {
         method: request.method,
         headers,
-        ...body !== undefined ? { body } : {},
+        ...body !== undefined ? { body, duplex: "half" } : {},
         redirect: "manual"
       }));
     } catch {
@@ -5526,6 +5529,18 @@ window.fetch=async function(input,init){
  const destination=response.headers.get('X-Olympus-Owner-Location');
  if(destination){location.replace(destination);throw new Error('Navigating');}
  return response;
+};
+// An upload's pieces go by XMLHttpRequest (for its progress): same-origin ones carry the proof too. A proven request is
+// never redirected (handle() turns its Location into a header), so the proof cannot follow one elsewhere. The proof
+// page writes the document into its own window, so this runs twice there: a header set twice is joined, and refused.
+const sameOrigin=new WeakSet(), sent=Symbol.for('olympus-owner-proof'), nativeOpen=XMLHttpRequest.prototype.open, nativeSend=XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.open=function(method,url){
+ if(new URL(url,location.href).origin===location.origin)sameOrigin.add(this);else sameOrigin.delete(this);
+ return nativeOpen.apply(this,arguments);
+};
+XMLHttpRequest.prototype.send=function(body){
+ const proof=localStorage.getItem(key);if(proof&&sameOrigin.has(this)&&!this[sent]){this[sent]=true;this.setRequestHeader(header,proof);}
+ return nativeSend.call(this,body);
 };
 document.addEventListener('submit',function(event){
  const form=event.target;if(!(form instanceof HTMLFormElement))return;
