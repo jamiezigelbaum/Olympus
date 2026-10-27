@@ -147,7 +147,7 @@ describe('the dashboard words come from the registry and the family', () => {
     expect(two).toContain('a notes export (a .zip file)');
     expect(two).toContain('; or Fake fakemail');
     expect(two.startsWith('Drop a file or folder from this computer: ')).toBe(true);
-    expect(two.endsWith('removes that copy once it has read what it needs, and never changes the original.')).toBe(true);
+    expect(two.endsWith('keeps a copy in its own storage to read it until you remove the import, and never changes the original.')).toBe(true);
   });
 
   test('a family\'s nouns: messages for mail and chat, notes for notes, items for anything else', () => {

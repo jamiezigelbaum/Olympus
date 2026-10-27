@@ -103,10 +103,15 @@ function choose(page: Page, key: 'picker:drop:file-input' | 'picker:drop:folder-
   input.dispatchEvent(new page.win.Event('change', { bubbles: true }) as unknown as Event);
 }
 
-type Fake = { name: string; text?: string; children?: Fake[] };
+type Fake = { name: string; text?: string; children?: Fake[]; unreadable?: true };
 /** A dragged file or folder as the browser's entries API shows it. */
 function entryOf(win: Window, node: Fake): any {
-  if (!node.children) return { isFile: true, isDirectory: false, name: node.name, file: (done: (file: File) => void) => done(new win.File([node.text ?? 'content'], node.name) as unknown as File) };
+  if (!node.children) {
+    return {
+      isFile: true, isDirectory: false, name: node.name,
+      file: (done: (file: File) => void, fail: (error: Error) => void) => (node.unreadable ? fail(new Error('NotReadableError')) : done(new win.File([node.text ?? 'content'], node.name) as unknown as File)),
+    };
+  }
   return {
     isFile: false, isDirectory: true, name: node.name,
     createReader: () => {
@@ -382,6 +387,20 @@ describe('Import an archive on the computer', () => {
     expect(page.uploads()[0]!.file.size).toBe('From mail'.length);
   });
 
+  test('a folder with a file the browser cannot read fails the drop rather than importing the rest', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+    });
+    page.button(A.importAction).click();
+    await settle();
+    dropOnZone(page, [{ name: 'Inbox.mbox', children: [{ name: 'mbox', text: 'From x' }, { name: 'Info.plist', unreadable: true }] }]);
+    await until(() => page.doc.querySelector('[role="alert"]') !== null);
+    expect(page.doc.querySelector('[role="alert"]')!.textContent).toBe(A.pick.unreadable);
+    expect(page.calls(ARCHIVE_UPLOAD_START_TOOL_NAME)).toEqual([]);
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([]);
+  });
+
   test('a drop with nothing in it, or a folder with no file, says so and starts nothing', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
@@ -546,7 +565,7 @@ describe('Import an archive on the computer', () => {
 });
 
 describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-25)', () => {
-  const TELEGRAM = { sourceId: 'telegram.messages', label: 'Telegram', intro: 'Drop a file or folder from this computer: a Telegram export. Olympus makes a copy in its own storage to read it, removes that copy once it has read what it needs, and never changes the original.' };
+  const TELEGRAM = { sourceId: 'telegram.messages', label: 'Telegram', intro: 'Drop a file or folder from this computer: a Telegram export. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.' };
 
   /** A state's answer with these cards importing their own exports. */
   function withSources(state: string, sources: unknown[] | undefined, archives = meta([])) {
@@ -1065,7 +1084,7 @@ describe('each archive under the Archives row', () => {
   test('the picker names the formats the engine registers, from the registry', async () => {
     expect(A.pick.intro).toContain('an .mbox file from Google Takeout or Thunderbird');
     expect(A.pick.intro.startsWith('Drop a file or folder from this computer: ')).toBe(true);
-    expect(A.pick.intro).toContain('Olympus makes a copy in its own storage to read it, removes that copy once it has read what it needs, and never changes the original.');
+    expect(A.pick.intro).toContain('Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.');
     // Import another archive takes any export, and says where one of a source's own goes.
     expect(A.pick.intro.endsWith('An export from one of your sources joins that source; any other is kept under Other archives.')).toBe(true);
   });

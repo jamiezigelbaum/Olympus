@@ -316,7 +316,7 @@ export function createArchiveUploads(options: ArchiveUploadsOptions): ArchiveUpl
           try {
             step = await reader.read();
           } catch {
-            throw new ArchiveUploadError(found.cancelled ? 'cancelled' : 'unreadable', found.cancelled ? ARCHIVE_UPLOAD_COPY.cancelled : ARCHIVE_UPLOAD_COPY.unreadable, found.cancelled ? 409 : 400);
+            throw new ArchiveUploadError('unreadable', ARCHIVE_UPLOAD_COPY.unreadable, 400);
           }
           if (step.done) break;
           const chunk = step.value;
@@ -373,7 +373,8 @@ export function createArchiveUploads(options: ArchiveUploadsOptions): ArchiveUpl
       found.partials.delete(key);
       // What the file's earlier pieces and this one had counted goes with it.
       found.bytes -= offset + written;
-      throw error;
+      // A cancel stops the read or the write under it, or deletes the folder it writes to: whichever fails, it was the cancel.
+      throw found.cancelled ? new ArchiveUploadError('cancelled', ARCHIVE_UPLOAD_COPY.cancelled, 409) : error;
     } finally {
       found.abort.delete(stop);
       found.active -= 1;

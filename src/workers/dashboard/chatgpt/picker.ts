@@ -531,25 +531,26 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   function entryFiles(entry: Any, prefix: string, found: Any[], gone: () => boolean): Promise<void> {
     if (gone() || !entry) return Promise.resolve();
     if (entry.isFile) {
-      return new Promise<void>((resolve) => {
+      // A file or folder the browser cannot read fails the drop: importing the rest would leave it out unsaid.
+      return new Promise<void>((resolve, reject) => {
         entry.file((file: File) => {
           found.push({ file, path: prefix + entry.name });
           resolve();
-        }, () => resolve());
+        }, reject);
       });
     }
     if (!entry.isDirectory) return Promise.resolve();
     const reader = entry.createReader();
     const here = prefix + entry.name + '/';
-    const next = (): Promise<void> => new Promise<void>((resolve) => {
+    const next = (): Promise<void> => new Promise<void>((resolve, reject) => {
       reader.readEntries((batch: Any[]) => {
         if (!batch.length || gone()) {
           resolve();
           return;
         }
         // One at a time: a folder of thousands never opens them all at once.
-        batch.reduce((chain: Promise<void>, child: Any) => chain.then(() => entryFiles(child, here, found, gone)), Promise.resolve()).then(() => next().then(resolve));
-      }, () => resolve());
+        batch.reduce((chain: Promise<void>, child: Any) => chain.then(() => entryFiles(child, here, found, gone)), Promise.resolve()).then(() => next()).then(resolve, reject);
+      }, reject);
     });
     return next();
   }

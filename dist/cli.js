@@ -51923,7 +51923,7 @@ function unknownStatus(value) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value };
 }
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
-  return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus makes a copy in its own storage to read it, removes that copy once it has read what it needs, and never changes the original.`;
+  return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
 function dashboardArchiveNouns(family) {
   const nouns = DASHBOARD_ARCHIVE_NOUNS;
@@ -140581,7 +140581,7 @@ function createArchiveUploads(options) {
           try {
             step = await reader.read();
           } catch {
-            throw new ArchiveUploadError(found.cancelled ? "cancelled" : "unreadable", found.cancelled ? ARCHIVE_UPLOAD_COPY.cancelled : ARCHIVE_UPLOAD_COPY.unreadable, found.cancelled ? 409 : 400);
+            throw new ArchiveUploadError("unreadable", ARCHIVE_UPLOAD_COPY.unreadable, 400);
           }
           if (step.done)
             break;
@@ -140638,7 +140638,7 @@ function createArchiveUploads(options) {
       found.paths.delete(key2);
       found.partials.delete(key2);
       found.bytes -= offset + written;
-      throw error2;
+      throw found.cancelled ? new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409) : error2;
     } finally {
       found.abort.delete(stop);
       found.active -= 1;
@@ -147545,25 +147545,25 @@ function chatgptPickerProgram(kit) {
     if (gone() || !entry)
       return Promise.resolve();
     if (entry.isFile) {
-      return new Promise((resolve25) => {
+      return new Promise((resolve25, reject) => {
         entry.file((file) => {
           found.push({ file, path: prefix + entry.name });
           resolve25();
-        }, () => resolve25());
+        }, reject);
       });
     }
     if (!entry.isDirectory)
       return Promise.resolve();
     const reader = entry.createReader();
     const here = prefix + entry.name + "/";
-    const next = () => new Promise((resolve25) => {
+    const next = () => new Promise((resolve25, reject) => {
       reader.readEntries((batch) => {
         if (!batch.length || gone()) {
           resolve25();
           return;
         }
-        batch.reduce((chain, child2) => chain.then(() => entryFiles(child2, here, found, gone)), Promise.resolve()).then(() => next().then(resolve25));
-      }, () => resolve25());
+        batch.reduce((chain, child2) => chain.then(() => entryFiles(child2, here, found, gone)), Promise.resolve()).then(() => next()).then(resolve25, reject);
+      }, reject);
     });
     return next();
   }
@@ -172551,17 +172551,7 @@ function createArchiveImportDashboard(options) {
     }
   };
   const refusal3 = (code, message2) => ({ ok: false, code, message: message2 });
-  const stillReads = (record5) => {
-    if (record5.status === "removing")
-      return false;
-    if (record5.status !== "imported")
-      return true;
-    try {
-      return (options.runtime.media.peek()?.count(record5.archive_id) ?? 0) > 0;
-    } catch {
-      return true;
-    }
-  };
+  const stillReads = (record5) => record5.status !== "removing";
   const stagingNeeded = (dir) => {
     const inside = (path) => path === dir || path.startsWith(`${dir}/`);
     try {

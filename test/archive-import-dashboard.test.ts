@@ -1135,7 +1135,7 @@ describe('a dropped archive', () => {
   const staging = (f: ReturnType<typeof fixture>): string => archiveStateSiblingPath(defaultArchiveImportStatePath(f.env), 'archive-staging');
   const copies = (f: ReturnType<typeof fixture>): string[] => (existsSync(staging(f)) ? readdirSync(staging(f)) : []);
 
-  test('is imported from Olympus\'s own copy, never changing the original, and the copy is gone once the import has finished', async () => {
+  test('is imported from Olympus\'s own copy, never changing the original, and the copy stays until the import is removed', async () => {
     const f = fixture();
     const text = mbox([mail(0), mail(1)]);
     const path = f.write('Takeout.mbox', text);
@@ -1151,15 +1151,19 @@ describe('a dropped archive', () => {
     expect(copies(f)).toEqual([uploadId]);
 
     await importAll(f.runtime, started.archive_id);
-    // The page reads the list every few seconds: the next read finds the import finished and removes the copy.
+    // Finished, the copy stays: the import's attachments are read from it later.
     const row = f.dashboard.view().archives[0]!;
     expect(row).toMatchObject({ status: 'imported', items: 2, name: 'Takeout.mbox' });
-    expect(copies(f)).toEqual([]);
+    expect(copies(f)).toEqual([uploadId]);
     // The copy is not the person's folder: no place is named for it.
     expect(row.where).toBe('');
     // The original is exactly as it was.
     expect(readFileSync(path, 'utf8')).toBe(text);
     expect(statSync(path).mtimeMs).toBe(before.mtimeMs);
+    // Remove is what ends it: the next read removes the copy.
+    expect(f.dashboard.remove(started.archive_id)).toEqual({ ok: true });
+    f.dashboard.view();
+    expect(copies(f)).toEqual([]);
   });
 
   test('a folder is imported as one archive from the copy of the whole folder', async () => {
@@ -1195,7 +1199,8 @@ describe('a dropped archive', () => {
     await f.dashboard.idle();
     expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ status: 'already_imported', archiveId: first.archive_id })]);
     expect(f.runtime.state.list()).toHaveLength(1);
-    expect(copies(f)).toEqual([]);
+    // Only the import's own copy is left.
+    expect(copies(f)).toHaveLength(1);
   });
 
   test('an upload that was never approved: Cancel removes the copy; an id nothing was made under is refused', async () => {
@@ -1220,7 +1225,7 @@ describe('a dropped archive', () => {
     expect(copies(f)).toEqual([uploadId]);
     await importAll(f.runtime, started.archive_id);
     expect(f.dashboard.view().archives[0]).toMatchObject({ status: 'imported', items: 2 });
-    expect(copies(f)).toEqual([]);
+    expect(copies(f)).toEqual([uploadId]);
   });
 
   test('a new upload begins by clearing copies nothing reads; one an import reads stays', async () => {

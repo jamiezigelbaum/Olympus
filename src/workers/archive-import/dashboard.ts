@@ -400,18 +400,10 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
 
   const refusal = (code: string, message: string): ArchiveApproveResult => ({ ok: false, code, message });
 
-  // Whether an import is still to read files of its staging copy: one that runs or stopped does, and so does one
-  // finished whose media (the pictures and files its messages name) are read later, from the same copy.
-  const stillReads = (record: ArchiveImportRecord): boolean => {
-    if (record.status === 'removing') return false;
-    if (record.status !== 'imported') return true;
-    try {
-      return (options.runtime.media.peek()?.count(record.archive_id) ?? 0) > 0;
-    } catch {
-      // Not told: keep the copy rather than lose what an import may still read.
-      return true;
-    }
-  };
+  // Whether an import may still read files of its staging copy: every one until it is removed. A finished import's
+  // attachments (an mbox's parts, an .enex's resources, a zip's members) and bound media are read later from the
+  // same copy, so deleting it on finish would lose them.
+  const stillReads = (record: ArchiveImportRecord): boolean => record.status !== 'removing';
   // Whether anything still reads the staging folder `dir`: an import (its root is inside it), a check of a possible copy, or a check to try again.
   const stagingNeeded = (dir: string): boolean => {
     const inside = (path: string): boolean => path === dir || path.startsWith(`${dir}/`);

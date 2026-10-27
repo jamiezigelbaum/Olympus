@@ -2063,7 +2063,7 @@ export const DASHBOARD_HOST_GATE_COPY = {
 export function archivePickIntro(formats: readonly { label: string; chooseHint?: string }[] = ARCHIVE_FORMATS): string {
   return `Drop a file or folder from this computer: ${
     formats.map((format) => format.chooseHint ?? format.label).join('; or ')
-  }. Olympus makes a copy in its own storage to read it, removes that copy once it has read what it needs, and never changes the original.`;
+  }. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
 
 const ARCHIVE_PICK_INTRO = archivePickIntro();
