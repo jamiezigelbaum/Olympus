@@ -7,10 +7,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ARCHIVE_FORMATS, legFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
-  besideLiveChecks, besideLiveJourney, besideLiveLine, panelArchivesOf, seedLiveChecks, unpairJourney,
-  type BesideLiveObservation, type RowView,
+  agentImportJourney, besideLiveChecks, besideLiveJourney, besideLiveLine, panelArchivesOf, seedLiveChecks, unpairJourney,
+  type BesideLiveObservation, type RowView, type StoreView,
 } from '../scripts/release-check/archive-leg.ts';
 import { liveSeedHook, registerLiveSeedHook } from '../scripts/release-check/archive-live-seeds.ts';
+import '../scripts/release-check/archive-live-seed-hooks.ts';
 import { afterSourceDelete, searchWhenJudged, type ArchiveHost } from '../scripts/release-check/archive-stages.ts';
 
 const fx: LegFixture = {
@@ -119,6 +120,28 @@ describe('an import beside a live input is judged', () => {
     expect(panel.rows.map((entry) => entry.sourceImport === true)).toEqual([true, false]);
   });
 
+  test('an export that names no account answers the account question: Add for the beside import, Keep apart for Archives', () => {
+    const beside = legFixture('beside', 'seed', 'whatsapp_chat');
+    expect(beside.accountQuestion).toEqual({ answer: 'add', sourceLabel: 'WhatsApp' });
+    const journey = besideLiveJourney(beside, '~/rc-archives/rc-beside-whatsapp_chat.zip');
+    const names = journey.steps.map((step) => step.name);
+    expect(names.some((name) => name.startsWith('Answer Add to WhatsApp'))).toBe(true);
+    const answer = journey.steps.find((step) => step.name.startsWith('Answer Add to WhatsApp'))!;
+    expect(answer.do).toMatchObject({ click: { role: 'button', name: 'Add to WhatsApp' } });
+    const apart = legFixture('agent', 'seed', 'whatsapp_chat');
+    expect(apart.accountQuestion).toEqual({ answer: 'apart' });
+    const archives = agentImportJourney(apart, '~/rc-archives/rc-agent-whatsapp_chat.zip');
+    expect(archives.steps.some((step) => step.name === `Answer ${A.account.apart}: the export stays apart`)).toBe(true);
+    // A format whose exports name their account is not asked.
+    expect(legFixture('agent', 'seed', 'mbox').accountQuestion).toBeUndefined();
+    expect(agentImportJourney(legFixture('agent', 'seed', 'mbox'), '~/rc-archives/x').steps.some((step) => step.name.startsWith('Answer'))).toBe(false);
+  });
+
+  test('the WhatsApp seed hook is registered for its beside fixture', () => {
+    expect(liveSeedHook('whatsapp').provider).toBe('whatsapp');
+    expect(liveSeedHook('whatsapp').stores({ env: { HOME: '/nonexistent-home' }, home: '/nonexistent-home' }).map((store) => store.tier)).toEqual(['private', 'personal']);
+  });
+
   test('a format with no import beside a live input has no beside fixture, and an unknown hook is named', () => {
     expect(() => legFixture('beside', 'seed', 'mbox')).toThrow('no import beside a live input');
     expect(() => liveSeedHook('nothing-registered')).toThrow('no live seed hook "nothing-registered"');
@@ -165,6 +188,59 @@ describe('the search beside a live input waits for the private model', () => {
     expect(failing(good({ search }))).toEqual(['archive.beside.fixture_chat.search']);
   });
 });
+
+describe('a source that keeps its records Private: the word stays there, and no search returns it', () => {
+  const kept: LegFixture = { ...fx, beside: { ...fx.beside!, search: 'withheld' } };
+  const stores = (personal: number): StoreView[] => [
+    { tier: 'private', exists: true, live: 4, tokenRows: 2 },
+    { tier: 'personal', exists: true, live: personal, tokenRows: personal },
+  ];
+  const answer = (carries: boolean) => ({ ok: true, isError: false, evidence: [{ source: 'Fixture', hasToken: carries }, { source: 'Other', hasToken: false }] });
+  const failingKept = (obs: BesideLiveObservation) => besideLiveChecks(obs, kept).filter((c) => c.status === 'fail').map((c) => c.id);
+
+  test('the WhatsApp fixture keeps its records Private, as the source does', () => {
+    expect(legFixture('beside', 'seed', 'whatsapp_chat').beside?.search).toBe('withheld');
+    // Telegram's, where it is imported beside its live input, are judged like its own and cited.
+    const telegram = (() => {
+      try {
+        return legFixture('beside', 'seed', 'telegram_json');
+      } catch {
+        return undefined;
+      }
+    })();
+    if (telegram) expect(telegram.beside?.search ?? 'cited').toBe('cited');
+  });
+
+  test('all of it in the Private store and a search that carries none of it passes', () => {
+    expect(failingKept(good({ stores: stores(0), search: answer(false) }))).toEqual([]);
+  });
+
+  test('a search that returns the word, or a lower store that holds it, fails', () => {
+    expect(failingKept(good({ stores: stores(0), search: answer(true) }))).toEqual(['archive.beside.fixture_chat.search']);
+    expect(failingKept(good({ stores: stores(2), search: answer(false) }))).toEqual(['archive.beside.fixture_chat.stores']);
+  });
+
+  test('the search is asked through the whole bound, and an answer that leaks the word is the one judged', async () => {
+    let clock = 0;
+    let calls = 0;
+    const lines: string[] = [];
+    const host = {
+      now: () => clock,
+      sleep: async (ms: number) => { clock += ms; },
+      say: (line: string) => { lines.push(line); },
+      search: async () => {
+        calls += 1;
+        // A leak on the third answer, after the judge ran.
+        return { ok: true, isError: false, structured: { evidence: [{ source: 'Fixture', excerpt: calls === 3 ? `the word ${fx.token}` : 'another message' }] } };
+      },
+    } as unknown as Parameters<typeof searchWhenJudged>[0];
+    const leaked = await searchWhenJudged(host, { ...kept, expect: { ...kept.expect, citationLabel: 'Fixture' } }, 900_000, 'withheld');
+    expect(calls).toBe(3);
+    expect(lines.at(-1)).toContain('LEAKED');
+    expect(failingKept(good({ stores: stores(0), search: leaked }))).toEqual(['archive.beside.fixture_chat.search']);
+  });
+});
+
 
 // Mac round 2 / Linux round 3, 2026-10-26: the stores were read right after the Delete returned, while the worker had only marked the
 // account and was about to restart; its files go at that boot. The next leg then met the engine restarting.

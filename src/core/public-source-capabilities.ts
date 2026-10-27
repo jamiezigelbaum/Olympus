@@ -142,10 +142,10 @@ export const V0_4_PUBLIC_SOURCE_CAPABILITIES: readonly PublicSourceCapability[] 
     source_id: 'whatsapp.personal.messages',
     label: 'WhatsApp',
     authentication: { type: 'paired_session', ownership: 'one linked user device' },
-    contextual_scopes: ['live linked-device traffic', 'optional exports', 'exclude Status broadcasts'],
+    contextual_scopes: ['live linked-device traffic', 'chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)', 'Status posts as their own kind'],
     dependencies: [{ id: 'whatsmeow_bridge', label: 'Packaged Whatsmeow bridge (Go and a C compiler for its first build)', required_for: 'QR pairing and live capture' }],
     provider_ceiling: 'Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.',
-    supported_formats: ['message text', 'link previews', 'reactions', 'media metadata', 'voice-note transcript sidecars'],
+    supported_formats: ['message text', 'captions', 'link previews', 'reactions', 'media metadata', 'voice-note transcript sidecars', 'WhatsApp chat exports (a chat .txt or .zip) with their media listed by name'],
     doctor_lane: {
       provider: 'whatsapp_personal',
       capability: 'whatsapp.personal.messages.sync',

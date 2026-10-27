@@ -69,6 +69,30 @@ func TestCaptionMentionsAreResolved(t *testing.T) {
 	}
 }
 
+func TestSenderSavedNameIsTheContactsFullNameOnly(t *testing.T) {
+	pn := types.JID{User: "15551230001", Server: types.DefaultUserServer}
+	lid := types.JID{User: "98765430001111", Server: types.HiddenUserServer}
+	device := types.JID{User: "15551230001", Server: types.DefaultUserServer, Device: 3}
+	contacts := fakeContacts{pn: {Found: true, FullName: "Rowan Hale", PushName: "ro"}}
+	if got := savedNameFromStores(context.Background(), contacts, nil, pn); got != "Rowan Hale" {
+		t.Fatalf("phone sender = %q", got)
+	}
+	if got := savedNameFromStores(context.Background(), contacts, fakeLIDs{lid: pn}, lid); got != "Rowan Hale" {
+		t.Fatalf("hidden-id sender = %q", got)
+	}
+	if got := savedNameFromStores(context.Background(), contacts, nil, device); got != "Rowan Hale" {
+		t.Fatalf("device sender = %q", got)
+	}
+	// Only a push name: nothing is saved, so the connector falls back to the push name itself.
+	unsaved := fakeContacts{pn: {Found: true, PushName: "ro"}}
+	if got := savedNameFromStores(context.Background(), unsaved, nil, pn); got != "" {
+		t.Fatalf("unsaved sender = %q", got)
+	}
+	if got := savedNameFromStores(context.Background(), contacts, failingLIDs{}, lid); got != "" {
+		t.Fatalf("unmapped hidden id = %q", got)
+	}
+}
+
 func readCaptureStatus(t *testing.T, spoolDir string) captureStatusReceipt {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(spoolDir, captureStatusName))

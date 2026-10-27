@@ -405,6 +405,8 @@ import {
   createWhatsAppConnectorStoreSyncHandler,
   type WhatsAppConnectorStoreSyncHandler,
 } from '../whatsapp/index.ts';
+import { createWhatsAppArchiveTarget } from '../whatsapp/archive-target.ts';
+import { readArchiveInputMedia } from '../archive-import/input-media.ts';
 import { SqliteSourceDashboardHistory, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
 import type { DashboardPanelTools } from './dashboard-panel-tools.ts';
 import { readEmbeddingRuntime } from '../dashboard/embedding-runtime.ts';
@@ -3283,6 +3285,30 @@ export async function main(): Promise<void> {
   if (whatsappTierSet && whatsappConnectorStore) {
     reportRehomedChatOverrides('whatsapp', rehomeChatLaneOverrides(whatsappTierSet.ledger, 'whatsapp', [whatsappConnectorStore]));
   }
+  // A WhatsApp chat export is an input of the WhatsApp connector: it writes this
+  // account's own stores (docs/design/archive-live-one-dataset.md). With no
+  // live lane open yet (the export creates the account), the import opens the
+  // account's stores the way the live lane does.
+  let whatsappImportTierSet: TieredStoreSet | undefined = whatsappTierSet;
+  archiveSourceTargets.register(createWhatsAppArchiveTarget({
+    env: process.env,
+    set: () => {
+      if (whatsappImportTierSet) return whatsappImportTierSet;
+      const store = createWhatsAppConnectorStore(process.env);
+      const secrets = openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, store.dbPath, WHATSAPP_LIVE_CORPUS_ID);
+      registerTierLegStore(store, WHATSAPP_LIVE_CORPUS_ID, tierSecureEmbeddingProvider ?? null);
+      whatsappImportTierSet = existingStoreTierSet(createWhatsAppTierLane({
+        store,
+        env: process.env,
+        ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
+        ...(secrets ? { secretLocations: secrets } : {}),
+        onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null),
+      }), { store, ...(secrets ? { secrets } : {}) });
+      if (tierSecureEmbeddingProvider) whatsappImportTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
+      return whatsappImportTierSet;
+    },
+    readChild: (locator, options) => readArchiveInputMedia(locator, { state: archiveImports.state, bindings: archiveImports.media }, options),
+  }));
   const whatsappConnectorStoreSync: WhatsAppConnectorStoreSyncHandler | undefined = whatsappConnectorStore
     ? createWhatsAppConnectorStoreSyncHandler({
         ...(whatsappTierSet ? { tierSet: whatsappTierSet } : {}),

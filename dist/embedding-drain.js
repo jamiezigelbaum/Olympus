@@ -34632,10 +34632,10 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "whatsapp.personal.messages",
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "optional exports", "exclude Status broadcasts"],
+      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
       dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
-      supported_formats: ["message text", "link previews", "reactions", "media metadata", "voice-note transcript sidecars"],
+      supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],
       doctor_lane: {
         provider: "whatsapp_personal",
         capability: "whatsapp.personal.messages.sync"
@@ -35310,6 +35310,7 @@ var init_vocabulary = __esm(() => {
       gmail_labels_unavailable: { one: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.", many: "Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now." },
       system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
       message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
+      match_near_miss: { one: "1 message may also be in the live chat, shown differently there (a renamed contact, an edited caption), so it was kept as its own", many: "{n} messages may also be in the live chat, shown differently there (a renamed contact, an edited caption), so each was kept as its own" },
       status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
       note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
       note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
@@ -35367,6 +35368,7 @@ var init_vocabulary = __esm(() => {
       message_content_unsupported: "not_imported",
       system_message: "how_read",
       message_empty: "how_read",
+      match_near_miss: "how_read",
       message_without_text: "how_read",
       status_updates: "not_imported",
       service_message: "not_imported",
@@ -37101,6 +37103,11 @@ var init_spool_index = __esm(() => {
 // src/workers/whatsapp/spool-resets.ts
 var init_spool_resets = () => {};
 
+// src/workers/whatsapp/match-keys.ts
+var init_match_keys = __esm(() => {
+  init_reaction_index();
+});
+
 // src/workers/whatsapp/spool-reader.ts
 var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES2, FINISH_STEP_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
 var init_spool_reader = __esm(() => {
@@ -37120,6 +37127,7 @@ var init_live_connector = __esm(() => {
   init_reaction_index();
   init_spool_index();
   init_spool_resets();
+  init_match_keys();
   init_spool_reader();
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
   TARGET_READ_CHUNK_BYTES = 4 * 1024;
@@ -50740,6 +50748,46 @@ init_provider();
 init_assets();
 init_manifest();
 init_source_watch();
+
+// src/workers/whatsapp/archive-target.ts
+init_olympus_layout();
+init_source_input();
+
+// src/workers/whatsapp/archive-input.ts
+init_archive_formats();
+init_state();
+
+// src/workers/archive-import/input-media.ts
+init_file_extraction_source();
+init_scope_safe_fs();
+init_media_bindings();
+init_zip_reader();
+
+// src/workers/whatsapp/archive-input.ts
+init_zip_reader();
+init_match_keys();
+init_spool_index();
+init_live_connector();
+
+// src/workers/whatsapp/export-zone.ts
+var formatters = new Map;
+
+// src/workers/whatsapp/archive-input.ts
+var SAMPLE_BYTES = 1024 * 1024 * 1024;
+var LIVE_INDEX_BYTES = 64 * 1024 * 1024;
+var SLOT_LOOKAHEAD_BYTES = 4 * 1024 * 1024;
+var DAY_MS2 = 24 * 3600000;
+
+// src/workers/whatsapp/archive-target.ts
+init_live_connector();
+init_store_sync2();
+var WHATSAPP_LANE_SYNC = Object.freeze({
+  placement: WHATSAPP_STORE_PLACEMENT,
+  fetchContent: true,
+  deferMetadataOnlyContent: true
+});
+
+// src/workers/email-source/server.ts
 init_source_dashboard();
 init_source_ingestion_ledger();
 init_connected_handles();

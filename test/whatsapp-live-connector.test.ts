@@ -499,7 +499,7 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     expect(status.files).toBe(2);
   });
 
-  test('skips status@broadcast lines without treating them as chat evidence', async () => {
+  test('reads status@broadcast posts as their own record kind in the status updates conversation', async () => {
     const dir = makeSpoolDir({
       '2026-06-10.jsonl':
         spoolLine({ id: 'chat-1', text: 'real private chat' })
@@ -516,13 +516,14 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     const pages = await drain(connector.listItems());
     const items = pages.flatMap((page) => [...page.items]);
 
-    expect(ids(items)).toEqual(['chat-1', 'chat-2']);
+    expect(ids(items)).toEqual(['chat-1', 'status-1', 'chat-2']);
+    const status = items.find((item) => item.identity.providerItemId === 'status-1');
+    expect(status?.metadata).toMatchObject({ recordKind: 'status', chat: 'Status updates' });
+    expect(status?.identity.providerConversationId).toBe('status@broadcast');
+    expect(items.find((item) => item.identity.providerItemId === 'chat-1')?.metadata['recordKind']).toBeUndefined();
     expect(pages.at(-1)?.nextCursor).toStartWith('2026-06-10.jsonl:3@');
-    expect(readWhatsAppLiveSpoolStatus(dir)).toMatchObject({
-      malformedLines: 0,
-      messages: 3,
-    });
-    await expect(connector.fetchItem(`${ACCOUNT}:status-1`)).rejects.toThrow(/was not found/);
+    const fetched = await connector.fetchItem(`${ACCOUNT}:status@broadcast:status-1`);
+    expect(fetched.metadata['recordKind']).toBe('status');
   });
 
   test('fetchItem re-reads a message by local item id', async () => {
