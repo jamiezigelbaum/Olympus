@@ -26850,12 +26850,12 @@ var init_secrets_disposition = __esm(() => {
 });
 
 // src/core/child-item-id.ts
-function childProviderItemId(parentProviderItemId, key2) {
+function childProviderItemId(parentProviderItemId, key) {
   if (!parentProviderItemId)
     throw new TypeError("A child needs its parent's id.");
-  if (!key2 || key2.includes(CHILD_ITEM_ID_SEPARATOR))
+  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
     throw new TypeError("A child's key must be plain text.");
-  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key2}`;
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
 }
 var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
@@ -99631,21 +99631,21 @@ class WhatsAppSpoolIndex {
         unsent_m = excluded.unsent_m, unsent_s = excluded.unsent_s, file = excluded.file, offset = excluded.offset
       WHERE excluded.file > live_keys.file OR (excluded.file = live_keys.file AND excluded.offset > live_keys.offset)
     `).run(chat, input.id, input.chatJid, input.fromMe ? 1 : 0, input.keys.timeMs, input.mediaType ?? null, input.mediaSaved ? 1 : 0, input.keys.exactMinute, input.keys.exactSecond, input.keys.looseMinute, input.keys.looseSecond, input.keys.unsentMinute, input.keys.unsentSecond, place.file, place.offset);
-    for (const key2 of [input.keys.exactMinute, input.keys.exactSecond]) {
-      this.db.query("INSERT OR IGNORE INTO live_version_keys (key, chat, id, file) VALUES (?, ?, ?, ?)").run(key2, chat, input.id, place.file);
+    for (const key of [input.keys.exactMinute, input.keys.exactSecond]) {
+      this.db.query("INSERT OR IGNORE INTO live_version_keys (key, chat, id, file) VALUES (?, ?, ?, ?)").run(key, chat, input.id, place.file);
     }
     if (input.chatNameKey) {
       this.db.query("INSERT OR IGNORE INTO chat_names (name, chat, chat_jid) VALUES (?, ?, ?)").run(input.chatNameKey, chat, input.chatJid);
     }
   }
-  uniqueLiveWithKey(precision, key2) {
-    const candidates = this.db.query("SELECT chat, id FROM live_version_keys WHERE key = ? LIMIT 2").all(key2);
+  uniqueLiveWithKey(precision, key) {
+    const candidates = this.db.query("SELECT chat, id FROM live_version_keys WHERE key = ? LIMIT 2").all(key);
     if (candidates.length !== 1)
       return;
     const column = precision === "second" ? "exact_s" : "exact_m";
     const row = this.db.query(`
       SELECT id, chat_jid, from_me, time_ms, media_type, media_saved FROM live_keys WHERE chat = ? AND id = ? AND ${column} = ?
-    `).get(candidates[0].chat, candidates[0].id, key2);
+    `).get(candidates[0].chat, candidates[0].id, key);
     return row ? {
       id: row.id,
       chatJid: row.chat_jid,
@@ -99655,13 +99655,13 @@ class WhatsAppSpoolIndex {
       mediaSaved: row.media_saved === 1
     } : undefined;
   }
-  hasLooseKey(precision, key2) {
+  hasLooseKey(precision, key) {
     const column = precision === "second" ? "loose_s" : "loose_m";
-    return this.db.query(`SELECT 1 FROM live_keys WHERE ${column} = ? LIMIT 1`).get(key2) !== null;
+    return this.db.query(`SELECT 1 FROM live_keys WHERE ${column} = ? LIMIT 1`).get(key) !== null;
   }
-  ownerSentUnsent(precision, key2) {
+  ownerSentUnsent(precision, key) {
     const column = precision === "second" ? "unsent_s" : "unsent_m";
-    return this.db.query(`SELECT 1 FROM live_keys WHERE ${column} = ? AND from_me = 1 LIMIT 1`).get(key2) !== null;
+    return this.db.query(`SELECT 1 FROM live_keys WHERE ${column} = ? AND from_me = 1 LIMIT 1`).get(key) !== null;
   }
   chatsNamed(name) {
     return this.db.query("SELECT chat_jid FROM chat_names WHERE name = ?").all(name).map((row) => row.chat_jid);
@@ -99762,8 +99762,8 @@ import { createHash as createHash64 } from "node:crypto";
 function nameKey(name) {
   return name.normalize("NFKC").replace(/[‎‏‪-‮⁦-⁩]/gu, "").replace(/\s+/gu, " ").trim().toLowerCase();
 }
-function textKey(text2) {
-  return text2.normalize("NFC").replace(/\r\n?/gu, `
+function textKey(text) {
+  return text.normalize("NFC").replace(/\r\n?/gu, `
 `).replace(/[‎‏‪-‮⁦-⁩]/gu, "").replace(/[ \t]+/gu, " ").replace(/ ?\n ?/gu, `
 `).trim();
 }
@@ -99773,32 +99773,32 @@ function keyDigest(...parts) {
 function timeSlot(ms, precision) {
   return precision === "second" ? `s${Math.floor(ms / 1000)}` : `m${Math.floor(ms / 60000)}`;
 }
-function exactKey(chatJid, ms, precision, sender, text2) {
-  return keyDigest(normalizeWhatsAppJid(chatJid), timeSlot(ms, precision), sender, text2);
+function exactKey(chatJid, ms, precision, sender, text) {
+  return keyDigest(normalizeWhatsAppJid(chatJid), timeSlot(ms, precision), sender, text);
 }
-function looseKey(ms, precision, sender, text2) {
-  return keyDigest(timeSlot(ms, precision), sender, text2);
+function looseKey(ms, precision, sender, text) {
+  return keyDigest(timeSlot(ms, precision), sender, text);
 }
-function unsentKey(chatJid, ms, precision, text2) {
-  return keyDigest(normalizeWhatsAppJid(chatJid), timeSlot(ms, precision), text2);
+function unsentKey(chatJid, ms, precision, text) {
+  return keyDigest(normalizeWhatsAppJid(chatJid), timeSlot(ms, precision), text);
 }
 function liveMatchKeys(input) {
   const ms = Date.parse(input.timestamp);
   if (!Number.isFinite(ms))
     return;
-  const text2 = textKey(input.text);
+  const text = textKey(input.text);
   return {
     timeMs: ms,
-    exactMinute: exactKey(input.chatJid, ms, "minute", input.sender, text2),
-    exactSecond: exactKey(input.chatJid, ms, "second", input.sender, text2),
-    looseMinute: looseKey(ms, "minute", input.sender, text2),
-    looseSecond: looseKey(ms, "second", input.sender, text2),
-    unsentMinute: unsentKey(input.chatJid, ms, "minute", text2),
-    unsentSecond: unsentKey(input.chatJid, ms, "second", text2)
+    exactMinute: exactKey(input.chatJid, ms, "minute", input.sender, text),
+    exactSecond: exactKey(input.chatJid, ms, "second", input.sender, text),
+    looseMinute: looseKey(ms, "minute", input.sender, text),
+    looseSecond: looseKey(ms, "second", input.sender, text),
+    unsentMinute: unsentKey(input.chatJid, ms, "minute", text),
+    unsentSecond: unsentKey(input.chatJid, ms, "second", text)
   };
 }
-function exportMessageId(chatJid, ms, precision, sender, text2, occurrence) {
-  return `wx${keyDigest("id", normalizeWhatsAppJid(chatJid), timeSlot(ms, precision), sender, text2, occurrence).slice(0, 30)}`;
+function exportMessageId(chatJid, ms, precision, sender, text, occurrence) {
+  return `wx${keyDigest("id", normalizeWhatsAppJid(chatJid), timeSlot(ms, precision), sender, text, occurrence).slice(0, 30)}`;
 }
 var OWNER_SENDER = "\x00me";
 var init_match_keys = __esm(() => {
@@ -100110,9 +100110,9 @@ function createWhatsAppLiveSourceConnector(options) {
     let match;
     const reactionIndex = createWhatsAppReactionIndexBuilder();
     for (const file of listSpoolFiles(spoolDir)) {
-      for (const line2 of spoolFileLines(join87(spoolDir, file))) {
-        const message2 = parseSpoolLine(line2);
-        if (message2 === undefined)
+      for (const line of spoolFileLines(join87(spoolDir, file))) {
+        const message = parseSpoolLine(line);
+        if (message === undefined)
           continue;
         if (message.reactionTargetId === providerItemId)
           reactionIndex.add(message);
@@ -100166,29 +100166,29 @@ function compareWhatsAppVersions(a, b) {
     return Math.sign(left - right);
   return a < b ? -1 : a > b ? 1 : 0;
 }
-function createRecordBuilder(account, fetchItem, authenticate2, readChild) {
+function createRecordBuilder(account, fetchItem, authenticate, readChild) {
   return {
     family: "chat",
-    entriesOf: (record2) => {
-      const own3 = recordIdentity(record2, account);
+    entriesOf: (record) => {
+      const own = recordIdentity(record, account);
       return [
         {
-          identity: own3,
-          bringsContent: recordBringsContent(record2) || record2.reactions !== undefined,
-          authoredAt: record2.timestamp
+          identity: own,
+          bringsContent: recordBringsContent(record) || record.reactions !== undefined,
+          authoredAt: record.timestamp
         },
-        ...(record2.children ?? []).map((child) => ({ identity: childIdentity(own3, child), bringsContent: child.available && child.locator !== undefined }))
+        ...(record.children ?? []).map((child) => ({ identity: childIdentity(own, child), bringsContent: child.available && child.locator !== undefined }))
       ];
     },
     compareVersions: compareWhatsAppVersions,
-    build: (record2, wanted) => {
+    build: (record, wanted) => {
       const fetchedAt = nowIso3();
       const items = [];
-      const own3 = rawItemFromSpoolMessage(record2, account, fetchedAt, record2.reactions);
-      if (wanted.has(own3.identity.localItemId))
-        items.push(own3);
-      for (const child of record2.children ?? []) {
-        const item = rawItemFromChild(record2, child, account, fetchedAt);
+      const own = rawItemFromSpoolMessage(record, account, fetchedAt, record.reactions);
+      if (wanted.has(own.identity.localItemId))
+        items.push(own);
+      for (const child of record.children ?? []) {
+        const item = rawItemFromChild(record, child, account, fetchedAt);
         if (wanted.has(item.identity.localItemId))
           items.push(item);
       }
@@ -100419,8 +100419,8 @@ function catchUpIndex(spoolDir, index, until, pass, atBoundary = true) {
 function noteLine(index, line, place) {
   if (line.trim() === "")
     return;
-  const message2 = parseSpoolLine(line2);
-  if (message2 === undefined)
+  const message = parseSpoolLine(line);
+  if (message === undefined)
     return;
   if (isWhatsAppReactionLine(message)) {
     const reaction = whatsAppReactionEntryOf(message);
@@ -100428,25 +100428,25 @@ function noteLine(index, line, place) {
       index.noteReaction(reaction.targetId, reaction.entry, place);
     return;
   }
-  index.noteMessage(message2.chatJid, message2.id, place);
-  if (message2.secretRedacted === true)
+  index.noteMessage(message.chatJid, message.id, place);
+  if (message.secretRedacted === true)
     return;
   const keys = liveMatchKeys({
-    chatJid: message2.chatJid,
-    timestamp: message2.timestamp,
-    sender: message2.fromMe ? OWNER_SENDER : nameKey(message2.senderContactName || message2.senderName || ""),
-    text: message2.text
+    chatJid: message.chatJid,
+    timestamp: message.timestamp,
+    sender: message.fromMe ? OWNER_SENDER : nameKey(message.senderContactName || message.senderName || ""),
+    text: message.text
   });
   if (!keys)
     return;
   index.noteMatchKeys({
-    chatJid: message2.chatJid,
-    id: message2.id,
-    fromMe: message2.fromMe,
-    ...message2.mediaType !== undefined ? { mediaType: message2.mediaType } : {},
-    mediaSaved: message2.mediaPath !== undefined,
+    chatJid: message.chatJid,
+    id: message.id,
+    fromMe: message.fromMe,
+    ...message.mediaType !== undefined ? { mediaType: message.mediaType } : {},
+    mediaSaved: message.mediaPath !== undefined,
     keys,
-    ...isWhatsAppStatusBroadcast(message2.chatJid) ? { chatNameKey: "status@broadcast" } : message2.chatName ? { chatNameKey: nameKey(message2.chatName) } : {}
+    ...isWhatsAppStatusBroadcast(message.chatJid) ? { chatNameKey: "status@broadcast" } : message.chatName ? { chatNameKey: nameKey(message.chatName) } : {}
   }, place);
 }
 function readSpoolPage(spoolDir, start, limit, pass) {
@@ -100511,10 +100511,10 @@ function readSpoolPage(spoolDir, start, limit, pass) {
           continue;
         }
         if (index && !index.covers(place))
-          noteLine(index, line2, place);
-        if (isWhatsAppReactionLine(message2)) {
-          reactions.push(message2);
-          const targetId = message2.reactionTargetId;
+          noteLine(index, line, place);
+        if (isWhatsAppReactionLine(message)) {
+          reactions.push(message);
+          const targetId = message.reactionTargetId;
           if (targetId !== undefined) {
             const target = chatScopedKey(message.chatJid, targetId);
             if (!pageMessages.has(target))
@@ -100630,10 +100630,10 @@ function parseSpoolLine(line) {
   return {
     id,
     chatJid,
-    chatName: optionalString9(record2["chat_name"]),
-    senderJid: optionalString9(record2["sender_jid"]),
-    senderName: optionalString9(record2["sender_name"]),
-    ...nonEmptyString2(record2["sender_contact_name"]) === undefined ? {} : { senderContactName: nonEmptyString2(record2["sender_contact_name"]) },
+    chatName: optionalString9(record["chat_name"]),
+    senderJid: optionalString9(record["sender_jid"]),
+    senderName: optionalString9(record["sender_name"]),
+    ...nonEmptyString2(record["sender_contact_name"]) === undefined ? {} : { senderContactName: nonEmptyString2(record["sender_contact_name"]) },
     fromMe,
     timestamp,
     text,
@@ -100706,26 +100706,26 @@ function recordBringsContent(message) {
     return false;
   return !(message.mediaType !== undefined && message.text === "");
 }
-function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
-  const identity2 = recordIdentity(message2, account);
-  const isMedia = message2.mediaType !== undefined && message2.text === "";
-  const redacted = message2.secretRedacted === true;
-  const text2 = spoolMessageText(message2);
-  const hasPreviewEnrichment = text2 !== resolveMentionText(message2.text, message2.mentions);
-  const status = isWhatsAppStatusBroadcast(message2.chatJid);
-  const senderName = message2.senderContactName || message2.senderName;
+function rawItemFromSpoolMessage(message, account, fetchedAt, reactions) {
+  const identity = recordIdentity(message, account);
+  const isMedia = message.mediaType !== undefined && message.text === "";
+  const redacted = message.secretRedacted === true;
+  const text = spoolMessageText(message);
+  const hasPreviewEnrichment = text !== resolveMentionText(message.text, message.mentions);
+  const status = isWhatsAppStatusBroadcast(message.chatJid);
+  const senderName = message.senderContactName || message.senderName;
   return {
     identity,
     mimeType: isMedia ? message.mediaMime ?? "application/octet-stream" : TEXT_MIME_TYPE,
     content: isMedia || redacted ? { kind: "metadata_only" } : { kind: "text", text },
     metadata: Object.freeze({
-      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || message2.chatJid,
-      sender: senderName || message2.senderJid,
-      senderId: message2.senderJid || undefined,
-      senderLabel: senderName || message2.senderJid || undefined,
-      senderIsOwner: message2.fromMe,
-      fromMe: message2.fromMe,
-      sentAt: message2.timestamp,
+      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
+      sender: senderName || message.senderJid,
+      senderId: message.senderJid || undefined,
+      senderLabel: senderName || message.senderJid || undefined,
+      senderIsOwner: message.fromMe,
+      fromMe: message.fromMe,
+      sentAt: message.timestamp,
       ...status ? { recordKind: "status" } : {},
       ...reactions === undefined ? {} : { reactions },
       ...hasPreviewEnrichment && !redacted ? { searchText: text } : {},
@@ -100737,10 +100737,10 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
     fetchedAt
   };
 }
-function rawItemFromChild(message2, child, account, fetchedAt) {
-  const parent = recordIdentity(message2, account);
-  const status = isWhatsAppStatusBroadcast(message2.chatJid);
-  const senderName = message2.senderContactName || message2.senderName;
+function rawItemFromChild(message, child, account, fetchedAt) {
+  const parent = recordIdentity(message, account);
+  const status = isWhatsAppStatusBroadcast(message.chatJid);
+  const senderName = message.senderContactName || message.senderName;
   return {
     identity: childIdentity(parent, child),
     mimeType: child.mimeType,
@@ -100748,13 +100748,13 @@ function rawItemFromChild(message2, child, account, fetchedAt) {
     metadata: Object.freeze({
       name: child.name,
       title: child.name,
-      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || message2.chatJid,
-      sender: senderName || message2.senderJid,
-      senderLabel: senderName || message2.senderJid || undefined,
-      senderIsOwner: message2.fromMe,
-      fromMe: message2.fromMe,
-      sentAt: message2.timestamp,
-      ...message2.mediaType === undefined ? {} : { mediaType: message2.mediaType }
+      chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
+      sender: senderName || message.senderJid,
+      senderLabel: senderName || message.senderJid || undefined,
+      senderIsOwner: message.fromMe,
+      fromMe: message.fromMe,
+      sentAt: message.timestamp,
+      ...message.mediaType === undefined ? {} : { mediaType: message.mediaType }
     }),
     fetchedAt,
     deferredBytes: {
@@ -100764,8 +100764,8 @@ function rawItemFromChild(message2, child, account, fetchedAt) {
     }
   };
 }
-function spoolMessageText(message2) {
-  return enrichWithLinkPreview(resolveMentionText(message2.text, message2.mentions), message2);
+function spoolMessageText(message) {
+  return enrichWithLinkPreview(resolveMentionText(message.text, message.mentions), message);
 }
 function redactWhatsAppLiveSpoolSecrets(options) {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty4(options.account, "WhatsApp account");
@@ -100798,9 +100798,9 @@ function redactWhatsAppLiveSpoolSecrets(options) {
     files: listSpoolFiles(options.spoolDir),
     ...from ? { from } : {},
     ...through ? { through } : {},
-    redact: (line2) => {
-      const message2 = parseSpoolLine(line2);
-      if (message2 === undefined)
+    redact: (line) => {
+      const message = parseSpoolLine(line);
+      if (message === undefined)
         return;
       if (isWhatsAppReactionLine(message))
         return;
@@ -100815,8 +100815,8 @@ function redactWhatsAppLiveSpoolSecrets(options) {
       const redaction = options.judge(identity, text);
       if (!redaction)
         return;
-      deleteOwnedMedia(message2);
-      const namesLeft = message2.chatName !== "" || message2.senderName !== "" || (message2.senderContactName ?? "") !== "";
+      deleteOwnedMedia(message);
+      const namesLeft = message.chatName !== "" || message.senderName !== "" || (message.senderContactName ?? "") !== "";
       if (alreadyRedacted && (redaction !== "names" || !namesLeft))
         return;
       const record = JSON.parse(line);
@@ -100838,10 +100838,10 @@ function redactWhatsAppLiveSpoolSecrets(options) {
       for (const key of removable)
         delete record[key];
       if (redaction === "names") {
-        record2["chat_name"] = "";
-        record2["sender_name"] = "";
-        if ("sender_contact_name" in record2)
-          record2["sender_contact_name"] = "";
+        record["chat_name"] = "";
+        record["sender_name"] = "";
+        if ("sender_contact_name" in record)
+          record["sender_contact_name"] = "";
       }
       record["secret_redacted"] = true;
       releaseMedia(message);
@@ -101697,13 +101697,8 @@ var init_tier_migration_lanes = __esm(() => {
 });
 
 // src/workers/classification/tier-migration-cli.ts
-var exports_tier_migration_cli = {};
-__export(exports_tier_migration_cli, {
-  runTierMigrateCommand: () => runTierMigrateCommand,
-  TIER_MIGRATE_USAGE: () => TIER_MIGRATE_USAGE
-});
 import { createHash as createHash65 } from "node:crypto";
-async function runTierMigrateCommand(args, context2 = {}) {
+async function runTierMigrateCommand(args, context = {}) {
   const [command, ...rest] = args;
   const flags = parseFlags(rest);
   const env = context.env ?? process.env;
@@ -120527,30 +120522,6 @@ var init_remote_result = __esm(() => {
 });
 
 // src/core/source-answer-jobs.ts
-var exports_source_answer_jobs = {};
-__export(exports_source_answer_jobs, {
-  sourceAnswerJobOwner: () => sourceAnswerJobOwner,
-  sourceAnswerJobLimitsFromEnv: () => sourceAnswerJobLimitsFromEnv,
-  isSourceAnswerPending: () => isSourceAnswerPending,
-  SourceAnswerJobRegistry: () => SourceAnswerJobRegistry,
-  SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS,
-  SOURCE_ANSWER_RESULT_WAIT_MAX_MS: () => SOURCE_ANSWER_RESULT_WAIT_MAX_MS,
-  SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS: () => SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
-  SOURCE_ANSWER_MAX_RUNNING_PER_OWNER: () => SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
-  SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING: () => SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING,
-  SOURCE_ANSWER_MAX_RUNNING_GLOBAL: () => SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
-  SOURCE_ANSWER_MAX_RETAINED_PER_OWNER: () => SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
-  SOURCE_ANSWER_MAX_RESULT_BYTES: () => SOURCE_ANSWER_MAX_RESULT_BYTES,
-  SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER: () => SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER,
-  SOURCE_ANSWER_MAX_QUEUED_OWNER: () => SOURCE_ANSWER_MAX_QUEUED_OWNER,
-  SOURCE_ANSWER_MAX_QUEUED_BACKGROUND: () => SOURCE_ANSWER_MAX_QUEUED_BACKGROUND,
-  SOURCE_ANSWER_JOB_TTL_MS: () => SOURCE_ANSWER_JOB_TTL_MS,
-  SOURCE_ANSWER_JOB_DEADLINE_MS: () => SOURCE_ANSWER_JOB_DEADLINE_MS,
-  SOURCE_ANSWER_HANDOFF_MIN_MS: () => SOURCE_ANSWER_HANDOFF_MIN_MS,
-  SOURCE_ANSWER_HANDOFF_MAX_MS: () => SOURCE_ANSWER_HANDOFF_MAX_MS,
-  SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
-  SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS: () => SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS
-});
 import { createHash as createHash66, randomBytes as randomBytes20, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
@@ -121318,8 +121289,8 @@ var init_server4 = __esm(() => {
 
 // connect-relay/shared/protocol.ts
 import { createHash as createHash67, createPublicKey, randomBytes as randomBytes21, sign, verify } from "node:crypto";
-function parseSurfacesMessage(message2) {
-  if (message2.type !== "surfaces" || message2.v !== 1 || !Array.isArray(message2.entries))
+function parseSurfacesMessage(message) {
+  if (message.type !== "surfaces" || message.v !== 1 || !Array.isArray(message.entries))
     return;
   if (message.entries.length > MAX_SURFACE_ENTRIES)
     return;
@@ -125546,8 +125517,8 @@ var init_dashboard_session_secret = __esm(() => {
 
 // src/core/file-extraction-source.ts
 import { createHash as createHash69 } from "node:crypto";
-function isFileExtractionSourceError(value2) {
-  if (!value2 || typeof value2 !== "object")
+function isFileExtractionSourceError(value) {
+  if (!value || typeof value !== "object")
     return false;
   const candidate = value;
   return typeof candidate.errorKind === "string" && typeof candidate.settleAs === "string" && typeof candidate.retryable === "boolean" && Object.hasOwn(FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, candidate.errorKind);
@@ -127553,8 +127524,8 @@ function clampInteger(value, min, max) {
 function makeJobId() {
   return `fx_${randomUUID27()}`;
 }
-function hashString5(value2) {
-  return createHash70("sha256").update(value2).digest("hex");
+function hashString5(value) {
+  return createHash70("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -132316,8 +132287,8 @@ function lostLeaseRecord(base, job) {
 function retryable(errorKind, error) {
   return { status: "failed_retryable", errorKind, errorHash: hashError(error) };
 }
-function hashError(error2) {
-  const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
+function hashError(error) {
+  const detail = error instanceof Error ? `${error.name}:${error.message}` : String(error);
   return createHash72("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error) {
@@ -132453,8 +132424,8 @@ function logPlanRefusal(corpusId, extractorKind, reason, count, error) {
   const field = error instanceof ExtractionJobFieldError ? ` field=${error.field}` : "";
   console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${corpusId} extractor_kind=${extractorKind} ` + `reason_kind=${reason}${field} candidates=${count} reason=${boundedLogErrorMessage(error)}`);
 }
-function hashToken(value2) {
-  return createHash72("sha256").update(value2).digest("hex");
+function hashToken(value) {
+  return createHash72("sha256").update(value).digest("hex");
 }
 function isScopeApprovalRefusal(error) {
   return error instanceof OperationError && error.code === "source_index_policy_violation";
@@ -135932,8 +135903,8 @@ function compareHits(left, right) {
 function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
-function sha2566(value2) {
-  return createHash74("sha256").update(value2, "utf8").digest("hex");
+function sha2566(value) {
+  return createHash74("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -137413,8 +137384,8 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 
 // src/workers/dashboard/components.ts
 import { createHash as createHash75 } from "node:crypto";
-function escapeHtml2(value2) {
-  return value2.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+function escapeHtml2(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 function escapeScriptJson(value) {
   return value.replaceAll("<", "\\u003c").replaceAll(">", "\\u003e").replaceAll("&", "\\u0026");
@@ -146223,21 +146194,9 @@ var init_dashboard = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-resource.ts
-var exports_dashboard_resource = {};
-__export(exports_dashboard_resource, {
-  versionedResourceUri: () => versionedResourceUri,
-  matchesResourceUri: () => matchesResourceUri,
-  dashboardResourceMeta: () => dashboardResourceMeta,
-  dashboardResourceHtml: () => dashboardResourceHtml,
-  MCP_APP_MIME_TYPE: () => MCP_APP_MIME_TYPE,
-  DASHBOARD_UI_DOMAIN: () => DASHBOARD_UI_DOMAIN,
-  DASHBOARD_RESOURCE_VERSIONED_URI: () => DASHBOARD_RESOURCE_VERSIONED_URI,
-  DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
-  DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
-});
 import { createHash as createHash76 } from "node:crypto";
-function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash76("sha256").update(html2).digest("hex").slice(0, 12)}`;
+function versionedResourceUri(base, html) {
+  return `${base}?v=${createHash76("sha256").update(html).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -147439,8 +147398,8 @@ var init_source_dispositions = __esm(() => {
 
 // src/workers/chat/chat-scope-filter.ts
 import { createHash as createHash77 } from "node:crypto";
-function parseStructuredChatScope(value2) {
-  const parts = value2.split(":");
+function parseStructuredChatScope(value) {
+  const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
     return;
   const accountScope = parts[0].trim();
@@ -147465,8 +147424,8 @@ function unresolvedChatTitleResolution(value) {
     resolved: false
   };
 }
-function safeDigest(value2) {
-  return createHash77("sha256").update(value2).digest("hex");
+function safeDigest(value) {
+  return createHash77("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -155283,8 +155242,8 @@ function normalizeRetryAt(retryAt, completedAt) {
     ...retryAt.degradedReason ? { degradedReason: retryAt.degradedReason } : {}
   };
 }
-function hash(value2) {
-  return createHash81("sha256").update(value2).digest("hex").slice(0, 16);
+function hash(value) {
+  return createHash81("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -161110,8 +161069,8 @@ function stoppedFrom(error, relPath) {
   }
   return archiveStopFromScopeError(error, relPath);
 }
-function sha2567(value2) {
-  return createHash82("sha256").update(value2).digest("hex");
+function sha2567(value) {
+  return createHash82("sha256").update(value).digest("hex");
 }
 function headerValue(email, key) {
   const value = email.headers.find((header) => header.key === key)?.value?.trim();
@@ -162094,8 +162053,8 @@ var init_place = __esm(() => {
 
 // src/workers/archive-import/whatsapp/connector.ts
 import { createHash as createHash83 } from "node:crypto";
-function sha2568(value2) {
-  return createHash83("sha256").update(value2).digest("hex");
+function sha2568(value) {
+  return createHash83("sha256").update(value).digest("hex");
 }
 function stoppedFrom2(error, relPath) {
   if (error instanceof WhatsAppFormatError) {
@@ -162751,8 +162710,8 @@ var init_resume_crc = __esm(() => {
 
 // src/workers/archive-import/notes/note.ts
 import { createHash as createHash84 } from "node:crypto";
-function isRecord11(value2) {
-  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
+function isRecord11(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function firstString(...values) {
   for (const value of values) {
@@ -162803,8 +162762,8 @@ function cleanTags(tags) {
   }
   return out;
 }
-function sha2569(value2) {
-  return createHash84("sha256").update(value2).digest("hex");
+function sha2569(value) {
+  return createHash84("sha256").update(value).digest("hex");
 }
 function buildNoteItem(input, draft, place, savedAt) {
   const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
@@ -164821,8 +164780,8 @@ function parseCursor3(input, cursor) {
   }
   return { resume, assumedZone: flag === "1:", done: false };
 }
-function sha25610(value2) {
-  return createHash85("sha256").update(value2).digest("hex");
+function sha25610(value) {
+  return createHash85("sha256").update(value).digest("hex");
 }
 function placeOf(event) {
   const path = event.path;
@@ -167991,8 +167950,8 @@ function labelFor2(mountPoint) {
     return "Macintosh HD";
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
-function shortHash(value2) {
-  return createHash87("sha256").update(value2).digest("hex").slice(0, 16);
+function shortHash(value) {
+  return createHash87("sha256").update(value).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -169994,15 +169953,15 @@ function parseArchiveInputMedia(locator) {
   return;
 }
 function servedRecord(state, archiveId) {
-  let record5;
+  let record;
   try {
-    record5 = state.get(archiveId);
+    record = state.get(archiveId);
   } catch {
     return;
   }
-  if (!record5 || record5.status === "removing" || record5.target === undefined)
+  if (!record || record.status === "removing" || record.target === undefined)
     return;
-  return record5;
+  return record;
 }
 function readArchiveInputMedia(locator, deps, options = {}) {
   let out = new Uint8Array(0);
@@ -170024,40 +169983,40 @@ function serveArchiveInputMedia(locator, deps, maxBytes, sink) {
   const parsed = parseArchiveInputMedia(locator);
   if (!parsed)
     throw new FileExtractionSourceError("source_item_not_found");
-  const record5 = servedRecord(deps.state, parsed.archiveId);
-  if (!record5)
+  const record = servedRecord(deps.state, parsed.archiveId);
+  if (!record)
     throw new FileExtractionSourceError("source_item_not_found");
   let root;
   try {
-    root = ScopeRoot.open(record5.root_path);
+    root = ScopeRoot.open(record.root_path);
   } catch {
     throw new FileExtractionSourceError("source_version_gone");
   }
   try {
     if (parsed.kind === "binding")
-      serveBinding(deps, record5, root, parsed.bindingId, maxBytes, sink);
+      serveBinding(deps, record, root, parsed.bindingId, maxBytes, sink);
     else
-      serveZipMember(record5, root, parsed, maxBytes, sink);
-  } catch (error2) {
-    if (error2 instanceof FileExtractionSourceError)
-      throw error2;
-    if (error2 instanceof ScopeSafeError) {
-      if (error2.code === "too_large")
+      serveZipMember(record, root, parsed, maxBytes, sink);
+  } catch (error) {
+    if (error instanceof FileExtractionSourceError)
+      throw error;
+    if (error instanceof ScopeSafeError) {
+      if (error.code === "too_large")
         throw new FileExtractionSourceError("source_too_large");
       throw new FileExtractionSourceError("source_version_gone");
     }
-    if (error2 instanceof ZipMemberError || error2 instanceof ZipFormatError) {
+    if (error instanceof ZipMemberError || error instanceof ZipFormatError) {
       throw new FileExtractionSourceError("source_content_unavailable");
     }
-    throw error2;
+    throw error;
   } finally {
     root.close();
   }
 }
-function serveBinding(deps, record5, root, bindingId, maxBytes, sink) {
+function serveBinding(deps, record, root, bindingId, maxBytes, sink) {
   if (!deps.bindings)
     throw new FileExtractionSourceError("source_item_not_found");
-  const access = archiveMediaAccess({ bindings: deps.bindings, archiveId: record5.archive_id, root, chosenRelPath: record5.chosen_rel_path });
+  const access = archiveMediaAccess({ bindings: deps.bindings, archiveId: record.archive_id, root, chosenRelPath: record.chosen_rel_path });
   const reader = access.open(bindingId);
   try {
     const size = reader.size;
@@ -170072,8 +170031,8 @@ function serveBinding(deps, record5, root, bindingId, maxBytes, sink) {
     reader.close();
   }
 }
-function serveZipMember(record5, root, ref, maxBytes, sink) {
-  const file = record5.files[ref.fileIndex];
+function serveZipMember(record, root, ref, maxBytes, sink) {
+  const file = record.files[ref.fileIndex];
   if (!file)
     throw new FileExtractionSourceError("source_item_not_found");
   let reader;
@@ -170212,9 +170171,9 @@ function chooseExportTimeZone(days, score, zones = candidateTimeZones()) {
     if (tried.has(signature))
       continue;
     tried.add(signature);
-    const matches2 = score(zone);
-    if (matches2 > best.matches)
-      best = { zone, matches: matches2 };
+    const matches = score(zone);
+    if (matches > best.matches)
+      best = { zone, matches };
   }
   return { ...best, assumed: best.matches === 0 };
 }
@@ -170228,8 +170187,8 @@ var init_export_zone = __esm(() => {
 import { createHash as createHash88 } from "node:crypto";
 import { existsSync as existsSync89 } from "node:fs";
 import { posix as posix7 } from "node:path";
-function hash2(value2) {
-  return createHash88("sha256").update(value2).digest("hex").slice(0, 24);
+function hash2(value) {
+  return createHash88("sha256").update(value).digest("hex").slice(0, 24);
 }
 function encodeCursor4(state, inner) {
   return `${CURSOR_PREFIX}${Buffer.from(JSON.stringify(state)).toString("base64url")}~${inner ?? ""}`;
@@ -170237,29 +170196,29 @@ function encodeCursor4(state, inner) {
 function decodeCursor3(cursor) {
   if (cursor === undefined)
     return {};
-  const invalid4 = new ArchiveImportStoppedError("resume_point_invalid", "This import's resume point is not one this build reads.");
+  const invalid = new ArchiveImportStoppedError("resume_point_invalid", "This import's resume point is not one this build reads.");
   if (!cursor.startsWith(CURSOR_PREFIX))
-    throw invalid4;
+    throw invalid;
   const rest = cursor.slice(CURSOR_PREFIX.length);
   const split = rest.indexOf("~");
   if (split < 0)
-    throw invalid4;
+    throw invalid;
   let state;
   try {
     state = JSON.parse(Buffer.from(rest.slice(0, split), "base64url").toString("utf8"));
   } catch {
-    throw invalid4;
+    throw invalid;
   }
   if (typeof state.z !== "string" || !isKnownTimeZone(state.z) || typeof state.j !== "object" || state.j === null)
-    throw invalid4;
+    throw invalid;
   const inner = rest.slice(split + 1);
   return { state, ...inner ? { inner } : {} };
 }
 function exportMessageOf(item) {
   const md = item.metadata;
-  const text4 = item.content.kind === "text" ? item.content.text : undefined;
+  const text = item.content.kind === "text" ? item.content.text : undefined;
   const wall = md["writtenAt"];
-  if (typeof text4 !== "string" || typeof wall !== "string" || typeof md["chat"] !== "string" || typeof md["sender"] !== "string")
+  if (typeof text !== "string" || typeof wall !== "string" || typeof md["chat"] !== "string" || typeof md["sender"] !== "string")
     return;
   return {
     chat: md["chat"],
@@ -170267,24 +170226,24 @@ function exportMessageOf(item) {
     wall,
     precision: md["timePrecision"] === "second" ? "second" : "minute",
     occurrence: typeof md["occurrence"] === "string" ? md["occurrence"] : "",
-    text: text4,
+    text,
     sourceFile: typeof md["sourceFile"] === "string" ? md["sourceFile"] : "",
     sourceFileIndex: typeof md["sourceFileIndex"] === "number" ? md["sourceFileIndex"] : 0,
     ...typeof md["sourceMember"] === "string" ? { sourceMember: md["sourceMember"] } : {}
   };
 }
-function splitMedia(text4) {
-  if (isWhatsAppMediaOmitted(text4))
+function splitMedia(text) {
+  if (isWhatsAppMediaOmitted(text))
     return { caption: "", files: [], omitted: true };
   const files = [];
   const kept = [];
-  for (const line2 of text4.split(`
+  for (const line of text.split(`
 `)) {
-    const name = line2.length <= 400 ? whatsAppAttachedFileName(line2) : undefined;
+    const name = line.length <= 400 ? whatsAppAttachedFileName(line) : undefined;
     if (name !== undefined)
       files.push(name);
     else
-      kept.push(line2);
+      kept.push(line);
   }
   return { caption: kept.join(`
 `).trim(), files, omitted: false };
@@ -170299,12 +170258,12 @@ function whatsAppMediaTypeOf(name) {
     return "sticker";
   if (/^PTT-|(^|-)AUDIO/u.test(upper) || upper.startsWith("AUD-"))
     return "audio";
-  const mime2 = whatsAppMediaMime(name);
-  if (mime2.startsWith("image/"))
-    return mime2 === "image/webp" ? "sticker" : "image";
-  if (mime2.startsWith("video/"))
+  const mime = whatsAppMediaMime(name);
+  if (mime.startsWith("image/"))
+    return mime === "image/webp" ? "sticker" : "image";
+  if (mime.startsWith("video/"))
     return "video";
-  if (mime2.startsWith("audio/"))
+  if (mime.startsWith("audio/"))
     return "audio";
   return "document";
 }
@@ -170315,7 +170274,7 @@ function createWhatsAppExportInput(options) {
     kind: "archive",
     records(listing = {}) {
       return async function* () {
-        const decoded2 = decodeCursor3(listing.cursor);
+        const decoded = decodeCursor3(listing.cursor);
         if (existsSync89(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
           yield { records: [], ...listing.cursor !== undefined ? { nextCursor: listing.cursor } : {}, done: false };
           return;
@@ -170324,8 +170283,8 @@ function createWhatsAppExportInput(options) {
         const matching = { index };
         try {
           let decided;
-          if (decoded2.state) {
-            decided = decoded2.state;
+          if (decoded.state) {
+            decided = decoded.state;
           } else {
             const window2 = index?.liveWindow();
             const sample = window2 ? await sampleExport(archive, window2) : [];
@@ -170348,14 +170307,14 @@ function createWhatsAppExportInput(options) {
               archive.reportItemPositions?.(told);
             }
           });
-          for await (const page2 of reader.listItems({
-            ...decoded2.inner !== undefined ? { cursor: decoded2.inner } : {},
+          for await (const page of reader.listItems({
+            ...decoded.inner !== undefined ? { cursor: decoded.inner } : {},
             ...listing.limit !== undefined ? { limit: listing.limit } : {}
           })) {
             const records = [];
-            const keyed = page2.items.flatMap((item, at) => {
-              const message2 = exportMessageOf(item);
-              return message2 ? [{ message: message2, at, keyed: keyOf(message2, decided, matching) }] : [];
+            const keyed = page.items.flatMap((item, at) => {
+              const message = exportMessageOf(item);
+              return message ? [{ message, at, keyed: keyOf(message, decided, matching) }] : [];
             });
             const carried = decided.g;
             const slotCount = new Map;
@@ -170365,21 +170324,21 @@ function createWhatsAppExportInput(options) {
               slotCount.set(carried.s, carried.n);
               if (carried.d)
                 doubt.add(carried.s);
-              for (const [key2, count] of Object.entries(carried.c ?? {}))
-                keyCount.set(key2, count);
+              for (const [key, count] of Object.entries(carried.c ?? {}))
+                keyCount.set(key, count);
             }
-            for (const { keyed: { key: key2, slot } } of keyed) {
+            for (const { keyed: { key, slot } } of keyed) {
               slotCount.set(slot, (slotCount.get(slot) ?? 0) + 1);
-              keyCount.set(key2, (keyCount.get(key2) ?? 0) + 1);
+              keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
             }
             const last = keyed.at(-1);
-            if (last && !page2.done && page2.nextCursor !== undefined) {
-              const ahead = await countSlotAhead(archive, page2.nextCursor, last.keyed.slot, decided, matching);
+            if (last && !page.done && page.nextCursor !== undefined) {
+              const ahead = await countSlotAhead(archive, page.nextCursor, last.keyed.slot, decided, matching);
               if (!ahead.whole)
                 doubt.add(last.keyed.slot);
               slotCount.set(last.keyed.slot, (slotCount.get(last.keyed.slot) ?? 0) + ahead.count);
-              for (const [key2, count] of ahead.keys)
-                keyCount.set(key2, (keyCount.get(key2) ?? 0) + count);
+              for (const [key, count] of ahead.keys)
+                keyCount.set(key, (keyCount.get(key) ?? 0) + count);
             }
             for (const [slot, count] of slotCount)
               if (count > SLOT_CAP)
@@ -170398,14 +170357,14 @@ function createWhatsAppExportInput(options) {
               }
               decided.g = inDoubt ? { s: slot, n: seen, d: 1 } : { s: slot, n: seen, c: counts };
             }
-            for (const { message: message2, at, keyed: k } of keyed) {
-              const place = positions[at] ?? { fileIndex: message2.sourceFileIndex, offset: 0 };
+            for (const { message, at, keyed: k } of keyed) {
+              const place = positions[at] ?? { fileIndex: message.sourceFileIndex, offset: 0 };
               const certain = !doubt.has(k.slot) && keyCount.get(k.key) === 1;
-              records.push(recordOf(message2, k, certain, decided, matching, media, (finding) => archive.report({ ...finding, fileIndex: place.fileIndex, offset: place.offset })));
+              records.push(recordOf(message, k, certain, decided, matching, media, (finding) => archive.report({ ...finding, fileIndex: place.fileIndex, offset: place.offset })));
             }
             positions = [];
-            const nextCursor = page2.nextCursor !== undefined ? encodeCursor4(decided, page2.nextCursor) : undefined;
-            yield page2.truncated === true ? { records, ...nextCursor ? { nextCursor } : {}, done: false, truncated: true } : { records, ...nextCursor ? { nextCursor } : {}, done: page2.done };
+            const nextCursor = page.nextCursor !== undefined ? encodeCursor4(decided, page.nextCursor) : undefined;
+            yield page.truncated === true ? { records, ...nextCursor ? { nextCursor } : {}, done: false, truncated: true } : { records, ...nextCursor ? { nextCursor } : {}, done: page.done };
           }
         } finally {
           index?.close();
@@ -170430,14 +170389,14 @@ async function sampleExport(archive, window2) {
     pageSize: 500
   });
   const sample = [];
-  for await (const page2 of quiet.listItems()) {
-    for (const item of page2.items) {
-      const message2 = exportMessageOf(item);
-      if (!message2)
+  for await (const page of quiet.listItems()) {
+    for (const item of page.items) {
+      const message = exportMessageOf(item);
+      if (!message)
         continue;
-      const wallMs = Date.parse(`${message2.wall}Z`);
+      const wallMs = Date.parse(`${message.wall}Z`);
       if (Number.isFinite(wallMs) && wallMs >= window2.fromMs - DAY_MS4 && wallMs <= window2.toMs + DAY_MS4)
-        sample.push(message2);
+        sample.push(message);
       if (sample.length >= SAMPLE_MESSAGES)
         return sample;
     }
@@ -170445,10 +170404,10 @@ async function sampleExport(archive, window2) {
   return sample;
 }
 function chatOf(state, matching, chat) {
-  const key2 = hash2(nameKey(chat));
-  const known = state.j[key2];
+  const key = hash2(nameKey(chat));
+  const known = state.j[key];
   if (known !== undefined)
-    return known === "" ? `${key2}@${WHATSAPP_EXPORT_CHAT_SERVER}` : known;
+    return known === "" ? `${key}@${WHATSAPP_EXPORT_CHAT_SERVER}` : known;
   let joined = "";
   if (nameKey(chat) === WHATSAPP_STATUS_JID)
     joined = WHATSAPP_STATUS_JID;
@@ -170457,36 +170416,36 @@ function chatOf(state, matching, chat) {
     if (named.length === 1)
       joined = named[0];
   }
-  state.j[key2] = joined;
-  return joined === "" ? `${key2}@${WHATSAPP_EXPORT_CHAT_SERVER}` : joined;
+  state.j[key] = joined;
+  return joined === "" ? `${key}@${WHATSAPP_EXPORT_CHAT_SERVER}` : joined;
 }
 function decide2(sample, matching, zones) {
   const state = { z: "", j: {} };
   const index = matching.index;
-  const days = [...new Set(sample.map((message2) => message2.wall.slice(0, 10)))].slice(0, 64);
-  const keyed = sample.map((message2) => ({ message: message2, caption: textKey(splitMedia(message2.text).caption) }));
+  const days = [...new Set(sample.map((message) => message.wall.slice(0, 10)))].slice(0, 64);
+  const keyed = sample.map((message) => ({ message, caption: textKey(splitMedia(message.text).caption) }));
   const chosen = chooseExportTimeZone(days.length > 0 ? days : ["2020-01-01"], (zone) => {
     if (!index)
       return 0;
-    let matches2 = 0;
-    for (const { message: message2, caption } of keyed) {
-      const ms = wallTimeToUtcMs(message2.wall, zone);
+    let matches = 0;
+    for (const { message, caption } of keyed) {
+      const ms = wallTimeToUtcMs(message.wall, zone);
       if (ms === undefined)
         continue;
-      if (index.hasLooseKey(message2.precision, looseKey(ms, message2.precision, nameKey(message2.sender), caption)) || index.hasLooseKey(message2.precision, looseKey(ms, message2.precision, OWNER_SENDER, caption)))
-        matches2 += 1;
+      if (index.hasLooseKey(message.precision, looseKey(ms, message.precision, nameKey(message.sender), caption)) || index.hasLooseKey(message.precision, looseKey(ms, message.precision, OWNER_SENDER, caption)))
+        matches += 1;
     }
-    return matches2;
+    return matches;
   }, zones);
   state.z = chosen.zone;
   const votes = new Map;
-  for (const { message: message2, caption } of keyed) {
-    const ms = wallTimeToUtcMs(message2.wall, state.z);
+  for (const { message, caption } of keyed) {
+    const ms = wallTimeToUtcMs(message.wall, state.z);
     if (ms === undefined || !index)
       continue;
-    const chat = chatOf(state, matching, message2.chat);
-    if (index.ownerSentUnsent(message2.precision, unsentKey(chat, ms, message2.precision, caption))) {
-      const name = hash2(nameKey(message2.sender));
+    const chat = chatOf(state, matching, message.chat);
+    if (index.ownerSentUnsent(message.precision, unsentKey(chat, ms, message.precision, caption))) {
+      const name = hash2(nameKey(message.sender));
       votes.set(name, (votes.get(name) ?? 0) + 1);
     }
   }
@@ -170520,23 +170479,23 @@ function createMediaLocator(archive) {
     return members;
   };
   return {
-    child(message2, name) {
-      if (message2.sourceMember !== undefined) {
-        const members = membersOf(message2.sourceFileIndex);
-        const folder2 = posix7.dirname(message2.sourceMember);
-        const member = members.get(folder2 === "." ? name : `${folder2}/${name}`) ?? members.get(name);
+    child(message, name) {
+      if (message.sourceMember !== undefined) {
+        const members = membersOf(message.sourceFileIndex);
+        const folder = posix7.dirname(message.sourceMember);
+        const member = members.get(folder === "." ? name : `${folder}/${name}`) ?? members.get(name);
         if (!member)
           return { name, available: false };
         return {
           name,
           available: true,
-          locator: archiveInputZipMediaLocator({ archiveId: archive.archiveId, fileIndex: message2.sourceFileIndex, memberIndex: member.index }),
+          locator: archiveInputZipMediaLocator({ archiveId: archive.archiveId, fileIndex: message.sourceFileIndex, memberIndex: member.index }),
           sizeBytes: member.size
         };
       }
       if (!archive.media)
         return { name, available: false };
-      const folder = posix7.dirname(message2.sourceFile);
+      const folder = posix7.dirname(message.sourceFile);
       const bound = archive.media.bind(folder === "." ? name : `${folder}/${name}`);
       if (!bound.ok)
         return { name, available: false };
@@ -170549,12 +170508,12 @@ function createMediaLocator(archive) {
     }
   };
 }
-function keyOf(message2, state, matching) {
-  const ms = wallTimeToUtcMs(message2.wall, state.z) ?? Date.parse(`${message2.wall}Z`);
-  const chatJid = chatOf(state, matching, message2.chat);
-  const owner = state.m !== undefined && hash2(nameKey(message2.sender)) === state.m;
-  const sender = owner ? OWNER_SENDER : nameKey(message2.sender);
-  const { caption, files, omitted } = splitMedia(message2.text);
+function keyOf(message, state, matching) {
+  const ms = wallTimeToUtcMs(message.wall, state.z) ?? Date.parse(`${message.wall}Z`);
+  const chatJid = chatOf(state, matching, message.chat);
+  const owner = state.m !== undefined && hash2(nameKey(message.sender)) === state.m;
+  const sender = owner ? OWNER_SENDER : nameKey(message.sender);
+  const { caption, files, omitted } = splitMedia(message.text);
   return {
     ms,
     chatJid,
@@ -170562,8 +170521,8 @@ function keyOf(message2, state, matching) {
     caption,
     files,
     omitted,
-    key: exactKey(chatJid, ms, message2.precision, sender, textKey(caption)),
-    slot: `${chatJid}\x00${timeSlot(ms, message2.precision)}`
+    key: exactKey(chatJid, ms, message.precision, sender, textKey(caption)),
+    slot: `${chatJid}\x00${timeSlot(ms, message.precision)}`
   };
 }
 async function countSlotAhead(archive, cursor, slot, state, matching) {
@@ -170583,12 +170542,12 @@ async function countSlotAhead(archive, cursor, slot, state, matching) {
   });
   const keys = new Map;
   let count = 0;
-  for await (const page2 of quiet.listItems({ cursor })) {
-    for (const item of page2.items) {
-      const message2 = exportMessageOf(item);
-      if (!message2)
+  for await (const page of quiet.listItems({ cursor })) {
+    for (const item of page.items) {
+      const message = exportMessageOf(item);
+      if (!message)
         continue;
-      const keyed = keyOf(message2, { ...state, j: { ...state.j } }, matching);
+      const keyed = keyOf(message, { ...state, j: { ...state.j } }, matching);
       if (keyed.slot !== slot)
         return { whole: true, count, keys };
       count += 1;
@@ -170596,18 +170555,18 @@ async function countSlotAhead(archive, cursor, slot, state, matching) {
       if (count > SLOT_CAP)
         return { whole: false, count, keys };
     }
-    if (page2.done)
+    if (page.done)
       return { whole: true, count, keys };
-    if (page2.truncated === true)
+    if (page.truncated === true)
       return { whole: false, count, keys };
   }
   return { whole: false, count, keys };
 }
-function recordOf(message2, keyed, certain, state, matching, media, report) {
-  const { ms, chatJid, owner, caption, files, omitted, key: key2 } = keyed;
+function recordOf(message, keyed, certain, state, matching, media, report) {
+  const { ms, chatJid, owner, caption, files, omitted, key } = keyed;
   const wordless = textKey(caption) === "" && (files.length > 0 || omitted);
-  const matched = wordless || !certain ? undefined : matching.index?.uniqueLiveWithKey(message2.precision, key2);
-  const id = matched ? matched.id : exportMessageId(chatJid, ms, message2.precision, owner ? OWNER_SENDER : nameKey(message2.sender), message2.text, message2.occurrence);
+  const matched = wordless || !certain ? undefined : matching.index?.uniqueLiveWithKey(message.precision, key);
+  const id = matched ? matched.id : exportMessageId(chatJid, ms, message.precision, owner ? OWNER_SENDER : nameKey(message.sender), message.text, message.occurrence);
   if (!matched && matching.index?.liveBetween(chatJid, ms - 60000, ms + 60000)) {
     report({ kind: WHATSAPP_INPUT_FINDINGS.nearMiss, class: "skipped" });
   }
@@ -170616,7 +170575,7 @@ function recordOf(message2, keyed, certain, state, matching, media, report) {
   const liveHoldsMedia = matched?.mediaSaved === true && mediaType === "audio";
   if (!liveHoldsMedia) {
     files.forEach((name, at) => {
-      const located = media.child(message2, name);
+      const located = media.child(message, name);
       if (!located.available)
         report({ kind: ARCHIVE_COMMON_FINDINGS.mediaNotImported, class: "gap" });
       children.push({ key: at === 0 ? "media" : `media-${at + 1}`, mimeType: whatsAppMediaMime(name), ...located });
@@ -170629,10 +170588,10 @@ function recordOf(message2, keyed, certain, state, matching, media, report) {
   return {
     id,
     chatJid: matched?.chatJid ?? chatJid,
-    chatName: message2.chat,
+    chatName: message.chat,
     senderJid: "",
-    senderName: owner ? "" : message2.sender,
-    ...owner ? {} : { senderContactName: message2.sender },
+    senderName: owner ? "" : message.sender,
+    ...owner ? {} : { senderContactName: message.sender },
     fromMe: matched?.fromMe ?? owner,
     timestamp: matched?.timestamp ?? new Date(ms).toISOString(),
     text: caption,
@@ -171172,7 +171131,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash89("sha256").update(`${accessToken}
+    const key = createHash89("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key);
     if (known !== undefined)
@@ -171230,8 +171189,8 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash89("sha256").update(session.token).digest("hex");
-    const known = verified.get(key2);
+    const key = createHash89("sha256").update(session.token).digest("hex");
+    const known = verified.get(key);
     if (known)
       return known;
     try {
@@ -171274,7 +171233,7 @@ ${folderIds.join(",")}`).digest("hex");
     }
     const token = await tokenAccountId();
     const history = historyAccountId();
-    const decide3 = (binding) => decideSourceAccountAction({
+    const decide = (binding) => decideSourceAccountAction({
       binding: binding?.provider_account_id || !history ? binding : { ...binding, provider_account_id: history },
       grantAccountId: handle.providerAccountId,
       grantConnectedAt: handle.connectedAt,
@@ -171285,9 +171244,9 @@ ${folderIds.join(",")}`).digest("hex");
     const read = readSourceAccountBindings(bindingsPath);
     if (read.kind === "malformed")
       throw new SourceAccountBindingsUnreadableError(bindingsPath);
-    let decision = decide3(read.bindings.sources[options.sourceId]);
-    const current2 = read.bindings.sources[options.sourceId];
-    if (decision.action === "purge" && decision.reason === "previous_account_unknown" && token && lastAccessToken && current2?.previous_account_folders?.length && await evidenceOpens(lastAccessToken, current2.previous_account_folders) === true) {
+    let decision = decide(read.bindings.sources[options.sourceId]);
+    const current = read.bindings.sources[options.sourceId];
+    if (decision.action === "purge" && decision.reason === "previous_account_unknown" && token && lastAccessToken && current?.previous_account_folders?.length && await evidenceOpens(lastAccessToken, current.previous_account_folders) === true) {
       let bound = false;
       updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => {
         const grantNow = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
@@ -171313,8 +171272,8 @@ ${folderIds.join(",")}`).digest("hex");
     if (decision.action === "proceed" && decision.write === undefined)
       return;
     if (decision.action !== "refuse") {
-      updateSourceAccountBinding(bindingsPath, options.sourceId, (current3) => {
-        decision = decide3(current3);
+      updateSourceAccountBinding(bindingsPath, options.sourceId, (current) => {
+        decision = decide(current);
         if (decision.action === "proceed") {
           return decision.write === undefined ? current : decision.write ?? undefined;
         }
@@ -171535,7 +171494,7 @@ async function runSnifferPass(options) {
     estimatedInputTokens: 0,
     estimatedOutputTokens: 0
   };
-  const keyOf2 = (question) => ({
+  const keyOf = (question) => ({
     materialHash: question.materialHash,
     modelId: snifferCacheModelId(options.lane),
     promptVersion,
@@ -171668,14 +171627,14 @@ async function runSnifferPass(options) {
       }
       if (snifferMaterialLooksLikeInjection(snifferOwnMaterial(question.material))) {
         const failSafe = { tier: "private", category: SNIFFER_INJECTION_CATEGORY, confidence: 0, failSafe: true };
-        target.sniffer.putVerdict(keyOf2(question), failSafe);
+        target.sniffer.putVerdict(keyOf(question), failSafe);
         apply({ target, question }, failSafe);
         report.injectionRefused += 1;
         continue;
       }
-      const cached3 = target.sniffer.getVerdict(keyOf2(question));
-      if (cached3 && cachedSnifferVerdictHolds(cached3)) {
-        apply({ target, question }, cached3);
+      const cached = target.sniffer.getVerdict(keyOf(question));
+      if (cached && cachedSnifferVerdictHolds(cached)) {
+        apply({ target, question }, cached);
         report.cacheHits += 1;
         continue;
       }
@@ -171763,7 +171722,7 @@ async function runSnifferPass(options) {
     const verdicts = parseSnifferBatchResponse(text, new Set(batch.map((_, index) => index + 1)));
     for (const [index, group] of batch.entries()) {
       const verdict = verdicts.get(index + 1);
-      const key2 = keyOf2(group2[0].question);
+      const key = keyOf(group[0].question);
       if (verdict) {
         const stored = { ...verdict, failSafe: false };
         group[0].target.sniffer.putVerdict(key, stored);
@@ -172121,9 +172080,9 @@ class TierSnifferService {
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
-      const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync90(own3))
-        paths.add(own3);
+      const own = tierLedgerPathForStore(store.dbPath);
+      if (existsSync90(own))
+        paths.add(own);
     }
     return [...paths];
   }
@@ -186569,25 +186528,6 @@ var init_remote_search = __esm(() => {
 });
 
 // src/workers/remote-mcp.ts
-var exports_remote_mcp = {};
-__export(exports_remote_mcp, {
-  withRemoteMcpRoute: () => withRemoteMcpRoute,
-  withRemoteFailureBoundary: () => withRemoteFailureBoundary,
-  unauthorized: () => unauthorized,
-  remoteOperationCaller: () => remoteOperationCaller,
-  remoteMcpSurface: () => remoteMcpSurface,
-  remoteFailureResponse: () => remoteFailureResponse,
-  lazyRemoteConnectionStore: () => lazyRemoteConnectionStore,
-  jsonResponse: () => jsonResponse,
-  isRemoteMcpRequest: () => isRemoteMcpRequest,
-  createRemoteMcpHandler: () => createRemoteMcpHandler,
-  createInProcessOperationContext: () => createInProcessOperationContext,
-  bearerToken: () => bearerToken,
-  authenticateRemoteRequest: () => authenticateRemoteRequest,
-  REMOTE_MCP_PATH: () => REMOTE_MCP_PATH,
-  REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
-  DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
-});
 import { existsSync as existsSync91 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
@@ -186752,7 +186692,7 @@ function lazyRemoteConnectionStore(resolvePath, open) {
   return (options = {}) => {
     if (store)
       return store;
-    const dbPath = resolvePath4();
+    const dbPath = resolvePath();
     if (!options.create && !existsSync91(dbPath))
       return;
     store = open(dbPath);
@@ -187007,16 +186947,6 @@ var init_redirect_uris = __esm(() => {
 });
 
 // src/workers/remote-oauth/handler.ts
-var exports_handler = {};
-__export(exports_handler, {
-  withRemoteOAuthRoutes: () => withRemoteOAuthRoutes,
-  protectedResourceMetadata: () => protectedResourceMetadata,
-  isRemoteOAuthRequest: () => isRemoteOAuthRequest,
-  createRemoteOAuthHandler: () => createRemoteOAuthHandler,
-  authorizationServerMetadata: () => authorizationServerMetadata,
-  REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
-  CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
-});
 import { createHash as createHash90, randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
@@ -187068,9 +186998,9 @@ function createRemoteOAuthHandler(options) {
     for (const [id, entry] of completed)
       if (entry.expiresAt <= at)
         completed.delete(id);
-    for (const [hash3, entry] of codes)
+    for (const [hash, entry] of codes)
       if (entry.expiresAt <= at)
-        codes.delete(hash3);
+        codes.delete(hash);
   };
   const admitPending = () => {
     if (pending.size < MAX_PENDING_CONSENTS)
@@ -187368,25 +187298,25 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash3 = sha25611(code);
-      const issued = codes.get(hash3);
+      const hash = sha25611(code);
+      const issued = codes.get(hash);
       if (!issued || issued.expiresAt <= now()) {
-        codes.delete(hash3);
+        codes.delete(hash);
         return oauthError(400, "invalid_grant", "The authorization code is invalid or expired.");
       }
       if (issued.connectionId !== undefined) {
-        codes.delete(hash3);
+        codes.delete(hash);
         store.oauth.revokeGrant(issued.connectionId);
         if (issued.receipt)
           completed.delete(issued.receipt);
         return oauthError(400, "invalid_grant", "The authorization code was already used.");
       }
       if (issued.clientId !== clientId || issued.redirectUri !== redirectUri) {
-        codes.delete(hash3);
+        codes.delete(hash);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
       if (!constantTimeEqual(createHash90("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
-        codes.delete(hash3);
+        codes.delete(hash);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
       if (resource !== undefined && resource !== issued.resource) {
@@ -187651,8 +187581,8 @@ function constantTimeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
-function sha25611(value2) {
-  return createHash90("sha256").update(value2).digest("hex");
+function sha25611(value) {
+  return createHash90("sha256").update(value).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -189719,17 +189649,6 @@ var init_remote_private_part = __esm(() => {
 });
 
 // src/workers/remote-openapi.ts
-var exports_remote_openapi = {};
-__export(exports_remote_openapi, {
-  withRemoteOpenApiRoutes: () => withRemoteOpenApiRoutes,
-  isRemoteOpenApiRequest: () => isRemoteOpenApiRequest,
-  createRemoteOpenApiHandler: () => createRemoteOpenApiHandler,
-  buildRemoteOpenApiSpec: () => buildRemoteOpenApiSpec,
-  REMOTE_OPENAPI_TOOLS_PREFIX: () => REMOTE_OPENAPI_TOOLS_PREFIX,
-  REMOTE_OPENAPI_SPEC_PATH: () => REMOTE_OPENAPI_SPEC_PATH,
-  REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
-  REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
-});
 import { createHash as createHash91 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
@@ -189746,8 +189665,8 @@ function createRemoteOpenApiHandler(options) {
   const currentSpec = () => {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
-      const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash91("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      const text = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
+      spec = { serverUrl, text, etag: `"${createHash91("sha256").update(text).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -190108,12 +190027,6 @@ var init_handoff = __esm(() => {
 });
 
 // src/workers/chatgpt/setup-backend.ts
-var exports_setup_backend = {};
-__export(exports_setup_backend, {
-  readChatGptPrivacySettings: () => readChatGptPrivacySettings,
-  privacyRevision: () => privacyRevision,
-  createChatGptSetupBackend: () => createChatGptSetupBackend
-});
 import { createHash as createHash92 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
@@ -190138,8 +190051,8 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest4 = createHash92("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
-  return `prv1.${digest4.slice(0, 32)}`;
+  const digest = createHash92("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  return `prv1.${digest.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
