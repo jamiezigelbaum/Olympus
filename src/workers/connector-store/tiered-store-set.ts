@@ -1651,6 +1651,11 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   readonly legOptions: Map<string, ConnectorStoreSyncOptions>;
   readonly counts: TieredStoreRoutingCounts;
   private readonly plans: Map<string, PlanEntry>;
+  /**
+   * The last plan made for each item version, whatever body it was judged on. A listing that names an item and
+   * then brings its body routes the fetched record, so the accepted (listed) record finds its plan here.
+   */
+  private readonly versionPlans: Map<string, Plan['kind']>;
   private readonly copyRemovals: Map<string, SourceItemIdentity>;
   /** The items whose write intent (ledger.withWriteIntent) this run wrote: cleared, last, once every leg has been written. */
   private readonly intents: Map<string, SourceItemIdentity>;
@@ -1673,6 +1678,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.routedDomains = new Set();
     this.legOptions = new Map();
     this.plans = new Map();
+    this.versionPlans = new Map();
     this.copyRemovals = new Map();
     this.pendingWithdrawals = new Map();
     this.intents = new Map();
@@ -1698,7 +1704,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
 
   /** What the run planned for an item's version, if it routed it at all. */
   plannedKind(item: RawItem): Plan['kind'] | undefined {
-    return this.plans.get(planKey(item))?.plan.kind;
+    return this.plans.get(planKey(item))?.plan.kind ?? this.versionPlans.get(versionKey(item));
   }
 
   async route(input: ConnectorStoreTierRouteInput): Promise<ConnectorStoreTierRoute> {
@@ -1713,6 +1719,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
       this.plans.set(key, entry);
     }
+    this.versionPlans.set(versionKey(input.item), entry.plan.kind);
     if (this.mode === 'per_leg' && !entry.handedOff) {
       entry.handedOff = true;
       await this.handOff(entry, input, domain);
@@ -2188,6 +2195,11 @@ function planKey(item: RawItem): string {
     ]))
     .digest('hex');
   return `${identityKey(item.identity)}\u0000${item.identity.sourceVersion ?? ''}\u0000${judged}`;
+}
+
+/** An item's identity and version, without the body it was judged on. */
+function versionKey(item: RawItem): string {
+  return `${identityKey(item.identity)}\u0000${item.identity.sourceVersion ?? ''}`;
 }
 
 function stringMetadata(item: RawItem, keys: readonly string[]): string | undefined {

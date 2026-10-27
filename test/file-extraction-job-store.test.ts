@@ -117,7 +117,7 @@ function isoSecondsFromNow(seconds: number): string {
 describe('extraction job store: module identity', () => {
   test('store id, schema version and default path follow the side-DB precedent', () => {
     expect(FILE_EXTRACTION_JOBS_STORE_ID).toBe('file-extraction-jobs');
-    expect(FILE_EXTRACTION_JOBS_SCHEMA_VERSION).toBe(5);
+    expect(FILE_EXTRACTION_JOBS_SCHEMA_VERSION).toBe(6);
     expect(defaultFileExtractionJobsDbPath({ XDG_DATA_HOME: '/data' }))
       .toBe('/data/openclaw/olympus/file-extraction-jobs.sqlite');
     // No env variable relocates the ledger alone (source storage step 6).
@@ -154,6 +154,31 @@ describe('extraction job store: module identity', () => {
 });
 
 describe('extraction job store: enqueue', () => {
+  test('an item text is owed until a job reads it or settles without it', () => {
+    const { store, dbPath } = newStore();
+    const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'item-owed' };
+    // Listed, not yet queued (or never to be): no job.
+    expect(store.itemExtractionState(item)).toBe('none');
+    const jobId = enqueueOne(store, 'item-owed');
+    expect(store.itemExtractionState(item)).toBe('active');
+    backdate(dbPath, jobId, { status: 'failed_retryable' });
+    expect(store.itemExtractionState(item)).toBe('active');
+    for (const status of ['metadata_only', 'failed_terminal', 'skipped_unsupported', 'indexed']) {
+      backdate(dbPath, jobId, { status });
+      expect(store.itemExtractionState(item)).toBe('settled');
+    }
+    // Looked up by identity, not by scanning the whole job history.
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const plan = db.query(`EXPLAIN QUERY PLAN SELECT DISTINCT status FROM extraction_jobs
+        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?`)
+        .all(item.provider, item.accountScope, item.providerItemId) as Array<{ detail: string }>;
+      expect(plan.map((row) => row.detail).join(' ')).toContain('idx_extraction_jobs_identity');
+    } finally {
+      db.close();
+    }
+  });
+
   test('a repeat enqueue of the same identity reuses the job rather than duplicating it', () => {
     const { store } = newStore();
     const first = store.enqueue({
