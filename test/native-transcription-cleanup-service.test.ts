@@ -355,7 +355,8 @@ describe('native transcription temp cleanup service', () => {
       worker: { transcriptionCleanup: { enabled: true, tempRoot: fx.tempRoot } },
     }, { scriptPath: fixtureScript(fx, 'exit 0') });
     await service.start({});
-    await waitUntil(() => existsSync(fx.envPath), 'the environment dump');
+    // The script appends one name per line: the file exists before its last line (the sweep age) is written.
+    await waitUntil(() => existsSync(fx.envPath) && readFileSync(fx.envPath, 'utf8').includes('OLYMPUS_TRANSCRIBE_SWEEP_AGE_MINUTES='), 'the whole environment dump');
     expect(readEnvDump(fx).OLYMPUS_TRANSCRIBE_SWEEP_AGE_MINUTES).toBe('1440');
   }, 15_000);
 
