@@ -30592,156 +30592,133 @@ var init_protection_claims = __esm(() => {
 });
 
 // src/workers/archive-import/byte-source.ts
-import * as zlib from "node:zlib";
-function tableCrc32(data2, value) {
-  if (!crcTable) {
-    crcTable = new Int32Array(256);
-    for (let n = 0;n < 256; n += 1) {
-      let c = n;
-      for (let k = 0;k < 8; k += 1)
-        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
-      crcTable[n] = c;
-    }
-  }
-  let crc = ~value;
-  for (let index = 0;index < data2.length; index += 1) {
-    crc = crcTable[(crc ^ data2[index]) & 255] ^ crc >>> 8;
-  }
-  return ~crc >>> 0;
-}
-function crc32Update(value, data2) {
-  if (data2.length === 0)
-    return value >>> 0;
-  return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
-}
-var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var ARCHIVE_SOURCE_CHUNK_BYTES;
 var init_byte_source = __esm(() => {
   ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
-  nativeCrc32 = zlib.crc32;
 });
 // node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
 var TokenType;
 var init_tokenType = __esm(() => {
-  (function(TokenType2) {
-    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
-    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
-    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
-    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
-    TokenType2[TokenType2["COLON"] = 4] = "COLON";
-    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
-    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
-    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
-    TokenType2[TokenType2["NULL"] = 8] = "NULL";
-    TokenType2[TokenType2["STRING"] = 9] = "STRING";
-    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
-    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  (function(TokenType) {
+    TokenType[TokenType["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType[TokenType["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType[TokenType["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType[TokenType["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType[TokenType["COLON"] = 4] = "COLON";
+    TokenType[TokenType["COMMA"] = 5] = "COMMA";
+    TokenType[TokenType["TRUE"] = 6] = "TRUE";
+    TokenType[TokenType["FALSE"] = 7] = "FALSE";
+    TokenType[TokenType["NULL"] = 8] = "NULL";
+    TokenType[TokenType["STRING"] = 9] = "STRING";
+    TokenType[TokenType["NUMBER"] = 10] = "NUMBER";
+    TokenType[TokenType["SEPARATOR"] = 11] = "SEPARATOR";
   })(TokenType || (TokenType = {}));
 });
 
 // node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
 var charset;
 var init_utf_8 = __esm(() => {
-  (function(charset2) {
-    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
-    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
-    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
-    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
-    charset2[charset2["TAB"] = 9] = "TAB";
-    charset2[charset2["SPACE"] = 32] = "SPACE";
-    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
-    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
-    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
-    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
-    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
-    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
-    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
-    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
-    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
-    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
-    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
-    charset2[charset2["COMMA"] = 44] = "COMMA";
-    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
-    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
-    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
-    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
-    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
-    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
-    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
-    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
-    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
-    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
-    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
-    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
-    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
-    charset2[charset2["COLON"] = 58] = "COLON";
-    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
-    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
-    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
-    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
-    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
-    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
-    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
-    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
-    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
-    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
-    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
-    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
-    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
-    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
-    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
-    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
-    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
-    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
-    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
-    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
-    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
-    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
-    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
-    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
-    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
-    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
-    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
-    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
-    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
-    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
-    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
-    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
-    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
-    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
-    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
-    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
-    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
-    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
-    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
-    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
-    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
-    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
-    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
-    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
-    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
-    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
-    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
-    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
-    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
-    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
-    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
-    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
-    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
-    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
-    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
-    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
-    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
-    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
-    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
-    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
-    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
-    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
-    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
-    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
-    charset2[charset2["TILDE"] = 126] = "TILDE";
+  (function(charset) {
+    charset[charset["BACKSPACE"] = 8] = "BACKSPACE";
+    charset[charset["FORM_FEED"] = 12] = "FORM_FEED";
+    charset[charset["NEWLINE"] = 10] = "NEWLINE";
+    charset[charset["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset[charset["TAB"] = 9] = "TAB";
+    charset[charset["SPACE"] = 32] = "SPACE";
+    charset[charset["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset[charset["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset[charset["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset[charset["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset[charset["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset[charset["AMPERSAND"] = 38] = "AMPERSAND";
+    charset[charset["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset[charset["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset[charset["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset[charset["ASTERISK"] = 42] = "ASTERISK";
+    charset[charset["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset[charset["COMMA"] = 44] = "COMMA";
+    charset[charset["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset[charset["FULL_STOP"] = 46] = "FULL_STOP";
+    charset[charset["SOLIDUS"] = 47] = "SOLIDUS";
+    charset[charset["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset[charset["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset[charset["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset[charset["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset[charset["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset[charset["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset[charset["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset[charset["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset[charset["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset[charset["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset[charset["COLON"] = 58] = "COLON";
+    charset[charset["SEMICOLON"] = 59] = "SEMICOLON";
+    charset[charset["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset[charset["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset[charset["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset[charset["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset[charset["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset[charset["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset[charset["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset[charset["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset[charset["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset[charset["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset[charset["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset[charset["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset[charset["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset[charset["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset[charset["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset[charset["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset[charset["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset[charset["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset[charset["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset[charset["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset[charset["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset[charset["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset[charset["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset[charset["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset[charset["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset[charset["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset[charset["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset[charset["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset[charset["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset[charset["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset[charset["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset[charset["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset[charset["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset[charset["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset[charset["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset[charset["LOW_LINE"] = 95] = "LOW_LINE";
+    charset[charset["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset[charset["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset[charset["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset[charset["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset[charset["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset[charset["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset[charset["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset[charset["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset[charset["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset[charset["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset[charset["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset[charset["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset[charset["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset[charset["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset[charset["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset[charset["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset[charset["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset[charset["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset[charset["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset[charset["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset[charset["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset[charset["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset[charset["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset[charset["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset[charset["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset[charset["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset[charset["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset[charset["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset[charset["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset[charset["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset[charset["TILDE"] = 126] = "TILDE";
   })(charset || (charset = {}));
 });
 
@@ -30750,38 +30727,38 @@ var TokenizerStates;
 var init_tokenizer = __esm(() => {
   init_tokenType();
   init_utf_8();
-  (function(TokenizerStates2) {
-    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
-    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
-    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
-    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
-    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
-    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
-    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
-    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
-    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
-    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
-    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
-    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
-    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
-    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
-    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
-    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
-    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
-    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
-    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  (function(TokenizerStates) {
+    TokenizerStates[TokenizerStates["START"] = 0] = "START";
+    TokenizerStates[TokenizerStates["ENDED"] = 1] = "ENDED";
+    TokenizerStates[TokenizerStates["ERROR"] = 2] = "ERROR";
+    TokenizerStates[TokenizerStates["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates[TokenizerStates["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates[TokenizerStates["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates[TokenizerStates["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates[TokenizerStates["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates[TokenizerStates["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates[TokenizerStates["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates[TokenizerStates["NULL1"] = 10] = "NULL1";
+    TokenizerStates[TokenizerStates["NULL2"] = 11] = "NULL2";
+    TokenizerStates[TokenizerStates["NULL3"] = 12] = "NULL3";
+    TokenizerStates[TokenizerStates["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates[TokenizerStates["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates[TokenizerStates["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates[TokenizerStates["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates[TokenizerStates["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates[TokenizerStates["BOM"] = 30] = "BOM";
   })(TokenizerStates || (TokenizerStates = {}));
 });
 
@@ -33231,8 +33208,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return { kind: "unreadable" };
     const parts = Array.isArray(result.content) ? result.content : [];
     const said = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
-    const text3 = said ? String(said.text).slice(0, RELAY_FAILURE_TEXT_MAX) : "";
-    return text3 ? { kind: "error", text: text3 } : { kind: "unreadable" };
+    const text = said ? String(said.text).slice(0, RELAY_FAILURE_TEXT_MAX) : "";
+    return text ? { kind: "error", text } : { kind: "unreadable" };
   }
   function rejectionFailure(error) {
     if (error instanceof Error && error.message === "timeout")
@@ -33293,8 +33270,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool)))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
-    const text3 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
-    return text3 ? String(text3.text) : "";
+    const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+    return text ? String(text.text) : "";
   }
   function callTool(name, args, key) {
     const mine = supersede();
@@ -33463,12 +33440,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     node.setAttribute("aria-hidden", "true");
     return node;
   }
-  function el(tag, cls, text3) {
+  function el(tag, cls, text) {
     const node = doc.createElement(tag);
     if (cls)
       node.className = cls;
-    if (text3 !== undefined)
-      node.textContent = text3;
+    if (text !== undefined)
+      node.textContent = text;
     return node;
   }
   function add(parent, ...children) {
@@ -33604,9 +33581,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }, "plain");
     return node;
   }
-  function copyLine(text3, key2) {
-    const code = el("code", "", text3);
-    return add(el("div", "remote-line"), code, copyControl(code, key2));
+  function copyLine(text, key) {
+    const code = el("code", "", text);
+    return add(el("div", "remote-line"), code, copyControl(code, key));
   }
   function remoteBox(key, href, source) {
     if (!state.open["remote:" + key])
@@ -33631,10 +33608,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return "";
     return (C[current] || C.relay_unavailable).disabledReason;
   }
-  function rowReason(text3) {
+  function rowReason(text) {
     if (state.hostReadOnly && state.hostKind === "computer")
       return null;
-    return el("span", "reason", text3);
+    return el("span", "reason", text);
   }
   function compact() {
     return state.displayMode !== "" && state.displayMode !== "fullscreen";
@@ -33723,10 +33700,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     return add(wrap, button(fix.label, key, action, style), action && fix.tool ? howLink(fix, key, source) : null, errorNote(failure));
   }
-  function errorNote(text3) {
-    if (!text3)
+  function errorNote(text) {
+    if (!text)
       return null;
-    const note = el("span", "reason error", text3);
+    const note = el("span", "reason error", text);
     note.setAttribute("role", "alert");
     return note;
   }
@@ -34723,8 +34700,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return sentence.slice(prefix.length);
     return typeof source.detail === "string" && source.detail ? source.detail : sentence;
   }
-  function capitalise(text3) {
-    return text3 ? text3.charAt(0).toUpperCase() + text3.slice(1) : text3;
+  function capitalise(text) {
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
   }
   function sourcesSection(sources) {
     const section = add(el("section", "section"), el("h2", "", P.sources));
@@ -34757,15 +34734,15 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return null;
     const section = add(el("section", "section privacy-row"), el("h2", "", W.section));
     const row = el("li", "row");
-    const text3 = el("div", "row-text");
+    const text = el("div", "row-text");
     if (configured) {
       const rules = typeof info.ruleCount === "number" && isFinite(info.ruleCount) ? Math.max(0, Math.round(info.ruleCount)) : state.privacyRules;
-      const words2 = rules === 0 ? W.row.none : rules === 1 ? W.row.one : W.row.many;
-      add(text3, el("p", "", rules >= 0 ? fill2(words2, { n: count(rules) }) : W.rowNoCount));
+      const words = rules === 0 ? W.row.none : rules === 1 ? W.row.one : W.row.many;
+      add(text, el("p", "", rules >= 0 ? fill(words, { n: count(rules) }) : W.rowNoCount));
     }
-    if (pending2 > 0)
-      add(text3, el("p", "muted", fill2(pending2 === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending2) })));
-    add(row, text3);
+    if (pending > 0)
+      add(text, el("p", "muted", fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })));
+    add(row, text);
     if (configured) {
       const blocked = globalReason();
       const edit = button(W.edit, "privacy:edit", blocked ? null : () => openPrivacy("privacy:edit"), "plain");
@@ -34986,22 +34963,22 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function installLine(entry) {
     const model = P.modelNames[entry.which];
     const line = el("div", "model-install" + (entry.state === "failed" ? " failed" : ""));
-    let text3;
+    let text;
     if (entry.state === "failed") {
-      text3 = fill2(P.modelInstallFailed, { model, reason: P.modelInstallReasons[entry.reason] });
+      text = fill(P.modelInstallFailed, { model, reason: P.modelInstallReasons[entry.reason] });
     } else if (entry.state === "verifying") {
-      text3 = fill2(P.modelInstallVerifying, { model });
+      text = fill(P.modelInstallVerifying, { model });
     } else {
       const parts = [fill(P.modelInstallDownloading, { model })];
       if (entry.percent >= 0)
         parts.push(percent(entry.percent) + "%");
       if (entry.total > 0 && entry.done >= 0)
         parts.push(installBytes(entry.done, entry.total));
-      text3 = parts.join(" · ");
+      text = parts.join(" · ");
     }
-    add(line, el("p", "", text3));
+    add(line, el("p", "", text));
     if (entry.state !== "failed" && entry.percent >= 0)
-      add(line, progressBar(entry.percent, text3));
+      add(line, progressBar(entry.percent, text));
     return line;
   }
   function modelsSection(models) {
@@ -35097,13 +35074,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const heading = add(el("h2"), doc.createTextNode(W.section + " "), el("span", "tag", W.onlyHere));
     const section = add(el("section", "section on-computer"), heading);
     const list = el("ul", "rows");
-    for (const key2 of keys) {
-      const words2 = W.rows[key2];
-      const text3 = add(el("div", "row-text"), el("p", "", words2.title), el("p", "muted", words2.line));
-      const href = state.hostLinks[key2];
-      const open3 = button(W.open, "computer:" + key2, () => openLink(href), "plain");
-      open3.setAttribute("aria-label", W.open + " " + words2.title);
-      add(list, add(el("li", "row"), text3, open3));
+    for (const key of keys) {
+      const words = W.rows[key];
+      const text = add(el("div", "row-text"), el("p", "", words.title), el("p", "muted", words.line));
+      const href = state.hostLinks[key];
+      const open = button(W.open, "computer:" + key, () => openLink(href), "plain");
+      open.setAttribute("aria-label", W.open + " " + words.title);
+      add(list, add(el("li", "row"), text, open));
     }
     return add(section, list);
   }
@@ -35357,20 +35334,20 @@ function privacyLogic(config) {
   const KINDS = ["folder", "label", "sender"];
   const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const DOMAIN = /^@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
-  const text3 = (value) => typeof value === "string" && value.trim() !== "";
+  const text = (value) => typeof value === "string" && value.trim() !== "";
   function validRule(rule) {
     if (!rule || typeof rule !== "object" || KINDS.indexOf(rule.kind) < 0)
       return false;
     if (rule.kind === "sender")
-      return rule.source_id === config.mailSourceId && text3(rule.value);
+      return rule.source_id === config.mailSourceId && text(rule.value);
     if (rule.kind === "label")
-      return rule.source_id === config.mailSourceId && text3(rule.key) && text3(rule.value);
-    return Object.prototype.hasOwnProperty.call(config.folderSources, rule.source_id) && text3(rule.key) && (rule.display === undefined || typeof rule.display === "string");
+      return rule.source_id === config.mailSourceId && text(rule.key) && text(rule.value);
+    return Object.prototype.hasOwnProperty.call(config.folderSources, rule.source_id) && text(rule.key) && (rule.display === undefined || typeof rule.display === "string");
   }
   function displayOf(rule, unnamed) {
     if (rule.kind === "sender" || rule.kind === "label")
       return String(rule.value);
-    return text3(rule.display) ? String(rule.display) : unnamed;
+    return text(rule.display) ? String(rule.display) : unnamed;
   }
   function viewRule(rule, display) {
     const raw = {};
@@ -35397,7 +35374,7 @@ function privacyLogic(config) {
       out.key = rule.key;
     if (typeof rule.value === "string")
       out.value = rule.value;
-    if (rule.kind === "folder" && text3(rule.display))
+    if (rule.kind === "folder" && text(rule.display))
       out.display = rule.display;
     return out;
   }
@@ -35489,9 +35466,9 @@ function privacyLogic(config) {
   function topicById(id) {
     return TOPICS.filter((entry) => entry.id === id)[0];
   }
-  function named(topic, text4) {
+  function named(topic, text) {
     const alternatives = topic.words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+"));
-    return new RegExp("(^|[^a-z0-9])(" + alternatives.join("|") + ")(?![a-z0-9])", "i").test(text4);
+    return new RegExp("(^|[^a-z0-9])(" + alternatives.join("|") + ")(?![a-z0-9])", "i").test(text);
   }
   function leadOf(id) {
     if (!words || !words.topics[id])
@@ -35579,19 +35556,19 @@ function privacyLogic(config) {
     return leadOf(id) + " " + parts.join("; ") + ".";
   }
   function refineDescription(description, answers) {
-    const text4 = String(description || "").replace(/\r\n/g, `
+    const text = String(description || "").replace(/\r\n/g, `
 `);
-    const refined = refineUnbounded(text4, answers);
-    return refined.length > DESCRIPTION_MAX ? text4 : refined;
+    const refined = refineUnbounded(text, answers);
+    return refined.length > DESCRIPTION_MAX ? text : refined;
   }
   function fitsAnswers(description, answers) {
     return refineUnbounded(String(description || "").replace(/\r\n/g, `
 `), answers).length <= DESCRIPTION_MAX;
   }
-  function refineUnbounded(text4, answers) {
-    if (!words2)
-      return text4;
-    const lines = text4.split(`
+  function refineUnbounded(text, answers) {
+    if (!words)
+      return text;
+    const lines = text.split(`
 `);
     for (const topic of TOPICS) {
       const answer = answers[topic.id];
@@ -35905,8 +35882,8 @@ function chatgptPickerProgram(kit) {
   }
   function errorSentence(result) {
     const parts = result && Array.isArray(result.content) ? result.content : [];
-    const text3 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
-    return text3 ? String(text3.text) : "";
+    const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+    return text ? String(text.text) : "";
   }
   function approveArchive(key, name, answer) {
     if (!archiveMode() || p.loading || p.saving)
@@ -35918,12 +35895,12 @@ function chatgptPickerProgram(kit) {
     p.confirm = null;
     kit.render("picker:pick:" + key);
     const mine = session;
-    const refused = (text3, access) => {
+    const refused = (text, access) => {
       if (mine !== session || !p)
         return;
       p.saving = false;
       p.savingKey = "";
-      p.saveError = text3 || Q.loadFailed;
+      p.saveError = text || Q.loadFailed;
       p.saveAccess = access && typeof access.message === "string" && access.message ? access : null;
       kit.render("picker:archive-error");
     };
@@ -36693,9 +36670,9 @@ function chatgptPickerProgram(kit) {
     line.setAttribute("role", "status");
     return line;
   }
-  function topRow(text3, control) {
+  function topRow(text, control) {
     const row = el("div", "this-row");
-    add(row, el("p", "this-label", text3), control);
+    add(row, el("p", "this-label", text), control);
     return row;
   }
   function exceptionList(rules) {
@@ -36951,7 +36928,7 @@ function chatgptPickerProgram(kit) {
     p.saveError = "";
     kit.render(focus);
   }
-  function option(type, name, key2, checked, text3, hint, onChange) {
+  function option(type, name, key, checked, text, hint, onChange) {
     const label = el("label", "opt");
     const input = el("input");
     input.type = type;
@@ -36961,7 +36938,7 @@ function chatgptPickerProgram(kit) {
     input.disabled = p.saving;
     input.setAttribute("data-key", key);
     input.addEventListener("change", () => onChange(input));
-    const words2 = add(el("span", "opt-text"), el("span", "", text3));
+    const words = add(el("span", "opt-text"), el("span", "", text));
     if (hint)
       add(words, el("span", "muted opt-hint", hint));
     return add(label, input, words);
@@ -37079,11 +37056,11 @@ function chatgptPickerProgram(kit) {
       const listNode = el("ul", "suggestions");
       p.suggestions.forEach((entry, index) => {
         const item = el("li", "suggestion");
-        const text3 = add(el("p", "suggestion-text"), el("span", "", entry.sender));
+        const text = add(el("p", "suggestion-text"), el("span", "", entry.sender));
         if (typeof entry.sample_messages === "number" && p.sampleSize > 0) {
-          add(text3, el("span", "muted", " · " + fill2(Q.mailSuggestionCount, { n: kit.count(entry.sample_messages), total: kit.count(p.sampleSize) })));
+          add(text, el("span", "muted", " · " + fill(Q.mailSuggestionCount, { n: kit.count(entry.sample_messages), total: kit.count(p.sampleSize) })));
         }
-        add(item, text3, add(el("div", "actions"), kit.button(Q.mailPrivate, "picker:suggest:private:" + index, p.saving ? null : () => addSender("always_private_senders", entry.sender, "picker:suggest:private:" + index), "plain"), kit.button(Q.mailSkip, "picker:suggest:skip:" + index, p.saving ? null : () => addSender("skip_senders", entry.sender, "picker:suggest:skip:" + index), "plain")));
+        add(item, text, add(el("div", "actions"), kit.button(Q.mailPrivate, "picker:suggest:private:" + index, p.saving ? null : () => addSender("always_private_senders", entry.sender, "picker:suggest:private:" + index), "plain"), kit.button(Q.mailSkip, "picker:suggest:skip:" + index, p.saving ? null : () => addSender("skip_senders", entry.sender, "picker:suggest:skip:" + index), "plain")));
         add(listNode, item);
       });
       add(senders, listNode);
@@ -38789,121 +38766,6 @@ var init_source_ingestion_ledger = __esm(() => {
 });
 
 // src/workers/classification-ledger.ts
-import { mkdir as mkdir4, open as open3, readFile as readFile4 } from "node:fs/promises";
-import { dirname as dirname29 } from "node:path";
-async function appendClassificationLedgerEntry(path, entry) {
-  if (!isClassificationLedgerEntry(entry))
-    throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname29(path), { recursive: true, mode: 448 });
-  const handle = await open3(path, "a", 384);
-  try {
-    await handle.chmod(384);
-    await handle.appendFile(`${JSON.stringify(entry)}
-`, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-async function appendClassificationLedgerEntryOnce(path, entry) {
-  const id = entry.entry_id?.trim();
-  if (id) {
-    const existing = await readClassificationLedger(path);
-    if (existing.entries.some((recorded) => recorded.entry_id === id))
-      return false;
-  }
-  await appendClassificationLedgerEntry(path, entry);
-  return true;
-}
-async function readClassificationLedger(path) {
-  let raw = "";
-  try {
-    raw = await readFile4(path, "utf8");
-  } catch (error) {
-    if (error?.code !== "ENOENT")
-      throw error;
-  }
-  const { entries, skipped } = parseClassificationLedgerJsonl(raw);
-  return { entries: newestFirst(entries), skipped, path };
-}
-function parseClassificationLedgerJsonl(text3) {
-  const entries = [];
-  let skipped = 0;
-  for (const line of text3.split(`
-`)) {
-    if (line.trim() === "")
-      continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      skipped += 1;
-      continue;
-    }
-    if (isClassificationLedgerEntry(parsed))
-      entries.push(parsed);
-    else
-      skipped += 1;
-  }
-  return { entries, skipped };
-}
-function isClassifierApproved(entries, key2, options = {}) {
-  const defaultCounts = options.builtInDefault === true && !builtInDefaultRevoked(entries, key2);
-  for (const entry of entries) {
-    if (entry.model_id !== key2.modelId || entry.prompt_version !== key2.promptVersion || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
-      continue;
-    const owner = entry.approved_by === CLASSIFICATION_LEDGER_OWNER_APPROVAL;
-    const builtInDefault = defaultCounts && entry.approved_by === CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL;
-    if (!owner && !builtInDefault)
-      continue;
-    if (owner && entry.kind === "classifier_model_revoked")
-      return false;
-    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
-      return true;
-  }
-  return false;
-}
-function builtInDefaultRevoked(entries, key2) {
-  for (const entry of entries) {
-    if (entry.model_id !== key2.modelId || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
-      continue;
-    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
-      continue;
-    if (entry.kind === "classifier_model_revoked")
-      return true;
-    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
-      return false;
-  }
-  return false;
-}
-function isClassificationLedgerEntry(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const record = value;
-  if (typeof record.recorded_at !== "string" || record.recorded_at.trim() === "")
-    return false;
-  if (typeof record.what !== "string" || record.what.trim() === "")
-    return false;
-  if (!["classifier_model_decision", "classifier_model_revoked", "note"].includes(record.kind))
-    return false;
-  if (!["owner", "built_in_default", "system-automatic", "unattributed-historical"].includes(record.approved_by))
-    return false;
-  if (!["pending", "complete", "n/a"].includes(record.status))
-    return false;
-  for (const key2 of ["model_id", "prompt_version", "lane", "profile_id", "why", "entry_id"]) {
-    if (record[key2] !== undefined && typeof record[key2] !== "string")
-      return false;
-  }
-  return true;
-}
-function newestFirst(entries) {
-  return entries.map((entry, index) => ({ entry, index, at: stampOrder2(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
-}
-function stampOrder2(recordedAt) {
-  const at = Date.parse(recordedAt);
-  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
-}
-var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner", CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
 var init_classification_ledger = __esm(() => {
   init_olympus_layout();
 });
@@ -39271,59 +39133,6 @@ var PROOF_HEADER = "X-Olympus-Owner-Proof";
 var FORM_PROOF = "_olympus_owner_proof";
 var STORAGE = "olympus-desktop-owner-v1";
 var SESSION_MS = 12 * 60 * 60 * 1000;
-var DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open";
-var DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.";
-var CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'";
-function randomOwnerHostname() {
-  const bytes = randomBytes3(16);
-  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
-  let bits = 0, value = 0, text3 = "";
-  for (const byte of bytes) {
-    value = value << 8 | byte;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      text3 += alphabet[value >>> bits & 31];
-    }
-  }
-  if (bits)
-    text3 += alphabet[value << 5 - bits & 31];
-  return `${text3}.localhost`;
-}
-var secret = () => randomBytes3(32).toString("base64url");
-function equal(a, b) {
-  return typeof a === "string" && /^[A-Za-z0-9_-]+$/.test(a) && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-async function boundedBody(request, limit) {
-  const result = await readBoundedRequestText(request, limit, { deadlineMs: 5000 });
-  if (!result.ok)
-    throw new Error("Body refused.");
-  return result.text;
-}
-function page(body, status = 200) {
-  return new Response(`<!doctype html><html><head><meta charset="utf-8"><title>Olympus owner confirmation</title></head><body>${body}</body></html>`, { status, headers: {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-    "Content-Security-Policy": CSP,
-    "Cross-Origin-Opener-Policy": "same-origin",
-    "Referrer-Policy": "no-referrer",
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY"
-  } });
-}
-function restarting() {
-  const response = page(`${openingView().replace("Opening your dashboard…", "Olympus is restarting…")}<script>setTimeout(()=>location.reload(),1000)</script>`, 503);
-  response.headers.set("Retry-After", "1");
-  return response;
-}
-function refusal(status = 403) {
-  const response = page(`<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>`, status);
-  response.headers.set("X-Olympus-Owner-Refused", "1");
-  return response;
-}
-function safeTarget(value) {
-  return typeof value === "string" && value.length <= 16384 && value.startsWith("/") && !value.startsWith("//") && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith("/owner-") && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);
-}
 var BOOTSTRAP = `<script>(function(){
 const key=${JSON.stringify(STORAGE)}, header=${JSON.stringify(PROOF_HEADER)}, field=${JSON.stringify(FORM_PROOF)};
 const nativeFetch=window.fetch.bind(window);
@@ -39870,12 +39679,12 @@ async function fetchCatalog(input, fetchedAtMs) {
   writeCatalogCache(input.cachePath, catalog);
   return { status: "success", catalog };
 }
-function parseCatalogModels(payload2) {
-  if (!isRecord3(payload2) || !Array.isArray(payload2.data) || payload2.data.length === 0) {
+function parseCatalogModels(payload) {
+  if (!isRecord3(payload) || !Array.isArray(payload.data) || payload.data.length === 0) {
     return;
   }
   const models = {};
-  for (const rawItem of payload2.data) {
+  for (const rawItem of payload.data) {
     if (!isRecord3(rawItem) || typeof rawItem.id !== "string" || !rawItem.id.trim())
       continue;
     if (!isRecord3(rawItem.model_spec))
@@ -39896,13 +39705,13 @@ function readCatalogCache(path, type) {
   } catch {
     return;
   }
-  if (!isRecord3(payload2) || payload2.schema_version !== CACHE_SCHEMA_VERSION)
+  if (!isRecord3(payload) || payload.schema_version !== CACHE_SCHEMA_VERSION)
     return;
   if (payload.catalog_type !== undefined && payload.catalog_type !== type)
     return;
   if (type === "embedding" && payload.catalog_type !== "embedding")
     return;
-  if (typeof payload2.fetched_at !== "string" || !isRecord3(payload2.models))
+  if (typeof payload.fetched_at !== "string" || !isRecord3(payload.models))
     return;
   const fetchedAtMs = Date.parse(payload.fetched_at);
   if (!Number.isFinite(fetchedAtMs))

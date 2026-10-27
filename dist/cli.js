@@ -26850,12 +26850,12 @@ var init_secrets_disposition = __esm(() => {
 });
 
 // src/core/child-item-id.ts
-function childProviderItemId(parentProviderItemId, key2) {
+function childProviderItemId(parentProviderItemId, key) {
   if (!parentProviderItemId)
     throw new TypeError("A child needs its parent's id.");
-  if (!key2 || key2.includes(CHILD_ITEM_ID_SEPARATOR))
+  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
     throw new TypeError("A child's key must be plain text.");
-  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key2}`;
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
 }
 var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
@@ -74374,8 +74374,8 @@ function bindInputToFiles(input, manifestSha256) {
         ...options?.limit !== undefined ? { limit: options.limit } : {}
       });
       return async function* () {
-        for await (const page2 of pages) {
-          yield page2.nextCursor !== undefined ? { ...page2, nextCursor: `${prefix}${page2.nextCursor}` } : page2;
+        for await (const page of pages) {
+          yield page.nextCursor !== undefined ? { ...page, nextCursor: `${prefix}${page.nextCursor}` } : page;
         }
       }();
     }
@@ -74394,8 +74394,8 @@ function holdingItems(connector) {
   held.listItems = (options) => {
     const pages = connector.listItems(options);
     return async function* () {
-      for await (const page2 of pages) {
-        yield { ...page2, items: page2.items.map((item) => ({ ...item, holdContentUntilJudged: true })) };
+      for await (const page of pages) {
+        yield { ...page, items: page.items.map((item) => ({ ...item, holdContentUntilJudged: true })) };
       }
     }();
   };
@@ -74526,35 +74526,35 @@ function scalarText(value) {
     return value ? "yes" : "no";
   return;
 }
-function labelOf(key2) {
-  const words2 = key2.replace(/_/g, " ").trim();
-  return words2 === "" ? key2 : words2.charAt(0).toUpperCase() + words2.slice(1);
+function labelOf(key) {
+  const words = key.replace(/_/g, " ").trim();
+  return words === "" ? key : words.charAt(0).toUpperCase() + words.slice(1);
 }
 function unixTimeText(value) {
-  const seconds2 = typeof value === "number" ? value : typeof value === "string" && /^\d{1,12}$/.test(value.trim()) ? Number(value) : NaN;
-  if (!Number.isFinite(seconds2) || seconds2 <= 0 || seconds2 >= LATEST_PLAUSIBLE_SECONDS2)
+  const seconds = typeof value === "number" ? value : typeof value === "string" && /^\d{1,12}$/.test(value.trim()) ? Number(value) : NaN;
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds >= LATEST_PLAUSIBLE_SECONDS2)
     return;
-  return new Date(seconds2 * 1000).toISOString();
+  return new Date(seconds * 1000).toISOString();
 }
 function appendFields(lines, indent, record, skip, depth) {
-  for (const [key2, value] of Object.entries(record)) {
-    if (skip.has(key2) || value === null || value === undefined)
+  for (const [key, value] of Object.entries(record)) {
+    if (skip.has(key) || value === null || value === undefined)
       continue;
-    if (key2.endsWith("_unixtime")) {
-      const base = key2.slice(0, -"_unixtime".length);
+    if (key.endsWith("_unixtime")) {
+      const base = key.slice(0, -"_unixtime".length);
       if (base !== "" && scalarText(record[base]) !== undefined)
         continue;
       const iso = unixTimeText(value);
       if (iso) {
-        lines.push(`${indent}${labelOf(base === "" ? key2 : base)}: ${iso}`);
+        lines.push(`${indent}${labelOf(base === "" ? key : base)}: ${iso}`);
         continue;
       }
     }
-    appendValue(lines, indent, key2, value, depth);
+    appendValue(lines, indent, key, value, depth);
   }
 }
-function appendValue(lines, indent, key2, value, depth) {
-  const label = labelOf(key2);
+function appendValue(lines, indent, key, value, depth) {
+  const label = labelOf(key);
   const scalar = scalarText(value);
   if (scalar !== undefined) {
     lines.push(`${indent}${label}: ${scalar}`);
@@ -74637,29 +74637,29 @@ function headline(section, record) {
 function accountEntryContent(section, value) {
   if (!isRecord5(value)) {
     const plain = scalarText(value);
-    const lines2 = [headline(section, {})];
+    const lines = [headline(section, {})];
     if (plain !== undefined)
-      lines2.push(plain);
+      lines.push(plain);
     else if (value !== null && value !== undefined)
-      appendValue(lines2, "", "value", value, 0);
-    return { text: lines2.join(`
+      appendValue(lines, "", "value", value, 0);
+    return { text: lines.join(`
 `), mediaFiles: 0, attachments: [] };
   }
-  const own3 = telegramMediaLines(value);
+  const own = telegramMediaLines(value);
   const nested = isRecord5(value.media) ? telegramMediaLines(value.media) : { lines: [], mediaFiles: 0, attachments: [] };
   const skip = new Set;
-  if (own3.lines.length > 0)
-    for (const key2 of TELEGRAM_MEDIA_KEYS)
-      skip.add(key2);
+  if (own.lines.length > 0)
+    for (const key of TELEGRAM_MEDIA_KEYS)
+      skip.add(key);
   if (nested.lines.length > 0)
     skip.add("media");
-  const lines = [headline(section, value), ...own3.lines, ...nested.lines];
+  const lines = [headline(section, value), ...own.lines, ...nested.lines];
   appendFields(lines, "", value, skip, 0);
   return {
     text: lines.join(`
 `),
-    mediaFiles: own3.mediaFiles + nested.mediaFiles,
-    attachments: [...own3.attachments, ...nested.attachments]
+    mediaFiles: own.mediaFiles + nested.mediaFiles,
+    attachments: [...own.attachments, ...nested.attachments]
   };
 }
 var ACCOUNT_SECTIONS, MAX_INDENT_DEPTH = 8, LATEST_PLAUSIBLE_SECONDS2 = 4102444800;
@@ -74688,9 +74688,9 @@ function slimResume(point) {
     offset: point.offset,
     levels: point.levels.map((level) => {
       const frame = {};
-      for (const key2 of ["name", "type", "id"]) {
-        if (Object.prototype.hasOwnProperty.call(level.frame, key2))
-          frame[key2] = level.frame[key2];
+      for (const key of ["name", "type", "id"]) {
+        if (Object.prototype.hasOwnProperty.call(level.frame, key))
+          frame[key] = level.frame[key];
       }
       return { kind: level.kind, pointer: level.pointer, frame };
     })
@@ -74762,10 +74762,10 @@ function chatTitle(name, type, place) {
   return place.section === "chat" ? "Unnamed Telegram chat" : `Unnamed Telegram chat ${place.chatIndex + 1}`;
 }
 function messageOutcome(input, event, fetchedAt) {
-  const message2 = event.value;
-  if (typeof message2 !== "object" || message2 === null || Array.isArray(message2))
+  const message = event.value;
+  if (typeof message !== "object" || message === null || Array.isArray(message))
     return { kind: "gap", reason: TELEGRAM_FINDINGS.unreadable };
-  const record = message2;
+  const record = message;
   const service = record.type === "service";
   const content = service ? telegramServiceContent(record) : telegramMessageContent(record);
   if (!content.hasContent) {
@@ -74881,7 +74881,7 @@ async function* telegramExportPages(input, options, make) {
   } catch (error) {
     throw archiveStopFromReaderError(error, file.relPath);
   }
-  const current2 = () => {
+  const current = () => {
     try {
       reader.assertCurrent();
     } catch (error) {
@@ -74901,7 +74901,7 @@ async function* telegramExportPages(input, options, make) {
       throw archiveStopFromReaderError(error, file.relPath);
     }
     let assumedZone = start.assumedZone;
-    let page2 = [];
+    let page = [];
     let positions = [];
     let after;
     let unsent = false;
@@ -74916,7 +74916,7 @@ async function* telegramExportPages(input, options, make) {
       whole = undefined;
       if (!part.dropped && part.fields.length > 0) {
         const built = make.account(part.section, 0, Object.fromEntries(part.fields));
-        page2.push(built.unit);
+        page.push(built.unit);
         positions.push(part.start);
         if (built.mediaFiles > 0)
           report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", part.start, built.mediaFiles);
@@ -74927,9 +74927,9 @@ async function* telegramExportPages(input, options, make) {
     for (;; ) {
       if (!input.shouldContinue()) {
         if (after && unsent) {
-          current2();
+          current();
           input.reportPosition?.({ fileIndex: 0, offset: after.offset });
-          yield { records: page2, positions, nextCursor: cursorAt(input, after, assumedZone), done: false };
+          yield { records: page, positions, nextCursor: cursorAt(input, after, assumedZone), done: false };
         }
         return;
       }
@@ -74978,7 +74978,7 @@ async function* telegramExportPages(input, options, make) {
             report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", event.start);
           } else {
             const built = make.account(section, Number(event.path[event.path.length - 1]), event.value);
-            page2.push(built.unit);
+            page.push(built.unit);
             positions.push(event.start);
             if (built.mediaFiles > 0)
               report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", event.start, built.mediaFiles);
@@ -74992,7 +74992,7 @@ async function* telegramExportPages(input, options, make) {
           } else if (outcome.kind === "skipped") {
             report(outcome.reason, "skipped", event.start);
           } else {
-            page2.push(outcome.unit);
+            page.push(outcome.unit);
             positions.push(event.start);
             for (const finding of outcome.findings)
               report(finding.kind, finding.class ?? "gap", event.start, finding.count);
@@ -75006,21 +75006,21 @@ async function* telegramExportPages(input, options, make) {
         unsent = true;
       }
       const budgetLeft = limit - emitted;
-      if (page2.length >= Math.min(pageSizeDefault, budgetLeft) || json.position - origin >= byteBudget) {
+      if (page.length >= Math.min(pageSizeDefault, budgetLeft) || json.position - origin >= byteBudget) {
         const point = after;
-        current2();
+        current();
         input.reportPosition?.({ fileIndex: 0, offset: point.offset });
-        yield { records: page2, positions, nextCursor: cursorAt(input, point, assumedZone), done: false };
-        emitted += page2.length;
-        page2 = [];
+        yield { records: page, positions, nextCursor: cursorAt(input, point, assumedZone), done: false };
+        emitted += page.length;
+        page = [];
         positions = [];
         unsent = false;
         if (emitted >= limit || json.position - origin >= byteBudget)
           return;
       }
     }
-    current2();
-    yield { records: page2, positions, nextCursor: doneCursor(input), done: true };
+    current();
+    yield { records: page, positions, nextCursor: doneCursor(input), done: true };
   } finally {
     reader.close();
   }
@@ -75045,7 +75045,7 @@ function createTelegramArchiveConnector(input) {
     async authenticate() {},
     listItems(options) {
       return async function* () {
-        for await (const page2 of telegramExportPages(input, options, {
+        for await (const page of telegramExportPages(input, options, {
           message: (event) => {
             const outcome = messageOutcome(input, event, fetchedAt);
             return outcome.kind === "item" ? { kind: "unit", unit: outcome.item, findings: outcome.findings, assumedZone: outcome.assumedZone } : outcome;
@@ -75055,7 +75055,7 @@ function createTelegramArchiveConnector(input) {
             return { unit: built.item, mediaFiles: built.mediaFiles };
           }
         })) {
-          yield { items: page2.records, nextCursor: page2.nextCursor, done: page2.done };
+          yield { items: page.records, nextCursor: page.nextCursor, done: page.done };
         }
       }();
     },
@@ -75156,12 +75156,12 @@ function telegramContactBaseKey(value) {
   return `name${createHash50("sha256").update(names.join("\x1F")).digest("hex").slice(0, 24)}`;
 }
 function telegramExportFacts(root, file) {
-  const key2 = `${file.relPath}\x1F${file.version.dev}:${file.version.ino}:${file.version.size}:${file.version.mtimeMs}`;
-  const known = remembered.get(key2);
+  const key = `${file.relPath}\x1F${file.version.dev}:${file.version.ino}:${file.version.size}:${file.version.mtimeMs}`;
+  const known = remembered.get(key);
   if (known)
     return known;
   const facts = { ...contentTimeOf(root, file), contactOccurrences: contactOccurrencesOf(root, file) };
-  remembered.set(key2, facts);
+  remembered.set(key, facts);
   return facts;
 }
 function contentTimeOf(root, file) {
@@ -75170,13 +75170,13 @@ function contentTimeOf(root, file) {
     let newest = 0;
     let carry = "";
     for (let offset = 0;offset < reader.size; offset += SCAN_CHUNK_BYTES) {
-      const text3 = carry + Buffer.from(reader.readAt(offset, Math.min(SCAN_CHUNK_BYTES, reader.size - offset))).toString("latin1");
-      for (const found of text3.matchAll(UNIXTIME)) {
-        const seconds2 = Number(found[1]);
-        if (seconds2 > newest && seconds2 < LATEST_PLAUSIBLE_SECONDS3)
-          newest = seconds2;
+      const text = carry + Buffer.from(reader.readAt(offset, Math.min(SCAN_CHUNK_BYTES, reader.size - offset))).toString("latin1");
+      for (const found of text.matchAll(UNIXTIME)) {
+        const seconds = Number(found[1]);
+        if (seconds > newest && seconds < LATEST_PLAUSIBLE_SECONDS3)
+          newest = seconds;
       }
-      carry = text3.slice(-48);
+      carry = text.slice(-48);
     }
     return newest > 0 ? { contentTime: new Date(newest * 1000).toISOString().replace(/\.000Z$/, "Z") } : {};
   } finally {
@@ -75281,13 +75281,13 @@ function telegramExportReactions(value) {
       continue;
     const emoji = typeof reaction.emoji === "string" ? reaction.emoji.trim() : "";
     const custom = telegramScalar(reaction.document_id);
-    const key2 = emoji !== "" ? emoji : custom && /^\d{1,20}$/.test(custom) ? `custom:${custom}` : undefined;
+    const key = emoji !== "" ? emoji : custom && /^\d{1,20}$/.test(custom) ? `custom:${custom}` : undefined;
     const count = reaction.count;
-    if (!key2 || key2.length > MAX_REACTION_KEY_CHARS || /[\u0000-\u001f\u007f]/.test(key2) || seen.has(key2))
+    if (!key || key.length > MAX_REACTION_KEY_CHARS || /[\u0000-\u001f\u007f]/.test(key) || seen.has(key))
       continue;
     if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1 || count > MAX_REACTION_COUNT)
       continue;
-    seen.add(key2);
+    seen.add(key);
     const actors = [];
     if (Array.isArray(reaction.recent)) {
       for (const recent of reaction.recent) {
@@ -75297,7 +75297,7 @@ function telegramExportReactions(value) {
       }
     }
     actors.sort((a, b) => a.providerActorId < b.providerActorId ? -1 : a.providerActorId > b.providerActorId ? 1 : 0);
-    entries.push({ key: key2, count, ...actors.length > 0 ? { actors: actors.slice(0, MAX_REACTION_ACTORS) } : {} });
+    entries.push({ key, count, ...actors.length > 0 ? { actors: actors.slice(0, MAX_REACTION_ACTORS) } : {} });
   }
   entries.sort((a, b) => b.count - a.count || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   entries.length = Math.min(entries.length, MAX_REACTION_TOKENS);
@@ -75305,14 +75305,14 @@ function telegramExportReactions(value) {
     entries.pop();
   return entries;
 }
-function mediaOf(message2) {
+function mediaOf(message) {
   const out = [];
   const named = (value) => typeof value === "string" && value.trim() !== "" ? value : undefined;
   const leftOut = (value) => value.startsWith("(") && value.endsWith(")");
   const size = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-  const photo = named(message2.photo);
+  const photo = named(message.photo);
   if (photo) {
-    const sizeBytes = size(message2.photo_file_size);
+    const sizeBytes = size(message.photo_file_size);
     out.push({
       field: "photo",
       ...leftOut(photo) ? {} : { path: photo },
@@ -75322,22 +75322,22 @@ function mediaOf(message2) {
       ...sizeBytes !== undefined ? { sizeBytes } : {}
     });
   }
-  const file = named(message2.file);
+  const file = named(message.file);
   if (file) {
-    const sizeBytes = size(message2.file_size);
-    const fileName = named(message2.file_name);
+    const sizeBytes = size(message.file_size);
+    const fileName = named(message.file_name);
     out.push({
       field: "file",
       ...leftOut(file) ? {} : { path: file },
       leftOut: leftOut(file),
       name: fileName ?? (leftOut(file) ? "File" : file.split("/").pop()),
-      ...named(message2.mime_type) ? { mimeType: named(message2.mime_type) } : {},
+      ...named(message.mime_type) ? { mimeType: named(message.mime_type) } : {},
       ...sizeBytes !== undefined ? { sizeBytes } : {}
     });
   }
   return out;
 }
-function telegramExportMessageRecord(context2, chat, value) {
+function telegramExportMessageRecord(context, chat, value) {
   if (!isRecord5(value))
     return { kind: "gap", reason: "message_unreadable" };
   const messageId = telegramScalar(value.id);
@@ -75360,27 +75360,27 @@ function telegramExportMessageRecord(context2, chat, value) {
   const editedAt = liveIso(edited.iso);
   const replyTo = telegramScalar(service && value.action === "pin_message" ? value.message_id : value.reply_to_message_id);
   const forwardedFrom = named(value.forwarded_from);
-  let sourceVersion = `${context2.account}:${conversationId}:${messageId}:${editedAt ?? sentAt ?? ""}`;
+  let sourceVersion = `${context.account}:${conversationId}:${messageId}:${editedAt ?? sentAt ?? ""}`;
   if (reactions)
     sourceVersion += `:r${sha2565(JSON.stringify(reactions)).slice(0, 8)}`;
-  const serviceEvent2 = {};
+  const serviceEvent = {};
   if (service) {
-    serviceEvent2.action = named(value.action) ?? "service";
-    for (const key2 of SERVICE_FIELDS2) {
-      const field = value[key2];
+    serviceEvent.action = named(value.action) ?? "service";
+    for (const key of SERVICE_FIELDS2) {
+      const field = value[key];
       if (typeof field === "string" || typeof field === "number")
-        serviceEvent2[key2] = field;
+        serviceEvent[key] = field;
       else if (Array.isArray(field)) {
         const names = field.flatMap((entry) => typeof entry === "string" && entry.trim() !== "" ? [entry.trim()] : isRecord5(entry) && named(entry.name) ? [named(entry.name)] : []);
         if (names.length > 0)
-          serviceEvent2[key2] = names;
+          serviceEvent[key] = names;
       }
     }
     const info = service && value.action === "information_text" ? flattenTelegramText(value.text).trim() : "";
     if (info)
-      serviceEvent2.title = info;
+      serviceEvent.title = info;
   }
-  const message2 = {
+  const message = {
     id: messageId,
     chatId: conversationId,
     conversationId,
@@ -75390,30 +75390,30 @@ function telegramExportMessageRecord(context2, chat, value) {
     ...chat.type && LIVE_CHAT_TYPES[chat.type] ? { chatType: LIVE_CHAT_TYPES[chat.type] } : {},
     ...senderId ? { senderId } : {},
     ...senderName ? { senderDisplayName: senderName } : {},
-    ...senderId && context2.ownUserId ? { senderIsOwner: senderId === context2.ownUserId } : {},
+    ...senderId && context.ownUserId ? { senderIsOwner: senderId === context.ownUserId } : {},
     ...content && content.hasContent ? { boundedText: content.text } : {},
-    ...service ? { service: serviceEvent2 } : {},
+    ...service ? { service: serviceEvent } : {},
     ...replyTo ? { replyToMessageId: replyTo } : {},
     ...forwardedFrom ? { forwardSource: "telegram_forward", forwardFromName: forwardedFrom } : {},
     ...media.length > 0 ? { attachments: media.map((entry) => ({ type: entry.field === "photo" ? "image" : "file", name: entry.name, ...entry.mimeType ? { mimeType: entry.mimeType } : {}, ...entry.sizeBytes !== undefined ? { sizeBytes: entry.sizeBytes } : {} })) } : {},
     ...reactions ? { reactions } : {},
     sourceVersion
   };
-  if (message2.chatTitle === undefined)
-    delete message2.chatTitle;
+  if (message.chatTitle === undefined)
+    delete message.chatTitle;
   const capturedItem = telegramMessageItem({
-    account: context2.account,
+    account: context.account,
     conversationId,
     trustDomain: "internal",
     corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
-    message: message2,
-    fetchedAt: context2.fetchedAt
+    message,
+    fetchedAt: context.fetchedAt
   });
   return {
     kind: "record",
     record: {
-      captureId: sha2565([context2.account, conversationId, messageId, sourceVersion].join("\x1F")),
-      capturedAt: context2.fetchedAt,
+      captureId: sha2565([context.account, conversationId, messageId, sourceVersion].join("\x1F")),
+      capturedAt: context.fetchedAt,
       capturedItem
     },
     media,
@@ -75441,14 +75441,14 @@ function telegramAccountEntryKey(section, value, ordinal, occurrence = 0) {
   }
   return sha2565(`${ordinal}\x1F${JSON.stringify(value) ?? ""}`).slice(0, 24);
 }
-function telegramAccountEntryRecord(context2, section, ordinal, value, clock2 = {}) {
+function telegramAccountEntryRecord(context, section, ordinal, value, clock = {}) {
   const content = accountEntryContent(section, value);
   const conversationId = telegramAccountConversation(section);
-  const id = telegramAccountEntryKey(section, value, ordinal, clock2.occurrence ?? 0);
-  const contentTime = liveIso(clock2.contentTime) ?? "";
-  const sourceVersion = `${context2.account}:${conversationId}:${id}:text:${sha2565(content.text).slice(0, 16)}${contentTime ? `:${contentTime}` : ""}`;
+  const id = telegramAccountEntryKey(section, value, ordinal, clock.occurrence ?? 0);
+  const contentTime = liveIso(clock.contentTime) ?? "";
+  const sourceVersion = `${context.account}:${conversationId}:${id}:text:${sha2565(content.text).slice(0, 16)}${contentTime ? `:${contentTime}` : ""}`;
   const capturedItem = telegramMessageItem({
-    account: context2.account,
+    account: context.account,
     conversationId,
     trustDomain: "internal",
     corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -75460,12 +75460,12 @@ function telegramAccountEntryRecord(context2, section, ordinal, value, clock2 = 
       boundedText: content.text,
       sourceVersion
     },
-    fetchedAt: context2.fetchedAt
+    fetchedAt: context.fetchedAt
   });
   return {
     record: {
-      captureId: sha2565([context2.account, conversationId, id, sourceVersion].join("\x1F")),
-      capturedAt: context2.fetchedAt,
+      captureId: sha2565([context.account, conversationId, id, sourceVersion].join("\x1F")),
+      capturedAt: context.fetchedAt,
       capturedItem
     },
     mediaFiles: content.mediaFiles
@@ -75505,7 +75505,7 @@ function telegramExportMediaLocator(archiveId, bindingId) {
 }
 function child(parent, media, deferredBytes) {
   const providerItemId = childProviderItemId(parent.identity.providerItemId, TELEGRAM_CHILD_KEY);
-  const identity2 = {
+  const identity = {
     family: parent.identity.family,
     provider: parent.identity.provider,
     accountScope: parent.identity.accountScope,
@@ -75518,7 +75518,7 @@ function child(parent, media, deferredBytes) {
   };
   const meta = parent.metadata;
   return {
-    identity: identity2,
+    identity,
     mimeType: media.mimeType ?? "application/octet-stream",
     content: { kind: "metadata_only" },
     metadata: Object.freeze({
@@ -75543,7 +75543,7 @@ function telegramExportInput(archive, options) {
     throw new Error("A Telegram export is one result.json.");
   const base = dirname52(file.relPath) === "." ? "" : dirname52(file.relPath);
   const fetchedAt = new Date().toISOString();
-  const context2 = {
+  const context = {
     account: options.account,
     fetchedAt,
     ...options.ownUserId ? { ownUserId: options.ownUserId } : {}
@@ -75574,7 +75574,7 @@ function telegramExportInput(archive, options) {
       const pages = telegramExportPages(archive, listOptions, {
         message(event) {
           const at = event.start;
-          const outcome = telegramExportMessageRecord(context2, telegramExportChat(event), event.value);
+          const outcome = telegramExportMessageRecord(context, telegramExportChat(event), event.value);
           if (outcome.kind === "skipped")
             return { kind: "skipped", reason: outcome.reason };
           if (outcome.kind === "gap") {
@@ -75598,7 +75598,7 @@ function telegramExportInput(archive, options) {
         account(section, ordinal, value) {
           const facts = telegramExportFacts(archive.root, file);
           const occurrence = facts.contactOccurrences.get(`${section.name}:${ordinal}`);
-          const built = telegramAccountEntryRecord(context2, section, ordinal, value, {
+          const built = telegramAccountEntryRecord(context, section, ordinal, value, {
             ...facts.contentTime ? { contentTime: facts.contentTime } : {},
             ...occurrence ? { occurrence } : {}
           });
@@ -75606,9 +75606,9 @@ function telegramExportInput(archive, options) {
         }
       });
       return async function* () {
-        for await (const page2 of pages) {
-          archive.reportItemPositions?.(page2.positions.map((offset) => ({ fileIndex: 0, offset })));
-          yield { records: page2.records, nextCursor: page2.nextCursor, done: page2.done };
+        for await (const page of pages) {
+          archive.reportItemPositions?.(page.positions.map((offset) => ({ fileIndex: 0, offset })));
+          yield { records: page.records, nextCursor: page.nextCursor, done: page.done };
         }
       }();
     }
@@ -75967,8 +75967,8 @@ function resolveTelegramTrustClaims(records, spoolConflicts, stores, set) {
       }
       continue;
     }
-    const claimed = telegramClaimKept(set, identity2.localItemId);
-    if (!claimed && !secureLaneClaims(stores, set, identity2))
+    const claimed = telegramClaimKept(set, identity.localItemId);
+    if (!claimed && !secureLaneClaims(stores, set, identity))
       continue;
     resolvedTrustByItemId.set(identity.localItemId, "secure_local");
     secureClaims.set(identity.localItemId, identity);
@@ -75977,12 +75977,12 @@ function resolveTelegramTrustClaims(records, spoolConflicts, stores, set) {
   }
   return { resolvedTrustByItemId, secureClaims: [...secureClaims.values()], moveWhole };
 }
-function secureLaneClaims(stores, set, identity2) {
-  if (!stores.secureLocal.itemPresence(identity2).active)
+function secureLaneClaims(stores, set, identity) {
+  if (!stores.secureLocal.itemPresence(identity).active)
     return false;
-  if (stores.secureLocal.itemOwnerPresent(identity2, TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local, "observed"))
+  if (stores.secureLocal.itemOwnerPresent(identity, TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local, "observed"))
     return true;
-  return set.ledger.getCurrent(identity2) === undefined;
+  return set.ledger.getCurrent(identity) === undefined;
 }
 function cursorFile(cursor) {
   return cursor.slice(0, cursor.lastIndexOf(":"));
@@ -76395,8 +76395,8 @@ function scopedTraversal(connector, connectorId, assertScopeCurrent) {
 function gmailCursorConnectorId(account, scope) {
   if (!scope)
     return GMAIL_PROVIDER;
-  const digest3 = createHash53("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
-  return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest3}`;
+  const digest = createHash53("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest}`;
 }
 function encodeCheckpoint(envelope) {
   if (!envelope.head)
@@ -76716,8 +76716,8 @@ function scopedTraversal2(connector, connectorId) {
 function googleDriveCursorConnectorId(account, scope) {
   if (!scope)
     return GOOGLE_DRIVE_PROVIDER;
-  const digest3 = createHash54("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
-  return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest3}`;
+  const digest = createHash54("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest}`;
 }
 function googleDriveScopedCheckpoint(cursor, connectorId) {
   return `${GOOGLE_DRIVE_SCOPED_CHECKPOINT_PREFIX}${connectorId.slice(`${GOOGLE_DRIVE_PROVIDER}.scope.`.length)}:` + Buffer.from(cursor).toString("base64url");
@@ -82558,14 +82558,14 @@ function rmTargetKeepingOwnerLock(target, lockPath) {
   const clear = (directory, depth) => {
     const inLockDirectory = depth === keep.length - 1;
     for (const name of readdirSync10(directory)) {
-      const child2 = join66(directory, name);
+      const child = join66(directory, name);
       if (inLockDirectory && isDataOwnerLockName(name))
         continue;
-      if (!inLockDirectory && name === keep[depth] && lstatSync27(child2).isDirectory()) {
-        clear(child2, depth + 1);
+      if (!inLockDirectory && name === keep[depth] && lstatSync27(child).isDirectory()) {
+        clear(child, depth + 1);
         continue;
       }
-      rmSync14(child2, { recursive: true, force: true });
+      rmSync14(child, { recursive: true, force: true });
     }
   };
   clear(target.path, 0);
@@ -82897,14 +82897,14 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
   return true;
 }
 function exportDurabilityBoundary(destination) {
-  let current2 = dirname57(resolve15(destination));
+  let current = dirname57(resolve15(destination));
   for (;; ) {
-    if (existsSync57(current2))
-      return current2;
-    const parent = dirname57(current2);
-    if (parent === current2)
-      return current2;
-    current2 = parent;
+    if (existsSync57(current))
+      return current;
+    const parent = dirname57(current);
+    if (parent === current)
+      return current;
+    current = parent;
   }
 }
 function makeDurableDirectory(path, boundary) {
@@ -82914,8 +82914,8 @@ function makeDurableDirectory(path, boundary) {
     syncDirectorySync2(current);
     if (current === boundary)
       return;
-    const parent = dirname57(current2);
-    if (parent === current2)
+    const parent = dirname57(current);
+    if (parent === current)
       return;
     current = parent;
   }
@@ -82947,10 +82947,10 @@ function sanitizeForExport(value) {
   if (!value || typeof value !== "object")
     return value;
   const sanitized = {};
-  for (const [key2, child2] of Object.entries(value)) {
-    if (isSecretKey(key2))
+  for (const [key, child] of Object.entries(value)) {
+    if (isSecretKey(key))
       continue;
-    sanitized[key2] = sanitizeForExport(child2);
+    sanitized[key] = sanitizeForExport(child);
   }
   return sanitized;
 }
@@ -83511,12 +83511,12 @@ function assertNoRawEmailFieldsAtPath(value, path) {
     value.forEach((item, index) => assertNoRawEmailFieldsAtPath(item, [...path, String(index)]));
     return;
   }
-  for (const [key2, child2] of Object.entries(value)) {
-    if (FORBIDDEN_RAW_RESPONSE_KEYS.has(key2)) {
-      const location = [...path, key2].join(".");
+  for (const [key, child] of Object.entries(value)) {
+    if (FORBIDDEN_RAW_RESPONSE_KEYS.has(key)) {
+      const location = [...path, key].join(".");
       throw new OperationError("email_policy_violation", `Private email lane response included forbidden raw field "${location}".`, "Return a bounded answer plus safe evidence metadata instead of raw email content.");
     }
-    assertNoRawEmailFieldsAtPath(child2, [...path, key2]);
+    assertNoRawEmailFieldsAtPath(child, [...path, key]);
   }
 }
 var FORBIDDEN_RAW_RESPONSE_KEYS;
@@ -84399,7 +84399,7 @@ function containsLocatorPayload(value) {
     return false;
   if (Array.isArray(value))
     return value.some(containsLocatorPayload);
-  return Object.entries(value).some(([key2, child2]) => SOURCE_INDEX_LOCATOR_KEYS.has(key2) || containsLocatorPayload(child2));
+  return Object.entries(value).some(([key, child]) => SOURCE_INDEX_LOCATOR_KEYS.has(key) || containsLocatorPayload(child));
 }
 function validateDropboxLocatorPayloads(hits) {
   let count = 0;
@@ -84486,12 +84486,12 @@ function assertNoSourceIndexOperationalLeakFieldsAtPath(value, path) {
     value.forEach((item, index) => assertNoSourceIndexOperationalLeakFieldsAtPath(item, [...path, String(index)]));
     return;
   }
-  for (const [key2, child2] of Object.entries(value)) {
-    if (FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS.has(key2)) {
-      const location = [...path, key2].join(".");
+  for (const [key, child] of Object.entries(value)) {
+    if (FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS.has(key)) {
+      const location = [...path, key].join(".");
       throw new OperationError("email_policy_violation", `Private source worker response included forbidden operational field "${location}".`, "Return safe hashes, counts, provenance labels, and local index identifiers instead of raw paths, scopes, cursors, sessions, or credentials.");
     }
-    assertNoSourceIndexOperationalLeakFieldsAtPath(child2, [...path, key2]);
+    assertNoSourceIndexOperationalLeakFieldsAtPath(child, [...path, key]);
   }
 }
 function parseSourceAnswerOpsec(value) {
@@ -84705,15 +84705,15 @@ function readEngineChildren(path) {
       return;
     const legacy = parsed.schema === ENGINE_CHILDREN_SCHEMA_V1;
     const children = [];
-    for (const child2 of parsed.children) {
-      if (!child2 || !Number.isSafeInteger(child2.pgid) || child2.pgid <= 1)
+    for (const child of parsed.children) {
+      if (!child || !Number.isSafeInteger(child.pgid) || child.pgid <= 1)
         continue;
-      const argv = !legacy && Array.isArray(child2.argv) && child2.argv.length > 0 && child2.argv.every((arg) => typeof arg === "string") ? child2.argv : [];
+      const argv = !legacy && Array.isArray(child.argv) && child.argv.length > 0 && child.argv.every((arg) => typeof arg === "string") ? child.argv : [];
       children.push({
-        service: typeof child2.service === "string" ? child2.service : "unknown",
-        pgid: child2.pgid,
-        started_at: typeof child2.started_at === "string" ? child2.started_at : "",
-        process_started: !legacy && typeof child2.process_started === "string" && child2.process_started ? child2.process_started : null,
+        service: typeof child.service === "string" ? child.service : "unknown",
+        pgid: child.pgid,
+        started_at: typeof child.started_at === "string" ? child.started_at : "",
+        process_started: !legacy && typeof child.process_started === "string" && child.process_started ? child.process_started : null,
         argv
       });
     }
@@ -84726,21 +84726,21 @@ function readEngineChildren(path) {
     return;
   }
 }
-function isRecordedLeader(entry, child2) {
-  return entry !== undefined && entry.pid === child2.pgid && entry.pgid === child2.pgid && child2.process_started !== null && child2.argv.length > 0 && entry.started === child2.process_started && entry.command === child2.argv.join(" ");
+function isRecordedLeader(entry, child) {
+  return entry !== undefined && entry.pid === child.pgid && entry.pgid === child.pgid && child.process_started !== null && child.argv.length > 0 && entry.started === child.process_started && entry.command === child.argv.join(" ");
 }
-function verifyGroup(table, child2) {
+function verifyGroup(table, child) {
   if (!table)
     return { ok: false, reason: "unreadable" };
-  const members = table.filter((entry) => entry.pgid === child2.pgid);
+  const members = table.filter((entry) => entry.pgid === child.pgid);
   if (members.length === 0)
     return { ok: false, reason: "gone" };
-  const leader = members.find((entry) => entry.pid === child2.pgid);
+  const leader = members.find((entry) => entry.pid === child.pgid);
   if (!leader)
     return { ok: false, reason: "unverified" };
-  if (child2.process_started === null || child2.argv.length === 0)
+  if (child.process_started === null || child.argv.length === 0)
     return { ok: false, reason: "unverified" };
-  return isRecordedLeader(leader, child2) ? { ok: true } : { ok: false, reason: "not_ours" };
+  return isRecordedLeader(leader, child) ? { ok: true } : { ok: false, reason: "not_ours" };
 }
 function reapRecordedEngineChildren(path, deps = {}) {
   const result = { stopped: [], skipped: [] };
@@ -84763,48 +84763,48 @@ function reapRecordedEngineChildren(path, deps = {}) {
     return result;
   const selfGroup = first.find((entry) => entry.pid === selfPid)?.pgid;
   const unsettled = [];
-  const skip = (child2, reason) => result.skipped.push({ service: child2.service, pgid: child2.pgid, reason });
+  const skip = (child, reason) => result.skipped.push({ service: child.service, pgid: child.pgid, reason });
   const candidates = [];
-  for (const child2 of record.children) {
-    if (child2.pgid === selfPid || child2.pgid === selfGroup) {
-      skip(child2, "self");
+  for (const child of record.children) {
+    if (child.pgid === selfPid || child.pgid === selfGroup) {
+      skip(child, "self");
       continue;
     }
-    const verdict = verifyGroup(first, child2);
+    const verdict = verifyGroup(first, child);
     if (verdict.ok)
-      candidates.push(child2);
+      candidates.push(child);
     else
-      skip(child2, verdict.reason === "unreadable" ? "unverified" : verdict.reason);
+      skip(child, verdict.reason === "unreadable" ? "unverified" : verdict.reason);
   }
   const terminated = [];
-  for (const child2 of candidates) {
-    const verdict = verifyGroup(list(), child2);
+  for (const child of candidates) {
+    const verdict = verifyGroup(list(), child);
     if (!verdict.ok) {
       if (verdict.reason === "gone")
-        result.stopped.push({ service: child2.service, pgid: child2.pgid });
+        result.stopped.push({ service: child.service, pgid: child.pgid });
       else if (verdict.reason === "unreadable") {
-        skip(child2, "unverified");
-        unsettled.push(child2);
+        skip(child, "unverified");
+        unsettled.push(child);
       } else
-        skip(child2, verdict.reason);
+        skip(child, verdict.reason);
       continue;
     }
-    signalGroup(kill, child2.pgid, "SIGTERM");
-    terminated.push(child2);
+    signalGroup(kill, child.pgid, "SIGTERM");
+    terminated.push(child);
   }
   if (terminated.length > 0)
-    sleep2(deps.graceMs ?? DEFAULT_REAP_GRACE_MS);
-  for (const child2 of terminated) {
-    const verdict = verifyGroup(list(), child2);
+    sleep(deps.graceMs ?? DEFAULT_REAP_GRACE_MS);
+  for (const child of terminated) {
+    const verdict = verifyGroup(list(), child);
     if (verdict.ok) {
-      signalGroup(kill, child2.pgid, "SIGKILL");
-      result.stopped.push({ service: child2.service, pgid: child2.pgid });
+      signalGroup(kill, child.pgid, "SIGKILL");
+      result.stopped.push({ service: child.service, pgid: child.pgid });
     } else if (verdict.reason === "gone") {
-      result.stopped.push({ service: child2.service, pgid: child2.pgid });
+      result.stopped.push({ service: child.service, pgid: child.pgid });
     } else {
-      skip(child2, "unverified");
+      skip(child, "unverified");
       if (verdict.reason === "unreadable")
-        unsettled.push(child2);
+        unsettled.push(child);
     }
   }
   if (deps.retainSettledRecord)
@@ -84963,10 +84963,10 @@ import { open as open3 } from "node:fs/promises";
 import { homedir as homedir28 } from "node:os";
 import { dirname as dirname59, isAbsolute as isAbsolute22, join as join68, posix as posix2, sep as sep11 } from "node:path";
 import { gunzip } from "node:zlib";
-function zkapiAsset(url, sha2566, bytes, extra = {}) {
+function zkapiAsset(url, sha256, bytes, extra = {}) {
   return {
     url,
-    sha256: sha2566,
+    sha256,
     bytes,
     executable: "bin/zkapi-clientd",
     required: [...ZKAPI_REQUIRED, ...extra.required ?? []],
@@ -84974,13 +84974,13 @@ function zkapiAsset(url, sha2566, bytes, extra = {}) {
     rename: ZKAPI_RENAME
   };
 }
-function torMacAsset(name, sha2566, bytes, adhocSign) {
-  return { url: `${TOR_RELEASE}/${name}`, sha256: sha2566, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"], ...adhocSign ? { adhocSign } : {} };
+function torMacAsset(name, sha256, bytes, adhocSign) {
+  return { url: `${TOR_RELEASE}/${name}`, sha256, bytes, executable: "tor/tor", required: ["tor/tor", "tor/libevent-2.1.7.dylib"], ...adhocSign ? { adhocSign } : {} };
 }
-function torLinuxAsset(name, sha2566, bytes) {
+function torLinuxAsset(name, sha256, bytes) {
   return {
     url: `${TOR_RELEASE}/${name}`,
-    sha256: sha2566,
+    sha256,
     bytes,
     executable: "bin/tor",
     required: ["tor/tor", "tor/libevent-2.1.so.7", "tor/libssl.so.3", "tor/libcrypto.so.3"],
@@ -85028,8 +85028,8 @@ function privatelyOwned(path, uid, kind) {
     return false;
   }
 }
-function within(parent, child2) {
-  return child2.startsWith(parent.endsWith(sep11) ? parent : `${parent}${sep11}`);
+function within(parent, child) {
+  return child.startsWith(parent.endsWith(sep11) ? parent : `${parent}${sep11}`);
 }
 function readManifest(path, uid) {
   try {
@@ -85147,8 +85147,8 @@ function earlierManagedFolders(tool, host) {
   }
   const found = [];
   for (const [version, hashes] of Object.entries(pin.replaces)) {
-    const sha2566 = hashes[platformKey];
-    if (!sha2566 || version === pin.version || version.startsWith(".") || version.includes("/") || version.includes(sep11))
+    const sha256 = hashes[platformKey];
+    if (!sha256 || version === pin.version || version.startsWith(".") || version.includes("/") || version.includes(sep11))
       continue;
     const dir = join68(toolDir, version);
     let stats;
@@ -85160,7 +85160,7 @@ function earlierManagedFolders(tool, host) {
     if (stats.isSymbolicLink() || !privatelyOwned(dir, uid, "dir"))
       continue;
     const manifest = readManifest(join68(dir, MANIFEST_FILE), uid);
-    if (!manifest || manifest.tool !== tool || manifest.version !== version || manifest.platform !== platformKey || manifest.sha256 !== sha2566)
+    if (!manifest || manifest.tool !== tool || manifest.version !== version || manifest.platform !== platformKey || manifest.sha256 !== sha256)
       continue;
     found.push({ version, dev: stats.dev, ino: stats.ino });
   }
@@ -85304,9 +85304,9 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
       }
     });
     options.onProgress?.({ tool, phase: "downloading", receivedBytes: 0, totalBytes: asset.bytes });
-    const sha2566 = await downloadTo(download, asset, options, (receivedBytes) => options.onProgress?.({ tool, phase: "downloading", receivedBytes, totalBytes: asset.bytes }), tool, pin.label);
+    const sha256 = await downloadTo(download, asset, options, (receivedBytes) => options.onProgress?.({ tool, phase: "downloading", receivedBytes, totalBytes: asset.bytes }), tool, pin.label);
     options.onProgress?.({ tool, phase: "checking" });
-    if (sha2566 !== asset.sha256) {
+    if (sha256 !== asset.sha256) {
       throw new ManagedToolsError("hash_mismatch", `The ${pin.label} download did not match its pinned fingerprint, so nothing was installed.`, tool);
     }
     options.onProgress?.({ tool, phase: "installing" });
@@ -87344,7 +87344,7 @@ async function launcherPath(env) {
           throw new Error("untrusted path");
         if (current === "/")
           break;
-        current2 = dirname60(current2);
+        current = dirname60(current);
       }
       if (!lstatSync29(path).isFile() || createHash58("sha256").update(await readFile4(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
@@ -87906,9 +87906,9 @@ function linuxBunStatusChannel() {
 }
 function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatusClosed, inheritedFds = []) {
   const statusChannel = onStatus ? linuxBunStatusChannel() : undefined;
-  let child2;
+  let child;
   try {
-    child2 = spawn5(process.execPath, [watchdog, String(process.pid), ...onStatus ? ["--private-status", String(inheritedFds.length)] : [], ...argv], { env, detached: true, stdio: onStatus ? ["pipe", "pipe", "pipe", statusChannel?.writer ?? "pipe", ...inheritedFds] : ["pipe", "pipe", "pipe"] });
+    child = spawn5(process.execPath, [watchdog, String(process.pid), ...onStatus ? ["--private-status", String(inheritedFds.length)] : [], ...argv], { env, detached: true, stdio: onStatus ? ["pipe", "pipe", "pipe", statusChannel?.writer ?? "pipe", ...inheritedFds] : ["pipe", "pipe", "pipe"] });
   } catch (error) {
     statusChannel?.reader.destroy();
     throw error;
@@ -87918,15 +87918,15 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
   }
   const handle = {
     role,
-    child: child2,
-    pgid: child2.pid ?? -1,
-    leader: child2.pid ? processInstanceIdentity(child2.pid) : undefined,
+    child,
+    pgid: child.pid ?? -1,
+    leader: child.pid ? processInstanceIdentity(child.pid) : undefined,
     gone: false,
     leaderExited: false,
     childExited: false,
     deliberate: false,
     go: () => {
-      child2.stdin?.write(`go
+      child.stdin?.write(`go
 `);
     }
   };
@@ -87941,12 +87941,12 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
     handle.leaderExited = true;
     report();
   };
-  child2.on("exit", exited);
-  child2.on("error", exited);
-  child2.stdin?.on("error", () => {
+  child.on("exit", exited);
+  child.on("error", exited);
+  child.stdin?.on("error", () => {
     return;
   });
-  for (const stream of [child2.stdout, child2.stderr]) {
+  for (const stream of [child.stdout, child.stderr]) {
     let pending = "";
     stream?.setEncoding("utf8");
     stream?.on("data", (chunk) => {
@@ -87978,7 +87978,7 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
     });
   }
   if (onStatus) {
-    const stream = statusChannel?.reader ?? child2.stdio[3];
+    const stream = statusChannel?.reader ?? child.stdio[3];
     let pending = "";
     let invalid = false;
     const reject = () => {
@@ -88215,15 +88215,15 @@ function standardExecutableDirectories(env, platform = process.platform) {
   return local;
 }
 function trustedChain(path, probe, uid) {
-  for (let current2 = path;; current2 = dirname61(current2)) {
-    const stats = probe.stat(current2);
-    if (current2 !== path && !stats.isDirectory())
+  for (let current = path;; current = dirname61(current)) {
+    const stats = probe.stat(current);
+    if (current !== path && !stats.isDirectory())
       return false;
     if (stats.uid !== uid && stats.uid !== 0)
       return false;
     if ((stats.mode & 18) !== 0)
       return false;
-    if (dirname61(current2) === current2)
+    if (dirname61(current) === current)
       return true;
   }
 }
@@ -88637,7 +88637,7 @@ async function openSession(options, control, recovery) {
   const finished = (async () => {
     try {
       mkdirSync41(dirname61(statePath), { recursive: true, mode: 448 });
-      const result2 = await withEngineConsultAdmission(statePath, () => {
+      const result = await withEngineConsultAdmission(statePath, () => {
         leaseHeld = true;
         if (zkapiConsultInFlight)
           return Promise.resolve(failure("busy", "not_sent", initialIdentity));
@@ -90377,7 +90377,7 @@ function engineSovereigntySeedBlocker(input) {
     } catch {
       return `${openclawConfig} could not be read to check for an OpenClaw-hosted Olympus.`;
     }
-    if (openClawConfigHasOlympus(text3, dirname62(openclawConfig)))
+    if (openClawConfigHasOlympus(text, dirname62(openclawConfig)))
       return `OpenClaw is configured to run Olympus (${openclawConfig}).`;
   }
   return;
@@ -90454,13 +90454,13 @@ function directoryBytes(path, budget = { entries: 20000 }) {
   for (const name of entries) {
     if (--budget.entries < 0)
       break;
-    const child2 = join72(path, name);
+    const child = join72(path, name);
     try {
-      const stat3 = lstatSync30(child2);
-      if (stat3.isDirectory())
-        total += directoryBytes(child2, budget);
-      else if (stat3.isFile())
-        total += stat3.size;
+      const stat = lstatSync30(child);
+      if (stat.isDirectory())
+        total += directoryBytes(child, budget);
+      else if (stat.isFile())
+        total += stat.size;
     } catch {}
   }
   return total;
@@ -91128,8 +91128,8 @@ function inheritedLockDescriptor(lockPath, exclude) {
   const target = lstatSync31(lockPath);
   try {
     for (const name of readdirSync16("/proc/self/fd")) {
-      const fd2 = Number(name);
-      if (!Number.isSafeInteger(fd2) || fd2 < 3 || fd2 === exclude)
+      const fd = Number(name);
+      if (!Number.isSafeInteger(fd) || fd < 3 || fd === exclude)
         continue;
       try {
         const info = fstatSync4(fd);
@@ -91448,20 +91448,20 @@ function readInstallTransaction(layout) {
   assertLinuxManagedPath(path);
   if ((lstatSync31(path).mode & 511) !== 384)
     throw new Error("The Linux install recovery journal must be private (0600).");
-  const value2 = JSON.parse(readFileSync47(path, "utf8"));
-  const hasDesktop = Object.hasOwn(value2?.before?.files ?? {}, linuxDesktopEntryPaths(layout).desktop);
-  const allowedFiles = transactionManagedFiles(layout, hasDesktop), actualFiles = value2?.before?.files && typeof value2.before.files === "object" ? Object.keys(value2.before.files) : [];
-  const backupDir = typeof value2?.backupDir === "string" ? resolve16(value2.backupDir) : "";
+  const value = JSON.parse(readFileSync47(path, "utf8"));
+  const hasDesktop = Object.hasOwn(value?.before?.files ?? {}, linuxDesktopEntryPaths(layout).desktop);
+  const allowedFiles = transactionManagedFiles(layout, hasDesktop), actualFiles = value?.before?.files && typeof value.before.files === "object" ? Object.keys(value.before.files) : [];
+  const backupDir = typeof value?.backupDir === "string" ? resolve16(value.backupDir) : "";
   const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname63(resolve16(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename12(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
-  const legacy = value2.legacySettings;
+  const legacy = value.legacySettings;
   if (legacy !== undefined && (!legacy || typeof legacy !== "object" || Array.isArray(legacy) || Object.entries(legacy).some(([name, snapshot], index) => !isLegacyLinuxSetting(name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join73(backupDir, `file-${1e4 + index}.backup`))))
     throw new Error("Invalid legacy settings recovery journal.");
   const restore = value.legacyRestoreSettings;
   if (restore !== undefined && (!legacy || !restore || typeof restore !== "object" || Array.isArray(restore) || Object.keys(restore).length !== Object.keys(legacy).length || Object.entries(restore).some(([name, snapshot], index) => !Object.hasOwn(legacy, name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join73(backupDir, `file-${20000 + index}.backup`))))
     throw new Error("Invalid legacy settings restore journal.");
   const createdAllowed = new Set(transactionCreatedFiles(layout));
-  const absent = value2?.before?.absentCreatedFiles;
-  if (value2.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value2.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value2.phase) || value2.priorUnitLinks !== undefined && (!Array.isArray(value2.priorUnitLinks) || new Set(value2.priorUnitLinks.map((entry) => entry?.path)).size !== value2.priorUnitLinks.length || value2.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve16(dirname63(entry.path), entry.target) !== layout.unitPath)) || value2.newUnitLinks !== undefined && (!Array.isArray(value2.newUnitLinks) || new Set(value2.newUnitLinks).size !== value2.newUnitLinks.length || value2.newUnitLinks.some((path2) => !unitLinkCandidates(layout).includes(path2))) || value2.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value2.desktopIconSha256)) || value2.before?.enabledRuntime !== undefined && (typeof value2.before.enabledRuntime !== "boolean" || value2.before.enabledRuntime && !value2.before.enabled) || typeof value2.before?.active !== "boolean" || typeof value2.before?.enabled !== "boolean" || !snapshotValid(value2.before?.receipt) || dirname63(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename12(backupDir)) || !Number.isSafeInteger(value2.backupDevice) || value2.backupDevice < 0 || !Number.isSafeInteger(value2.backupInode) || value2.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value2.before.files, file) || !snapshotValid(value2.before.files[file]) || value2.before.files[file].present && value2.before.files[file].backupPath !== join73(backupDir, `file-${index}.backup`)) || !snapshotValid(value2.before.receipt) || value2.before.receipt.present && value2.before.receipt.backupPath !== join73(backupDir, `file-${allowedFiles.length}.backup`) || dirname63(resolve16(value2.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename12(value2.stagingPath)) || value2.generationPath !== undefined && (dirname63(resolve16(value2.generationPath)) !== join73(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename12(value2.generationPath))) || value2.generationCreated !== undefined && typeof value2.generationCreated !== "boolean" || (value2.stagingDevice !== undefined || value2.stagingInode !== undefined) && (!Number.isSafeInteger(value2.stagingDevice) || value2.stagingDevice < 0 || !Number.isSafeInteger(value2.stagingInode) || value2.stagingInode <= 0) || value2.generationArtifact !== undefined && (value2.generationArtifact.kind !== "tree" || value2.generationArtifact.path !== value2.generationPath || value2.generationArtifact.sha256 !== basename12(value2.generationArtifact.path) || !Number.isSafeInteger(value2.generationArtifact.rootDevice) || value2.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value2.generationArtifact.rootInode) || value2.generationArtifact.rootInode <= 0 || value2.generationArtifact.markerPath !== join73(value2.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value2.generationArtifact.markerSha256 ?? ""))) {
+  const absent = value?.before?.absentCreatedFiles;
+  if (value.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value.phase) || value.priorUnitLinks !== undefined && (!Array.isArray(value.priorUnitLinks) || new Set(value.priorUnitLinks.map((entry) => entry?.path)).size !== value.priorUnitLinks.length || value.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve16(dirname63(entry.path), entry.target) !== layout.unitPath)) || value.newUnitLinks !== undefined && (!Array.isArray(value.newUnitLinks) || new Set(value.newUnitLinks).size !== value.newUnitLinks.length || value.newUnitLinks.some((path) => !unitLinkCandidates(layout).includes(path))) || value.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value.desktopIconSha256)) || value.before?.enabledRuntime !== undefined && (typeof value.before.enabledRuntime !== "boolean" || value.before.enabledRuntime && !value.before.enabled) || typeof value.before?.active !== "boolean" || typeof value.before?.enabled !== "boolean" || !snapshotValid(value.before?.receipt) || dirname63(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename12(backupDir)) || !Number.isSafeInteger(value.backupDevice) || value.backupDevice < 0 || !Number.isSafeInteger(value.backupInode) || value.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value.before.files, file) || !snapshotValid(value.before.files[file]) || value.before.files[file].present && value.before.files[file].backupPath !== join73(backupDir, `file-${index}.backup`)) || !snapshotValid(value.before.receipt) || value.before.receipt.present && value.before.receipt.backupPath !== join73(backupDir, `file-${allowedFiles.length}.backup`) || dirname63(resolve16(value.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename12(value.stagingPath)) || value.generationPath !== undefined && (dirname63(resolve16(value.generationPath)) !== join73(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename12(value.generationPath))) || value.generationCreated !== undefined && typeof value.generationCreated !== "boolean" || (value.stagingDevice !== undefined || value.stagingInode !== undefined) && (!Number.isSafeInteger(value.stagingDevice) || value.stagingDevice < 0 || !Number.isSafeInteger(value.stagingInode) || value.stagingInode <= 0) || value.generationArtifact !== undefined && (value.generationArtifact.kind !== "tree" || value.generationArtifact.path !== value.generationPath || value.generationArtifact.sha256 !== basename12(value.generationArtifact.path) || !Number.isSafeInteger(value.generationArtifact.rootDevice) || value.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value.generationArtifact.rootInode) || value.generationArtifact.rootInode <= 0 || value.generationArtifact.markerPath !== join73(value.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value.generationArtifact.markerSha256 ?? ""))) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value.phase === "qualified" || value.phase === "recovered") {
@@ -91506,7 +91506,7 @@ function restoreOptionalFile(path, snapshot) {
     removeFileDurablySync(path);
   else {
     createLinuxPrivateDirectory(dirname63(path));
-    writePrivateFileAtomicSync(path, text3);
+    writePrivateFileAtomicSync(path, text);
     chmodSync23(path, snapshot.mode ?? 384);
     syncCopiedFile(path);
     syncDirectorySync(dirname63(path));
@@ -91973,7 +91973,7 @@ function removeReleasedWorkerSocket2(layout, before, after, options) {
   const childrenPath = engineServicePaths({ ...options, platform: "linux" }).childrenPath;
   const recorded = readEngineChildren(childrenPath);
   const table = processTable(options);
-  if (existsSync61(childrenPath) && (!recorded || !table || recorded.children.some((child2) => table.some((process2) => process2.pgid === child2.pgid)))) {
+  if (existsSync61(childrenPath) && (!recorded || !table || recorded.children.some((child) => table.some((process2) => process2.pgid === child.pgid)))) {
     throw new Error("Recorded engine process custody is live or unknown; the worker socket was retained.");
   }
   if ((options.workerStopped ?? workerSocketListenerStopped)(layout.workerSocketPath) !== true)
@@ -92293,7 +92293,7 @@ function stopLinuxEngine(options) {
     const recorded = readEngineChildren(childrenPath);
     const reaped = reapRecordedEngineChildren(childrenPath, options.reap);
     const remainingTable = processTable(options);
-    if (recorded?.children.length && (!remainingTable || recorded.children.some((child2) => remainingTable.some((p) => p.pgid === child2.pgid)))) {
+    if (recorded?.children.length && (!remainingTable || recorded.children.some((child) => remainingTable.some((p) => p.pgid === child.pgid)))) {
       writePrivateFileAtomicSync(childrenPath, JSON.stringify(recorded));
       throw new Error("Recorded engine child custody remains live or unknown after cleanup. Files and child identities were retained.");
     }
@@ -92375,7 +92375,7 @@ async function rollbackLinuxEngine(options) {
     if (engineBuildIdentity(previous.program.workingDirectory) !== previous.program.build)
       throw new Error("The previous package has changed; rollback refused.");
     const receipt = readLinuxEngineReceipt(l.receiptPath);
-    for (const program of [previous.program, current2]) {
+    for (const program of [previous.program, current]) {
       const generation = dirname63(program.workingDirectory);
       const artifact = receipt?.machineArtifacts.find((entry) => entry.path === generation && entry.kind === "tree");
       if (!artifact)
@@ -92874,14 +92874,14 @@ function consultWriterContextFromPack(pack, options = {}) {
         walk(item, `${path}[]`, itemGroup, depth + 1);
       });
     } else {
-      const parentKey2 = path.slice(path.lastIndexOf(".") + 1);
-      const isMap = MAP_KEYS.has(parentKey2);
-      for (const [key2, child2] of Object.entries(value2)) {
-        const segment = isMap ? "*" : pathSegment(key2);
+      const parentKey = path.slice(path.lastIndexOf(".") + 1);
+      const isMap = MAP_KEYS.has(parentKey);
+      for (const [key, child] of Object.entries(value)) {
+        const segment = isMap ? "*" : pathSegment(key);
         const childPath = path ? `${path}.${segment}` : segment;
-        if (isMap || !SCHEMA_FIELD_NAMES.has(key2))
-          push("identifier", key2, `${childPath}#key`, group);
-        walk(child2, childPath, group, depth2 + 1);
+        if (isMap || !SCHEMA_FIELD_NAMES.has(key))
+          push("identifier", key, `${childPath}#key`, group);
+        walk(child, childPath, group, depth + 1);
       }
     }
     ancestors.delete(value);
@@ -93306,21 +93306,21 @@ function requestedPackNotLoaded(options) {
     return false;
   return (vocabularyCache.get(selectionKey(options))?.status ?? []).some((entry) => entry.origin === "user" && entry.state !== "loaded");
 }
-function verifiedPackFile(path, sha2566) {
+function verifiedPackFile(path, sha256) {
   try {
     if (!existsSync63(path))
       return "missing";
     if (statSync29(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync48(path);
-    return createHash63("sha256").update(gz).digest("hex") === sha2566 ? gz : "hash_mismatch";
+    return createHash63("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
 }
-function readPack(path, sha2566) {
+function readPack(path, sha256) {
   try {
-    const gz = verifiedPackFile(path, sha2566);
+    const gz = verifiedPackFile(path, sha256);
     if (typeof gz === "string")
       return gz;
     let bytes;
@@ -93350,8 +93350,8 @@ function consultVocabularyFileStatus(options = {}, env = process.env) {
     const userDir = consultUserVocabularyDir(env);
     const manifest = new Map(userManifestEntries(userDir));
     for (const id of selection.user) {
-      const sha2566 = manifest.get(id);
-      const result = !manifest.has(id) ? "missing" : sha2566 === undefined ? "hash_mismatch" : verifiedPackFile(join74(userDir, `${id}.txt.gz`), sha2566);
+      const sha256 = manifest.get(id);
+      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join74(userDir, `${id}.txt.gz`), sha256);
       status.push({ id, origin: "user", state: typeof result === "string" ? result : "verified" });
     }
   }
@@ -93362,8 +93362,8 @@ function loadConsultVocabulary(packs = CONSULT_VOCABULARY_PACKS, userDir = null,
   const loaded = [];
   const status = [];
   let complete = root !== undefined;
-  for (const [id, sha2566] of Object.entries(packs)) {
-    const result = root ? readPack(join74(root, ...VOCABULARY_DIR, `${id}.txt.gz`), sha2566) : "missing";
+  for (const [id, sha256] of Object.entries(packs)) {
+    const result = root ? readPack(join74(root, ...VOCABULARY_DIR, `${id}.txt.gz`), sha256) : "missing";
     if (typeof result === "string") {
       status.push({ id, origin: "shipped", state: result, words: 0 });
       complete = false;
@@ -93372,12 +93372,12 @@ function loadConsultVocabulary(packs = CONSULT_VOCABULARY_PACKS, userDir = null,
     loaded.push(result);
     status.push({ id, origin: "shipped", state: "loaded", words: result.starts.length });
   }
-  for (const [id, sha2566] of userManifestEntries(userDir)) {
+  for (const [id, sha256] of userManifestEntries(userDir)) {
     if (id in CONSULT_VOCABULARY_PACKS || userPacks !== "all" && !userPacks.includes(id))
       continue;
     if (status.filter((entry) => entry.origin === "user").length >= CONSULT_VOCABULARY_MAX_USER_PACKS)
       break;
-    const result = sha2566 === undefined ? "hash_mismatch" : readPack(join74(userDir, `${id}.txt.gz`), sha2566);
+    const result = sha256 === undefined ? "hash_mismatch" : readPack(join74(userDir, `${id}.txt.gz`), sha256);
     if (typeof result === "string") {
       status.push({ id, origin: "user", state: result, words: 0 });
       continue;
@@ -93414,8 +93414,8 @@ function userManifestEntries(userDir) {
     if (!packs || typeof packs !== "object" || Array.isArray(packs))
       return [];
     return Object.entries(packs).filter(([id]) => /^[a-z0-9-]{1,40}$/u.test(id)).map(([id, entry]) => {
-      const sha2566 = entry && typeof entry === "object" ? entry.sha256 : undefined;
-      return [id, typeof sha2566 === "string" && /^[0-9a-f]{64}$/u.test(sha2566) ? sha2566 : undefined];
+      const sha256 = entry && typeof entry === "object" ? entry.sha256 : undefined;
+      return [id, typeof sha256 === "string" && /^[0-9a-f]{64}$/u.test(sha256) ? sha256 : undefined];
     });
   } catch {
     return [];
@@ -97770,7 +97770,7 @@ import { dirname as dirname65, join as join77 } from "node:path";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync65) {
   let directory = dirname65(fileURLToPath7(moduleUrl));
-  for (let depth2 = 0;depth2 < 6; depth2 += 1) {
+  for (let depth = 0;depth < 6; depth += 1) {
     const candidate = join77(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
@@ -100135,8 +100135,8 @@ function privacyRuleToTierRule(rule) {
 }
 function privacyRuleId(rule) {
   const matched = rule.kind === "sender" ? rule.value ?? "" : rule.key ?? "";
-  const digest4 = createHash66("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
-  return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest4}`;
+  const digest = createHash66("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
+  return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest}`;
 }
 function writePrivacyProfile(update, options = {}) {
   const current = readPrivacyProfile(options);
@@ -100208,7 +100208,7 @@ function writeTierMigrationState(statePath, state) {
   writeOwnerOnlyFile(statePath, `${JSON.stringify(state, null, 2)}
 `);
 }
-function writeOwnerOnlyFile(path, text3) {
+function writeOwnerOnlyFile(path, text) {
   mkdirSync46(dirname71(path), { recursive: true, mode: 448 });
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync16(temp, text, { mode: 384 });
@@ -100231,8 +100231,8 @@ function findPlan(statePath, planId) {
     throw new OperationError("invalid_params", `No tier migration plan ${planId}.`, "Run olympus tier migrate plan.");
   return plan;
 }
-function sha2567(text3) {
-  return createHash67("sha256").update(text3, "utf8").digest("hex");
+function sha2567(text) {
+  return createHash67("sha256").update(text, "utf8").digest("hex");
 }
 function tierMigrationBatchKey(selector) {
   return sha2567(`tier-migration-batch\x00${normalizeSelector(selector)}`).slice(0, 32);
@@ -101450,10 +101450,10 @@ function purgeTargets(plan, lanes) {
       }
     }
   }
-  const copies = targets.reduce((sum2, target) => sum2 + target.superseded.length, 0);
-  const namesOnly = targets.reduce((sum2, target) => sum2 + target.namesOnly.length, 0);
-  const digest4 = sha2567(JSON.stringify(canonical({ planId: plan.planId, copies, chunks, namesOnly, namesOnlyChunks }))).slice(0, 16);
-  return { targets, chunks, namesOnlyChunks, digest: digest4 };
+  const copies = targets.reduce((sum, target) => sum + target.superseded.length, 0);
+  const namesOnly = targets.reduce((sum, target) => sum + target.namesOnly.length, 0);
+  const digest = sha2567(JSON.stringify(canonical({ planId: plan.planId, copies, chunks, namesOnly, namesOnlyChunks }))).slice(0, 16);
+  return { targets, chunks, namesOnlyChunks, digest };
 }
 function chunkCountIn(lane, corpusId, proposal) {
   const domain = lane.set.domainForCorpus(corpusId);
@@ -102981,13 +102981,8 @@ var init_tier_migration_lanes = __esm(() => {
 });
 
 // src/workers/classification/tier-migration-cli.ts
-var exports_tier_migration_cli = {};
-__export(exports_tier_migration_cli, {
-  runTierMigrateCommand: () => runTierMigrateCommand,
-  TIER_MIGRATE_USAGE: () => TIER_MIGRATE_USAGE
-});
 import { createHash as createHash68 } from "node:crypto";
-async function runTierMigrateCommand(args, context2 = {}) {
+async function runTierMigrateCommand(args, context = {}) {
   const [command, ...rest] = args;
   const flags = parseFlags(rest);
   const env = context.env ?? process.env;
@@ -104094,8 +104089,8 @@ function connectLinuxOwnerBridgeHost(path, transport) {
   let closed = false;
   const request = async (suffix, method = "GET") => {
     const workerPath = validateWorkerSocketDirectory(transport);
-    const stat3 = lstatSync36(path);
-    if (!workerPath || dirname72(path) !== dirname72(workerPath) || !/^owner-host-\d+-[a-f0-9]{12}\.sock$/.test(path.split("/").at(-1)) || !stat3.isSocket() || stat3.uid !== (transport?.uid ?? process.getuid?.()) || (stat3.mode & 511) !== 384)
+    const stat = lstatSync36(path);
+    if (!workerPath || dirname72(path) !== dirname72(workerPath) || !/^owner-host-\d+-[a-f0-9]{12}\.sock$/.test(path.split("/").at(-1)) || !stat.isSocket() || stat.uid !== (transport?.uid ?? process.getuid?.()) || (stat.mode & 511) !== 384)
       throw new Error("Unsafe owner host socket.");
     return fetch("http://localhost" + suffix, { unix: path, method, signal: AbortSignal.timeout(5000) });
   };
@@ -104229,7 +104224,7 @@ function createNativeProcessService(options) {
   const stopFailedStart = async (lifetime) => {
     let waitingReported = false;
     for (let attempt = 0;; attempt += 1) {
-      const child2 = lifetime.child;
+      const child = lifetime.child;
       try {
         if (await stopChild(lifetime) === "unconfirmed") {
           reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
@@ -104238,7 +104233,7 @@ function createNativeProcessService(options) {
       } catch {}
       if (!isCurrent(lifetime))
         return false;
-      if (!child2 || childExited(child2)) {
+      if (!child || childExited(child)) {
         reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after a failed start; retrying anyway.`);
         return true;
       }
@@ -104247,16 +104242,16 @@ function createNativeProcessService(options) {
         reportStuckDescendants(lifetime, `Olympus ${options.label} could not be stopped after a failed start; waiting for it to exit before starting another.`);
       }
       try {
-        child2.kill("SIGKILL");
+        child.kill("SIGKILL");
       } catch {}
       const index = Math.min(attempt, Math.max(restartDelaysMs.length - 1, 0));
-      await waitForChildExit(child2, restartDelaysMs[index] ?? 30000);
+      await waitForChildExit(child, restartDelaysMs[index] ?? 30000);
       if (!isCurrent(lifetime))
         return false;
     }
   };
-  const completeCleanExit = (lifetime, child2) => {
-    return stopChild(lifetime, child2).then((result) => {
+  const completeCleanExit = (lifetime, child) => {
+    return stopChild(lifetime, child).then((result) => {
       if (!isCurrent(lifetime))
         return;
       if (result === "unconfirmed") {
@@ -104290,18 +104285,18 @@ function createNativeProcessService(options) {
     reportFailure(lifetime, `Olympus ${options.label} is starting.`);
     if (!isCurrent(lifetime))
       throw new NativeProcessServiceStoppedError;
-    const child2 = spawnChild2(settings.command, [...settings.args], {
+    const child = spawnChild(settings.command, [...settings.args], {
       env: settings.env,
       stdio: childStdio === "inherit" ? ["ignore", "inherit", "inherit"] : "ignore",
       detached: process.platform !== "win32",
       ...options.workingDirectory ? { cwd: options.workingDirectory } : {}
     });
-    lifetime.child = child2;
+    lifetime.child = child;
     lifetime.childReady = false;
-    notifyChildObserver("spawned", options.id, child2.pid, [settings.command, ...settings.args]);
+    notifyChildObserver("spawned", options.id, child.pid, [settings.command, ...settings.args]);
     let spawnFailed = false;
-    child2.once("exit", (code, signal) => {
-      if (lifetime.child !== child2 || !isCurrent(lifetime) || !lifetime.childReady)
+    child.once("exit", (code, signal) => {
+      if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
         return;
       lifetime.childReady = false;
       if (lifetime.stableTimer) {
@@ -104309,12 +104304,12 @@ function createNativeProcessService(options) {
         lifetime.stableTimer = undefined;
       }
       if (!restartOnCleanExit && code === 0 && signal === null) {
-        completeCleanExit(lifetime, child2).catch(() => {
+        completeCleanExit(lifetime, child).catch(() => {
           reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
         });
         return;
       }
-      const cleanup = stopChild(lifetime, child2);
+      const cleanup = stopChild(lifetime, child);
       reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
       cleanup.then((result) => {
         if (result === "unconfirmed") {
@@ -104326,12 +104321,12 @@ function createNativeProcessService(options) {
         scheduleRestart(lifetime);
       });
     });
-    child2.once("error", () => {
+    child.once("error", () => {
       spawnFailed = true;
     });
     const outcome = await waitForChildReadiness({
       lifetime,
-      child: child2,
+      child,
       settings,
       isCurrent,
       startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
@@ -104339,13 +104334,13 @@ function createNativeProcessService(options) {
       restartOnCleanExit,
       spawnFailed: () => spawnFailed
     });
-    if (!isCurrent(lifetime) || lifetime.child !== child2)
+    if (!isCurrent(lifetime) || lifetime.child !== child)
       throw new NativeProcessServiceStoppedError;
-    if (outcome === "cleanCompletion" || !restartOnCleanExit && !spawnFailed && isCleanExit(child2)) {
-      await completeCleanExit(lifetime, child2);
+    if (outcome === "cleanCompletion" || !restartOnCleanExit && !spawnFailed && isCleanExit(child)) {
+      await completeCleanExit(lifetime, child);
       return;
     }
-    if (spawnFailed || childExited(child2))
+    if (spawnFailed || childExited(child))
       throw new Error(`Olympus ${options.label} exited during startup.`);
     lifetime.childReady = true;
     if (stableUptimeMs > 0) {
@@ -104353,7 +104348,7 @@ function createNativeProcessService(options) {
         clearTimeout(lifetime.stableTimer);
       lifetime.stableTimer = setTimeout(() => {
         lifetime.stableTimer = undefined;
-        if (isCurrent(lifetime) && lifetime.child === child2 && lifetime.childReady)
+        if (isCurrent(lifetime) && lifetime.child === child && lifetime.childReady)
           lifetime.restartAttempt = 0;
       }, stableUptimeMs);
       lifetime.stableTimer.unref?.();
@@ -104478,22 +104473,22 @@ async function readinessReceiptAfterExit(input) {
 async function terminateChild(lifetime, graceMs, settleMs, expectedChild) {
   if (lifetime.cleanupPromise)
     return await lifetime.cleanupPromise;
-  const child2 = lifetime.child;
-  if (expectedChild && child2 !== expectedChild)
+  const child = lifetime.child;
+  if (expectedChild && child !== expectedChild)
     return "stopped";
   lifetime.childReady = false;
-  if (!child2?.pid) {
-    if (lifetime.child === child2)
+  if (!child?.pid) {
+    if (lifetime.child === child)
       lifetime.child = undefined;
     return "stopped";
   }
-  const cleanup = terminateChildProcessGroup(child2, graceMs, settleMs);
+  const cleanup = terminateChildProcessGroup(child, graceMs, settleMs);
   lifetime.cleanupPromise = cleanup;
   try {
     const result = await cleanup;
-    notifyChildObserver("stopped", lifetime.serviceId, child2.pid);
+    notifyChildObserver("stopped", lifetime.serviceId, child.pid);
     lifetime.previousChildReleased = result === "stopped";
-    if (lifetime.child === child2)
+    if (lifetime.child === child)
       lifetime.child = undefined;
     return result;
   } finally {
@@ -104501,66 +104496,66 @@ async function terminateChild(lifetime, graceMs, settleMs, expectedChild) {
       lifetime.cleanupPromise = undefined;
   }
 }
-async function terminateChildProcessGroup(child2, graceMs, settleMs) {
-  const processGroupId = child2.pid;
+async function terminateChildProcessGroup(child, graceMs, settleMs) {
+  const processGroupId = child.pid;
   if (!processGroupId)
     return "stopped";
-  signalChildTree(child2, "SIGTERM");
-  await waitForChildExit(child2, graceMs);
-  const forced2 = signalChildTree(child2, "SIGKILL");
-  await waitForChildExit(child2, 1000);
-  if (!childExited(child2))
+  signalChildTree(child, "SIGTERM");
+  await waitForChildExit(child, graceMs);
+  const forced = signalChildTree(child, "SIGKILL");
+  await waitForChildExit(child, 1000);
+  if (!childExited(child))
     throw new NativeProcessChildAliveError;
   if (forced !== "denied")
     return "stopped";
-  return await settleDeniedGroup(child2, settleMs);
+  return await settleDeniedGroup(child, settleMs);
 }
-async function settleDeniedGroup(child2, settleMs) {
+async function settleDeniedGroup(child, settleMs) {
   const deadline = Date.now() + settleMs;
   for (;; ) {
-    const probe = signalChildTree(child2, 0);
+    const probe = signalChildTree(child, 0);
     if (probe === "gone")
       return "stopped";
     if (probe === "sent")
-      signalChildTree(child2, "SIGKILL");
+      signalChildTree(child, "SIGKILL");
     if (Date.now() >= deadline)
       return "unconfirmed";
     await delay(Math.min(DESCENDANT_SETTLE_POLL_MS, Math.max(deadline - Date.now(), 0)));
   }
 }
-function signalChildTree(child2, signal) {
+function signalChildTree(child, signal) {
   try {
-    if (process.platform !== "win32" && child2.pid)
-      process.kill(-child2.pid, signal);
+    if (process.platform !== "win32" && child.pid)
+      process.kill(-child.pid, signal);
     else if (signal !== 0)
-      child2.kill(signal);
+      child.kill(signal);
     return "sent";
   } catch (error) {
     const code = error.code;
     if (code === "ESRCH")
       return "gone";
-    if (code === "EPERM" && childExited(child2))
+    if (code === "EPERM" && childExited(child))
       return "denied";
     throw error;
   }
 }
-function childExited(child2) {
-  return child2.exitCode !== null || child2.signalCode !== null;
+function childExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
 }
-function isCleanExit(child2) {
-  return child2.exitCode === 0 && child2.signalCode === null;
+function isCleanExit(child) {
+  return child.exitCode === 0 && child.signalCode === null;
 }
-async function waitForChildExit(child2, timeoutMs) {
-  if (childExited(child2))
+async function waitForChildExit(child, timeoutMs) {
+  if (childExited(child))
     return;
   await new Promise((resolve) => {
     const timeout = setTimeout(done, timeoutMs);
     timeout.unref?.();
-    child2.once("exit", done);
+    child.once("exit", done);
     function done() {
       clearTimeout(timeout);
-      child2.removeListener("exit", done);
-      resolve17();
+      child.removeListener("exit", done);
+      resolve();
     }
   });
 }
@@ -104905,7 +104900,7 @@ async function prepareEmbeddingDrainStart(input, options) {
     endpointOccupied: false,
     readinessPath,
     instanceId,
-    readinessProbe: (child2) => embeddingDrainReadinessProbe(readinessPath, instanceId, child2)
+    readinessProbe: (child) => embeddingDrainReadinessProbe(readinessPath, instanceId, child)
   };
 }
 function freshPluginConfig(contextConfig, initialPluginConfig) {
@@ -104961,13 +104956,13 @@ function assertUsableFile(path, label) {
   } catch {}
   throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} file is missing.`);
 }
-async function embeddingDrainReadinessProbe(readinessPath, instanceId, child2) {
+async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
   try {
     const stat = statSync32(readinessPath);
     if (!stat.isFile() || stat.size > 16 * 1024)
       return false;
     const receipt = JSON.parse(readFileSync59(readinessPath, "utf8"));
-    return receipt.kind === "source_embedding_drain_service_readiness" && receipt.schema_version === 1 && receipt.instance_id === instanceId && receipt.pid === child2.pid && receipt.options_validated === true && receipt.content_free === true;
+    return receipt.kind === "source_embedding_drain_service_readiness" && receipt.schema_version === 1 && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.options_validated === true && receipt.content_free === true;
   } catch {
     return false;
   }
@@ -105100,10 +105095,10 @@ function createNativeWorkerService(options) {
       const probe = settings.readinessProbe;
       return {
         ...settings,
-        async readinessProbe(child2) {
-          const ready = await probe(child2);
+        async readinessProbe(child) {
+          const ready = await probe(child);
           if (ready && generation === proofGeneration)
-            readyChild = child2;
+            readyChild = child;
           return ready;
         }
       };
@@ -105466,10 +105461,10 @@ function prepareRelayStart(config, options) {
       endpointOccupied: false,
       statusDir,
       instanceId,
-      readinessProbe: async (child2) => {
-        watchExit(child2, statusDir, instanceId);
+      readinessProbe: async (child) => {
+        watchExit(child, statusDir, instanceId);
         const reported = readRemoteAccessStatus(statusDir);
-        return reported?.instance_id === instanceId && reported.pid === child2.pid;
+        return reported?.instance_id === instanceId && reported.pid === child.pid;
       }
     }
   };
@@ -105484,11 +105479,11 @@ function workerOrigin(config, env) {
   }
   return loopbackWorkerOrigin(config.email.baseUrl);
 }
-function watchExit(child2, statusDir, instanceId) {
-  if (watchedChildren.has(child2))
+function watchExit(child, statusDir, instanceId) {
+  if (watchedChildren.has(child))
     return;
-  watchedChildren.add(child2);
-  child2.once("exit", () => {
+  watchedChildren.add(child);
+  child.once("exit", () => {
     try {
       const status = readRemoteAccessStatus(statusDir);
       if (!status || status.instance_id !== instanceId || status.relay?.state === "stopped")
@@ -105605,11 +105600,11 @@ async function startEngineHost(options) {
   const recordedBeforeReap = readEngineChildren(childrenPath);
   const reaped = reapRecordedEngineChildren(childrenPath, { ...options.reap ?? {}, retainSettledRecord: true });
   if (reaped.stopped.length > 0) {
-    log(`engine: stopped ${reaped.stopped.length} process group(s) a previous engine left running (${reaped.stopped.map((child2) => child2.service).join(", ")}).`);
+    log(`engine: stopped ${reaped.stopped.length} process group(s) a previous engine left running (${reaped.stopped.map((child) => child.service).join(", ")}).`);
   }
   if (paths.linux) {
-    const workerGroups = recordedBeforeReap?.children.filter((child2) => child2.service === "olympus-worker") ?? [];
-    const workerReleased = workerGroups.length > 0 && workerGroups.every((child2) => reaped.stopped.some((entry) => entry.pgid === child2.pgid) || reaped.skipped.some((entry) => entry.pgid === child2.pgid && ["gone", "not_ours"].includes(entry.reason)));
+    const workerGroups = recordedBeforeReap?.children.filter((child) => child.service === "olympus-worker") ?? [];
+    const workerReleased = workerGroups.length > 0 && workerGroups.every((child) => reaped.stopped.some((entry) => entry.pgid === child.pgid) || reaped.skipped.some((entry) => entry.pgid === child.pgid && ["gone", "not_ours"].includes(entry.reason)));
     try {
       removeReleasedWorkerSocket({ platform: "linux", env: dataEnv }, { previousWorkerReleased: workerReleased });
     } catch (error) {
@@ -105618,7 +105613,7 @@ async function startEngineHost(options) {
       return;
     }
   }
-  const allRecordedReleased = (recordedBeforeReap?.children ?? []).every((child2) => reaped.stopped.some((entry) => entry.pgid === child2.pgid) || reaped.skipped.some((entry) => entry.pgid === child2.pgid && ["gone", "not_ours"].includes(entry.reason)));
+  const allRecordedReleased = (recordedBeforeReap?.children ?? []).every((child) => reaped.stopped.some((entry) => entry.pgid === child.pgid) || reaped.skipped.some((entry) => entry.pgid === child.pgid && ["gone", "not_ours"].includes(entry.reason)));
   if (allRecordedReleased)
     removeFileDurablySync(childrenPath);
   setNativeProcessChildObserver(engineChildrenRecorder({ path: childrenPath }));
@@ -106137,12 +106132,12 @@ function removeTokenDir(tokenDir) {
     return false;
   }
 }
-function trackServerProcess(child2, tokenDir, onExit) {
-  let exited = child2.exitCode !== null || child2.signalCode !== null;
+function trackServerProcess(child, tokenDir, onExit) {
+  let exited = child.exitCode !== null || child.signalCode !== null;
   let tokenDirPresent = true;
   const exitWaiters = new Set;
   const server = {
-    pid: child2.pid,
+    pid: child.pid,
     get exited() {
       return exited;
     },
@@ -106166,7 +106161,7 @@ function trackServerProcess(child2, tokenDir, onExit) {
       if (exited)
         return;
       try {
-        child2.kill(signal);
+        child.kill(signal);
       } catch {}
     },
     cleanupTokenDir() {
@@ -106184,9 +106179,9 @@ function trackServerProcess(child2, tokenDir, onExit) {
     onExit(server);
     server.cleanupTokenDir();
   };
-  child2.once("exit", finish);
-  child2.once("error", () => {
-    if (child2.pid === undefined)
+  child.once("exit", finish);
+  child.once("error", () => {
+    if (child.pid === undefined)
       finish();
   });
   if (exited)
@@ -121811,30 +121806,6 @@ var init_remote_result = __esm(() => {
 });
 
 // src/core/source-answer-jobs.ts
-var exports_source_answer_jobs = {};
-__export(exports_source_answer_jobs, {
-  sourceAnswerJobOwner: () => sourceAnswerJobOwner,
-  sourceAnswerJobLimitsFromEnv: () => sourceAnswerJobLimitsFromEnv,
-  isSourceAnswerPending: () => isSourceAnswerPending,
-  SourceAnswerJobRegistry: () => SourceAnswerJobRegistry,
-  SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS,
-  SOURCE_ANSWER_RESULT_WAIT_MAX_MS: () => SOURCE_ANSWER_RESULT_WAIT_MAX_MS,
-  SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS: () => SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
-  SOURCE_ANSWER_MAX_RUNNING_PER_OWNER: () => SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
-  SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING: () => SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING,
-  SOURCE_ANSWER_MAX_RUNNING_GLOBAL: () => SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
-  SOURCE_ANSWER_MAX_RETAINED_PER_OWNER: () => SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
-  SOURCE_ANSWER_MAX_RESULT_BYTES: () => SOURCE_ANSWER_MAX_RESULT_BYTES,
-  SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER: () => SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER,
-  SOURCE_ANSWER_MAX_QUEUED_OWNER: () => SOURCE_ANSWER_MAX_QUEUED_OWNER,
-  SOURCE_ANSWER_MAX_QUEUED_BACKGROUND: () => SOURCE_ANSWER_MAX_QUEUED_BACKGROUND,
-  SOURCE_ANSWER_JOB_TTL_MS: () => SOURCE_ANSWER_JOB_TTL_MS,
-  SOURCE_ANSWER_JOB_DEADLINE_MS: () => SOURCE_ANSWER_JOB_DEADLINE_MS,
-  SOURCE_ANSWER_HANDOFF_MIN_MS: () => SOURCE_ANSWER_HANDOFF_MIN_MS,
-  SOURCE_ANSWER_HANDOFF_MAX_MS: () => SOURCE_ANSWER_HANDOFF_MAX_MS,
-  SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
-  SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS: () => SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS
-});
 import { createHash as createHash69, randomBytes as randomBytes19, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
@@ -122602,8 +122573,8 @@ var init_server4 = __esm(() => {
 
 // connect-relay/shared/protocol.ts
 import { createHash as createHash70, createPublicKey, randomBytes as randomBytes20, sign, verify } from "node:crypto";
-function parseSurfacesMessage(message2) {
-  if (message2.type !== "surfaces" || message2.v !== 1 || !Array.isArray(message2.entries))
+function parseSurfacesMessage(message) {
+  if (message.type !== "surfaces" || message.v !== 1 || !Array.isArray(message.entries))
     return;
   if (message.entries.length > MAX_SURFACE_ENTRIES)
     return;
@@ -123492,21 +123463,21 @@ var init_remote_relay_runtime = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/manifest.ts
-function unslothQwen(size, revision, bytes, sha2568) {
+function unslothQwen(size, revision, bytes, sha256) {
   const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
   return {
     name,
     url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
     bytes,
-    sha256: sha2568
+    sha256
   };
 }
-function ggmlOrgAsrFile(name, bytes, sha2568) {
+function ggmlOrgAsrFile(name, bytes, sha256) {
   return {
     name,
     url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
     bytes,
-    sha256: sha2568
+    sha256
   };
 }
 function pickBuiltInReasoningModel(totalMemoryBytes, choice = "auto", models = BUILT_IN_REASONING_MODELS) {
@@ -123637,7 +123608,7 @@ import {
   writeSync as writeSync5
 } from "node:fs";
 import { dirname as dirname77, isAbsolute as isAbsolute30, join as join95 } from "node:path";
-function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
+function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform = currentPlatform2()) {
   const root = builtInReasoningRoot(env);
   return {
     root,
@@ -123892,8 +123863,8 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
     reporter.set("verifying", "Unpacking the built-in model server");
     try {
       extract(archivePath, staging);
-    } catch (error2) {
-      if (isNoSpaceError(error2)) {
+    } catch (error) {
+      if (isNoSpaceError(error)) {
         throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname77(runtimeDir)) ?? 0, "the disk filled up while unpacking");
       }
       throw new BuiltInReasoningInstallError("runtime_load_failed", `The built-in model server could not be unpacked (${error instanceof Error ? error.message : String(error)}).`);
@@ -123941,14 +123912,14 @@ function locateFile(root, name, depth = 0, prefix = "") {
   if (depth >= 2)
     return;
   for (const entry of entries) {
-    const child2 = prefix ? `${prefix}/${entry}` : entry;
+    const child = prefix ? `${prefix}/${entry}` : entry;
     try {
-      if (!statSync34(join95(root, child2)).isDirectory())
+      if (!statSync34(join95(root, child)).isDirectory())
         continue;
     } catch {
       continue;
     }
-    const found = locateFile(root, name, depth2 + 1, child2);
+    const found = locateFile(root, name, depth + 1, child);
     if (found)
       return found;
   }
@@ -123968,8 +123939,8 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     stallMs,
     verifyTimeoutMs: VERIFY_TIMEOUT_MS,
     keepPartial: true,
-    error: (reason, message2) => new BuiltInReasoningInstallError(reason, message2),
-    diskError: (error2) => isNoSpaceError(error2) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname77(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error2)}`),
+    error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
+    diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname77(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
     write: space.write,
     onStart: () => reporter.set("downloading", label),
     onProgress: (bytes) => reporter.advance(bytes, label)
@@ -126813,7 +126784,7 @@ function loadOrCreateDashboardSessionSecret(options = {}) {
   const secret = newDashboardSessionSecret();
   try {
     mkdirSync52(dirname78(path), { recursive: true, mode: 448 });
-    writePrivateFileAtomicSync(path, `${secret2}
+    writePrivateFileAtomicSync(path, `${secret}
 `);
     chmodSync28(path, 384);
     return { secret, source: existing === "missing" ? "created" : "regenerated", path };
@@ -126830,8 +126801,8 @@ var init_dashboard_session_secret = __esm(() => {
 
 // src/core/file-extraction-source.ts
 import { createHash as createHash72 } from "node:crypto";
-function isFileExtractionSourceError(value2) {
-  if (!value2 || typeof value2 !== "object")
+function isFileExtractionSourceError(value) {
+  if (!value || typeof value !== "object")
     return false;
   const candidate = value;
   return typeof candidate.errorKind === "string" && typeof candidate.settleAs === "string" && typeof candidate.retryable === "boolean" && Object.hasOwn(FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, candidate.errorKind);
@@ -128837,8 +128808,8 @@ function clampInteger(value, min, max) {
 function makeJobId() {
   return `fx_${randomUUID27()}`;
 }
-function hashString5(value2) {
-  return createHash73("sha256").update(value2).digest("hex");
+function hashString5(value) {
+  return createHash73("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -133309,8 +133280,8 @@ async function settleOneJob(input) {
     const media = staged.media;
     if (media?.stagingHolder)
       releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname81(media.path));
-  } catch (error2) {
-    console.error(`[olympus:file-extraction] media_release_failed job_id=${input.job.jobId} reason=${boundedLogErrorMessage(error2)}`);
+  } catch (error) {
+    console.error(`[olympus:file-extraction] media_release_failed job_id=${input.job.jobId} reason=${boundedLogErrorMessage(error)}`);
   }
   return outcome;
 }
@@ -133600,8 +133571,8 @@ function lostLeaseRecord(base, job) {
 function retryable(errorKind, error) {
   return { status: "failed_retryable", errorKind, errorHash: hashError(error) };
 }
-function hashError(error2) {
-  const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
+function hashError(error) {
+  const detail = error instanceof Error ? `${error.name}:${error.message}` : String(error);
   return createHash75("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error) {
@@ -133737,8 +133708,8 @@ function logPlanRefusal(corpusId, extractorKind, reason, count, error) {
   const field = error instanceof ExtractionJobFieldError ? ` field=${error.field}` : "";
   console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${corpusId} extractor_kind=${extractorKind} ` + `reason_kind=${reason}${field} candidates=${count} reason=${boundedLogErrorMessage(error)}`);
 }
-function hashToken(value2) {
-  return createHash75("sha256").update(value2).digest("hex");
+function hashToken(value) {
+  return createHash75("sha256").update(value).digest("hex");
 }
 function isScopeApprovalRefusal(error) {
   return error instanceof OperationError && error.code === "source_index_policy_violation";
@@ -133897,7 +133868,7 @@ function createTieredStoreExtractionSink(options) {
     ...tierClassification ? { tierClassification } : {},
     ...recordContentTier ? {} : { recordContentTier: false },
     ...contentRulesRan ? { secretsFloor: false } : {},
-    ...contentRulesRan ? { mediaJudgment: (sha2568) => setMediaJudgment(set2, sha2568) } : {}
+    ...contentRulesRan ? { mediaJudgment: (sha256) => setMediaJudgment(set, sha256) } : {}
   });
   return {
     async accept(request) {
@@ -134156,8 +134127,8 @@ function singleItemConnector(store, item) {
     }
   };
 }
-function parentOf(set2, anchorStore, child2) {
-  const localItemId = anchorStore.parentLocalItemIdOf(child2);
+function parentOf(set, anchorStore, child) {
+  const localItemId = anchorStore.parentLocalItemIdOf(child);
   if (!localItemId)
     return;
   for (const domain of TIER_DOMAIN_ORDER) {
@@ -134943,11 +134914,11 @@ function createUnreadableFiles(options) {
       return "blocked_policy";
     }
   }
-  function placeOf2(item) {
+  function placeOf(item) {
     return { at: item.failedAt, id: createHash76("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
   }
   function cursorOf(item) {
-    const place = placeOf2(item);
+    const place = placeOf(item);
     return `${place.at}~${place.id}`;
   }
   function isAfter(place, cursor) {
@@ -134978,7 +134949,7 @@ function createUnreadableFiles(options) {
         out.push(item);
       }
     }
-    const places = new Map(out.map((item) => [item, placeOf2(item)]));
+    const places = new Map(out.map((item) => [item, placeOf(item)]));
     return out.sort((a, b) => {
       const pa = places.get(a);
       const pb = places.get(b);
@@ -135091,7 +135062,7 @@ function createUnreadableFiles(options) {
       const at = now();
       sweep(at);
       const cursor = list.after;
-      const all = merged(corpusIds).filter((item) => !cursor || isAfter(placeOf2(item), cursor));
+      const all = merged(corpusIds).filter((item) => !cursor || isAfter(placeOf(item), cursor));
       const shown = [];
       let more = 0;
       for (const item of all) {
@@ -137147,9 +137118,9 @@ function resolveSourceWatchGatewayConnection(config, options = {}) {
 }
 async function loadOpenClawGatewayConfig(env = process.env) {
   const command = resolveOpenClawCommand2(env);
-  let child2;
+  let child;
   try {
-    child2 = Bun.spawn([command, "config", "get", "gateway", "--json"], {
+    child = Bun.spawn([command, "config", "get", "gateway", "--json"], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",
@@ -137158,11 +137129,11 @@ async function loadOpenClawGatewayConfig(env = process.env) {
   } catch {
     return;
   }
-  const timer = setTimeout(() => child2.kill(), 15000);
+  const timer = setTimeout(() => child.kill(), 15000);
   try {
     const [stdout, code] = await Promise.all([
-      new Response(child2.stdout).text(),
-      child2.exited
+      new Response(child.stdout).text(),
+      child.exited
     ]);
     if (code !== 0) {
       throw new Error("OpenClaw gateway configuration could not be resolved.");
@@ -137216,8 +137187,8 @@ function compareHits(left, right) {
 function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
-function sha2568(value2) {
-  return createHash77("sha256").update(value2, "utf8").digest("hex");
+function sha2568(value) {
+  return createHash77("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -138697,8 +138668,8 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 
 // src/workers/dashboard/components.ts
 import { createHash as createHash78 } from "node:crypto";
-function escapeHtml2(value2) {
-  return value2.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+function escapeHtml2(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 function escapeScriptJson(value) {
   return value.replaceAll("<", "\\u003c").replaceAll(">", "\\u003e").replaceAll("&", "\\u0026");
@@ -140374,9 +140345,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return node;
   }
   function add(parent, ...children) {
-    for (const child2 of children)
-      if (child2)
-        parent.appendChild(child2);
+    for (const child of children)
+      if (child)
+        parent.appendChild(child);
     return parent;
   }
   let accentUsed = false;
@@ -143055,8 +143026,8 @@ function chatgptPickerProgram(kit) {
   function trailOf(key) {
     return (p.ancestors.get(key) || []).concat([key]);
   }
-  function nameOf2(key2) {
-    const node = p.catalog.get(key2);
+  function nameOf(key) {
+    const node = p.catalog.get(key);
     if (node && typeof node.name === "string" && node.name)
       return node.name;
     const above = (p.ancestors.get(key) || []).filter((ancestor) => {
@@ -143068,8 +143039,8 @@ function chatgptPickerProgram(kit) {
   function shortPath(key) {
     const node = p.catalog.get(key);
     if (!node || typeof node.name !== "string" || !node.name)
-      return nameOf2(key2);
-    const ancestors = p.ancestors.get(key2) || [];
+      return nameOf(key);
+    const ancestors = p.ancestors.get(key) || [];
     const parent = ancestors.length ? p.catalog.get(ancestors[ancestors.length - 1]) : null;
     return parent && typeof parent.name === "string" && parent.name ? parent.name + " / " + node.name : node.name;
   }
@@ -143132,7 +143103,7 @@ function chatgptPickerProgram(kit) {
     return state ? Q.states[state] : Q.notIncluded;
   }
   function sourceName(from) {
-    return from === ACCOUNT ? wholeWord("row") : nameOf2(from);
+    return from === ACCOUNT ? wholeWord("row") : nameOf(from);
   }
   function size(bytes) {
     const units = ["bytes", "KB", "MB", "GB", "TB"];
@@ -143652,7 +143623,7 @@ function chatgptPickerProgram(kit) {
     add(body, folders);
   }
   function pathLine() {
-    const names = [p.label].concat(p.path.map((key2) => nameOf2(key2)));
+    const names = [p.label].concat(p.path.map((key) => nameOf(key)));
     const shown = names.length > 3 ? [Q.pathMore].concat(names.slice(-2)) : names;
     const head = el("h1", "fpath");
     shown.forEach((name, index) => {
@@ -143670,12 +143641,12 @@ function chatgptPickerProgram(kit) {
     const node = p.catalog.get(key);
     if (p.pick) {
       const here = el("div", "this-row pick");
-      add(here, add(el("p", "this-text"), el("span", "this-label", nameOf2(key2))));
+      add(here, add(el("p", "this-text"), el("span", "this-label", nameOf(key))));
       if (!node || node.selectable !== false)
-        add(here, pickButton(key2, nameOf2(key2), "picker:pick-this"));
+        add(here, pickButton(key, nameOf(key), "picker:pick-this"));
       add(body, here);
     } else
-      add(body, topRow(Q.thisFolder, folderControl(key2, nameOf2(key2), node)));
+      add(body, topRow(Q.thisFolder, folderControl(key, nameOf(key), node)));
     add(body, loadingLine());
     const refused = p.access.get(key);
     if (blockedByComputer(refused) && !p.loading)
@@ -144035,8 +144006,8 @@ function chatgptPickerProgram(kit) {
     const deep = p.mode === "folders" && p.path.length > 0;
     const backButton = deep ? kit.button(Q.up, "picker:up", escape2, "plain") : kit.button(p.pick ? p.pick.words.back : Q.back, "picker:back", escape2, "plain");
     if (deep) {
-      const above = p.path.length > 1 ? nameOf2(p.path[p.path.length - 2]) : p.pick ? p.label : wholeWord("row");
-      backButton.setAttribute("aria-label", fill2(Q.upTo, { name: above }));
+      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : p.pick ? p.label : wholeWord("row");
+      backButton.setAttribute("aria-label", fill(Q.upTo, { name: above }));
     }
     backButton.className = "btn back";
     add(top, backButton);
@@ -147507,21 +147478,9 @@ var init_dashboard = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-resource.ts
-var exports_dashboard_resource = {};
-__export(exports_dashboard_resource, {
-  versionedResourceUri: () => versionedResourceUri,
-  matchesResourceUri: () => matchesResourceUri,
-  dashboardResourceMeta: () => dashboardResourceMeta,
-  dashboardResourceHtml: () => dashboardResourceHtml,
-  MCP_APP_MIME_TYPE: () => MCP_APP_MIME_TYPE,
-  DASHBOARD_UI_DOMAIN: () => DASHBOARD_UI_DOMAIN,
-  DASHBOARD_RESOURCE_VERSIONED_URI: () => DASHBOARD_RESOURCE_VERSIONED_URI,
-  DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
-  DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
-});
 import { createHash as createHash79 } from "node:crypto";
-function versionedResourceUri(base, html2) {
-  return `${base}?v=${createHash79("sha256").update(html2).digest("hex").slice(0, 12)}`;
+function versionedResourceUri(base, html) {
+  return `${base}?v=${createHash79("sha256").update(html).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -148723,8 +148682,8 @@ var init_source_dispositions = __esm(() => {
 
 // src/workers/chat/chat-scope-filter.ts
 import { createHash as createHash80 } from "node:crypto";
-function parseStructuredChatScope(value2) {
-  const parts = value2.split(":");
+function parseStructuredChatScope(value) {
+  const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
     return;
   const accountScope = parts[0].trim();
@@ -148749,8 +148708,8 @@ function unresolvedChatTitleResolution(value) {
     resolved: false
   };
 }
-function safeDigest(value2) {
-  return createHash80("sha256").update(value2).digest("hex");
+function safeDigest(value) {
+  return createHash80("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -148990,15 +148949,15 @@ class GogcliEmailConnector {
 
 class SpawnCommandRunner {
   async run(command, args, options = {}) {
-    const child2 = Bun.spawn([command, ...args], {
+    const child = Bun.spawn([command, ...args], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe"
     });
     const completed = Promise.all([
-      new Response(child2.stdout).text(),
-      new Response(child2.stderr).text(),
-      child2.exited
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited
     ]).then(([stdout, stderr, code]) => ({ code, stdout, stderr }));
     const timeoutMs = options.timeoutMs;
     if (!timeoutMs)
@@ -149010,10 +148969,10 @@ class SpawnCommandRunner {
         completed,
         new Promise((resolve) => {
           termTimer = setTimeout(() => {
-            child2.kill();
+            child.kill();
             killTimer = setTimeout(() => {
-              child2.kill("SIGKILL");
-              resolve21({
+              child.kill("SIGKILL");
+              resolve({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -153744,8 +153703,8 @@ var init_locations = __esm(() => {
 import { createRequire as createRequire7 } from "node:module";
 import { existsSync as existsSync83, readFileSync as readFileSync72 } from "node:fs";
 import { dirname as dirname85, join as join109 } from "node:path";
-function watchIgnoreGlobs(context2, extra = []) {
-  const home2 = context2.home;
+function watchIgnoreGlobs(context, extra = []) {
+  const home = context.home;
   const globs = IGNORE_SEGMENTS.map((segment) => `**/${segment}`);
   globs.push(`${home}/.olympus`, `${home}/.openclaw`, `${home}/.local/share/openclaw`, `${home}/.local/share/Trash`);
   if ((context.platform ?? process.platform) === "darwin")
@@ -154609,9 +154568,9 @@ function localFilesStoreView(store, tierSet) {
     activeItemsDirectlyUnderRootIfIndexed(input) {
       const union = new Map;
       for (const domain of TIER_DOMAIN_ORDER) {
-        for (const child2 of tierSet.store(domain)?.activeItemsDirectlyUnderRootIfIndexed(input) ?? []) {
-          if (!union3.has(child2.identity.providerItemId))
-            union3.set(child2.identity.providerItemId, child2);
+        for (const child of tierSet.store(domain)?.activeItemsDirectlyUnderRootIfIndexed(input) ?? []) {
+          if (!union.has(child.identity.providerItemId))
+            union.set(child.identity.providerItemId, child);
         }
       }
       return [...union.values()];
@@ -156567,8 +156526,8 @@ function normalizeRetryAt(retryAt, completedAt) {
     ...retryAt.degradedReason ? { degradedReason: retryAt.degradedReason } : {}
   };
 }
-function hash(value2) {
-  return createHash84("sha256").update(value2).digest("hex").slice(0, 16);
+function hash(value) {
+  return createHash84("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -162394,8 +162353,8 @@ function stoppedFrom(error, relPath) {
   }
   return archiveStopFromScopeError(error, relPath);
 }
-function sha2569(value2) {
-  return createHash85("sha256").update(value2).digest("hex");
+function sha2569(value) {
+  return createHash85("sha256").update(value).digest("hex");
 }
 function headerValue(email, key) {
   const value = email.headers.find((header) => header.key === key)?.value?.trim();
@@ -162521,11 +162480,11 @@ async function messageOutcome2(input, span) {
 `)].filter((part) => part !== "").join(`
 
 `) || `Subject: ${subject}`;
-  const messageId = bareMessageId(email2.messageId ?? headerValue(email2, "message-id"));
+  const messageId = bareMessageId(email.messageId ?? headerValue(email, "message-id"));
   const messageHash = sha2569(raw);
   const providerItemId = sha2569(`${messageId ?? ""}\x00${messageHash}`).slice(0, 32);
-  const gmailThread = headerValue(email2, "x-gm-thrid");
-  const threadRoot = firstMessageId(email2.references) ?? firstMessageId(email2.inReplyTo) ?? messageId;
+  const gmailThread = headerValue(email, "x-gm-thrid");
+  const threadRoot = firstMessageId(email.references) ?? firstMessageId(email.inReplyTo) ?? messageId;
   const providerThreadId = gmailThread && /^\d+$/.test(gmailThread) ? `gm:${gmailThread}` : threadRoot ? `mid:${sha2569(threadRoot).slice(0, 24)}` : undefined;
   const item = {
     identity: {
@@ -162551,7 +162510,7 @@ async function messageOutcome2(input, span) {
       attachmentBytesDeclared: attachments.bytes,
       ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
       attachmentsNotIngested: attachments.count,
-      contentHash: sha2569(text4)
+      contentHash: sha2569(text)
     }),
     fetchedAt: new Date().toISOString()
   };
@@ -162601,7 +162560,7 @@ function createMboxArchiveConnector(input) {
                 if (pending) {
                   current();
                   input.reportPosition?.({ fileIndex, offset: splitter.position });
-                  yield { items: page2, nextCursor: cursorAt2(input, fileIndex, splitter.position), done: false };
+                  yield { items: page, nextCursor: cursorAt2(input, fileIndex, splitter.position), done: false };
                 }
                 return;
               }
@@ -162637,13 +162596,13 @@ function createMboxArchiveConnector(input) {
                 current();
                 const last = fileIndex === input.files.length - 1 && splitter.done;
                 if (last) {
-                  yield { items: page2, nextCursor: doneCursor2(input), done: true };
+                  yield { items: page, nextCursor: doneCursor2(input), done: true };
                   return;
                 }
                 input.reportPosition?.({ fileIndex, offset: splitter.position });
-                yield { items: page2, nextCursor: cursorAt2(input, fileIndex, splitter.position), done: false };
-                emitted += page2.length;
-                page2 = [];
+                yield { items: page, nextCursor: cursorAt2(input, fileIndex, splitter.position), done: false };
+                emitted += page.length;
+                page = [];
                 pending = false;
                 if (emitted >= limit || bytesRead >= byteBudget)
                   return;
@@ -162651,13 +162610,13 @@ function createMboxArchiveConnector(input) {
             }
             current();
             if (fileIndex === input.files.length - 1) {
-              yield { items: page2, nextCursor: doneCursor2(input), done: true };
+              yield { items: page, nextCursor: doneCursor2(input), done: true };
               return;
             }
             if (pending) {
               input.reportPosition?.({ fileIndex: fileIndex + 1, offset: 0 });
-              yield { items: page2, nextCursor: cursorAt2(input, fileIndex + 1, 0), done: false };
-              emitted += page2.length;
+              yield { items: page, nextCursor: cursorAt2(input, fileIndex + 1, 0), done: false };
+              emitted += page.length;
               if (emitted >= limit)
                 return;
             }
@@ -163257,7 +163216,7 @@ function cursorOf(input, place) {
     ...place.window && place.window.keys.length > 0 ? { w: [place.window.sentAt, place.window.keys] } : {},
     ...place.crc !== undefined ? { c: place.crc >>> 0 } : {}
   };
-  return `${WHATSAPP_CURSOR_PREFIX}${manifestTag3(input)}:${JSON.stringify(json2)}`;
+  return `${WHATSAPP_CURSOR_PREFIX}${manifestTag3(input)}:${JSON.stringify(json)}`;
 }
 function doneCursor3(input) {
   return `${WHATSAPP_CURSOR_PREFIX}${manifestTag3(input)}:done`;
@@ -163271,7 +163230,7 @@ function isRecord11(value) {
 function parseCursor3(input, cursor) {
   if (!cursor)
     return;
-  const invalid4 = (message2 = "The resume point is not a position in this archive.") => new ArchiveImportStoppedError("resume_point_invalid", message2);
+  const invalid = (message = "The resume point is not a position in this archive.") => new ArchiveImportStoppedError("resume_point_invalid", message);
   const prefix = `${WHATSAPP_CURSOR_PREFIX}${manifestTag3(input)}:`;
   if (!cursor.startsWith(prefix))
     throw invalid("The resume point belongs to other files than this archive's.");
@@ -163378,8 +163337,8 @@ var init_place = __esm(() => {
 
 // src/workers/archive-import/whatsapp/connector.ts
 import { createHash as createHash86 } from "node:crypto";
-function sha25610(value2) {
-  return createHash86("sha256").update(value2).digest("hex");
+function sha25610(value) {
+  return createHash86("sha256").update(value).digest("hex");
 }
 function stoppedFrom2(error, relPath) {
   if (error instanceof WhatsAppFormatError) {
@@ -163784,8 +163743,8 @@ function createWhatsAppArchiveConnector(input) {
               } else {
                 const textHash = sha25610(raw.text);
                 const sameAtTime = window2.ordinal(header.sentAt, sha25610(`${raw.sender}\x00${textHash}`).slice(0, 12));
-                run2.page.push(itemOf(unit, raw, header, textHash, sameAtTime));
-                run2.positions.push({ fileIndex: unit.fileIndex, offset: findingOffsetOf(context2, unit, raw.offset) });
+                run.page.push(itemOf(unit, raw, header, textHash, sameAtTime));
+                run.positions.push({ fileIndex: unit.fileIndex, offset: findingOffsetOf(context, unit, raw.offset) });
                 const media = whatsAppMediaMarkerCount(raw.text);
                 if (media > 0)
                   report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", raw.offset, media);
@@ -163814,10 +163773,10 @@ function createWhatsAppArchiveConnector(input) {
             flushTallies();
             context.current();
             if (isLastFile && isLastUnit) {
-              input.reportPosition?.({ fileIndex: unit.fileIndex, offset: context2.file.version.size });
-              yield { items: pageItems2(), nextCursor: doneCursor3(input), done: true };
-              run2.page = [];
-              run2.finished = true;
+              input.reportPosition?.({ fileIndex: unit.fileIndex, offset: context.file.version.size });
+              yield { items: pageItems(), nextCursor: doneCursor3(input), done: true };
+              run.page = [];
+              run.finished = true;
               return;
             }
             if (run.pending) {
@@ -163908,7 +163867,7 @@ function createWhatsAppArchiveConnector(input) {
           if (run.stopped || run.finished)
             return;
         }
-        yield { items: pageItems2(), nextCursor: doneCursor3(input), done: true };
+        yield { items: pageItems(), nextCursor: doneCursor3(input), done: true };
       }();
     },
     async fetchItem() {
@@ -164031,8 +163990,8 @@ var init_resume_crc = __esm(() => {
 
 // src/workers/archive-import/notes/note.ts
 import { createHash as createHash87 } from "node:crypto";
-function isRecord12(value2) {
-  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
+function isRecord12(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function firstString(...values) {
   for (const value of values) {
@@ -164083,8 +164042,8 @@ function cleanTags(tags) {
   }
   return out;
 }
-function sha25611(value2) {
-  return createHash87("sha256").update(value2).digest("hex");
+function sha25611(value) {
+  return createHash87("sha256").update(value).digest("hex");
 }
 function buildNoteItem(input, draft, place, savedAt) {
   const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
@@ -164101,7 +164060,7 @@ function buildNoteItem(input, draft, place, savedAt) {
 
 `);
   const providerItemId = sha25611(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
-  const contentHash = sha25611(text4);
+  const contentHash = sha25611(text);
   const item = {
     identity: {
       family: input.format.family,
@@ -168109,8 +168068,8 @@ function labelFor2(mountPoint) {
     return "Macintosh HD";
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
-function shortHash(value2) {
-  return createHash89("sha256").update(value2).digest("hex").slice(0, 16);
+function shortHash(value) {
+  return createHash89("sha256").update(value).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -168918,10 +168877,10 @@ function resolveOne(request, stores, scopes) {
   const lane = stores.filter((store) => scope ? scope.corpusIds.has(store.corpusId) : store.corpusId === request.corpusId);
   if (lane.length === 0)
     return;
-  const child2 = request.sourceItem;
+  const child = request.sourceItem;
   let parentLocalItemId;
   for (const store of lane) {
-    parentLocalItemId = store.parentLocalItemIdOf(child2);
+    parentLocalItemId = store.parentLocalItemIdOf(child);
     if (parentLocalItemId)
       break;
   }
@@ -169208,7 +169167,7 @@ function candidates(sourceId, slot, env) {
   if (sourceId === TELEGRAM_SOURCE_ID) {
     const legacyDir = dirname87(legacyTelegramSessionBase(env));
     const folderDir = dirname87(accountSessionPath(account, env));
-    const own3 = basename18(legacyTelegramSessionBase(env));
+    const own = basename18(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames(legacyDir))
       if (folderNameOfStagedTelegramLogin(name, env))
@@ -169699,10 +169658,10 @@ function revert(ctx, sourceId, slot, migration, fault) {
   checkpoint("revert");
   try {
     syncFolderChains(ctx, moves.map((move) => dirname87(absPath(ctx, move.from))));
-  } catch (error2) {
-    if (error2 instanceof AccountMigrationKilled)
-      throw error2;
-    throw new MoveFault("failed", "move_failed", `The folders the files go back to could not be made durable (${errorCode2(error2)}).`);
+  } catch (error) {
+    if (error instanceof AccountMigrationKilled)
+      throw error;
+    throw new MoveFault("failed", "move_failed", `The folders the files go back to could not be made durable (${errorCode2(error)}).`);
   }
   const back = [...moves].reverse();
   const lost = [];
@@ -170518,7 +170477,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash90("sha256").update(`${accessToken}
+    const key = createHash90("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key);
     if (known !== undefined)
@@ -170576,8 +170535,8 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash90("sha256").update(session.token).digest("hex");
-    const known = verified.get(key2);
+    const key = createHash90("sha256").update(session.token).digest("hex");
+    const known = verified.get(key);
     if (known)
       return known;
     try {
@@ -174729,7 +174688,7 @@ async function askAnonymously(input, deps) {
   if (input.model === undefined && input.callerProvider !== undefined && consultModelProvider(consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider)) === input.callerProvider) {
     return { ok: false, code: "model_same_provider", message: CONSULT_ASK_MESSAGES.configuredModelSameProvider };
   }
-  let remembered2 = false;
+  let remembered = false;
   let rememberNote;
   if (input.remember === true && input.level !== undefined) {
     if (!deps.remember) {
@@ -174742,7 +174701,7 @@ async function askAnonymously(input, deps) {
         outcome = { ok: false, message: CONSULT_ASK_MESSAGES.rememberUnavailable };
       }
       if (outcome.ok) {
-        remembered2 = true;
+        remembered = true;
         try {
           read = deps.settings();
         } catch {
@@ -174886,7 +174845,7 @@ async function askAnonymously(input, deps) {
     level,
     ...strict ? {} : { cleanup },
     rewritten,
-    remembered: remembered2,
+    remembered,
     model: sentModel,
     ...rememberNote ? { note: rememberNote } : {},
     ...input.callerProvider === "other" ? { providerNote: CONSULT_ASK_MESSAGES.providerUnknown } : {}
@@ -186334,16 +186293,6 @@ var init_redirect_uris = __esm(() => {
 });
 
 // src/workers/remote-oauth/handler.ts
-var exports_handler = {};
-__export(exports_handler, {
-  withRemoteOAuthRoutes: () => withRemoteOAuthRoutes,
-  protectedResourceMetadata: () => protectedResourceMetadata,
-  isRemoteOAuthRequest: () => isRemoteOAuthRequest,
-  createRemoteOAuthHandler: () => createRemoteOAuthHandler,
-  authorizationServerMetadata: () => authorizationServerMetadata,
-  REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
-  CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
-});
 import { createHash as createHash91, randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
@@ -186695,8 +186644,8 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash2 = sha25612(code);
-      const issued = codes.get(hash2);
+      const hash = sha25612(code);
+      const issued = codes.get(hash);
       if (!issued || issued.expiresAt <= now()) {
         codes.delete(hash);
         return oauthError(400, "invalid_grant", "The authorization code is invalid or expired.");
@@ -186713,7 +186662,7 @@ function createRemoteOAuthHandler(options) {
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
       if (!constantTimeEqual(createHash91("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
-        codes.delete(hash2);
+        codes.delete(hash);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
       if (resource !== undefined && resource !== issued.resource) {
@@ -186978,8 +186927,8 @@ function constantTimeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
-function sha25612(value2) {
-  return createHash91("sha256").update(value2).digest("hex");
+function sha25612(value) {
+  return createHash91("sha256").update(value).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -189046,17 +188995,6 @@ var init_remote_private_part = __esm(() => {
 });
 
 // src/workers/remote-openapi.ts
-var exports_remote_openapi = {};
-__export(exports_remote_openapi, {
-  withRemoteOpenApiRoutes: () => withRemoteOpenApiRoutes,
-  isRemoteOpenApiRequest: () => isRemoteOpenApiRequest,
-  createRemoteOpenApiHandler: () => createRemoteOpenApiHandler,
-  buildRemoteOpenApiSpec: () => buildRemoteOpenApiSpec,
-  REMOTE_OPENAPI_TOOLS_PREFIX: () => REMOTE_OPENAPI_TOOLS_PREFIX,
-  REMOTE_OPENAPI_SPEC_PATH: () => REMOTE_OPENAPI_SPEC_PATH,
-  REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
-  REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
-});
 import { createHash as createHash92 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
@@ -189073,8 +189011,8 @@ function createRemoteOpenApiHandler(options) {
   const currentSpec = () => {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
-      const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash92("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      const text = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
+      spec = { serverUrl, text, etag: `"${createHash92("sha256").update(text).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -189435,12 +189373,6 @@ var init_handoff = __esm(() => {
 });
 
 // src/workers/chatgpt/setup-backend.ts
-var exports_setup_backend = {};
-__export(exports_setup_backend, {
-  readChatGptPrivacySettings: () => readChatGptPrivacySettings,
-  privacyRevision: () => privacyRevision,
-  createChatGptSetupBackend: () => createChatGptSetupBackend
-});
 import { createHash as createHash93 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
@@ -189465,8 +189397,8 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest4 = createHash93("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
-  return `prv1.${digest4.slice(0, 32)}`;
+  const digest = createHash93("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  return `prv1.${digest.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
@@ -189781,14 +189713,6 @@ var init_consult_settings_writer = __esm(() => {
 });
 
 // src/workers/email-source/dashboard-consult.ts
-var exports_dashboard_consult = {};
-__export(exports_dashboard_consult, {
-  dashboardInstallView: () => dashboardInstallView,
-  createDashboardConsultAdapter: () => createDashboardConsultAdapter,
-  DASHBOARD_ZKAPI_PROFILE_ID: () => DASHBOARD_ZKAPI_PROFILE_ID,
-  DASHBOARD_ZKAPI_DEFAULT_MODEL: () => DASHBOARD_ZKAPI_DEFAULT_MODEL,
-  DASHBOARD_ZKAPI_API_KEY_ENV: () => DASHBOARD_ZKAPI_API_KEY_ENV
-});
 import { delimiter as delimiter9, dirname as dirname91 } from "node:path";
 function acknowledgementsCurrent(acknowledgements) {
   return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
@@ -196583,11 +196507,11 @@ function syncVersionTree(root) {
   syncDirectorySync(root);
 }
 function versionTreeDigest(root) {
-  const digest4 = createHash64("sha256");
-  hashVersionTree(root, "", digest4);
-  return digest4.digest("hex");
+  const digest = createHash64("sha256");
+  hashVersionTree(root, "", digest);
+  return digest.digest("hex");
 }
-function hashVersionTree(root, relativeRoot, digest4) {
+function hashVersionTree(root, relativeRoot, digest) {
   const entries = readdirSync17(root, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
     const relativePath = relativeRoot ? `${relativeRoot}/${entry.name}` : entry.name;
@@ -197195,15 +197119,15 @@ function restoreManagedFile(homeDir, path, backupPath, previousPresent, expected
     return;
   }
   assertRegularFile2(backupPath, "lifecycle backup");
-  const text3 = readFileSync54(backupPath, "utf8");
-  if (!expectedDigest || sha2566(text3) !== expectedDigest) {
+  const text = readFileSync54(backupPath, "utf8");
+  if (!expectedDigest || sha2566(text) !== expectedDigest) {
     throw new OperationError("config_error", "Lifecycle rollback backup integrity check failed.");
   }
   if (pathIsWithin(homeDir, path))
     ensurePrivateDirectoryTreeSync(homeDir, dirname67(path));
   else
     mkdirSync43(dirname67(path), { recursive: true });
-  writePrivateFileAtomicSync(path, text3);
+  writePrivateFileAtomicSync(path, text);
 }
 function isRecordedManagedPath(value) {
   return typeof value === "string" && value.trim() !== "" && isAbsolute26(value) && !/[\0\r\n]/.test(value);
@@ -197388,8 +197312,8 @@ function assertRegularFile2(path, label) {
   } catch {}
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
 }
-function sha2566(value2) {
-  return createHash65("sha256").update(value2).digest("hex");
+function sha2566(value) {
+  return createHash65("sha256").update(value).digest("hex");
 }
 
 // src/cli.ts
@@ -198069,7 +197993,7 @@ async function runEngineCommand(args, deps = {}) {
     const current = installedProgram(paths.plistPath);
     const engine = await installEngineVerified({
       ...service,
-      ...current2 ? { fromCheckout: dirname76(dirname76(current2.entryPath)), bunBin: current2.runtimePath } : {},
+      ...current ? { fromCheckout: dirname76(dirname76(current.entryPath)), bunBin: current.runtimePath } : {},
       ...deps.health ? { health: deps.health } : {}
     });
     if (engine.action === "unchanged")
@@ -198262,10 +198186,10 @@ async function probeWorker(fetchImpl, baseUrl, socket) {
 }
 async function followEngineLogs(deps, lines) {
   const paths = engineServicePaths(deps);
-  const child2 = spawn6("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
-  const reader = createInterface2({ input: child2.stdout });
-  reader.on("line", (line2) => console.log(redactLogLine(line2)));
-  await new Promise((resolve18) => child2.once("exit", () => resolve18()));
+  const child = spawn6("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
+  const reader = createInterface2({ input: child.stdout });
+  reader.on("line", (line) => console.log(redactLogLine(line)));
+  await new Promise((resolve) => child.once("exit", () => resolve()));
 }
 function parseNowArg(command, args) {
   if (args.length === 0)

@@ -14358,156 +14358,133 @@ var init_protection_claims = __esm(() => {
 });
 
 // src/workers/archive-import/byte-source.ts
-import * as zlib from "node:zlib";
-function tableCrc32(data, value) {
-  if (!crcTable) {
-    crcTable = new Int32Array(256);
-    for (let n = 0;n < 256; n += 1) {
-      let c = n;
-      for (let k = 0;k < 8; k += 1)
-        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
-      crcTable[n] = c;
-    }
-  }
-  let crc = ~value;
-  for (let index = 0;index < data.length; index += 1) {
-    crc = crcTable[(crc ^ data[index]) & 255] ^ crc >>> 8;
-  }
-  return ~crc >>> 0;
-}
-function crc32Update(value, data) {
-  if (data.length === 0)
-    return value >>> 0;
-  return nativeCrc32 ? nativeCrc32(data, value) >>> 0 : tableCrc32(data, value);
-}
-var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var ARCHIVE_SOURCE_CHUNK_BYTES;
 var init_byte_source = __esm(() => {
   ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
-  nativeCrc32 = zlib.crc32;
 });
 // node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
 var TokenType;
 var init_tokenType = __esm(() => {
-  (function(TokenType2) {
-    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
-    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
-    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
-    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
-    TokenType2[TokenType2["COLON"] = 4] = "COLON";
-    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
-    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
-    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
-    TokenType2[TokenType2["NULL"] = 8] = "NULL";
-    TokenType2[TokenType2["STRING"] = 9] = "STRING";
-    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
-    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  (function(TokenType) {
+    TokenType[TokenType["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType[TokenType["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType[TokenType["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType[TokenType["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType[TokenType["COLON"] = 4] = "COLON";
+    TokenType[TokenType["COMMA"] = 5] = "COMMA";
+    TokenType[TokenType["TRUE"] = 6] = "TRUE";
+    TokenType[TokenType["FALSE"] = 7] = "FALSE";
+    TokenType[TokenType["NULL"] = 8] = "NULL";
+    TokenType[TokenType["STRING"] = 9] = "STRING";
+    TokenType[TokenType["NUMBER"] = 10] = "NUMBER";
+    TokenType[TokenType["SEPARATOR"] = 11] = "SEPARATOR";
   })(TokenType || (TokenType = {}));
 });
 
 // node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
 var charset;
 var init_utf_8 = __esm(() => {
-  (function(charset2) {
-    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
-    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
-    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
-    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
-    charset2[charset2["TAB"] = 9] = "TAB";
-    charset2[charset2["SPACE"] = 32] = "SPACE";
-    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
-    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
-    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
-    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
-    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
-    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
-    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
-    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
-    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
-    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
-    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
-    charset2[charset2["COMMA"] = 44] = "COMMA";
-    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
-    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
-    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
-    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
-    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
-    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
-    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
-    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
-    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
-    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
-    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
-    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
-    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
-    charset2[charset2["COLON"] = 58] = "COLON";
-    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
-    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
-    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
-    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
-    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
-    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
-    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
-    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
-    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
-    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
-    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
-    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
-    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
-    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
-    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
-    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
-    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
-    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
-    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
-    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
-    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
-    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
-    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
-    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
-    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
-    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
-    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
-    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
-    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
-    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
-    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
-    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
-    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
-    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
-    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
-    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
-    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
-    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
-    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
-    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
-    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
-    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
-    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
-    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
-    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
-    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
-    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
-    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
-    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
-    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
-    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
-    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
-    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
-    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
-    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
-    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
-    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
-    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
-    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
-    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
-    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
-    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
-    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
-    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
-    charset2[charset2["TILDE"] = 126] = "TILDE";
+  (function(charset) {
+    charset[charset["BACKSPACE"] = 8] = "BACKSPACE";
+    charset[charset["FORM_FEED"] = 12] = "FORM_FEED";
+    charset[charset["NEWLINE"] = 10] = "NEWLINE";
+    charset[charset["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset[charset["TAB"] = 9] = "TAB";
+    charset[charset["SPACE"] = 32] = "SPACE";
+    charset[charset["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset[charset["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset[charset["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset[charset["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset[charset["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset[charset["AMPERSAND"] = 38] = "AMPERSAND";
+    charset[charset["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset[charset["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset[charset["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset[charset["ASTERISK"] = 42] = "ASTERISK";
+    charset[charset["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset[charset["COMMA"] = 44] = "COMMA";
+    charset[charset["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset[charset["FULL_STOP"] = 46] = "FULL_STOP";
+    charset[charset["SOLIDUS"] = 47] = "SOLIDUS";
+    charset[charset["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset[charset["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset[charset["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset[charset["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset[charset["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset[charset["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset[charset["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset[charset["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset[charset["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset[charset["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset[charset["COLON"] = 58] = "COLON";
+    charset[charset["SEMICOLON"] = 59] = "SEMICOLON";
+    charset[charset["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset[charset["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset[charset["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset[charset["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset[charset["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset[charset["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset[charset["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset[charset["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset[charset["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset[charset["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset[charset["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset[charset["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset[charset["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset[charset["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset[charset["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset[charset["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset[charset["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset[charset["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset[charset["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset[charset["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset[charset["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset[charset["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset[charset["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset[charset["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset[charset["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset[charset["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset[charset["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset[charset["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset[charset["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset[charset["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset[charset["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset[charset["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset[charset["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset[charset["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset[charset["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset[charset["LOW_LINE"] = 95] = "LOW_LINE";
+    charset[charset["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset[charset["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset[charset["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset[charset["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset[charset["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset[charset["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset[charset["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset[charset["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset[charset["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset[charset["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset[charset["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset[charset["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset[charset["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset[charset["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset[charset["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset[charset["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset[charset["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset[charset["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset[charset["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset[charset["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset[charset["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset[charset["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset[charset["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset[charset["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset[charset["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset[charset["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset[charset["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset[charset["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset[charset["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset[charset["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset[charset["TILDE"] = 126] = "TILDE";
   })(charset || (charset = {}));
 });
 
@@ -14516,38 +14493,38 @@ var TokenizerStates;
 var init_tokenizer = __esm(() => {
   init_tokenType();
   init_utf_8();
-  (function(TokenizerStates2) {
-    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
-    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
-    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
-    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
-    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
-    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
-    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
-    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
-    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
-    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
-    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
-    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
-    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
-    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
-    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
-    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
-    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
-    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
-    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  (function(TokenizerStates) {
+    TokenizerStates[TokenizerStates["START"] = 0] = "START";
+    TokenizerStates[TokenizerStates["ENDED"] = 1] = "ENDED";
+    TokenizerStates[TokenizerStates["ERROR"] = 2] = "ERROR";
+    TokenizerStates[TokenizerStates["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates[TokenizerStates["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates[TokenizerStates["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates[TokenizerStates["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates[TokenizerStates["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates[TokenizerStates["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates[TokenizerStates["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates[TokenizerStates["NULL1"] = 10] = "NULL1";
+    TokenizerStates[TokenizerStates["NULL2"] = 11] = "NULL2";
+    TokenizerStates[TokenizerStates["NULL3"] = 12] = "NULL3";
+    TokenizerStates[TokenizerStates["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates[TokenizerStates["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates[TokenizerStates["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates[TokenizerStates["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates[TokenizerStates["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates[TokenizerStates["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates[TokenizerStates["BOM"] = 30] = "BOM";
   })(TokenizerStates || (TokenizerStates = {}));
 });
 
@@ -22742,10 +22719,10 @@ function parseConsultSettings(value) {
   }
   let standardInstruction;
   if (Object.hasOwn(value, "standardInstruction")) {
-    const text3 = value.standardInstruction;
-    if (typeof text3 !== "string" || text3.trim().length === 0 || text3.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS || /\u0000/.test(text3))
+    const text = value.standardInstruction;
+    if (typeof text !== "string" || text.trim().length === 0 || text.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS || /\u0000/.test(text))
       return;
-    standardInstruction = text3;
+    standardInstruction = text;
   }
   if (standardMode === "custom" !== (standardInstruction !== undefined))
     return;
@@ -22805,14 +22782,14 @@ function parseConsultWriterChoice(value) {
     ...typeof timeoutMs === "number" ? { timeoutMs } : {}
   });
 }
-function parseConsultSettingsText(text3) {
+function parseConsultSettingsText(text) {
   let parsed;
   try {
-    parsed = JSON.parse(text3);
+    parsed = JSON.parse(text);
   } catch {
     return invalid("malformed_json");
   }
-  if (hasDuplicateObjectKey(text3))
+  if (hasDuplicateObjectKey(text))
     return invalid("duplicate_key");
   const settings = parseConsultSettings(parsed);
   return settings ? { state: "valid", settings } : invalid("invalid_shape");
@@ -22856,13 +22833,13 @@ function readConsultSettings(location = {}) {
       __consultSettingsTestHooks.afterRead?.(length);
       if (length > CONSULT_SETTINGS_MAX_BYTES)
         return invalid("too_large");
-      let text3;
+      let text;
       try {
-        text3 = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length));
+        text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length));
       } catch {
         return invalid("invalid_utf8");
       }
-      return parseConsultSettingsText(text3);
+      return parseConsultSettingsText(text);
     } finally {
       closeSync7(descriptor);
     }
@@ -22876,10 +22853,10 @@ function consultGateOptionsFromSettings(settings) {
 function invalid(reason) {
   return { state: "invalid", reason, settings: DEFAULT_CONSULT_SETTINGS };
 }
-function hasDuplicateObjectKey(text3) {
+function hasDuplicateObjectKey(text) {
   const frames = [];
-  for (let index = 0;index < text3.length; index += 1) {
-    const char = text3[index];
+  for (let index = 0;index < text.length; index += 1) {
+    const char = text[index];
     if (char === "{") {
       frames.push({ keys: new Set, expectKey: true });
     } else if (char === "[") {
@@ -22892,11 +22869,11 @@ function hasDuplicateObjectKey(text3) {
         top.expectKey = true;
     } else if (char === '"') {
       let end = index + 1;
-      while (text3[end] !== '"')
-        end += text3[end] === "\\" ? 2 : 1;
+      while (text[end] !== '"')
+        end += text[end] === "\\" ? 2 : 1;
       const top = frames.at(-1);
       if (top?.keys && top.expectKey) {
-        const key = JSON.parse(text3.slice(index, end + 1));
+        const key = JSON.parse(text.slice(index, end + 1));
         if (top.keys.has(key))
           return true;
         top.keys.add(key);
@@ -24503,9 +24480,9 @@ function ocrmypdfArguments(input) {
 function tesseractArguments(inputPath) {
   return [inputPath, "stdout", "-l", "eng", "--psm", "3"];
 }
-function probeWordRead(text3) {
+function probeWordRead(text) {
   let letters = "";
-  for (const char of text3.toUpperCase()) {
+  for (const char of text.toUpperCase()) {
     if (char >= "A" && char <= "Z" || char >= "0" && char <= "9")
       letters += char;
   }
@@ -24658,8 +24635,8 @@ async function probeOcrCapability(options = {}) {
 var ARCH_IDS2 = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
 var DEBIAN_IDS2 = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
 var FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
-function osReleaseValue2(text3, key) {
-  for (const line of text3.split(`
+function osReleaseValue2(text, key) {
+  for (const line of text.split(`
 `)) {
     const trimmed = line.trim();
     if (!trimmed.startsWith(`${key}=`))
@@ -24670,12 +24647,12 @@ function osReleaseValue2(text3, key) {
   }
   return "";
 }
-function linuxFamilyFromOsRelease2(text3) {
-  if (!text3)
+function linuxFamilyFromOsRelease2(text) {
+  if (!text)
     return "other";
   const words = [
-    osReleaseValue2(text3, "ID"),
-    ...osReleaseValue2(text3, "ID_LIKE").split(" ")
+    osReleaseValue2(text, "ID"),
+    ...osReleaseValue2(text, "ID_LIKE").split(" ")
   ].filter((word) => word.length > 0);
   for (const word of words) {
     if (ARCH_IDS2.includes(word))
@@ -25829,9 +25806,9 @@ function registerOlympusDashboardGateway(api, config, options = {}) {
   registerOAuthCallbackRoutes(api, config, fetchImpl);
 }
 function parseDashboardToolParams(value) {
-  const record2 = exactRecord(value, ["name", "arguments"]);
-  const name = enumValue(record2.name, OLYMPUS_TAB_TOOL_NAMES, "name");
-  const args = record2.arguments === undefined ? {} : record2.arguments;
+  const record = exactRecord(value, ["name", "arguments"]);
+  const name = enumValue(record.name, OLYMPUS_TAB_TOOL_NAMES, "name");
+  const args = record.arguments === undefined ? {} : record.arguments;
   if (!isRecord4(args))
     throw new DashboardGatewayInvalidRequestError("Dashboard tool arguments must be an object.");
   return { name, arguments: args };
@@ -25842,7 +25819,7 @@ async function requestDashboardTool(input) {
   if (Buffer.byteLength(encoded, "utf8") > DASHBOARD_TOOL_REQUEST_MAX_BYTES) {
     throw new DashboardGatewayInvalidRequestError("Dashboard tool request is too large.");
   }
-  const { response, text: text3 } = await boundedWorkerRequest({
+  const { response, text } = await boundedWorkerRequest({
     fetchImpl: input.fetchImpl ?? fetch,
     url: workerRootUrl(input.config, "/dashboard/tools/call"),
     init: {
@@ -25857,7 +25834,7 @@ async function requestDashboardTool(input) {
   });
   let body;
   try {
-    body = JSON.parse(text3);
+    body = JSON.parse(text);
   } catch {
     throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
   }
@@ -25878,16 +25855,16 @@ function registerPanelRoute(api, config, fetchImpl) {
   let pending;
   async function readPanel() {
     const authToken = requireWorkerAuthToken(config);
-    const { response: worker, text: text3 } = await boundedWorkerRequest({
+    const { response: worker, text } = await boundedWorkerRequest({
       fetchImpl,
       url: workerRootUrl(config, "/dashboard/panel"),
       init: { method: "GET", headers: workerHeaders(authToken), redirect: "error" },
       timeoutMs: dashboardTimeoutMs(config),
       maxResponseBytes: DASHBOARD_PANEL_MAX_BYTES
     });
-    if (worker.status !== 200 || !text3.startsWith("<!doctype html>"))
+    if (worker.status !== 200 || !text.startsWith("<!doctype html>"))
       throw new DashboardGatewayUnavailableError("panel unavailable");
-    return text3;
+    return text;
   }
   api.registerHttpRoute({
     path: OLYMPUS_DASHBOARD_PANEL_PATH,
@@ -26212,8 +26189,8 @@ async function boundedWorkerRequest(input) {
   const timer = setTimeout(() => controller.abort(new Error("dashboard timeout")), input.timeoutMs);
   try {
     const response = await input.fetchImpl(input.url, { ...input.init, signal: controller.signal });
-    const text3 = await readBoundedResponseText(response, input.maxResponseBytes, controller.signal);
-    return { response, text: text3 };
+    const text = await readBoundedResponseText(response, input.maxResponseBytes, controller.signal);
+    return { response, text };
   } catch (error) {
     if (error instanceof DashboardGatewayUnavailableError)
       throw error;
@@ -26229,7 +26206,7 @@ async function readBoundedResponseText(response, maxBytes, signal) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder;
   let total = 0;
-  let text3 = "";
+  let text = "";
   try {
     while (true) {
       const { done, value } = await untilAborted(reader.read(), signal);
@@ -26242,9 +26219,9 @@ async function readBoundedResponseText(response, maxBytes, signal) {
         });
         throw new DashboardGatewayUnavailableError("Olympus dashboard worker response is too large.");
       }
-      text3 += decoder.decode(value, { stream: true });
+      text += decoder.decode(value, { stream: true });
     }
-    return text3 + decoder.decode();
+    return text + decoder.decode();
   } catch (error) {
     if (signal.aborted && error === signal.reason) {
       throw new DashboardGatewayUnavailableError("Olympus dashboard worker is unavailable.");
