@@ -18391,6 +18391,7 @@ var init_parent_context = __esm(() => {
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
   init_tier_ledger();
+  init_local_index();
 });
 
 // src/workers/embedding-ledger.ts
@@ -18523,6 +18524,7 @@ var init_tier_move = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_secrets_disposition();
+  init_job_names();
   init_tier_placement();
 });
 

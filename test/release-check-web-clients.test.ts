@@ -211,8 +211,8 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
       await Bun.sleep(250);
     }
     throw new Error('the test browser did not start');
-  // Longer than the 15 s start wait above: under Bun's 5 s hook default a slow
-  // browser start failed the hook before the wait could finish.
+    // The wait above allows the browser 15 s to start; the hook's own limit
+    // must not end it at Bun's default 5 s on a loaded runner.
   }, 20_000);
   afterAll(() => {
     server?.stop(true);
