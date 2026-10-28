@@ -83,7 +83,7 @@ describe('a pass through the tier lane', () => {
   test('stores the notes, records the pass only once it completed, and reads nothing unchanged again', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     const book = fake.addNotebook('Field work');
-    fake.addNote({ title: 'Survey', created: day(2024), notebookId: book.id, body: '<en-note>River survey</en-note>', tags: ['river'] });
+    const survey = fake.addNote({ title: 'Survey', created: day(2024), notebookId: book.id, body: '<en-note>River survey</en-note>', tags: ['river'] });
     const gone = fake.addNote({ title: 'Draft', created: day(2024, 2), notebookId: book.id, body: '<en-note>Draft</en-note>' });
     fake.addNote({ title: 'Shared with me', created: day(2024, 3) });
     const { sync, runtime } = await connected(fake);
@@ -94,6 +94,11 @@ describe('a pass through the tier lane', () => {
     expect(sync.status()).toMatchObject({ counts: { notes_listed: 3, shared_not_imported: 1 } });
     expect(sync.status()?.last_completed_at).toBeDefined();
     expect(runtime.dashboardPass()).toMatchObject({ notes: 3, notebooks: 1, shared_not_imported: 1 });
+    // No source-level tier: an ordinary note is judged by its own content and rests in the Personal store.
+    const identity = { provider: 'evernote', accountScope: 'personal', providerItemId: survey.id };
+    const lane = runtime.existingLane()!;
+    expect(lane.internal.open().storedItemState(identity)).toMatchObject({ tombstoned: false });
+    expect(lane.secure.open().storedItemState(identity)?.tombstoned ?? true).toBe(true);
 
     const second = await sync.pass();
     expect(second.counts).toMatchObject({ notes_read: 0, notes_unchanged: 2, items_indexed: 0 });
