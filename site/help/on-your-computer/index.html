@@ -57,6 +57,24 @@
       <p>Google sign-in happens on the computer where Olympus runs, so your Google account connects straight to it. In ChatGPT, <strong>Connect</strong> gives you a link: open it on that computer and it continues to Google. On a phone the link says to open it on your computer instead; Gmail and Google Drive cannot be connected from a phone. If Olympus runs on a computer you reach over SSH, see <a href="#headless">On a Linux computer without a screen</a>.</p>
       <p>If you connected Google with a version of Olympus before 1.0.0, choose <strong>Reconnect Google</strong> in the dashboard after you update: the old sign-in service is retired, so the old connection can no longer renew.</p>
 
+      <h3 id="google-unverified">Google says it hasn't verified this app</h3>
+      <p>When you connect Gmail or Google Drive, Google may show <strong>Google hasn't verified this app</strong>. That is expected: Olympus's Google app has not been through Google's review yet, which is a paid security assessment for any app that reads mail or files. Olympus asks only to read, and only the source you chose: Gmail asks for your mail, Google Drive for your files, each separately. What it reads stays on your computer.</p>
+      <p>To continue, choose <strong>Advanced</strong>, then <strong>Go to Olympus (unsafe)</strong>, then allow access on the next page. If you would rather not, choose <strong>Back to safety</strong>; nothing is connected, and you can <a href="#google-own-app">use your own Google app</a> instead.</p>
+
+      <h3 id="google-own-app">If Google won't let you connect: use your own Google app</h3>
+      <p>Until it is reviewed, Google lets Olympus's Google app sign in at most 100 people in total. Once it is full, Google stops new people on its own page and you never get back to Olympus. You can still connect Gmail and Drive with a Google app of your own. It takes about ten minutes, is free, and Google then shows your own address on its warning, not ours.</p>
+      <ol>
+        <li>Open <a href="https://console.cloud.google.com/projectcreate">Google Cloud</a> with your Google account and create a project called Olympus.</li>
+        <li>Turn on the <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com">Gmail API</a> and the <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com">Google Drive API</a> for that project. Without them, syncing fails.</li>
+        <li>Open <a href="https://console.cloud.google.com/auth/overview">Google Auth Platform</a>, choose <strong>Get started</strong>, name the app Olympus, give your own email for support and contact, and choose <strong>External</strong>.</li>
+        <li>Under <strong>Audience</strong>, choose <strong>Publish app</strong>. If you leave it in Testing, Google ends the connection every 7 days.</li>
+        <li>Under <strong>Clients</strong>, choose <strong>Create client</strong>, pick <strong>Desktop app</strong>, name it Olympus, and keep the <strong>Client ID</strong> and <strong>Client secret</strong> it shows. Google needs both when it hands the connection to Olympus.</li>
+        <li>On the computer running Olympus, open a terminal and run, with your Client ID:
+          <pre><code>olympus connect gmail --client-id YOUR-CLIENT-ID --client-secret-stdin --detach</code></pre>
+          It waits for the secret: paste your Client secret, press Return, then press Control-D. The secret stays on your computer. Then sign in and allow access on the Google page it opens (or open the <code>authorizationUrl</code> it prints). Use <code>google-drive</code> instead of <code>gmail</code> for Drive. <code>olympus connect status gmail</code> says <strong>connected</strong> when it worked.</li>
+      </ol>
+      <p>Google still shows its unverified-app warning for your own app, now naming you as the developer. Continue the same way.</p>
+
       <h2 id="connect">Connect your sources</h2>
       <p>Every source can be connected from the Olympus dashboard on your computer. In ChatGPT, Dropbox can also be connected from the Olympus dashboard there, and <strong>Connect</strong> next to Gmail or Google Drive gives you a link to open on your computer (see <a href="#google">Connect Gmail or Google Drive</a>). These are only ever connected on your computer:</p>
       <ul>

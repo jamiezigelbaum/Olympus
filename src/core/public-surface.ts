@@ -137,6 +137,7 @@ export const V0_4_PUBLIC_SOURCE_IDS = [
   'telegram.messages',
   'whatsapp.personal.messages',
   'readwise.library',
+  'evernote.notes',
 ] as const;
 
 export const V0_4_PUBLIC_CLI_COMMANDS = [

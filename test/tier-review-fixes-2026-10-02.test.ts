@@ -810,42 +810,6 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
     // The routed Secret has no copy rows left: hidden, never mistaken for legacy.
     expect(gate([hit, legacy] as never) as unknown[]).toEqual([legacy]);
   });
-
-  test('an owner override lowers an item out of a lane whose items rest Private (the floor yields to the owner only)', async () => {
-    const { dir, cleanup } = (() => {
-      const path = mkdtempSync(join(tmpdir(), 'olympus-tier-floor-'));
-      return { dir: path, cleanup: () => rmSync(path, { recursive: true, force: true }) };
-    })();
-    closers.push(cleanup);
-    const paths = fixtureStorePaths(dir);
-    const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local) });
-    const internal = openLegStore(paths, 'internal', ledger);
-    const secure = openLegStore(paths, 'secure_local', ledger);
-    closers.push(() => { internal.close(); secure.close(); ledger.close(); });
-    const set = new TieredStoreSet({
-      setId: 'fixture.chat',
-      ledger,
-      splitLayers: false,
-      laneFloor: { trustDomain: 'secure_local', liftedByOwnerRule: ['chat'] },
-      registerWithLedger: false,
-      legs: [
-        { trustDomain: 'internal', corpusId: CORPORA.internal, store: internal, embeddingProvider: cloudProvider() },
-        { trustDomain: 'secure_local', corpusId: CORPORA.secure_local, store: secure, embeddingProvider: localProvider() },
-      ],
-    });
-    await set.sync(fixtureConnector(() => [{ id: 'm1', name: 'garden chat.txt', text: 'Seed order for the spring beds.' }]));
-    const m1 = fixtureIdentityOf('m1');
-    expect(currentCopies(ledger, m1)).toEqual([CORPORA.secure_local]);
-
-    ledger.setOverride(m1, { kind: 'tier', tier: 'private' });
-    expect(applyOwnerOverrides({ set })).toMatchObject({ lowered: 1 });
-    // As the automatic moves call it: target tiers only.
-    await moveTieredItem({ set, identity: m1, target: { metadataTier: 'private', contentTier: 'private' } });
-    expect(currentCopies(ledger, m1)).toEqual([CORPORA.internal]);
-    expect(ledger.getCurrent(m1)).toMatchObject({ state: 'current', contentTier: 'private', decidedBy: 'override' });
-    // Settled: no move queued again.
-    expect(applyOwnerOverrides({ set })).toMatchObject({ lowered: 0, updated: 0, raised: 0 });
-  });
 });
 
 describe('12c. owner overrides under interleaving, round 2 (review of PR #255)', () => {

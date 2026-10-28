@@ -6,12 +6,13 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ArchiveImportFinding } from '../src/core/archive-formats.ts';
 import type { SourceConnector } from '../src/core/contracts.ts';
 import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { archiveFileEntries, archiveManifestSha256, buildArchiveManifest } from '../src/workers/archive-import/manifest.ts';
 import { holdingItems } from '../src/workers/archive-import/source-input.ts';
 import { WHATSAPP_ARCHIVE_FORMAT } from '../src/core/archive-formats.ts';
@@ -79,7 +80,7 @@ function lane(): Lane {
   const store = new LocalConnectorStore({ dbPath: join(root, 'whatsapp.db'), corpusId: WHATSAPP_LIVE_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
   const tier = createWhatsAppTierLane({
     store,
-    env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'whatsapp-internal.db') },
+    env: { HOME: join(root, 'home') },
   });
   closers.push(() => {
     tier.newStores.internal?.current()?.close();
@@ -145,17 +146,21 @@ interface Row {
   tombstoned: number;
 }
 
+/** The lane's rows across its tier stores (each message goes where its content puts it), in the order they were first stored. */
 function rows(target: Lane): Row[] {
-  const db = new Database(join(target.root, 'whatsapp.db'), { readonly: true });
-  try {
-    return db.query(`
-      SELECT provider_item_id AS id, provider_conversation_id AS conversation, source_version AS version,
-        parent_local_item_id AS parent, deferred_locator AS locator, tombstoned
-      FROM items ORDER BY item_pk
-    `).all() as Row[];
-  } finally {
-    db.close();
-  }
+  const internal = resolvedStorePath('whatsapp.personal.messages', 'internal', { HOME: join(target.root, 'home') });
+  return [join(target.root, 'whatsapp.db'), internal].filter((path) => existsSync(path)).flatMap((path) => {
+    const db = new Database(path, { readonly: true });
+    try {
+      return db.query(`
+        SELECT provider_item_id AS id, provider_conversation_id AS conversation, source_version AS version,
+          parent_local_item_id AS parent, deferred_locator AS locator, tombstoned, indexed_at AS seen
+        FROM items ORDER BY item_pk
+      `).all() as Array<Row & { seen: string }>;
+    } finally {
+      db.close();
+    }
+  }).sort((a, b) => a.seen.localeCompare(b.seen)).map(({ seen: _seen, ...row }) => row);
 }
 
 function activeIds(target: Lane): string[] {

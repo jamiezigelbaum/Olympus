@@ -58,7 +58,7 @@ describe('olympus:// targets', () => {
     expect(paths).toEqual([
       'dashboard',
       'private',
-      'connect/x', 'connect/readwise', 'connect/telegram', 'connect/whatsapp',
+      'connect/x', 'connect/readwise', 'connect/telegram', 'connect/whatsapp', 'connect/evernote',
       'fix/connect', 'fix/reconnect', 'fix/answers', 'fix/search', 'fix/models',
       'unreadable/dropbox', 'unreadable/drive', 'unreadable/whatsapp',
       'archives',

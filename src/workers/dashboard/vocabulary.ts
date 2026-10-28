@@ -15,7 +15,7 @@ import type {
   DashboardSourceCard,
   SourceDashboardViewModel,
 } from '../source-dashboard.ts';
-import type { DashboardSyncName } from '../source-dashboard.ts';
+import type { DashboardLivePassErrorKind, DashboardSyncName } from '../source-dashboard.ts';
 import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, DASHBOARD_UNSETTLED_CUSTODY_LABELS } from '../source-dashboard.ts';
 import { ARCHIVE_FORMATS } from '../../core/archive-formats.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
@@ -1249,7 +1249,8 @@ function freshLine(source: DashboardSourceCard, now: Date): string {
   // found in place of the bare sync time.
   const manual = dashboardManualSyncLine(source, now);
   const capture = dashboardCaptureClause(source);
-  const tail = [unreadable, capture].filter((part): part is string => !!part).join(' · ');
+  const pass = dashboardLivePassClause(source);
+  const tail = [pass, unreadable, capture].filter((part): part is string => !!part).join(' · ');
   if (manual) return tail ? `${manual} · ${tail}` : manual;
   const hours = source.freshness.hours;
   if (typeof hours !== 'number' || !Number.isFinite(hours)) return tail;
@@ -1260,6 +1261,32 @@ function freshLine(source: DashboardSourceCard, now: Date): string {
   // page's paused sentence for the same marker.
   const synced = dashboardOperatorPaused(source) ? `synced ${relative} · sync paused` : `synced ${relative}`;
   return tail ? `${synced} · ${tail}` : synced;
+}
+
+/** What stopped a source's latest pass, in words (`DashboardLivePass.error`). */
+export const DASHBOARD_LIVE_PASS_ERROR_COPY: Readonly<Record<DashboardLivePassErrorKind, string>> = Object.freeze({
+  auth: 'the last check could not sign in',
+  rate_limited: 'the last check was slowed by the provider and resumes on its own',
+  listing_incomplete: 'the last check could not list every note, so nothing was changed',
+  account_changed: 'the last check found a different Evernote account than the notes stored here, so nothing was changed: reconnect the earlier account, or delete this card\'s indexed data first',
+  unavailable: 'the last check could not reach the provider',
+});
+
+/**
+ * A pass-read source's last pass: "1,204 notes in 12 notebooks · 3 shared
+ * with you, not imported", and what stopped a later pass. Undefined before
+ * the first pass.
+ */
+export function dashboardLivePassClause(source: Pick<DashboardSourceCard, 'live_pass'>): string | undefined {
+  const pass = source.live_pass;
+  if (!pass) return undefined;
+  const parts: string[] = [];
+  if (pass.completed_at) {
+    parts.push(`${dashboardCount(pass.notes)} ${pass.notes === 1 ? 'note' : 'notes'} in ${dashboardCount(pass.notebooks)} ${pass.notebooks === 1 ? 'notebook' : 'notebooks'}`);
+    if (pass.shared_not_imported > 0) parts.push(`${dashboardCount(pass.shared_not_imported)} shared with you, not imported`);
+  }
+  if (pass.error) parts.push(DASHBOARD_LIVE_PASS_ERROR_COPY[pass.error.kind]);
+  return parts.length > 0 ? parts.join(' · ') : undefined;
 }
 
 /**

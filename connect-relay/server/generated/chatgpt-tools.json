@@ -614,6 +614,7 @@
               "dropbox.files",
               "x.bookmarks",
               "readwise.library",
+              "evernote.notes",
               "local.files"
             ]
           }
@@ -659,6 +660,7 @@
               "dropbox.files",
               "x.bookmarks",
               "readwise.library",
+              "evernote.notes",
               "local.files",
               "telegram.messages",
               "whatsapp.personal.messages"
@@ -914,6 +916,7 @@
               "dropbox.files",
               "x.bookmarks",
               "readwise.library",
+              "evernote.notes",
               "local.files"
             ]
           }

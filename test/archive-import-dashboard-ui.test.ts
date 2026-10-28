@@ -821,7 +821,7 @@ describe('Reflect, Roam and Evernote: import-only sources with cards of their ow
     expect(page.text()).toContain('an Evernote export');
     choose(page, 'picker:drop:file-input', [{ path: 'Field notes.enex' }]);
     await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes('Importing Field notes.enex into Evernote.'));
-    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)[0]!.arguments).toEqual({ upload_id: page.uploads()[0]!.upload_id, source_id: 'evernote.archive' });
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)[0]!.arguments).toEqual({ upload_id: page.uploads()[0]!.upload_id, source_id: 'evernote.notes' });
     expect(page.text()).toContain('Importing Field notes.enex into Evernote. It shows in Evernote as it is read.');
   });
 

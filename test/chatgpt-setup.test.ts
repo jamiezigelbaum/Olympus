@@ -868,7 +868,7 @@ describe('setup tools over the remote handler', () => {
       expect(tool._meta).toMatchObject({ 'openai/visibility': 'private', ui: { visibility: ['app'] }, 'openai/widgetAccessible': true });
       expect(tool.annotations).toEqual({ readOnlyHint: false, destructiveHint: false, openWorldHint: false });
       expect(tool.inputSchema).toMatchObject({
-        properties: { source_id: { enum: ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'local.files'] } },
+        properties: { source_id: { enum: ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes', 'local.files'] } },
         required: ['source_id'],
       });
 

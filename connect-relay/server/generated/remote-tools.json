@@ -70,7 +70,9 @@
               "public_safe.local.files",
               "secure_local.telegram.protected.messages",
               "secure_local.whatsapp.messages",
-              "internal.whatsapp.messages"
+              "internal.whatsapp.messages",
+              "secure_local.evernote.notes",
+              "internal.evernote.notes"
             ]
           },
           "corpus_ids": {
@@ -224,7 +226,9 @@
               "public_safe.local.files",
               "secure_local.telegram.protected.messages",
               "secure_local.whatsapp.messages",
-              "internal.whatsapp.messages"
+              "internal.whatsapp.messages",
+              "secure_local.evernote.notes",
+              "internal.evernote.notes"
             ]
           },
           "approved_scope_key": {

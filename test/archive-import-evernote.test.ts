@@ -7,6 +7,7 @@
 // code, never a real one.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -146,6 +147,31 @@ describe('listing', () => {
     // What Evernote read is never in an item's metadata, which is not judged as content: it comes with the bytes.
     expect(JSON.stringify(items.map((item) => item.metadata))).not.toContain('noon');
     expect(findings).toEqual([]);
+  });
+
+  test('an attachment is keyed by the MD5 of its bytes, a repeat by its ordinal; the notebook is the folder key of note and attachment', async () => {
+    const twice: EnexNote[] = [{
+      title: 'Receipts',
+      enml: '<div>two copies</div>',
+      created: '20240104T080000Z',
+      resources: [
+        { mime: 'image/png', fileName: 'a.png', bytes: pngBytes(3) },
+        { mime: 'image/png', fileName: 'b.png', bytes: pngBytes(4) },
+        { mime: 'image/png', fileName: 'a-again.png', bytes: pngBytes(3) },
+      ],
+    }];
+    const { connector } = connectorOver('Tax 2024.enex', enexExport(twice));
+    const { items } = await listAll(connector);
+    const [note, first, second, again] = items as [RawItem, RawItem, RawItem, RawItem];
+    const md5 = (bytes: Uint8Array): string => createHash('md5').update(bytes).digest('hex');
+    const keys = [first, second, again].map((child) => child.identity.providerItemId.slice(`${note.identity.providerItemId}#child:`.length));
+    expect(keys).toEqual([md5(pngBytes(3)), md5(pngBytes(4)), `${md5(pngBytes(3))}.2`]);
+    expect(first.metadata['md5']).toBe(md5(pngBytes(3)));
+    // Listing the same file again names every attachment the same.
+    const relisted = await listAll(connectorOver('Tax 2024.enex', enexExport(twice)).connector);
+    expect(relisted.items.map((item) => item.identity.providerItemId.split('#child:')[1])).toEqual([undefined, ...keys]);
+    for (const item of [note, first, again]) expect(connector.classificationSignals(item).folderKeys).toEqual(['Tax 2024']);
+    expect(connector.classificationSignals(note).labels).toBeUndefined();
   });
 
   test('an attachment\'s bytes, read from its place: whole, within a ceiling, and refused for other files', async () => {

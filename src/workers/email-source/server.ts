@@ -295,6 +295,9 @@ import {
   type OnDemandTierStore,
   type TieredStoreSet,
 } from '../connector-store/tiered-store-set.ts';
+import { EVERNOTE_SOURCE_ID } from '../evernote/connector.ts';
+import { EVERNOTE_SYNC_CAPABILITY } from '../evernote/live-sync.ts';
+import { createEvernoteRuntime } from '../evernote/runtime.ts';
 import {
   READWISE_SECURE_LIBRARY_CORPUS_ID,
   createReadwiseTierLane,
@@ -578,28 +581,18 @@ export function createWorkerMessagingCaptureOwnership(options: {
  * One pass over the sources this worker runs capture for. Each source is
  * reconciled on its own: one that throws (no Python, a missing executable) is
  * recorded as a failure for the dashboard and does not stop the others, and a
- * failure clears when a later reconcile succeeds. `stopAll` is the posture
- * that forbids capture altogether (secure-local routes off): every helper is
- * stopped and reported stopped, as before.
+ * failure clears when a later reconcile succeeds. No privacy policy stops
+ * capture: each captured message is tiered by its own content, like any
+ * other source's items.
  */
 export async function reconcileWorkerCaptures(input: {
   captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
   statuses: Partial<Record<MessagingCaptureSource, MessagingCaptureStatus>>;
   failures: Partial<Record<MessagingCaptureSource, true>>;
-  stopAll?: boolean;
   warn?: (message: string) => void;
 }): Promise<void> {
   const warn = input.warn ?? ((message: string) => console.warn(message));
   const entries = Object.entries(input.captures) as Array<[MessagingCaptureSource, WorkerMessagingCaptureSupervisor]>;
-  if (input.stopAll) {
-    await Promise.all(entries.map(async ([source, capture]) => {
-      await capture.stop();
-      input.statuses[source] = { source, state: 'stopped' };
-      // An earlier failure to start is moot once capture is stopped on purpose.
-      delete input.failures[source];
-    }));
-    return;
-  }
   await Promise.all(entries.map(async ([source, capture]) => {
     try {
       input.statuses[source] = await capture.reconcile();
@@ -2379,8 +2372,6 @@ export async function main(): Promise<void> {
         captures,
         statuses: captureStatuses,
         failures: captureFailures,
-        stopAll: sovereigntyEngine.config.routes.secure_local?.mode === 'disabled'
-          || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap',
       });
     } finally { captureReconcileRunning = false; }
   };
@@ -3269,10 +3260,8 @@ export async function main(): Promise<void> {
   const whatsappConnectorStore = whatsappConnectorStoreLane.enabled
     ? createWhatsAppConnectorStore(process.env)
     : undefined;
-  // Per-tier stores (P1c), failing closed: every message rests Private in the
-  // lane's own store unless an OWNER chat rule set its chat to Personal (rule
-  // loading is phase P2, so none does yet), and then only a message its own
-  // text keeps Personal goes to the Personal store.
+  // Per-tier stores (P1c): each message is tiered by its own content; Private
+  // ones rest in the lane's own store and Personal ones in the Personal store.
   const whatsappSecretLocations = whatsappConnectorStore
     ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID)
     : undefined;
@@ -3903,6 +3892,35 @@ export async function main(): Promise<void> {
     if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes();
   } catch (error) {
     console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.name : 'error'}`);
+  }
+  // Evernote's account, read in passes over its MCP server (workers/evernote/):
+  // its lane opens when an account is connected or a previous one left stores,
+  // and is adopted like every other lane's.
+  const evernote = createEvernoteRuntime({
+    env: process.env,
+    secretStore: () => lazySecretStore(process.env),
+    registryPath: connectedHandleRegistryPath!,
+    extractors: fileExtractionExtractors,
+    openSecretLocations: (secureDbPath) => openTierSecretLocations({ sourceId: EVERNOTE_SOURCE_ID }, secureDbPath, 'Evernote'),
+    onLane: (lane) => {
+      if (tierSecureEmbeddingProvider) lane.set.declarePrivateEmbedder(tierSecureEmbeddingProvider);
+      adoptTierLane({
+        ledger: lane.ledger,
+        secureCorpusId: lane.secure.corpusId,
+        corpusIds: [lane.secure.corpusId, lane.internal.corpusId],
+        onDemand: [lane.secure, lane.internal],
+      });
+    },
+    onStoreOpened: (store) => registerTierLegStore(
+      store,
+      store.corpusId,
+      store.trustDomain === 'secure_local' ? tierSecureEmbeddingProvider ?? null : sourceIndexEmbeddingProvider ?? null,
+    ),
+  });
+  try {
+    if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID })) evernote.existingLane();
+  } catch (error) {
+    console.warn(`[evernote] the Evernote stores are not served this run: ${error instanceof Error ? error.name : 'error'}`);
   }
   // Reading the child items an import listed by name (an attachment, a photo): the shared
   // extraction factory over the archive lanes' stores, built on first use and again when a
@@ -5018,6 +5036,22 @@ export async function main(): Promise<void> {
           ...(whatsappLiveMaxItems !== undefined ? { maxItems: whatsappLiveMaxItems } : {}),
         }),
       ),
+      (() => {
+        const handle = selectedSourceCredentialHandle({
+          env: process.env,
+          pinEnvName: 'OLYMPUS_SOURCE_INDEX_EVERNOTE_CREDENTIAL_HANDLE',
+          provider: 'evernote',
+          capability: EVERNOTE_SYNC_CAPABILITY,
+          handles,
+        });
+        // A sign-in the provider refused waits for Reconnect rather than failing every hour.
+        const usable = handle && handle.backendState?.status !== 'reauth_required' ? handle : undefined;
+        return recordLane(
+          SCHEDULER_SOURCE_IDS.evernote,
+          usable ? undefined : 'no_handle',
+          () => evernote.schedulerSource({ config: olympusConfig, handle: usable! }),
+        );
+      })(),
       recordLane(
         SCHEDULER_SOURCE_IDS.archiveImports,
         undefined,
@@ -5666,6 +5700,10 @@ export async function main(): Promise<void> {
             loopbackPort: port,
             ...(fileSourceScopes ? { fileSourceScopes } : {}),
             archiveImports: archiveImportDashboard,
+            livePasses: () => {
+              const pass = evernote.dashboardPass();
+              return pass ? { 'evernote.notes': pass } : {};
+            },
             enforceConnectedSourceReads: true,
             // The filter applies to the override too. An override is a caller
             // saying which handles changed, never a claim that an unpaired

@@ -707,6 +707,7 @@ function sourceIdsForProvider(provider: string): string[] {
     case 'dropbox': return ['dropbox.files'];
     case 'x': return ['x.bookmarks'];
     case 'readwise': return ['readwise.library'];
+    case 'evernote': return ['evernote.notes'];
     case 'venice': return ['venice.api'];
     default: return [];
   }

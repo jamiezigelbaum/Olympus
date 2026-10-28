@@ -559,14 +559,14 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     expect(first.map((item) => item.identity)).toEqual(second.map((item) => item.identity));
   });
 
-  test('signals keep live chat history at a Private resting prior', async () => {
+  test('signals publish no source-level prior: each message is tiered by its content', async () => {
     const dir = makeSpoolDir({
       '2026-06-11.jsonl': spoolLine({ id: 'a1' }) + spoolLine({ id: 'media-1', text: '', media_type: 'image' }),
     });
     const connector = connectorFor(dir);
     for (const item of await drainItems(connector)) {
       const signals = connector.classificationSignals(item);
-      expect(signals.prior).toEqual({ tier: 'secure', strength: 'prior', basis: 'source_default:trust_domain:secure_local' });
+      expect(signals.prior).toBeUndefined();
     }
   });
 

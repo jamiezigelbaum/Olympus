@@ -34,13 +34,13 @@
     {
       "host_os": "darwin_arm64",
       "host_surface": "openclaw",
-      "source_ids": ["gmail.email", "google_drive.docs", "dropbox.files", "local.files", "archive.imports", "x.bookmarks", "telegram.messages", "whatsapp.personal.messages", "readwise.library"],
+      "source_ids": ["gmail.email", "google_drive.docs", "dropbox.files", "local.files", "archive.imports", "x.bookmarks", "telegram.messages", "whatsapp.personal.messages", "readwise.library", "evernote.notes"],
       "checks": ["install", "lifecycle", "dashboard_states", "dependencies", "inventory", "upgrade", "rollback", "uninstall"]
     },
     {
       "host_os": "linux_x64_ubuntu_lts",
       "host_surface": "openclaw",
-      "source_ids": ["gmail.email", "google_drive.docs", "dropbox.files", "local.files", "archive.imports", "x.bookmarks", "telegram.messages", "whatsapp.personal.messages", "readwise.library"],
+      "source_ids": ["gmail.email", "google_drive.docs", "dropbox.files", "local.files", "archive.imports", "x.bookmarks", "telegram.messages", "whatsapp.personal.messages", "readwise.library", "evernote.notes"],
       "checks": ["install", "lifecycle", "dashboard_states", "dependencies", "inventory", "upgrade", "rollback", "uninstall"]
     }
   ],
@@ -54,6 +54,7 @@
     { "source_id": "telegram.messages", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
     { "source_id": "whatsapp.personal.messages", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
     { "source_id": "readwise.library", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "evernote.notes", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
     { "source_id": "gmail.email", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
     { "source_id": "google_drive.docs", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
     { "source_id": "dropbox.files", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
@@ -62,7 +63,8 @@
     { "source_id": "x.bookmarks", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
     { "source_id": "telegram.messages", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
     { "source_id": "whatsapp.personal.messages", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
-    { "source_id": "readwise.library", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" }
+    { "source_id": "readwise.library", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "evernote.notes", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" }
   ],
   "hermes_cell": {
     "source_id": "gmail.email",

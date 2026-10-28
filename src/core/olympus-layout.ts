@@ -321,7 +321,10 @@ const ARCHIVE_FILE_LABEL: Readonly<Record<string, string>> = { secure_local: '',
  * declares its tiers here and nothing else about where its files go
  * (docs/CREATE_CONNECTOR.md, Leg 3).
  */
-const FOLDER_ONLY_STORES: Record<string, readonly LegacyTier[]> = {};
+const FOLDER_ONLY_STORES: Record<string, readonly LegacyTier[]> = {
+  // Live Evernote (src/workers/evernote/): Personal notes, and Private ones.
+  'evernote.notes': ['secure_local', 'internal'],
+};
 
 /** The source ids that have a layout for their files: the rest (Reflect, Roam) are `legacy` for good. */
 export const FOLDER_LAYOUT_SOURCES: readonly string[] = [...Object.keys(LEGACY_STORES), ...Object.keys(FOLDER_ONLY_STORES)];
@@ -423,6 +426,7 @@ export type AccountRawName =
   | 'archive-import-requests.json'
   | 'archive-media-bindings.sqlite'
   | 'archive-staging'
+  | 'evernote-pass.json'
   | MessagingRawName;
 
 const RAW_OWNER: Readonly<Record<AccountRawName, string>> = {
@@ -432,6 +436,8 @@ const RAW_OWNER: Readonly<Record<AccountRawName, string>> = {
   'archive-import-requests.json': ARCHIVE_IMPORTS,
   'archive-media-bindings.sqlite': ARCHIVE_IMPORTS,
   'archive-staging': ARCHIVE_IMPORTS,
+  // What the last complete Evernote pass held (its deletions and change checks).
+  'evernote-pass.json': 'evernote.notes',
   ...messagingRawOwners(),
 };
 

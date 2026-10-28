@@ -60,6 +60,7 @@ const PUBLIC_CREDENTIAL_PROVIDERS = [
   'telegram',
   'whatsapp_personal',
   'x',
+  'evernote',
 ] as const;
 
 const PRIVATE_CREDENTIAL_PROVIDERS = [
@@ -70,7 +71,6 @@ const PRIVATE_CREDENTIAL_PROVIDERS = [
   'apple_messages',
   'reflect',
   'roam',
-  'evernote',
 ] as const;
 
 export const CREDENTIAL_PROVIDERS = [
@@ -700,6 +700,19 @@ const DEFAULT_ENV_HANDLES: EnvCredentialHandleDefinition[] = [
       'OLYMPUS_SOURCE_INDEX_READWISE_TOKEN',
       'READWISE_TOKEN',
     ],
+    expiresInSeconds: 3600,
+  },
+  {
+    // Live Evernote (workers/evernote/): signed in through Evernote's own MCP server from
+    // the dashboard. Its credential lives in the secret store (the connected-handle
+    // registry names it), never in the environment.
+    handle: 'evernote.personal',
+    provider: 'evernote',
+    accountRole: 'personal',
+    trustDomain: 'secure_local',
+    allowedCapabilities: ['evernote.notes.sync'],
+    scopes: ['read'],
+    tokenEnvNames: [],
     expiresInSeconds: 3600,
   },
   {

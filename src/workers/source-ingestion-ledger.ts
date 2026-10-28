@@ -437,6 +437,12 @@ const SOURCE_DEFINITIONS: Record<string, LedgerSourceDefinition> = {
     family: 'file',
     corpusSourceIds: ['local.files'],
   },
+  evernote: {
+    label: 'Evernote',
+    primaryCorpusId: 'secure_local.evernote.notes',
+    family: 'note',
+    corpusSourceIds: ['evernote.notes'],
+  },
   archive_imports: {
     label: 'Archives',
     // Mail is the first format; every family's archive stores share the row.

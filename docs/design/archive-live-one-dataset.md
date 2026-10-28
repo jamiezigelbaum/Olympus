@@ -1304,6 +1304,12 @@ Evernote export is a new format whose attachments are child items.
   the Archives row does). "Import another archive" sends the same file to the
   same card, and Other archives no longer lists them. A start says "Importing
   Field notes.enex into Evernote. It shows in Evernote as it is read."
+  Since live Evernote (issue #568) the ENEX format names the live source's
+  card, `evernote.notes`: one Evernote card shows the account's connection
+  (Connect, the last pass) and still offers Import an archive and lists those
+  imports. The imports stay stored under Archives and are not merged with the
+  live notes; Delete indexed data on the card removes the live notes, and each
+  import keeps its own Remove.
 - **Storage does not move.** The imports stay where source-storage.md (step 4e)
   keeps archive-only formats: `archive.imports`'s note store set, one account
   scope per import, with their Remove. The cards are views of the public
@@ -1323,7 +1329,12 @@ Evernote export is a new format whose attachments are child items.
   note is a note item (ENML to plain lines; `<en-crypt>` is never decrypted and
   is reported as content Olympus cannot read). Each `<resource>` is a child item
   with a locator to its base64 range, read later by the extraction factory and
-  judged on its own.
+  judged on its own. Its key in the note is the MD5 of its bytes (`<md5>.<n>`
+  for the nth copy of the same bytes), the name the live Evernote server gives
+  it, so an export and a live connection name it alike. The export's file name
+  (less `.enex`) is the notebook, which Evernote names each export after; it is
+  the folder key of its notes and their attachments, so an owner's notebook
+  rule reaches them.
 - **Assets of Reflect and Roam: there are none to read.** Their exports link to
   pictures on the provider's servers rather than holding them (community
   reports for Roam's Export All; Reflect's documentation does not say), and an

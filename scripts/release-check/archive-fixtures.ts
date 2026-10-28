@@ -76,13 +76,6 @@ export interface BesideLiveExpectation {
   alreadyThere: number;
   /** How a search result names the source's items. */
   citationLabel: string;
-  /**
-   * What a search for the word comes to. `cited` (the default): the import's records are judged like the source's own and reach the
-   * Personal store, so a search cites them. `withheld`: the source's records rest Private by the source's own rule (WhatsApp:
-   * `trustDomainPrior('secure_local', 'source_default')`, which no automatic signal lowers), so the word stays in the Private store and
-   * no search result may carry it.
-   */
-  search?: 'cited' | 'withheld';
 }
 
 /** An export of the account a source's live input reads, imported beside that input. */
@@ -462,8 +455,8 @@ function whatsappBesideLive(token: string): { bytes: Uint8Array; expect: BesideL
   ];
   return {
     bytes: chatZip(chatText(messages, { style: 'ios-24-dmy' }), { textName: `WhatsApp Chat - ${WHATSAPP_BESIDE_CHAT}.txt` }),
-    // WhatsApp chats rest Private by the source's own rule: the imported records stay there, and a search must not return them.
-    expect: { read: 4, alreadyThere: 2, citationLabel: 'WhatsApp', search: 'withheld' },
+    // Each message is judged by its content, like any source's: the ordinary ones with the word reach the Personal store and are cited.
+    expect: { read: 4, alreadyThere: 2, citationLabel: 'WhatsApp' },
   };
 }
 

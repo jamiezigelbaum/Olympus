@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  canaryVerdict, isDashboard, isSystemPrompt, openedWindows, parseWindows, pinnedVersion, renderCanaryHtml, runCanary,
+  canaryVerdict, isDashboard, isSystemPrompt, openedWindows, parseCanaryAccounts, parseWindows, pinnedVersion, renderCanaryHtml, renewals, runCanary,
   SITE_INSTALLER, type CanaryOptions, type CanaryReport,
 } from '../scripts/release-check/canary.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
@@ -195,5 +195,59 @@ describe('release-check canary', () => {
     const html = renderCanaryHtml(report, (path) => path.replace('/run/', ''));
     expect(html).toContain('&lt;b&gt;');
     expect(html).toContain('src="screens/a.png"');
+  });
+
+  test('inconclusive: nothing failed but a check could not be made, and the page says what to renew', () => {
+    const skipped = { id: 'web.grok.a', title: 'Grok: a', status: 'skip' as const, detail: 'Inconclusive: Grok is signed out; sign the test account in again in the canary browser' };
+    expect(canaryVerdict([{ id: 'a', title: 'a', status: 'pass' }, skipped, { ...skipped, id: 'web.grok.b' }])).toBe('inconclusive');
+    expect(canaryVerdict([{ id: 'a', title: 'a', status: 'fail' }, skipped])).toBe('fail');
+    expect(renewals([skipped, { ...skipped, id: 'web.grok.b' }])).toEqual(['Grok is signed out; sign the test account in again in the canary browser']);
+    const report: CanaryReport = {
+      schema: 'olympus.release-check.canary.v1', runId: 'r', machine: { handle: 'test-mac', os: 'macos' },
+      candidate: { label: 'main', source: 'installed' }, startedAt: 's', finishedAt: 'f', verdict: 'inconclusive',
+      counts: { pass: 0, fail: 0, warn: 0, skip: 1 }, checks: [skipped], screens: [],
+    };
+    expect(renderCanaryHtml(report, (path) => path)).toContain('<h2>To renew before the next run</h2><ul><li>Grok is signed out;');
+  });
+
+  test('the accounts file: sources, clients and the questions file it names; a broken one says what is wrong', () => {
+    const questions = { questions: [{ id: 'flight-time', prompt: 'Ask Olympus what time our flight leaves.', kind: 'personal', expect: ['7:05'] }] };
+    const read: string[] = [];
+    const accounts = parseCanaryAccounts({
+      sources: [{ id: 'gmail', label: 'Gmail', known: { question: 'flight to Santa Fe', expect: ['K7Q2ZX'] } }],
+      clients: ['chatgpt', 'claude'], questions: 'client-questions.json',
+    }, (path) => { read.push(path); return questions; });
+    expect(read).toEqual(['client-questions.json']);
+    expect(accounts.clients).toEqual(['chatgpt', 'claude']);
+    expect(accounts.questions.map((q) => q.id)).toEqual(['flight-time']);
+    expect(() => parseCanaryAccounts({ clients: ['chatgpt'] }, () => questions)).toThrow('no questions file');
+    expect(() => parseCanaryAccounts({ clients: ['bard'], questions: 'q.json' }, () => questions)).toThrow('clients are chatgpt, claude, grok');
+    expect(() => parseCanaryAccounts({ sources: [{ id: 'Gmail!', label: 'Gmail' }] }, () => questions)).toThrow('each source needs an id');
+    const chatgptOnly = { questions: [{ ...questions.questions[0], clients: ['chatgpt'] }] };
+    expect(() => parseCanaryAccounts({ clients: ['chatgpt', 'grok'], questions: 'q.json' }, () => chatgptOnly)).toThrow('no question applies to grok');
+  });
+
+  test('accounts only: the run\'s connection is made, the sources are asked over MCP, and the connection is revoked', async () => {
+    const desktop = fakeDesktop('macos');
+    const exec = desktop.machine.exec;
+    desktop.machine.exec = async (script, opts) => {
+      if (script.includes('connections add release-canary')) return { code: 0, stdout: 'conn_1\n', stderr: '', timedOut: false, ms: 1 };
+      if (script.includes('http://127.0.0.1:8010/mcp')) {
+        const body = script.includes('source_index_status')
+          ? { result: { structuredContent: { kind: 'source_index_status', corpora: [{ corpus_id: 'gmail.mail', label: 'Gmail', configured: true, counts: { indexed_items: 12 }, last_refresh: { status: 'completed', completed_at: new Date().toISOString() } }] } } }
+          : { result: { structuredContent: { evidence: [{ source: 'Gmail', title: 'Your trip to Santa Fe is booked', excerpt: 'K7Q2ZX' }] } } };
+        desktop.scripts.push(script);
+        return { code: 0, stdout: JSON.stringify({ jsonrpc: '2.0', id: 2, ...body }), stderr: '', timedOut: false, ms: 1 };
+      }
+      return exec(script, opts);
+    };
+    const result = await runCanary(desktop.machine, options('macos', {
+      accountsOnly: true,
+      accounts: { sources: [{ id: 'gmail', label: 'Gmail', known: { question: 'flight to Santa Fe', expect: ['K7Q2ZX'] } }], clients: [], questions: [] },
+    }));
+    expect(statusOf(result.checks)).toEqual({ 'live.gmail.status': 'pass', 'live.gmail.known': 'pass' });
+    expect(desktop.scripts.some((script) => script.includes('connections revoke conn_1'))).toBe(true);
+    // The token stays on the machine: no script carries it, each reads it from the machine's own file.
+    expect(desktop.scripts.filter((script) => script.includes('8010/mcp')).every((script) => script.includes('token="$(cat "$HOME/.olympus-canary/mcp-token")"'))).toBe(true);
   });
 });

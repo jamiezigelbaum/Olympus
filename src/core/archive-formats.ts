@@ -127,7 +127,10 @@ export interface ArchiveFormatDefinition {
    * card in Sources lists the format's imports and imports its exports. The
    * imports stay stored under Archives (`archive.imports`, one account scope
    * each, with their Remove), as source-storage.md keeps archive-only formats.
-   * Formats that name the same id share one card. Absent: Other archives.
+   * Formats that name the same id share one card. A live source's id names
+   * that source's own card (Evernote's): its connection stays the live one,
+   * and the card also lists the format's imports and imports its exports.
+   * Absent: Other archives.
    */
   sourceCard?: { id: string; label: string };
   /**
@@ -665,7 +668,8 @@ export const EVERNOTE_ENEX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.free
   provider: 'evernote',
   chooseHint: 'an Evernote export (the .enex file, or a folder of them)',
   citationLabel: 'Evernote',
-  sourceCard: Object.freeze({ id: 'evernote.archive', label: 'Evernote' }),
+  // The live Evernote source's card: one Evernote card shows the connection and lists these imports.
+  sourceCard: Object.freeze({ id: 'evernote.notes', label: 'Evernote' }),
   probeNames: Object.freeze(['*.enex']),
   detect(probe: ArchiveProbe): readonly string[] | undefined {
     if (probe.chosen.kind === 'file') return looksLikeEnex(probe.chosen.head) ? [''] : undefined;

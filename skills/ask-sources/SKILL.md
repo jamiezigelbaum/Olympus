@@ -113,14 +113,14 @@ source-search lane is unavailable.
 
 ## Telegram
 
-For Telegram, approved ordinary groups and chats live in
-`internal.telegram.messages`. The calling assistant may search and answer from that corpus
-when OPSEC allows.
-
-Protected Telegram chats are secure-local and should not be searched through a
-calling-assistant-visible raw packet or database path. If a question appears to target a
-protected chat such as accountant, lawyer, Secret Chat, credential/security, or
-other high-risk private material, use unified `source_answer` with
+Telegram, like every source, is tiered per message by content: no chat is
+Private as a whole. Messages judged Personal live in
+`internal.telegram.messages`, and the calling assistant may search and answer
+from that corpus when OPSEC allows. Messages judged Private (and every message
+of a chat the owner marked always Private) are secure-local and are never
+searched through a calling-assistant-visible raw packet or database path. If
+a question appears to target private material (an accountant, a lawyer, a
+Secret Chat, credentials, health, money), use unified `source_answer` with
 `include_secure_local: true`. Do not pin Telegram unless the user specifically
 asked for Telegram or a prior result selected a Telegram item.
 

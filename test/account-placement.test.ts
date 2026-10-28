@@ -8,7 +8,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { archiveImportFamilies } from '../src/core/archive-formats.ts';
-import { FOLDER_LAYOUT_SOURCES, accountFolder, accountSessionPath, legacyAccountPaths, legacyOverrideEnvNames, olympusDataRoot } from '../src/core/olympus-layout.ts';
+import { FOLDER_LAYOUT_SOURCES, accountFolder, hasLegacyLayout, accountSessionPath, legacyAccountPaths, legacyOverrideEnvNames, olympusDataRoot } from '../src/core/olympus-layout.ts';
 import {
   decideAccountLayout,
   hasFolderLayout,
@@ -68,6 +68,9 @@ function legacyFiles(sourceId: string): string[] {
   return [...stores, ...stores.map(tierLedgerPathForStore), ...stores.map((store) => `${store}-wal`), ...raw];
 }
 
+// The folder-layout sources that existed before account folders: only these can have files at legacy paths.
+const LEGACY_LAYOUT_SOURCES = FOLDER_LAYOUT_SOURCES.filter(hasLegacyLayout);
+
 describe('placement: a new account', () => {
   test('every source with a folder layout is placed in a folder on a fresh install, and only those', () => {
     expect(FOLDER_LAYOUT_SOURCES).toEqual([
@@ -80,7 +83,9 @@ describe('placement: a new account', () => {
       'archive.imports',
       'telegram.messages',
       'whatsapp.personal.messages',
+      'evernote.notes',
     ]);
+    expect(FOLDER_LAYOUT_SOURCES.filter((id) => !hasLegacyLayout(id))).toEqual(['evernote.notes']);
     for (const sourceId of FOLDER_LAYOUT_SOURCES) {
       expect(decideAccountLayout(sourceId, env).layout).toBe('folder');
       expect(placedAccount(sourceId, env)).toEqual({ source_id: sourceId, slot: '1', layout: 'folder' });
@@ -102,7 +107,7 @@ describe('placement: a new account', () => {
     expect(existsSync(olympusDataRoot(env))).toBe(false);
   });
 
-  test.each(FOLDER_LAYOUT_SOURCES.map((id) => [id]))('%s: any file at a legacy location places it legacy', (sourceId) => {
+  test.each(LEGACY_LAYOUT_SOURCES.map((id) => [id]))('%s: any file at a legacy location places it legacy', (sourceId) => {
     const files = legacyFiles(sourceId);
     expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
@@ -209,9 +214,11 @@ describe('placement: a new account', () => {
     // A dangling link where the data folder should be.
     mkdirSync(dirname(olympusDataRoot(env)), { recursive: true });
     symlinkSync(join(dir, 'missing'), olympusDataRoot(env));
-    for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+    for (const sourceId of LEGACY_LAYOUT_SOURCES) {
       expect(decideAccountLayout(sourceId, env)).toEqual({ layout: 'legacy', why: 'the data folder cannot be looked at' });
     }
+    // A source that never had legacy paths has no second set of stores to risk.
+    expect(decideAccountLayout('evernote.notes', env)).toEqual({ layout: 'folder', why: 'its source never had legacy paths' });
     rmSync(olympusDataRoot(env));
     // A file where the folder should be.
     writeFileSync(olympusDataRoot(env), '');
@@ -224,7 +231,7 @@ describe('placement: a new account', () => {
     mkdirSync(root, { recursive: true });
     chmodSync(root, 0o000);
     try {
-      for (const sourceId of FOLDER_LAYOUT_SOURCES) expect(decideAccountLayout(sourceId, env).layout).toBe('legacy');
+      for (const sourceId of LEGACY_LAYOUT_SOURCES) expect(decideAccountLayout(sourceId, env).layout).toBe('legacy');
     } finally {
       chmodSync(root, 0o700);
     }
@@ -696,6 +703,7 @@ describe('every process reaches the same answer', () => {
       ['x.bookmarks', 'folder'],
       ['telegram.messages', 'folder'],
       ['whatsapp.personal.messages', 'folder'],
+      ['evernote.notes', 'folder'],
     ]);
     expect(inThisProcess()).toEqual(before);
     expect(await inAnotherProcess()).toEqual(before);

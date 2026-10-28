@@ -407,13 +407,12 @@ describe('Apple Messages SourceConnector (Contract 1)', () => {
     await expect(mainConnector().fetchItem('personal:guid-never-existed')).rejects.toThrow(/not found/);
   });
 
-  test('signals publish the Private resting prior for every content kind, and never a tier', async () => {
+  test('signals publish no source-level prior for any content kind: each message is tiered by its content', async () => {
     const connector = mainConnector();
     const items = await listAll(connector);
-    const prior = { tier: 'secure', strength: 'prior', basis: 'source_default:trust_domain:secure_local' } as const;
 
-    expect(connector.classificationSignals(itemByGuid(items, 'guid-inbound-nanos')).prior).toEqual(prior);
-    expect(connector.classificationSignals(itemByGuid(items, 'guid-attachment-only')).prior).toEqual(prior);
+    expect(connector.classificationSignals(itemByGuid(items, 'guid-inbound-nanos')).prior).toBeUndefined();
+    expect(connector.classificationSignals(itemByGuid(items, 'guid-attachment-only')).prior).toBeUndefined();
     const secretLooking: RawItem = {
       ...itemByGuid(items, 'guid-inbound-nanos'),
       content: { kind: 'text', text: 'my aws key is AKIAABCDEFGHIJKLMNOP' },

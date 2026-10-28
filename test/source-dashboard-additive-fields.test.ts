@@ -331,7 +331,7 @@ describe('dashboard view model additive facts', () => {
       host_names_returned: false,
     });
     expect(view.summary).toEqual({
-      // Nine sources, and the import-only sources' cards (Reflect, Roam, Evernote).
+      // Ten sources (Evernote's card lists its exports too), and the import-only sources' cards (Reflect, Roam).
       configured_sources: 12,
       connected_sources: 1,
       answer_ready_sources: 1,

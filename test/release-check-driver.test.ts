@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CommandDriver, parseProvisionLine } from '../scripts/release-check/machine.ts';
+import { CommandDriver, openTunnel, parseProvisionLine } from '../scripts/release-check/machine.ts';
 import { newRunId, parseAgentLine, runReleaseCheck, type RunConfigFile } from '../scripts/release-check/run.ts';
 import { PRIVATE_MARKER, SECRET_MARKER } from '../scripts/release-check/fixture.ts';
 
@@ -53,6 +53,16 @@ afterEach(() => {
   }
 });
 const driverLog = (): string[] => readFileSync(logPath, 'utf8').split('\n').filter(Boolean);
+
+describe('tunnel', () => {
+  test('the port the driver prints once its forward is up, and a driver that ends first is an error', async () => {
+    const tunnel = await openTunnel(['bash', '-c', 'echo "forwarding" >&2; echo \'{"port": 4567}\'; sleep 30']);
+    expect(tunnel.port).toBe(4567);
+    tunnel.close();
+    await expect(openTunnel(['bash', '-c', 'echo nope; exit 3'])).rejects.toThrow('driver tunnel ended (exit 3) before it reported a port');
+    await expect(openTunnel(['bash', '-c', 'sleep 5'], undefined, 200)).rejects.toThrow('did not report a port in time');
+  });
+});
 
 describe('provision line', () => {
   test('is found even when a progress meter is glued to it', () => {

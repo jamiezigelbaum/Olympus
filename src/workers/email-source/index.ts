@@ -30,7 +30,8 @@ import {
   OAUTH_RELAY_STATE_TTL_MS,
   type OAuthRelayStateKeys,
 } from '../../core/oauth-relay.ts';
-import { connectPublicApiKeySource, oauthAuthorizeOrigin, safeOAuthErrorCode, startExternalOAuthSourceConnection, startOAuthSourceConnection, type OAuthFetch } from '../../core/connect.ts';
+import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { connectPublicApiKeySource, oauthAuthorizeOrigin, safeOAuthErrorCode, startExternalOAuthSourceConnection, startOAuthSourceConnection, type ExternalPendingOAuthConnection, type OAuthFetch } from '../../core/connect.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import {
   callerClaimsRemoteConnection,
@@ -223,6 +224,7 @@ import {
   type DashboardApiKeySource,
   type DashboardConnectSource,
   type DashboardImportedArchives,
+  type DashboardLivePass,
   type DashboardSyncSource,
   type DashboardThisComputerSource,
   type DashboardOAuthSource,
@@ -543,6 +545,12 @@ export interface EmailSourceWorkerOptions {
     startOAuthConnection?: typeof startOAuthSourceConnection;
     startExternalOAuthConnection?: typeof startExternalOAuthSourceConnection;
     oauthFetch?: OAuthFetch;
+    /**
+     * Test seam: the Evernote MCP server signed in to and the hosts its
+     * authorization page may be on (default Evernote's own,
+     * workers/evernote/connector.ts).
+     */
+    evernoteSignIn?: { serverUrl: string; authorizationHosts: readonly string[] };
     apiKeyFetch?: OAuthFetch;
     connectApiKey?: typeof connectPublicApiKeySource;
     modelSetup?: () => ModelSetupView;
@@ -668,6 +676,8 @@ export interface EmailSourceWorkerOptions {
      * importing is not set up here.
      */
     archiveImports?: ArchiveImportDashboard;
+    /** Each pass-read source's last pass (Evernote's), by card source id. Read on every render; a throw shows none. */
+    livePasses?: () => Readonly<Record<string, DashboardLivePass>>;
     fileSourceScopes?: {
       summaries(): SourceFolderScopeSummary[];
       browse(input: {
@@ -1547,6 +1557,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
               ingestionDispositionsAvailable: sourceDashboard.ingestionDispositions !== undefined,
               ...dashboardImportedArchives(sourceDashboard.archiveImports),
+              ...dashboardLivePasses(sourceDashboard.livePasses),
               // The dispatch chain is this worker's to know. Without it the card
               // offered Sync now for a source nothing here can sync.
               syncNowAvailable: dashboardSourceSyncAvailable,
@@ -1859,6 +1870,34 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'This sign-in cannot return through the relay on this install.');
           }
           const dashboardOrigin = handback?.origin ?? dashboardOAuthRedirectOrigin(url, request.headers);
+          // Evernote's MCP server registers its own client at sign-in: no
+          // client id, no relay, a callback on this dashboard's own origin.
+          if (source === 'evernote') {
+            if (handback || computerHandback) {
+              throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'Evernote connects in the Olympus dashboard on this computer.');
+            }
+            const attempt = await startDashboardEvernoteSignIn({
+              redirectUri: `${dashboardOrigin}/oauth/callback/evernote`,
+              secretStore,
+              registryPath: sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
+              ...(sourceDashboard.evernoteSignIn ?? {}),
+              ...(sourceDashboard.oauthFetch ? { fetch: sourceDashboard.oauthFetch as FetchLike } : {}),
+            });
+            dashboardOAuthAttempts.set(source, {
+              source,
+              pending: attempt.pending,
+              returnTo: dashboardReturnTo(),
+              startedAt: attempt.pending.startedAt,
+              expiresAt: attempt.pending.expiresAt,
+            });
+            return json({
+              ok: true,
+              source,
+              authorization_url: attempt.pending.authorizationUrl,
+              expires_at: attempt.pending.expiresAt,
+              policy: { raw_runtime_secrets_exposed: false, client_secret_returned: false },
+            });
+          }
           // Publisher mode: Olympus's own registered app, so the owner presses
           // Connect and nothing else. It is chosen only when this install has
           // no registration of its own for the source — a submitted client id
@@ -5306,6 +5345,7 @@ function sourceSchedulerSourceIdForCorpus(corpusId: string): string | undefined 
   if (corpusId === X_BOOKMARKS_CORPUS_ID) return 'x.bookmarks';
   if (isTelegramMessagesCorpusId(corpusId)) return 'telegram.messages';
   if (corpusId === 'secure_local.whatsapp.messages') return 'whatsapp.personal.messages';
+  if (corpusId === 'secure_local.evernote.notes' || corpusId === 'internal.evernote.notes') return 'evernote.notes';
   return undefined;
 }
 
@@ -5650,6 +5690,15 @@ function sourceWatchNotSupported(): EmailSourceWorkerError {
  * The Archives card's connection. A failure to read it is said as such,
  * never as no archives imported.
  */
+function dashboardLivePasses(read: (() => Readonly<Record<string, DashboardLivePass>>) | undefined): { livePasses?: Readonly<Record<string, DashboardLivePass>> } {
+  if (!read) return {};
+  try {
+    return { livePasses: read() };
+  } catch {
+    return {};
+  }
+}
+
 function dashboardImportedArchives(archiveImports: ArchiveImportDashboard | undefined): {
   importedArchives?: DashboardImportedArchives;
   importedArchivesByCard?: Record<string, DashboardImportedArchives>;
@@ -5723,10 +5772,10 @@ function asOptionalExactNarrowingString(
 
 function parseDashboardOAuthSource(value: unknown): DashboardOAuthSource {
   const source = asOptionalString(value);
-  if (source === 'google' || source === 'gmail' || source === 'google-drive' || source === 'dropbox' || source === 'x') {
+  if (source === 'google' || source === 'gmail' || source === 'google-drive' || source === 'dropbox' || source === 'x' || source === 'evernote') {
     return source;
   }
-  throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be google, gmail, google-drive, dropbox, or x.');
+  throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be google, gmail, google-drive, dropbox, x, or evernote.');
 }
 
 function parseDashboardApiKeySource(value: unknown): DashboardApiKeySource | 'gemini' {
@@ -5782,6 +5831,7 @@ function parseDashboardDisconnectSource(value: unknown): V04PublicSourceId {
     || source === 'telegram.messages'
     || source === 'whatsapp.personal.messages'
     || source === 'readwise.library'
+    || source === 'evernote.notes'
   ) return source;
   throw new EmailSourceWorkerError(400, 'invalid_request', 'source_id must name one declared v0.4 source.');
 }
@@ -6161,6 +6211,7 @@ function dashboardProvidersForSource(source: DashboardOAuthSource | DashboardApi
   if (source === 'telegram.messages') return ['telegram'];
   if (source === 'whatsapp.personal.messages') return ['whatsapp_personal'];
   if (source === 'readwise' || source === 'readwise.library') return ['readwise'];
+  if (source === 'evernote' || source === 'evernote.notes') return ['evernote'];
   return [source];
 }
 
@@ -6269,6 +6320,7 @@ function dashboardSourceIdsForHandle(handle: ConnectedCredentialHandle): V04Publ
   if (handle.provider === 'telegram') return ['telegram.messages'];
   if (handle.provider === 'whatsapp_personal') return ['whatsapp.personal.messages'];
   if (handle.provider === 'readwise') return ['readwise.library'];
+  if (handle.provider === 'evernote') return ['evernote.notes'];
   return [];
 }
 
@@ -6278,6 +6330,7 @@ function dashboardOAuthSourcesForDisconnected(sourceIds: Set<V04PublicSourceId>)
   if (sourceIds.has('google_drive.docs')) output.push('google-drive', 'google');
   if (sourceIds.has('dropbox.files')) output.push('dropbox');
   if (sourceIds.has('x.bookmarks')) output.push('x');
+  if (sourceIds.has('evernote.notes')) output.push('evernote');
   return [...new Set(output)];
 }
 
@@ -6353,6 +6406,7 @@ function dashboardPublicSourceIdForConnectSource(source: DashboardConnectSource)
   if (source === 'dropbox') return 'dropbox.files';
   if (source === 'x') return 'x.bookmarks';
   if (source === 'readwise') return 'readwise.library';
+  if (source === 'evernote') return 'evernote.notes';
   return undefined;
 }
 
@@ -6365,11 +6419,12 @@ function markDashboardSourceConnected(
   if (source === 'dropbox') disconnected.delete('dropbox.files');
   if (source === 'x') disconnected.delete('x.bookmarks');
   if (source === 'readwise') disconnected.delete('readwise.library');
+  if (source === 'evernote') disconnected.delete('evernote.notes');
 }
 
 function isDashboardSyncSource(source: DashboardSyncSource | string): source is DashboardSyncSource {
   return source === 'gmail' || source === 'google-drive' || source === 'dropbox' || source === 'x' || source === 'readwise'
-    || isDashboardThisComputerSource(source);
+    || source === 'evernote' || isDashboardThisComputerSource(source);
 }
 
 /** A source with no account, by the id its Connect action names (read off the definitions). */
@@ -6386,12 +6441,57 @@ function dashboardSchedulerSourceId(source: DashboardSyncSource): string | undef
   if (source === 'dropbox') return 'dropbox.files';
   if (source === 'readwise') return 'readwise.library';
   if (source === 'x') return 'x.bookmarks';
+  if (source === 'evernote') return 'evernote.notes';
   return undefined;
 }
 
+/** What an attempt keeps of its sign-in: the state it went out with, and how it completes or is abandoned. */
+type DashboardPendingOAuth = Pick<ExternalPendingOAuthConnection, 'authorizationUrl' | 'state' | 'startedAt' | 'expiresAt' | 'completeCallback' | 'cancel'>;
+
+/**
+ * An Evernote sign-in (workers/evernote/live-sync.ts) as a dashboard attempt:
+ * its own random state, checked again at the callback like every other
+ * source's, and a completion that stores the credential and the handle.
+ */
+async function startDashboardEvernoteSignIn(input: {
+  redirectUri: string;
+  secretStore: SecretStore;
+  registryPath: string;
+  serverUrl?: string;
+  authorizationHosts?: readonly string[];
+  fetch?: FetchLike;
+}): Promise<{ pending: DashboardPendingOAuth }> {
+  const state = randomBytes(24).toString('base64url');
+  // Loaded on first use: the MCP client is needed by nothing else here.
+  const { startEvernoteSignIn } = await import('../evernote/live-sync.ts');
+  const signIn = await startEvernoteSignIn({ ...input, state });
+  const startedAt = new Date();
+  const expiresAt = new Date(startedAt.getTime() + DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS);
+  let done = false;
+  return {
+    pending: {
+      authorizationUrl: signIn.authorizationUrl,
+      state,
+      startedAt: startedAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      async completeCallback(callback) {
+        if (done || callback.state !== state) throw new Error('OAuth connection attempt is no longer active.');
+        done = true;
+        const handle = await signIn.complete(callback.code);
+        return { ok: true, source: 'evernote', handles: [handle.handle], registryPath: input.registryPath, secretRefs: [...(handle.tokenSecretRefs ?? [])] };
+      },
+      cancel() {
+        done = true;
+      },
+    },
+  };
+}
+
+const DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 10 * 60_000;
+
 interface DashboardOAuthAttempt {
   source: DashboardOAuthSource;
-  pending: Awaited<ReturnType<typeof startExternalOAuthSourceConnection>>;
+  pending: DashboardPendingOAuth;
   returnTo: string;
   startedAt: string;
   expiresAt: string;
@@ -7191,6 +7291,7 @@ function dashboardOAuthSourceLabel(source: DashboardOAuthSource): string {
     'google-drive': 'Google Drive',
     dropbox: 'Dropbox',
     x: 'X',
+    evernote: 'Evernote',
   };
   return labels[source] ?? source;
 }
