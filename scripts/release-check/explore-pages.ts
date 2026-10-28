@@ -716,7 +716,9 @@ export function judge(input: JudgeInput): Judged {
     outcomes.push({ ok: gone, expected: 'after Lock the page no longer offers Lock', actual: gone ? 'it is gone' : 'the page still offers Lock' });
   } else if (control.tag === 'summary' || control.expanded !== null || control.attrs.includes('data-sheet-toggle')) {
     const moved = after.expanded !== before.expanded || after.open !== before.open || visibleCount(afterControls) > visibleCount(controlsBefore) || after.text !== before.text;
-    outcomes.push({ ok: moved, expected: 'a control that opens something shows it', actual: moved ? 'it opened' : 'nothing opened' });
+    // A Connect sheet starts its sign-in at once: the tab goes on to the provider and the page redraws with the sheet closed again.
+    const signIn = opened.some((url) => url === BLANK_WINDOW.elsewhere || /^https:\/\//.test(url));
+    outcomes.push({ ok: moved || signIn, expected: 'a control that opens something shows it', actual: moved ? 'it opened' : signIn ? 'it opened the sign-in in a new window' : 'nothing opened' });
   }
   if (!changed && !control.copy && !control.invalid) findings.push(`pressing "${control.name}" did nothing: nothing on the page changed`);
   for (const message of consoleErrors) findings.push(`console error: ${message.slice(0, 200)}`);

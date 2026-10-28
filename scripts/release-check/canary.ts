@@ -20,13 +20,20 @@
  * with what it asked: it needs a person at the machine, which is a machine-setup finding, not a product one. Every window the
  * canary opened is closed again.
  *
- * Writes <out>/<run id>/report.json, report.html and screens/. Exit status: 0 pass, 1 fail, 2 could not start.
+ * With `--accounts <file>` the live accounts (live-accounts.ts) and the web clients (web-clients.ts) are checked after the
+ * desktop; `--accounts-only` leaves out the update and the desktop checks. `--web-sign-in` only opens the canary browser on
+ * the machine at each web app, for a person to sign the test accounts in and connect Olympus (over Screen Sharing).
+ *
+ * Writes <out>/<run id>/report.json, report.html and screens/. Exit status: 0 pass, 1 fail, 2 could not start, 3 inconclusive
+ * (nothing failed, but a sign-in to renew or a bot check kept a check from being made; the report lists what to renew).
  */
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { CommandDriver, type Machine } from './machine.ts';
 import { escapeHtml, type CheckResult, type CheckStatus } from './report.ts';
+import { openEngineMcp, runLiveAccounts, type LiveSourceSpec } from './live-accounts.ts';
+import { isInconclusive, openForSignIn, parseClientQuestions, runWebClients, WEB_CLIENT_IDS, type ClientQuestion, type WebClientId } from './web-clients.ts';
 
 export type CanaryOs = 'linux' | 'macos';
 
@@ -42,7 +49,7 @@ export interface CanaryReport {
   harnessCommit?: string;
   startedAt: string;
   finishedAt: string;
-  verdict: 'pass' | 'fail';
+  verdict: CanaryVerdict;
   counts: Record<CheckStatus, number>;
   checks: CheckResult[];
   screens: CanaryScreen[];
@@ -56,6 +63,10 @@ export interface CanaryOptions {
   expectVersion?: string;
   /** Where screen pictures are written (screens/ under the run folder). */
   screensDir: string;
+  /** The live accounts and web clients (live-accounts.ts, web-clients.ts), checked after the desktop. */
+  accounts?: CanaryAccounts;
+  /** Leave out the update and the desktop checks: only the accounts and web clients. */
+  accountsOnly?: boolean;
   /** Poll timing; tests shorten it. */
   pollMs?: number;
   windowTimeoutMs?: number;
@@ -127,8 +138,61 @@ export function pinnedVersion(installScript: string): string | undefined {
 
 const describe = (window: DesktopWindow): string => `${window.app}${window.title ? ` "${window.title}"` : ''}`;
 
+/**
+ * The accounts file (olympus-ops config/canary-accounts.json): the sources the machine's Olympus is connected to with test
+ * accounts, the web apps signed in with test accounts in the canary browser, and the questions asked there.
+ */
+export interface CanaryAccounts {
+  sources: LiveSourceSpec[];
+  clients: WebClientId[];
+  questions: ClientQuestion[];
+}
+
+export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) => unknown): CanaryAccounts {
+  const record = (raw ?? {}) as { sources?: unknown; clients?: unknown; questions?: unknown };
+  const sources = Array.isArray(record.sources) ? record.sources as LiveSourceSpec[] : [];
+  for (const source of sources) {
+    if (typeof source?.id !== 'string' || !/^[a-z0-9-]{1,40}$/.test(source.id) || typeof source.label !== 'string') throw new Error('each source needs an id (lowercase) and a label');
+    if (source.known && (typeof source.known.question !== 'string' || !Array.isArray(source.known.expect))) throw new Error(`source ${source.id}: known needs a question and an expect list`);
+    if (source.plant && (!Array.isArray(source.plant.argv) || source.plant.argv.length === 0)) throw new Error(`source ${source.id}: plant needs an argv list`);
+  }
+  const clients = Array.isArray(record.clients) ? record.clients : [];
+  for (const client of clients) if (!WEB_CLIENT_IDS.includes(client as WebClientId)) throw new Error(`clients are ${WEB_CLIENT_IDS.join(', ')}`);
+  const questions = typeof record.questions === 'string' ? parseClientQuestions(readQuestions(record.questions)) : [];
+  if (clients.length > 0 && questions.length === 0) throw new Error('web clients are listed but no questions file is named');
+  // A client no question applies to would pass having been asked nothing.
+  const unasked = clients.filter((client) => !questions.some((q) => !q.clients || q.clients.includes(client as WebClientId)));
+  if (unasked.length > 0) throw new Error(`no question applies to ${unasked.join(', ')}`);
+  return { sources, clients: clients as WebClientId[], questions };
+}
+
 /** Runs the canary's checks on one machine. Never throws for a product problem: every failure is a check. */
 export async function runCanary(machine: Machine, options: CanaryOptions): Promise<{ checks: CheckResult[]; screens: CanaryScreen[] }> {
+  const desktop = options.accountsOnly ? { checks: [], screens: [] } : await runDesktopChecks(machine, options);
+  const accounts = options.accounts;
+  // A failed update leaves nothing worth asking.
+  if (!accounts || desktop.checks.some((check) => check.id === 'canary.update' && check.status === 'fail')) return desktop;
+  const checks = [...desktop.checks];
+  const screens = [...desktop.screens];
+  if (accounts.sources.length > 0) {
+    const started = Date.now();
+    let engine;
+    try { engine = await openEngineMcp(machine); } catch (error) {
+      checks.push({ id: 'live.connection', title: 'A connection to the machine\'s Olympus for the account checks', status: 'fail', detail: error instanceof Error ? error.message : String(error), ms: Date.now() - started });
+    }
+    if (engine) {
+      try { checks.push(...await runLiveAccounts(engine, { sources: accounts.sources, ...(options.sleep ? { sleep: options.sleep, pollMs: options.pollMs ?? 1 } : {}) })); } finally { await engine.close(); }
+    }
+  }
+  if (accounts.clients.length > 0) {
+    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, os: options.os, screensDir: options.screensDir });
+    checks.push(...web.checks);
+    screens.push(...web.screens);
+  }
+  return { checks, screens };
+}
+
+async function runDesktopChecks(machine: Machine, options: CanaryOptions): Promise<{ checks: CheckResult[]; screens: CanaryScreen[] }> {
   const checks: CheckResult[] = [];
   const screens: CanaryScreen[] = [];
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
@@ -307,17 +371,27 @@ export function hyprDispatch(classic: string, lua: string): string {
   return `[ "$(hyprctl dispatch ${classic} 2>&1)" = ok ] || hyprctl dispatch ${shellQuote(lua)} >/dev/null`;
 }
 
-export function canaryVerdict(checks: readonly CheckResult[]): 'pass' | 'fail' {
-  return checks.length > 0 && !checks.some((check) => check.status === 'fail') ? 'pass' : 'fail';
+/** Inconclusive: nothing failed, but a check could not be made (a sign-in to renew, a bot check): not a pass. */
+export type CanaryVerdict = 'pass' | 'fail' | 'inconclusive';
+
+export function canaryVerdict(checks: readonly CheckResult[]): CanaryVerdict {
+  if (checks.length === 0 || checks.some((check) => check.status === 'fail')) return 'fail';
+  return checks.some(isInconclusive) ? 'inconclusive' : 'pass';
+}
+
+/** What a person must renew before the next run: each inconclusive check's reason, once. */
+export function renewals(checks: readonly CheckResult[]): string[] {
+  return [...new Set(checks.filter(isInconclusive).map((check) => (check.detail ?? '').replace(/^Inconclusive:\s*/, '')))];
 }
 
 export function renderCanaryHtml(report: CanaryReport, relative: (path: string) => string): string {
   const rows = report.checks.map((check) => `<tr class="${check.status}"><td>${check.status.toUpperCase()}</td><td>${escapeHtml(check.title)}</td><td>${escapeHtml(check.detail ?? '')}</td></tr>`).join('\n');
   const pictures = report.screens.map((screen) => `<figure><img src="${escapeHtml(relative(screen.path))}" alt="${escapeHtml(screen.label)}"><figcaption>${escapeHtml(screen.label)}</figcaption></figure>`).join('\n');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Canary ${escapeHtml(report.machine.handle)}</title>
-<style>body{font:15px/1.5 system-ui,sans-serif;margin:24px;max-width:1100px}td{padding:4px 8px;vertical-align:top;border-bottom:1px solid #ddd}tr.fail td:first-child{color:#b00020;font-weight:600}tr.pass td:first-child{color:#1b7f3b}tr.warn td:first-child{color:#a15c00}img{max-width:100%;border:1px solid #ccc}figure{margin:16px 0}</style></head><body>
+<style>body{font:15px/1.5 system-ui,sans-serif;margin:24px;max-width:1100px}td{padding:4px 8px;vertical-align:top;border-bottom:1px solid #ddd}tr.fail td:first-child{color:#b00020;font-weight:600}tr.pass td:first-child{color:#1b7f3b}tr.warn td:first-child{color:#a15c00}tr.skip td:first-child{color:#555}img{max-width:100%;border:1px solid #ccc}figure{margin:16px 0}</style></head><body>
 <h1>Canary on ${escapeHtml(report.machine.handle)}: ${report.verdict.toUpperCase()}</h1>
 <p>${escapeHtml(report.candidate.label)}${report.candidate.version ? ` (${escapeHtml(report.candidate.version)})` : ''}, ${escapeHtml(report.candidate.source)} &middot; ${escapeHtml(report.startedAt)} to ${escapeHtml(report.finishedAt)}</p>
+${renewals(report.checks).length > 0 ? `<h2>To renew before the next run</h2><ul>${renewals(report.checks).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>` : ''}
 <table>${rows}</table>
 ${pictures}
 </body></html>
@@ -327,14 +401,14 @@ ${pictures}
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   const option = (name: string): string | undefined => { const at = argv.indexOf(name); return at >= 0 ? argv[at + 1] : undefined; };
-  const usage = 'usage: bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --out <reports dir> [--candidate <bundle dir> | --published <site base URL>] [--label <text>] [--sha <commit>] [--harness-commit <commit>]';
+  const usage = 'usage: bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --out <reports dir> [--candidate <bundle dir> | --published <site base URL>] [--accounts <file> [--accounts-only]] [--label <text>] [--sha <commit>] [--harness-commit <commit>]\n       bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --accounts <file> --web-sign-in';
   const configPath = option('--config');
   const handle = option('--machine');
   const os = option('--os');
   const out = option('--out');
   const candidate = option('--candidate');
   const published = option('--published');
-  if (!configPath || !handle || !out || (os !== 'linux' && os !== 'macos') || (candidate && published)) {
+  if (!configPath || !handle || (!out && !argv.includes('--web-sign-in')) || (os !== 'linux' && os !== 'macos') || (candidate && published)) {
     console.error(usage);
     process.exit(2);
   }
@@ -342,6 +416,28 @@ if (import.meta.main) {
   if (!Array.isArray(config.driver) || config.driver.length === 0) {
     console.error('the config needs a "driver" argv array');
     process.exit(2);
+  }
+  const accountsPath = option('--accounts');
+  let accounts: CanaryAccounts | undefined;
+  if (accountsPath) {
+    try {
+      // The questions file is named relative to the accounts file.
+      accounts = parseCanaryAccounts(JSON.parse(readFileSync(accountsPath, 'utf8')), (path) => JSON.parse(readFileSync(resolve(dirname(accountsPath), path), 'utf8')));
+    } catch (error) {
+      console.error(`the accounts file ${accountsPath} is not usable: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(2);
+    }
+  }
+  if ((argv.includes('--accounts-only') || argv.includes('--web-sign-in')) && !accounts) {
+    console.error(usage);
+    process.exit(2);
+  }
+  if (argv.includes('--web-sign-in')) {
+    // A person signs each app in and connects Olympus there, in the canary's own browser on the machine (Screen Sharing).
+    const signInDriver = new CommandDriver({ argv: config.driver, onLog: (line) => console.error(`driver: ${line}`) });
+    const target = signInDriver.machineFor({ handle, label: handle, os, driver: 'driver' });
+    console.log(await openForSignIn(target, os, accounts!.clients.length > 0 ? accounts!.clients : WEB_CLIENT_IDS));
+    process.exit(0);
   }
   let expectVersion: string | undefined;
   // The bundle's installer has the site's name for the platform (publish-release-to-site.ts --linux-local / --mac-local).
@@ -351,7 +447,7 @@ if (import.meta.main) {
     expectVersion = response.ok ? pinnedVersion(await response.text()) : undefined;
   }
   const runId = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '')}-${randomBytes(2).toString('hex')}`.toLowerCase();
-  const runDir = resolve(out, runId);
+  const runDir = resolve(out!, runId);
   mkdirSync(runDir, { recursive: true });
   const driver = new CommandDriver({ argv: config.driver, onLog: (line) => console.error(`driver: ${line}`) });
   const machine = driver.machineFor({ handle, label: handle, os, driver: 'driver' });
@@ -360,6 +456,8 @@ if (import.meta.main) {
     os,
     update: candidate ? { kind: 'candidate', dir: resolve(candidate) } : published ? { kind: 'published', site: published } : { kind: 'installed' },
     ...(expectVersion ? { expectVersion } : {}),
+    ...(accounts ? { accounts } : {}),
+    accountsOnly: argv.includes('--accounts-only'),
     screensDir: join(runDir, 'screens'),
   });
   const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, warn: 0, skip: 0 };
@@ -376,6 +474,8 @@ if (import.meta.main) {
   writeFileSync(join(runDir, 'report.json'), `${JSON.stringify({ ...report, screens: screens.map((screen) => ({ ...screen, path: relative(screen.path) })) }, null, 2)}\n`);
   writeFileSync(join(runDir, 'report.html'), renderCanaryHtml(report, relative));
   for (const check of checks) console.error(`check ${check.status.toUpperCase()} ${check.id} - ${check.detail ?? ''}`);
+  for (const line of renewals(checks)) console.error(`renew: ${line}`);
   console.log(JSON.stringify({ verdict: report.verdict, counts, report: join(runDir, 'report.html') }));
-  process.exit(report.verdict === 'pass' ? 0 : 1);
+  // 3: inconclusive (nothing failed, but a sign-in or bot check kept a check from being made).
+  process.exit(report.verdict === 'pass' ? 0 : report.verdict === 'inconclusive' ? 3 : 1);
 }
