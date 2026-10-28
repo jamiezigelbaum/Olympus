@@ -46,6 +46,7 @@ import {
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies, type SecretsDisposition } from './secrets-disposition.ts';
+import { extractionJobsDbPaths, oweExtractionRereadAfterTierMove } from '../file-extraction/job-names.ts';
 import { defaultStoreTrustTier } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -532,6 +533,35 @@ function copyFingerprint(copy: ConnectorStoreItemCopy, layers: TierCopyLayers): 
 }
 
 function finishVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): TierMoveResult {
+  const result = flipVerifiedMove(options, receipt);
+  oweExtractionRereads(options.set.ledger, options.identity);
+  return result;
+}
+
+/**
+ * After the flip: extraction jobs that settled on the old placement (its
+ * store kept names only, or the names had to move first) are read again, so
+ * the moved item's text lands where it now rests. Best effort per job
+ * ledger, like the Secrets clearing: an unreachable one is skipped.
+ */
+function oweExtractionRereads(ledger: TierLedger, identity: TierLedgerIdentity): void {
+  let known: string[] = [];
+  try {
+    known = ledger.knownJobLedgerPaths();
+  } catch {
+    // The default path and the ledgers this process has open are still visited.
+  }
+  const item = { provider: identity.provider, accountScope: identity.accountScope, providerItemId: identity.providerItemId };
+  for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+    try {
+      oweExtractionRereadAfterTierMove(jobsPath, item);
+    } catch {
+      // The move stands; only this ledger's re-read is lost.
+    }
+  }
+}
+
+function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): TierMoveResult {
   const { set, identity } = options;
   const ledger = set.ledger;
   const contentDestination = copyServingLayer(receipt.placement, 'content');

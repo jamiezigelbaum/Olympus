@@ -1069,9 +1069,11 @@ export class TierLedger {
   }
 
   /**
-   * Routed items held pending ONLY because their text has not been read (no
-   * open names question, content unread), in key order after `after`: the
-   * rows a names-only settle pass checks (tier-names-only-settle.ts).
+   * Routed items held ONLY because their text has not been read (no open
+   * names question, content unread): pending on it, or settled fail-safe
+   * Private for the content question it could not have yet. In key order
+   * after `after`: the rows a names-only settle pass checks
+   * (tier-names-only-settle.ts).
    */
   listAwaitingText(options: { limit?: number; after?: TierLedgerIdentity } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
@@ -1080,7 +1082,10 @@ export class TierLedger {
       : null;
     const rows = this.db.query(`
       SELECT * FROM tier_items
-      WHERE state = 'pending' AND routed = 1 AND content_read = 0 AND content_pending = 1 AND metadata_pending = 0
+      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')))
         AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?

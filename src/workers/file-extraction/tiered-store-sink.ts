@@ -29,7 +29,7 @@ import {
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
+import { classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import { copyServingLayer, isFailSafeMissingContentQuestion, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import { parentNamesContext } from '../connector-store/parent-context.ts';
@@ -38,6 +38,7 @@ import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { settleSecretsCopies, settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
 import {
   TIER_DOMAIN_ORDER,
+  TIER_KEY_TRUST_DOMAIN,
   TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
   type TieredStoreSet,
 } from '../connector-store/tiered-store-set.ts';
@@ -320,6 +321,27 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           embedHold: placement.embedHold,
         });
       }
+      let landingGeneration = record.generation;
+      if (contentStore === anchorStore && settledUnread && record.contentTier === 'secure'
+        && contentDomainOf(record) !== contentStore.trustDomain) {
+        // The names store widens its copy to hold text only at the content
+        // tier the ledger records (LocalConnectorStore.tierWriteAllowed). An
+        // unread item can rest there at a tier that is no verdict on its text:
+        // a fail-safe Private hold for a question that could not exist yet.
+        // Judged lower now, that tier is recorded first, text still unread and
+        // the copies unchanged, or the store refuses the text and the item
+        // stays names-only for good. Only that hold: any other recorded raise
+        // keeps the store's refusal, which never widens a lower copy.
+        const unread = { ...decision, contentRead: false };
+        landingGeneration = ledger.recordRoutedPlacement(
+          identity,
+          unread,
+          set.placementFor(unread, { contentArrivesLater: true }),
+          // As the fail-safe itself was recorded: a copy an aborted landing
+          // staged is no move to queue.
+          { guard: { generation: record.generation, override }, stagedLandingAllowed: true },
+        ).record.generation;
+      }
       const anchorScope = anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope;
       if (contentStore !== anchorStore && !contentStore.activeLocalItemRow(ref.localItemId)) {
         // A child's content row names its parent as the names row does, so each
@@ -351,7 +373,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       }
       const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
       if (!result.accepted) return result;
-      ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: record.generation });
+      ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: landingGeneration });
       return result;
     },
   };
@@ -396,6 +418,14 @@ function legacyStoreFor(
       return store ? [store] : [];
     });
   return legacy.find((store) => store.activeLocalItemRow(localItemId) !== undefined) ?? legacy[0];
+}
+
+/**
+ * The store the ledger's recorded content tier puts the text in: the one a
+ * store's write gate accepts it in on a first landing.
+ */
+function contentDomainOf(record: { contentTier: TierKey }): SourceTrustDomain | undefined {
+  return record.contentTier === 'secrets' ? undefined : TIER_KEY_TRUST_DOMAIN[record.contentTier];
 }
 
 function samePlacement(current: readonly TierCopy[], placement: TierPlacementPlan): boolean {

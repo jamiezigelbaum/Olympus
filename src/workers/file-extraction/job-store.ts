@@ -43,6 +43,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   SECRET_ITEM_REDACTION_CLAIMS_TABLE,
   SECRET_RESTORED_REREADS_TABLE,
+  REREAD_AFTER_PLACEMENT,
   SECRET_ITEM_REDACTIONS_TABLE,
   defaultFileExtractionJobsDbPath,
   itemNameRedacted,
@@ -59,7 +60,7 @@ import type {
 } from './types.ts';
 
 export const FILE_EXTRACTION_JOBS_STORE_ID = 'file-extraction-jobs';
-export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 6;
+export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 7;
 export { defaultFileExtractionJobsDbPath };
 
 /**
@@ -2234,6 +2235,25 @@ function fileExtractionJobMigrations(): SqliteMigration[] {
       db.exec(`
         CREATE INDEX IF NOT EXISTS idx_extraction_jobs_identity
           ON extraction_jobs(provider, account_scope, provider_item_id, status);
+      `);
+    },
+  }, {
+    version: 7,
+    name: 'owe_reread_to_names_only_refusals',
+    up(db) {
+      // Before 1.2.0 an unread item held fail-safe Private and then judged
+      // Personal from its text was refused by its Personal store, and its job
+      // settled names-only for good (#592). Each such job is owed one re-read,
+      // taken only if its item is listed again still without text.
+      // Why a re-read is owed: a placement debt never reopens a Secrets verdict.
+      const columns = db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all() as { name: string }[];
+      if (!columns.some((column) => column.name === 'reason')) {
+        db.exec(`ALTER TABLE ${SECRET_RESTORED_REREADS_TABLE} ADD COLUMN reason TEXT;`);
+      }
+      db.exec(`
+        INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+        SELECT job_id, '${REREAD_AFTER_PLACEMENT}' FROM extraction_jobs
+        WHERE status = 'metadata_only' AND last_error_kind = 'store_item_metadata_only';
       `);
     },
   }];
