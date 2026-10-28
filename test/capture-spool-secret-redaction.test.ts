@@ -340,7 +340,7 @@ function openWhatsApp(root: string) {
     tierSet,
     now: () => new Date('2026-10-13T10:00:00Z'),
   });
-  return { spoolDir, mediaDir, store, tierSet, sync, file: join(spoolDir, WHATSAPP_FILE) };
+  return { spoolDir, mediaDir, store, tierSet, sync, file: join(spoolDir, WHATSAPP_FILE), internal: () => lane.newStores.internal?.current() };
 }
 
 describe('WhatsApp capture spool: Secrets leave the spool', () => {
@@ -363,8 +363,10 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
     expect(spool.split('\n')[0]).toBe(lines[0]!);
     expect(statSync(whatsapp.file).size).toBe(sizeBefore);
     expect(JSON.parse(spool.split('\n')[1]!)).toMatchObject({ id: 'A2', text: '', secret_redacted: true });
-    expect(whatsapp.store.searchItems('climbing', 5).map((row) => row.sourceItem.providerItemId)).toEqual(['A1']);
+    // The ordinary message is judged Personal by its content; the Secret is stored nowhere.
+    expect(whatsapp.internal()?.searchItems('climbing', 5).map((row) => row.sourceItem.providerItemId)).toEqual(['A1']);
     expect(whatsapp.store.searchItems('prod', 5)).toEqual([]);
+    expect(whatsapp.internal()?.searchItems('prod', 5)).toEqual([]);
   });
 
   test('a voice note later judged Secret loses its saved audio and re-download keys', async () => {
