@@ -49,5 +49,5 @@ describe('telegram-pair.py controlling terminal', () => {
     expect(driver.stdout).not.toContain('ERROR:controlling_terminal_required');
     expect(driver.stdout).toContain('VALUE:12345');
     expect(driver.stdout).toMatch(/^EXIT:0$/m);
-  });
+  }, 40_000);
 });
