@@ -646,7 +646,9 @@ export function inboxAnswers(driver: JourneyDriver, options: { questions: readon
         if (view.error) return { ok: false, detail: `the local model did not answer: ${String(view.message ?? '').slice(0, 160)}` };
         rows = await rowCount();
         if (view.found && !view.busy && view.answer && rows > before) break;
-        if (now() >= until) return { ok: false, detail: `the local model's answer was not finished and in the Inbox in time (${view.answer ? 'answered' : 'no answer yet'}; the Inbox holds ${rows} of ${wanted})` };
+        // The panel's last words say which case a timeout is: an ask still waiting on its request, a queued one, or nothing shown.
+        const said = view.message ? `the panel said "${view.message.slice(0, 160)}"` : 'the panel showed nothing';
+        if (now() >= until) return { ok: false, detail: `the local model's answer was not finished and in the Inbox in time (${view.answer ? 'answered' : 'no answer yet'}; ${said}${view.busy ? ', the button still busy' : ''}; the Inbox holds ${rows} of ${wanted})` };
         await sleep(2_000);
       }
     }
