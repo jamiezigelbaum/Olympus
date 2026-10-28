@@ -2046,6 +2046,9 @@ export const DASHBOARD_HOST_GATE_COPY = {
   pasteToken: 'Paste the worker bearer token.',
   readToken: 'That is the read-only view token; use the worker bearer token from setup.',
   refused: 'That token was not accepted.',
+  /** Beside the panel when the browser kept a page the panel opened (a sign-in) from opening. */
+  openBlocked: 'Your browser did not open the page.',
+  openBlockedLink: 'Open it',
 } as const;
 
 /**
