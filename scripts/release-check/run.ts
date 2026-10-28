@@ -709,7 +709,7 @@ async function collectEvidence(run: Run, outDir: string): Promise<void> {
     writeFileSync(dashPath, redactMarkers(body, run.markers));
     run.logs.push({ label: 'dashboard.json (redacted)', path: 'logs/dashboard.json' });
   } else {
-    run.add({ id: 'scan.the dashboard payload', title: 'No Private or Secret content in the dashboard payload', status: 'fail', detail: 'the dashboard payload could not be read' });
+    run.add({ id: 'scan.the dashboard payload', title: 'No Private or Secret content in the dashboard payload', status: 'fail', detail: `the dashboard payload could not be read: ${dash.result ? `the dashboard answered ${dash.result.status}` : `the read exited ${dash.code}: ${dash.stderr.trim().slice(-200) || 'with nothing on stderr'}`}` });
   }
 
   const remoteLogs = '~/rc/logs';

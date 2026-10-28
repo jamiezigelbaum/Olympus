@@ -32,6 +32,10 @@
  *       before it printed a handle, so the driver names its machine from the run id.
  *   reap --older-than-min <n>
  *       Optional. Destroys leftovers from earlier runs of this driver.
+ *   tunnel --machine <handle> --remote-port <n>
+ *       Optional (only the canary's web clients use it). Forwards a free loopback port on this computer to the
+ *       machine's own loopback port <n>, prints {"port":<local port>} on stdout once the forward is up, and keeps
+ *       it open until the process is stopped.
  */
 import { spawn } from 'node:child_process';
 
@@ -55,12 +59,17 @@ export interface MachineInfo {
   driver: string;
 }
 
+/** A loopback port on this computer that reaches a loopback port on the machine; close() ends the forward. */
+export interface Tunnel { port: number; close(): void }
+
 export interface Machine extends MachineInfo {
   /** Updates the install on the machine with a newer build's installer bundle, the way a user does. */
   upgrade(candidateDir: string): Promise<void>;
   exec(script: string, options?: ExecOptions): Promise<ExecResult>;
   put(from: string, to: string): Promise<void>;
   get(from: string, to: string): Promise<void>;
+  /** Forwards a local port to the machine's loopback port (the driver's optional `tunnel` verb). */
+  tunnel?(remotePort: number): Promise<Tunnel>;
 }
 
 interface RunOptions extends ExecOptions {
@@ -95,6 +104,34 @@ function run(argv: readonly string[], options: RunOptions = {}): Promise<ExecRes
       resolve({ code: timedOut ? 124 : (code ?? 1), stdout, stderr, timedOut, ms: Date.now() - started });
     });
     if (options.stdin !== undefined) child.stdin.end(options.stdin); else child.stdin.end();
+  });
+}
+
+/** Starts the driver's tunnel verb and waits (at most 30 s) for the {"port":n} line it prints once the forward is up. */
+export function openTunnel(argv: readonly string[], onStderr?: (chunk: string) => void, timeoutMs = 30_000): Promise<Tunnel> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(argv[0]!, argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let settled = false;
+    const fail = (message: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill('SIGTERM');
+      reject(new Error(message));
+    };
+    const timer = setTimeout(() => fail('driver tunnel did not report a port in time'), timeoutMs);
+    child.stderr.on('data', (chunk: Buffer) => onStderr?.(chunk.toString('utf8')));
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+      const line = /\{"port":\s*(\d+)\}/.exec(stdout);
+      if (!line || settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ port: Number(line[1]), close: () => { child.kill('SIGTERM'); } });
+    });
+    child.on('error', (error) => fail(`driver tunnel could not start: ${error.message}`));
+    child.on('close', (code) => fail(`driver tunnel ended (exit ${code ?? 1}) before it reported a port`));
   });
 }
 
@@ -175,6 +212,7 @@ export class CommandDriver {
         const r = await run([...base, 'get', '--machine', info.handle, '--from', from, '--to', to], { timeoutMs: 120_000, onStderr: log });
         if (r.code !== 0) throw new Error(`driver get failed (exit ${r.code})`);
       },
+      tunnel: (remotePort) => openTunnel([...base, 'tunnel', '--machine', info.handle, '--remote-port', String(remotePort)], log),
     };
   }
 

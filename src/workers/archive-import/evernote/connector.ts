@@ -16,7 +16,12 @@
  *   bytes are read by `fetchItem` from the locator, which names the manifest,
  *   the file and the byte range, so a read of other files is refused. Each is
  *   judged on its own, takes no floor from its note, and is held until judged
- *   like every item of an archive.
+ *   like every item of an archive. Its key in its note is the MD5 of its
+ *   bytes (`<md5>.<n>` for the nth copy of the same bytes), the name the live
+ *   Evernote server gives it too, so both name it alike.
+ * - The notebook: Evernote names each notebook's export after it, so the file
+ *   name (less `.enex`) is the notebook, published as the folder key of its
+ *   notes and their attachments for the owner's notebook rules.
  * - Findings: an empty note is skipped, a note past NOTE_MAX_RECORD_BYTES
  *   (its attachments' bytes not counted) is `note_too_large`, encrypted text
  *   is `note_content_unsupported`, an attachment whose bytes are not in the
@@ -108,21 +113,20 @@ const BASE64 = (() => {
 
 /**
  * Base64 from `start` to `end` of a file, decoded a slice at a time, space
- * skipped, stopping after `cap` bytes. Anything that is not base64 refuses
- * the read.
+ * skipped, handed to `sink` in pieces, stopping after `cap` bytes. Anything
+ * that is not base64 refuses the read. Returns how many bytes went out.
  */
-export function decodeBase64Range(reader: ScopeFileReader, start: number, end: number, cap: number): Uint8Array {
-  const out: Uint8Array[] = [];
-  let total = 0;
-  let pending: Uint8Array = new Uint8Array(Math.min(cap, 64 * 1024) + 3);
+function decodeBase64Chunks(reader: ScopeFileReader, start: number, end: number, cap: number, sink: (chunk: Uint8Array) => void): number {
+  const buffer = new Uint8Array(64 * 1024);
   let used = 0;
+  let total = 0;
+  const flush = (): void => {
+    if (used > 0) sink(buffer.slice(0, used));
+    used = 0;
+  };
   const push = (byte: number): boolean => {
-    if (used === pending.length) {
-      out.push(pending.subarray(0, used));
-      pending = new Uint8Array(Math.min(Math.max(64 * 1024, pending.length * 2), 16 * 1024 * 1024));
-      used = 0;
-    }
-    pending[used++] = byte;
+    if (used === buffer.length) flush();
+    buffer[used++] = byte;
     total += 1;
     return total >= cap;
   };
@@ -155,16 +159,36 @@ export function decodeBase64Range(reader: ScopeFileReader, start: number, end: n
       if (!push((quad >> 10) & 0xff)) push((quad >> 2) & 0xff);
     } else if (count === 1) throw new FileExtractionSourceError('source_content_unavailable');
   }
-  out.push(pending.subarray(0, used));
-  const bytes = new Uint8Array(Math.min(total, cap));
+  flush();
+  return Math.min(total, cap);
+}
+
+/** Base64 from `start` to `end` of a file, decoded, at most `cap` bytes. */
+export function decodeBase64Range(reader: ScopeFileReader, start: number, end: number, cap: number): Uint8Array {
+  const parts: Uint8Array[] = [];
+  const length = decodeBase64Chunks(reader, start, end, cap, (chunk) => parts.push(chunk));
+  const bytes = new Uint8Array(length);
   let at = 0;
-  for (const part of out) {
+  for (const part of parts) {
     const take = Math.min(part.length, bytes.length - at);
     bytes.set(part.subarray(0, take), at);
     at += take;
-    if (at >= bytes.length) break;
   }
   return bytes;
+}
+
+/** The MD5 of the decoded bytes of base64 from `start` to `end`: Evernote's own name for a resource (`<en-media hash>`). */
+export function md5OfBase64Range(reader: ScopeFileReader, start: number, end: number): string {
+  const hash = createHash('md5');
+  decodeBase64Chunks(reader, start, end, Number.MAX_SAFE_INTEGER, (chunk) => hash.update(chunk));
+  return hash.digest('hex');
+}
+
+/** The notebook an export file holds: Evernote names each notebook's export after it. */
+export function notebookOfExport(relPath: string): string | undefined {
+  const name = relPath.split('/').pop() ?? '';
+  const notebook = name.replace(/\.enex$/i, '').trim();
+  return notebook || undefined;
 }
 
 export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): SourceConnector {
@@ -198,7 +222,7 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
   };
 
   /** A note and its attachments, parent first; the place of each for counting; findings reported at the note's place. */
-  const buildNote = (note: XmlElement, fileIndex: number, start: number, savedAt: string): { items: RawItem[]; positions: number[] } => {
+  const buildNote = (note: XmlElement, fileIndex: number, start: number, savedAt: string, reader: ScopeFileReader): { items: RawItem[]; positions: number[] } => {
     const title = textOf(xmlChild(note, 'title'));
     const contentElement = xmlChild(note, 'content');
     const body = contentElement ? enmlToText(xmlText(contentElement)) : { text: '', unsupported: 0, media: 0 };
@@ -220,9 +244,11 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
     }, { fileIndex, member: -1, ordinal: start }, savedAt);
     if (body.unsupported > 0) report(NOTE_FINDINGS.unsupported, 'gap', fileIndex, start);
     if (built.dateAssumed) report(NOTE_FINDINGS.dateAssumed, 'gap', fileIndex, start);
-    const parent = built.item;
+    const notebook = notebookOfExport(input.files[fileIndex]!.relPath);
+    const parent: RawItem = notebook ? { ...built.item, metadata: Object.freeze({ ...built.item.metadata, notebook }) } : built.item;
     const items: RawItem[] = [parent];
     const positions = [start];
+    const seen = new Map<string, number>();
     resources.forEach((resource, index) => {
       const data = xmlChild(resource, 'data');
       const mime = textOf(xmlChild(resource, 'mime')) || 'application/octet-stream';
@@ -231,15 +257,30 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
       const name = (fileName || `Attachment ${index + 1} (${mime})`).slice(0, 500);
       const ranges = data?.ranges ?? [];
       const encoding = (data?.attributes['encoding'] ?? 'base64').toLowerCase();
-      const readable = data !== undefined && encoding === 'base64' && data.rangeEntities !== true && ranges.length === 1;
+      let readable = data !== undefined && encoding === 'base64' && data.rangeEntities !== true && ranges.length === 1;
+      // The child's key is Evernote's own name for the file, the MD5 of its bytes, as the live
+      // server gives it, so an export and a live connection name the same attachment alike.
+      let md5: string | undefined;
+      if (readable) {
+        try {
+          md5 = md5OfBase64Range(reader, ranges[0]!.start, ranges[0]!.end);
+        } catch (error) {
+          if (!(error instanceof FileExtractionSourceError)) throw error;
+          readable = false;
+        }
+      }
       const range = readable ? ranges[0]! : undefined;
       // Evernote's own reading of the attachment (`<recognition>`) is not used yet: it waits for
       // RawItem.providerText (docs/design/child-items.md, "Text the provider supplies").
       const locator = range
         ? `${prefix}${fileIndex}:${range.start}:${range.end}:${Buffer.from(mime).toString('base64url')}`
         : `${prefix}none`;
-      // The child's id is its parent's and its place among the note's resources (child-item-id.ts).
-      const providerItemId = childProviderItemId(parent.identity.providerItemId, `resource-${index}`);
+      // The same bytes twice in one note: the second is `<md5>.2` (docs/design/child-items.md).
+      // Bytes not in the file have no MD5 and keep their place among the note's resources.
+      const occurrence = md5 ? (seen.get(md5) ?? 0) + 1 : 0;
+      if (md5) seen.set(md5, occurrence);
+      const key = md5 ? (occurrence === 1 ? md5 : `${md5}.${occurrence}`) : `resource-${index}`;
+      const providerItemId = childProviderItemId(parent.identity.providerItemId, key);
       const authoredAt = parent.metadata['authoredAt'];
       items.push({
         identity: {
@@ -257,6 +298,8 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
           title: name,
           name,
           mimeType: mime,
+          ...(md5 ? { md5 } : {}),
+          ...(notebook ? { notebook } : {}),
           ...(typeof authoredAt === 'string' ? { authoredAt } : {}),
         }),
         fetchedAt: new Date().toISOString(),
@@ -344,7 +387,7 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
           segment.next = { file: cursor.file, offset: event.end, from: 0, done: false };
           continue;
         }
-        const built = buildNote(event.element, cursor.file, event.start, savedAt);
+        const built = buildNote(event.element, cursor.file, event.start, savedAt, reader);
         const skip = event.start === cursor.offset ? Math.min(cursor.from, built.items.length) : 0;
         const left = built.items.length - skip;
         const take = Math.min(left, room - segment.items.length);
@@ -471,7 +514,10 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
       return readAttachment(localItemId, options.deferredBytes ? { deferredBytes: options.deferredBytes } : undefined, cap);
     },
     classificationSignals(item: RawItem): SourceClassificationSignals {
-      return noteClassificationSignals(item);
+      // The notebook is the export's folder, so an owner's notebook rule reaches its notes and their attachments.
+      const notebook = typeof item.metadata['notebook'] === 'string' ? item.metadata['notebook'] : undefined;
+      const signals = noteClassificationSignals(item);
+      return notebook ? { ...signals, folderKeys: [notebook] } : signals;
     },
   };
   return connector;
