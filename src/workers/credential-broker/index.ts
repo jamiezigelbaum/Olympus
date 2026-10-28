@@ -703,6 +703,19 @@ const DEFAULT_ENV_HANDLES: EnvCredentialHandleDefinition[] = [
     expiresInSeconds: 3600,
   },
   {
+    // Live Evernote (workers/evernote/): signed in through Evernote's own MCP server from
+    // the dashboard. Its credential lives in the secret store (the connected-handle
+    // registry names it), never in the environment.
+    handle: 'evernote.personal',
+    provider: 'evernote',
+    accountRole: 'personal',
+    trustDomain: 'secure_local',
+    allowedCapabilities: ['evernote.notes.sync'],
+    scopes: ['read'],
+    tokenEnvNames: [],
+    expiresInSeconds: 3600,
+  },
+  {
     handle: 'dropbox.personal',
     provider: 'dropbox',
     accountRole: 'personal',

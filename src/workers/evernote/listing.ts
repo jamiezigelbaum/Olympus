@@ -133,7 +133,8 @@ async function searchNotebooks(session: McpSourceSession, query: string, sortBy:
   for (const raw of data.hits) {
     const hit = record(raw);
     if (typeof hit?.notebookId !== 'string' || hit.notebookId === '' || hit.notebookId.includes('"')) throw new EvernoteListingIncomplete();
-    const label = typeof hit.label === 'string' ? hit.label : '';
+    // Trimmed as the ENEX import trims the export's file name, so both give a note the same folder key.
+    const label = typeof hit.label === 'string' ? hit.label.trim() : '';
     // The server's own filter when it is the notebook-id filter, else the same built here.
     const filter = typeof hit.searchFilter === 'string' && hit.searchFilter === `nbGuid:"${hit.notebookId}"`
       ? hit.searchFilter

@@ -454,7 +454,8 @@
                     "x.bookmarks",
                     "telegram.messages",
                     "whatsapp.personal.messages",
-                    "readwise.library"
+                    "readwise.library",
+                    "evernote.notes"
                   ]
                 },
                 "uniqueItems": true,
@@ -881,6 +882,8 @@
                         "secure_local.readwise.library",
                         "internal.x.bookmarks",
                         "secure_local.x.bookmarks",
+                        "secure_local.evernote.notes",
+                        "internal.evernote.notes",
                         "secure_local.dropbox.files",
                         "internal.dropbox.files",
                         "public_safe.dropbox.files",
@@ -917,7 +920,8 @@
                         "x",
                         "telegram",
                         "whatsapp",
-                        "readwise"
+                        "readwise",
+                        "evernote"
                       ]
                     },
                     "family": {
@@ -927,7 +931,8 @@
                         "file",
                         "chat",
                         "readwise",
-                        "x"
+                        "x",
+                        "note"
                       ]
                     },
                     "trustDomain": {
@@ -1303,6 +1308,65 @@
                       "type": "object",
                       "properties": {
                         "corpusId": {
+                          "const": "secure_local.evernote.notes"
+                        },
+                        "sourceId": {
+                          "const": "evernote.notes"
+                        },
+                        "provider": {
+                          "const": "evernote"
+                        },
+                        "family": {
+                          "const": "note"
+                        },
+                        "trustDomain": {
+                          "const": "secure_local"
+                        },
+                        "capabilities": {
+                          "items": {
+                            "enum": [
+                              "answer",
+                              "status",
+                              "sync",
+                              "search"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "corpusId": {
+                          "const": "internal.evernote.notes"
+                        },
+                        "sourceId": {
+                          "const": "evernote.notes"
+                        },
+                        "provider": {
+                          "const": "evernote"
+                        },
+                        "family": {
+                          "const": "note"
+                        },
+                        "trustDomain": {
+                          "const": "internal"
+                        },
+                        "capabilities": {
+                          "items": {
+                            "enum": [
+                              "answer",
+                              "status",
+                              "search"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "corpusId": {
                           "const": "secure_local.dropbox.files"
                         },
                         "sourceId": {
@@ -1592,6 +1656,8 @@
                     "secure_local.readwise.library",
                     "internal.x.bookmarks",
                     "secure_local.x.bookmarks",
+                    "secure_local.evernote.notes",
+                    "internal.evernote.notes",
                     "secure_local.dropbox.files",
                     "internal.dropbox.files",
                     "public_safe.dropbox.files",
@@ -1628,7 +1694,8 @@
                     "x",
                     "telegram",
                     "whatsapp",
-                    "readwise"
+                    "readwise",
+                    "evernote"
                   ]
                 },
                 "family": {
@@ -1638,7 +1705,8 @@
                     "file",
                     "chat",
                     "readwise",
-                    "x"
+                    "x",
+                    "note"
                   ]
                 },
                 "trustDomain": {
@@ -1998,6 +2066,65 @@
                     },
                     "trustDomain": {
                       "const": "secure_local"
+                    },
+                    "capabilities": {
+                      "items": {
+                        "enum": [
+                          "answer",
+                          "status",
+                          "search"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "corpusId": {
+                      "const": "secure_local.evernote.notes"
+                    },
+                    "sourceId": {
+                      "const": "evernote.notes"
+                    },
+                    "provider": {
+                      "const": "evernote"
+                    },
+                    "family": {
+                      "const": "note"
+                    },
+                    "trustDomain": {
+                      "const": "secure_local"
+                    },
+                    "capabilities": {
+                      "items": {
+                        "enum": [
+                          "answer",
+                          "status",
+                          "sync",
+                          "search"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "corpusId": {
+                      "const": "internal.evernote.notes"
+                    },
+                    "sourceId": {
+                      "const": "evernote.notes"
+                    },
+                    "provider": {
+                      "const": "evernote"
+                    },
+                    "family": {
+                      "const": "note"
+                    },
+                    "trustDomain": {
+                      "const": "internal"
                     },
                     "capabilities": {
                       "items": {

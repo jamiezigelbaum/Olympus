@@ -91,9 +91,10 @@ can trust the same way:
    instructions never reach a model as instructions.
 6. **One shared MCP layer.** The MCP client, OAuth, paging, and request budget
    are source-neutral and written once in `src/`. The per-source connector
-   only maps the provider's read tools to list and fetch. That layer does not
-   exist yet: the first MCP source builds it, as shared code, in its own PR
-   before the connector.
+   only maps the provider's read tools to list and fetch. The layer is
+   `src/core/mcp-source/` (session, OAuth, pacer, typed errors), built with
+   the first MCP source; live Evernote (`src/workers/evernote/`) is its
+   reference connector.
 
 ## Reference stampings
 

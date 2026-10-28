@@ -187,7 +187,7 @@ const DEFAULT_SOURCE_CORPORA: SourceCorpusConfig[] = [
     provider: 'evernote',
     family: 'note',
     trustDomain: 'secure_local',
-    activationMode: 'lexical_only',
+    activationMode: 'hybrid_shadow',
     capabilities: ['answer', 'status', 'sync', 'search'],
     createdOnDemand: true,
     description: 'Evernote notes and attachments judged Private (and the lane\'s own placement until judged).',
@@ -198,7 +198,7 @@ const DEFAULT_SOURCE_CORPORA: SourceCorpusConfig[] = [
     provider: 'evernote',
     family: 'note',
     trustDomain: 'internal',
-    activationMode: 'lexical_only',
+    activationMode: 'hybrid_shadow',
     // No 'sync' of its own: the Evernote lane's tier set fills it.
     capabilities: ['answer', 'status', 'search'],
     createdOnDemand: true,
