@@ -31,8 +31,6 @@
 //   extraction factory) routes a new item's names at listing and lands its
 //   content by the content tier decided from that text (tiered-extraction.ts,
 //   file-extraction/tiered-store-sink.ts);
-// - `laneFloor`: a lane whose items never rest below a domain unless the
-//   OWNER lifts it (a per-item override or an owner rule of a named kind);
 // - `restingTier`: the tier a routed copy rests at in a leg;
 // - legs, the secure one included, created on first need
 //   (`createTieredLaneSet`, `createExistingStoreTierLane`).
@@ -66,7 +64,6 @@ import {
   maxTier,
   hasCredentialUrl,
   PERSONAL_FIRST_REASON,
-  type OwnerTierRule,
   type TierDecidedBy,
   type TierDecision,
   type TierKey,
@@ -183,18 +180,6 @@ export interface TieredStoreLegSpec {
   restingTier?: SourceTrustTier;
 }
 
-/**
- * A lane-level floor (design section 2.1, chats): the lane's items are never
- * placed below `trustDomain` unless the OWNER said so, either with a per-item
- * override or with an owner rule of one of `liftedByOwnerRule`'s kinds whose
- * tier is below the floor. Fail closed: a classifier default, a sensitivity
- * map category or public evidence never lowers an item below it.
- */
-export interface TieredLaneFloor {
-  trustDomain: SourceTrustDomain;
-  liftedByOwnerRule: readonly OwnerTierRule['match']['kind'][];
-}
-
 export interface TieredStoreSetOptions {
   /** Stable id for this set's resume points (e.g. provider plus account). */
   setId: string;
@@ -207,8 +192,6 @@ export interface TieredStoreSetOptions {
   secretLocations?: SecretLocationsIndex;
   /** Told once when a lazily created leg opens, so a runtime can serve it. */
   onLegOpened?: (store: LocalConnectorStore, leg: TieredStoreLegSpec) => void;
-  /** See TieredLaneFloor. */
-  laneFloor?: TieredLaneFloor;
   /**
    * The lane lists items without their text and a later reader (the shared
    * extraction factory) supplies it. A NEW item is then routed from its
@@ -296,7 +279,6 @@ export class TieredStoreSet {
   private readonly tierClassification: ConnectorStoreTierClassification | undefined;
   private readonly secretLocations: SecretLocationsIndex | undefined;
   private readonly onLegOpened: TieredStoreSetOptions['onLegOpened'];
-  private readonly laneFloor: TieredLaneFloor | undefined;
   private readonly contentArrivesLater: boolean;
   private readonly contentArrivesLaterFor: ((item: RawItem) => boolean) | undefined;
   private privateEmbedder: SourceEmbeddingProvider | undefined;
@@ -315,7 +297,6 @@ export class TieredStoreSet {
     this.tierClassification = options.tierClassification;
     this.secretLocations = options.secretLocations;
     this.onLegOpened = options.onLegOpened;
-    this.laneFloor = options.laneFloor;
     this.contentArrivesLater = options.contentArrivesLater === true;
     this.contentArrivesLaterFor = options.contentArrivesLater === true ? undefined : options.contentArrivesLaterFor;
     this.legs = new Map();
@@ -627,7 +608,7 @@ export class TieredStoreSet {
    */
   placementFor(
     decision: Pick<TierDecision, 'metadataTier' | 'contentTier' | 'state' | 'metadataPending' | 'contentPending'>
-      & Partial<Pick<TierDecision, 'contentRead' | 'decidedBy' | 'metadataOwnerRule' | 'reasons'>>,
+      & Partial<Pick<TierDecision, 'contentRead' | 'reasons'>>,
     options: { contentArrivesLater?: boolean } = {},
   ): TierPlacementPlan {
     if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') {
@@ -645,8 +626,7 @@ export class TieredStoreSet {
         stored: { trustDomain: domain, trustTier: this.restingTierFor(domain) },
       };
     }
-    const floor = this.floorFor(decision);
-    const metadataDomain = this.domainAtLeast(atLeastDomain(TIER_KEY_TRUST_DOMAIN[decision.metadataTier], floor));
+    const metadataDomain = this.domainAtLeast(TIER_KEY_TRUST_DOMAIN[decision.metadataTier]);
     if (deferred && decision.contentRead !== true) {
       return {
         copies: [{ corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: 'metadata' }],
@@ -657,10 +637,9 @@ export class TieredStoreSet {
     const contentHeld = decision.contentPending && !decision.reasons?.includes(PERSONAL_FIRST_REASON);
     const contentDomain = contentHeld
       ? this.domainAtLeast('secure_local')
-      : this.domainAtLeast(atLeastDomain(
+      : this.domainAtLeast(
           TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier) as Exclude<TierKey, 'secrets'>],
-          floor,
-        ));
+        );
     const copies: TierCopyPlan[] = !this.splitLayers || metadataDomain === contentDomain
       ? [{ corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: 'both' }]
       : [
@@ -740,25 +719,6 @@ export class TieredStoreSet {
   /** @internal The tier a routed copy in this domain's leg is stored at. */
   restingTierFor(domain: SourceTrustDomain): SourceTrustTier {
     return this.legs.get(domain)?.spec.restingTier ?? defaultStoreTrustTier(domain);
-  }
-
-  /**
-   * The lane floor that applies to this decision: undefined when the lane has
-   * none, or when the OWNER lifted it (a per-item override, or an owner rule of
-   * a lifting kind that set a tier below the floor).
-   */
-  private floorFor(decision: Partial<Pick<TierDecision, 'decidedBy' | 'metadataOwnerRule'>>): SourceTrustDomain | undefined {
-    const floor = this.laneFloor;
-    if (!floor) return undefined;
-    if (decision.decidedBy === 'override') return undefined;
-    const rule = decision.metadataOwnerRule;
-    if (rule
-      && floor.liftedByOwnerRule.includes(rule.kind)
-      && rule.tier !== 'secrets'
-      && trustDomainRank(TIER_KEY_TRUST_DOMAIN[rule.tier]) < trustDomainRank(floor.trustDomain)) {
-      return undefined;
-    }
-    return floor.trustDomain;
   }
 
   /**
@@ -1351,7 +1311,6 @@ export interface TieredLaneSetOptions {
    */
   ledger?: TierLedger;
   onLegOpened?: (store: LocalConnectorStore, leg: TieredStoreLegSpec) => void;
-  laneFloor?: TieredLaneFloor;
   contentArrivesLater?: boolean;
   /** See TieredStoreSetOptions.contentArrivesLaterFor. */
   contentArrivesLaterFor?: (item: RawItem) => boolean;
@@ -1395,7 +1354,6 @@ export function createTieredLaneSet(options: TieredLaneSetOptions): TieredStoreS
     ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.onLegOpened ? { onLegOpened: options.onLegOpened } : {}),
-    ...(options.laneFloor ? { laneFloor: options.laneFloor } : {}),
     ...(options.contentArrivesLater === true ? { contentArrivesLater: true } : {}),
     ...(options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {}),
   });
@@ -1448,7 +1406,6 @@ export function createExistingStoreTierLane(options: {
   embeddingProvider?: SourceEmbeddingProvider;
   restingTier?: SourceTrustTier;
   splitLayers?: boolean;
-  laneFloor?: TieredLaneFloor;
   contentArrivesLater?: boolean;
   tierClassification?: ConnectorStoreTierClassification;
   secretLocations?: SecretLocationsIndex;
@@ -1494,7 +1451,6 @@ export function createExistingStoreTierLane(options: {
     ledger,
     legs: legs as TieredLaneSetOptions['legs'],
     ...(options.splitLayers === false ? { splitLayers: false } : {}),
-    ...(options.laneFloor ? { laneFloor: options.laneFloor } : {}),
     ...(options.contentArrivesLater === true ? { contentArrivesLater: true } : {}),
     ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
@@ -2136,10 +2092,6 @@ function tieredRun(legs: TieredStoreLegRun[], routing: TieredStoreRoutingCounts,
   const byDomain: Partial<Record<SourceTrustDomain, TieredStoreLegRun>> = {};
   for (const leg of legs) byDomain[leg.trustDomain] = leg;
   return { legs, byDomain, ...(cursor ? { cursor } : {}), routing: { ...routing } };
-}
-
-function atLeastDomain(domain: SourceTrustDomain, floor: SourceTrustDomain | undefined): SourceTrustDomain {
-  return floor !== undefined && trustDomainRank(floor) > trustDomainRank(domain) ? floor : domain;
 }
 
 /**

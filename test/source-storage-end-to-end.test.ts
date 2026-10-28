@@ -24,6 +24,7 @@ import {
   accountFolderEntry,
   accountRawPath,
   accountStoreNames,
+  hasLegacyLayout,
   legacyAccountFiles,
   legacyAccountPaths,
   olympusDataRoot,
@@ -44,6 +45,8 @@ const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'se
 const REPO = join(import.meta.dir, '..');
 const TOKEN = 'e2e-worker-token-0123456789abcdef0123456789abcdef';
 
+// Sources a pre-folder install could have files for: a folder-only source (live Evernote) has nothing to move.
+const MOVED_SOURCES = FOLDER_LAYOUT_SOURCES.filter(hasLegacyLayout);
 const roots: string[] = [];
 const children: Array<ReturnType<typeof Bun.spawn>> = [];
 afterEach(() => {
@@ -291,7 +294,7 @@ describe('source storage, end to end on this host', () => {
     try {
       const output = first.output();
       expect(output, listening(first)).toContain('worker listening');
-      for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+      for (const sourceId of MOVED_SOURCES) {
         expect(output, `${sourceId}\n${output.slice(0, 4000)}`).toContain(`[storage] ${sourceId} moved into its account folder.`);
       }
       const status = await ask(env, first, '/v1/source/index/status', {});
@@ -323,7 +326,7 @@ describe('source storage, end to end on this host', () => {
     expect(readFileSync(arrived('whatsapp.personal.messages', 'raw/whatsapp/spool/2026-10-24.jsonl'), 'utf8')).toBe('{"id":"M1"}\n');
 
     // Every account in its folder; nothing left at a legacy place.
-    for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+    for (const sourceId of MOVED_SOURCES) {
       expect(legacyLeft(sourceId, env), sourceId).toEqual([]);
       expect(lstatSync(accountFolder({ source_id: sourceId, slot: '1' }, env)).isDirectory(), sourceId).toBe(true);
     }
@@ -333,12 +336,12 @@ describe('source storage, end to end on this host', () => {
       expect(snapshotStore(resolvedStorePath(sourceId!, name, env)).items.length, key).toBe(count);
     }
     const registry = readSourceRegistry(env);
-    for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+    for (const sourceId of MOVED_SOURCES) {
       expect(registry.accounts.find((account) => account.source_id === sourceId), sourceId).toMatchObject({ layout: 'folder', state: 'active' });
     }
 
     // Delete one source (the worker stopped: the CLI's path), then the next boot removes it.
-    const before = Object.fromEntries(FOLDER_LAYOUT_SOURCES.map((sourceId) => [sourceId, filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env))]));
+    const before = Object.fromEntries(MOVED_SOURCES.map((sourceId) => [sourceId, filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env))]));
     const mineFolder = accountFolder({ source_id: MINE.source_id, slot: '1' }, env);
     const mineStore = resolvedStorePath(MINE.source_id, 'secure_local', env);
     const mineInode = lstatSync(mineStore).ino;
@@ -356,7 +359,7 @@ describe('source storage, end to end on this host', () => {
       expect(lstatSync(mineStore).ino).not.toBe(mineInode);
       expect(snapshotStore(mineStore).items.length).toBe(0);
     }
-    for (const sourceId of FOLDER_LAYOUT_SOURCES.filter((id) => id !== MINE.source_id)) {
+    for (const sourceId of MOVED_SOURCES.filter((id) => id !== MINE.source_id)) {
       expect(filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env)), sourceId).toEqual(expect.arrayContaining(before[sourceId]!));
     }
     for (const file of SEEDED_FOR_MINE) {

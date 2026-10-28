@@ -80,7 +80,7 @@ export function dashboardHomeHref(token?: string): string {
 
 /**
  * What an olympusplugin.ai/open/<path>/ link means on the computer: Connect
- * for X, Readwise, Telegram or WhatsApp opens that source's setup sheet on
+ * for X, Readwise, Telegram, WhatsApp or Evernote opens that source's setup sheet on
  * Keys; a models fix opens Models there; See why on a source (unreadable/<id>)
  * opens this dashboard landed on it; the dashboard is the dashboard. The
  * ChatGPT-connection fixes (connect, reconnect) keep their help page.

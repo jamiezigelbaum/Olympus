@@ -90,20 +90,15 @@ export function compactClassificationSignals(signals: {
 }
 
 /**
- * The resting tier a source's trust domain implies, as a `prior`: item-level
- * raises still apply and no automatic signal lowers it. `basis` says where
- * the domain came from: `source_config` for a domain the owner or deployment
- * configured, `source_default` for a source whose existing doctrine keeps
- * every item at that domain (published so the recorded decision is never
- * less private than today's placement until an owner rule replaces it).
+ * The resting tier an OWNER- or deployment-configured trust domain implies
+ * (a Telegram chat the owner protected, say), as a `prior`: item-level raises
+ * still apply and no automatic signal lowers it. Never a whole source's
+ * default: every source's items are tiered by their own content.
  */
-export function trustDomainPrior(
-  trustDomain: SourceTrustDomain,
-  basis: 'source_config' | 'source_default',
-): SourceClassificationPrior {
+export function trustDomainPrior(trustDomain: SourceTrustDomain): SourceClassificationPrior {
   return {
     tier: trustDomain === 'secure_local' ? 'secure' : trustDomain === 'public_safe' ? 'public' : 'private',
     strength: 'prior',
-    basis: `${basis}:trust_domain:${trustDomain}`,
+    basis: `source_config:trust_domain:${trustDomain}`,
   };
 }

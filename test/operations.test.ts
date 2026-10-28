@@ -327,7 +327,7 @@ describe('operations', () => {
     });
     expect(operationToolSchema(sourceAnswer!)).toMatchObject({
       properties: {
-        corpus_id: { enum: ['secure_local.email.private', 'internal.email', 'public_safe.email', 'internal.drive.docs', 'secure_local.drive.docs', 'public_safe.drive.docs', 'internal.telegram.messages', 'internal.readwise.library', 'secure_local.readwise.library', 'internal.x.bookmarks', 'secure_local.x.bookmarks', 'secure_local.dropbox.files', 'internal.dropbox.files', 'public_safe.dropbox.files', 'secure_local.local.files', 'internal.local.files', 'public_safe.local.files', 'secure_local.telegram.protected.messages', 'secure_local.whatsapp.messages', 'internal.whatsapp.messages'] },
+        corpus_id: { enum: ['secure_local.email.private', 'internal.email', 'public_safe.email', 'internal.drive.docs', 'secure_local.drive.docs', 'public_safe.drive.docs', 'internal.telegram.messages', 'internal.readwise.library', 'secure_local.readwise.library', 'internal.x.bookmarks', 'secure_local.x.bookmarks', 'secure_local.dropbox.files', 'internal.dropbox.files', 'public_safe.dropbox.files', 'secure_local.local.files', 'internal.local.files', 'public_safe.local.files', 'secure_local.telegram.protected.messages', 'secure_local.whatsapp.messages', 'internal.whatsapp.messages', 'secure_local.evernote.notes', 'internal.evernote.notes'] },
         approved_scope_key: { type: 'string' },
         chat_scope: {
           type: 'string',
@@ -534,7 +534,7 @@ describe('operations', () => {
     });
     expect(operationToolSchema(sourceIndexStatus!)).toMatchObject({
       properties: {
-        corpus_id: { enum: ['secure_local.email.private', 'internal.email', 'public_safe.email', 'internal.drive.docs', 'secure_local.drive.docs', 'public_safe.drive.docs', 'internal.telegram.messages', 'internal.readwise.library', 'secure_local.readwise.library', 'internal.x.bookmarks', 'secure_local.x.bookmarks', 'secure_local.dropbox.files', 'internal.dropbox.files', 'public_safe.dropbox.files', 'secure_local.local.files', 'internal.local.files', 'public_safe.local.files', 'secure_local.telegram.protected.messages', 'secure_local.whatsapp.messages', 'internal.whatsapp.messages'] },
+        corpus_id: { enum: ['secure_local.email.private', 'internal.email', 'public_safe.email', 'internal.drive.docs', 'secure_local.drive.docs', 'public_safe.drive.docs', 'internal.telegram.messages', 'internal.readwise.library', 'secure_local.readwise.library', 'internal.x.bookmarks', 'secure_local.x.bookmarks', 'secure_local.dropbox.files', 'internal.dropbox.files', 'public_safe.dropbox.files', 'secure_local.local.files', 'internal.local.files', 'public_safe.local.files', 'secure_local.telegram.protected.messages', 'secure_local.whatsapp.messages', 'internal.whatsapp.messages', 'secure_local.evernote.notes', 'internal.evernote.notes'] },
         include_ingestion_ledger: {
           description: expect.stringContaining('normalized cross-source ingestion ledger'),
         },

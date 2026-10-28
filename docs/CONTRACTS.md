@@ -355,6 +355,18 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-28 (no version change): **no source is Private wholesale** (owner
+  ruling, repeated: privacy is decided per item by its content, in every
+  source). WhatsApp and Apple Messages no longer publish a `source_default`
+  Private prior, and the WhatsApp lane's floor (`laneFloor`, which only an
+  owner chat rule could lift) is deleted with its machinery. Their messages
+  start Personal and are raised to Private or Secrets by the shared tier
+  classifier, its sniffer and the owner's rules, like mail and files.
+  `trustDomainPrior` now only expresses an owner- or deployment-configured
+  domain. Telegram pairing no longer marks every approved chat protected.
+  The `prior` field stays optional, so none of this is reachable from the
+  three contract types and the fingerprint is unchanged. Stored data is not
+  moved by this change; the owner-approved tier migration re-judges it.
 - 2026-10-25 (v2.2.0, additive): **one pipeline for a source's two ways in**
   (owner direction 2026-10-25; `docs/design/archive-live-one-dataset.md`,
   reviewed in two rounds). Additive and optional, no existing field changes:
@@ -834,7 +846,7 @@ per-item hold (`holdContentUntilJudged`); see the change log.
   so a new file's names are routed at listing and its content where the
   extraction factory's text puts it; Readwise and X items can be raised to
   Private or Secrets; WhatsApp stays Private unless an owner chat rule sets a
-  chat Personal. The source ingestion policy no longer pins Dropbox to
+  chat Personal (superseded 2026-10-28: WhatsApp is judged per message). The source ingestion policy no longer pins Dropbox to
   `secure_local` (its `corpusId` names the lane). None of this is reachable
   from the three contract types, so the fingerprint is unchanged; no stored
   data migrates.

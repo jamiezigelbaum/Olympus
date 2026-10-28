@@ -51,6 +51,7 @@ const SYNC_ROUTE_SOURCES: Readonly<Record<ChatGptSyncSourceId, string>> = {
   'dropbox.files': 'dropbox',
   'x.bookmarks': 'x',
   'readwise.library': 'readwise',
+  'evernote.notes': 'evernote',
   // A source on this computer is named by its own id.
   'local.files': 'local.files',
 };

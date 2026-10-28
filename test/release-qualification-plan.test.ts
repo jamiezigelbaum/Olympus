@@ -124,7 +124,7 @@ describe('Slice 3F exact qualification plan', () => {
       const real = realCells.map((cell, index) => runRealCell(fixture, dir, `real-${index}`, cell));
       const verified = Bun.spawnSync(['bun', 'scripts/release-qualification-harness.ts', 'verify-real-provider', fixture.plan, ...real.map((cell) => cell.receipt), '--session-proofs', ...real.map((cell) => cell.proof)], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
       expect(verified.exitCode).toBe(0);
-      expect(JSON.parse(verified.stdout.toString())).toMatchObject({ matrix: 'real_provider_inputs', custody_consistent: true, passed: 18, failed: 1, eligible_passes: 18, real_provider_passes: 17, failure_reasons: { engineering_intervention: 1 }, qualification_complete: false, completion_owner: 'slice4_independent_review' });
+      expect(JSON.parse(verified.stdout.toString())).toMatchObject({ matrix: 'real_provider_inputs', custody_consistent: true, passed: 20, failed: 1, eligible_passes: 20, real_provider_passes: 19, failure_reasons: { engineering_intervention: 1 }, qualification_complete: false, completion_owner: 'slice4_independent_review' });
       const incompleteReview = Bun.spawnSync(['bun', 'scripts/release-qualification-harness.ts', 'review-real-provider', fixture.plan, ...real.map((cell) => cell.receipt), '--session-proofs', ...real.map((cell) => cell.proof)], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
       expect(incompleteReview.exitCode).not.toBe(0);
       expect(incompleteReview.stderr.toString()).toContain('non-passing receipt');
@@ -141,7 +141,7 @@ describe('Slice 3F exact qualification plan', () => {
       ].map((cell, index) => runRealCell(fixture, dir, `qualified-real-${index}`, cell));
       const reviewedReal = Bun.spawnSync(['bun', 'scripts/release-qualification-harness.ts', 'review-real-provider', fixture.plan, ...qualifiedReal.map((cell) => cell.receipt), '--session-proofs', ...qualifiedReal.map((cell) => cell.proof)], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
       expect(reviewedReal.exitCode).toBe(0);
-      expect(JSON.parse(reviewedReal.stdout.toString())).toMatchObject({ matrix: 'real_provider_qualification', attempts: 19, passed: 19, real_provider_passes: 18, qualification_complete: true });
+      expect(JSON.parse(reviewedReal.stdout.toString())).toMatchObject({ matrix: 'real_provider_qualification', attempts: 21, passed: 21, real_provider_passes: 20, qualification_complete: true });
 
       const pilot = Array.from({ length: 5 }, (_, index) => runRealCell(fixture, dir, `pilot-${index}`, {
         source_id: 'gmail.email', host_os: 'darwin_arm64', host_surface: 'openclaw', check: 'pilot_task',

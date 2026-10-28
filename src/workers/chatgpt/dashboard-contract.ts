@@ -866,6 +866,7 @@ export type ChatGptDisconnectSourceId =
   | 'dropbox.files'
   | 'x.bookmarks'
   | 'readwise.library'
+  | 'evernote.notes'
   | 'local.files';
 /**
  * Sources whose indexed data the panel may delete: the Disconnect set, plus the

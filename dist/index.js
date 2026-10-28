@@ -1256,7 +1256,8 @@ var init_public_surface = __esm(() => {
     "x.bookmarks",
     "telegram.messages",
     "whatsapp.personal.messages",
-    "readwise.library"
+    "readwise.library",
+    "evernote.notes"
   ];
   PUBLIC_OPERATION_NAMES = {
     native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
@@ -1595,6 +1596,28 @@ var init_source_corpus_registry = __esm(() => {
       description: "X bookmarks raised to Private by per-item four-tier classification."
     },
     {
+      corpusId: "secure_local.evernote.notes",
+      sourceId: "evernote.notes",
+      provider: "evernote",
+      family: "note",
+      trustDomain: "secure_local",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "sync", "search"],
+      createdOnDemand: true,
+      description: "Evernote notes and attachments judged Private (and the lane's own placement until judged)."
+    },
+    {
+      corpusId: "internal.evernote.notes",
+      sourceId: "evernote.notes",
+      provider: "evernote",
+      family: "note",
+      trustDomain: "internal",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Evernote notes and attachments judged Personal, routed here by per-item four-tier classification."
+    },
+    {
       corpusId: "secure_local.dropbox.files",
       sourceId: "dropbox.files",
       provider: "dropbox",
@@ -1685,7 +1708,7 @@ var init_source_corpus_registry = __esm(() => {
       activationMode: "hybrid_shadow",
       capabilities: ["status", "search", "answer"],
       createdOnDemand: true,
-      description: "WhatsApp messages of chats the owner set to Personal, routed here per message. The default for every chat stays Private."
+      description: "WhatsApp messages judged Personal by their content, routed here per message."
     }
   ];
   DEFAULT_CAPABILITY_ORDER = {
@@ -1709,7 +1732,9 @@ var init_source_corpus_registry = __esm(() => {
       "public_safe.local.files",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       "secure_local.whatsapp.messages",
-      "internal.whatsapp.messages"
+      "internal.whatsapp.messages",
+      "secure_local.evernote.notes",
+      "internal.evernote.notes"
     ],
     status: [
       "secure_local.email.private",
@@ -1731,7 +1756,9 @@ var init_source_corpus_registry = __esm(() => {
       "public_safe.local.files",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       "secure_local.whatsapp.messages",
-      "internal.whatsapp.messages"
+      "internal.whatsapp.messages",
+      "secure_local.evernote.notes",
+      "internal.evernote.notes"
     ],
     sync: [
       "internal.email",
@@ -1743,7 +1770,8 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.dropbox.files",
       "secure_local.local.files",
       "internal.telegram.messages",
-      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
+      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+      "secure_local.evernote.notes"
     ],
     search: [
       "internal.email",
@@ -1761,7 +1789,9 @@ var init_source_corpus_registry = __esm(() => {
       "internal.x.bookmarks",
       "secure_local.x.bookmarks",
       "internal.telegram.messages",
-      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
+      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+      "secure_local.evernote.notes",
+      "internal.evernote.notes"
     ],
     promotion_candidates: ["secure_local.dropbox.files", "secure_local.local.files"]
   };
@@ -2711,7 +2741,9 @@ var init_olympus_layout = __esm(() => {
     }
   };
   ARCHIVE_FILE_LABEL = { secure_local: "", internal: "-internal", public_safe: "-public" };
-  FOLDER_ONLY_STORES = {};
+  FOLDER_ONLY_STORES = {
+    "evernote.notes": ["secure_local", "internal"]
+  };
   FOLDER_LAYOUT_SOURCES = [...Object.keys(LEGACY_STORES), ...Object.keys(FOLDER_ONLY_STORES)];
   RAW_OWNER = {
     watch: "local.files",
@@ -2720,6 +2752,7 @@ var init_olympus_layout = __esm(() => {
     "archive-import-requests.json": ARCHIVE_IMPORTS,
     "archive-media-bindings.sqlite": ARCHIVE_IMPORTS,
     "archive-staging": ARCHIVE_IMPORTS,
+    "evernote-pass.json": "evernote.notes",
     ...messagingRawOwners()
   };
   MESSAGING_RAW_NAMES = [
@@ -5885,7 +5918,7 @@ var init_archive_formats = __esm(() => {
     provider: "evernote",
     chooseHint: "an Evernote export (the .enex file, or a folder of them)",
     citationLabel: "Evernote",
-    sourceCard: Object.freeze({ id: "evernote.archive", label: "Evernote" }),
+    sourceCard: Object.freeze({ id: "evernote.notes", label: "Evernote" }),
     probeNames: Object.freeze(["*.enex"]),
     detect(probe) {
       if (probe.chosen.kind === "file")
@@ -13367,7 +13400,8 @@ var init_credential_broker = __esm(() => {
     "dropbox",
     "telegram",
     "whatsapp_personal",
-    "x"
+    "x",
+    "evernote"
   ];
   PRIVATE_CREDENTIAL_PROVIDERS = [
     "notion",
@@ -13376,8 +13410,7 @@ var init_credential_broker = __esm(() => {
     "whatsapp_business",
     "apple_messages",
     "reflect",
-    "roam",
-    "evernote"
+    "roam"
   ];
   CREDENTIAL_PROVIDERS = [
     ...PUBLIC_CREDENTIAL_PROVIDERS,
@@ -13563,6 +13596,16 @@ var init_credential_broker = __esm(() => {
         "OLYMPUS_SOURCE_INDEX_READWISE_TOKEN",
         "READWISE_TOKEN"
       ],
+      expiresInSeconds: 3600
+    },
+    {
+      handle: "evernote.personal",
+      provider: "evernote",
+      accountRole: "personal",
+      trustDomain: "secure_local",
+      allowedCapabilities: ["evernote.notes.sync"],
+      scopes: ["read"],
+      tokenEnvNames: [],
       expiresInSeconds: 3600
     },
     {
@@ -14348,7 +14391,7 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -14377,6 +14420,13 @@ var init_vocabulary = __esm(() => {
     "invalid_redirect_uri",
     "redirect_uri_not_registered"
   ]);
+  DASHBOARD_LIVE_PASS_ERROR_COPY = Object.freeze({
+    auth: "the last check could not sign in",
+    rate_limited: "the last check was slowed by the provider and resumes on its own",
+    listing_incomplete: "the last check could not list every note, so nothing was changed",
+    account_changed: "the last check found a different Evernote account than the notes stored here, so nothing was changed: reconnect the earlier account, or delete this card's indexed data first",
+    unavailable: "the last check could not reach the provider"
+  });
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
   DASHBOARD_UNREADABLE_REASON_WORDS = {
     privacy_check_missing: {
@@ -22442,13 +22492,26 @@ var init_public_source_capabilities = __esm(() => {
         capability: "readwise.sync",
         env_flag: "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED"
       }
+    },
+    {
+      source_id: "evernote.notes",
+      label: "Evernote",
+      authentication: { type: "oauth2", ownership: "sign-in with Evernote on this computer (read permission only)" },
+      contextual_scopes: ["notebooks the person owns", "notes shared with the person are counted, not imported"],
+      dependencies: [{ id: "evernote_mcp", label: "Evernote's own MCP server", required_for: "listing notes and reading notes and attachments" }],
+      provider_ceiling: "An hourly full pass, paced at about one call a second; a large first import finishes over several passes.",
+      supported_formats: ["note text", "title", "notebook", "tags", "created and updated times", "attachments read on their own"],
+      doctor_lane: {
+        provider: "evernote",
+        capability: "evernote.notes.sync"
+      }
     }
   ];
   CAPABILITIES_BY_SOURCE = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((capability) => [capability.source_id, capability]));
 });
 
 // src/workers/source-dashboard.ts
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", DASHBOARD_SUPPORTED_SOURCES;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", LIVE_ARCHIVE_CARD_IDS, DASHBOARD_SUPPORTED_SOURCES;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -22518,6 +22581,7 @@ var init_source_dashboard = __esm(() => {
       }
     ]
   };
+  LIVE_ARCHIVE_CARD_IDS = new Set(["evernote.notes"]);
   DASHBOARD_SUPPORTED_SOURCES = [
     {
       source_id: "gmail.email",
@@ -22650,7 +22714,20 @@ var init_source_dashboard = __esm(() => {
       content_arrives_extracted: true,
       connect_action: { kind: "api_key", source: "readwise" }
     },
-    ...archiveSourceCards().map((card) => ({
+    {
+      source_id: "evernote.notes",
+      primary_corpus_id: "secure_local.evernote.notes",
+      corpus_source_ids: ["evernote.notes"],
+      ingestion_ledger_source_id: "evernote",
+      label: "Evernote",
+      provider: "evernote",
+      family: "note",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      sync_name: { mid: "your Evernote notes", start: "Your Evernote notes", plural: true },
+      connect_action: { kind: "oauth", source: "evernote" }
+    },
+    ...archiveSourceCards().filter((card) => !LIVE_ARCHIVE_CARD_IDS.has(card.id)).map((card) => ({
       source_id: card.id,
       primary_corpus_id: card.id,
       corpus_source_ids: [],
@@ -23636,6 +23713,12 @@ var init_source_ingestion_ledger = __esm(() => {
       family: "file",
       corpusSourceIds: ["local.files"]
     },
+    evernote: {
+      label: "Evernote",
+      primaryCorpusId: "secure_local.evernote.notes",
+      family: "note",
+      corpusSourceIds: ["evernote.notes"]
+    },
     archive_imports: {
       label: "Archives",
       primaryCorpusId: archiveCorpusId("secure_local", "email"),
@@ -23760,7 +23843,8 @@ var OPEN_CONNECT_SOURCES = {
   x: { sourceId: "x.bookmarks", label: "X bookmarks" },
   readwise: { sourceId: "readwise.library", label: "Readwise" },
   telegram: { sourceId: "telegram.messages", label: "Telegram" },
-  whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" },
+  evernote: { sourceId: "evernote.notes", label: "Evernote" }
 };
 var OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
 var OPEN_UNREADABLE_SOURCES = {

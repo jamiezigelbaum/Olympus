@@ -189,58 +189,11 @@ describe('the search beside a live input waits for the private model', () => {
   });
 });
 
-describe('a source that keeps its records Private: the word stays there, and no search returns it', () => {
-  const kept: LegFixture = { ...fx, beside: { ...fx.beside!, search: 'withheld' } };
-  const stores = (personal: number): StoreView[] => [
-    { tier: 'private', exists: true, live: 4, tokenRows: 2 },
-    { tier: 'personal', exists: true, live: personal, tokenRows: personal },
-  ];
-  const answer = (carries: boolean) => ({ ok: true, isError: false, evidence: [{ source: 'Fixture', hasToken: carries }, { source: 'Other', hasToken: false }] });
-  const failingKept = (obs: BesideLiveObservation) => besideLiveChecks(obs, kept).filter((c) => c.status === 'fail').map((c) => c.id);
-
-  test('the WhatsApp fixture keeps its records Private, as the source does', () => {
-    expect(legFixture('beside', 'seed', 'whatsapp_chat').beside?.search).toBe('withheld');
-    // Telegram's, where it is imported beside its live input, are judged like its own and cited.
-    const telegram = (() => {
-      try {
-        return legFixture('beside', 'seed', 'telegram_json');
-      } catch {
-        return undefined;
-      }
-    })();
-    if (telegram) expect(telegram.beside?.search ?? 'cited').toBe('cited');
-  });
-
-  test('all of it in the Private store and a search that carries none of it passes', () => {
-    expect(failingKept(good({ stores: stores(0), search: answer(false) }))).toEqual([]);
-  });
-
-  test('a search that returns the word, or a lower store that holds it, fails', () => {
-    expect(failingKept(good({ stores: stores(0), search: answer(true) }))).toEqual(['archive.beside.fixture_chat.search']);
-    expect(failingKept(good({ stores: stores(2), search: answer(false) }))).toEqual(['archive.beside.fixture_chat.stores']);
-  });
-
-  test('the search is asked through the whole bound, and an answer that leaks the word is the one judged', async () => {
-    let clock = 0;
-    let calls = 0;
-    const lines: string[] = [];
-    const host = {
-      now: () => clock,
-      sleep: async (ms: number) => { clock += ms; },
-      say: (line: string) => { lines.push(line); },
-      search: async () => {
-        calls += 1;
-        // A leak on the third answer, after the judge ran.
-        return { ok: true, isError: false, structured: { evidence: [{ source: 'Fixture', excerpt: calls === 3 ? `the word ${fx.token}` : 'another message' }] } };
-      },
-    } as unknown as Parameters<typeof searchWhenJudged>[0];
-    const leaked = await searchWhenJudged(host, { ...kept, expect: { ...kept.expect, citationLabel: 'Fixture' } }, 900_000, 'withheld');
-    expect(calls).toBe(3);
-    expect(lines.at(-1)).toContain('LEAKED');
-    expect(failingKept(good({ stores: stores(0), search: leaked }))).toEqual(['archive.beside.fixture_chat.search']);
+describe('no source keeps its records Private wholesale', () => {
+  test('the WhatsApp fixture is judged by content and cited, like every source', () => {
+    expect(legFixture('beside', 'seed', 'whatsapp_chat').beside).not.toHaveProperty('search');
   });
 });
-
 
 // Mac round 2 / Linux round 3, 2026-10-26: the stores were read right after the Delete returned, while the worker had only marked the
 // account and was about to restart; its files go at that boot. The next leg then met the engine restarting.

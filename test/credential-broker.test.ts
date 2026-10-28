@@ -436,6 +436,7 @@ describe('Olympus credential broker', () => {
       'google_drive.personal',
       'reflect.archive',
       'roam.archive',
+      'evernote.personal',
       'evernote.archive',
     ]);
     expect(statuses.map((status) => status?.handle)).toEqual(handles);
