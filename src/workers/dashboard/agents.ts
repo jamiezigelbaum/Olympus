@@ -169,7 +169,7 @@ export function renderDashboardAgentsSection(input: DashboardAgentsSectionInput)
 
   return [
     '<div class="sect" id="agents">Agents</div>',
-    remoteAccessRow(view.remoteAccess),
+    remoteAccessRow(view.remoteAccess, view.remoteAccessManual),
     setupRow({
       label: 'Connect an agent',
       blurb: platform === 'linux'
@@ -184,7 +184,7 @@ export function renderDashboardAgentsSection(input: DashboardAgentsSectionInput)
   ].join('\n');
 }
 
-function remoteAccessRow(access: DashboardRemoteAccess): string {
+function remoteAccessRow(access: DashboardRemoteAccess, manual: string | undefined): string {
   const why = access.state === 'on'
     ? `On. Agents in the cloud reach Olympus at ${hostOf(access.mcpUrl)}.`
     : access.state === 'off'
@@ -197,9 +197,12 @@ function remoteAccessRow(access: DashboardRemoteAccess): string {
     : access.state === 'on' && access.setBy === 'worker_env'
       ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml(WORKER_ENV_ADDRESS_MESSAGE)}</span>`
       : '';
+  // A host that cannot switch it from here says how instead, and offers no button (it could only be refused).
+  const workerEnv = access.state === 'on' && access.setBy === 'worker_env';
+  const how = manual !== undefined && !workerEnv ? `<span class="hint" data-remote-manual> ${escapeHtml(manual)}</span>` : '';
   return `<div class="attncard plain" data-remote-access="${access.state}">`
-    + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}</div>`
-    + remoteAccessControls(access)
+    + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}${how}</div>`
+    + (manual === undefined ? remoteAccessControls(access) : '')
     + `</div>`
     + (access.state === 'off' || (access.state === 'not_connected' && access.needsTerms) ? termsPanel() : '');
 }

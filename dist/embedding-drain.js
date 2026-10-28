@@ -39774,7 +39774,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context2));
     if (checking)
       add(controls, checkingControl("primary:" + id));
-    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry, id)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    const deleted = state.deleting[id] !== undefined;
+    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry, id)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)) && !(deleted && entry && entry.tool === config.deleteDataTool));
     if (other) {
       const importing = (entry) => !!entry && (entry.archiveImport === true || entry.label === H.copy.archives.importAction);
       const shown2 = menu.filter(importing)[0];
@@ -41134,7 +41135,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
   }
   function refreshDelay() {
-    const base = deletePending() ? R.settleMs : moving() ? R.activeMs : R.idleMs;
+    if (deletePending())
+      return R.settleMs;
+    const base = moving() ? R.activeMs : R.idleMs;
     return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
   }
   function scheduleRefresh() {
@@ -47098,6 +47101,7 @@ init_corpora();
 init_zkapi_consult_settings();
 
 // src/workers/dashboard/components.ts
+init_open_targets();
 init_source_dashboard();
 
 // src/workers/dashboard/theme.ts

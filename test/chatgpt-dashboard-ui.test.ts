@@ -1161,6 +1161,33 @@ describe('Delete indexed data (olympus_delete_source_data): confirm in the sourc
     }
   });
 
+  test('reads refused while the engine restarts keep the settle cadence: no back-off until the row settles', async () => {
+    jest.useFakeTimers();
+    try {
+      const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+      const dashboardCalls = (host: Host) => host.toolCalls().filter((call) => call.name === 'olympus_dashboard').length;
+      const host = mount();
+      host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
+      host.button('Delete indexed data').click();
+      host.button('Yes, delete indexed data').click();
+      host.respond('tools/call', { structuredContent: { status: 'deleted', source_id: 'dropbox.files', restarting: true } });
+      await flush();
+      // Five refusals in a row (a slow restart), each followed by the next read within the settle cadence.
+      for (let refused = 1; refused <= 5; refused++) {
+        host.respond('tools/call', undefined, { code: -32000, message: 'worker restarting' });
+        await flush();
+        jest.advanceTimersByTime(2_000);
+        await flush();
+        expect(dashboardCalls(host)).toBe(refused + 1);
+      }
+      host.respond('tools/call', { structuredContent: model({ sources: [dropbox([])] }) });
+      await flush();
+      expect(host.text()).not.toContain('Delete indexed data');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a read that still offers Delete after it ran is not trusted: the page re-reads soon until the row is settled', async () => {
     jest.useFakeTimers();
     try {
@@ -1173,10 +1200,10 @@ describe('Delete indexed data (olympus_delete_source_data): confirm in the sourc
       host.respond('tools/call', { structuredContent: { status: 'deleted', source_id: 'dropbox.files', restarting: true } });
       await flush();
       expect(dashboardCalls(host)).toBe(1);
-      // The old process answers: still 4 items, still offering Delete.
+      // The old process answers: still 4 items, still offering Delete. The page does not offer it again.
       host.respond('tools/call', { structuredContent: model({ sources: [dropbox([DELETE])] }) });
       await flush();
-      expect(host.buttons().some((b) => b.textContent === 'Delete indexed data' || b.textContent === '⋯')).toBe(true);
+      expect(host.text()).not.toContain('Delete indexed data');
       jest.advanceTimersByTime(5_000);
       await flush();
       expect(dashboardCalls(host)).toBe(2);

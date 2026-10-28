@@ -5815,19 +5815,12 @@ export async function main(): Promise<void> {
   // Turn on / Turn off remote access: the config change through the host's
   // own config write.
   if (authToken) {
-    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      // Under OpenClaw the Gateway writes. The standalone engine has no
-      // config writer yet: it says how to change engine.json instead of
-      // calling a Gateway that is not there.
-      setEnabled: remoteAccessHostKind === 'standalone'
-        ? async (enabled: boolean) => ({
-            ok: false as const,
-            status: 501,
-            code: 'config_write_unsupported',
-            message: `Set "remote": {"enabled": ${enabled}} in ~/.olympus/engine.json, then run: olympus engine restart`,
-          })
-        : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
-    });
+    // Under OpenClaw the Gateway writes. The standalone engine has no
+    // config writer yet: the panel says how to change engine.json instead of
+    // offering a button that could only be refused.
+    dashboardRemoteAccessControl = remoteAccessHostKind === 'standalone'
+      ? { manual: (enabled: boolean) => `To turn remote access ${enabled ? 'on' : 'off'}, set "remote": {"enabled": ${enabled}} in ~/.olympus/engine.json, then run: olympus engine restart` }
+      : createDashboardRemoteAccessControl({ setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }) });
   }
   // A background connection: a live remote agent that is not ChatGPT (the
   // owner's ChatGPT is the owner's own work). An unknown id is not one.
