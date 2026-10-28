@@ -64,6 +64,7 @@ import {
   EVERNOTE_SOURCE_ID,
   createEvernoteSourceConnector,
   evernotePassWithUnfinished,
+  evernoteUnfinishedWith,
   type EvernotePassCounts,
   type EvernotePassRecord,
   type EvernoteSourceConnector,
@@ -325,7 +326,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
     const previous = evernotePassWithUnfinished(file.record, file.unfinished);
     // Kept before each page is stored: a pass that stops after storing some notes still leaves them to delete.
     const live = connector(() => previous, (notes) => {
-      file.unfinished = { ...file.unfinished, ...notes };
+      file.unfinished = evernoteUnfinishedWith(file.unfinished, notes);
       writePassFile(passPath, file);
     });
     const sync: ConnectorStoreSyncOptions = {

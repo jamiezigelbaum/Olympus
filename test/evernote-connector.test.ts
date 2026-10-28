@@ -11,6 +11,8 @@ import {
   EVERNOTE_READ_TOOLS,
   createEvernoteSourceConnector,
   evernoteAttachmentKeys,
+  evernotePassWithUnfinished,
+  evernoteUnfinishedWith,
   type EvernotePassRecord,
   type EvernoteSourceConnector,
 } from '../src/workers/evernote/connector.ts';
@@ -27,7 +29,7 @@ const day = (year: number, month = 1, date = 1): number => Date.UTC(year, month 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 1, 2, 3]);
 const PDF = new TextEncoder().encode('%PDF-1.4\nPRIVATE_EVERNOTE_MARKER\n%%EOF');
 
-function connectorFor(server: FakeEvernoteServer, options: { callBudget?: number; previous?: () => EvernotePassRecord | undefined } = {}): EvernoteSourceConnector {
+function connectorFor(server: FakeEvernoteServer, options: { callBudget?: number; previous?: () => EvernotePassRecord | undefined; readSoFar?: (notes: EvernotePassRecord['notes']) => void } = {}): EvernoteSourceConnector {
   return createEvernoteSourceConnector({
     accountScope: 'personal',
     session: () => new McpSourceSession({
@@ -40,6 +42,7 @@ function connectorFor(server: FakeEvernoteServer, options: { callBudget?: number
       rateLimitBackoffMs: 1,
     }),
     ...(options.previous ? { previous: options.previous } : {}),
+    ...(options.readSoFar ? { readSoFar: options.readSoFar } : {}),
     downloadHosts: ['127.0.0.1'],
   });
 }
@@ -197,6 +200,32 @@ describe('Evernote pass', () => {
     expect(fake.calls.get_note).toBe(1);
     expect(notesOf(await read(() => ({ version: stored!, hasContent: true, tombstoned: true })))).toHaveLength(1);
     expect(fake.calls.get_note).toBe(2);
+  });
+
+  test('an attachment an unfinished pass saw stays recorded until a pass commits', async () => {
+    fake = new FakeEvernoteServer().start();
+    const work = fake.addNotebook('Work');
+    const note = fake.addNote({
+      title: 'A', notebookId: work.id, created: day(2020),
+      resources: [{ bytes: PNG, mime: 'image/png', name: 'a.png' }],
+    });
+    // A first pass stops after storing the note and its attachment.
+    let unfinished: EvernotePassRecord['notes'] | undefined;
+    const first = connectorFor(fake, { readSoFar: (notes) => { unfinished = evernoteUnfinishedWith(unfinished, notes); } });
+    await runPass(first);
+    // The attachment goes; a retry reads the note without it, and stops again before storing the deletion.
+    note.resources = [];
+    note.updated = day(2024);
+    const retry = connectorFor(fake, {
+      previous: () => evernotePassWithUnfinished(undefined, unfinished),
+      readSoFar: (notes) => { unfinished = evernoteUnfinishedWith(unfinished, notes); },
+    });
+    await runPass(retry);
+    // The next complete pass still deletes it.
+    const final = connectorFor(fake, { previous: () => evernotePassWithUnfinished(undefined, unfinished) });
+    const items = await runPass(final);
+    expect(items.filter((item) => item.metadata.deleted === true).map((item) => item.identity.providerItemId))
+      .toEqual([`${note.id}#child:${md5Hex(PNG)}`]);
   });
 
   test('a deletion applies only when both listings completed', async () => {

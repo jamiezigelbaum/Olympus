@@ -157752,6 +157752,14 @@ function evernotePassWithUnfinished(record6, unfinished) {
   }
   return { version: 1, completedAt: record6?.completedAt ?? "", notes };
 }
+function evernoteUnfinishedWith(unfinished, notes) {
+  const next = { ...unfinished };
+  for (const [noteId, entry] of Object.entries(notes)) {
+    const children = [...new Set([...next[noteId]?.children ?? [], ...entry.children ?? []])];
+    next[noteId] = { v: entry.v, ...children.length > 0 ? { children } : {} };
+  }
+  return next;
+}
 function evernoteNoteVersion(updatedAt, notebookId, notebookLabel) {
   return `${updatedAt}|${notebookId}|${digest4(notebookLabel)}`;
 }
@@ -158283,7 +158291,7 @@ function createEvernoteLiveSync(options) {
     const file = readPassFile(passPath);
     const previous = evernotePassWithUnfinished(file.record, file.unfinished);
     const live = connector(() => previous, (notes) => {
-      file.unfinished = { ...file.unfinished, ...notes };
+      file.unfinished = evernoteUnfinishedWith(file.unfinished, notes);
       writePassFile(passPath, file);
     });
     const sync = {

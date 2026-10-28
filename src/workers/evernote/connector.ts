@@ -108,6 +108,22 @@ export function evernotePassWithUnfinished(
   return { version: 1, completedAt: record?.completedAt ?? '', notes };
 }
 
+/**
+ * The notes unfinished passes read, with another pass's added. An attachment key stays until a pass
+ * commits: a retry that stops again may not have stored the deletion of an attachment it no longer sees.
+ */
+export function evernoteUnfinishedWith(
+  unfinished: EvernotePassRecord['notes'] | undefined,
+  notes: EvernotePassRecord['notes'],
+): EvernotePassRecord['notes'] {
+  const next = { ...unfinished };
+  for (const [noteId, entry] of Object.entries(notes)) {
+    const children = [...new Set([...(next[noteId]?.children ?? []), ...(entry.children ?? [])])];
+    next[noteId] = { v: entry.v, ...(children.length > 0 ? { children } : {}) };
+  }
+  return next;
+}
+
 export interface EvernoteConnectorOptions {
   accountScope: string;
   /** A fresh, unopened session for one pass or one attachment read. */
