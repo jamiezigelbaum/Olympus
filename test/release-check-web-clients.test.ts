@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findBrowser } from '../scripts/release-check/browser.ts';
@@ -200,20 +200,27 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
   let server: ReturnType<typeof Bun.serve>;
   let chrome: ChildProcess;
   let profile: string;
-  const port = 19_000 + Math.floor(Math.random() * 1_000);
+  // Chosen by the browser itself (--remote-debugging-port=0, read back from
+  // DevToolsActivePort): a random fixed port can collide on a shared runner.
+  let port = 0;
   beforeAll(async () => {
     server = Bun.serve({ port: 0, fetch: (request) => new Response(CHAT_PAGE(new URL(request.url).pathname.slice(1)), { headers: { 'content-type': 'text/html' } }) });
     profile = mkdtempSync(join(tmpdir(), 'web-clients-profile-'));
     // A throwaway profile must not ask the desktop session's keychain for a browser-storage key (scripts/release-check/browser.ts).
-    chrome = spawn(browserPath!, ['--headless=new', '--no-sandbox', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' });
-    for (let i = 0; i < 60; i += 1) {
-      try { if ((await fetch(`http://127.0.0.1:${port}/json/version`)).ok) return; } catch { /* starting */ }
+    chrome = spawn(browserPath!, ['--headless=new', '--no-sandbox', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
+    const portFile = join(profile, 'DevToolsActivePort');
+    for (let i = 0; i < 160; i += 1) {
+      if (chrome.exitCode !== null) throw new Error(`the test browser exited with code ${chrome.exitCode}`);
+      try {
+        if (!port && existsSync(portFile)) port = Number(readFileSync(portFile, 'utf8').split('\n')[0]) || 0;
+        if (port && (await fetch(`http://127.0.0.1:${port}/json/version`)).ok) return;
+      } catch { /* starting */ }
       await Bun.sleep(250);
     }
     throw new Error('the test browser did not start');
-    // The wait above allows the browser 15 s to start; the hook's own limit
-    // must not end it at Bun's default 5 s on a loaded runner.
-  }, 20_000);
+    // The wait above allows the browser 40 s to start on a loaded runner; the
+    // hook's own limit must not end it first.
+  }, 45_000);
   afterAll(() => {
     server?.stop(true);
     chrome?.kill('SIGKILL');
