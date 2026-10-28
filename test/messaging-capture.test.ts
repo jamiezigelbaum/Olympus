@@ -97,7 +97,11 @@ describe('messaging capture supervisor', () => {
     const sessionPath = join(root, 'telegram.personal');
     writeFileSync(`${sessionPath}.session`, 'fixture');
     writeRegistry(registryPath, true);
-    saveMessagingCaptureGrant({ path: grantPath, pairing: telegramPairing(sessionPath) });
+    // A grant saved by 1.1.x pairing, which marked every approved chat protected.
+    const oldPairing = telegramPairing(sessionPath);
+    oldPairing.producer.env.OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES = 'telegram.personal:chat:101';
+    oldPairing.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES = 'telegram.personal:chat:101';
+    saveMessagingCaptureGrant({ path: grantPath, pairing: oldPairing });
     let resolveExit!: (code: number) => void;
     const exited = new Promise<number>((resolve) => { resolveExit = resolve; });
     let killed = false;
@@ -127,6 +131,9 @@ describe('messaging capture supervisor', () => {
     expect(await supervisor.reconcile()).toEqual({ source: 'telegram', state: 'running' });
     expect(spawnedEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES).toBe('telegram.personal:chat:101');
     expect(spawnedEnv?.OLYMPUS_TELEGRAM_API_HASH).toBe('fixture-secret');
+    // No chat is Private wholesale: its messages are tiered one by one.
+    expect(spawnedEnv?.OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES).toBeUndefined();
+    expect(spawnedEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES).toBeUndefined();
 
     writeRegistry(registryPath, false);
     expect(await supervisor.reconcile()).toEqual({
