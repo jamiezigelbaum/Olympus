@@ -170,6 +170,8 @@ describe('olympus setup wizard', () => {
         dependencyCheck: () => runSetupDependencyCheck({
           platform: 'linux',
           commandExists: (command) => command === 'node',
+          // Missing Bun is only possible when the CLI runs on Node.
+          runtimeBunVersion: undefined,
           pythonModuleExists: () => false,
         }),
       })).rejects.toMatchObject({
@@ -188,8 +190,8 @@ describe('olympus setup wizard', () => {
   test('flags Bun below the setup minimum version as a required dependency failure', () => {
     const result = runSetupDependencyCheck({
       platform: 'linux',
-      commandExists: (command) => command === 'bun' || command === 'node',
-      commandVersion: (command) => command === 'bun' ? '1.1.42' : '20.0.0',
+      commandExists: (command) => command === 'node',
+      runtimeBunVersion: '1.1.42',
       pythonModuleExists: () => false,
     });
 
@@ -198,6 +200,33 @@ describe('olympus setup wizard', () => {
     expect(bun?.ok).toBe(false);
     expect(bun?.detail).toContain('Bun 1.1.42');
     expect(bun?.repairHint).toContain('Bun 1.2+');
+  });
+
+  test('checks the Bun and Python Olympus runs, not the ones on PATH (#578)', () => {
+    const probed: string[] = [];
+    // install.sh's pinned Bun runs this CLI and is not on PATH; Telethon lives in the private venv pairing uses.
+    const result = runSetupDependencyCheck({
+      platform: 'darwin',
+      commandExists: () => false,
+      runtimeBunVersion: '1.3.14',
+      telegramPython: '/home/me/.cache/olympus/telegram-python/bin/python',
+      pythonModuleExists: (python, module) => { probed.push(`${python} ${module}`); return true; },
+    });
+    expect(result.checks.find((check) => check.id === 'bun')?.ok).toBe(true);
+    expect(result.checks.find((check) => check.id === 'python-telethon')?.ok).toBe(true);
+    expect(probed).toEqual(['/home/me/.cache/olympus/telegram-python/bin/python telethon']);
+    expect(result.ok).toBe(true);
+  });
+
+  test('with no Python to probe, Telethon is reported missing without running any Python', () => {
+    const result = runSetupDependencyCheck({
+      platform: 'darwin',
+      commandExists: () => false,
+      runtimeBunVersion: '1.3.14',
+      telegramPython: undefined,
+      pythonModuleExists: () => { throw new Error('no Python may run'); },
+    });
+    expect(result.checks.find((check) => check.id === 'python-telethon')?.ok).toBe(false);
   });
 
   test('no-sensitive needs no embedding key: the built-in model indexes Personal and Private content', async () => {

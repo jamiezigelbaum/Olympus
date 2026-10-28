@@ -411,8 +411,30 @@ function hostProgram(input: {
         window.location.assign(parsed.pathname + parsed.search + parsed.hash);
         return;
       }
-      window.open(url, '_blank', 'noopener');
+      // No 'noopener' feature: with it window.open answers null even when the tab opened, so a blocked open
+      // (Safari blocks one that comes after the connect call, not inside the click) could not be told apart.
+      let tab: Window | null = null;
+      try {
+        tab = window.open(url, '_blank');
+      } catch {
+        tab = null;
+      }
+      if (tab) {
+        tab.opener = null;
+        return;
+      }
+      // Blocked: the link goes beside the panel, where pressing it is the person's own click, which no browser blocks.
+      const offer = document.querySelector<HTMLElement>('[data-open-offer]');
+      const link = document.querySelector<HTMLAnchorElement>('[data-open-offer-link]');
+      if (!offer || !link) return;
+      link.href = url;
+      offer.hidden = false;
     },
+  });
+  const offerLink = document.querySelector<HTMLAnchorElement>('[data-open-offer-link]');
+  offerLink?.addEventListener('click', () => {
+    const offer = document.querySelector<HTMLElement>('[data-open-offer]');
+    if (offer) offer.hidden = true;
   });
 
   const toggle = document.querySelector<HTMLButtonElement>('[data-gate-toggle]');
@@ -562,6 +584,8 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
       + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`,
     ] : []),
     lockedGate(!locked),
+    `<section class="gate" data-open-offer role="alert" hidden><p>${text(DASHBOARD_HOST_GATE_COPY.openBlocked)} `
+    + `<a class="btn" data-open-offer-link target="_blank" rel="noopener noreferrer">${text(DASHBOARD_HOST_GATE_COPY.openBlockedLink)}</a></p></section>`,
     ...(input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map(model => `<p><strong>${text(model.name)} — ${text(model.state)}</strong>: ${text(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p>`).join('')}</details>`] : []),
     // allow-scripts only: an opaque origin, so the panel can reach nothing of
     // this page's (cookies, storage, DOM) and talks only through postMessage.

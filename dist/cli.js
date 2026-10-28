@@ -52471,7 +52471,9 @@ var init_vocabulary = __esm(() => {
     unlocking: "Unlocking…",
     pasteToken: "Paste the worker bearer token.",
     readToken: "That is the read-only view token; use the worker bearer token from setup.",
-    refused: "That token was not accepted."
+    refused: "That token was not accepted.",
+    openBlocked: "Your browser did not open the page.",
+    openBlockedLink: "Open it"
   };
   ARCHIVE_PICK_INTRO = archivePickIntro();
   DASHBOARD_ARCHIVE_NOUNS = {
@@ -143864,7 +143866,8 @@ function pageShell(input) {
     csrfToken: input.controller?.csrfToken ?? "",
     signature: dashboardPageSignature(input.body),
     session: sessionMarker,
-    intervalMs: input.poll?.intervalMs ?? 15000
+    intervalMs: input.poll?.intervalMs ?? 15000,
+    lockedHtml: standaloneLockedNotice()
   })];
   const scripts = !useController ? [...input.scripts ?? []].join(`
     `) : controller.join(`
@@ -144082,6 +144085,10 @@ function redirectUriInput(action) {
     }
   };
 }
+function standaloneLockedNotice() {
+  const C = DASHBOARD_HOST_GATE_COPY;
+  return `<div class="attncard" data-dashboard-control-gate data-state="locked"><div class="grow">` + `<span class="name">${escapeHtml2(C.title)}</span>` + `<span class="why"> — <a href="${escapeHtml2(olympusOpenUrl({ kind: "dashboard" }))}">${escapeHtml2(C.open)}</a> ` + `${escapeHtml2(C.fallbackBefore)}<code>${escapeHtml2(C.fallbackCommand)}</code>${escapeHtml2(C.fallbackAfter)}</span></div></div>`;
+}
 function standaloneDashboardControllerScript(input) {
   const mountSource = mountDashboardController.toString().replaceAll("</script", "<\\/script");
   const config2 = escapeScriptJson(JSON.stringify(input));
@@ -144094,6 +144101,16 @@ function standaloneDashboardControllerScript(input) {
       if (!root) return;
       var abort = new AbortController();
       var mount = ${mountSource};
+      // A page opened with a reader's token still reads once locked; one opened by its session alone reads
+      // nothing more, so it locks in place instead of asking again (every ask would be refused).
+      var readable = new URL(window.location.href).searchParams.has('token');
+      function showLocked() {
+        abort.abort();
+        var page = root.querySelector('.page') || root;
+        var top = page.querySelector('.top');
+        page.innerHTML = config.lockedHtml;
+        if (top) page.insertBefore(top, page.firstChild);
+      }
       function route(params) {
         var action = params.action;
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
@@ -144142,14 +144159,15 @@ function standaloneDashboardControllerScript(input) {
               headers: { 'X-Olympus-CSRF': csrfToken },
             });
             if (response.ok) csrfToken = '';
+            if (response.ok && !readable) showLocked();
             return response.ok;
           },
         },
         navigate: function (href) { window.location.assign(href); },
         refresh: async function () {
           var response = await fetch(window.location.href, { cache: 'no-store' });
-          // Locked (here or in another tab): load the page again so it shows the locked gate, not stale controls.
-          if (response.status === 401) { window.location.reload(); return undefined; }
+          // Locked (here or in another tab): show the locked gate, not stale controls.
+          if (response.status === 401) { if (readable) window.location.reload(); else showLocked(); return undefined; }
           if (!response.ok) return undefined;
           var next = new DOMParser().parseFromString(await response.text(), 'text/html');
           var nextRoot = next.querySelector('[data-olympus-dashboard-root]');
@@ -144180,6 +144198,7 @@ function standaloneDashboardControllerScript(input) {
 }
 var DONUT_CIRCUMFERENCE = 12.566, SAFE_COLOR, DASHBOARD_CONTROL_GATE_ID = "dashboard-controls";
 var init_components = __esm(() => {
+  init_open_targets();
   init_source_dashboard();
   init_theme();
   init_vocabulary();
@@ -145991,7 +146010,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context2));
     if (checking)
       add(controls, checkingControl("primary:" + id));
-    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry, id)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    const deleted = state.deleting[id] !== undefined;
+    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry, id)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)) && !(deleted && entry && entry.tool === config2.deleteDataTool));
     if (other) {
       const importing = (entry) => !!entry && (entry.archiveImport === true || entry.label === H.copy.archives.importAction);
       const shown2 = menu.filter(importing)[0];
@@ -147339,6 +147359,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return !!data2.models && !!data2.models.embedding && installLines(data2.models).some((entry) => entry.state !== "failed");
   }
   function deletePending() {
+    for (const id of Object.keys(state.deleting))
+      if (Date.now() >= (state.deleting[id] ?? 0))
+        delete state.deleting[id];
     return Object.keys(state.deleting).length > 0;
   }
   function settleDeleting(data2) {
@@ -147351,7 +147374,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
   }
   function refreshDelay() {
-    const base = deletePending() ? R.settleMs : moving() ? R.activeMs : R.idleMs;
+    if (deletePending())
+      return R.settleMs;
+    const base = moving() ? R.activeMs : R.idleMs;
     return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
   }
   function scheduleRefresh() {
@@ -151187,8 +151212,29 @@ function hostProgram(input, bridge) {
         window.location.assign(parsed.pathname + parsed.search + parsed.hash);
         return;
       }
-      window.open(url2, "_blank", "noopener");
+      let tab = null;
+      try {
+        tab = window.open(url2, "_blank");
+      } catch {
+        tab = null;
+      }
+      if (tab) {
+        tab.opener = null;
+        return;
+      }
+      const offer = document.querySelector("[data-open-offer]");
+      const link = document.querySelector("[data-open-offer-link]");
+      if (!offer || !link)
+        return;
+      link.href = url2;
+      offer.hidden = false;
     }
+  });
+  const offerLink = document.querySelector("[data-open-offer-link]");
+  offerLink?.addEventListener("click", () => {
+    const offer = document.querySelector("[data-open-offer]");
+    if (offer)
+      offer.hidden = true;
   });
   const toggle = document.querySelector("[data-gate-toggle]");
   const how = document.getElementById("gate-how");
@@ -151344,6 +151390,7 @@ function renderComputerHostPage(input) {
       `<section class="update" data-update-notice${update ? "" : " hidden"}><p data-update-text>${update ? text3(DASHBOARD_UPDATE_COPY.notice(update.version)) : ""}</p>` + `<p><code id="update-command">${text3(installer.command)}</code> ` + `<button class="btn" type="button" data-update-copy>${text3(DASHBOARD_UPDATE_COPY.copy)}</button> ` + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`
     ] : [],
     lockedGate(!locked2),
+    `<section class="gate" data-open-offer role="alert" hidden><p>${text3(DASHBOARD_HOST_GATE_COPY.openBlocked)} ` + `<a class="btn" data-open-offer-link target="_blank" rel="noopener noreferrer">${text3(DASHBOARD_HOST_GATE_COPY.openBlockedLink)}</a></p></section>`,
     ...input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map((model) => `<p><strong>${text3(model.name)} — ${text3(model.state)}</strong>: ${text3(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p>`).join("")}</details>`] : [],
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute2(input.panelHtml)}"></iframe>`,
     "</main>",
@@ -151458,14 +151505,17 @@ function relayNotConnected(status) {
 }
 function dashboardAgentsView(backend) {
   const remoteAccess = backend.remoteAccess();
+  const control = backend.remoteAccessControl;
+  const manual = control && "manual" in control ? { remoteAccessManual: control.manual(remoteAccess.state === "off") } : {};
   let records;
   try {
     records = backend.store()?.list() ?? [];
   } catch {
-    return { remoteAccess, connections: [], unavailable: true };
+    return { remoteAccess, connections: [], unavailable: true, ...manual };
   }
   return {
     remoteAccess,
+    ...manual,
     connections: records.filter((record5) => record5.revokedAt === null).map((record5) => ({
       id: record5.id,
       name: record5.displayName,
@@ -151557,6 +151607,8 @@ async function setRemoteAccess(body, backend) {
   if (!control) {
     return refusal2(501, "remote_access_control_not_supported", "This Olympus cannot turn remote access on or off from the dashboard.");
   }
+  if ("manual" in control)
+    return refusal2(501, "config_write_unsupported", control.manual(body.enabled));
   const before = currentAccess(backend);
   if (before?.state === "on" && before.setBy === "worker_env") {
     return refusal2(409, "set_by_worker_env", WORKER_ENV_ADDRESS_MESSAGE);
@@ -151699,7 +151751,7 @@ function renderDashboardAgentsSection(input) {
   };
   return [
     '<div class="sect" id="agents">Agents</div>',
-    remoteAccessRow(view3.remoteAccess),
+    remoteAccessRow(view3.remoteAccess, view3.remoteAccessManual),
     setupRow({
       label: "Connect an agent",
       blurb: platform2 === "linux" ? "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules on this computer." : "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.",
@@ -151710,10 +151762,12 @@ function renderDashboardAgentsSection(input) {
   ].join(`
 `);
 }
-function remoteAccessRow(access) {
+function remoteAccessRow(access, manual) {
   const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf(access.mcpUrl)}.` : access.state === "off" ? "Off. Only agents on this computer can ask Olympus." : access.state === "not_connected" ? "On, but not connected. Agents in the cloud cannot reach Olympus until it is." : `Not set up correctly. ${access.detail}`;
   const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml2(access.detail)}</span>` : access.state === "on" && access.setBy === "worker_env" ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml2(WORKER_ENV_ADDRESS_MESSAGE)}</span>` : "";
-  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml2(why)}</span>${next}</div>` + remoteAccessControls(access) + `</div>` + (access.state === "off" || access.state === "not_connected" && access.needsTerms ? termsPanel() : "");
+  const workerEnv = access.state === "on" && access.setBy === "worker_env";
+  const how = manual !== undefined && !workerEnv ? `<span class="hint" data-remote-manual> ${escapeHtml2(manual)}</span>` : "";
+  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml2(why)}</span>${next}${how}</div>` + (manual === undefined ? remoteAccessControls(access) : "") + `</div>` + (access.state === "off" || access.state === "not_connected" && access.needsTerms ? termsPanel() : "");
 }
 function remoteAccessControls(access) {
   const status = `<span class="actmsg" data-action-message role="status"></span>`;
@@ -206653,14 +206707,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     return remoteAccessFromStatus({ live: remotePublicUrls(), status, liveOrigin: remotePublicSource.origin });
   };
   if (authToken) {
-    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      setEnabled: remoteAccessHostKind === "standalone" ? async (enabled) => ({
-        ok: false,
-        status: 501,
-        code: "config_write_unsupported",
-        message: `Set "remote": {"enabled": ${enabled}} in ~/.olympus/engine.json, then run: olympus engine restart`
-      }) : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env })
-    });
+    dashboardRemoteAccessControl = remoteAccessHostKind === "standalone" ? { manual: (enabled) => `To turn remote access ${enabled ? "on" : "off"}, set "remote": {"enabled": ${enabled}} in ~/.olympus/engine.json, then run: olympus engine restart` } : createDashboardRemoteAccessControl({ setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }) });
   }
   function isBackgroundConnection(connectionId) {
     if (!connectionId)
@@ -210181,6 +210228,7 @@ init_olympus_layout();
 
 // src/core/setup.ts
 init_privacy_language();
+init_messaging_runtime();
 import { randomBytes as randomBytes18 } from "node:crypto";
 import { spawnSync as spawnSync17 } from "node:child_process";
 import { homedir as homedir34 } from "node:os";
@@ -210199,9 +210247,10 @@ function runSetupDependencyCheck(input = {}) {
   const commandExists = input.commandExists ?? defaultCommandExists2;
   const commandVersion = input.commandVersion ?? defaultCommandVersion;
   const pythonModuleExists = input.pythonModuleExists ?? defaultPythonModuleExists2;
-  const pythonCommand = commandExists("python3") ? "python3" : commandExists("python") ? "python" : undefined;
-  const bunExists = commandExists("bun");
-  const bunVersion = bunExists ? commandVersion("bun") : undefined;
+  const pythonCommand = "telegramPython" in input ? input.telegramPython : defaultTelegramPython(platform2);
+  const runtimeBun = "runtimeBunVersion" in input ? input.runtimeBunVersion : process.versions.bun;
+  const bunExists = runtimeBun !== undefined || commandExists("bun");
+  const bunVersion = runtimeBun ?? (bunExists ? commandVersion("bun") : undefined);
   const bunOk = bunExists && isMinimumVersion(bunVersion, [1, 2, 0]);
   const checks = [
     dependencyFinding({
@@ -210242,7 +210291,7 @@ function runSetupDependencyCheck(input = {}) {
       required: false,
       ok: Boolean(pythonCommand && pythonModuleExists(pythonCommand, "telethon")),
       detail: "Optional Telegram guided-session reader.",
-      repairHint: "Create ~/.cache/olympus/telegram-python with python3 -m venv, then install Telethon in that environment before connecting Telegram."
+      repairHint: TELEGRAM_DEPENDENCY_HINT
     }),
     dependencyFinding({
       id: "go",
@@ -210414,6 +210463,12 @@ function defaultCommandExists2(command) {
     stdio: "ignore"
   });
   return result.status === 0;
+}
+function defaultTelegramPython(platform2) {
+  const python = telegramPythonExecutable();
+  if (platform2 === "darwin" && python === "/usr/bin/python3" && spawnSync17("/usr/bin/xcode-select", ["-p"], { stdio: "ignore" }).status !== 0)
+    return;
+  return python;
 }
 function defaultPythonModuleExists2(pythonCommand, moduleName) {
   const result = spawnSync17(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });

@@ -1,6 +1,7 @@
 import { PRIVACY_PRESET_LABELS } from './privacy-language.ts';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { telegramPythonExecutable, TELEGRAM_DEPENDENCY_HINT } from './messaging-runtime.ts';
 import { homedir } from 'node:os';
 import { installManagedWorkerFiles, type ManagedWorkerFilesResult } from './lifecycle.ts';
 import { OperationError } from './operation-error.ts';
@@ -136,14 +137,21 @@ export function runSetupDependencyCheck(input: {
   commandExists?: (command: string) => boolean;
   commandVersion?: (command: string) => string | undefined;
   pythonModuleExists?: (pythonCommand: string, moduleName: string) => boolean;
+  /** The Bun running this CLI; absent when it runs on Node (an OpenClaw plugin host). */
+  runtimeBunVersion?: string | undefined;
+  /** The Python Telegram pairing runs (its private venv first); absent when there is none to probe. */
+  telegramPython?: string | undefined;
 } = {}): SetupDependencyCheck {
   const platform = normalizeSetupPlatform(input.platform ?? process.platform);
   const commandExists = input.commandExists ?? defaultCommandExists;
   const commandVersion = input.commandVersion ?? defaultCommandVersion;
   const pythonModuleExists = input.pythonModuleExists ?? defaultPythonModuleExists;
-  const pythonCommand = commandExists('python3') ? 'python3' : commandExists('python') ? 'python' : undefined;
-  const bunExists = commandExists('bun');
-  const bunVersion = bunExists ? commandVersion('bun') : undefined;
+  const pythonCommand = 'telegramPython' in input ? input.telegramPython : defaultTelegramPython(platform);
+  // The Bun running this CLI is the one Olympus runs on: install.sh's pinned runtime is not on PATH, so
+  // asking PATH failed every install.sh user (#578). PATH's Bun stands in only when this CLI runs on Node.
+  const runtimeBun = 'runtimeBunVersion' in input ? input.runtimeBunVersion : process.versions.bun;
+  const bunExists = runtimeBun !== undefined || commandExists('bun');
+  const bunVersion = runtimeBun ?? (bunExists ? commandVersion('bun') : undefined);
   const bunOk = bunExists && isMinimumVersion(bunVersion, [1, 2, 0]);
   const checks: SetupDependencyFinding[] = [
     dependencyFinding({
@@ -188,7 +196,7 @@ export function runSetupDependencyCheck(input: {
       required: false,
       ok: Boolean(pythonCommand && pythonModuleExists(pythonCommand, 'telethon')),
       detail: 'Optional Telegram guided-session reader.',
-      repairHint: 'Create ~/.cache/olympus/telegram-python with python3 -m venv, then install Telethon in that environment before connecting Telegram.',
+      repairHint: TELEGRAM_DEPENDENCY_HINT,
     }),
     dependencyFinding({
       id: 'go',
@@ -398,6 +406,14 @@ function defaultCommandExists(command: string): boolean {
     stdio: 'ignore',
   });
   return result.status === 0;
+}
+
+function defaultTelegramPython(platform: SetupDependencyCheck['platform']): string | undefined {
+  const python = telegramPythonExecutable();
+  // Without the Command Line Tools, macOS's /usr/bin/python3 is a stub whose first run opens an install dialog:
+  // doctor never starts one. `xcode-select -p` only reads where the tools are.
+  if (platform === 'darwin' && python === '/usr/bin/python3' && spawnSync('/usr/bin/xcode-select', ['-p'], { stdio: 'ignore' }).status !== 0) return undefined;
+  return python;
 }
 
 function defaultPythonModuleExists(pythonCommand: string, moduleName: string): boolean {

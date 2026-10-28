@@ -36,6 +36,13 @@ const SENDER: Target = { role: 'textbox', name: PRIVACY.senderLabel, contains: t
 const MODELS_LINE: Target = { role: 'button', name: new RegExp(`^${PANEL.models}\\s+—`) };
 // What the open section says; a closed section's content counts as hidden here (the probe's rule), whatever the page's text holds.
 const SEARCH_LINE: Target = { text: new RegExp(`^${PANEL.modelSearch}: \\S`) };
+/** The id of the first Inbox row below the top one that is settled (not "not checked yet"), or null. */
+const KEEP_ROW = `(() => { const rows = Array.from(document.querySelectorAll('[data-pa-question]')).slice(1); const keep = rows.find((row) => !(row.querySelector('.pafrom')?.textContent ?? '').includes(${JSON.stringify(ASK.unchecked)})); return keep ? keep.getAttribute('data-pa-question') : null; })()`;
+const onlyDeletedGone = (expected: string) => async ({ count, vars }: StepContext): Promise<{ ok: boolean; expected: string; actual: string }> => {
+  const gone = await count({ css: `[data-pa-question="${String(vars.firstId)}"]` }, 'host');
+  const kept = await count({ css: `[data-pa-question="${String(vars.keepId)}"]` }, 'host');
+  return { ok: gone === 0 && kept === 1, expected, actual: `deleted answer: ${gone === 0 ? 'gone' : 'still listed'}; the settled answer: ${kept === 1 ? 'still listed' : 'missing'}` };
+};
 const DISCARDED_NOTE = 'release check: this note is never saved';
 const DISCARDED_SENDER = 'release-check@example.com';
 
@@ -289,15 +296,23 @@ export const JOURNEYS: readonly Journey[] = [
     mutates: true,
     needs: ['inbox'],
     steps: [
-      { name: 'Open the Inbox page', do: { open: 'private' }, expect: [{ count: { css: '[data-pa-question]' }, atLeast: 2 }] },
+      {
+        name: 'Open the Inbox page',
+        do: { open: 'private' },
+        expect: [
+          { count: { css: '[data-pa-question]' }, atLeast: 2 },
+          // The answer that must survive is a settled one below the first. A "not checked yet" row is re-checked in the background and
+          // dropped when nothing Private matches it, so neither it nor a row count can be pinned across a reload (2026-10-28, 8 -> 4).
+          { custom: async ({ driver, vars }) => {
+            vars.keepId = String(await driver.probe('host', KEEP_ROW) ?? '');
+            return { ok: vars.keepId !== '', expected: 'a settled answer below the first one, to check it survives', actual: vars.keepId ? 'found one' : 'every answer below the first is still being checked' };
+          } },
+        ],
+      },
       {
         name: 'Delete the first answer',
         do: { click: { role: 'button', name: ASK.delete, within: { css: '[data-pa-question]' } }, frame: 'host' },
-        remember: {
-          before: { countOf: { css: '[data-pa-question]' } },
-          firstId: { attrOf: { css: '[data-pa-question]', nth: 0 }, attr: 'data-pa-question' },
-          secondId: { attrOf: { css: '[data-pa-question]', nth: 1 }, attr: 'data-pa-question' },
-        },
+        remember: { firstId: { attrOf: { css: '[data-pa-question]', nth: 0 }, attr: 'data-pa-question', frame: 'host' } },
         expect: [
           // What the worker says it removed (the page records it): a delete that removed nothing names itself here,
           // not at the reload (2026-10-26, a Linux run whose deleted answers all came back).
@@ -306,24 +321,13 @@ export const JOURNEYS: readonly Journey[] = [
             const none = await count({ css: '[data-pa-removed="0"]' }, 'host');
             return { ok: one === 1, expected: 'the worker says it removed exactly one answer', actual: one === 1 ? 'it removed one' : none === 1 ? 'it removed none' : 'it said nothing about what it removed' };
           } },
-          { countSince: { target: { css: '[data-pa-question]' }, since: 'before', delta: -1 } },
-          { custom: async ({ count, vars }) => {
-            const gone = await count({ css: `[data-pa-question="${String(vars.firstId)}"]` });
-            const kept = await count({ css: `[data-pa-question="${String(vars.secondId)}"]` });
-            return { ok: gone === 0 && kept === 1, expected: 'the answer that was deleted is gone and the one after it is still there', actual: `deleted answer: ${gone === 0 ? 'gone' : 'still listed'}; the next answer: ${kept === 1 ? 'still listed' : 'missing'}` };
-          } },
+          { custom: onlyDeletedGone('the answer that was deleted is gone and a settled one after it is still there') },
         ],
       },
       {
         name: 'Reload: the deleted answer stays gone',
         do: { reload: true },
-        expect: [
-          { countSince: { target: { css: '[data-pa-question]' }, since: 'before', delta: -1 } },
-          { custom: async ({ count, vars }) => {
-            const gone = await count({ css: `[data-pa-question="${String(vars.firstId)}"]` });
-            return { ok: gone === 0, expected: 'the deleted answer is still gone after a reload', actual: gone === 0 ? 'it is' : 'it is listed again' };
-          } },
-        ],
+        expect: [{ custom: onlyDeletedGone('after a reload the deleted answer is still gone and the settled one is still there') }],
       },
     ],
   },

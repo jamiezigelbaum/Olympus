@@ -1177,9 +1177,13 @@ export function chatgptDashboardClient(
     // A press still checking: its button says so, disabled, in the row's place.
     if (checking) add(controls, checkingControl('primary:' + id));
     // The ⋯ menu keeps only secondary actions, never a copy of the row's fix,
-    // and no second Sync now while one is checking.
+    // and no second Sync now while one is checking. A delete that ran is not
+    // offered again while the engine restarts: its reads may still come from
+    // the old process, and the data is going whatever they say.
+    const deleted = state.deleting[id] !== undefined;
     const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry: Any) => archiveFix(archives, entry, id)).filter((entry: Any) =>
-      (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+      (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry))
+      && !(deleted && entry && entry.tool === config.deleteDataTool));
     // Under Other archives, Import another archive is the section's own button, always in sight, never in ⋯.
     if (other) {
       const importing = (entry: Any) => !!entry && (entry.archiveImport === true || entry.label === H.copy.archives.importAction);
@@ -2755,7 +2759,9 @@ export function chatgptDashboardClient(
   }
 
   /** A source whose Delete indexed data ran and whose row still offers it (or is not yet read again). */
+  /** A wait past its deadline ends here too, so an engine that never comes back returns to the normal back-off. */
   function deletePending(): boolean {
+    for (const id of Object.keys(state.deleting)) if (Date.now() >= (state.deleting[id] ?? 0)) delete state.deleting[id];
     return Object.keys(state.deleting).length > 0;
   }
 
@@ -2771,7 +2777,9 @@ export function chatgptDashboardClient(
   }
 
   function refreshDelay(): number {
-    const base = deletePending() ? R.settleMs : moving() ? R.activeMs : R.idleMs;
+    // A read refused while the engine restarts after a delete is expected: keep the settle cadence, no back-off.
+    if (deletePending()) return R.settleMs;
+    const base = moving() ? R.activeMs : R.idleMs;
     return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
   }
 
