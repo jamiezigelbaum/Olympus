@@ -76,7 +76,6 @@ import {
   defaultSovereigntyConfigPath,
   loadSovereigntyPreset,
   presetKeepingPublicTier,
-  loadSovereigntyEngine,
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
 } from './core/sovereignty.ts';
@@ -2470,16 +2469,12 @@ async function runMessagingPairing(
   secretStore: Parameters<typeof pairMessagingSource>[0]['secretStore'],
   registryPath?: string,
 ): Promise<unknown> {
-  const policy = loadSovereigntyEngine().config;
-  if (policy.routes.secure_local?.mode === 'disabled' || policy.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
-    throw new OperationError('invalid_params', 'This pairing flow captures messaging as Private data. Your current privacy choice excludes it; ask your agent to review that choice before pairing.');
-  }
   let terminal: number;
   try { terminal = openSync('/dev/tty', 'r+'); }
   catch { throw new OperationError('invalid_params', 'Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.'); }
   const tell = (text: string) => writeSync(terminal, text);
   try {
-    tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.\n`);
+    tell(`Pairing ${source} privately on this machine. Each message is judged Personal, Private or Secret by what it says. No messages are captured until you approve the scope.\n`);
     if (source === 'whatsapp') tell(`${WHATSAPP_UNOFFICIAL_CLIENT_NOTICE}\n`);
     const paired = await pairMessagingSource({
       source,
