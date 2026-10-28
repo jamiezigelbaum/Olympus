@@ -179919,8 +179919,8 @@ function createEvernoteRuntime(options) {
       runtime: stores.length === 0 ? undefined : createChildExtractionRuntime({
         provider: EVERNOTE_ATTACHMENT_EXTRACTION_PROVIDER,
         scopeKey: EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY,
-        corpusIds: stores.map((store) => store.corpusId),
-        stores,
+        corpusIds: [opened.secure.corpusId],
+        stores: [opened.secure.open(), ...stores.filter((store) => store.corpusId !== opened.secure.corpusId)],
         set: opened.set,
         accountScope: () => accountScope,
         connector: (scope) => scope === accountScope ? connector : undefined,
@@ -179988,8 +179988,7 @@ function createEvernoteRuntime(options) {
         freshnessThresholdHours: config2.worker.scheduler.freshnessThresholdHours,
         tasks: [
           pass,
-          attachmentTask(opened.secure.corpusId, () => opened.secure.current()),
-          attachmentTask(opened.internal.corpusId, () => opened.internal.current())
+          attachmentTask(opened.secure.corpusId, () => opened.secure.current() ?? opened.internal.current())
         ],
         lastSyncCompletedAt: () => sync.lastStoreRunCompletedAt()
       };

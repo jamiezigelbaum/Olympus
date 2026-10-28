@@ -22,7 +22,9 @@ import { createEvernoteRuntime, evernoteDashboardPass, evernoteSchedulerFailure 
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { SourceSchedulerTaskFailure } from '../src/workers/source-scheduler.ts';
-import { FakeEvernoteServer } from './support/evernote-mcp-fake.ts';
+import { childProviderItemId } from '../src/core/child-item-id.ts';
+import { evernoteAttachmentKeys } from '../src/workers/evernote/connector.ts';
+import { FakeEvernoteServer, md5Hex } from './support/evernote-mcp-fake.ts';
 
 let fake: FakeEvernoteServer | undefined;
 const dirs: string[] = [];
@@ -188,7 +190,7 @@ describe('a pass through the tier lane', () => {
 });
 
 describe('the scheduler source', () => {
-  test('one pass task at the scheduler interval, and an attachment read per store', async () => {
+  test('one pass task at the scheduler interval, and one attachment read for the whole lane', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     const { runtime, handle } = await connected(fake);
     const source = runtime.schedulerSource({
@@ -200,12 +202,29 @@ describe('the scheduler source', () => {
     expect(source.tasks.map((task) => task.id)).toEqual([
       'evernote.notes_pass',
       'evernote.attachments.secure_local.evernote.notes',
-      'evernote.attachments.internal.evernote.notes',
     ]);
-    // A store the pass has not opened has nothing to read.
-    expect(await source.tasks[2]!.run()).toEqual({ status: 'idle', counts: {} });
+    // Before the pass has opened a store there is nothing to read.
+    expect(await source.tasks[1]!.run()).toEqual({ status: 'idle', counts: {} });
     const run = await source.tasks[0]!.run();
     expect(run.counts).toMatchObject({ pass_complete: 1 });
+  });
+
+  test('an attachment of an ordinary note is read and its text lands, whichever store the note rests in', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Field work');
+    const bytes = new TextEncoder().encode('fixtureferryword: the ferry leaves the quay at seven.');
+    const note = fake.addNote({ title: 'Timetable', created: day(2024), notebookId: book.id, body: '<en-note>Ferry times</en-note>', resources: [{ bytes, mime: 'text/plain', name: 'timetable.txt' }] });
+    const { runtime, handle } = await connected(fake);
+    const source = runtime.schedulerSource({
+      config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
+      handle,
+    });
+    expect((await source.tasks[0]!.run()).counts).toMatchObject({ pass_complete: 1 });
+    for (const task of source.tasks.slice(1)) await task.run();
+    const child = `personal:${childProviderItemId(note.id, evernoteAttachmentKeys([md5Hex(bytes)])[0]!)}`;
+    const lane = runtime.existingLane()!;
+    const text = [lane.secure.open(), lane.internal.open()].flatMap((store) => store.localContent(child)?.chunks ?? []).join(' ');
+    expect(text).toContain('fixtureferryword');
   });
 
   test('a rate-limited pass retries later; a refused sign-in is a credential failure', () => {
