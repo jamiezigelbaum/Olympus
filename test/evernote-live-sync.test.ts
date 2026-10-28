@@ -12,6 +12,9 @@ import { McpCallPacer } from '../src/core/mcp-source/pacer.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { readConnectedHandleRegistry, type ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
+import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { computerOpenTargets } from '../src/workers/dashboard/host-page.ts';
+import { renderDashboardKeysPage } from '../src/workers/dashboard/pages/local.ts';
 import { dashboardSubLine } from '../src/workers/dashboard/vocabulary.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { EVERNOTE_HANDLE, startEvernoteSignIn } from '../src/workers/evernote/live-sync.ts';
@@ -210,6 +213,23 @@ describe('the dashboard', () => {
     expect(await secretStore.get('evernote.personal.mcp_credential')).toBeDefined();
   });
 
+  test('the panel\'s Connect opens the computer\'s Evernote row, whose button starts the sign-in route', () => {
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: { generated_at: '2026-10-28T12:00:00.000Z', corpora: [] } as never,
+      sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+      now: new Date('2026-10-28T12:00:00.000Z'),
+    });
+    const row = buildChatGptDashboardViewModel(view, {}).sources.find((source) => source.id === 'evernote.notes')!;
+    expect(row.primary).toMatchObject({ label: 'Connect', href: 'https://olympusplugin.ai/open/connect/evernote/', openHref: true });
+    // On the computer that link is the Keys page, landed on Evernote's row.
+    expect(computerOpenTargets('http://127.0.0.1:8787')['connect/evernote']).toBe('http://127.0.0.1:8787/dashboard?keys#olympus-open=connect.evernote');
+    const keys = renderDashboardKeysPage(view, {});
+    const at = keys.indexOf('data-source-id="evernote.notes"');
+    expect(at).toBeGreaterThan(0);
+    // The row's Connect posts { source: 'evernote' } to /dashboard/connect/oauth/start (start_oauth).
+    expect(keys.slice(at, keys.indexOf('</div>', at))).toContain('data-connect-kind="oauth"><input type="hidden" name="source" value="evernote">');
+  });
+
   test('the card offers one Connect, then says what the last pass counted', () => {
     const view = (livePasses?: Parameters<typeof buildSourceDashboardViewModel>[0]['livePasses']) => buildSourceDashboardViewModel({
       sourceIndexStatus: { generated_at: '2026-10-28T12:00:00.000Z', corpora: [] } as never,
@@ -218,10 +238,10 @@ describe('the dashboard', () => {
       ...(livePasses ? { livePasses } : {}),
     });
     const card = view().sources.find((source) => source.source_id === 'evernote.notes')!;
-    expect(card.label).toBe('Evernote account');
+    expect(card.label).toBe('Evernote');
     expect(card.connection.action).toEqual({ kind: 'oauth', source: 'evernote', label: 'Connect', publisher_client: true });
-    // The ENEX exports keep their own card beside it.
-    expect(view().sources.some((source) => source.source_id === 'evernote.archive')).toBe(true);
+    // One Evernote card: the ENEX exports show on it, not on a second card.
+    expect(view().sources.filter((source) => source.provider === 'evernote').map((source) => source.source_id)).toEqual(['evernote.notes']);
 
     const pass = evernoteDashboardPass({
       last_completed_at: '2026-10-28T11:00:00.000Z',

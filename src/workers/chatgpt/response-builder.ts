@@ -973,7 +973,7 @@ const SOURCE_LABELS: Record<string, string> = {
   'local.files': 'Files on this computer',
   'x.bookmarks': 'X bookmarks',
   'readwise.library': 'Readwise',
-  'evernote.notes': 'Evernote account',
+  'evernote.notes': 'Evernote',
   'telegram.messages': 'Telegram',
   'whatsapp.personal.messages': 'WhatsApp',
 };

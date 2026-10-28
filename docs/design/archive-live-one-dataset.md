@@ -1304,6 +1304,12 @@ Evernote export is a new format whose attachments are child items.
   the Archives row does). "Import another archive" sends the same file to the
   same card, and Other archives no longer lists them. A start says "Importing
   Field notes.enex into Evernote. It shows in Evernote as it is read."
+  Since live Evernote (issue #568) the ENEX format names the live source's
+  card, `evernote.notes`: one Evernote card shows the account's connection
+  (Connect, the last pass) and still offers Import an archive and lists those
+  imports. The imports stay stored under Archives and are not merged with the
+  live notes; Delete indexed data on the card removes the live notes, and each
+  import keeps its own Remove.
 - **Storage does not move.** The imports stay where source-storage.md (step 4e)
   keeps archive-only formats: `archive.imports`'s note store set, one account
   scope per import, with their Remove. The cards are views of the public

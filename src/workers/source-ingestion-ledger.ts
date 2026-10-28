@@ -438,7 +438,7 @@ const SOURCE_DEFINITIONS: Record<string, LedgerSourceDefinition> = {
     corpusSourceIds: ['local.files'],
   },
   evernote: {
-    label: 'Evernote account',
+    label: 'Evernote',
     primaryCorpusId: 'secure_local.evernote.notes',
     family: 'note',
     corpusSourceIds: ['evernote.notes'],

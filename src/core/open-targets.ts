@@ -21,6 +21,8 @@ export const OPEN_CONNECT_SOURCES = {
   readwise: { sourceId: 'readwise.library', label: 'Readwise' },
   telegram: { sourceId: 'telegram.messages', label: 'Telegram' },
   whatsapp: { sourceId: 'whatsapp.personal.messages', label: 'WhatsApp' },
+  // Signs in to Evernote's own MCP server from this computer: the server registers its own client.
+  evernote: { sourceId: 'evernote.notes', label: 'Evernote' },
 } as const;
 
 export type OpenConnectSource = keyof typeof OPEN_CONNECT_SOURCES;

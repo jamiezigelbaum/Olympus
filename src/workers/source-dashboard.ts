@@ -1901,6 +1901,9 @@ export function dashboardSensitivityTiers(sovereigntyEngine: SovereigntyEngine):
 /** The Archives card (Other archives): imports no source card claims. */
 const ARCHIVE_IMPORTS_CARD_ID = 'archive.imports';
 
+/** Live sources whose card also lists a format's imports (`ArchiveFormatDefinition.sourceCard`). */
+const LIVE_ARCHIVE_CARD_IDS: ReadonlySet<string> = new Set(['evernote.notes']);
+
 export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] = [
   {
     source_id: 'gmail.email',
@@ -2044,13 +2047,14 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
   },
   {
     // Evernote's own MCP server, read in hourly passes (workers/evernote/).
-    // Beside the Evernote card below, which holds the ENEX exports imported
-    // on this computer: the two are not merged (issue #568, open question).
+    // The one Evernote card: the ENEX format names it (`sourceCard`), so it
+    // also offers Import an archive and lists those imports, which stay
+    // stored under Archives. The two datasets are not merged (issue #568).
     source_id: 'evernote.notes',
     primary_corpus_id: 'secure_local.evernote.notes',
     corpus_source_ids: ['evernote.notes'],
     ingestion_ledger_source_id: 'evernote',
-    label: 'Evernote account',
+    label: 'Evernote',
     provider: 'evernote',
     family: 'note',
     trust_domain: 'secure_local',
@@ -2062,7 +2066,8 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
   // connector reads names its card in the format registry. Its imports are
   // stored under Archives, one account scope each, so the card owns no corpus
   // of its own; its connection is its imports (importedArchivesByCard).
-  ...archiveSourceCards().map((card): DashboardSupportedSourceDefinition => ({
+  // A card a live source already has (Evernote's) is that source's: no second card.
+  ...archiveSourceCards().filter((card) => !LIVE_ARCHIVE_CARD_IDS.has(card.id)).map((card): DashboardSupportedSourceDefinition => ({
     source_id: card.id,
     // No corpus is this card's: the family's store set holds every import-only source's notes, and Other archives owns it.
     primary_corpus_id: card.id,

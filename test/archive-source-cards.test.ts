@@ -78,7 +78,8 @@ describe('the import-only sources the format registry names', () => {
     expect(cards.map((card) => ({ id: card.id, label: card.label, formats: card.formats.map((format) => format.id) }))).toEqual([
       { id: 'reflect.archive', label: 'Reflect', formats: ['reflect-json', 'reflect-markdown'] },
       { id: 'roam.archive', label: 'Roam', formats: ['roam-json'] },
-      { id: 'evernote.archive', label: 'Evernote', formats: ['evernote-enex'] },
+      // Evernote's exports show on the live Evernote card.
+      { id: 'evernote.notes', label: 'Evernote', formats: ['evernote-enex'] },
     ]);
     for (const format of ARCHIVE_FORMATS) {
       if (format.family !== 'note') expect(archiveSourceCardOf(format.id)).toBeUndefined();
@@ -86,18 +87,23 @@ describe('the import-only sources the format registry names', () => {
   });
 
   test('each card is a source on the dashboard, part of the public Archives source, owning no corpus of its own', () => {
-    for (const card of archiveSourceCards()) {
+    for (const card of archiveSourceCards().filter((entry) => entry.id !== 'evernote.notes')) {
       const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === card.id)!;
       expect(definition).toMatchObject({ label: card.label, public_source_id: 'archive.imports', connect_action: { kind: 'archive_import' } });
       expect(definition.corpus_source_ids).toEqual([]);
     }
+    // Evernote's card is the live source's own: one card, its connection the account's.
+    const evernote = DASHBOARD_SUPPORTED_SOURCES.filter((entry) => entry.provider === 'evernote');
+    expect(evernote.map((entry) => ({ id: entry.source_id, label: entry.label, action: entry.connect_action.kind }))).toEqual([
+      { id: 'evernote.notes', label: 'Evernote', action: 'oauth' },
+    ]);
   });
 });
 
 describe('an import-only source\'s card', () => {
   test('its Import an archive takes its exports, which show in its card and not under Other archives', async () => {
     const f = fixture();
-    expect(f.dashboard.archiveSources().map((entry) => entry.sourceId)).toEqual(['reflect.archive', 'roam.archive', 'evernote.archive']);
+    expect(f.dashboard.archiveSources().map((entry) => entry.sourceId)).toEqual(['reflect.archive', 'roam.archive', 'evernote.notes']);
     const reflect = f.dashboard.archiveSources().find((entry) => entry.sourceId === 'reflect.archive')!;
     expect(reflect.intro).toContain('a Reflect export');
     expect(reflect.intro).not.toContain('mail export');
@@ -194,10 +200,15 @@ describe('an import-only source\'s card', () => {
 
   test('a card with nothing imported, beside notes another card imported, never reads as a disconnected account', () => {
     // An Evernote import is the only one: its items sit in the notes store set Other archives owns.
-    const result = previewDashboardToolResult('archives-notes-evernote', false) as unknown as { structuredContent: { sources: Array<{ id: string; detail?: string }> } };
+    const result = previewDashboardToolResult('archives-notes-evernote', false) as unknown as {
+      structuredContent: { sources: Array<{ id: string; detail?: string }> };
+      _meta: Record<string, { archiveCards?: Array<{ sourceId: string; archives: unknown[] }> }>;
+    };
     const detail = (id: string) => result.structuredContent.sources.find((source) => source.id === id)?.detail ?? '';
-    // The card whose import is running says so in its own words, not a corpus's first sync.
-    expect(detail('evernote.archive')).toMatch(/^importing/i);
+    // Evernote's import is listed on the one Evernote card, whose line stays the account's own.
+    const computer = Object.values(result._meta).find((value) => value && typeof value === 'object' && 'archiveCards' in value);
+    expect(computer?.archiveCards?.map((card) => card.sourceId)).toEqual(['evernote.notes']);
+    expect(detail('evernote.notes')).not.toBe(DASHBOARD_DISCONNECTED_DATA_KEPT);
     for (const id of ['reflect.archive', 'roam.archive', 'archive.imports']) {
       expect(detail(id)).not.toBe(DASHBOARD_DISCONNECTED_DATA_KEPT);
       expect(detail(id)).toMatch(/no archives imported yet/i);

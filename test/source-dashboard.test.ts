@@ -360,8 +360,8 @@ describe('multi-source source dashboard', () => {
     });
 
     expect(view.summary).toMatchObject({
-      // Ten sources, and the import-only sources' cards (Reflect, Roam, Evernote).
-      configured_sources: 13,
+      // Ten sources (Evernote's card lists its exports too), and the import-only sources' cards (Reflect, Roam).
+      configured_sources: 12,
       connected_sources: 3,
       answer_ready_sources: 1,
       needs_attention_sources: 1,
@@ -378,11 +378,11 @@ describe('multi-source source dashboard', () => {
       'Telegram',
       'WhatsApp',
       'Readwise',
-      'Evernote account',
+      // One Evernote card: the live account, and the ENEX imports it lists.
+      'Evernote',
       // The import-only sources' cards (step 7 of archive-live-one-dataset.md).
       'Reflect',
       'Roam',
-      'Evernote',
     ]);
     expect(view.sources.find((source) => source.source_id === 'gmail.email')).toMatchObject({
       connection: { state: 'synced', label: 'synced 1 hour ago' },
@@ -1217,8 +1217,8 @@ describe('multi-source source dashboard', () => {
         now: new Date('2026-07-02T11:00:00.000Z'),
       });
 
-      // One sample per card per snapshot: thirteen cards (the import-only sources' among them), two snapshots.
-      expect(view.history).toMatchObject({ sample_count: 26, eta_available: true });
+      // One sample per card per snapshot: twelve cards (the import-only sources' among them), two snapshots.
+      expect(view.history).toMatchObject({ sample_count: 24, eta_available: true });
       expect(view.sources[0]?.progress).toEqual({
         indexed_items_per_hour: 30,
         eta_minutes: 60,
@@ -1276,8 +1276,8 @@ describe('multi-source source dashboard', () => {
 
     expect(response.status).toBe(200);
     expect(body.kind).toBe('source_dashboard');
-    // Ten sources and the import-only sources' cards (Reflect, Roam, Evernote).
-    expect(body.sources).toHaveLength(13);
+    // Ten sources and the import-only sources' cards (Reflect, Roam).
+    expect(body.sources).toHaveLength(12);
     expect(body.sources.some((source: { source_id: string }) => source.source_id === 'venice.api')).toBe(false);
     expect(body.answer_lanes).toEqual([
       expect.objectContaining({
