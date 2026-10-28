@@ -258,7 +258,7 @@ describe('scheduler construction boot receipt', () => {
       selectedSourceIds: Object.values(SCHEDULER_SOURCE_IDS),
     });
 
-    expect(lines.at(-1)).toBe('[source-scheduler] constructed=9 skipped=0 selected=9');
+    expect(lines.at(-1)).toBe('[source-scheduler] constructed=10 skipped=0 selected=10');
   });
 
   test('reports no allowlist as every construction selected, not as drift', () => {

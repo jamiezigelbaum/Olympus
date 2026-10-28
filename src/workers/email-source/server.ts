@@ -295,6 +295,9 @@ import {
   type OnDemandTierStore,
   type TieredStoreSet,
 } from '../connector-store/tiered-store-set.ts';
+import { EVERNOTE_SOURCE_ID } from '../evernote/connector.ts';
+import { EVERNOTE_SYNC_CAPABILITY } from '../evernote/live-sync.ts';
+import { createEvernoteRuntime } from '../evernote/runtime.ts';
 import {
   READWISE_SECURE_LIBRARY_CORPUS_ID,
   createReadwiseTierLane,
@@ -3904,6 +3907,35 @@ export async function main(): Promise<void> {
   } catch (error) {
     console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.name : 'error'}`);
   }
+  // Evernote's account, read in passes over its MCP server (workers/evernote/):
+  // its lane opens when an account is connected or a previous one left stores,
+  // and is adopted like every other lane's.
+  const evernote = createEvernoteRuntime({
+    env: process.env,
+    secretStore: () => lazySecretStore(process.env),
+    registryPath: connectedHandleRegistryPath!,
+    extractors: fileExtractionExtractors,
+    openSecretLocations: (secureDbPath) => openTierSecretLocations({ sourceId: EVERNOTE_SOURCE_ID }, secureDbPath, 'Evernote'),
+    onLane: (lane) => {
+      if (tierSecureEmbeddingProvider) lane.set.declarePrivateEmbedder(tierSecureEmbeddingProvider);
+      adoptTierLane({
+        ledger: lane.ledger,
+        secureCorpusId: lane.secure.corpusId,
+        corpusIds: [lane.secure.corpusId, lane.internal.corpusId],
+        onDemand: [lane.secure, lane.internal],
+      });
+    },
+    onStoreOpened: (store) => registerTierLegStore(
+      store,
+      store.corpusId,
+      store.trustDomain === 'secure_local' ? tierSecureEmbeddingProvider ?? null : sourceIndexEmbeddingProvider ?? null,
+    ),
+  });
+  try {
+    if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID })) evernote.existingLane();
+  } catch (error) {
+    console.warn(`[evernote] the Evernote stores are not served this run: ${error instanceof Error ? error.name : 'error'}`);
+  }
   // Reading the child items an import listed by name (an attachment, a photo): the shared
   // extraction factory over the archive lanes' stores, built on first use and again when a
   // lane's stores change, with the same extractor configuration as the main runtime.
@@ -5018,6 +5050,22 @@ export async function main(): Promise<void> {
           ...(whatsappLiveMaxItems !== undefined ? { maxItems: whatsappLiveMaxItems } : {}),
         }),
       ),
+      (() => {
+        const handle = selectedSourceCredentialHandle({
+          env: process.env,
+          pinEnvName: 'OLYMPUS_SOURCE_INDEX_EVERNOTE_CREDENTIAL_HANDLE',
+          provider: 'evernote',
+          capability: EVERNOTE_SYNC_CAPABILITY,
+          handles,
+        });
+        // A sign-in the provider refused waits for Reconnect rather than failing every hour.
+        const usable = handle && handle.backendState?.status !== 'reauth_required' ? handle : undefined;
+        return recordLane(
+          SCHEDULER_SOURCE_IDS.evernote,
+          usable ? undefined : 'no_handle',
+          () => evernote.schedulerSource({ config: olympusConfig, handle: usable! }),
+        );
+      })(),
       recordLane(
         SCHEDULER_SOURCE_IDS.archiveImports,
         undefined,
@@ -5666,6 +5714,10 @@ export async function main(): Promise<void> {
             loopbackPort: port,
             ...(fileSourceScopes ? { fileSourceScopes } : {}),
             archiveImports: archiveImportDashboard,
+            livePasses: () => {
+              const pass = evernote.dashboardPass();
+              return pass ? { 'evernote.notes': pass } : {};
+            },
             enforceConnectedSourceReads: true,
             // The filter applies to the override too. An override is a caller
             // saying which handles changed, never a claim that an unpaired

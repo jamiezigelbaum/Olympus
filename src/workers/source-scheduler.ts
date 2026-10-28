@@ -127,6 +127,7 @@ export const SCHEDULER_SOURCE_IDS = {
   telegram: TELEGRAM_MESSAGES_SOURCE_ID,
   whatsapp: WHATSAPP_PERSONAL_SOURCE_ID,
   archiveImports: 'archive.imports',
+  evernote: 'evernote.notes',
 } as const;
 
 export interface SourceSchedulerConstructionDecision {

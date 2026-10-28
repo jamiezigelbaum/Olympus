@@ -903,7 +903,8 @@
                         "x.bookmarks",
                         "telegram.messages",
                         "whatsapp.personal.messages",
-                        "readwise.library"
+                        "readwise.library",
+                        "evernote.notes"
                       ]
                     },
                     "provider": {
@@ -1613,7 +1614,8 @@
                     "x.bookmarks",
                     "telegram.messages",
                     "whatsapp.personal.messages",
-                    "readwise.library"
+                    "readwise.library",
+                    "evernote.notes"
                   ]
                 },
                 "provider": {

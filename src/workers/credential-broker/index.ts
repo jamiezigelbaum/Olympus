@@ -60,6 +60,7 @@ const PUBLIC_CREDENTIAL_PROVIDERS = [
   'telegram',
   'whatsapp_personal',
   'x',
+  'evernote',
 ] as const;
 
 const PRIVATE_CREDENTIAL_PROVIDERS = [
@@ -70,7 +71,6 @@ const PRIVATE_CREDENTIAL_PROVIDERS = [
   'apple_messages',
   'reflect',
   'roam',
-  'evernote',
 ] as const;
 
 export const CREDENTIAL_PROVIDERS = [

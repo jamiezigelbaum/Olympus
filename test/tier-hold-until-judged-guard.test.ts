@@ -52,6 +52,11 @@ const LANE_OPTION_SHARED: ReadonlyArray<{ path: string; snippet: string; why: st
     why: 'a Gmail attachment child is held until judged, live or imported (child-items.md, "Mail attachments"): stricter, never looser',
   },
   {
+    path: 'src/workers/evernote/connector.ts',
+    snippet: 'holdContentUntilJudged: true,\n        deferredBytes: {',
+    why: 'an Evernote attachment child is held until judged, like a Gmail attachment (child-items.md, "Mail attachments"): stricter, never looser',
+  },
+  {
     path: 'src/workers/connector-store/local-index.ts',
     snippet: "listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;",
     why: 'a fetched replacement of a listed item keeps the listed item\'s hold',

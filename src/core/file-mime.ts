@@ -1,3 +1,5 @@
+import { stillImageFormatFromBytes, stillImageMimeTypes } from './still-image-formats.ts';
+
 /**
  * A media type from a file name, for sources whose provider does not say.
  * Unknown names get `application/octet-stream`, which the extraction factory
@@ -32,4 +34,29 @@ export function fileMimeTypeFromName(name: string): string {
   const extension = name.slice(dot + 1).toLowerCase();
   return MIME_BY_EXTENSION[extension]
     ?? (SOURCE_CODE_EXTENSIONS.has(extension) ? 'text/plain' : 'application/octet-stream');
+}
+
+const asciiAt = (bytes: Uint8Array, start: number, length: number): string =>
+  bytes.length >= start + length ? String.fromCharCode(...bytes.subarray(start, start + length)) : '';
+
+/**
+ * A media type from a file's first bytes, for sources whose provider's stated
+ * type is not to be trusted: still images, PDF, and the common audio and video
+ * containers. Undefined when the bytes do not say.
+ */
+export function fileMimeTypeFromBytes(bytes: Uint8Array): string | undefined {
+  const image = stillImageFormatFromBytes(bytes);
+  if (image) return stillImageMimeTypes(image)[0];
+  if (asciiAt(bytes, 0, 5) === '%PDF-') return 'application/pdf';
+  if (asciiAt(bytes, 0, 3) === 'ID3' || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1]! & 0xe0) === 0xe0)) return 'audio/mpeg';
+  if (asciiAt(bytes, 0, 4) === 'RIFF' && asciiAt(bytes, 8, 4) === 'WAVE') return 'audio/wav';
+  if (asciiAt(bytes, 0, 4) === 'OggS') return 'audio/ogg';
+  if (asciiAt(bytes, 0, 4) === 'fLaC') return 'audio/flac';
+  if (asciiAt(bytes, 4, 4) === 'ftyp') {
+    const brand = asciiAt(bytes, 8, 4);
+    if (brand === 'M4A ' || brand === 'M4B ') return 'audio/mp4';
+    if (brand === 'qt  ') return 'video/quicktime';
+    return 'video/mp4';
+  }
+  return undefined;
 }
