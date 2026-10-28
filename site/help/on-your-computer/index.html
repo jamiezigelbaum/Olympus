@@ -68,10 +68,10 @@
         <li>Turn on the <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com">Gmail API</a> and the <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com">Google Drive API</a> for that project. Without them, syncing fails.</li>
         <li>Open <a href="https://console.cloud.google.com/auth/overview">Google Auth Platform</a>, choose <strong>Get started</strong>, name the app Olympus, give your own email for support and contact, and choose <strong>External</strong>.</li>
         <li>Under <strong>Audience</strong>, choose <strong>Publish app</strong>. If you leave it in Testing, Google ends the connection every 7 days.</li>
-        <li>Under <strong>Clients</strong>, choose <strong>Create client</strong>, pick <strong>Desktop app</strong>, name it Olympus, and copy the <strong>Client ID</strong>. You don't need the client secret.</li>
+        <li>Under <strong>Clients</strong>, choose <strong>Create client</strong>, pick <strong>Desktop app</strong>, name it Olympus, and keep the <strong>Client ID</strong> and <strong>Client secret</strong> it shows. Google needs both when it hands the connection to Olympus.</li>
         <li>On the computer running Olympus, open a terminal and run, with your Client ID:
-          <pre><code>olympus connect gmail --client-id YOUR-CLIENT-ID --detach</code></pre>
-          Sign in and allow access on the Google page it opens (or open the <code>authorizationUrl</code> it prints). Use <code>google-drive</code> instead of <code>gmail</code> for Drive. <code>olympus connect status gmail</code> says <strong>connected</strong> when it worked.</li>
+          <pre><code>olympus connect gmail --client-id YOUR-CLIENT-ID --client-secret-stdin --detach</code></pre>
+          It waits for the secret: paste your Client secret, press Return, then press Control-D. The secret stays on your computer. Then sign in and allow access on the Google page it opens (or open the <code>authorizationUrl</code> it prints). Use <code>google-drive</code> instead of <code>gmail</code> for Drive. <code>olympus connect status gmail</code> says <strong>connected</strong> when it worked.</li>
       </ol>
       <p>Google still shows its unverified-app warning for your own app, now naming you as the developer. Continue the same way.</p>
 
