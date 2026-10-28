@@ -3,7 +3,7 @@ import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { LocalConnectorStore, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import { gmailCursorConnectorId } from '../src/workers/google-connectors/index.ts';
-import { withLocalPrivateEmbeddingBackfill, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { TransientSourceEmbeddingError, type SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 function item(id: string, date = '2026-10-14T12:00:00Z'): RawItem {
@@ -20,7 +20,7 @@ function provider(captured: string[]): SourceEmbeddingProvider {
   return { provider: 'built-in', backend: 'local', modelId: 'fixture-local', configHash: 'fixture', epochId: 'fixture-epoch', dimension: 2, async embed(inputs) { captured.push(...inputs.map(input => input.text)); return inputs.map(() => [1, 0]); } };
 }
 
-describe('Private meaning backfill follows current provider observations', () => {
+describe('Private meaning catch-up follows current provider observations', () => {
   test('mail from an old scope/account generation or outside the current content date is never submitted', async () => {
     const s = store(); const captured: string[] = []; const local = provider(captured);
     const prior = gmailCursorConnectorId('personal', { generation: 'old-account', revision: 'wide-scope' });
@@ -38,7 +38,7 @@ describe('Private meaning backfill follows current provider observations', () =>
         retrievalAvailability: { [s.corpusId]: () => ({ servable: s.hasEmbeddings(local.modelId), modelId: local.modelId, embeddingEpoch: local.epochId, backend: local.backend, provider: local.provider }) },
       });
       expect((await status.status()).corpora[0]!.embedding_parity).toMatchObject({ chunks: 1, missing_chunks: 1 });
-      const task = withLocalPrivateEmbeddingBackfill([source(s.corpusId)], () => [{ store: s, provider: local, accountScope: 'personal', filters }])[0]!.tasks[0]!;
+      const task = withEmbeddingSweep([source(s.corpusId)], () => () => [{ store: s, provider: local, wholeStore: true, accountScope: 'personal', filters }])[0]!.tasks[0]!;
       expect(await task.run()).toMatchObject({ counts: { chunks_embedded: 1 } });
       expect(captured).toHaveLength(1);
       expect(captured[0]).toContain('allowed-now private body');
@@ -62,7 +62,7 @@ describe('Private meaning backfill follows current provider observations', () =>
       await first.syncFromConnector(connector('first', [item('first')]), { fetchContent: true });
       await second.syncFromConnector(connector('second', [item('second')]), { fetchContent: true });
       first.queueEmbedding(['first'], cloud);
-      const task = withLocalPrivateEmbeddingBackfill([source(first.corpusId)], () => [{ store: first, provider: intermittent }, { store: second, provider: local }])[0]!.tasks[0]!;
+      const task = withEmbeddingSweep([source(first.corpusId)], () => () => [{ store: first, provider: intermittent, wholeStore: true }, { store: second, provider: local, wholeStore: true }])[0]!.tasks[0]!;
       expect(await task.run({ sourceId: 'gmail.email', corpusId: first.corpusId, taskId: task.id, attemptedAt: '2026-10-14T12:00:00Z', consecutiveFailures: 0, effectiveIntervalMs: 60_000 })).toMatchObject({ counts: { chunks_embedded: 1, stores_deferred: 1 }, retryAt: { effectiveIntervalMs: 120_000, degradedReason: 'embedding_provider_unavailable' } });
       expect(cloudCalls).toBe(0);
       expect(await task.run()).toMatchObject({ counts: { chunks_embedded: 1, stores_deferred: 0 } });

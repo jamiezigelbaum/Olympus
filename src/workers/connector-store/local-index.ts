@@ -1543,14 +1543,10 @@ export interface ConnectorStoreEmbeddingTarget {
   provider: SourceEmbeddingProvider;
   /**
    * true: besides its queue, embed any chunk in the store with no current
-   * vector (the store-wide sweep). Only for a store whose corpus is served
-   * hybrid, whose embedding policy is not disabled, and whose source the
-   * owner approved for it (withEmbeddingSweep decides). Scoped file and mail
-   * lanes stay queue-only, embedding under their scope binding.
+   * vector (the store-wide sweep), within `accountScope` and `filters`.
+   * planStoreEmbedding decides, the same way for every store.
    */
   wholeStore?: boolean;
-  /** Backfill only on the current provider; never replay historical queue providers. */
-  missingOnly?: boolean;
   accountScope?: string;
   filters?: ConnectorStoreSearchFilters;
   assertAuthorized?: () => void | Promise<void>;
@@ -1577,7 +1573,9 @@ export interface ConnectorStoreEmbedStoreRun {
  *      embedded with the exact provider it was queued with, so a scoped lane
  *      embeds under the scope binding its sync used; a group whose binding is
  *      no longer current (the owner narrowed the scope) is dropped, and the
- *      next traversal under the new scope queues what is still in it;
+ *      next traversal under the new scope queues what is still in it; on a
+ *      `wholeStore` target a group queued under another identity is dropped
+ *      too and caught up by step 2 on the current one;
  *   2. for a `wholeStore` target, then any item with a chunk missing a vector,
  *      up to the same `maxItems` bound — which is what recovers a backlog after
  *      a restart emptied the in-memory queue.
@@ -1602,7 +1600,14 @@ export async function embedPendingChunks(
       itemsOutOfScope: 0,
     };
     runs.push(run);
-    const groups = target.missingOnly ? [] : store.queuedEmbeddingGroups(options.maxItems);
+    const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
+      // A store that catches up never replays a queue left under another
+      // identity (the owner changed the tier's model): its items are missing
+      // vectors on the current one and are picked up below instead.
+      if (target.wholeStore !== true || sameEmbeddingIdentity(group.provider, target.provider)) return true;
+      store.completeQueuedEmbedding(group.localItemIds);
+      return false;
+    });
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
@@ -1638,6 +1643,10 @@ export async function embedPendingChunks(
     else if (answered) store.setEmbeddingDeferral(undefined);
   }
   return runs;
+}
+
+function sameEmbeddingIdentity(a: SourceEmbeddingProvider, b: SourceEmbeddingProvider): boolean {
+  return a.provider === b.provider && a.backend === b.backend && a.modelId === b.modelId && a.epochId === b.epochId;
 }
 
 /**

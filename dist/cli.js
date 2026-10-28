@@ -29200,7 +29200,12 @@ async function embedPendingChunks(targets, options) {
       itemsOutOfScope: 0
     };
     runs.push(run);
-    const groups = target.missingOnly ? [] : store.queuedEmbeddingGroups(options.maxItems);
+    const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
+      if (target.wholeStore !== true || sameEmbeddingIdentity(group.provider, target.provider))
+        return true;
+      store.completeQueuedEmbedding(group.localItemIds);
+      return false;
+    });
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
@@ -29238,6 +29243,9 @@ async function embedPendingChunks(targets, options) {
       store.setEmbeddingDeferral(undefined);
   }
   return runs;
+}
+function sameEmbeddingIdentity(a, b) {
+  return a.provider === b.provider && a.backend === b.backend && a.modelId === b.modelId && a.epochId === b.epochId;
 }
 async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
   try {
@@ -165134,9 +165142,6 @@ function createSourceSchedulerFromConfig(input) {
 function createCanonicalDropboxSchedulerSource(input) {
   if (!input.providerSync || !input.store)
     return;
-  if (input.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(input.embeddingProvider)) {
-    throw new Error("Dropbox secure_local embeddings require a local/private or approved Venice embedding provider.");
-  }
   const metadataScopes = dropboxPolicyApprovedScopeKeys(input.policy);
   const extractionScopes = dropboxPolicyFullExtractionScopeKeys(input.policy);
   const tasks = [];
@@ -165192,37 +165197,6 @@ function createCanonicalDropboxSchedulerSource(input) {
         batchSize: input.policy.content.batch_size
       }));
     }
-  }
-  if (input.embeddingProvider) {
-    tasks.push({
-      id: "dropbox.files_embeddings",
-      kind: "embed",
-      writer: true,
-      run: async () => {
-        const result = await input.store.embedChunks({
-          provider: input.embeddingProvider,
-          limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS
-        });
-        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
-      }
-    });
-  }
-  for (const tier of input.tierEmbeddings ?? []) {
-    tasks.push({
-      id: `dropbox.files_embeddings.${schedulerScopeHash(tier.corpusId)}`,
-      kind: "embed",
-      writer: true,
-      run: async () => {
-        const store = tier.store();
-        if (!store)
-          return progressFromCounts({ chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0 });
-        if (store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(tier.provider)) {
-          throw new Error("A secure_local tier store requires a local/private or approved Venice embedding provider.");
-        }
-        const result = await store.embedChunks({ provider: tier.provider, limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS });
-        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
-      }
-    });
   }
   return {
     sourceId: SCHEDULER_SOURCE_IDS.dropbox,
@@ -165375,23 +165349,8 @@ function createReadwiseSchedulerSource(input) {
     lastSyncCompletedAt: () => input.liveSync?.lastStoreRunCompletedAt()
   };
 }
-function wholeStoreEmbeddingSweepAllowed(sourceId, corpusId) {
-  const allowed = WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId];
-  return allowed === true || Array.isArray(allowed) && corpusId !== undefined && allowed.includes(corpusId);
-}
-function withLocalPrivateEmbeddingBackfill(sources, targetsFor) {
-  return sources.map((source) => {
-    const targets = () => targetsFor(source).filter((target) => target.store.trustDomain === "secure_local" && target.provider.provider === "built-in" && target.provider.backend === "local").map((target) => ({ ...target, wholeStore: true, missingOnly: true }));
-    if (targets().length === 0)
-      return source;
-    const task = embeddingSweepTask(source, targets);
-    return { ...source, tasks: [...source.tasks, { ...task, id: `${source.sourceId}_private_meaning` }] };
-  });
-}
 function withEmbeddingSweep(sources, targetsFor) {
   return sources.map((source) => {
-    if (source.tasks.some((task) => task.kind === "embed"))
-      return source;
     const targets = targetsFor(source);
     if (!targets)
       return source;
@@ -165424,8 +165383,9 @@ function embeddingSweepTask(source, targets) {
       const status = counts.chunks_embedded > 0 ? "progress" : "idle";
       const attemptedAt = Date.parse(context2?.attemptedAt ?? "") || Date.now();
       if (deferred2 === 0) {
+        const more = runs.some((run2) => run2.busy !== true && run2.chunksEmbedded > 0 && run2.itemsAttempted >= EMBEDDING_SWEEP_MAX_ITEMS);
         if (counts.items_failed === 0)
-          return { status, counts };
+          return { status, counts, ...more ? { continueSoon: true } : {} };
         return {
           status,
           counts,
@@ -165878,16 +165838,6 @@ function googleDriveSchedulerFailure(error2) {
     }
   });
 }
-function embedPassResult(result, limit) {
-  return {
-    ...progressFromCounts({
-      chunks_seen: result.chunksSeen,
-      chunks_embedded: result.chunksEmbedded,
-      chunks_skipped: result.chunksSkipped
-    }),
-    ...result.chunksEmbedded >= limit ? { continueSoon: true } : {}
-  };
-}
 function progressFromCounts(counts) {
   return {
     status: Object.values(counts).some((value2) => value2 > 0) ? "progress" : "idle",
@@ -166182,7 +166132,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true, WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS = 512, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_config();
   init_operation_error();
@@ -166193,7 +166143,6 @@ var init_source_scheduler = __esm(() => {
   init_connector_store();
   init_google_connectors();
   init_readwise();
-  init_embeddings();
   init_x_bookmarks();
   init_live_control2();
   init_whatsapp();
@@ -166230,13 +166179,6 @@ var init_source_scheduler = __esm(() => {
   };
   EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
   EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-  WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE = {
-    [SCHEDULER_SOURCE_IDS.readwise]: true,
-    [SCHEDULER_SOURCE_IDS.gmail]: ["internal.email"],
-    [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-    [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-    [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP
-  };
   HONEST_SCHEDULER_ERROR_KINDS = new Set([
     "api_request_guard",
     "config_missing_folder_argument",
@@ -166541,9 +166483,6 @@ function retryTomorrow(context2, reason, afterMs = DAY_MS3) {
 function createLocalFilesSchedulerSource(input) {
   if (!input.providerSync || !input.store)
     return;
-  if (input.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(input.embeddingProvider)) {
-    throw new Error("Local files secure_local embeddings require a local/private or approved Venice embedding provider.");
-  }
   const roots = input.policy.roots;
   const tasks = [];
   const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync22(homedir43()) });
@@ -166620,37 +166559,6 @@ function createLocalFilesSchedulerSource(input) {
       }));
     }
   }
-  if (input.embeddingProvider) {
-    tasks.push({
-      id: "local.files_embeddings",
-      kind: "embed",
-      writer: true,
-      run: async () => {
-        const result = await input.store.embedChunks({
-          provider: input.embeddingProvider,
-          limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS
-        });
-        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
-      }
-    });
-  }
-  for (const tier of input.tierEmbeddings ?? []) {
-    tasks.push({
-      id: `local.files_embeddings.${schedulerScopeHash(tier.corpusId)}`,
-      kind: "embed",
-      writer: true,
-      run: async () => {
-        const store = tier.store();
-        if (!store)
-          return progressFromCounts({ chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0 });
-        if (store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(tier.provider)) {
-          throw new Error("A secure_local tier store requires a local/private or approved Venice embedding provider.");
-        }
-        const result = await store.embedChunks({ provider: tier.provider, limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS });
-        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
-      }
-    });
-  }
   if (input.watch)
     watchApprovedFolders(input.watch, roots.filter((root) => !blockedRoots.has(root.path)).map((root) => root.path));
   return {
@@ -166681,7 +166589,6 @@ function watchApprovedFolders(watch, scopePaths) {
 }
 var DAY_MS3, PERMISSION_RETRY_MS;
 var init_scheduler_source = __esm(() => {
-  init_embeddings();
   init_source_scheduler();
   init_mac_permissions();
   init_connector6();
@@ -178119,24 +178026,7 @@ function createArchiveImportsSchedulerSource(input) {
       });
     }
   }
-  for (const tier of input.tierEmbeddings ?? []) {
-    tasks.push({
-      id: `${SCHEDULER_SOURCE_IDS.archiveImports}_embeddings.${schedulerScopeHash(tier.corpusId)}`,
-      kind: "embed",
-      writer: true,
-      run: async () => {
-        const store = tier.store();
-        if (!store)
-          return progressFromCounts({ chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0 });
-        if (store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(tier.provider)) {
-          throw new Error("A secure_local archive store requires a local/private or approved Venice embedding provider.");
-        }
-        const result = await store.embedChunks({ provider: tier.provider, limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS });
-        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
-      }
-    });
-  }
-  if (tasks.length === 0)
+  if (tasks.length === 0 && input.holdsStores !== true)
     return;
   const families = input.runtime.families();
   return {
@@ -178151,7 +178041,6 @@ function createArchiveImportsSchedulerSource(input) {
 }
 var ARCHIVE_IMPORTS_CONCURRENCY_KEY = "archive.imports", ARCHIVE_EXTRACTION_PLAN_LIMIT = 200, ARCHIVE_EXTRACTION_BATCH_SIZE = 10, ARCHIVE_IMPORT_STATUS_CHECK_MS = 1000;
 var init_scheduler_source2 = __esm(() => {
-  init_embeddings();
   init_source_scheduler();
   init_extraction_source3();
   init_removal();
@@ -179733,15 +179622,6 @@ function gmailItemAccountScope(stores, roleScope) {
 }
 function gmailHoldsImportedHistory(stores) {
   return stores.some((store) => store?.holdsItemsMatching(GMAIL_IMPORTED_FILTERS) === true);
-}
-function gmailImportedHistoryEmbeddingTargets(input) {
-  return input.stores.flatMap((store) => {
-    const provider = input.providerFor(store);
-    return provider ? [{ store, provider, wholeStore: true, missingOnly: true, accountScope: input.accountScope, filters: GMAIL_IMPORTED_FILTERS }] : [];
-  });
-}
-function gmailLaneEmbeddingTargets(input) {
-  return [...input.live, ...gmailImportedHistoryEmbeddingTargets(input)];
 }
 function gmailRecordBuilder(account, build = {}) {
   return {
@@ -182384,6 +182264,34 @@ var init_gmail_header_match = __esm(() => {
   init_request_budget();
   waitFor2 = gmailImportWait;
   SEARCHABLE = /^[^\s"()<>{}]{1,500}$/;
+});
+
+// src/workers/connector-store/embedding-plan.ts
+function storeEmbeddingCatchesUp(corpusId, provider) {
+  if (provider.provider === "built-in" && provider.backend === "local")
+    return true;
+  return QUEUE_ONLY_METERED_EMBEDDING[corpusId] === undefined;
+}
+function planStoreEmbedding(facts) {
+  const { store, provider, scope } = facts;
+  if (!provider || !facts.servedByMeaning)
+    return;
+  if (store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(provider))
+    return;
+  if (!scope.allowed)
+    return { store, provider };
+  return {
+    store,
+    provider: scope.bind ? scope.bind(provider) : provider,
+    wholeStore: storeEmbeddingCatchesUp(store.corpusId, provider),
+    ...scope.accountScope ? { accountScope: scope.accountScope } : {},
+    ...scope.filters ? { filters: scope.filters } : {}
+  };
+}
+var QUEUE_ONLY_METERED_EMBEDDING;
+var init_embedding_plan = __esm(() => {
+  init_embeddings();
+  QUEUE_ONLY_METERED_EMBEDDING = {};
 });
 
 // src/workers/archive-import/mbox/part-reader.ts
@@ -203148,6 +203056,8 @@ __export(exports_server2, {
   workerCaptureRuntime: () => workerCaptureRuntime,
   validateSecureVeniceAnalystProfileAtConstruction: () => validateSecureVeniceAnalystProfileAtConstruction,
   trustedAnalystAssistTimeoutMs: () => trustedAnalystAssistTimeoutMs,
+  storeServedByMeaning: () => storeServedByMeaning,
+  storeEmbeddingScope: () => storeEmbeddingScope,
   stopBuiltInModelOnShutdown: () => stopBuiltInModelOnShutdown,
   startWorkerWithLaunch: () => startWorkerWithLaunch,
   startApprovedSourceRun: () => startApprovedSourceRun,
@@ -203179,7 +203089,6 @@ __export(exports_server2, {
   moveAccountsAtBoot: () => moveAccountsAtBoot,
   migrateAccountFoldersAtBoot: () => migrateAccountFoldersAtBoot,
   main: () => main,
-  localPrivateEmbeddingTargets: () => localPrivateEmbeddingTargets,
   loadSourceWorkerSovereignty: () => loadSourceWorkerSovereignty,
   deleteMarkedAccountsAtBoot: () => deleteMarkedAccountsAtBoot,
   createXBookmarksConnectorStoreRuntime: () => createXBookmarksConnectorStoreRuntime,
@@ -203420,66 +203329,57 @@ function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
     ...env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH } : {}
   });
 }
-function localPrivateEmbeddingTargets(input) {
-  const {
-    source,
-    sovereigntyEngine,
-    secureLocalPolicyEmbeddingProvider,
-    sourceCorpusRegistry: sourceCorpusRegistry2,
-    scopeRefs,
-    connectorStores,
-    fullCorpusDefinitions,
-    fileSourceScopeAuthority,
-    readScope: connectorStoreReadScope,
-    connectorStoreAccountScopes,
-    gmailAccountScope,
-    gmailImportAccountScope
-  } = input;
-  const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
-  if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== "built-in" || policy?.activationMode !== "hybrid_shadow" && policy?.activationMode !== "hybrid_primary")
-    return [];
-  const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
-  corpusIds.add(source.corpusId);
-  const ref = scopeRefs.get(source.sourceId);
-  return connectorStores.flatMap((store) => {
-    if (store.trustDomain !== "secure_local" || !corpusIds.has(store.corpusId))
-      return [];
-    const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === store.corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
-    const registered3 = sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
-    if (!definition || definition.activationMode === "lexical_only" || definition.embeddingPolicy === "disabled" || registered3?.activationMode === "lexical_only" || registered3?.embeddingPolicy === "disabled")
-      return [];
-    if (source.sourceId === SCHEDULER_SOURCE_IDS.gmail && (!ref || !fileSourceScopeAuthority)) {
-      if (!gmailImportAccountScope)
-        return [];
-      return [{
-        store,
-        provider: secureLocalPolicyEmbeddingProvider,
-        accountScope: gmailImportAccountScope,
-        filters: { provider: "gmail", observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX }
-      }];
+function storeServedByMeaning(input) {
+  const { store, sourceCorpusRegistry: sourceCorpusRegistry2 } = input;
+  const registered3 = sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === store.corpusId);
+  const definition = input.fullCorpusDefinitions.find((entry) => entry.corpusId === store.corpusId) ?? registered3;
+  const served = (entry) => entry === undefined || entry.activationMode !== "lexical_only" && entry.embeddingPolicy !== "disabled";
+  if (!definition || !served(definition) || !served(registered3))
+    return false;
+  const domain = store.trustDomain === "public_safe" || store.trustDomain === "internal" || store.trustDomain === "secure_local" ? input.sovereigntyEngine.config.retrieval.trustDomains[store.trustDomain]?.activationMode : undefined;
+  return domain !== "lexical_only" && domain !== "metadata_only";
+}
+function storeEmbeddingScope(input) {
+  const { store, sourceId, scopeRef: ref, authority } = input;
+  if (!SCOPE_APPROVED_SOURCE_IDS.has(sourceId))
+    return { allowed: true };
+  if (sourceId === SCHEDULER_SOURCE_IDS.gmail && (!ref || !authority)) {
+    if (!input.gmailImportAccountScope)
+      return { allowed: false };
+    return { allowed: true, accountScope: input.gmailImportAccountScope, filters: GMAIL_IMPORTED_FILTERS };
+  }
+  if (!ref || !authority)
+    return { allowed: false };
+  const bind = (provider) => scopeBoundEmbeddingProvider(provider, authority, ref);
+  if (isMailSourceScopePolicyRef(ref)) {
+    try {
+      authority.assertCurrentMail(ref);
+    } catch {
+      return { allowed: false };
     }
-    if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles].some((id) => id === source.sourceId) && (!ref || !fileSourceScopeAuthority))
-      return [];
-    const scope = connectorStoreReadScope(store);
-    if (!scope.allowed || !scope.contentAllowed)
-      return [];
-    const mail = ref && isMailSourceScopePolicyRef(ref) && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(ref) : undefined;
-    const accountScope = mail ? gmailAccountScope?.trim() || "personal" : scope.accountScope ?? connectorStoreAccountScopes.get(store.corpusId);
-    if (mail && !accountScope)
-      return [];
-    const filters = mail ? {
-      provider: "gmail",
-      observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
-      observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX
-    } : scope.contentFilters;
-    const provider = ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref) : secureLocalPolicyEmbeddingProvider;
-    return [{
-      store,
-      provider,
-      ...accountScope ? { accountScope } : {},
-      ...filters ? { filters } : {}
-    }];
-  });
+    if (store.trustDomain !== "secure_local")
+      return { allowed: true, bind };
+    const accountScope = input.gmailAccountScope?.trim() || "personal";
+    return {
+      allowed: true,
+      bind,
+      accountScope,
+      filters: {
+        provider: "gmail",
+        observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
+        observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX
+      }
+    };
+  }
+  const scope = input.readScope(store);
+  if (!scope.allowed || !scope.contentAllowed)
+    return { allowed: false };
+  return {
+    allowed: true,
+    bind,
+    ...scope.accountScope ? { accountScope: scope.accountScope } : {},
+    ...scope.contentFilters ? { filters: scope.contentFilters } : {}
+  };
 }
 function loadSourceWorkerSovereignty(config2, env) {
   const options = {
@@ -206039,15 +205939,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           config: olympusConfig,
           ...currentDropboxProviderStoreSync ? { providerSync: currentDropboxProviderStoreSync } : {},
           ...dropboxConnectorStore ? { store: dropboxConnectorStore } : {},
-          ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
-          ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) && currentDropboxScopeRef && fileSourceScopeAuthority ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, currentDropboxScopeRef) } : {},
-          ...dropboxTierLane && sourceIndexEmbeddingProvider && currentDropboxScopeRef && fileSourceScopeAuthority ? {
-            tierEmbeddings: [dropboxTierLane.internal, dropboxTierLane.public].map((leg) => ({
-              corpusId: leg.corpusId,
-              store: () => leg.current(),
-              provider: scopeBoundEmbeddingProvider(sourceIndexEmbeddingProvider, fileSourceScopeAuthority, currentDropboxScopeRef)
-            }))
-          } : {}
+          ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}
         });
         return withSourceAccountGuard(source && currentDropboxScopeRef && fileSourceScopeAuthority ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentDropboxScopeRef }) : undefined, {
           sourceId: "dropbox.files",
@@ -206070,14 +205962,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           ...currentLocalFilesSync ? { providerSync: currentLocalFilesSync } : {},
           ...localFilesConnectorStore ? { store: localFilesConnectorStore } : {},
           ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
-          ...localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, currentLocalFilesScopeRef) } : {},
-          ...localFilesTierLane && sourceIndexEmbeddingProvider ? {
-            tierEmbeddings: [localFilesTierLane.internal, localFilesTierLane.public].map((leg) => ({
-              corpusId: leg.corpusId,
-              store: () => leg.current(),
-              provider: scopeBoundEmbeddingProvider(sourceIndexEmbeddingProvider, fileSourceScopeAuthority, currentLocalFilesScopeRef)
-            }))
-          } : {},
           watch: { hub: localFilesWatchHub, volumes: localFilesVolumes, ignore: localFilesWatchIgnore }
         });
         return source ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentLocalFilesScopeRef }) : undefined;
@@ -206124,11 +206008,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           runtime: archiveImports,
           config: olympusConfig,
           extraction: archiveExtraction,
-          tierEmbeddings: lanes.flatMap((lane) => [
-            { leg: lane.secure, provider: tierSecureEmbeddingProvider },
-            { leg: lane.internal, provider: sourceIndexEmbeddingProvider },
-            { leg: lane.public, provider: sourceIndexEmbeddingProvider }
-          ].flatMap(({ leg, provider }) => provider ? [{ corpusId: leg.corpusId, store: () => leg.current(), provider }] : []))
+          holdsStores: lanes.length > 0
         });
       })
     ].filter((source) => source !== undefined);
@@ -206168,60 +206048,36 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         }))]
       };
     }
-    const sweptSources = withEmbeddingSweep(sources, (source) => {
-      const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
-      corpusIds.add(source.corpusId);
-      const hybridServed = (corpusId) => {
-        const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === corpusId) ?? sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === corpusId);
-        return definition !== undefined && definition.activationMode !== "lexical_only" && definition.embeddingPolicy !== "disabled";
-      };
-      if (source === gmailImportedHistory) {
-        const importScope = gmailItemScopeFor(currentGmailHandle);
-        const importTargets = () => gmailImportedHistoryEmbeddingTargets({
-          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
-          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
-          accountScope: importScope
-        });
-        return importTargets().length > 0 ? importTargets : undefined;
-      }
-      const targets = () => connectorStores.flatMap((store) => {
-        if (!corpusIds.has(store.corpusId))
-          return [];
-        const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
-        return provider ? [{ store, provider, wholeStore: wholeStoreEmbeddingSweepAllowed(source.sourceId, store.corpusId) && hybridServed(store.corpusId) }] : [];
-      });
-      if (source.sourceId === SCHEDULER_SOURCE_IDS.gmail) {
-        const importScope = gmailItemScopeFor(currentGmailHandle);
-        const laneTargets = () => gmailLaneEmbeddingTargets({
-          live: targets(),
-          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
-          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
-          accountScope: importScope
-        });
-        return laneTargets().length > 0 ? laneTargets : undefined;
-      }
-      return targets().length > 0 ? targets : undefined;
-    });
     const scopeRefs = new Map;
     for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef, currentLocalFilesScopeRef]) {
       if (ref)
         scopeRefs.set(ref.sourceId, ref);
     }
-    const privateBackfillSources = withLocalPrivateEmbeddingBackfill(sweptSources, (source) => localPrivateEmbeddingTargets({
-      source,
-      sovereigntyEngine,
-      secureLocalPolicyEmbeddingProvider,
-      sourceCorpusRegistry: sourceCorpusRegistry2,
-      scopeRefs,
-      connectorStores,
-      fullCorpusDefinitions,
-      fileSourceScopeAuthority,
-      readScope: connectorStoreReadScope,
-      connectorStoreAccountScopes,
-      gmailAccountScope: currentGmailHandle ? gmailItemScopeFor(currentGmailHandle) : undefined,
-      gmailImportAccountScope: gmailItemScopeFor(currentGmailHandle)
-    }));
-    const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
+    const sweptSources = withEmbeddingSweep(sources, (source) => {
+      const corpusIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
+      corpusIds.add(source.corpusId);
+      const targets = () => connectorStores.flatMap((store) => {
+        if (!corpusIds.has(store.corpusId))
+          return [];
+        const target = planStoreEmbedding({
+          store,
+          provider: connectorStoreEmbeddingProviders.get(store.corpusId),
+          servedByMeaning: storeServedByMeaning({ store, sovereigntyEngine, sourceCorpusRegistry: sourceCorpusRegistry2, fullCorpusDefinitions }),
+          scope: storeEmbeddingScope({
+            store,
+            sourceId: source.sourceId,
+            scopeRef: scopeRefs.get(source.sourceId),
+            authority: fileSourceScopeAuthority,
+            readScope: connectorStoreReadScope,
+            gmailAccountScope: currentGmailHandle ? gmailItemScopeFor(currentGmailHandle) : undefined,
+            gmailImportAccountScope: gmailItemScopeFor(currentGmailHandle)
+          })
+        });
+        return target ? [target] : [];
+      });
+      return targets().length > 0 ? targets : undefined;
+    });
+    const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
       decisions,
       sources: sourceWatchPass ? attachSourceWatchSchedulerTask({
@@ -208060,7 +207916,7 @@ function googleFilePage(locator) {
     return false;
   }
 }
-var GMAIL_ATTACHMENT_READER_REUSE_MS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch, dataOwnerLock;
+var GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch, dataOwnerLock;
 var init_server5 = __esm(async () => {
   init_source_placement();
   init_vocabulary();
@@ -208195,6 +208051,7 @@ var init_server5 = __esm(async () => {
   init_gmail_scope_browser();
   init_gmail_archive_target();
   init_gmail_header_match();
+  init_embedding_plan();
   init_gmail_import_allowance();
   init_source_registry();
   init_gmail_live_sync();
@@ -208218,6 +208075,12 @@ var init_server5 = __esm(async () => {
   init_agent_connections();
   init_remote_access_control();
   GMAIL_ATTACHMENT_READER_REUSE_MS = 5 * 60000;
+  SCOPE_APPROVED_SOURCE_IDS = new Set([
+    SCHEDULER_SOURCE_IDS.gmail,
+    SCHEDULER_SOURCE_IDS.googleDrive,
+    SCHEDULER_SOURCE_IDS.dropbox,
+    SCHEDULER_SOURCE_IDS.localFiles
+  ]);
   INGESTION_DISPOSITION_SOURCES = [
     {
       sourceId: DROPBOX_INGESTION_EXCLUSION_SOURCE,
