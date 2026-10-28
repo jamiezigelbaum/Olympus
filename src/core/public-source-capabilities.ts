@@ -165,6 +165,19 @@ export const V0_4_PUBLIC_SOURCE_CAPABILITIES: readonly PublicSourceCapability[] 
       env_flag: 'OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED',
     },
   },
+  {
+    source_id: 'evernote.notes',
+    label: 'Evernote',
+    authentication: { type: 'oauth2', ownership: 'sign-in with Evernote on this computer (read permission only)' },
+    contextual_scopes: ['notebooks the person owns', 'notes shared with the person are counted, not imported'],
+    dependencies: [{ id: 'evernote_mcp', label: 'Evernote\'s own MCP server', required_for: 'listing notes and reading notes and attachments' }],
+    provider_ceiling: 'An hourly full pass, paced at about one call a second; a large first import finishes over several passes.',
+    supported_formats: ['note text', 'title', 'notebook', 'tags', 'created and updated times', 'attachments read on their own'],
+    doctor_lane: {
+      provider: 'evernote',
+      capability: 'evernote.notes.sync',
+    },
+  },
 ] as const;
 
 const CAPABILITIES_BY_SOURCE = new Map<V04PublicSourceId, PublicSourceCapability>(

@@ -180,6 +180,10 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
       files.raw.push(rawPath('archive-imports.json'), rawPath('archive-import-requests.json'), rawPath('archive-staging'));
       files.rawDatabases.push({ path: rawPath('archive-media-bindings.sqlite'), storeId: ARCHIVE_MEDIA_BINDINGS_STORE_ID });
       break;
+    case 'evernote.notes':
+      // The last complete pass: what each note was, which deletions are judged against.
+      files.raw.push(rawPath('evernote-pass.json'));
+      break;
     case 'x.bookmarks':
       // X's reconcile snapshots per X user id. The usage ledger beside them is
       // the quota ledger and stays; its sync checkpoints are a forget step.

@@ -993,6 +993,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       'connect.readwise': 'readwise.library',
       'connect.telegram': 'telegram.messages',
       'connect.whatsapp': 'whatsapp.personal.messages',
+      'connect.evernote': 'evernote.notes',
     };
     let focus: HTMLElement | null = null;
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;

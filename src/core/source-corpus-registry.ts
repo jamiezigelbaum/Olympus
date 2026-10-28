@@ -182,6 +182,29 @@ const DEFAULT_SOURCE_CORPORA: SourceCorpusConfig[] = [
     description: 'X bookmarks raised to Private by per-item four-tier classification.',
   },
   {
+    corpusId: 'secure_local.evernote.notes',
+    sourceId: 'evernote.notes',
+    provider: 'evernote',
+    family: 'note',
+    trustDomain: 'secure_local',
+    activationMode: 'hybrid_shadow',
+    capabilities: ['answer', 'status', 'sync', 'search'],
+    createdOnDemand: true,
+    description: 'Evernote notes and attachments judged Private (and the lane\'s own placement until judged).',
+  },
+  {
+    corpusId: 'internal.evernote.notes',
+    sourceId: 'evernote.notes',
+    provider: 'evernote',
+    family: 'note',
+    trustDomain: 'internal',
+    activationMode: 'hybrid_shadow',
+    // No 'sync' of its own: the Evernote lane's tier set fills it.
+    capabilities: ['answer', 'status', 'search'],
+    createdOnDemand: true,
+    description: 'Evernote notes and attachments judged Personal, routed here by per-item four-tier classification.',
+  },
+  {
     corpusId: 'secure_local.dropbox.files',
     sourceId: 'dropbox.files',
     provider: 'dropbox',
@@ -302,6 +325,8 @@ const DEFAULT_CAPABILITY_ORDER: Partial<Record<SourceCorpusCapability, readonly 
     PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
     'secure_local.whatsapp.messages',
     'internal.whatsapp.messages',
+    'secure_local.evernote.notes',
+    'internal.evernote.notes',
   ],
   status: [
     'secure_local.email.private',
@@ -324,6 +349,8 @@ const DEFAULT_CAPABILITY_ORDER: Partial<Record<SourceCorpusCapability, readonly 
     PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
     'secure_local.whatsapp.messages',
     'internal.whatsapp.messages',
+    'secure_local.evernote.notes',
+    'internal.evernote.notes',
   ],
   sync: [
     'internal.email',
@@ -336,6 +363,7 @@ const DEFAULT_CAPABILITY_ORDER: Partial<Record<SourceCorpusCapability, readonly 
     'secure_local.local.files',
     'internal.telegram.messages',
     PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+    'secure_local.evernote.notes',
   ],
   search: [
     'internal.email',
@@ -354,6 +382,8 @@ const DEFAULT_CAPABILITY_ORDER: Partial<Record<SourceCorpusCapability, readonly 
     'secure_local.x.bookmarks',
     'internal.telegram.messages',
     PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+    'secure_local.evernote.notes',
+    'internal.evernote.notes',
   ],
   promotion_candidates: ['secure_local.dropbox.files', 'secure_local.local.files'],
 };

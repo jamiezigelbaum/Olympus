@@ -468,6 +468,8 @@ describe('config-driven source corpus registry', () => {
       'secure_local.telegram.protected.messages',
       'secure_local.whatsapp.messages',
       'internal.whatsapp.messages',
+      'secure_local.evernote.notes',
+      'internal.evernote.notes',
     ]);
     expect(registry.ids('status')).toEqual([
       'secure_local.email.private',
@@ -490,6 +492,8 @@ describe('config-driven source corpus registry', () => {
       'secure_local.telegram.protected.messages',
       'secure_local.whatsapp.messages',
       'internal.whatsapp.messages',
+      'secure_local.evernote.notes',
+      'internal.evernote.notes',
     ]);
     expect(registry.ids('sync')).toEqual([
       'internal.email',
@@ -502,6 +506,7 @@ describe('config-driven source corpus registry', () => {
       'secure_local.local.files',
       'internal.telegram.messages',
       'secure_local.telegram.protected.messages',
+      'secure_local.evernote.notes',
       'secure_local.whatsapp.messages',
     ]);
     expect(registry.ids('search')).toEqual([
@@ -521,6 +526,8 @@ describe('config-driven source corpus registry', () => {
       'secure_local.x.bookmarks',
       'internal.telegram.messages',
       'secure_local.telegram.protected.messages',
+      'secure_local.evernote.notes',
+      'internal.evernote.notes',
       'secure_local.whatsapp.messages',
       'internal.whatsapp.messages',
     ]);

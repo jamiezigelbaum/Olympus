@@ -130,7 +130,7 @@ const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009fâ€‹-â€
  */
 const OAUTH_SOURCES = new Set<ChatGptOAuthSource>(['gmail', 'google-drive', 'dropbox']);
 const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']);
-const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'local.files']);
+const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes', 'local.files']);
 const DELETE_DATA_SOURCE_IDS = new Set<ChatGptDeleteSourceId>([...DISCONNECT_SOURCE_IDS, 'telegram.messages', 'whatsapp.personal.messages']);
 const SYNC_SOURCE_IDS = new Set<ChatGptSyncSourceId>(DISCONNECT_SOURCE_IDS);
 const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
@@ -973,6 +973,7 @@ const SOURCE_LABELS: Record<string, string> = {
   'local.files': 'Files on this computer',
   'x.bookmarks': 'X bookmarks',
   'readwise.library': 'Readwise',
+  'evernote.notes': 'Evernote',
   'telegram.messages': 'Telegram',
   'whatsapp.personal.messages': 'WhatsApp',
 };

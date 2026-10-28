@@ -96,9 +96,9 @@ describe('v0.4 positive public surface', () => {
     expect(plugin.uiHints['worker.authToken']).toMatchObject({ sensitive: true });
     expect(sourceCorpus.properties.sourceId?.enum).toEqual([...V0_4_PUBLIC_SOURCE_IDS]);
     expect(sourceCorpus.properties.provider?.enum)
-      .toEqual(['gmail', 'google_drive', 'dropbox', 'local_files', 'x', 'telegram', 'whatsapp', 'readwise']);
+      .toEqual(['gmail', 'google_drive', 'dropbox', 'local_files', 'x', 'telegram', 'whatsapp', 'readwise', 'evernote']);
     expect(sourceCorpus.properties.family?.enum)
-      .toEqual(['email', 'file', 'chat', 'readwise', 'x']);
+      .toEqual(['email', 'file', 'chat', 'readwise', 'x', 'note']);
     expect(sourceCorpus.properties.activationMode?.enum)
       .toEqual(['lexical_only', 'hybrid_shadow', 'hybrid_primary']);
     expect(sourceCorpus.required)

@@ -1297,7 +1297,7 @@ export function previewArchiveBrowse(args: { parent_key?: unknown }) {
 const PREVIEW_NOTES_FILES: Readonly<Record<string, (name: string) => boolean>> = {
   'reflect.archive': (name) => /^reflect/i.test(name) && /\.(?:zip|json)$/i.test(name),
   'roam.archive': (name) => /^roam/i.test(name) && /\.(?:zip|json)$/i.test(name),
-  'evernote.archive': (name) => /\.enex$/i.test(name),
+  'evernote.notes': (name) => /\.enex$/i.test(name),
 };
 const PREVIEW_ARCHIVE_SOURCES = [
   { sourceId: 'gmail.email', label: 'Gmail', formats: [MBOX_ARCHIVE_FORMAT], accepts: (name: string) => name.endsWith('.mbox') },

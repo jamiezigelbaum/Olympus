@@ -26,7 +26,7 @@ describe('a source\'s own Import an archive', () => {
     const sources = h.dashboard.archiveSources();
     // The fixture source first; the import-only sources of the format registry (Reflect, Roam, Evernote) after it.
     expect(sources.map((entry) => ({ sourceId: entry.sourceId, label: entry.label }))[0]).toEqual({ sourceId: FIXTURE_SOURCE_ID, label: FIXTURE_LABEL });
-    expect(sources.slice(1).map((entry) => entry.sourceId)).toEqual(['reflect.archive', 'roam.archive', 'evernote.archive']);
+    expect(sources.slice(1).map((entry) => entry.sourceId)).toEqual(['reflect.archive', 'roam.archive', 'evernote.notes']);
     // The fixture reads mbox only: the picker names that export and no other.
     expect(sources[0]!.intro).toContain('a mail export');
     expect(sources[0]!.intro).not.toContain('WhatsApp');
