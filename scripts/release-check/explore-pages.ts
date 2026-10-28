@@ -25,6 +25,7 @@
  * advisory; the rules are blocking.
  */
 import type { PageControlEntry, PageInventory } from './explore-pages-inventory.ts';
+import { DASHBOARD_PRIVATE_ANSWERS_COPY } from '../../src/workers/dashboard/vocabulary.ts';
 import { ASK_VIEW } from './inbox-page.ts';
 import { BLANK_WINDOW } from './probe.ts';
 import { screenshotWithin, type ElementInfo, type JourneyDriver, type JourneyTrace, type StepTrace } from './journey.ts';
@@ -645,7 +646,15 @@ export function inboxAnswers(driver: JourneyDriver, options: { questions: readon
         const view = JSON.parse(String(await driver.probe('host', ASK_VIEW))) as { found?: boolean; busy?: boolean; answer?: string; error?: boolean; message?: string };
         if (view.error) return { ok: false, detail: `the local model did not answer: ${String(view.message ?? '').slice(0, 160)}` };
         rows = await rowCount();
-        if (view.found && !view.busy && view.answer && rows > before) break;
+        // "Nothing on this computer answers this." is a finished answer with no answer text; it is in the Inbox like any other.
+        const finished = view.found && !view.busy && (!!view.answer || view.message === DASHBOARD_PRIVATE_ANSWERS_COPY.notFound);
+        if (finished && rows <= before) {
+          // The page lists new rows only in its live refresh, which a hidden window skips (the Mac leg's); the server-rendered list is the record.
+          await driver.go(page.path);
+          rows = await rowCount();
+          if (rows <= before) return { ok: false, detail: `the local model answered "${question}", but after a reload the Inbox still holds ${rows} of ${wanted}` };
+        }
+        if (finished) break;
         // The panel's last words say which case a timeout is: an ask still waiting on its request, a queued one, or nothing shown.
         const said = view.message ? `the panel said "${view.message.slice(0, 160)}"` : 'the panel showed nothing';
         if (now() >= until) return { ok: false, detail: `the local model's answer was not finished and in the Inbox in time (${view.answer ? 'answered' : 'no answer yet'}; ${said}${view.busy ? ', the button still busy' : ''}; the Inbox holds ${rows} of ${wanted})` };
