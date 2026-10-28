@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import getpass
 import hashlib
+import io
 import json
 import os
 import sys
@@ -170,7 +171,11 @@ class Terminal:
 
 def controlling_terminal() -> Terminal:
     try:
-        stream = open("/dev/tty", "r+", encoding="utf-8", buffering=1)
+        # A tty cannot seek, and text-mode open("r+") wraps it in BufferedRandom,
+        # which raises UnsupportedOperation on every platform (#584).
+        stream = io.TextIOWrapper(
+            io.FileIO("/dev/tty", "r+"), encoding="utf-8", line_buffering=True, write_through=True
+        )
     except OSError as error:
         raise SafePairingError("controlling_terminal_required") from error
     return Terminal(stream)
