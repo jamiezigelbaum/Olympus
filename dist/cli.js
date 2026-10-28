@@ -139119,11 +139119,13 @@ class ModelSetupService {
   localCheckPromise;
   localCheckedAt;
   autoCheck;
+  builtInAnswers;
   constructor(options) {
     this.config = options.config;
     this.credentialState = options.credentialState;
     this.localApiKey = options.localApiKey;
     this.expectedEmbeddingDimension = options.expectedEmbeddingDimension;
+    this.builtInAnswers = options.builtInAnswers;
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? (() => new Date);
     this.autoCheck = options.autoCheck !== false;
@@ -139322,6 +139324,11 @@ class ModelSetupService {
   }
   async runLocalChecks(targets) {
     for (const target of targets) {
+      if (target.analyst && !target.embedding && this.builtInAnswers?.(target.id)) {
+        if (!await this.answersOrFallsBack(target))
+          return false;
+        continue;
+      }
       const listed = await this.modelIsListed(target.baseUrl, target.model, target.apiKey);
       const embeddingOnly = target.embedding && !target.analyst && target.expectedEmbeddingDimension !== undefined;
       if (!listed && !embeddingOnly)
@@ -139332,6 +139339,15 @@ class ModelSetupService {
         return false;
     }
     return true;
+  }
+  async answersOrFallsBack(target) {
+    try {
+      return await this.modelIsListed(target.baseUrl, target.model, target.apiKey) && await this.chatCompletes(target.baseUrl, target.model, target.apiKey);
+    } catch (error2) {
+      if (isAbortError(error2))
+        return false;
+      return this.builtInAnswers?.(target.id) === true;
+    }
   }
   async modelIsListed(baseUrl, model, apiKey) {
     const result = await this.requestJson(endpoint(baseUrl, "models"), { method: "GET" }, apiKey);
@@ -204426,6 +204442,16 @@ async function main() {
       if (internal?.id === id)
         return internalPolicyEmbeddingProvider?.dimension;
       return;
+    },
+    builtInAnswers: (id) => {
+      if (!workerBuiltInModel?.available())
+        return false;
+      try {
+        const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" }).members;
+        return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === "venice");
+      } catch {
+        return false;
+      }
     }
   });
   const getModelSetup = () => {

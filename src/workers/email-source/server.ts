@@ -2512,6 +2512,17 @@ export async function main(): Promise<void> {
       if (internal?.id === id) return internalPolicyEmbeddingProvider?.dimension;
       return undefined;
     },
+    // Mirrors applyBuiltInPrivateAnalyst: the built-in model backs the
+    // Private pool's local members unless Venice is in that pool.
+    builtInAnswers: (id) => {
+      if (!workerBuiltInModel?.available()) return false;
+      try {
+        const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members;
+        return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === 'venice');
+      } catch {
+        return false;
+      }
+    },
   });
   const getModelSetup = () => {
     const view = modelSetup.getStatus();

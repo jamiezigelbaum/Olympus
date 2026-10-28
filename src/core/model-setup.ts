@@ -1,5 +1,5 @@
 import { modelEndpointFetch } from './model-transport.ts';
-import { fetchBoundedText } from './http-timeout.ts';
+import { fetchBoundedText, isAbortError } from './http-timeout.ts';
 import type {
   SovereigntyConfig,
   SovereigntyModelProfile,
@@ -40,6 +40,13 @@ export interface ModelSetupServiceOptions {
    * (owner-reported, issue #118).
    */
   autoCheck?: boolean;
+  /**
+   * Whether the built-in model answers for this analyst profile when its
+   * server is unreachable (the Private pool's withBuiltInFallback). Without
+   * it, local-only on a standalone install locked every source behind a
+   * server that is never started there (#591).
+   */
+  builtInAnswers?: (profileId: string) => boolean;
 }
 
 type RequiredProfile = { id: string; profile: SovereigntyModelProfile };
@@ -127,12 +134,14 @@ export class ModelSetupService {
   /** When the last local check finished; undefined until one has. */
   private localCheckedAt: number | undefined;
   private readonly autoCheck: boolean;
+  private readonly builtInAnswers: ModelSetupServiceOptions['builtInAnswers'];
 
   constructor(options: ModelSetupServiceOptions) {
     this.config = options.config;
     this.credentialState = options.credentialState;
     this.localApiKey = options.localApiKey;
     this.expectedEmbeddingDimension = options.expectedEmbeddingDimension;
+    this.builtInAnswers = options.builtInAnswers;
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? (() => new Date());
     this.autoCheck = options.autoCheck !== false;
@@ -345,6 +354,10 @@ export class ModelSetupService {
 
   private async runLocalChecks(targets: LocalTarget[]): Promise<boolean> {
     for (const target of targets) {
+      if (target.analyst && !target.embedding && this.builtInAnswers?.(target.id)) {
+        if (!await this.answersOrFallsBack(target)) return false;
+        continue;
+      }
       // A served alias may be missing from /models (Delphi lists
       // delphi/embedding but serves secure-local-qwen3-embed). An unlisted ID
       // is refused before inference, except for an embedding-only target
@@ -361,6 +374,21 @@ export class ModelSetupService {
       )) return false;
     }
     return true;
+  }
+
+  /**
+   * An analyst the built-in model backs is usable when its server answers, or
+   * when the server cannot be reached at all: that is the one failure the
+   * fallback covers. A timeout or a wrong answer still fails the check.
+   */
+  private async answersOrFallsBack(target: LocalTarget): Promise<boolean> {
+    try {
+      return await this.modelIsListed(target.baseUrl, target.model, target.apiKey)
+        && await this.chatCompletes(target.baseUrl, target.model, target.apiKey);
+    } catch (error) {
+      if (isAbortError(error)) return false;
+      return this.builtInAnswers?.(target.id) === true;
+    }
   }
 
   private async modelIsListed(baseUrl: URL, model: string, apiKey?: string): Promise<boolean> {
