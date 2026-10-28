@@ -24,8 +24,7 @@ import type { SourceConnector, SourceConnectorInput } from '../../core/contracts
 import type { ArchiveConnectorInput } from '../../core/archive-formats.ts';
 import { googleAccountIdFromAddress } from '../../core/provider-account-identity.ts';
 import { inputConnector, type IntakeObservingInput, type SourceRecordBuilder } from '../../core/source-inputs.ts';
-import type { ConnectorStoreEmbeddingTarget, ConnectorStoreSyncOptions, LocalConnectorStore } from '../connector-store/index.ts';
-import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import type { ConnectorStoreSyncOptions, LocalConnectorStore } from '../connector-store/index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { archiveFileEntries } from '../archive-import/manifest.ts';
 import { identifyGmailExport } from '../archive-import/mbox/gmail-account.ts';
@@ -70,41 +69,6 @@ export const GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_I
 /** Whether any of these Gmail stores holds mail an import brought in (kept live mail does not count). */
 export function gmailHoldsImportedHistory(stores: ReadonlyArray<Pick<LocalConnectorStore, 'holdsItemsMatching'> | undefined>): boolean {
   return stores.some((store) => store?.holdsItemsMatching(GMAIL_IMPORTED_FILTERS) === true);
-}
-
-/**
- * The embedding sweep of Gmail's stores with no live lane: only what the
- * imports brought, store-wide on each store's current provider, and never a
- * queue a live sync left under an approval that may no longer stand.
- */
-export function gmailImportedHistoryEmbeddingTargets(input: {
-  stores: readonly LocalConnectorStore[];
-  providerFor: (store: LocalConnectorStore) => SourceEmbeddingProvider | undefined;
-  accountScope: string;
-}): ConnectorStoreEmbeddingTarget[] {
-  return input.stores.flatMap((store) => {
-    const provider = input.providerFor(store);
-    return provider
-      ? [{ store, provider, wholeStore: true, missingOnly: true, accountScope: input.accountScope, filters: GMAIL_IMPORTED_FILTERS }]
-      : [];
-  });
-}
-
-/**
- * The live Gmail lane's sweep targets, with the imports' recovery beside them:
- * the live lane drains its own queue (under its scope binding), and what the
- * imports brought is recovered store-wide whatever the live approval state,
- * so a backlog a restart left (the queue is in memory) never waits on the
- * fallback source. The imports' targets touch only archive-observed rows with
- * a vector missing, so live rows are never embedded twice.
- */
-export function gmailLaneEmbeddingTargets(input: {
-  live: readonly ConnectorStoreEmbeddingTarget[];
-  stores: readonly LocalConnectorStore[];
-  providerFor: (store: LocalConnectorStore) => SourceEmbeddingProvider | undefined;
-  accountScope: string;
-}): ConnectorStoreEmbeddingTarget[] {
-  return [...input.live, ...gmailImportedHistoryEmbeddingTargets(input)];
 }
 
 /** The Gmail connector's one way from a record to items, for any input of the account `account`. */

@@ -381,8 +381,6 @@ import {
   createXBookmarksSchedulerSource,
   attachSourceWatchSchedulerTask,
   withEmbeddingSweep,
-  withLocalPrivateEmbeddingBackfill,
-  wholeStoreEmbeddingSweepAllowed,
   sourceSchedulerConstructionLogLines,
   sourceSchedulerEnabledLogLine,
   SCHEDULER_SOURCE_IDS,
@@ -456,12 +454,12 @@ import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../
 import {
   GMAIL_IMPORT_CONNECTOR_PREFIX,
   gmailArchiveTarget,
+  GMAIL_IMPORTED_FILTERS,
   gmailHoldsImportedHistory,
-  gmailImportedHistoryEmbeddingTargets,
   gmailItemAccountScope,
-  gmailLaneEmbeddingTargets,
 } from '../google-connectors/gmail-archive-target.ts';
 import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
+import { planStoreEmbedding, type StoreEmbeddingScope } from '../connector-store/embedding-plan.ts';
 import {
   GMAIL_IMPORT_LABELS_COST,
   GMAIL_IMPORT_MAX_RETRIES,
@@ -856,77 +854,109 @@ export function createSourceIndexEmbeddingProviderFromEnv(
   });
 }
 
-/** The worker's scope-guarded Private targets, shared with startup-wiring tests. */
-export function localPrivateEmbeddingTargets(input: {
-  source: SourceSchedulerSource;
+/**
+ * Whether a store is indexed for meaning at all: its corpus is served hybrid
+ * with embedding not disabled (the full definition and the registry's both),
+ * and its tier's retrieval policy does not keep it to keywords.
+ */
+export function storeServedByMeaning(input: {
+  store: Pick<LocalConnectorStore, 'corpusId' | 'trustDomain'>;
   sovereigntyEngine: SovereigntyEngine;
-  secureLocalPolicyEmbeddingProvider?: SourceEmbeddingProvider | undefined;
   sourceCorpusRegistry: ReturnType<typeof createSourceCorpusRegistry>;
-  scopeRefs: ReadonlyMap<string, SourceScopePolicyRef>;
-  connectorStores: readonly LocalConnectorStore[];
   fullCorpusDefinitions: readonly import('../../core/source-index/corpus.ts').SourceIndexCorpusDefinition[];
-  fileSourceScopeAuthority?: FileSourceScopeAuthority | undefined;
+}): boolean {
+  const { store, sourceCorpusRegistry } = input;
+  // A tier store opened after boot has no full definition yet; the
+  // registry's declaration of the same corpus stands in for it.
+  const registered = sourceCorpusRegistry.definitions().find((entry) => entry.corpusId === store.corpusId);
+  const definition = input.fullCorpusDefinitions.find((entry) => entry.corpusId === store.corpusId) ?? registered;
+  const served = (entry: typeof definition) => entry === undefined
+    || (entry.activationMode !== 'lexical_only' && entry.embeddingPolicy !== 'disabled');
+  if (!definition || !served(definition) || !served(registered)) return false;
+  const domain = store.trustDomain === 'public_safe' || store.trustDomain === 'internal' || store.trustDomain === 'secure_local'
+    ? input.sovereigntyEngine.config.retrieval.trustDomains[store.trustDomain]?.activationMode
+    : undefined;
+  return domain !== 'lexical_only' && domain !== 'metadata_only';
+}
+
+/**
+ * Whether any of these corpora would be indexed for meaning once its store
+ * opens: served by meaning, with an identity for its tier. Shared with
+ * startup-wiring tests.
+ */
+export function sourceStoresCouldEmbed(input: Omit<Parameters<typeof storeServedByMeaning>[0], 'store'> & {
+  corpusIds: ReadonlySet<string>;
+  providerFor: (trustDomain: string) => SourceEmbeddingProvider | undefined;
+}): boolean {
+  return input.sourceCorpusRegistry.list().some((corpus) => input.corpusIds.has(corpus.corpusId)
+    && input.providerFor(corpus.trustDomain) !== undefined
+    && storeServedByMeaning({ ...input, store: corpus }));
+}
+
+/** Sources whose stores are read only under the owner's current scope approval. */
+const SCOPE_APPROVED_SOURCE_IDS: ReadonlySet<string> = new Set([
+  SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles,
+]);
+
+/**
+ * What a store's embedding may read now, from the scope authority: the same
+ * population the store's status counts as owed. Shared with startup-wiring tests.
+ *   - Gmail with no current mail approval: only what its imports brought,
+ *     which the owner approved one by one. Live approval governs live reads.
+ *   - Gmail's Private store under an approval: the approval's observations
+ *     and the imports'.
+ *   - A file source's store: the approved folders' content scope.
+ * Every scoped store's provider is bound to the approval, so a pass stops
+ * the moment it changes. Other stores carry no scope.
+ */
+export function storeEmbeddingScope(input: {
+  store: LocalConnectorStore;
+  sourceId: string;
+  scopeRef: SourceScopePolicyRef | undefined;
+  authority: FileSourceScopeAuthority | undefined;
   readScope: (store: LocalConnectorStore) => { allowed: false } | {
     allowed: true; contentAllowed: boolean; accountScope?: string; contentFilters?: ConnectorStoreSearchFilters;
   };
-  connectorStoreAccountScopes: ReadonlyMap<string, string>;
   gmailAccountScope?: string | undefined;
-  /**
-   * The account scope of Gmail's imported mail: with no live mail approval,
-   * the Private store's imported items (and only they) are still embedded
-   * privately. Live approval governs live reads.
-   */
+  /** The account scope Gmail's imported mail is kept under. */
   gmailImportAccountScope?: string | undefined;
-}) {
-  const { source, sovereigntyEngine, secureLocalPolicyEmbeddingProvider, sourceCorpusRegistry,
-    scopeRefs, connectorStores, fullCorpusDefinitions, fileSourceScopeAuthority,
-    readScope: connectorStoreReadScope, connectorStoreAccountScopes, gmailAccountScope, gmailImportAccountScope } = input;
-  const policy = sovereigntyEngine.config.retrieval.trustDomains.secure_local;
-  if (!secureLocalPolicyEmbeddingProvider || secureLocalPolicyEmbeddingProvider.provider !== 'built-in'
-    || (policy?.activationMode !== 'hybrid_shadow' && policy?.activationMode !== 'hybrid_primary')) return [];
-  const corpusIds = new Set(sourceCorpusRegistry.list().filter(corpus => corpus.sourceId === source.sourceId).map(corpus => corpus.corpusId));
-  corpusIds.add(source.corpusId);
-  const ref = scopeRefs.get(source.sourceId);
-  return connectorStores.flatMap(store => {
-    if (store.trustDomain !== 'secure_local' || !corpusIds.has(store.corpusId)) return [];
-    const definition = fullCorpusDefinitions.find(entry => entry.corpusId === store.corpusId)
-      ?? sourceCorpusRegistry.definitions().find(entry => entry.corpusId === store.corpusId);
-    const registered = sourceCorpusRegistry.definitions().find(entry => entry.corpusId === store.corpusId);
-    if (!definition || definition.activationMode === 'lexical_only' || definition.embeddingPolicy === 'disabled'
-      || registered?.activationMode === 'lexical_only' || registered?.embeddingPolicy === 'disabled') return [];
-    // Gmail with no live mail approval: what its imports brought, which the owner approved one by one.
-    if (source.sourceId === SCHEDULER_SOURCE_IDS.gmail && (!ref || !fileSourceScopeAuthority)) {
-      if (!gmailImportAccountScope) return [];
-      return [{
-        store,
-        provider: secureLocalPolicyEmbeddingProvider,
-        accountScope: gmailImportAccountScope,
-        filters: { provider: 'gmail', observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX },
-      }];
+}): StoreEmbeddingScope {
+  const { store, sourceId, scopeRef: ref, authority } = input;
+  if (!SCOPE_APPROVED_SOURCE_IDS.has(sourceId)) return { allowed: true };
+  if (sourceId === SCHEDULER_SOURCE_IDS.gmail && (!ref || !authority)) {
+    if (!input.gmailImportAccountScope) return { allowed: false };
+    return { allowed: true, accountScope: input.gmailImportAccountScope, filters: GMAIL_IMPORTED_FILTERS };
+  }
+  if (!ref || !authority) return { allowed: false };
+  const bind = (provider: SourceEmbeddingProvider) => scopeBoundEmbeddingProvider(provider, authority, ref);
+  if (isMailSourceScopePolicyRef(ref)) {
+    // A superseded approval leaves only the queue; the next build carries the new one.
+    try {
+      authority.assertCurrentMail(ref);
+    } catch {
+      return { allowed: false };
     }
-    // Scope-gated source adapters must supply their current binding.
-    if ([SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles].some(id => id === source.sourceId) && (!ref || !fileSourceScopeAuthority)) return [];
-    const scope = connectorStoreReadScope(store);
-    if (!scope.allowed || !scope.contentAllowed) return [];
-    const mail = ref && isMailSourceScopePolicyRef(ref) && fileSourceScopeAuthority
-      ? fileSourceScopeAuthority.assertCurrentMail(ref) : undefined;
-    const accountScope = mail ? gmailAccountScope?.trim() || 'personal'
-      : scope.accountScope ?? connectorStoreAccountScopes.get(store.corpusId);
-    if (mail && !accountScope) return [];
-    const filters = mail ? {
-      provider: 'gmail',
-      observedConnectorId: gmailCursorConnectorId(accountScope!, { generation: ref!.accountGeneration, revision: ref!.revision }),
-      observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX,
-    } : scope.contentFilters;
-    const provider = ref && fileSourceScopeAuthority
-      ? scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, ref)
-      : secureLocalPolicyEmbeddingProvider;
-    return [{
-      store, provider,
-      ...(accountScope ? { accountScope } : {}),
-      ...(filters ? { filters } : {}),
-    }];
-  });
+    if (store.trustDomain !== 'secure_local') return { allowed: true, bind };
+    const accountScope = input.gmailAccountScope?.trim() || 'personal';
+    return {
+      allowed: true,
+      bind,
+      accountScope,
+      filters: {
+        provider: 'gmail',
+        observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
+        observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX,
+      },
+    };
+  }
+  const scope = input.readScope(store);
+  if (!scope.allowed || !scope.contentAllowed) return { allowed: false };
+  return {
+    allowed: true,
+    bind,
+    ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
+    ...(scope.contentFilters ? { filters: scope.contentFilters } : {}),
+  };
 }
 
 /** Worker startup policy loading; hosted paths stay read-only. */
@@ -4934,21 +4964,6 @@ export async function main(): Promise<void> {
           ...(currentDropboxProviderStoreSync ? { providerSync: currentDropboxProviderStoreSync } : {}),
           ...(dropboxConnectorStore ? { store: dropboxConnectorStore } : {}),
           ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
-          ...(dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)
-            && currentDropboxScopeRef && fileSourceScopeAuthority
-            ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, currentDropboxScopeRef) }
-            : {}),
-          // The Personal and Public stores embed with their own (cloud)
-          // identity once they exist; the secure store keeps its own above.
-          ...(dropboxTierLane && sourceIndexEmbeddingProvider && currentDropboxScopeRef && fileSourceScopeAuthority
-            ? {
-                tierEmbeddings: [dropboxTierLane.internal, dropboxTierLane.public].map((leg) => ({
-                  corpusId: leg.corpusId,
-                  store: () => leg.current(),
-                  provider: scopeBoundEmbeddingProvider(sourceIndexEmbeddingProvider, fileSourceScopeAuthority!, currentDropboxScopeRef!),
-                })),
-              }
-            : {}),
           });
           return withSourceAccountGuard(source && currentDropboxScopeRef && fileSourceScopeAuthority
             ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentDropboxScopeRef })
@@ -4987,18 +5002,6 @@ export async function main(): Promise<void> {
             ...(currentLocalFilesSync ? { providerSync: currentLocalFilesSync } : {}),
             ...(localFilesConnectorStore ? { store: localFilesConnectorStore } : {}),
             ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
-            ...(localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)
-              ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, currentLocalFilesScopeRef) }
-              : {}),
-            ...(localFilesTierLane && sourceIndexEmbeddingProvider
-              ? {
-                  tierEmbeddings: [localFilesTierLane.internal, localFilesTierLane.public].map((leg) => ({
-                    corpusId: leg.corpusId,
-                    store: () => leg.current(),
-                    provider: scopeBoundEmbeddingProvider(sourceIndexEmbeddingProvider, fileSourceScopeAuthority!, currentLocalFilesScopeRef),
-                  })),
-                }
-              : {}),
             watch: { hub: localFilesWatchHub, volumes: localFilesVolumes, ignore: localFilesWatchIgnore },
           });
           return source
@@ -5089,13 +5092,7 @@ export async function main(): Promise<void> {
             runtime: archiveImports,
             config: olympusConfig,
             extraction: archiveExtraction,
-            tierEmbeddings: lanes.flatMap((lane) => [
-              { leg: lane.secure, provider: tierSecureEmbeddingProvider },
-              { leg: lane.internal, provider: sourceIndexEmbeddingProvider },
-              { leg: lane.public, provider: sourceIndexEmbeddingProvider },
-            ].flatMap(({ leg, provider }) => provider
-              ? [{ corpusId: leg.corpusId, store: () => leg.current(), provider }]
-              : [])),
+            holdsStores: lanes.length > 0,
           });
         },
       ),
@@ -5145,72 +5142,48 @@ export async function main(): Promise<void> {
     }
     // One embedding sweep per source that embeds, built once here from the
     // worker's own store registry: every mounted store of the source's corpora
-    // (tier legs included, resolved per pass) with the identity it embeds
-    // with. See withEmbeddingSweep.
+    // (tier legs included, resolved per pass), each planned by the one
+    // store-level rule whatever filled it. See withEmbeddingSweep.
+    const scopeRefs = new Map<string, SourceScopePolicyRef>();
+    for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef, currentLocalFilesScopeRef]) {
+      if (ref) scopeRefs.set(ref.sourceId, ref);
+    }
     const sweptSources = withEmbeddingSweep(sources, (source) => {
       const corpusIds = new Set(sourceCorpusRegistry.list()
         .filter((corpus) => corpus.sourceId === source.sourceId)
         .map((corpus) => corpus.corpusId));
       corpusIds.add(source.corpusId);
-      // Store-wide only where the owner approved it for the source, the corpus
-      // is served hybrid, and its embedding policy is not disabled. Scoped
-      // lanes stay queue-only: their queued items carry the scope-bound
-      // provider their sync used, and nothing else is embedded.
-      const hybridServed = (corpusId: string): boolean => {
-        // A tier store opened after boot has no full definition yet; the
-        // registry's declaration of the same corpus stands in for it.
-        const definition = fullCorpusDefinitions.find((entry) => entry.corpusId === corpusId)
-          ?? sourceCorpusRegistry.definitions().find((entry) => entry.corpusId === corpusId);
-        return definition !== undefined
-          && definition.activationMode !== 'lexical_only'
-          && definition.embeddingPolicy !== 'disabled';
-      };
-      // Gmail with no live lane: only what the imports brought, each store store-wide on its current provider
-      // (never a queue a live sync left under an approval that may no longer stand).
-      if (source === gmailImportedHistory) {
-        const importScope = gmailItemScopeFor(currentGmailHandle);
-        const importTargets = () => gmailImportedHistoryEmbeddingTargets({
-          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
-          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
-          accountScope: importScope,
-        });
-        return importTargets().length > 0 ? importTargets : undefined;
-      }
       const targets = () => connectorStores.flatMap((store) => {
         if (!corpusIds.has(store.corpusId)) return [];
-        const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
-        return provider
-          ? [{ store, provider, wholeStore: wholeStoreEmbeddingSweepAllowed(source.sourceId, store.corpusId) && hybridServed(store.corpusId) }]
-          : [];
-      });
-      // Live Gmail: its own queue, and the imports' recovery beside it whatever the approval state.
-      if (source.sourceId === SCHEDULER_SOURCE_IDS.gmail) {
-        const importScope = gmailItemScopeFor(currentGmailHandle);
-        const laneTargets = () => gmailLaneEmbeddingTargets({
-          live: targets(),
-          stores: connectorStores.filter((store) => corpusIds.has(store.corpusId) && hybridServed(store.corpusId)),
-          providerFor: (store) => connectorStoreEmbeddingProviders.get(store.corpusId),
-          accountScope: importScope,
+        const target = planStoreEmbedding({
+          store,
+          provider: connectorStoreEmbeddingProviders.get(store.corpusId),
+          servedByMeaning: storeServedByMeaning({ store, sovereigntyEngine, sourceCorpusRegistry, fullCorpusDefinitions }),
+          scope: storeEmbeddingScope({
+            store,
+            sourceId: source.sourceId,
+            scopeRef: scopeRefs.get(source.sourceId),
+            authority: fileSourceScopeAuthority,
+            readScope: connectorStoreReadScope,
+            gmailAccountScope: currentGmailHandle ? gmailItemScopeFor(currentGmailHandle) : undefined,
+            gmailImportAccountScope: gmailItemScopeFor(currentGmailHandle),
+          }),
         });
-        return laneTargets().length > 0 ? laneTargets : undefined;
-      }
-      // A source with no store that embeds (a keyword-only lane) gets no sweep.
-      return targets().length > 0 ? targets : undefined;
+        return target ? [target] : [];
+      });
+      // A tier store opens on its first routed or imported item, after this
+      // build: a source whose stores could embed gets its sweep up front, so
+      // that first item is indexed without waiting for a rebuild. A source
+      // with no store that could embed (a keyword-only lane) gets no sweep.
+      const couldEmbed = sourceStoresCouldEmbed({
+        corpusIds, sovereigntyEngine, sourceCorpusRegistry, fullCorpusDefinitions,
+        providerFor: (trustDomain) => trustDomain === 'secure_local' ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider,
+      });
+      return couldEmbed || targets().length > 0 ? targets : undefined;
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
-    const scopeRefs = new Map<string, SourceScopePolicyRef>();
-    for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef, currentLocalFilesScopeRef]) {
-      if (ref) scopeRefs.set(ref.sourceId, ref);
-    }
-    const privateBackfillSources = withLocalPrivateEmbeddingBackfill(sweptSources, source => localPrivateEmbeddingTargets({
-      source, sovereigntyEngine, secureLocalPolicyEmbeddingProvider, sourceCorpusRegistry,
-      scopeRefs, connectorStores, fullCorpusDefinitions, fileSourceScopeAuthority,
-      readScope: connectorStoreReadScope, connectorStoreAccountScopes,
-      gmailAccountScope: currentGmailHandle ? gmailItemScopeFor(currentGmailHandle) : undefined,
-      gmailImportAccountScope: gmailItemScopeFor(currentGmailHandle),
-    }));
-    const guardedSources = guardAccountBoundLanes(privateBackfillSources, laneGuards);
+    const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
       decisions,
       sources: sourceWatchPass

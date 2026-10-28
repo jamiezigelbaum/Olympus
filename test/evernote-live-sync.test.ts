@@ -21,7 +21,8 @@ import { EVERNOTE_HANDLE, startEvernoteSignIn } from '../src/workers/evernote/li
 import { createEvernoteRuntime, evernoteDashboardPass, evernoteSchedulerFailure } from '../src/workers/evernote/runtime.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
-import { SourceSchedulerTaskFailure, wholeStoreEmbeddingSweepAllowed } from '../src/workers/source-scheduler.ts';
+import { SourceSchedulerTaskFailure } from '../src/workers/source-scheduler.ts';
+import { planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
 import { childProviderItemId } from '../src/core/child-item-id.ts';
 import { embedPendingChunks } from '../src/workers/connector-store/local-index.ts';
 import { evernoteAttachmentKeys } from '../src/workers/evernote/connector.ts';
@@ -237,10 +238,10 @@ describe('the scheduler source', () => {
     const internal = runtime.existingLane()!.internal.open();
     // The pass stages in the Private store and routes per item: nothing queues the Personal copy.
     expect(internal.queuedEmbeddingItemIds()).toEqual([]);
-    expect(wholeStoreEmbeddingSweepAllowed('evernote.notes', internal.corpusId)).toBe(true);
-    expect(wholeStoreEmbeddingSweepAllowed('evernote.notes', 'secure_local.evernote.notes')).toBe(false);
     const provider = new RecordingProvider('google-gemini', 'gemini-embedding-2', 'cloud');
-    const [run] = await embedPendingChunks([{ store: internal, provider, wholeStore: true }], { maxItems: 32 });
+    const target = planStoreEmbedding({ store: internal, provider, servedByMeaning: true, scope: { allowed: true } })!;
+    expect(target.wholeStore).toBe(true);
+    const [run] = await embedPendingChunks([target], { maxItems: 32 });
     expect(run!.chunksEmbedded).toBeGreaterThan(0);
   });
 

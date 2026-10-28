@@ -7,11 +7,12 @@ import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.t
 import { withFileLeaseSync } from '../src/core/file-lease.ts';
 import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { createSovereigntyEngine, loadSovereigntyEngine, migratePrivateMeaningSearch, defaultSovereigntyConfigPath, type SovereigntyTrustDomainPolicy } from '../src/core/sovereignty.ts';
-import { localPrivateEmbeddingTargets, loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } from '../src/workers/email-source/server.ts';
+import { storeEmbeddingScope, storeServedByMeaning, loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } from '../src/workers/email-source/server.ts';
+import { planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
 import { LocalConnectorStore, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
-import { withLocalPrivateEmbeddingBackfill, EMBEDDING_SWEEP_INTERVAL_MS, EMBEDDING_SWEEP_MAX_ITEMS, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { withEmbeddingSweep, EMBEDDING_SWEEP_INTERVAL_MS, EMBEDDING_SWEEP_MAX_ITEMS, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 
 const oldBytes = readFileSync(new URL('./fixtures/sovereignty-1.0.0/no-sensitive.json', import.meta.url), 'utf8');
@@ -30,7 +31,7 @@ const expectedSecure: SovereigntyTrustDomainPolicy = {
 };
 
 describe('the default install finds Private items by meaning locally', () => {
-  test('backfill honors account and content filters, rechecks authorization, and refuses a cloud provider', async () => {
+  test('catch-up honors account and content filters, rechecks authorization, and refuses a cloud provider', async () => {
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'secure_local.fixture.files', family: 'file', trustDomain: 'secure_local', tierLedger: null });
     const items: RawItem[] = ['eligible', 'other-account', 'other-provider'].map(id => ({
       identity: { family: 'file', provider: id === 'other-provider' ? 'elsewhere' : 'fixture', accountScope: id === 'other-account' ? 'someone-else' : 'personal', providerItemId: id, localItemId: id, sourceVersion: 'v1' },
@@ -42,9 +43,11 @@ describe('the default install finds Private items by meaning locally', () => {
     const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId: 'fixture-local', configHash: 'fixture', epochId: 'fixture-epoch', dimension: 2, async embed(batch) { inputs.push(...batch.map(input => input.text)); return batch.map(() => [1, 0]); } };
     const cloud: SourceEmbeddingProvider = { ...provider, provider: 'gemini', backend: 'cloud', async embed() { throw new Error('Cloud must never be called'); } };
     const source: SourceSchedulerSource = { sourceId: 'fixture', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 1_000, freshnessThresholdHours: 1, tasks: [] };
-    const task = withLocalPrivateEmbeddingBackfill([source], () => [
-      { store, provider: cloud },
-      { store, provider, accountScope: 'personal', filters: { provider: 'fixture' }, assertAuthorized: () => { if (!authorized) throw new Error('scope changed'); } },
+    // The plan offers a Private store no cloud identity at all.
+    expect(planStoreEmbedding({ store, provider: cloud, servedByMeaning: true, scope: { allowed: true } })).toBeUndefined();
+    const planned = planStoreEmbedding({ store, provider, servedByMeaning: true, scope: { allowed: true, accountScope: 'personal', filters: { provider: 'fixture' } } })!;
+    const task = withEmbeddingSweep([source], () => () => [
+      { ...planned, assertAuthorized: () => { if (!authorized) throw new Error('scope changed'); } },
     ])[0]!.tasks[0]!;
     try {
       await store.syncFromConnector(connector, { fetchContent: true });
@@ -87,10 +90,11 @@ describe('the default install finds Private items by meaning locally', () => {
       expect(before.embedding_parity).toMatchObject({ chunks: 35, embedded_chunks: 0, missing_chunks: 35 });
       expect(before.embedding_parity?.backlog_estimate?.missing_chunks).toBe(35);
       const source: SourceSchedulerSource = { sourceId: 'fixture', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 1_000, freshnessThresholdHours: 1, tasks: [] };
-      const task = withLocalPrivateEmbeddingBackfill([source], () => [{ store, provider }])[0]!.tasks[0]!;
+      const task = withEmbeddingSweep([source], () => () => [{ store, provider, wholeStore: true }])[0]!.tasks[0]!;
       const first = await task.run();
       expect(first).toMatchObject({ status: 'progress', counts: { chunks_embedded: 32 } });
-      expect(first.continueSoon).toBeUndefined();
+      // A full pass asks to run again soon, so a backlog does not wait a minute per bound.
+      expect(first.continueSoon).toBe(true);
       expect(task.intervalMs).toBe(EMBEDDING_SWEEP_INTERVAL_MS);
       expect(store.missingEmbeddingItemIds(provider, 100)).toHaveLength(3);
       expect(await task.run()).toMatchObject({ status: 'progress', counts: { chunks_embedded: 3 } });
@@ -299,23 +303,26 @@ test('seeded default through worker target wiring gives a Private item a local v
   const inputs: string[] = [];
   provider.embed = async batch => { inputs.push(...batch.map(input => input.text)); return batch.map(() => Array.from({ length: provider.dimension }, (_, i) => i === 0 ? 1 : 0)); };
   const source: SourceSchedulerSource = { sourceId: 'whatsapp.personal.messages', corpusId, cadence: 'continuous', intervalMs: 1_000, freshnessThresholdHours: 1, tasks: [] };
-  const targets = () => localPrivateEmbeddingTargets({
-    source, sovereigntyEngine: engine, secureLocalPolicyEmbeddingProvider: provider,
-    sourceCorpusRegistry: registry, connectorStores: [s], fullCorpusDefinitions: [definition],
-    scopeRefs: new Map(), readScope: () => ({ allowed: true, contentAllowed: true }),
-    connectorStoreAccountScopes: new Map([[corpusId, 'personal']]),
+  // The worker's own planning, as its scheduler assembly runs it for every store.
+  const targets = () => [s].flatMap(store => {
+    const target = planStoreEmbedding({
+      store, provider,
+      servedByMeaning: storeServedByMeaning({ store, sovereigntyEngine: engine, sourceCorpusRegistry: registry, fullCorpusDefinitions: [definition] }),
+      scope: storeEmbeddingScope({ store, sourceId: source.sourceId, scopeRef: undefined, authority: undefined, readScope: () => ({ allowed: true, contentAllowed: true }) }),
+    });
+    return target ? [target] : [];
   });
+  const sweep = () => withEmbeddingSweep([source], () => targets().length > 0 ? targets : undefined)[0]!;
   try {
     await s.syncFromConnector(connector, { fetchContent: true });
     expect(s.hasEmbeddings(provider.modelId)).toBe(false);
-    const task = withLocalPrivateEmbeddingBackfill([source], targets)[0]!.tasks[0]!;
+    const task = sweep().tasks[0]!;
     expect(await task.run()).toMatchObject({ counts: { chunks_embedded: 1 } });
     expect(inputs).toHaveLength(1);
     expect(inputs[0]).toContain('Private discussion');
     expect(s.hasEmbeddings(provider.modelId)).toBe(true);
     engine.config.retrieval.trustDomains.secure_local!.activationMode = 'lexical_only';
-    expect(withLocalPrivateEmbeddingBackfill([source], targets)[0]!.tasks).toEqual([]);
-    expect(withLocalPrivateEmbeddingBackfill([source], () => [])[0]).toBe(source);
+    expect(sweep()).toBe(source);
   } finally { provider.embed = embed; s.close(); }
 });
 

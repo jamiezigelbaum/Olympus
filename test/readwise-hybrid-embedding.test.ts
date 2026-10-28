@@ -45,8 +45,7 @@ import {
   SourceScheduler,
   createReadwiseSchedulerSource,
   withEmbeddingSweep,
-  wholeStoreEmbeddingSweepAllowed,
-  CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
+  EMBEDDING_SWEEP_MAX_ITEMS,
   type SourceSchedulerSource,
 } from '../src/workers/source-scheduler.ts';
 import { estimatedEmbeddingCostUsd } from '../src/core/embedding-cost-estimates.ts';
@@ -490,20 +489,6 @@ describe('the generic embedding sweep recovers any lane that deferred inline (ch
     await scheduler.runDueTasks();
     expect(task('fixture.messages_store_pull').degraded_reason).toBeUndefined();
   });
-
-  test('a source that declares its own embed task keeps it and gets no second sweep', () => {
-    const store = { embeddingDeferredReason: () => undefined, queuedEmbeddingItemIds: () => [], embeddingFailedItemCount: () => 0 };
-    const source: SourceSchedulerSource = {
-      sourceId: 'dropbox.files',
-      corpusId: 'secure_local.dropbox.files',
-      cadence: 'continuous',
-      intervalMs: 60_000,
-      freshnessThresholdHours: 26,
-      tasks: [{ id: 'dropbox.files_embeddings', kind: 'embed', writer: true, run: async () => ({ status: 'idle' }) }],
-    };
-    const [swept] = withEmbeddingSweep([source], () => () => [{ store, provider: cloudProvider() } as never]);
-    expect(swept!.tasks.map((entry) => entry.id)).toEqual(['dropbox.files_embeddings']);
-  });
 });
 
 describe('one embedder per store', () => {
@@ -754,20 +739,22 @@ describe('review round 2: scope binding, store-wide sweep, isolation, gate', () 
     expect(task.last_result?.counts).toMatchObject({ items_failed: 1, chunks_embedded: 1 });
   });
 
-  test('the store-wide sweep is a per-source setting: on for Readwise and Gmail, the owner\'s answer for chat lanes', () => {
-    expect(wholeStoreEmbeddingSweepAllowed('readwise.library')).toBe(true);
-    // Gmail: only the internal store; the secure and public-safe mail stores never sweep store-wide.
-    expect(wholeStoreEmbeddingSweepAllowed('gmail.email', 'internal.email')).toBe(true);
-    expect(wholeStoreEmbeddingSweepAllowed('gmail.email', 'secure_local.email.private')).toBe(false);
-    expect(wholeStoreEmbeddingSweepAllowed('gmail.email', 'public_safe.email')).toBe(false);
-    expect(wholeStoreEmbeddingSweepAllowed('gmail.email')).toBe(false);
-    for (const chat of ['x.bookmarks', 'whatsapp.personal.messages', 'telegram.messages']) {
-      expect(wholeStoreEmbeddingSweepAllowed(chat)).toBe(CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP);
-    }
-    // Scoped file lanes never sweep store-wide.
-    for (const scoped of ['google_drive.docs', 'dropbox.files']) {
-      expect(wholeStoreEmbeddingSweepAllowed(scoped)).toBe(false);
-    }
+  test('a backlog larger than one pass drains pass after pass, not one bound a minute', async () => {
+    const root = workspace();
+    const store = fixtureStore(root, 'backlog');
+    const items = Array.from({ length: EMBEDDING_SWEEP_MAX_ITEMS + 1 }, (_, index) => readwiseItem(`b${index}`, `Backlog item ${index}.`));
+    await store.syncFromConnector(listConnector(items), { fetchContent: true });
+    const provider = cloudProvider();
+    const source: SourceSchedulerSource = {
+      sourceId: 'readwise.library', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 5 * 60_000, freshnessThresholdHours: 26, tasks: [],
+    };
+    const [swept] = withEmbeddingSweep([source], () => () => [{ store, provider, wholeStore: true }]);
+    const sweep = swept!.tasks[0]!;
+    expect((await sweep.run())).toMatchObject({ status: 'progress', continueSoon: true });
+    const last = await sweep.run();
+    expect(last.status).toBe('progress');
+    expect(last.continueSoon).toBeUndefined();
+    expect(store.missingEmbeddingItemIds(provider, 100)).toEqual([]);
   });
 
   test('the backlog estimate counts chunks and prices tokens', () => {

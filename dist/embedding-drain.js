@@ -64721,9 +64721,6 @@ init_store();
 init_scope();
 init_store();
 
-// src/workers/local-files/scheduler-source.ts
-init_embeddings();
-
 // src/workers/source-scheduler.ts
 init_config();
 init_operation_error();
@@ -64734,7 +64731,6 @@ init_drive_extraction_source();
 init_connector_store();
 init_google_connectors();
 init_readwise();
-init_embeddings();
 init_x_bookmarks();
 init_live_control2();
 import { createHash as createHash24 } from "node:crypto";
@@ -65472,15 +65468,6 @@ ${request.taskId}`);
 }
 var EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
 var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-var CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true;
-var WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE = {
-  [SCHEDULER_SOURCE_IDS.readwise]: true,
-  [SCHEDULER_SOURCE_IDS.gmail]: ["internal.email"],
-  [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-  [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-  [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-  [SCHEDULER_SOURCE_IDS.evernote]: ["internal.evernote.notes"]
-};
 function normalizeTaskResult(result) {
   return {
     status: result.status,
@@ -66915,9 +66902,6 @@ var ARCHIVE_EXTRACTION_SCOPE_KEY = `${ARCHIVE_IMPORTS_SOURCE_ID2}:extraction`;
 // src/workers/archive-import/extraction-runtime.ts
 init_lane();
 
-// src/workers/archive-import/scheduler-source.ts
-init_embeddings();
-
 // src/workers/archive-import/sync.ts
 init_archive_formats();
 init_archive_formats();
@@ -67884,6 +67868,9 @@ var GMAIL_IMPORT_MIN_DAILY_BUDGET = Math.ceil((GMAIL_IMPORT_LABELS_COST + GMAIL_
 
 // src/workers/google-connectors/gmail-header-match.ts
 init_request_budget();
+
+// src/workers/connector-store/embedding-plan.ts
+init_embeddings();
 
 // src/workers/email-source/server.ts
 init_source_registry();
@@ -69375,6 +69362,12 @@ function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
     ...env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH } : {}
   });
 }
+var SCOPE_APPROVED_SOURCE_IDS = new Set([
+  SCHEDULER_SOURCE_IDS.gmail,
+  SCHEDULER_SOURCE_IDS.googleDrive,
+  SCHEDULER_SOURCE_IDS.dropbox,
+  SCHEDULER_SOURCE_IDS.localFiles
+]);
 function parseOptionalTimeoutSeconds(value, name) {
   if (value === undefined || value.trim().length === 0)
     return;
