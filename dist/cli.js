@@ -138228,9 +138228,14 @@ async function answerOnThisComputer(input, options) {
       ...input.onModelCall ? { modelStarting: input.onModelCall } : {}
     }, { detail: input.detail === "full" ? "full" : "summary" });
   } catch (error2) {
-    if (error2 instanceof NoPrivateEvidenceError)
+    if (!(error2 instanceof NoPrivateEvidenceError))
       return { status: "failed" };
-    return { status: "failed" };
+    try {
+      await options.eligible(candidates);
+      return { status: "not_found", leftOut };
+    } catch {
+      return { status: "failed" };
+    }
   }
   const read = (used ?? candidates.map((_, index) => index)).map((index) => candidates[index]).filter((item) => item !== undefined);
   if (read.length > 0) {

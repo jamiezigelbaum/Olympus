@@ -37,6 +37,7 @@ import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/das
 import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
 import { createBuiltInPrivateAnswerModel, type PanelAnswerLimits } from '../src/workers/chatgpt/private-answer-model.ts';
+import { NoPrivateEvidenceError, type PrivateAnswerModel } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { VERSIONED_FIXTURE_ITEMS, versionedFixtureHits } from '../eval/fixtures/versioned-documents.ts';
@@ -58,6 +59,7 @@ import { ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2 } from '../src/workers/source-ind
 import { BuiltInEmbeddingNotReadyError, BuiltInSourceEmbeddingProvider, loadedBuiltInEmbedding } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import {
+  answerOnThisComputer,
   builtInEmbeddingOnly,
   type LocalAnswerRequest,
   type LocalAnswerResult,
@@ -351,6 +353,26 @@ function waitingStore(): WaitingQuestionStore {
 async function backgroundSettled(): Promise<void> {
   for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setTimeout(resolve, 10));
 }
+
+describe('a waiting question whose matches may no longer be read', () => {
+  test('settles as not found instead of retrying with no outcome', async () => {
+    const spec: FixtureSpec = { id: 'owe', name: 'balance.txt', text: 'I owe Alex twenty euros.', legacyDomain: 'secure_local' };
+    const local = await localFixture({ specs: [spec], privateIds: ['owe'], keywordOnly: true });
+    const model: PrivateAnswerModel = {
+      status: () => ({ state: 'ready' }),
+      answerPrivately: async () => { throw new NoPrivateEvidenceError(); },
+    };
+    const answer = (input: LocalAnswerRequest) => answerOnThisComputer(input, { lanes: (request) => local.lanes(request, 'built_in_only'), model, eligible: local.eligible });
+    const store = waitingStore();
+    const question = 'do i owe anyone anything?';
+    const ref = store.record(store.ticket('conn-chatgpt'), { question, surface: 'remote', state: 'waiting' })!;
+    const controller = createLocalPrivateAnswers({ answer, eligible: local.eligible, store: () => store });
+    await controller.tick();
+    const saved = store.get(ref.id)!;
+    expect(saved.result?.status).toBe('not_found');
+    expect(saved.attempts).toBe(0);
+  });
+});
 
 describe('answers on this computer, with every outbound request denied', () => {
   const oweSpec: FixtureSpec = { id: 'owe', name: 'balance.txt', text: 'SENTINEL_OWE: I owe Alex twenty euros.', legacyDomain: 'secure_local' };

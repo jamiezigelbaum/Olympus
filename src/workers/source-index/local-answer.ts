@@ -197,8 +197,16 @@ export async function answerOnThisComputer(
       ...(input.onModelCall ? { modelStarting: input.onModelCall } : {}),
     }, { detail: input.detail === 'full' ? 'full' : 'summary' });
   } catch (error) {
-    if (error instanceof NoPrivateEvidenceError) return { status: 'failed' };
-    return { status: 'failed' };
+    if (!(error instanceof NoPrivateEvidenceError)) return { status: 'failed' };
+    // No match may be read now. A guard that threw ends here too, so this
+    // settles as not found only when the live check answers definitely;
+    // as `failed` the waiting question retried forever with no outcome.
+    try {
+      await options.eligible(candidates);
+      return { status: 'not_found', leftOut };
+    } catch {
+      return { status: 'failed' };
+    }
   }
   // Before anything is shown: every item that can reach the output (the items
   // read, and the other versions the note names) is still readable now.
