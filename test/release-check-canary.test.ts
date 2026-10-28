@@ -234,7 +234,7 @@ describe('release-check canary', () => {
       if (script.includes('connections add release-canary')) return { code: 0, stdout: 'conn_1\n', stderr: '', timedOut: false, ms: 1 };
       if (script.includes('http://127.0.0.1:8010/mcp')) {
         const body = script.includes('source_index_status')
-          ? { result: { structuredContent: { kind: 'source_index_status', corpora: [{ corpus_id: 'gmail.mail', label: 'Gmail', configured: true, counts: { indexed_items: 12 }, last_refresh: { status: 'running' } }] } } }
+          ? { result: { structuredContent: { kind: 'source_index_status', corpora: [{ corpus_id: 'gmail.mail', label: 'Gmail', configured: true, counts: { indexed_items: 12 }, last_refresh: { status: 'completed', completed_at: new Date().toISOString() } }] } } }
           : { result: { structuredContent: { evidence: [{ source: 'Gmail', title: 'Your trip to Santa Fe is booked', excerpt: 'K7Q2ZX' }] } } };
         desktop.scripts.push(script);
         return { code: 0, stdout: JSON.stringify({ jsonrpc: '2.0', id: 2, ...body }), stderr: '', timedOut: false, ms: 1 };

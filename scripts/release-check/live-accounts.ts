@@ -128,8 +128,9 @@ export function evidenceOf(structured: unknown): SearchEvidence[] {
 }
 
 /**
- * Connected and syncing: a configured corpus of the source holds items, and a refresh succeeded recently (or one is running now).
- * Cached items beside a recent failure are not syncing, so a failure newer than the last success warns.
+ * Connected and syncing: a configured corpus of the source holds items, and a refresh succeeded recently. A running refresh
+ * is not a success: with no recent success the source fails, and with none at all yet the check is inconclusive.
+ * Cached items beside a recent failure are not syncing, so a failure newer than the last success fails, as degraded search does.
  */
 export function statusCheck(spec: LiveSourceSpec, rows: readonly CorpusRow[], now = Date.now()): CheckResult {
   const id = `live.${spec.id}.status`;
@@ -144,13 +145,17 @@ export function statusCheck(spec: LiveSourceSpec, rows: readonly CorpusRow[], no
   const said = `${own.length} corpus(es), ${items} item(s) indexed${newest ? `, last refresh ${newest.status} at ${newest.completed_at}` : ''}`;
   if (items === 0) return { id, title, status: 'fail', detail: `${said}: nothing indexed yet` };
   const running = refreshed.some((r) => r.status === 'running');
-  if (!running && finished.length > 0 && !success) return { id, title, status: 'fail', detail: `${said}: every refresh failed` };
-  if (!running && !success) return { id, title, status: 'fail', detail: `${said}: no refresh has finished` };
+  if (finished.length > 0 && !success) return { id, title, status: 'fail', detail: `${said}: every refresh failed` };
+  if (!success) {
+    return running
+      ? { id, title, status: 'skip', detail: `Inconclusive: ${said}: the first refresh is still running` }
+      : { id, title, status: 'fail', detail: `${said}: no refresh has finished` };
+  }
   const maxAgeH = spec.maxSyncAgeH ?? 24;
-  if (!running && now - Date.parse(success!.completed_at!) > maxAgeH * 3_600_000) return { id, title, status: 'fail', detail: `${said}: the last successful one was more than ${maxAgeH} h ago` };
+  if (now - Date.parse(success.completed_at!) > maxAgeH * 3_600_000) return { id, title, status: 'fail', detail: `${said}: the last successful one was more than ${maxAgeH} h ago${running ? ' (one is running now)' : ''}` };
   const failedSince = newest !== undefined && newest !== success && newest.status === 'failed';
   const degraded = own.some((row) => row.retrieval?.state === 'degraded');
-  return { id, title, status: degraded || failedSince ? 'warn' : 'pass', detail: `${said}${running ? '; a refresh is running' : ''}${failedSince ? `; it failed after the last success (${success?.completed_at})` : ''}${degraded ? '; search is degraded' : ''}` };
+  return { id, title, status: degraded || failedSince ? 'fail' : 'pass', detail: `${said}${running ? '; a refresh is running' : ''}${failedSince ? `; it failed after the last success (${success.completed_at})` : ''}${degraded ? '; search is degraded' : ''}` };
 }
 
 /** The search found an item of this source holding every needle. */

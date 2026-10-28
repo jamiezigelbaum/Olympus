@@ -9,10 +9,13 @@
  * question typed into the message box, Enter, and the reply read off the page once it stops changing.
  *
  * What a question is held to (all exact string matches on the page text after the question, nothing asks a model):
- *   - the app answered, and Olympus was used (its name appears in the turn: the app's tool chip or the reply);
- *   - every expected string is in the turn; when the question names the items to cite, one of them is;
- *   - no forbidden string (a Private fact, a Secret) is anywhere in the turn;
- *   - a Private question gets the private note in the reply, and in ChatGPT the private answer panel under it.
+ *   - the app answered, and Olympus was used: one of the machine's app connections was used while the question was asked
+ *     (its last use moved on), not just the name Olympus on the page;
+ *   - every expected string is in the turn; a personal question names the items to cite, and one of them is in the turn;
+ *   - no forbidden string is anywhere in the turn: the question's own, and every other question's (a Private fact or a
+ *     Secret must not surface in any reply), except the strings this question expects;
+ *   - a Private question gets the private note in the reply, and in ChatGPT the private answer panel under it;
+ *   - a Secret question gets a refusal: the reply says it was withheld, or that it cannot be shared or found.
  * A bot check, a signed-out app, an app whose Olympus connection needs renewing or a page with no message box is
  * inconclusive, not a product failure: the report says which sign-in to renew. Each question gets a picture of the page.
  */
@@ -61,6 +64,8 @@ export const CLIENT_ADAPTERS: Record<WebClientId, ClientAdapter> = {
 const PRIVATE_NOTE = /privately|private (answer|panel)|on (your|the) (computer|mac)\b|not sent to/i;
 /** A reply that says the app cannot reach Olympus: its connection needs renewing, not the product fixing. */
 const NOT_CONNECTED = /(connect|reconnect|authori[sz]e|sign in to) olympus|olympus (isn't|is not) (connected|available)|couldn't (reach|access) olympus|no (access|connection) to olympus/i;
+/** A refusal, as the apps reword Olympus's withheld answer (core/remote-result.ts REMOTE_ANSWER_WITHHELD) or a search with nothing it may show. */
+const REFUSAL = /withh(e|o)ld|privacy (rules|settings)|(can't|cannot|can not|won't|will not|unable to|not able to|not allowed to) (share|provide|reveal|show|disclose|access|give|retrieve)|(couldn't|could not|didn't|did not|wasn't able to) (find|locate|retrieve)|no (matching )?(results|records|matches)|(is|are|was|were|marked( as)?) (a )?(secret|private)\b/i;
 
 export const WEB_DEBUG_PORT = 9333;
 export const WEB_PROFILE = '.olympus-canary/web-clients';
@@ -126,14 +131,28 @@ export interface TurnObservation {
   ms: number;
   /** The reply was still coming when the answer time ran out: what it said so far is not a finished answer. */
   unfinished?: boolean;
+  /** Whether one of the machine's app connections was used while the question was asked; left out when it was not read. */
+  olympus?: OlympusUse;
+}
+
+export type OlympusUse = { used: boolean; detail: string } | { unreadable: string };
+
+/** The strings a question is held not to say: its own forbidden ones, and every other question's, less those it expects. */
+export function forbiddenFor(q: ClientQuestion, shared: readonly string[] = []): string[] {
+  const allowed = new Set([...(q.expect ?? []), ...(q.cite ?? [])].map(fold));
+  const out: string[] = [];
+  for (const value of [...(q.forbid ?? []), ...shared]) {
+    if (value && !allowed.has(fold(value)) && !out.some((have) => fold(have) === fold(value))) out.push(value);
+  }
+  return out;
 }
 
 /** The checks for one asked question. Never repeats a forbidden string. */
-export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnObservation | Inconclusive): CheckResult[] {
+export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnObservation | Inconclusive, sharedForbid: readonly string[] = []): CheckResult[] {
   const prefix = `web.${client}.${q.id}`;
   const label = CLIENT_ADAPTERS[client].label;
   if ('inconclusive' in obs) return [{ id: prefix, title: `${label}: ${q.id}`, status: 'skip', detail: `Inconclusive: ${obs.inconclusive}` }];
-  const forbid = q.forbid ?? [];
+  const forbid = forbiddenFor(q, sharedForbid);
   const turn = obs.turn.trim();
   const shown = redactForbidden(turn.replace(/\s+/g, ' '), forbid).slice(0, 400);
   const checks: CheckResult[] = [];
@@ -151,9 +170,13 @@ export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnOb
     return [{ id: prefix, title: `${label}: ${q.id}`, status: 'skip', detail: `Inconclusive: ${label} could not reach Olympus; connect Olympus again in the test account (reply: ${shown.slice(0, 200)})` }];
   }
   add('answered', 'the app answered', !obs.unfinished, obs.unfinished ? `the reply was still coming after ${Math.round(obs.ms / 1000)} s (${turn.length} characters so far)` : `${turn.length} characters in ${Math.round(obs.ms / 1000)} s`);
-  add('used-olympus', 'Olympus was used', /olympus/i.test(turn), /olympus/i.test(turn) ? 'Olympus is named in the turn' : `the turn never names Olympus, so the app may have answered without it: ${shown}`);
+  // The word Olympus on the page proves nothing (the question names it); a connection used while it was asked does.
+  const use = obs.olympus ?? { unreadable: 'the machine\'s app connections were not read' };
+  if ('unreadable' in use) checks.push({ id: `${prefix}.used-olympus`, title: `${label}: ${q.id}: Olympus was used`, status: 'skip', detail: `Inconclusive: ${use.unreadable}`, ms: obs.ms });
+  else add('used-olympus', 'Olympus was used', use.used, use.used ? use.detail : `${use.detail}, so the app answered without Olympus: ${shown}`);
   add('no-leak', 'nothing forbidden in the reply', leaked.length === 0,
     leaked.length === 0 ? `none of ${forbid.length} forbidden string(s)` : `forbidden string(s) ${leaked.map((row) => row.index + 1).join(', ')} of ${forbid.length} appeared`);
+  if (q.kind === 'secret') add('refused', 'the reply refuses the Secret', REFUSAL.test(turn), REFUSAL.test(turn) ? 'the reply says it is withheld or cannot be shared' : `the reply neither withholds nor refuses: ${shown}`);
   if (q.kind === 'private') {
     add('private-note', 'the reply says the answer is private, on the computer', PRIVATE_NOTE.test(turn), PRIVATE_NOTE.test(turn) ? 'the reply points to the private answer' : `no private note in the reply: ${shown}`);
     const panel = CLIENT_ADAPTERS[client].privatePanel;
@@ -176,6 +199,9 @@ export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnOb
   if (cite.length > 0) {
     const cited = cite.filter((value) => turnContains(turn, value));
     add('cited', 'a source item is cited', cited.length > 0, cited.length > 0 ? `cites ${cited.map((value) => `"${value}"`).join(', ')}` : `none of ${cite.map((value) => `"${value}"`).join(', ')} is cited`);
+  } else if (q.kind === 'personal') {
+    // A personal answer comes from items; a question that names none to cite cannot tell a cited answer from a guess.
+    add('cited', 'a source item is cited', false, 'the question names no items to cite (cite in the questions file)');
   }
   return checks;
 }
@@ -207,6 +233,42 @@ export function parseClientQuestions(raw: unknown): ClientQuestion[] {
       ...(clients ? { clients: clients as WebClientId[] } : {}),
     };
   });
+}
+
+/**
+ * When each of the machine's app connections was last used, by id: active ones only, the canary's own left out.
+ * The engine rewrites a connection's last use at most once a minute (core/remote-connections.ts
+ * REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS), so questions are asked at least CONNECTION_USE_GAP_MS apart.
+ */
+export const CONNECTION_USE_GAP_MS = 61_000;
+const CANARY_CONNECTION = 'release-canary';
+
+export function connectionUses(listed: unknown): Map<string, { name: string; at: string }> | undefined {
+  const rows = (listed as { connections?: unknown } | null)?.connections;
+  if (!Array.isArray(rows)) return undefined;
+  const out = new Map<string, { name: string; at: string }>();
+  for (const row of rows as Array<Record<string, unknown>>) {
+    if (typeof row?.id !== 'string' || row.status !== 'active' || row.name === CANARY_CONNECTION) continue;
+    out.set(row.id, { name: String(row.name ?? row.id), at: typeof row.last_used_at === 'string' ? row.last_used_at : '' });
+  }
+  return out;
+}
+
+/** Whether a connection was used between two readings: its last use moved on, or it is new and has been used. */
+export function olympusUse(before: Map<string, { name: string; at: string }> | string, after: Map<string, { name: string; at: string }> | string): OlympusUse {
+  if (typeof before === 'string') return { unreadable: before };
+  if (typeof after === 'string') return { unreadable: after };
+  const moved = [...after].filter(([id, now]) => now.at !== '' && now.at !== before.get(id)?.at).map(([, now]) => now.name);
+  if (moved.length > 0) return { used: true, detail: `the connection ${moved.map((name) => `"${name}"`).join(', ')} was used while it was asked` };
+  return { used: false, detail: after.size === 0 ? 'the machine has no app connection' : `none of the machine's ${after.size} app connection(s) was used while it was asked` };
+}
+
+async function readConnectionUses(machine: Machine): Promise<Map<string, { name: string; at: string }> | string> {
+  const result = await machine.exec('"$HOME/.local/bin/olympus" connections list', { timeoutMs: 60_000 }).catch((error: unknown) => ({ code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error) }));
+  if (result.code !== 0) return `olympus connections list failed: ${(result.stdout + result.stderr).trim().slice(-200) || `exit ${result.code}`}`;
+  let listed: unknown;
+  try { listed = JSON.parse(result.stdout); } catch { return `olympus connections list printed something that is not JSON: ${result.stdout.slice(0, 120)}`; }
+  return connectionUses(listed) ?? 'olympus connections list printed no connections list';
 }
 
 export const isInconclusive = (check: CheckResult): boolean => check.status === 'skip' && (check.detail ?? '').startsWith('Inconclusive');
@@ -437,6 +499,8 @@ export interface WebClientsOptions {
   debugPort?: number;
   /** Where each app's new chat opens; the apps' own addresses when left out (tests serve stand-ins). */
   newChatUrls?: Partial<Record<WebClientId, string>>;
+  /** The least time between questions, so each one's connection use shows (CONNECTION_USE_GAP_MS when left out). */
+  useGapMs?: number;
 }
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
@@ -485,15 +549,24 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
     browser = await connectBrowser(wsUrl);
     checks.push({ id: 'web.browser', title: 'The canary browser on the machine', status: 'pass', detail: `reached through the tunnel in ${Math.round((Date.now() - started) / 1000)} s`, ms: Date.now() - started });
     mkdirSync(options.screensDir, { recursive: true });
+    const gap = options.useGapMs ?? CONNECTION_USE_GAP_MS;
+    // Each question is held to every other question's forbidden strings too.
+    const sharedForbid = options.questions.flatMap((question) => question.forbid ?? []);
+    // A use in the last minute before the first question would hide that question's own.
+    let lastAsked = Date.now();
     for (const client of options.clients) {
       const tab = await openTab(browser);
       try {
         for (const q of options.questions.filter((question) => !question.clients || question.clients.includes(client))) {
+          await t.sleep(Math.max(0, gap - (Date.now() - lastAsked)));
+          const before = await readConnectionUses(machine);
           let obs: TurnObservation | Inconclusive;
           try { obs = await askQuestion(tab, client, q, t, options.newChatUrls?.[client]); } catch (error) { obs = { inconclusive: `${CLIENT_ADAPTERS[client].label} could not be driven: ${error instanceof Error ? error.message : String(error)}` }; }
+          lastAsked = Date.now();
+          if (!('inconclusive' in obs)) obs = { ...obs, olympus: olympusUse(before, await readConnectionUses(machine)) };
           const picture = join(options.screensDir, `web-${client}-${q.id}.png`);
           try { await tab.screenshot(picture); screens.push({ label: `${CLIENT_ADAPTERS[client].label}: ${q.id}`, path: picture }); } catch { /* no picture */ }
-          const results = evaluateTurn(client, q, obs);
+          const results = evaluateTurn(client, q, obs, sharedForbid);
           checks.push(...results);
           // A signed-out app or a bot check stops that app: every later question would say the same.
           if (results.length === 1 && isInconclusive(results[0]!) && !/could not reach Olympus/.test(results[0]!.detail ?? '')) break;
