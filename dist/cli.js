@@ -52403,7 +52403,9 @@ var init_vocabulary = __esm(() => {
     unlocking: "Unlocking…",
     pasteToken: "Paste the worker bearer token.",
     readToken: "That is the read-only view token; use the worker bearer token from setup.",
-    refused: "That token was not accepted."
+    refused: "That token was not accepted.",
+    openBlocked: "Your browser did not open the page.",
+    openBlockedLink: "Open it"
   };
   ARCHIVE_PICK_INTRO = archivePickIntro();
   DASHBOARD_ARCHIVE_NOUNS = {
@@ -150919,8 +150921,29 @@ function hostProgram(input, bridge) {
         window.location.assign(parsed.pathname + parsed.search + parsed.hash);
         return;
       }
-      window.open(url, "_blank", "noopener");
+      let tab = null;
+      try {
+        tab = window.open(url, "_blank");
+      } catch {
+        tab = null;
+      }
+      if (tab) {
+        tab.opener = null;
+        return;
+      }
+      const offer = document.querySelector("[data-open-offer]");
+      const link = document.querySelector("[data-open-offer-link]");
+      if (!offer || !link)
+        return;
+      link.href = url;
+      offer.hidden = false;
     }
+  });
+  const offerLink = document.querySelector("[data-open-offer-link]");
+  offerLink?.addEventListener("click", () => {
+    const offer = document.querySelector("[data-open-offer]");
+    if (offer)
+      offer.hidden = true;
   });
   const toggle = document.querySelector("[data-gate-toggle]");
   const how = document.getElementById("gate-how");
@@ -151076,6 +151099,7 @@ function renderComputerHostPage(input) {
       `<section class="update" data-update-notice${update ? "" : " hidden"}><p data-update-text>${update ? text3(DASHBOARD_UPDATE_COPY.notice(update.version)) : ""}</p>` + `<p><code id="update-command">${text3(installer.command)}</code> ` + `<button class="btn" type="button" data-update-copy>${text3(DASHBOARD_UPDATE_COPY.copy)}</button> ` + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`
     ] : [],
     lockedGate(!locked2),
+    `<section class="gate" data-open-offer role="alert" hidden><p>${text3(DASHBOARD_HOST_GATE_COPY.openBlocked)} ` + `<a class="btn" data-open-offer-link target="_blank" rel="noopener noreferrer">${text3(DASHBOARD_HOST_GATE_COPY.openBlockedLink)}</a></p></section>`,
     ...input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map((model) => `<p><strong>${text3(model.name)} — ${text3(model.state)}</strong>: ${text3(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p>`).join("")}</details>`] : [],
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute2(input.panelHtml)}"></iframe>`,
     "</main>",
@@ -206341,6 +206365,7 @@ init_olympus_layout();
 
 // src/core/setup.ts
 init_privacy_language();
+init_messaging_runtime();
 import { randomBytes as randomBytes18 } from "node:crypto";
 import { spawnSync as spawnSync17 } from "node:child_process";
 import { homedir as homedir34 } from "node:os";
@@ -206359,9 +206384,10 @@ function runSetupDependencyCheck(input = {}) {
   const commandExists = input.commandExists ?? defaultCommandExists2;
   const commandVersion = input.commandVersion ?? defaultCommandVersion;
   const pythonModuleExists = input.pythonModuleExists ?? defaultPythonModuleExists2;
-  const pythonCommand = commandExists("python3") ? "python3" : commandExists("python") ? "python" : undefined;
-  const bunExists = commandExists("bun");
-  const bunVersion = bunExists ? commandVersion("bun") : undefined;
+  const pythonCommand = "telegramPython" in input ? input.telegramPython : defaultTelegramPython(platform2);
+  const runtimeBun = "runtimeBunVersion" in input ? input.runtimeBunVersion : process.versions.bun;
+  const bunExists = runtimeBun !== undefined || commandExists("bun");
+  const bunVersion = runtimeBun ?? (bunExists ? commandVersion("bun") : undefined);
   const bunOk = bunExists && isMinimumVersion(bunVersion, [1, 2, 0]);
   const checks = [
     dependencyFinding({
@@ -206402,7 +206428,7 @@ function runSetupDependencyCheck(input = {}) {
       required: false,
       ok: Boolean(pythonCommand && pythonModuleExists(pythonCommand, "telethon")),
       detail: "Optional Telegram guided-session reader.",
-      repairHint: "Create ~/.cache/olympus/telegram-python with python3 -m venv, then install Telethon in that environment before connecting Telegram."
+      repairHint: TELEGRAM_DEPENDENCY_HINT
     }),
     dependencyFinding({
       id: "go",
@@ -206574,6 +206600,12 @@ function defaultCommandExists2(command) {
     stdio: "ignore"
   });
   return result.status === 0;
+}
+function defaultTelegramPython(platform2) {
+  const python = telegramPythonExecutable();
+  if (platform2 === "darwin" && python === "/usr/bin/python3" && spawnSync17("/usr/bin/xcode-select", ["-p"], { stdio: "ignore" }).status !== 0)
+    return;
+  return python;
 }
 function defaultPythonModuleExists2(pythonCommand, moduleName) {
   const result = spawnSync17(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
