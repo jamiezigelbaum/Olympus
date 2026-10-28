@@ -289,11 +289,13 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         const version = book ? evernoteNoteVersion(hit.updatedAt, book.id, book.label) : undefined;
         if (version) {
           const stored = listOptions.storedItem?.({ provider: EVERNOTE_PROVIDER, accountScope: account, providerItemId: noteId }, (a, b) => a.localeCompare(b));
-          const current = stored
-            ? stored.version === version && stored.tombstoned !== true && stored.incomplete !== true
-            : before?.v === version;
-          if (current) {
-            nextNotes[noteId] = before?.v === version ? before : { v: version };
+          // Skipped only when the last committed pass recorded this version: a note stored by a pass
+          // that stopped before its record was written is read again, so its attachments and their
+          // keys are complete.
+          const current = before?.v === version
+            && (!stored || (stored.version === version && stored.tombstoned !== true && stored.incomplete !== true));
+          if (current && before) {
+            nextNotes[noteId] = before;
             counts.notes_unchanged += 1;
             continue;
           }
