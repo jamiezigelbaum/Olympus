@@ -239,6 +239,41 @@ describe('Evernote pass', () => {
     expect(run.connector().lastOutcome()?.counts.shared_not_imported).toBe(1);
   });
 
+  test('an imported note that becomes shared-only leaves the index with its attachments', async () => {
+    fake = new FakeEvernoteServer().start();
+    const work = fake.addNotebook('Work');
+    const note = fake.addNote({
+      title: 'Was mine', notebookId: work.id, created: day(2020),
+      resources: [{ bytes: PNG, mime: 'image/png', name: 'a.png' }],
+    });
+    const run = chained(fake);
+    expect(notesOf(await run.pass())).toHaveLength(1);
+    delete note.notebookId;
+    note.updated = day(2024);
+    const items = await run.pass();
+    expect(items.filter((item) => item.metadata.deleted === true).map((item) => item.identity.providerItemId))
+      .toEqual([note.id, `${note.id}#child:${md5Hex(PNG)}`]);
+    expect(notesOf(items)).toHaveLength(0);
+    expect(run.connector().lastOutcome()?.counts).toMatchObject({ notes_deleted: 1, shared_not_imported: 1 });
+    expect(await run.pass()).toHaveLength(0);
+  });
+
+  test('a note moved to the trash leaves the index with its attachments', async () => {
+    fake = new FakeEvernoteServer().start();
+    const work = fake.addNotebook('Work');
+    const note = fake.addNote({
+      title: 'Trashed', notebookId: work.id, created: day(2020),
+      resources: [{ bytes: PNG, mime: 'image/png', name: 'a.png' }],
+    });
+    const run = chained(fake);
+    await run.pass();
+    note.trashed = true;
+    note.updated = day(2024);
+    const items = await run.pass();
+    expect(items.filter((item) => item.metadata.deleted === true).map((item) => item.identity.providerItemId))
+      .toEqual([note.id, `${note.id}#child:${md5Hex(PNG)}`]);
+  });
+
   test('the call budget stops reading notes: what was read is kept, the rest is read next pass', async () => {
     fake = new FakeEvernoteServer().start();
     const work = fake.addNotebook('Work');

@@ -157881,11 +157881,14 @@ function createEvernoteSourceConnector(options) {
       const nextNotes = {};
       const pending = [];
       let stoppedBy;
+      const retire = (noteId, entry) => {
+        pending.push(deletedItem(noteId), ...(entry?.children ?? []).map((key2) => deletedItem(childProviderItemId(noteId, key2))));
+        counts.notes_deleted += 1;
+      };
       for (const [noteId, entry] of Object.entries(previous?.notes ?? {})) {
         if (byDate.has(noteId) || entry.v.startsWith("shared|"))
           continue;
-        pending.push(deletedItem(noteId), ...(entry.children ?? []).map((key2) => deletedItem(childProviderItemId(noteId, key2))));
-        counts.notes_deleted += 1;
+        retire(noteId, entry);
       }
       for (const [noteId, hit] of byDate) {
         const before = previous?.notes[noteId];
@@ -157932,13 +157935,14 @@ function createEvernoteSourceConnector(options) {
         }
         const notebookId = typeof note.notebookId === "string" && note.notebookId !== "" ? note.notebookId : undefined;
         if (!notebookId) {
+          if (before && !before.v.startsWith("shared|"))
+            retire(noteId, before);
           nextNotes[noteId] = { v: `shared|${hit.updatedAt}` };
           counts.shared_not_imported += 1;
           continue;
         }
         if (note.active === false) {
-          pending.push(deletedItem(noteId));
-          counts.notes_deleted += 1;
+          retire(noteId, before);
           continue;
         }
         const label = book?.id === notebookId ? book.label : notebooks.find((entry) => entry.id === notebookId)?.label ?? "";

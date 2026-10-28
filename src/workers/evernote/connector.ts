@@ -270,11 +270,16 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
       const pending: RawItem[] = [];
       let stoppedBy: McpSourceErrorKind | undefined;
 
+      // A note retired with every attachment the last complete pass recorded for it.
+      const retire = (noteId: string, entry: EvernotePassRecord['notes'][string] | undefined) => {
+        pending.push(deletedItem(noteId), ...(entry?.children ?? []).map((key) => deletedItem(childProviderItemId(noteId, key))));
+        counts.notes_deleted += 1;
+      };
+
       // Deletions: a note the last complete pass held that neither listing names now.
       for (const [noteId, entry] of Object.entries(previous?.notes ?? {})) {
         if (byDate.has(noteId) || entry.v.startsWith('shared|')) continue;
-        pending.push(deletedItem(noteId), ...(entry.children ?? []).map((key) => deletedItem(childProviderItemId(noteId, key))));
-        counts.notes_deleted += 1;
+        retire(noteId, entry);
       }
 
       for (const [noteId, hit] of byDate) {
@@ -324,13 +329,14 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         }
         const notebookId = typeof note.notebookId === 'string' && note.notebookId !== '' ? note.notebookId : undefined;
         if (!notebookId) {
+          // Imported before, shared-only now: what was imported leaves the index.
+          if (before && !before.v.startsWith('shared|')) retire(noteId, before);
           nextNotes[noteId] = { v: `shared|${hit.updatedAt}` };
           counts.shared_not_imported += 1;
           continue;
         }
         if (note.active === false) {
-          pending.push(deletedItem(noteId));
-          counts.notes_deleted += 1;
+          retire(noteId, before);
           continue;
         }
         const label = book?.id === notebookId ? book.label : notebooks.find((entry) => entry.id === notebookId)?.label ?? '';
