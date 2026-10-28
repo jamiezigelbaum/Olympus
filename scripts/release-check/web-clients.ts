@@ -65,7 +65,7 @@ const PRIVATE_NOTE = /privately|private (answer|panel)|on (your|the) (computer|m
 /** A reply that says the app cannot reach Olympus: its connection needs renewing, not the product fixing. */
 const NOT_CONNECTED = /(connect|reconnect|authori[sz]e|sign in to) olympus|olympus (isn't|is not) (connected|available)|couldn't (reach|access) olympus|no (access|connection) to olympus/i;
 /** A refusal, as the apps reword Olympus's withheld answer (core/remote-result.ts REMOTE_ANSWER_WITHHELD) or a search with nothing it may show. */
-const REFUSAL = /withh(e|o)ld|privacy (rules|settings)|(can't|cannot|can not|won't|will not|unable to|not able to|not allowed to) (share|provide|reveal|show|disclose|access|give|retrieve)|(couldn't|could not|didn't|did not|wasn't able to) (find|locate|retrieve)|no (matching )?(results|records|matches)|(is|are|was|were|marked( as)?) (a )?(secret|private)\b/i;
+const REFUSAL = /withh(e|o)ld|privacy (rules|settings)|(can['’]t|cannot|can not|couldn['’]t|could not|didn['’]t|did not|won['’]t|will not|unable to|not able to|wasn['’]t able to|not allowed to) (share|provide|reveal|show|disclose|access|give|retrieve|find|locate)|no (matching )?(results|records|matches)|(is|are|was|were|marked( as)?) (a )?(secret|private)\b/i;
 
 export const WEB_DEBUG_PORT = 9333;
 export const WEB_PROFILE = '.olympus-canary/web-clients';
