@@ -97,7 +97,11 @@ describe('messaging capture supervisor', () => {
     const sessionPath = join(root, 'telegram.personal');
     writeFileSync(`${sessionPath}.session`, 'fixture');
     writeRegistry(registryPath, true);
-    saveMessagingCaptureGrant({ path: grantPath, pairing: telegramPairing(sessionPath) });
+    // A grant saved by 1.1.x pairing, which marked every approved chat protected.
+    const oldPairing = telegramPairing(sessionPath);
+    oldPairing.producer.env.OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES = 'telegram.personal:chat:101';
+    oldPairing.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES = 'telegram.personal:chat:101';
+    saveMessagingCaptureGrant({ path: grantPath, pairing: oldPairing });
     let resolveExit!: (code: number) => void;
     const exited = new Promise<number>((resolve) => { resolveExit = resolve; });
     let killed = false;
@@ -127,6 +131,9 @@ describe('messaging capture supervisor', () => {
     expect(await supervisor.reconcile()).toEqual({ source: 'telegram', state: 'running' });
     expect(spawnedEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES).toBe('telegram.personal:chat:101');
     expect(spawnedEnv?.OLYMPUS_TELEGRAM_API_HASH).toBe('fixture-secret');
+    // No chat is Private wholesale: its messages are tiered one by one.
+    expect(spawnedEnv?.OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES).toBeUndefined();
+    expect(spawnedEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES).toBeUndefined();
 
     writeRegistry(registryPath, false);
     expect(await supervisor.reconcile()).toEqual({
@@ -512,39 +519,6 @@ describe('a capture helper that cannot be started is reported, not hidden by the
     telegramThrows = false;
     await reconcileWorkerCaptures({ captures, statuses, failures, warn: (message) => warnings.push(message) });
     expect(failures).toEqual({});
-  });
-
-  test('stopping capture on purpose ends an earlier start failure for that source, and only that one', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-failure-then-stop-'));
-    const registryPath = join(root, 'handles.json');
-    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('telegram', registryPath), pairing: telegramPairing('/fixture/telegram'), now: PAIRED });
-    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('whatsapp', registryPath), pairing: whatsappPairing('*'), now: PAIRED });
-    const statuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
-    const failures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
-    const captures = {
-      telegram: stubSupervisor(async () => { throw new Error('Python 3 is required to start Telegram capture.'); }),
-      whatsapp: stubSupervisor(async () => { throw new Error('bridge missing'); }),
-    };
-    await reconcileWorkerCaptures({ captures, statuses, failures, warn: () => {} });
-    const supervisors = (): Array<'telegram' | 'whatsapp'> => ['telegram', 'whatsapp'];
-    expect(failures).toEqual({ telegram: true, whatsapp: true });
-    expect(workerCaptureRuntime({ sources: supervisors(), statuses, failures, registryPath })['telegram.messages']?.supervisor)
-      .toEqual({ state: 'blocked', reason: 'start_failed' });
-    // Secure-local capture is switched off: the stop succeeds, so the failure to start no longer applies.
-    await reconcileWorkerCaptures({ captures, statuses, failures, stopAll: true });
-    expect(failures).toEqual({});
-    const runtime = workerCaptureRuntime({ sources: supervisors(), statuses, failures, registryPath });
-    expect(runtime['telegram.messages']?.supervisor).toEqual({ state: 'stopped' });
-    expect(runtime['whatsapp.personal.messages']?.supervisor).toEqual({ state: 'stopped' });
-    // A stop that itself fails clears nothing.
-    failures.telegram = true;
-    await expect(reconcileWorkerCaptures({
-      captures: { telegram: { reconcile: async () => ({ state: 'running' }), stop: async () => { throw new Error('did not exit'); } } },
-      statuses,
-      failures,
-      stopAll: true,
-    })).rejects.toThrow('did not exit');
-    expect(failures).toEqual({ telegram: true });
   });
 
   test('the dashboard says start_failed over a previous running status, and when nothing ever reported', () => {

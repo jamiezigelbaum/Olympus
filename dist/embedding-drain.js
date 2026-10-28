@@ -46373,6 +46373,7 @@ import { existsSync as existsSync21, mkdirSync as mkdirSync14, rmSync as rmSync6
 import { homedir as homedir13 } from "node:os";
 import { dirname as dirname27, join as join29 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+var GRANT_RETIRED_ENV = ["OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES", "OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES"];
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return captureGrantPathBeside(source, registryPath);
 }
@@ -46442,6 +46443,8 @@ class MessagingCaptureSupervisor {
       return { source: grant.source, state: "blocked", reason: "session_missing" };
     }
     const childEnv = definedEnv({ ...layoutEnv, ...grant.producer.env });
+    for (const name of GRANT_RETIRED_ENV)
+      delete childEnv[name];
     if (account.layout === "folder") {
       for (const name of folderCaptureEnvRemoved(account))
         delete childEnv[name];
