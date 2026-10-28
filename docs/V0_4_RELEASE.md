@@ -285,6 +285,31 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-10-28 — One indexing pass for every store.** Owner direction: "one
+  process by which all new information coming into the spine is judged … it
+  shouldn't be different for each connection." Judging was already one
+  per-item classifier, and now indexing for meaning is one pass too. A
+  single store-level plan (`planStoreEmbedding`,
+  `src/workers/connector-store/embedding-plan.ts`) decides for every mounted
+  store, whatever filled it: a sync, per-item routing from another tier, an
+  import, or text read later. It checks three things: whether the store is
+  served by meaning, which identity its tier allows, and the store's current
+  scope (the same population the store's status counts as owed). One sweep
+  (`withEmbeddingSweep`) runs the plan, and no source declares an embed task
+  of its own (`test/embedding-path-guard.test.ts`). Owner decision, the same
+  day: every store catches up on its own missing vectors, on the model its
+  tier uses. That includes Google Drive (all tiers), Gmail Public, and Gmail
+  Private on a cloud or Venice model. It supersedes the 2026-09-30
+  queue-only rule for Gmail's Private store, and the store-wide opt-ins of
+  2026-09-24 (Readwise) and 2026-09-25 (chat lanes) become the default. A
+  future cost exception goes in `QUEUE_ONLY_METERED_EMBEDDING`, which is
+  empty now. A full pass reruns soon, so a backlog drains pass after pass,
+  and a queue left under another identity is dropped and caught up on the
+  current one. The change deletes `WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE`,
+  `CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP`, the Dropbox, local-files and
+  archive embed tasks, the separate Private meaning backfill, and Gmail's
+  imported-history target builders.
+
 - **2026-10-15 — Grok Bot and Cursor marketplace listing.** Owner decision:
   list Olympus in the Grok Bot and Cursor marketplace (Anysphere's form,
   https://x.ai/bot/marketplace/submit-a-plugin), which signs in with Cursor's

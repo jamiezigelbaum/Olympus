@@ -50,10 +50,6 @@ import {
   type ReadwiseLiveSyncConfig,
 } from './readwise/index.ts';
 import {
-  isApprovedSecureSourceEmbeddingProvider,
-  type SourceEmbeddingProvider,
-} from './source-index/embeddings.ts';
-import {
   X_BOOKMARKS_CORPUS_ID,
   XBookmarksLiveSyncError,
   type XBookmarksConnectorStoreSyncHandler,
@@ -1365,22 +1361,8 @@ export function createCanonicalDropboxSchedulerSource(input: {
   providerSync?: DropboxProviderStoreSyncHandler;
   store?: LocalConnectorStore;
   fileExtraction?: FileExtractionRunner;
-  embeddingProvider?: SourceEmbeddingProvider;
-  /**
-   * The lane's other tier stores (per-item routing): each is embedded with its
-   * own trust domain's identity once it exists. The secure store keeps
-   * `embeddingProvider` above.
-   */
-  tierEmbeddings?: ReadonlyArray<{
-    corpusId: string;
-    store: () => LocalConnectorStore | undefined;
-    provider: SourceEmbeddingProvider;
-  }>;
 }): SourceSchedulerSource | undefined {
   if (!input.providerSync || !input.store) return undefined;
-  if (input.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(input.embeddingProvider)) {
-    throw new Error('Dropbox secure_local embeddings require a local/private or approved Venice embedding provider.');
-  }
 
   const metadataScopes = dropboxPolicyApprovedScopeKeys(input.policy);
   const extractionScopes = dropboxPolicyFullExtractionScopeKeys(input.policy);
@@ -1441,39 +1423,6 @@ export function createCanonicalDropboxSchedulerSource(input: {
         batchSize: input.policy.content.batch_size,
       }));
     }
-  }
-
-  if (input.embeddingProvider) {
-    tasks.push({
-      id: 'dropbox.files_embeddings',
-      kind: 'embed',
-      writer: true,
-      run: async () => {
-        const result = await input.store!.embedChunks({
-          provider: input.embeddingProvider!,
-          limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS,
-        });
-        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
-      },
-    });
-  }
-
-  for (const tier of input.tierEmbeddings ?? []) {
-    tasks.push({
-      id: `dropbox.files_embeddings.${schedulerScopeHash(tier.corpusId)}`,
-      kind: 'embed',
-      writer: true,
-      run: async () => {
-        // A tier store exists only once a file was routed to it.
-        const store = tier.store();
-        if (!store) return progressFromCounts({ chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0 });
-        if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(tier.provider)) {
-          throw new Error('A secure_local tier store requires a local/private or approved Venice embedding provider.');
-        }
-        const result = await store.embedChunks({ provider: tier.provider, limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS });
-        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
-      },
-    });
   }
 
   return {
@@ -1682,80 +1631,23 @@ export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
 const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
 
 /**
- * Owner decision for the chat lanes' store-wide sweep (X, WhatsApp, Telegram):
- * their sweep also embeds chunks no sync queued, so a backlog on the lane's
- * approved identity catches up. On since 2026-09-25 (embedding ledger
- * decision-2026-09-25-chat-lane-catch-up). Flip this one line to switch every
- * chat lane at once.
- */
-export const CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true;
-
-/**
- * Per source: may its embedding sweep embed store-wide (every hybrid-served
- * chunk still missing a vector), not only what its syncs queued? Readwise: yes,
- * owner decision 2026-09-24 (embedding ledger decision-2026-09-24-readwise-hybrid).
- * Gmail: only its internal (non-secure) store, owner decision 2026-09-30
- * (embedding ledger decision-2026-09-30-gmail-catch-up), so that backlog embeds
- * once; the secure mail store stays queue-only. Evernote: only its Personal
- * store, part of the owner's 2026-10-28 decision to ship Evernote in full in
- * 1.2.0. Its notes reach that store only by per-item routing, and a pass never
- * lists an unchanged note again, so nothing would ever queue them; its Private
- * store embeds through the local backfill. A list names the only corpora
- * of the source that may sweep store-wide. The file
- * lanes (Drive, Dropbox) are absent: they stay queue-only under their scope
- * binding, and Dropbox keeps its own embed tasks.
- */
-export const WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE: Readonly<Record<string, boolean | readonly string[]>> = {
-  [SCHEDULER_SOURCE_IDS.readwise]: true,
-  [SCHEDULER_SOURCE_IDS.gmail]: ['internal.email'],
-  [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-  [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-  [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-  [SCHEDULER_SOURCE_IDS.evernote]: ['internal.evernote.notes'],
-};
-
-/** Whether a source's store may sweep store-wide; see WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE. */
-export function wholeStoreEmbeddingSweepAllowed(sourceId: string, corpusId?: string): boolean {
-  const allowed = WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE[sourceId];
-  return allowed === true || (Array.isArray(allowed) && corpusId !== undefined && allowed.includes(corpusId));
-}
-
-/**
- * Local Private meaning search also indexes already-ingested items after an
- * upgrade. Queue-only sync lanes can have no new provider pages to enqueue.
- * Use their normal store embedder, bounded per pass, with current account and
- * content scope supplied by the host. No connector traversal or cloud lane.
- */
-export function withLocalPrivateEmbeddingBackfill(
-  sources: readonly SourceSchedulerSource[],
-  targetsFor: (source: SourceSchedulerSource) => readonly ConnectorStoreEmbeddingTarget[],
-): SourceSchedulerSource[] {
-  return sources.map(source => {
-    const targets = () => targetsFor(source)
-      .filter(target => target.store.trustDomain === 'secure_local'
-        && target.provider.provider === 'built-in' && target.provider.backend === 'local')
-      .map(target => ({ ...target, wholeStore: true, missingOnly: true }));
-    if (targets().length === 0) return source;
-    const task = embeddingSweepTask(source, targets);
-    return { ...source, tasks: [...source.tasks, { ...task, id: `${source.sourceId}_private_meaning` }] };
-  });
-}
-
-/**
  * Give every source that embeds one embedding sweep, built here once for all
- * of them rather than per source.
+ * of them rather than per source. It is the only way a store gets vectors
+ * after its items landed: sources declare no embed tasks of their own
+ * (test/embedding-path-guard.test.ts).
  *
- * `targetsFor(source)` names the stores the source embeds into, with the
- * identity each embeds with (tier legs included), resolved on every pass so a
- * store opened later is swept too. It returns undefined for a source that
- * embeds nothing. A source that already declares its own embed task (Dropbox)
- * keeps it and gets no sweep.
+ * `targetsFor(source)` names the stores the source embeds into, each planned
+ * by the one store-level rule (planStoreEmbedding), resolved on every pass so
+ * a store opened later is swept too. It returns undefined for a source that
+ * embeds nothing.
  *
  * Each pass (embedPendingChunks) embeds the items syncs queued, each under
  * the provider and scope binding it was queued with, and for a target marked
- * `wholeStore` (see WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE) any other chunk
- * still missing a vector, bounded per pass. Its task:
- *   - reports progress only when it embedded a chunk;
+ * `wholeStore` any other chunk still missing a vector (an item routed in from
+ * another tier, text read later, a backlog a restart dropped from the queue),
+ * bounded per pass. Its task:
+ *   - reports progress only when it embedded a chunk, and runs again soon
+ *     while a store filled its per-pass bound;
  *   - while a provider does not answer, succeeds with degraded reason
  *     EMBEDDING_PROVIDER_UNAVAILABLE_REASON and doubles its interval up to
  *     EMBEDDING_SWEEP_MAX_BACKOFF_MS; the first pass that answers resets both;
@@ -1773,7 +1665,6 @@ export function withEmbeddingSweep(
   targetsFor: (source: SourceSchedulerSource) => (() => readonly ConnectorStoreEmbeddingTarget[]) | undefined,
 ): SourceSchedulerSource[] {
   return sources.map((source) => {
-    if (source.tasks.some((task) => task.kind === 'embed')) return source;
     const targets = targetsFor(source);
     if (!targets) return source;
     return {
@@ -1811,7 +1702,9 @@ function embeddingSweepTask(
       const status: SourceSchedulerTaskRunResult['status'] = counts.chunks_embedded > 0 ? 'progress' : 'idle';
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
       if (deferred === 0) {
-        if (counts.items_failed === 0) return { status, counts };
+        // A store that filled its bound has more owed: a backlog drains pass after pass, not one bound a minute.
+        const more = runs.some((run) => run.busy !== true && run.chunksEmbedded > 0 && run.itemsAttempted >= EMBEDDING_SWEEP_MAX_ITEMS);
+        if (counts.items_failed === 0) return { status, counts, ...(more ? { continueSoon: true } : {}) };
         // Skipped items are surfaced, not retried: the sweep keeps its cadence.
         return {
           status,
@@ -1839,14 +1732,6 @@ function embeddingSweepTask(
     },
   };
 }
-
-/**
- * Chunks a Dropbox embed task embeds per pass. Unbounded, one pass over a large
- * backlog held the store's embedding lease (and its source's scheduler group)
- * for as long as the whole backlog took; bounded, the task returns and the
- * next pass continues.
- */
-export const DROPBOX_EMBED_MAX_CHUNKS_PER_PASS = 512;
 
 export function createWhatsAppSchedulerSource(input: {
   config: OlympusConfig;
@@ -2386,20 +2271,6 @@ function googleDriveSchedulerFailure(error: unknown): SourceSchedulerTaskFailure
 }
 
 /** A bounded embedding pass; a pass that used its whole limit has more waiting. */
-export function embedPassResult(
-  result: { chunksSeen: number; chunksEmbedded: number; chunksSkipped: number },
-  limit: number,
-): SourceSchedulerTaskRunResult {
-  return {
-    ...progressFromCounts({
-      chunks_seen: result.chunksSeen,
-      chunks_embedded: result.chunksEmbedded,
-      chunks_skipped: result.chunksSkipped,
-    }),
-    ...(result.chunksEmbedded >= limit ? { continueSoon: true } : {}),
-  };
-}
-
 export function progressFromCounts(counts: Record<string, number>): SourceSchedulerTaskRunResult {
   return {
     status: Object.values(counts).some((value) => value > 0) ? 'progress' : 'idle',

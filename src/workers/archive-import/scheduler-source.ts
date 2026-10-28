@@ -25,18 +25,14 @@
  * photo) through the shared extraction factory, in the same serialization as
  * the import and the removal, so a child never lands beside a removal.
  *
- * Embedding: one task per tier store that exists, each with the identity its
- * trust domain allows (the Private store only with a local or approved
- * private embedder).
+ * Embedding: none of its own. The shared embedding sweep reaches every tier
+ * store that exists, each with the identity its trust domain allows (the
+ * Private store only with a local or approved private embedder).
  */
 import type { OlympusConfig } from '../../core/config.ts';
 import type { WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
-import type { LocalConnectorStore } from '../connector-store/index.ts';
-import { isApprovedSecureSourceEmbeddingProvider, type SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
-  DROPBOX_EMBED_MAX_CHUNKS_PER_PASS,
   SCHEDULER_SOURCE_IDS,
-  embedPassResult,
   fileExtractionSchedulerTask,
   progressFromCounts,
   schedulerScopeHash,
@@ -112,13 +108,10 @@ export interface ArchiveImportsSchedulerSourceInput {
    */
   extraction?: Pick<ArchiveExtractionRuntime, 'runner'>;
   /**
-   * One embed task per tier store, with the identity its domain allows.
+   * Whether any family's stores exist: the source then stands with no task of
+   * its own, so the shared embedding sweep still reaches those stores.
    */
-  tierEmbeddings?: ReadonlyArray<{
-    corpusId: string;
-    store: () => LocalConnectorStore | undefined;
-    provider: SourceEmbeddingProvider;
-  }>;
+  holdsStores?: boolean;
   /**
    * The sources an import can be an input of (default: the runtime's).
    */
@@ -246,24 +239,7 @@ export function createArchiveImportsSchedulerSource(
     }
   }
 
-  for (const tier of input.tierEmbeddings ?? []) {
-    tasks.push({
-      id: `${SCHEDULER_SOURCE_IDS.archiveImports}_embeddings.${schedulerScopeHash(tier.corpusId)}`,
-      kind: 'embed',
-      writer: true,
-      run: async () => {
-        const store = tier.store();
-        if (!store) return progressFromCounts({ chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0 });
-        if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(tier.provider)) {
-          throw new Error('A secure_local archive store requires a local/private or approved Venice embedding provider.');
-        }
-        const result = await store.embedChunks({ provider: tier.provider, limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS });
-        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
-      },
-    });
-  }
-
-  if (tasks.length === 0) return undefined;
+  if (tasks.length === 0 && input.holdsStores !== true) return undefined;
   const families = input.runtime.families();
   return {
     sourceId: SCHEDULER_SOURCE_IDS.archiveImports,

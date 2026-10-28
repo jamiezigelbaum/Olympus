@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { OlympusConfig } from '../src/core/config.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
-import { DROPBOX_EMBED_MAX_CHUNKS_PER_PASS, createCanonicalDropboxSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { createCanonicalDropboxSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { SourceScheduler, SourceSchedulerTaskFailure } from '../src/workers/source-scheduler.ts';
 import type { DropboxProviderStoreSyncHandler } from '../src/workers/dropbox-files/index.ts';
 import type {
@@ -10,7 +10,6 @@ import type {
   FileExtractionRunner,
 } from '../src/workers/file-extraction/runner.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 describe('canonical Dropbox scheduler', () => {
   test('the shipped default policy constructs the shared extraction task', () => {
@@ -24,31 +23,7 @@ describe('canonical Dropbox scheduler', () => {
     expect(source?.tasks.some((task) => task.kind === 'extract')).toBe(true);
   });
 
-  test('each Dropbox embed task embeds a bounded batch per pass', async () => {
-    const limits: Array<number | undefined> = [];
-    const store = {
-      corpusId: 'secure_local.dropbox.files',
-      trustDomain: 'secure_local',
-      async embedChunks(options: { limit?: number }) {
-        limits.push(options.limit);
-        return { chunksSeen: 0, chunksEmbedded: 0, chunksSkipped: 0 };
-      },
-    } as unknown as LocalConnectorStore;
-    const local = { provider: 'local-openai-compatible', backend: 'local', modelId: 'm' } as unknown as SourceEmbeddingProvider;
-    const source = createCanonicalDropboxSchedulerSource({
-      policy: defaultDropboxIngestionPolicy(),
-      config: schedulerConfig(),
-      providerSync: stubProviderSync(),
-      store,
-      embeddingProvider: local,
-      tierEmbeddings: [{ corpusId: 'internal.dropbox.files', store: () => store, provider: local }],
-    });
-    for (const task of source!.tasks.filter((entry) => entry.kind === 'embed')) await task.run();
-
-    expect(limits).toEqual([DROPBOX_EMBED_MAX_CHUNKS_PER_PASS, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS]);
-  });
-
-  test('orders metadata for every admitted root before shared extraction and local embedding', async () => {
+  test('orders metadata for every admitted root before shared extraction, and declares no embed task', async () => {
     const calls: string[] = [];
     const policy = defaultDropboxIngestionPolicy();
     policy.roots = [
@@ -154,23 +129,7 @@ describe('canonical Dropbox scheduler', () => {
         };
       },
     } as unknown as FileExtractionRunner;
-    const store = {
-      async embedChunks() {
-        calls.push('embed');
-        return {
-          corpusId: policy.corpusId,
-          modelId: 'local-test',
-          chunksSeen: 1,
-          chunksEmbedded: 1,
-          chunksSkipped: 0,
-        };
-      },
-    } as unknown as LocalConnectorStore;
-    const embeddingProvider = {
-      backend: 'local',
-      modelId: 'local-test',
-      epochId: 'epoch-test',
-    } as SourceEmbeddingProvider;
+    const store = {} as unknown as LocalConnectorStore;
 
     const source = createCanonicalDropboxSchedulerSource({
       policy,
@@ -178,9 +137,9 @@ describe('canonical Dropbox scheduler', () => {
       providerSync,
       store,
       fileExtraction,
-      embeddingProvider,
     });
-    expect(source?.tasks.map((task) => task.kind)).toEqual(['sync', 'sync', 'extract', 'embed']);
+    // Its stores get vectors from the shared embedding sweep (withEmbeddingSweep).
+    expect(source?.tasks.map((task) => task.kind)).toEqual(['sync', 'sync', 'extract']);
     for (const task of source!.tasks) {
       await task.run({
         sourceId: source!.sourceId,
@@ -205,19 +164,8 @@ describe('canonical Dropbox scheduler', () => {
       // the same next position again ends the scan.
       'plan:dropbox.personal:/Full:candidate-cursor',
       'extract:dropbox.personal:/Full:local_text',
-      'embed',
     ]);
     expect(source?.tasks.some((task) => task.id.includes('/Full'))).toBe(false);
-  });
-
-  test('refuses a non-local embedding provider for the secure Dropbox corpus', () => {
-    expect(() => createCanonicalDropboxSchedulerSource({
-      policy: defaultDropboxIngestionPolicy(),
-      config: schedulerConfig(),
-      providerSync: {} as DropboxProviderStoreSyncHandler,
-      store: {} as LocalConnectorStore,
-      embeddingProvider: { backend: 'cloud' } as SourceEmbeddingProvider,
-    })).toThrow('require a local/private or approved Venice embedding provider');
   });
 
   test('records a typed scheduler failure when an extractor preflight pauses the lane', async () => {

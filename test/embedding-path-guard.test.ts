@@ -1,36 +1,53 @@
-// Every store that per-item routing fills must have something that embeds it. Such a store has no
-// sync of its own, so its items are never queued by a sync of that store: without a named path its
-// chunks stay keyword-only for good (Evernote's Personal store, test-mac 2026-10-28).
+// Every store gets its vectors one way, whatever source filled it. A store
+// that per-item routing, an import, or a later read fills has no sync of its
+// own that could queue it; per-source embed wiring is how such a store once
+// stayed keyword-only for good (Evernote's Personal store, test-mac
+// 2026-10-28). So: no source declares its own embed task, and the one
+// store-level plan gives every store served by meaning a store-wide catch-up.
 
 import { describe, expect, test } from 'bun:test';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { defaultSourceCorpusRegistryConfig } from '../src/core/source-corpus-registry.ts';
-import { wholeStoreEmbeddingSweepAllowed } from '../src/workers/source-scheduler.ts';
+import { archiveImportCorpora } from '../src/workers/archive-import/store.ts';
+import { QUEUE_ONLY_METERED_EMBEDDING, planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
+import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { RecordingProvider } from './helpers/tier-fixtures.ts';
 
-/**
- * The routed stores embedded some other way than the store-wide sweep:
- * - Dropbox and local files run their own embed task per tier store;
- * - the Gmail and Drive tier sets give each leg its provider, so a sync queues
- *   what it routes there (under the lane's scope binding).
- */
-const OTHER_EMBEDDING_PATHS: Readonly<Record<string, string>> = {
-  'internal.dropbox.files': 'own embed task',
-  'public_safe.dropbox.files': 'own embed task',
-  'internal.local.files': 'own embed task',
-  'public_safe.local.files': 'own embed task',
-  'public_safe.email': 'leg provider queues routed items',
-  'public_safe.drive.docs': 'leg provider queues routed items',
-};
+const SRC = new URL('../src/', import.meta.url).pathname;
+
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) return sourceFiles(path);
+    return path.endsWith('.ts') ? [path] : [];
+  });
+}
 
 describe('embedding paths', () => {
-  test('every routed store served by meaning has a named way to get its vectors', () => {
-    const routed = defaultSourceCorpusRegistryConfig().corpora.filter((corpus) =>
-      corpus.trustDomain !== 'secure_local'
-      && corpus.activationMode !== 'lexical_only'
-      && !(corpus.capabilities ?? []).includes('sync'));
-    expect(routed.length).toBeGreaterThan(0);
-    const missing = routed
-      .filter((corpus) => !wholeStoreEmbeddingSweepAllowed(corpus.sourceId, corpus.corpusId) && !OTHER_EMBEDDING_PATHS[corpus.corpusId])
-      .map((corpus) => corpus.corpusId);
+  test('the shared sweep is the only embed task: no source wires its own', () => {
+    const declaring = sourceFiles(SRC)
+      .filter((path) => /kind:\s*'embed'/.test(readFileSync(path, 'utf8')))
+      .map((path) => relative(SRC, path));
+    expect(declaring).toEqual(['workers/source-scheduler.ts']);
+    const scheduler = readFileSync(join(SRC, 'workers/source-scheduler.ts'), 'utf8');
+    expect(scheduler.match(/kind:\s*'embed'/g)).toHaveLength(1);
+    expect(scheduler).toMatch(/function embeddingSweepTask\([\s\S]*?kind: 'embed'/);
+  });
+
+  test('every store served by meaning catches up store-wide, whether or not a sync of its own fills it', () => {
+    const corpora = [...defaultSourceCorpusRegistryConfig().corpora, ...archiveImportCorpora()]
+      .filter((corpus) => corpus.activationMode !== 'lexical_only');
+    // The stores per-item routing or an import fills are among them.
+    expect(corpora.some((corpus) => !(corpus.capabilities ?? []).includes('sync'))).toBe(true);
+    const missing = corpora.filter((corpus) => {
+      const provider = corpus.trustDomain === 'secure_local'
+        ? new RecordingProvider('built-in', 'embeddinggemma', 'local')
+        : new RecordingProvider('google-gemini', 'gemini-embedding-2', 'cloud');
+      const store = { corpusId: corpus.corpusId, trustDomain: corpus.trustDomain } as unknown as LocalConnectorStore;
+      const target = planStoreEmbedding({ store, provider, servedByMeaning: true, scope: { allowed: true } });
+      return target?.wholeStore !== true && QUEUE_ONLY_METERED_EMBEDDING[corpus.corpusId] === undefined;
+    }).map((corpus) => corpus.corpusId);
     expect(missing).toEqual([]);
   });
 });
