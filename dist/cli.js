@@ -209226,10 +209226,10 @@ async function runMessagingPairing(source, secretStore, registryPath) {
     if (!paired.registered)
       return paired;
     saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, registryPath), pairing: paired });
-    tell(`Pairing and scope verified. Restarting the managed Olympus worker to start capture.
+    tell(`Pairing and scope verified. Restarting the Olympus worker to start capture.
 `);
-    const activation = runWorkerLifecycle("restart");
-    return { ...paired, captureStarted: false, captureActivation: activation.ok ? "requested" : "needs_attention", next: activation.ok ? "Open this source in the Olympus dashboard to monitor capture and initial indexing." : "Pairing is saved. Ask your agent to repair the managed worker before capture can start." };
+    const activation = restartCaptureWorker();
+    return { ...paired, captureStarted: false, captureActivation: activation.ok ? "requested" : "needs_attention", next: activation.ok ? "Open this source in the Olympus dashboard to monitor capture and initial indexing." : `Pairing is saved. Capture starts once the worker restarts: ${activation.next}` };
   } finally {
     closeSync30(terminal);
   }
@@ -209318,6 +209318,23 @@ function parseConnectOptions(args) {
     }
   }
   return options;
+}
+function restartCaptureWorker(deps = {}) {
+  const platform2 = deps.platform ?? process.platform;
+  const engineLoaded = deps.engineLoaded ?? (() => engineDataCustody(inspectEngine()) === "loaded");
+  if ((platform2 === "darwin" || platform2 === "linux") && engineLoaded()) {
+    try {
+      (deps.restartEngine ?? restartEngine)();
+      return { ok: true, next: "" };
+    } catch (error2) {
+      return { ok: false, next: `${error2 instanceof Error ? error2.message : String(error2)} Then run: olympus engine restart` };
+    }
+  }
+  try {
+    return { ok: (deps.restartWorker ?? (() => runWorkerLifecycle("restart")))().ok, next: "run olympus worker restart." };
+  } catch (error2) {
+    return { ok: false, next: `${error2 instanceof Error ? error2.message : String(error2)} Then run: olympus worker restart` };
+  }
 }
 function observedWorkerServiceState() {
   if (process.platform === "darwin" || process.platform === "linux") {
@@ -209831,6 +209848,7 @@ export {
   runDashboardTokenCommand,
   runDashboardCommand,
   runConnectionsCommand,
+  restartCaptureWorker,
   resolveCliOperation,
   parseXReconcileRecoveryArgs,
   parseXContentRecoveryArgs,

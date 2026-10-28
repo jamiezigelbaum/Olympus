@@ -138,7 +138,7 @@ import {
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import { readThisComputerHandles } from './core/this-computer.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
-import { engineDataCustody, inspectEngine } from './core/engine-service.ts';
+import { engineDataCustody, inspectEngine, restartEngine } from './core/engine-service.ts';
 import {
   reachableLoopbackWorkerOrigin,
   readRemoteAccessStatus,
@@ -2506,11 +2506,11 @@ async function runMessagingPairing(
     });
     if (!paired.registered) return paired;
     saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, registryPath), pairing: paired });
-    tell('Pairing and scope verified. Restarting the managed Olympus worker to start capture.\n');
-    const activation = runWorkerLifecycle('restart');
+    tell('Pairing and scope verified. Restarting the Olympus worker to start capture.\n');
+    const activation = restartCaptureWorker();
     return { ...paired, captureStarted: false, captureActivation: activation.ok ? 'requested' : 'needs_attention', next: activation.ok
       ? 'Open this source in the Olympus dashboard to monitor capture and initial indexing.'
-      : 'Pairing is saved. Ask your agent to repair the managed worker before capture can start.' };
+      : `Pairing is saved. Capture starts once the worker restarts: ${activation.next}` };
   } finally { closeSync(terminal); }
 }
 
@@ -2619,6 +2619,33 @@ function parseConnectOptions(args: string[]): {
     }
   }
   return options;
+}
+
+/**
+ * Restarts the worker that runs capture, so it reads a new capture grant. On a standalone install that is the
+ * engine's own worker: restarting the legacy worker unit left capture off and hit a job that cannot bind (#588).
+ */
+export function restartCaptureWorker(deps: {
+  platform?: NodeJS.Platform;
+  engineLoaded?: () => boolean;
+  restartEngine?: () => unknown;
+  restartWorker?: () => { ok: boolean };
+} = {}): { ok: boolean; next: string } {
+  const platform = deps.platform ?? process.platform;
+  const engineLoaded = deps.engineLoaded ?? (() => engineDataCustody(inspectEngine()) === 'loaded');
+  if ((platform === 'darwin' || platform === 'linux') && engineLoaded()) {
+    try {
+      (deps.restartEngine ?? restartEngine)();
+      return { ok: true, next: '' };
+    } catch (error) {
+      return { ok: false, next: `${error instanceof Error ? error.message : String(error)} Then run: olympus engine restart` };
+    }
+  }
+  try {
+    return { ok: (deps.restartWorker ?? (() => runWorkerLifecycle('restart')))().ok, next: 'run olympus worker restart.' };
+  } catch (error) {
+    return { ok: false, next: `${error instanceof Error ? error.message : String(error)} Then run: olympus worker restart` };
+  }
 }
 
 /** The supervised worker state delete custody reads, or `unknown` if unreadable. */
