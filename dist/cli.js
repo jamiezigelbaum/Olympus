@@ -203272,6 +203272,7 @@ __export(exports_server2, {
   connectorStoreLaneHandle: () => connectorStoreLaneHandle,
   connectorStoreAnswerScope: () => connectorStoreAnswerScope,
   commaSeparatedEnv: () => commaSeparatedEnv,
+  builtInBacksPrivateAnalyst: () => builtInBacksPrivateAnalyst,
   applyBuiltInPrivateAnalyst: () => applyBuiltInPrivateAnalyst,
   analystRouteTrustDomain: () => analystRouteTrustDomain,
   activeCredentialHandle: () => activeCredentialHandle,
@@ -203856,6 +203857,11 @@ function applyBuiltInPrivateAnalyst(map2, securePoolMemberIds, builtInAnalyst) {
     wired = true;
   }
   return wired;
+}
+function builtInBacksPrivateAnalyst(id, state, members) {
+  if (!state || state === "failed")
+    return false;
+  return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === "venice");
 }
 async function probeLocalAnalystService(olympusConfig) {
   try {
@@ -204533,11 +204539,8 @@ async function main() {
       return;
     },
     builtInAnswers: (id) => {
-      if (!workerBuiltInModel?.available())
-        return false;
       try {
-        const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" }).members;
-        return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === "venice");
+        return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" }).members);
       } catch {
         return false;
       }

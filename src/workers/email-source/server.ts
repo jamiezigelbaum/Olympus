@@ -1429,6 +1429,22 @@ export function applyBuiltInPrivateAnalyst(
   return wired;
 }
 
+/**
+ * Whether the built-in model answers for this Private-pool analyst when its
+ * server is down, as applyBuiltInPrivateAnalyst wires it: a local member of a
+ * pool without Venice. Judged by install state, not by "prepared in this
+ * process": boot re-verifies the model while the first readiness check runs,
+ * and that check locked every source (#591).
+ */
+export function builtInBacksPrivateAnalyst(
+  id: string,
+  state: ReturnType<BuiltInAnalystModel['status']>['state'] | undefined,
+  members: readonly { id: string; profile: SovereigntyModelProfile }[],
+): boolean {
+  if (!state || state === 'failed') return false;
+  return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === 'venice');
+}
+
 /** Whether this computer's configured local answer model answers /models within a few seconds. */
 async function probeLocalAnalystService(olympusConfig: ReturnType<typeof loadConfig>): Promise<boolean> {
   try {
@@ -2512,13 +2528,9 @@ export async function main(): Promise<void> {
       if (internal?.id === id) return internalPolicyEmbeddingProvider?.dimension;
       return undefined;
     },
-    // Mirrors applyBuiltInPrivateAnalyst: the built-in model backs the
-    // Private pool's local members unless Venice is in that pool.
     builtInAnswers: (id) => {
-      if (!workerBuiltInModel?.available()) return false;
       try {
-        const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members;
-        return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === 'venice');
+        return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members);
       } catch {
         return false;
       }
