@@ -130,7 +130,7 @@ Canonical: [docs/ops/HARNESS_PROTOCOL.md](docs/ops/HARNESS_PROTOCOL.md) — read
 it before implementing, merging, or deploying from any harness.
 
 A direct instruction from the owner authorizes delivery of that scoped change
-through a short-lived pull request; no work order is required.
+through a short-lived pull request.
 
 ## ChatGPT directory review (until OpenAI's result)
 
