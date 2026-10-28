@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import { compactClassificationSignals, trustDomainPrior } from '../src/core/classification-signals.ts';
+import { compactClassificationSignals } from '../src/core/classification-signals.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import {
   clearInstalledTierClassification,
@@ -78,7 +78,7 @@ describe('WhatsApp: owner chat rules from tier-rules.json', () => {
         const spec = specs().find((candidate) => candidate.id === raw.identity.providerItemId
           && candidate.conversation === raw.identity.providerConversationId);
         return spec
-          ? compactClassificationSignals({ prior: trustDomainPrior('secure_local', 'source_default'), title: spec.title, folderKeys: [spec.conversation] })
+          ? compactClassificationSignals({ title: spec.title, folderKeys: [spec.conversation] })
           : {};
       },
     };
@@ -105,12 +105,12 @@ describe('WhatsApp: owner chat rules from tier-rules.json', () => {
     };
   }
 
-  test('an explicit chat rule to Personal moves a new Personal message to internal; nothing else moves', async () => {
+  test('an installed always-Private chat rule keeps that chat Private; other chats are judged by content', async () => {
     const root = workspace();
     const rulesPath = join(root, 'tier-rules.json');
     writeFileSync(rulesPath, JSON.stringify({
       schemaVersion: 1,
-      rules: [{ id: 'garden-club', match: { chat: 'chat-a' }, tier: 'private', strength: 'prior' }],
+      rules: [{ id: 'family', match: { chat: 'chat-b' }, tier: 'secure', strength: 'prior' }],
     }));
     configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: rulesPath } });
     const { store, sync, internal } = openLane(root);
@@ -125,13 +125,13 @@ describe('WhatsApp: owner chat rules from tier-rules.json', () => {
     expect(ids(store, 'allotment')).toEqual(['m3']);
   });
 
-  test('with no rules file every new message stays Private', async () => {
+  test('with no rules file an ordinary message is Personal', async () => {
     const root = workspace();
     configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: join(root, 'none.json') } });
     const { store, sync, internal } = openLane(root);
     await sync([{ id: 'm1', conversation: 'chat-a', title: 'Garden club', text: 'See you at the allotment on Saturday.' }]);
-    expect(internal()).toBeUndefined();
-    expect(ids(store, 'allotment')).toEqual(['m1']);
+    expect(ids(internal(), 'allotment')).toEqual(['m1']);
+    expect(ids(store, 'allotment')).toEqual([]);
   });
 });
 

@@ -2163,7 +2163,7 @@ var init_source_corpus_registry = __esm(() => {
       activationMode: "hybrid_shadow",
       capabilities: ["status", "search", "answer"],
       createdOnDemand: true,
-      description: "WhatsApp messages of chats the owner set to Personal, routed here per message. The default for every chat stays Private."
+      description: "WhatsApp messages judged Personal by their content, routed here per message."
     }
   ];
   PUBLIC_SOURCE_IDS = new Set(V0_4_PUBLIC_SOURCE_IDS);
@@ -13509,8 +13509,7 @@ function classifyItemTiersWithPublic(input, options) {
     metadataPending: metadata.pending,
     contentPending,
     metadataForced: metadata.forced,
-    metadataFlagged: metadata.flags.length > 0,
-    ...metadata.ownerRule ? { metadataOwnerRule: metadata.ownerRule } : {}
+    metadataFlagged: metadata.flags.length > 0
   };
 }
 function classifyContentTier(input, options = {}) {

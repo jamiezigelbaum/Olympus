@@ -272,11 +272,11 @@ const DEFAULT_SOURCE_CORPORA: SourceCorpusConfig[] = [
     family: 'chat',
     trustDomain: 'internal',
     activationMode: 'hybrid_shadow',
-    // No 'sync' of its own: the WhatsApp lane's tier set fills it, and only
-    // with messages of a chat the OWNER set to Personal.
+    // No 'sync' of its own: the WhatsApp lane's tier set fills it with the
+    // messages judged Personal.
     capabilities: ['status', 'search', 'answer'],
     createdOnDemand: true,
-    description: 'WhatsApp messages of chats the owner set to Personal, routed here per message. The default for every chat stays Private.',
+    description: 'WhatsApp messages judged Personal by their content, routed here per message.',
   },
 ];
 

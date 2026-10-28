@@ -80,7 +80,7 @@ export function telegramClassificationSignals(
   const conversationKind = telegramConversationKind(signalText(item.metadata, 'chatType'));
   const redacted = item.metadata['secretRedacted'] === true;
   return compactClassificationSignals({
-    prior: trustDomainPrior(trust, 'source_config'),
+    prior: trustDomainPrior(trust),
     ...(redacted
       ? { floor: { tier: 'secrets' as const, basis: TELEGRAM_SECRET_REDACTED_FLOOR_BASIS } }
       : conversationKind === 'secret_chat'

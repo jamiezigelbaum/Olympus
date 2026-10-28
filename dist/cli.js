@@ -3303,7 +3303,7 @@ var init_source_corpus_registry = __esm(() => {
       activationMode: "hybrid_shadow",
       capabilities: ["status", "search", "answer"],
       createdOnDemand: true,
-      description: "WhatsApp messages of chats the owner set to Personal, routed here per message. The default for every chat stays Private."
+      description: "WhatsApp messages judged Personal by their content, routed here per message."
     }
   ];
   DEFAULT_CAPABILITY_ORDER = {
@@ -18644,8 +18644,7 @@ function classifyItemTiersWithPublic(input, options) {
     metadataPending: metadata.pending,
     contentPending,
     metadataForced: metadata.forced,
-    metadataFlagged: metadata.flags.length > 0,
-    ...metadata.ownerRule ? { metadataOwnerRule: metadata.ownerRule } : {}
+    metadataFlagged: metadata.flags.length > 0
   };
 }
 function classifyContentTier(input, options = {}) {
@@ -25019,11 +25018,11 @@ function compactClassificationSignals(signals) {
     out.conversationKind = signals.conversationKind;
   return out;
 }
-function trustDomainPrior(trustDomain, basis) {
+function trustDomainPrior(trustDomain) {
   return {
     tier: trustDomain === "secure_local" ? "secure" : trustDomain === "public_safe" ? "public" : "private",
     strength: "prior",
-    basis: `${basis}:trust_domain:${trustDomain}`
+    basis: `source_config:trust_domain:${trustDomain}`
   };
 }
 var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
@@ -60684,7 +60683,6 @@ class TieredStoreSet {
   tierClassification;
   secretLocations;
   onLegOpened;
-  laneFloor;
   contentArrivesLater;
   contentArrivesLaterFor;
   privateEmbedder;
@@ -60702,7 +60700,6 @@ class TieredStoreSet {
     this.tierClassification = options.tierClassification;
     this.secretLocations = options.secretLocations;
     this.onLegOpened = options.onLegOpened;
-    this.laneFloor = options.laneFloor;
     this.contentArrivesLater = options.contentArrivesLater === true;
     this.contentArrivesLaterFor = options.contentArrivesLater === true ? undefined : options.contentArrivesLaterFor;
     this.legs = new Map;
@@ -60940,8 +60937,7 @@ class TieredStoreSet {
         stored: { trustDomain: domain, trustTier: this.restingTierFor(domain) }
       };
     }
-    const floor = this.floorFor(decision);
-    const metadataDomain = this.domainAtLeast(atLeastDomain(TIER_KEY_TRUST_DOMAIN[decision.metadataTier], floor));
+    const metadataDomain = this.domainAtLeast(TIER_KEY_TRUST_DOMAIN[decision.metadataTier]);
     if (deferred && decision.contentRead !== true) {
       return {
         copies: [{ corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: "metadata" }],
@@ -60950,7 +60946,7 @@ class TieredStoreSet {
       };
     }
     const contentHeld = decision.contentPending && !decision.reasons?.includes(PERSONAL_FIRST_REASON);
-    const contentDomain = contentHeld ? this.domainAtLeast("secure_local") : this.domainAtLeast(atLeastDomain(TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier)], floor));
+    const contentDomain = contentHeld ? this.domainAtLeast("secure_local") : this.domainAtLeast(TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier)]);
     const copies = !this.splitLayers || metadataDomain === contentDomain ? [{ corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: "both" }] : [
       { corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: "metadata" },
       { corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: "content" }
@@ -60996,18 +60992,6 @@ class TieredStoreSet {
   }
   restingTierFor(domain) {
     return this.legs.get(domain)?.spec.restingTier ?? defaultStoreTrustTier(domain);
-  }
-  floorFor(decision) {
-    const floor = this.laneFloor;
-    if (!floor)
-      return;
-    if (decision.decidedBy === "override")
-      return;
-    const rule = decision.metadataOwnerRule;
-    if (rule && floor.liftedByOwnerRule.includes(rule.kind) && rule.tier !== "secrets" && trustDomainRank(TIER_KEY_TRUST_DOMAIN[rule.tier]) < trustDomainRank(floor.trustDomain)) {
-      return;
-    }
-    return floor.trustDomain;
   }
   async sync(...args) {
     await this.finishWritesCutOff();
@@ -61385,7 +61369,6 @@ function createTieredLaneSet(options) {
     ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
     ...options.onLegOpened ? { onLegOpened: options.onLegOpened } : {},
-    ...options.laneFloor ? { laneFloor: options.laneFloor } : {},
     ...options.contentArrivesLater === true ? { contentArrivesLater: true } : {},
     ...options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {}
   });
@@ -61437,7 +61420,6 @@ function createExistingStoreTierLane(options) {
     ledger,
     legs,
     ...options.splitLayers === false ? { splitLayers: false } : {},
-    ...options.laneFloor ? { laneFloor: options.laneFloor } : {},
     ...options.contentArrivesLater === true ? { contentArrivesLater: true } : {},
     ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {}
@@ -61894,9 +61876,6 @@ function tieredRun(legs, routing, cursor) {
   for (const leg of legs)
     byDomain[leg.trustDomain] = leg;
   return { legs, byDomain, ...cursor ? { cursor } : {}, routing: { ...routing } };
-}
-function atLeastDomain(domain, floor) {
-  return floor !== undefined && trustDomainRank(floor) > trustDomainRank(domain) ? floor : domain;
 }
 function withRecordedContent(decision, record) {
   if (decision.contentRead || !record?.contentRead)
@@ -74248,7 +74227,7 @@ function telegramClassificationSignals(item, fallbackTrust = "internal") {
   const conversationKind = telegramConversationKind(signalText(item.metadata, "chatType"));
   const redacted = item.metadata["secretRedacted"] === true;
   return compactClassificationSignals({
-    prior: trustDomainPrior(trust, "source_config"),
+    prior: trustDomainPrior(trust),
     ...redacted ? { floor: { tier: "secrets", basis: TELEGRAM_SECRET_REDACTED_FLOOR_BASIS } } : conversationKind === "secret_chat" ? { floor: { tier: "secure", basis: "provider:secret_chat" } } : {},
     conversationKind,
     title: signalText(item.metadata, "title"),
@@ -79030,7 +79009,6 @@ function createWhatsAppLiveSourceConnector(options) {
 }
 function whatsAppClassificationSignals(item) {
   return compactClassificationSignals({
-    prior: trustDomainPrior("secure_local", "source_default"),
     ...item.metadata["secretRedacted"] === true ? { floor: { tier: "secrets", basis: WHATSAPP_SECRET_REDACTED_FLOOR_BASIS } } : {},
     title: signalText(item.metadata, "chat"),
     sender: signalText(item.metadata, "sender"),
@@ -80721,7 +80699,6 @@ function createWhatsAppTierLane(options) {
     setId: WHATSAPP_PERSONAL_SOURCE_ID,
     store: options.store,
     splitLayers: false,
-    laneFloor: { trustDomain: "secure_local", liftedByOwnerRule: ["chat"] },
     newLegs: {
       internal: {
         corpusId: WHATSAPP_INTERNAL_CORPUS_ID,
@@ -114600,7 +114577,7 @@ function signalsFromStoredItem(item, storeDomain, storedPlacementIsPrior) {
   const path = pathOf(item);
   const sender = item.senderLabel ?? item.senderId;
   return {
-    ...storedPlacementIsPrior ? { prior: trustDomainPrior(storeDomain, "source_config") } : {},
+    ...storedPlacementIsPrior ? { prior: trustDomainPrior(storeDomain) } : {},
     ...item.title ? { title: item.title } : {},
     ...path ? { path } : {},
     ...folderKeys.length > 0 ? { folderKeys } : {},
@@ -116207,7 +116184,6 @@ function installedTierMigrationLaneSpecs(env = process.env) {
       sourceId: WHATSAPP_PERSONAL_SOURCE_ID,
       setId: WHATSAPP_PERSONAL_SOURCE_ID,
       splitLayers: false,
-      laneFloor: { trustDomain: "secure_local", liftedByOwnerRule: ["chat"] },
       legs: {
         internal: { corpusId: WHATSAPP_INTERNAL_CORPUS_ID, dbPath: resolvedStorePath("whatsapp.personal.messages", "internal", env), family: "chat" },
         secure_local: { corpusId: WHATSAPP_LIVE_CORPUS_ID, dbPath: resolvedStorePath("whatsapp.personal.messages", "secure_local", env), family: "chat", legacy: true }
@@ -116262,7 +116238,6 @@ function openTierMigrationLanes(specs, options) {
         ledger,
         legs: laneLegs,
         ...spec.splitLayers === false ? { splitLayers: false } : {},
-        ...spec.laneFloor ? { laneFloor: spec.laneFloor } : {},
         ...spec.contentArrivesLater ? { contentArrivesLater: true } : {},
         ...spec.contentArrivesLaterFor ? { contentArrivesLaterFor: spec.contentArrivesLaterFor } : {},
         ...tierClassification ? { tierClassification } : {},

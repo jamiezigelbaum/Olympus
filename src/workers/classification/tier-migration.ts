@@ -389,7 +389,7 @@ function signalsFromStoredItem(
   const path = pathOf(item);
   const sender = item.senderLabel ?? item.senderId;
   return {
-    ...(storedPlacementIsPrior ? { prior: trustDomainPrior(storeDomain, 'source_config') } : {}),
+    ...(storedPlacementIsPrior ? { prior: trustDomainPrior(storeDomain) } : {}),
     ...(item.title ? { title: item.title } : {}),
     ...(path ? { path } : {}),
     ...(folderKeys.length > 0 ? { folderKeys } : {}),

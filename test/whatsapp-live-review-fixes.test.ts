@@ -66,18 +66,20 @@ function lane(now = '2026-10-25T12:00:00Z') {
   const store = new LocalConnectorStore({ dbPath: join(root, 'whatsapp.db'), corpusId: WHATSAPP_LIVE_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
   const tier = createWhatsAppTierLane({
     store,
-    env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'whatsapp-internal.db') },
+    env: { HOME: join(root, 'home') },
   });
   closers.push(() => {
     tier.newStores.internal?.current()?.close();
     store.close();
   });
   const sync = createWhatsAppConnectorStoreSyncHandler({ store, spoolDir, tierSet: tier.set, now: () => new Date(now) });
-  return { root, spoolDir, store, sync, file: join(spoolDir, '2026-10-25.jsonl') };
+  return { root, spoolDir, store, sync, file: join(spoolDir, '2026-10-25.jsonl'), internal: () => tier.newStores.internal?.current() };
 }
 
+/** A message's stored text, from whichever tier store its content put it in. */
 function storedText(target: ReturnType<typeof lane>, providerItemId: string): string {
-  return (target.store.localContent(`personal:chat-1@s.whatsapp.net:${providerItemId}`)?.chunks ?? []).join(' ');
+  const id = `personal:chat-1@s.whatsapp.net:${providerItemId}`;
+  return [target.store, target.internal()].flatMap((store) => store?.localContent(id)?.chunks ?? []).join(' ');
 }
 
 async function drain(pages: AsyncIterable<SourceConnectorListPage>): Promise<SourceConnectorListPage[]> {

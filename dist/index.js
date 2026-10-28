@@ -1685,7 +1685,7 @@ var init_source_corpus_registry = __esm(() => {
       activationMode: "hybrid_shadow",
       capabilities: ["status", "search", "answer"],
       createdOnDemand: true,
-      description: "WhatsApp messages of chats the owner set to Personal, routed here per message. The default for every chat stays Private."
+      description: "WhatsApp messages judged Personal by their content, routed here per message."
     }
   ];
   DEFAULT_CAPABILITY_ORDER = {

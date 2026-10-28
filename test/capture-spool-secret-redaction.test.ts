@@ -325,7 +325,7 @@ function openWhatsApp(root: string) {
   });
   const lane = createWhatsAppTierLane({
     store,
-    env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'whatsapp-internal.db') },
+    env: { HOME: join(root, 'home') },
   });
   closers.push(() => {
     lane.newStores.internal?.current()?.close();
