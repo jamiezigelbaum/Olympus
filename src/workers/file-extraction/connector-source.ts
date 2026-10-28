@@ -323,7 +323,7 @@ export function createConnectorFileExtractionSource(
       const content = item.content;
       if (content.kind === 'metadata_only') throw refusalFor(item);
       const bytes = content.kind === 'bytes' ? content.bytes : new TextEncoder().encode(content.text);
-      const mimeType = content.kind === 'bytes' ? content.mimeType : item.mimeType;
+      const mimeType = typeFor(ref, content.kind === 'bytes' ? content.mimeType : item.mimeType);
       if (fetchOptions.maxBytes !== undefined && bytes.byteLength > fetchOptions.maxBytes) {
         throw new FileExtractionSourceError('source_too_large');
       }
@@ -349,7 +349,7 @@ export function createConnectorFileExtractionSource(
         throw asSourceError(error);
       }
       const content = handed.item.content;
-      const mimeType = content.kind === 'bytes' ? content.mimeType : handed.item.mimeType;
+      const mimeType = typeFor(ref, content.kind === 'bytes' ? content.mimeType : handed.item.mimeType);
       return {
         path: handed.path,
         ...(mimeType ? { mimeType } : {}),
@@ -393,6 +393,14 @@ export function createConnectorFileExtractionSource(
       throw asSourceError(error);
     }
   }
+}
+
+/**
+ * The bytes' type: the connector's, unless it knows only that they are bytes, when the row's own type (what
+ * the listing said the file is: a child's photo, say) stands for it.
+ */
+function typeFor(ref: ExtractionItemRef, mimeType: string | undefined): string | undefined {
+  return (mimeType === undefined || mimeType === 'application/octet-stream') && ref.mimeType ? ref.mimeType : mimeType;
 }
 
 function asSourceError(error: unknown): FileExtractionSourceError {

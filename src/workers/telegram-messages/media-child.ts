@@ -81,7 +81,8 @@ export function telegramMediaChild(
 }
 
 /** The kept file a live locator names, when it is a regular file under the spool's media folder. */
-function liveMediaPath(spoolDir: string, locator: string): string | undefined {
+/** The kept file a live locator names, when it is a plain file under the spool's media folder; otherwise none. */
+export function telegramLiveMediaPath(spoolDir: string, locator: string): string | undefined {
   if (!locator.startsWith(TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX)) return undefined;
   const relative = locator.slice(TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX.length);
   // `<message>.<tag><ext>`: the tag says which file the message carried (Telegram's id, access hash, size, date).
@@ -115,7 +116,7 @@ export function telegramLiveMediaChild(parent: RawItem, spoolDir: string): RawIt
   const mimeType = typeof attachment.mimeType === 'string' ? attachment.mimeType : attachment.type === 'image' ? 'image/jpeg' : undefined;
   const relative = typeof attachment.mediaFile === 'string' ? attachment.mediaFile : undefined;
   const locator = relative ? `${TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX}${relative}` : undefined;
-  const kept = locator ? liveMediaPath(spoolDir, locator) : undefined;
+  const kept = locator ? telegramLiveMediaPath(spoolDir, locator) : undefined;
   const size = typeof attachment.sizeBytes === 'number' && Number.isSafeInteger(attachment.sizeBytes) ? attachment.sizeBytes : undefined;
   const leftOut: TelegramMediaLeftOut | undefined = attachment.mediaLeftOut === 'waiting_for_disk' ? attachment.mediaLeftOut : undefined;
   const description = { name, kind, ...(mimeType ? { mimeType } : {}), ...(leftOut ? { leftOut } : {}) };
@@ -126,7 +127,7 @@ export function telegramLiveMediaChild(parent: RawItem, spoolDir: string): RawIt
 
 /** The bytes of a live child, read from its kept file (bounded), with the child itself. */
 export function telegramLiveMediaBytes(child: RawItem, spoolDir: string, locator: string): RawItem {
-  const path = liveMediaPath(spoolDir, locator);
+  const path = telegramLiveMediaPath(spoolDir, locator);
   if (!path) throw new Error('Telegram no longer has this media file.');
   const size = lstatSync(path).size;
   if (size > LIVE_MEDIA_MAX_READ_BYTES) throw new Error('Telegram media file is larger than one read.');

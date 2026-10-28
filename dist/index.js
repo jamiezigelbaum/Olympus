@@ -2201,6 +2201,83 @@ async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
     removeUpstreamAbortListener?.();
   }
 }
+async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    return fetchImpl(url, init);
+  const controller = new AbortController;
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  let timer;
+  const settle = () => {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    timer = undefined;
+    removeUpstreamAbortListener?.();
+    removeUpstreamAbortListener = undefined;
+  };
+  const deadline = new AbortController;
+  timer = setTimeout(() => {
+    timer = undefined;
+    const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+    error.name = "AbortError";
+    controller.abort(error);
+    deadline.abort(error);
+  }, timeoutMs);
+  timer.unref?.();
+  let response;
+  try {
+    response = await untilAborted(fetchImpl(url, { ...init, signal: controller.signal }), deadline.signal);
+  } catch (error) {
+    settle();
+    throw error;
+  }
+  if (!response.body || NULL_BODY_STATUSES.has(response.status)) {
+    settle();
+    return response;
+  }
+  const reader = response.body.getReader();
+  const body = new ReadableStream({
+    async pull(stream) {
+      try {
+        const { done, value } = await untilAborted(reader.read(), deadline.signal);
+        if (done) {
+          settle();
+          stream.close();
+          return;
+        }
+        if (value)
+          stream.enqueue(value);
+      } catch (error) {
+        settle();
+        stream.error(error);
+        reader.cancel().catch(() => {
+          return;
+        });
+      }
+    },
+    cancel(reason) {
+      settle();
+      controller.abort();
+      reader.cancel(reason).catch(() => {
+        return;
+      });
+    }
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers
+  });
+}
 function isAbortError(error) {
   return error instanceof Error && error.name === "AbortError";
 }
@@ -6530,7 +6607,6 @@ var init_engine_maintenance = __esm(() => {
     staleAfterMs: Number.MAX_SAFE_INTEGER
   };
 });
-
 // src/core/source-model-policy.ts
 function assertModelTrustTierAllowed(trustTier) {
   if (trustTier === "S5") {
@@ -15405,6 +15481,15 @@ var init_sender_rules = __esm(() => {
 
 // src/core/file-extraction-source.ts
 import { createHash as createHash8 } from "node:crypto";
+function splitScopedLocalItemId(localItemId) {
+  const separator = localItemId.indexOf(":");
+  if (separator <= 0 || separator === localItemId.length - 1)
+    return;
+  return {
+    accountScope: localItemId.slice(0, separator),
+    providerItemId: localItemId.slice(separator + 1)
+  };
+}
 var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, ERROR_HASH_CHARS = 32, FileExtractionSourceError;
 var init_file_extraction_source = __esm(() => {
   FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
@@ -19524,6 +19609,15 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
+import { createHash as createHash13 } from "node:crypto";
+function computeDropboxContentHash(bytes) {
+  const blockDigests = [];
+  for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
+    const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
+    blockDigests.push(createHash13("sha256").update(block).digest());
+  }
+  return createHash13("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+}
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
   DROPBOX_CONTENT_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
@@ -20226,476 +20320,6 @@ var init_archive_target = __esm(() => {
   PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 });
 
-// src/workers/telegram-messages/store-sync.ts
-var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY;
-var init_store_sync = __esm(() => {
-  init_media_child();
-  init_source_placement();
-  init_spool_file_identity();
-  init_source_storage();
-  init_tiered_store_set();
-  init_record_builder();
-  init_protection_claims();
-  init_capture_spool_secrets();
-  init_capture_freshness();
-  init_corpus_adapter4();
-  init_capture_spool_connector();
-  init_archive_target();
-  init_record_builder();
-  TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
-});
-
-// src/workers/telegram-messages/index.ts
-var init_telegram_messages = __esm(() => {
-  init_corpus_adapter4();
-  init_capture_spool_connector();
-  init_store_sync();
-});
-
-// src/workers/source-index/status.ts
-var init_status = __esm(() => {
-  init_corpus();
-  init_embedding_cost_estimates();
-  init_source_corpus_registry();
-  init_answer_ready_coverage();
-  init_corpora();
-  init_readwise();
-  init_x_bookmarks();
-  init_dropbox_files();
-  init_store();
-  init_telegram_messages();
-  init_operation_error();
-  init_secret_locations();
-});
-
-// src/core/public-source-capabilities.ts
-function publicSourceDoctorLanes() {
-  const registry = createSourceCorpusRegistry();
-  return V0_4_PUBLIC_SOURCE_CAPABILITIES.flatMap((source) => {
-    const lane = source.doctor_lane;
-    if (!lane)
-      return [];
-    return registry.list("sync").filter((corpus) => corpus.sourceId === source.source_id).map((corpus) => ({
-      provider: lane.provider,
-      capability: lane.capability,
-      sourceId: source.source_id,
-      corpusId: corpus.corpusId,
-      ...lane.env_flag ? { envFlag: lane.env_flag } : {},
-      ...lane.default_off_when_absent === true ? { defaultOffWhenAbsent: true } : {}
-    }));
-  });
-}
-var V0_4_PUBLIC_SOURCE_CAPABILITIES, CAPABILITIES_BY_SOURCE;
-var init_public_source_capabilities = __esm(() => {
-  init_source_corpus_registry();
-  V0_4_PUBLIC_SOURCE_CAPABILITIES = [
-    {
-      source_id: "gmail.email",
-      label: "Gmail",
-      authentication: { type: "oauth2", ownership: "Olympus publisher Google app with advanced BYO fallback" },
-      contextual_scopes: ["mail query", "exclude Spam and Trash"],
-      dependencies: [{ id: "google_oauth_client", label: "Google OAuth client", required_for: "authorization and refresh" }],
-      provider_ceiling: "Provider history traversal and incremental refresh remain bounded by Gmail quota and pagination.",
-      supported_formats: ["headers", "snippet", "text/plain", "text/html (stripped)", "attachment metadata"],
-      doctor_lane: {
-        provider: "gmail",
-        capability: "gmail.email.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED",
-        default_off_when_absent: true
-      }
-    },
-    {
-      source_id: "google_drive.docs",
-      label: "Google Drive",
-      authentication: { type: "oauth2", ownership: "Olympus publisher Google app with advanced BYO fallback" },
-      contextual_scopes: ["inclusion roots", "shared drives", "exclude trashed items", "fail-closed ancestry exclusions"],
-      dependencies: [{ id: "google_oauth_client", label: "Google OAuth client", required_for: "authorization and refresh" }],
-      provider_ceiling: "Provider history and change traversal remain bounded by Drive quota, pagination, and export limits.",
-      supported_formats: ["Google Docs text export", "text", "PDF", "common images"],
-      doctor_lane: {
-        provider: "google_drive",
-        capability: "google_drive.docs.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_ENABLED",
-        default_off_when_absent: true
-      }
-    },
-    {
-      source_id: "dropbox.files",
-      label: "Dropbox",
-      authentication: { type: "oauth2", ownership: "one user-owned Dropbox account" },
-      contextual_scopes: ["approved path roots", "metadata-only or full-extract policy per root"],
-      dependencies: [
-        { id: "local_document_extractors", label: "Local document extractors", required_for: "Office, table, PDF, image, and audio content" },
-        { id: "local_embedding_lane", label: "Approved local embedding lane", required_for: "optional semantic retrieval" }
-      ],
-      provider_ceiling: "Folder-ID scope is unsupported; traversal is bounded by provider pagination and configured work budgets.",
-      supported_formats: ["text", "Office documents", "tables", "PDF", "common images", "audio transcription"],
-      doctor_lane: {
-        provider: "dropbox",
-        capability: "dropbox.files.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED"
-      }
-    },
-    {
-      source_id: "local.files",
-      label: "Files on this computer",
-      authentication: { type: "none", ownership: "no account: the folders you choose on this computer" },
-      contextual_scopes: ["approved folders and disks (nothing is chosen by default)", "metadata-only or full-extract policy per folder", "system, cache, build and version-control folders off by default"],
-      dependencies: [
-        { id: "local_document_extractors", label: "Local document extractors", required_for: "Office, table, PDF, image, and audio content" },
-        { id: "file_watcher", label: "Native file watcher (@parcel/watcher)", required_for: "instant updates; without it folders are re-listed on a timer" }
-      ],
-      provider_ceiling: "Changes are seen as the operating system reports them; a folder the system will not let Olympus read (a permission prompt, an unmounted disk) is skipped and reported.",
-      supported_formats: ["text", "Office documents", "tables", "PDF", "common images", "audio transcription"]
-    },
-    {
-      source_id: "archive.imports",
-      label: "Archives",
-      authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
-      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices left out", "a chat export is a snapshot: it is not updated after the export"],
-      dependencies: [
-        { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
-      ],
-      provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names"]
-    },
-    {
-      source_id: "x.bookmarks",
-      label: "X bookmarks",
-      authentication: { type: "oauth2", ownership: "user-owned X developer application and API plan" },
-      contextual_scopes: ["bookmark folders retained as provenance"],
-      dependencies: [{ id: "x_developer_app", label: "X developer application", required_for: "OAuth and bookmark API access" }],
-      provider_ceiling: "Plan availability, cost, rate limits, pagination, and provider windows can prevent complete history.",
-      supported_formats: ["post text", "author", "URL", "folder memberships", "media URLs"],
-      doctor_lane: {
-        provider: "x",
-        capability: "x.bookmarks.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED"
-      }
-    },
-    {
-      source_id: "telegram.messages",
-      label: "Telegram",
-      authentication: { type: "paired_session", ownership: "one user-owned MTProto session" },
-      contextual_scopes: ["explicit approved chats"],
-      dependencies: [{ id: "python_telethon", label: "Python with Telethon", required_for: "pairing and capture" }],
-      provider_ceiling: "Only captured approved-chat history is available; attachment bytes are not extracted in v0.4.",
-      supported_formats: ["message text", "replies", "forwards", "reactions", "attachment metadata"],
-      doctor_lane: {
-        provider: "telegram",
-        capability: "telegram.messages.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_INDEX_ENABLED"
-      }
-    },
-    {
-      source_id: "whatsapp.personal.messages",
-      label: "WhatsApp",
-      authentication: { type: "paired_session", ownership: "one linked user device" },
-      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
-      dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
-      provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
-      supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],
-      doctor_lane: {
-        provider: "whatsapp_personal",
-        capability: "whatsapp.personal.messages.sync"
-      }
-    },
-    {
-      source_id: "readwise.library",
-      label: "Readwise",
-      authentication: { type: "api_key", ownership: "one user-owned Readwise API key" },
-      contextual_scopes: ["category", "location"],
-      dependencies: [{ id: "readwise_api_key", label: "Readwise API key", required_for: "Reader and Export API access" }],
-      provider_ceiling: "Reader v3 and Export v2 traversal are bounded by provider pagination and the daily request guard.",
-      supported_formats: ["document text", "highlight text", "HTML", "user annotations", "author", "tags", "URL", "category", "location"],
-      doctor_lane: {
-        provider: "readwise",
-        capability: "readwise.sync",
-        env_flag: "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED"
-      }
-    }
-  ];
-  CAPABILITIES_BY_SOURCE = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((capability) => [capability.source_id, capability]));
-});
-
-// src/workers/source-dashboard.ts
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", DASHBOARD_SUPPORTED_SOURCES;
-var init_source_dashboard = __esm(() => {
-  init_olympus_layout();
-  init_google_handle_compatibility();
-  init_publisher_oauth_client();
-  init_privacy_language();
-  init_archive_formats();
-  init_sqlite_migrations();
-  init_ingestion_throughput();
-  init_source_corpus_registry();
-  init_types();
-  init_sovereignty();
-  init_scheduler_markers();
-  init_source_failure();
-  init_answer_ready_coverage();
-  init_vocabulary();
-  init_capture_freshness();
-  init_phases();
-  init_credential_health();
-  init_status();
-  init_public_source_capabilities();
-  DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
-    DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
-    DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
-    DASHBOARD_UNPAIR_INCOMPLETE_LABEL
-  ]);
-  DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
-    "credential_refresh_busy",
-    "credential_session_latched"
-  ]);
-  DASHBOARD_MANUAL_SYNC_SHOWN_MS = 10 * 60000;
-  MIN_PROGRESS_WINDOW_MS = 5 * 60000;
-  SAMPLE_RETENTION_MS = 24 * 60 * 60000;
-  DASHBOARD_SENSITIVITY_TIERS = {
-    policy_basis: "enforced",
-    tiers: [
-      {
-        name: SENSITIVITY_TIER_LABELS.secrets,
-        tier_label: "S5",
-        meaning: "Refused before storage — content never stored and never reaches any model",
-        local: false,
-        venice: false,
-        frontier: false
-      },
-      {
-        name: SENSITIVITY_TIER_LABELS.secure,
-        tier_label: "S4",
-        meaning: "Sensitive personal material — local models and Venice only, never frontier cloud",
-        local: true,
-        venice: true,
-        frontier: false
-      },
-      {
-        name: SENSITIVITY_TIER_LABELS.private,
-        tier_label: "S1–S3",
-        meaning: "Everyday mail, files, and notes",
-        local: true,
-        venice: true,
-        frontier: true
-      },
-      {
-        name: SENSITIVITY_TIER_LABELS.public,
-        tier_label: "S0",
-        meaning: "Freely shareable material",
-        local: true,
-        venice: true,
-        frontier: true
-      }
-    ]
-  };
-  DASHBOARD_SUPPORTED_SOURCES = [
-    {
-      source_id: "gmail.email",
-      primary_corpus_id: "internal.email",
-      corpus_source_ids: ["gmail.email"],
-      ingestion_ledger_source_id: "email",
-      label: "Gmail",
-      provider: "gmail",
-      family: "email",
-      trust_domain: "secure_local",
-      connect_kind: "oauth",
-      connect_action: { kind: "oauth", source: "gmail" }
-    },
-    {
-      source_id: "google_drive.docs",
-      primary_corpus_id: "internal.drive.docs",
-      corpus_source_ids: ["google_drive.docs"],
-      ingestion_ledger_source_id: "google_drive",
-      label: "Google Drive",
-      provider: "google_drive",
-      family: "file",
-      trust_domain: "internal",
-      connect_kind: "oauth",
-      connect_action: { kind: "oauth", source: "google-drive" }
-    },
-    {
-      source_id: "dropbox.files",
-      primary_corpus_id: "secure_local.dropbox.files",
-      corpus_source_ids: ["dropbox.files"],
-      ingestion_ledger_source_id: "dropbox",
-      label: "Dropbox",
-      provider: "dropbox",
-      family: "file",
-      trust_domain: "secure_local",
-      connect_kind: "oauth",
-      connect_action: { kind: "oauth", source: "dropbox" }
-    },
-    {
-      source_id: "local.files",
-      primary_corpus_id: "secure_local.local.files",
-      corpus_source_ids: ["local.files"],
-      ingestion_ledger_source_id: "local_files",
-      label: "Files on this computer",
-      provider: "local_files",
-      family: "file",
-      trust_domain: "secure_local",
-      connect_kind: "local",
-      sync_name: { mid: "your files", start: "Your files", plural: true },
-      connect_action: { kind: "this_computer", source: "local.files" }
-    },
-    {
-      source_id: "archive.imports",
-      primary_corpus_id: "secure_local.archive.email",
-      corpus_source_ids: ["archive.imports"],
-      owns_corpus: (corpus) => corpus.corpus_id.split(".")[1] === "archive" || isArchiveProvider(corpus.provider),
-      ingestion_ledger_source_id: "archive_imports",
-      label: "Archives",
-      provider: ARCHIVE_NEUTRAL_PROVIDER,
-      family: "email",
-      trust_domain: "secure_local",
-      connect_kind: "local",
-      connect_action: { kind: "archive_import" }
-    },
-    {
-      source_id: "x.bookmarks",
-      primary_corpus_id: "internal.x.bookmarks",
-      corpus_source_ids: ["x.bookmarks"],
-      ingestion_ledger_source_id: "x",
-      label: "X bookmarks",
-      provider: "x",
-      family: "x",
-      trust_domain: "internal",
-      connect_kind: "oauth",
-      content_arrives_extracted: true,
-      connect_action: { kind: "oauth", source: "x" }
-    },
-    {
-      source_id: "telegram.messages",
-      primary_corpus_id: "internal.telegram.messages",
-      corpus_source_ids: ["telegram.messages"],
-      ingestion_ledger_source_id: "telegram",
-      label: "Telegram",
-      provider: "telegram",
-      family: "chat",
-      trust_domain: "internal",
-      connect_kind: "pairing",
-      content_arrives_extracted: true,
-      raw_message_copies: "messages",
-      connect_action: {
-        kind: "guided_session",
-        source: "telegram",
-        instructions: [
-          "Telegram pairs with a phone-number login on this computer.",
-          "Ask your agent to start Telegram pairing; this card updates once the login completes."
-        ]
-      }
-    },
-    {
-      source_id: "whatsapp.personal.messages",
-      primary_corpus_id: "secure_local.whatsapp.messages",
-      corpus_source_ids: ["whatsapp.personal.messages"],
-      ingestion_ledger_source_id: "whatsapp",
-      label: "WhatsApp",
-      provider: "whatsapp_personal",
-      family: "chat",
-      trust_domain: "secure_local",
-      connect_kind: "pairing",
-      content_arrives_extracted: true,
-      raw_message_copies: "messages_and_media",
-      connect_action: {
-        kind: "guided_session",
-        source: "whatsapp",
-        instructions: [
-          "WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).",
-          WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
-          "Ask your agent to start WhatsApp pairing; this card updates once the scan completes."
-        ]
-      }
-    },
-    {
-      source_id: "readwise.library",
-      primary_corpus_id: "internal.readwise.library",
-      corpus_source_ids: ["readwise.library"],
-      ingestion_ledger_source_id: "readwise",
-      label: "Readwise",
-      provider: "readwise",
-      family: "readwise",
-      trust_domain: "internal",
-      connect_kind: "api_token",
-      content_arrives_extracted: true,
-      connect_action: { kind: "api_key", source: "readwise" }
-    },
-    ...archiveSourceCards().map((card) => ({
-      source_id: card.id,
-      primary_corpus_id: card.id,
-      corpus_source_ids: [],
-      owns_corpus: () => false,
-      ingestion_ledger_source_id: card.id,
-      public_source_id: ARCHIVE_IMPORTS_CARD_ID,
-      label: card.label,
-      provider: card.formats[0].provider,
-      family: card.formats[0].family,
-      trust_domain: "secure_local",
-      connect_kind: "local",
-      connect_action: { kind: "archive_import" }
-    }))
-  ];
-});
-
-// src/workers/google-connectors/gmail-live-control.ts
-var GMAIL_STORE_PULL_INTERVAL_MS, GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS, GMAIL_STORE_RECONCILE_INTERVAL_MS, GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
-var init_gmail_live_control = __esm(() => {
-  GMAIL_STORE_PULL_INTERVAL_MS = 30 * 60000;
-  GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
-  GMAIL_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
-  GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-});
-
-// src/workers/google-connectors/gmail-live-sync.ts
-var GMAIL_SCOPED_CONNECTOR_PREFIX;
-var init_gmail_live_sync = __esm(() => {
-  init_tiered_store_set();
-  init_tier_rules_sweep();
-  init_embeddings();
-  init_gmail_mail_record();
-  init_gmail();
-  init_gmail_live_control();
-  GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
-});
-
-// src/workers/google-connectors/drive-live-control.ts
-var GOOGLE_DRIVE_STORE_PULL_INTERVAL_MS, GOOGLE_DRIVE_STORE_PULL_FRESHNESS_THRESHOLD_MS, GOOGLE_DRIVE_STORE_RECONCILE_INTERVAL_MS, GOOGLE_DRIVE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
-var init_drive_live_control = __esm(() => {
-  GOOGLE_DRIVE_STORE_PULL_INTERVAL_MS = 30 * 60000;
-  GOOGLE_DRIVE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
-  GOOGLE_DRIVE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
-  GOOGLE_DRIVE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-});
-
-// src/workers/google-connectors/drive-live-sync.ts
-var init_drive_live_sync = __esm(() => {
-  init_tiered_store_set();
-  init_tier_classifier();
-  init_embeddings();
-  init_drive();
-  init_drive_live_control();
-});
-
-// src/workers/google-connectors/index.ts
-var init_google_connectors = __esm(() => {
-  init_gmail();
-  init_gmail_live_control();
-  init_gmail_live_sync();
-  init_drive();
-  init_drive_live_control();
-  init_drive_live_sync();
-  init_request_budget();
-  init_corpora();
-});
-
-// src/core/pairing-session-paths.ts
-var init_pairing_session_paths = __esm(() => {
-  init_olympus_layout();
-  init_source_placement();
-  init_source_registry();
-});
-
 // src/workers/archive-import/state.ts
 var init_state = __esm(() => {
   init_source_placement();
@@ -20703,21 +20327,6 @@ var init_state = __esm(() => {
   init_atomic_file();
   init_archive_formats();
   init_file_lease();
-});
-
-// src/workers/archive-import/store.ts
-var ARCHIVE_STORE_PLACEMENT;
-var init_store2 = __esm(() => {
-  init_source_placement();
-  init_archive_formats();
-  init_source_corpus_registry();
-  init_source_storage();
-  init_state();
-  ARCHIVE_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S4",
-    trustDomain: "secure_local",
-    secretsInContent: true
-  });
 });
 
 // src/workers/archive-import/media-bindings.ts
@@ -20728,36 +20337,6 @@ var init_media_bindings = __esm(() => {
   init_source_storage();
   init_state();
   init_olympus_layout();
-});
-
-// src/core/account-files.ts
-var STORE_ORDER, SOURCE_ALIASES;
-var init_account_files = __esm(() => {
-  init_olympus_layout();
-  init_archive_formats();
-  init_source_placement();
-  init_source_registry();
-  init_source_ingestion_policy();
-  init_messaging_capture_grant_file();
-  init_pairing_session_paths();
-  init_store2();
-  init_media_bindings();
-  init_reconcile_state();
-  STORE_ORDER = {
-    [WHATSAPP_SOURCE_ID]: ["secure_local", "internal"]
-  };
-  SOURCE_ALIASES = {
-    [WHATSAPP_SOURCE_ID]: ["whatsapp.messages"]
-  };
-});
-
-// src/workers/archive-import/record-probe.ts
-var RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES, RECORD_PROBE_MAX_FOLDER_SCAN_BYTES;
-var init_record_probe = __esm(() => {
-  init_json_stream();
-  RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
-  RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
-  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
 });
 
 // node_modules/fflate/esm/browser.js
@@ -21430,9 +21009,1770 @@ var init_zip_reader = __esm(() => {
   lenientUtf8 = new TextDecoder("utf-8");
 });
 
+// src/workers/archive-import/input-media.ts
+var init_input_media = __esm(() => {
+  init_file_extraction_source();
+  init_scope_safe_fs();
+  init_media_bindings();
+  init_zip_reader();
+});
+// src/workers/file-extraction/spool.ts
+var EXTRACTION_SPOOL_STALE_MS;
+var init_spool = __esm(() => {
+  EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
+});
+
+// src/workers/dropbox-files/extraction-source.ts
+import { readFile as readFile3, realpath, stat as stat3 } from "node:fs/promises";
+import { relative as relative5, resolve as resolve10, sep as sep6 } from "node:path";
+
+class DropboxExtractionSource {
+  id;
+  corpusId;
+  provider;
+  candidates;
+  scopes;
+  token;
+  locators;
+  localRoots;
+  fetchImpl;
+  contentBaseUrl;
+  downloadTimeoutMs;
+  canonicalRootCache = new Map;
+  constructor(options) {
+    this.id = requireNonEmpty(options.id, "Dropbox extraction source id");
+    this.corpusId = requireNonEmpty(options.corpusId, "Dropbox extraction source corpus id");
+    this.provider = requireNonEmpty(options.provider, "Dropbox extraction source provider");
+    this.token = requireNonEmpty(options.token, "Dropbox content token");
+    this.candidates = options.candidates;
+    this.locators = options.locators;
+    this.scopes = options.scopes.map((scope) => resolveScope(scope));
+    this.localRoots = (options.localRoots ?? []).map((root) => normalizeRootConfig(root)).filter((root) => Boolean(root));
+    this.fetchImpl = options.fetch ?? ((url, init) => fetch(url, init));
+    this.contentBaseUrl = options.contentBaseUrl?.replace(/\/+$/, "") || DROPBOX_CONTENT_BASE_URL;
+    this.downloadTimeoutMs = options.downloadTimeoutMs ?? DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
+  }
+  async listCandidates(options) {
+    const scopes = this.scopesFor(options.approvedScopeKeys);
+    if (scopes.length === 0)
+      return { candidates: [], done: true };
+    const readerOptions = {
+      limit: options.limit,
+      withoutChunksOnly: true,
+      includeStaleChunks: true
+    };
+    if (options.cursor !== undefined)
+      readerOptions.cursor = options.cursor;
+    if (options.mimeTypes)
+      readerOptions.mimeTypes = options.mimeTypes;
+    const sharedAccount = singleAccount(scopes);
+    if (sharedAccount)
+      readerOptions.accountScope = sharedAccount;
+    const page2 = await this.candidates.extractionCandidates(readerOptions);
+    const candidates = [];
+    for (const row of page2.candidates) {
+      const ref = this.refFromRow(row, scopes);
+      if (ref)
+        candidates.push(ref);
+    }
+    return {
+      candidates,
+      ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
+      done: page2.done
+    };
+  }
+  async fetch(ref, options) {
+    const local = await this.readFromLocalMount(ref, options.maxBytes);
+    if (local)
+      return local;
+    return this.downloadFromProvider(ref, options.maxBytes);
+  }
+  verifyBytes(ref, bytes) {
+    if (!ref.contentHash)
+      return false;
+    return computeDropboxContentHash(bytes) === ref.contentHash;
+  }
+  scopesFor(approvedScopeKeys) {
+    if (!approvedScopeKeys)
+      return this.scopes;
+    const wanted = new Set(approvedScopeKeys);
+    return this.scopes.filter((scope) => wanted.has(scope.approvedScopeKey));
+  }
+  refFromRow(row, scopes) {
+    const split = splitScopedLocalItemId(row.localItemId);
+    const accountScope = row.accountScope ?? split?.accountScope;
+    const providerItemId = row.providerItemId ?? split?.providerItemId;
+    if (!accountScope || !providerItemId)
+      return;
+    const scope = matchScope(scopes, accountScope, row.locatorUri);
+    if (!scope)
+      return;
+    const name = row.name ?? row.title;
+    return {
+      corpusId: this.corpusId,
+      provider: this.provider,
+      accountScope,
+      approvedScopeKey: scope.approvedScopeKey,
+      providerItemId,
+      localItemId: row.localItemId,
+      ...row.sourceVersion ? { sourceVersion: row.sourceVersion } : {},
+      ...row.contentHash ? { contentHash: row.contentHash } : {},
+      ...name ? { name } : {},
+      ...row.mimeType ? { mimeType: row.mimeType } : {},
+      ...row.sizeBytes !== undefined ? { sizeBytes: row.sizeBytes } : {}
+    };
+  }
+  async readFromLocalMount(ref, maxBytes) {
+    if (this.localRoots.length === 0)
+      return;
+    if (!ref.contentHash)
+      return;
+    const roots = this.localRoots.filter((root) => rootMatchesRef(root, ref));
+    if (roots.length === 0)
+      return;
+    const dropboxPath = await this.dropboxPathFor(ref);
+    if (!dropboxPath)
+      return;
+    for (const root of roots) {
+      const candidatePath = await this.candidatePath(root, dropboxPath);
+      if (!candidatePath)
+        continue;
+      const bytes = await readVerifiedCandidate({
+        candidatePath,
+        contentHash: ref.contentHash,
+        ...maxBytes !== undefined ? { maxBytes } : {},
+        ...ref.sizeBytes !== undefined ? { declaredSizeBytes: ref.sizeBytes } : {}
+      });
+      if (!bytes)
+        continue;
+      return {
+        bytes,
+        ...ref.mimeType ? { mimeType: ref.mimeType } : {},
+        sizeBytes: bytes.byteLength
+      };
+    }
+    return;
+  }
+  async dropboxPathFor(ref) {
+    if (!this.locators)
+      return;
+    const content = await this.locators.localContent(ref.localItemId, LOCATOR_LOOKUP_MAX_CHARS);
+    return content?.locatorUri;
+  }
+  async candidatePath(root, dropboxPath) {
+    const relativePath = dropboxRelativePath(root.dropboxPathPrefix, dropboxPath);
+    if (relativePath === undefined)
+      return;
+    const rootRealPath = await this.canonicalRoot(root.rootPath);
+    if (!rootRealPath)
+      return;
+    const candidatePath = resolve10(rootRealPath, relativePath);
+    const relativeToRoot = relative5(rootRealPath, candidatePath);
+    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep6}`)) {
+      return;
+    }
+    return candidatePath;
+  }
+  canonicalRoot(rootPath) {
+    let cached2 = this.canonicalRootCache.get(rootPath);
+    if (!cached2) {
+      cached2 = realpath(rootPath).catch(() => {
+        return;
+      });
+      this.canonicalRootCache.set(rootPath, cached2);
+    }
+    return cached2;
+  }
+  async downloadFromProvider(ref, maxBytes) {
+    let response;
+    try {
+      const fetchImpl = (url, init) => this.fetchImpl(url, init);
+      response = await fetchWithBodyDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Dropbox-API-Arg": JSON.stringify(dropboxDownloadArg(ref))
+        }
+      }, this.downloadTimeoutMs);
+    } catch {
+      throw new FileExtractionSourceError("network_unreachable");
+    }
+    if (!response.ok)
+      throw await downloadFailure(response);
+    const declaredSize = parsePositiveInteger(response.headers.get("content-length") ?? undefined);
+    if (maxBytes !== undefined && declaredSize !== undefined && declaredSize > maxBytes) {
+      throw new FileExtractionSourceError("source_too_large");
+    }
+    let bytes;
+    try {
+      bytes = new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      if (isAbortError(error))
+        throw new FileExtractionSourceError("network_socket_closed");
+      throw error;
+    }
+    if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
+      throw new FileExtractionSourceError("source_too_large");
+    }
+    const contentType = response.headers.get("content-type");
+    return {
+      bytes,
+      ...contentType ? { mimeType: contentType } : {},
+      sizeBytes: declaredSize ?? bytes.byteLength
+    };
+  }
+}
+function dropboxDownloadArg(ref) {
+  if (ref.sourceVersion) {
+    return {
+      path: ref.sourceVersion.startsWith("rev:") ? ref.sourceVersion : `rev:${ref.sourceVersion}`
+    };
+  }
+  return { path: ref.providerItemId };
+}
+function matchScope(scopes, accountScope, locatorUri) {
+  const path = normalizeDropboxPath2(locatorUri);
+  if (!path)
+    return;
+  const lowerPath = path.toLowerCase();
+  let best;
+  for (const scope of scopes) {
+    if (scope.account !== accountScope)
+      continue;
+    const prefix = scope.pathPrefix.toLowerCase();
+    const contains = prefix === "/" ? lowerPath.length > 1 : lowerPath.startsWith(`${prefix}/`);
+    if (!contains)
+      continue;
+    if (!best || scope.pathPrefix.length > best.pathPrefix.length)
+      best = scope;
+  }
+  return best;
+}
+function resolveScope(scope) {
+  const approvedScopeKey = scope.approvedScopeKey?.trim();
+  if (!approvedScopeKey) {
+    throw new Error("Dropbox extraction scope requires an approvedScopeKey.");
+  }
+  const separator = approvedScopeKey.indexOf(":");
+  const parsedAccount = approvedScopeKey.startsWith(DROPBOX_SCOPE_KEY_PROVIDER_PREFIX) && separator > 0 ? approvedScopeKey.slice(DROPBOX_SCOPE_KEY_PROVIDER_PREFIX.length, separator) : undefined;
+  const account = scope.account?.trim() || parsedAccount;
+  if (!account) {
+    throw new Error(`Dropbox extraction scope ${approvedScopeKey} needs an account it cannot parse from its key.`);
+  }
+  const parsedPath = separator > 0 ? approvedScopeKey.slice(separator + 1) : undefined;
+  const rawPrefix = scope.pathPrefix?.trim() || (parsedPath && !parsedPath.startsWith(DROPBOX_FOLDER_ID_SCOPE_PREFIX) ? parsedPath : undefined);
+  const pathPrefix = normalizeDropboxPath2(rawPrefix);
+  if (!pathPrefix) {
+    throw new Error(`Dropbox extraction scope ${approvedScopeKey} requires an explicit pathPrefix.`);
+  }
+  return { approvedScopeKey, account, pathPrefix };
+}
+function singleAccount(scopes) {
+  const accounts = new Set(scopes.map((scope) => scope.account));
+  return accounts.size === 1 ? [...accounts][0] : undefined;
+}
+async function readVerifiedCandidate(input) {
+  let fileStat2;
+  try {
+    fileStat2 = await stat3(input.candidatePath);
+  } catch {
+    return;
+  }
+  if (!fileStat2.isFile())
+    return;
+  if (input.maxBytes !== undefined && fileStat2.size > input.maxBytes) {
+    throw new FileExtractionSourceError("source_too_large");
+  }
+  if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat2.size) {
+    return;
+  }
+  const bytes = new Uint8Array(await readFile3(input.candidatePath));
+  if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
+    throw new FileExtractionSourceError("source_too_large");
+  }
+  if (computeDropboxContentHash(bytes) !== input.contentHash)
+    return;
+  return bytes;
+}
+function normalizeRootConfig(root) {
+  const rootPath = root.rootPath.trim();
+  if (!rootPath)
+    return;
+  const normalized = { rootPath };
+  if (root.account?.trim())
+    normalized.account = root.account.trim();
+  if (root.approvedScopeKey?.trim())
+    normalized.approvedScopeKey = root.approvedScopeKey.trim();
+  const dropboxPathPrefix = normalizeDropboxPath2(root.dropboxPathPrefix ?? "/");
+  if (dropboxPathPrefix)
+    normalized.dropboxPathPrefix = dropboxPathPrefix;
+  if (root.rootId?.trim())
+    normalized.rootId = root.rootId.trim();
+  return normalized;
+}
+function rootMatchesRef(root, ref) {
+  if (root.account && root.account !== ref.accountScope)
+    return false;
+  if (root.approvedScopeKey && root.approvedScopeKey !== ref.approvedScopeKey)
+    return false;
+  return true;
+}
+function dropboxRelativePath(prefix, dropboxPath) {
+  const normalizedPath = normalizeDropboxPath2(dropboxPath);
+  if (!normalizedPath)
+    return;
+  const normalizedPrefix = normalizeDropboxPath2(prefix ?? "/");
+  if (!normalizedPrefix || normalizedPrefix === "/") {
+    return normalizedPath.slice(1);
+  }
+  if (normalizedPath.toLowerCase() === normalizedPrefix.toLowerCase()) {
+    return;
+  }
+  if (!normalizedPath.toLowerCase().startsWith(`${normalizedPrefix.toLowerCase()}/`)) {
+    return;
+  }
+  return normalizedPath.slice(normalizedPrefix.length + 1);
+}
+function normalizeDropboxPath2(path) {
+  const trimmed = path?.trim().replace(/\\/g, "/").replace(/\/+/g, "/");
+  if (!trimmed)
+    return;
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+async function downloadFailure(response) {
+  let detail = "";
+  try {
+    detail = (await response.text()).slice(0, MAX_PROVIDER_DETAIL_CHARS);
+  } catch {
+    detail = "";
+  }
+  const options = { detailForHash: `${response.status}:${detail}` };
+  if (response.status === 401)
+    return new FileExtractionSourceError("source_auth_expired", options);
+  if (response.status === 403)
+    return new FileExtractionSourceError("source_permission_denied", options);
+  if (response.status === 429)
+    return new FileExtractionSourceError("source_rate_limited", options);
+  if (response.status === 404 || response.status === 409) {
+    return new FileExtractionSourceError("source_item_not_found", options);
+  }
+  if (response.status >= 500)
+    return new FileExtractionSourceError("source_unavailable", options);
+  if (response.status >= 400)
+    return new FileExtractionSourceError("source_request_rejected", options);
+  return new FileExtractionSourceError("source_unavailable", options);
+}
+function parsePositiveInteger(value) {
+  if (!value)
+    return;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+function requireNonEmpty(value, label) {
+  const trimmed = value?.trim();
+  if (!trimmed)
+    throw new Error(`${label} is required.`);
+  return trimmed;
+}
+var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2", DROPBOX_SCOPE_KEY_PROVIDER_PREFIX = "dropbox.", DROPBOX_FOLDER_ID_SCOPE_PREFIX = "folder_id:", MAX_PROVIDER_DETAIL_CHARS = 500, LOCATOR_LOOKUP_MAX_CHARS = 1;
+var init_extraction_source = __esm(() => {
+  init_dropbox_content_hash();
+  init_provider_client();
+  init_http_timeout();
+  init_file_extraction_source();
+});
+
+// src/workers/google-connectors/drive-extraction-source.ts
+var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES;
+var init_drive_extraction_source = __esm(() => {
+  init_file_extraction_source();
+  init_drive();
+  init_request_budget();
+  GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/tiff",
+    "image/webp",
+    "image/heic",
+    "image/heif"
+  ]);
+});
+
+// src/workers/file-extraction/connector-source.ts
+var init_connector_source = __esm(() => {
+  init_spool();
+  init_file_extraction_source();
+});
+
+// src/workers/whatsapp/child-media.ts
+var COPY_CHUNK_BYTES;
+var init_child_media = __esm(() => {
+  init_file_extraction_source();
+  init_input_media();
+  COPY_CHUNK_BYTES = 1024 * 1024;
+});
+
+// src/workers/whatsapp/extraction-source.ts
+var init_extraction_source2 = __esm(() => {
+  init_spool();
+  init_child_media();
+  init_input_media();
+  init_file_extraction_source();
+});
+
+// src/workers/whatsapp/reaction-index.ts
+var init_reaction_index = __esm(() => {
+  init_reactions();
+});
+
+// src/workers/whatsapp/spool-index.ts
+var init_spool_index = __esm(() => {
+  init_spool_file_identity();
+  init_reaction_index();
+});
+
+// src/workers/whatsapp/spool-resets.ts
+var init_spool_resets = () => {};
+
+// src/workers/whatsapp/match-keys.ts
+var init_match_keys = __esm(() => {
+  init_reaction_index();
+});
+
+// src/workers/whatsapp/spool-reader.ts
+var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES2, FINISH_STEP_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
+var init_spool_reader = __esm(() => {
+  init_spool_file_identity();
+  WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
+  CHUNK_BYTES2 = 256 * 1024;
+  FINISH_STEP_BYTES = 4 * 1024;
+  NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
+  CAPTURE_STATUS_MAX_BYTES = 64 * 1024;
+});
+
+// src/workers/whatsapp/live-connector.ts
+var DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, CHILD_MEDIA_TYPES, WHATSAPP_FETCHED_MEDIA_TYPES, MEDIA_TEMP_MAX_AGE_MS;
+var init_live_connector = __esm(() => {
+  init_source_inputs();
+  init_capture_spool_secrets();
+  init_reaction_index();
+  init_spool_index();
+  init_spool_resets();
+  init_child_media();
+  init_match_keys();
+  init_spool_reader();
+  DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
+  TARGET_READ_CHUNK_BYTES = 4 * 1024;
+  CHILD_MEDIA_TYPES = new Set(["image", "video", "video_note"]);
+  WHATSAPP_FETCHED_MEDIA_TYPES = new Set([...CHILD_MEDIA_TYPES, "audio"]);
+  MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
+});
+
+// src/workers/whatsapp/media-fetch.ts
+var DISK_FLOOR_MIN_BYTES, ANSWER_HEAD_MAX_BYTES;
+var init_media_fetch = __esm(() => {
+  init_source_inputs();
+  init_secrets_disposition();
+  init_tier_rejudge();
+  init_child_media();
+  init_live_connector();
+  init_spool_reader();
+  DISK_FLOOR_MIN_BYTES = 5 * 1024 * 1024 * 1024;
+  ANSWER_HEAD_MAX_BYTES = 64 * 1024;
+});
+
+// src/workers/whatsapp/store-sync.ts
+var WHATSAPP_STORE_PLACEMENT, WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES, CLEARED_FILES_KEY;
+var init_store_sync = __esm(() => {
+  init_olympus_layout();
+  init_source_placement();
+  init_source_storage();
+  init_tiered_store_set();
+  init_capture_spool_secrets();
+  init_capture_freshness();
+  init_live_connector();
+  init_spool_reader();
+  init_spool_file_identity();
+  init_spool_index();
+  init_media_fetch();
+  init_child_media();
+  WHATSAPP_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local"
+  });
+  WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
+  CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
+});
+
+// src/workers/whatsapp/extraction-factory.ts
+var init_extraction_factory = __esm(() => {
+  init_source_placement();
+  init_connector_source();
+  init_child_media();
+  init_extraction_source2();
+  init_store_sync();
+});
+
+// src/workers/file-extraction/job-store.ts
+var NETWORK_ERROR_KINDS, POLICY_DECISIONS, TERMINAL_STATUSES;
+var init_job_store = __esm(() => {
+  init_sqlite_migrations();
+  init_job_names();
+  NETWORK_ERROR_KINDS = new Set([
+    "network_unreachable",
+    "network_socket_closed"
+  ]);
+  POLICY_DECISIONS = new Set([
+    "index_allowed",
+    "index_redacted",
+    "metadata_only",
+    "blocked_sensitive",
+    "needs_review"
+  ]);
+  TERMINAL_STATUSES = new Set([
+    "indexed",
+    "metadata_only",
+    "skipped_unsupported",
+    "skipped_too_large",
+    "blocked_policy",
+    "failed_retryable",
+    "failed_terminal"
+  ]);
+});
+
+// src/workers/file-extraction/extractors/bounded-text.ts
+var TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, GENERIC_MIME_TYPES;
+var init_bounded_text = __esm(() => {
+  TEXT_MIME_TYPES = new Set([
+    "application/json",
+    "application/x-ndjson",
+    "application/xml",
+    "text/csv",
+    "text/html",
+    "text/markdown",
+    "text/plain",
+    "text/tab-separated-values",
+    "text/xml"
+  ]);
+  TABLE_MIME_TYPES = new Set([
+    "text/csv",
+    "text/tab-separated-values"
+  ]);
+  IMAGE_MIME_TYPES = new Set([
+    "image/bmp",
+    "image/gif",
+    "image/heic",
+    "image/heif",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp"
+  ]);
+  GENERIC_MIME_TYPES = new Set([
+    "application/octet-stream",
+    "binary/octet-stream",
+    "application/binary"
+  ]);
+});
+
+// src/workers/file-extraction/extractors/document-formats.ts
+var init_document_formats = __esm(() => {
+  init_bounded_text();
+});
+
+// src/workers/file-extraction/extractors/input-limits.ts
+var DOCUMENT_READER_MAX_INPUT_BYTES, IMAGE_READER_MAX_INPUT_BYTES;
+var init_input_limits = __esm(() => {
+  DOCUMENT_READER_MAX_INPUT_BYTES = 256 * 1024 * 1024;
+  IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/file-extraction/extractors/image-prepare.ts
+var init_image_prepare = __esm(() => {
+  init_media_cache();
+  init_still_image_formats();
+  init_command_runner();
+  init_image_preparers();
+  init_ocr();
+  init_input_limits();
+});
+
+// src/workers/file-extraction/extractors/text.ts
+var init_text = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  init_document_formats();
+  init_image_prepare();
+  init_media_cache();
+  init_still_image_formats();
+  init_input_limits();
+});
+
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+import { existsSync as existsSync17 } from "node:fs";
+import { dirname as dirname28, join as join38 } from "node:path";
+import { fileURLToPath as fileURLToPath7 } from "node:url";
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync17) {
+  let directory = dirname28(fileURLToPath7(moduleUrl));
+  for (let depth2 = 0;depth2 < 6; depth2 += 1) {
+    const candidate = join38(directory, APPLE_VISION_OCR_SCRIPT);
+    if (exists(candidate))
+      return candidate;
+    const parent = dirname28(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  return;
+}
+function appleVisionOcrSelected(preference, platform2 = process.platform) {
+  return preference === "auto" && platform2 === "darwin";
+}
+function parseOcrEnginePreference(value) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized)
+    return;
+  if (OCR_ENGINE_PREFERENCES.includes(normalized)) {
+    return normalized;
+  }
+  throw new Error(`OCR engine must be one of ${OCR_ENGINE_PREFERENCES.join(", ")}; got ${value}.`);
+}
+var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js", APPLE_VISION_OSASCRIPT = "/usr/bin/osascript", OCR_ENGINE_PREFERENCES;
+var init_apple_vision_ocr = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
+});
+
+// src/workers/file-extraction/extractors/ocr-probe-fixture.ts
+function ocrProbeJpeg() {
+  return new Uint8Array(Buffer.from(OCR_PROBE_IMAGE_BASE64, "base64"));
+}
+var OCR_PROBE_WORD = "OLYMPUS", OCR_PROBE_IMAGE_WIDTH = 360, OCR_PROBE_IMAGE_HEIGHT = 96, OCR_PROBE_IMAGE_BASE64;
+var init_ocr_probe_fixture = __esm(() => {
+  OCR_PROBE_IMAGE_BASE64 = [
+    "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"
+  ].join("");
+});
+
+// src/workers/file-extraction/extractors/ocr-capability.ts
+import { mkdtemp, readFile as readFile4, readdir, rm as rm2, writeFile } from "node:fs/promises";
+import { tmpdir as tmpdir4 } from "node:os";
+import { join as join39 } from "node:path";
+function ocrmypdfArguments(input) {
+  return [
+    "--force-ocr",
+    "--rotate-pages",
+    "--deskew",
+    "--clean",
+    "--jobs",
+    "1",
+    "--optimize",
+    "0",
+    "--output-type",
+    "pdf",
+    "--sidecar",
+    input.sidecarPath,
+    input.inputPath,
+    input.outputPath
+  ];
+}
+function tesseractArguments(inputPath) {
+  return [inputPath, "stdout", "-l", "eng", "--psm", "3"];
+}
+function probeWordRead(text3) {
+  let letters = "";
+  for (const char of text3.toUpperCase()) {
+    if (char >= "A" && char <= "Z" || char >= "0" && char <= "9")
+      letters += char;
+  }
+  return letters.includes(OCR_PROBE_WORD);
+}
+function commandMissing(error) {
+  return error?.code === "ENOENT";
+}
+function buildOcrProbePdf() {
+  const jpeg = ocrProbeJpeg();
+  const pageWidth = OCR_PROBE_IMAGE_WIDTH * 72 / PROBE_RENDER_DPI;
+  const pageHeight = OCR_PROBE_IMAGE_HEIGHT * 72 / PROBE_RENDER_DPI;
+  const content = `q ${pageWidth} 0 0 ${pageHeight} 0 0 cm /Im0 Do Q`;
+  const chunks = [];
+  const offsets = [];
+  let length = 0;
+  const push = (chunk) => {
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk, "latin1") : chunk;
+    chunks.push(buffer);
+    length += buffer.length;
+  };
+  push(`%PDF-1.4
+`);
+  const object = (number, body, stream) => {
+    offsets[number] = length;
+    push(`${number} 0 obj
+`);
+    push(body);
+    if (stream) {
+      push(`
+stream
+`);
+      push(stream);
+      push(`
+endstream`);
+    }
+    push(`
+endobj
+`);
+  };
+  object(1, "<< /Type /Catalog /Pages 2 0 R >>");
+  object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  object(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` + "/Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>");
+  object(4, `<< /Type /XObject /Subtype /Image /Width ${OCR_PROBE_IMAGE_WIDTH} /Height ${OCR_PROBE_IMAGE_HEIGHT} ` + `/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>`, Buffer.from(jpeg));
+  object(5, `<< /Length ${content.length} >>`, Buffer.from(content, "latin1"));
+  const xrefOffset = length;
+  push(`xref
+0 6
+0000000000 65535 f
+`);
+  for (let number = 1;number <= 5; number += 1) {
+    push(`${String(offsets[number]).padStart(10, "0")} 00000 n
+`);
+  }
+  push(`trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+${xrefOffset}
+%%EOF
+`);
+  return new Uint8Array(Buffer.concat(chunks));
+}
+async function probeTesseract(input) {
+  try {
+    const result = await input.runner({
+      command: TESSERACT_COMMAND,
+      args: tesseractArguments(input.imagePath),
+      timeoutMs: PROBE_TESSERACT_TIMEOUT_MS,
+      env: TESSERACT_ENV
+    });
+    return probeWordRead(result.stdout) ? "ok" : "failed";
+  } catch (error) {
+    return commandMissing(error) ? "missing" : "failed";
+  }
+}
+async function probePdftoppm(input) {
+  const prefix = join39(input.directory, "render");
+  try {
+    await input.runner({
+      command: PDFTOPPM_COMMAND,
+      args: ["-f", "1", "-l", "1", "-r", String(PROBE_RENDER_DPI), "-png", input.pdfPath, prefix],
+      timeoutMs: PROBE_PDFTOPPM_TIMEOUT_MS
+    });
+  } catch (error) {
+    return commandMissing(error) ? "missing" : "failed";
+  }
+  const rendered = (await readdir(input.directory)).filter((name) => name.startsWith("render") && name.endsWith(".png"));
+  const first = rendered[0];
+  if (!first)
+    return "failed";
+  if (input.tesseract === "ok") {
+    const read = await probeTesseract({ runner: input.runner, imagePath: join39(input.directory, first) });
+    if (read !== "ok")
+      return "failed";
+  }
+  return "ok";
+}
+async function probeOcrmypdf(input) {
+  const sidecarPath = join39(input.directory, "probe-sidecar.txt");
+  try {
+    await input.runner({
+      command: OCRMYPDF_COMMAND,
+      args: ocrmypdfArguments({
+        inputPath: input.pdfPath,
+        outputPath: join39(input.directory, "probe-output.pdf"),
+        sidecarPath
+      }),
+      timeoutMs: PROBE_OCRMYPDF_TIMEOUT_MS
+    });
+  } catch (error) {
+    return commandMissing(error) ? "missing" : "failed";
+  }
+  try {
+    return probeWordRead(await readFile4(sidecarPath, "utf8")) ? "ok" : "failed";
+  } catch {
+    return "failed";
+  }
+}
+async function probeOcrCapability(options = {}) {
+  const runner = options.commandRunner ?? runExtractionCommand;
+  const now = options.now ?? Date.now;
+  let tesseract = "failed";
+  let pdftoppm = "failed";
+  let ocrmypdf = "failed";
+  let directory;
+  try {
+    directory = await mkdtemp(join39(tmpdir4(), PROBE_TEMP_PREFIX));
+    const imagePath = join39(directory, "probe.jpg");
+    const pdfPath = join39(directory, "probe.pdf");
+    await writeFile(imagePath, ocrProbeJpeg());
+    await writeFile(pdfPath, buildOcrProbePdf());
+    tesseract = await probeTesseract({ runner, imagePath });
+    pdftoppm = await probePdftoppm({ runner, directory, pdfPath, tesseract });
+    ocrmypdf = tesseract === "ok" ? await probeOcrmypdf({ runner, directory, pdfPath }) : "skipped";
+  } catch {} finally {
+    if (directory)
+      await rm2(directory, { recursive: true, force: true }).catch(() => {});
+  }
+  return {
+    tesseract,
+    pdftoppm,
+    ocrmypdf,
+    pdfEngine: ocrmypdf === "ok" ? "ocrmypdf" : tesseract === "ok" && pdftoppm === "ok" ? "pdftoppm_tesseract" : undefined,
+    imageEngine: tesseract === "ok" ? "tesseract" : undefined,
+    checkedAt: now()
+  };
+}
+var OCRMYPDF_COMMAND = "ocrmypdf", TESSERACT_COMMAND = "tesseract", PDFTOPPM_COMMAND = "pdftoppm", TESSERACT_ENV, OCR_READY_TTL_MS, PROBE_TESSERACT_TIMEOUT_MS = 30000, PROBE_PDFTOPPM_TIMEOUT_MS = 30000, PROBE_OCRMYPDF_TIMEOUT_MS = 90000, PROBE_TEMP_PREFIX = "olympus-ocr-probe-", PROBE_RENDER_DPI = 150;
+var init_ocr_capability = __esm(() => {
+  init_command_runner();
+  init_ocr_probe_fixture();
+  TESSERACT_ENV = { OMP_THREAD_LIMIT: "1" };
+  OCR_READY_TTL_MS = 10 * 60000;
+});
+
+// src/workers/file-extraction/extractors/pdf-raster-ocr.ts
+var init_pdf_raster_ocr = __esm(() => {
+  init_bounded_text();
+  init_apple_vision_ocr();
+  init_command_runner();
+  init_ocr_capability();
+  init_pdf_render();
+});
+
+// src/workers/file-extraction/extractors/ocr.ts
+var init_ocr = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  init_text();
+  init_apple_vision_ocr();
+  init_ocr_capability();
+  init_pdf_raster_ocr();
+  init_input_limits();
+});
+
+// src/workers/file-extraction/extractors/remote-vlm.ts
+var DEFAULT_REMOTE_EXTRACTION_PROMPT;
+var init_remote_vlm = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  init_pdf_render();
+  init_text();
+  init_input_limits();
+  init_zkapi_consult_settings();
+  init_engine();
+  DEFAULT_REMOTE_EXTRACTION_PROMPT = [
+    "Extract concise evidence text from this secure-local document for private indexing.",
+    "Return only visible or directly readable content.",
+    "For tables, reports, receipts, screenshots, or scans, preserve labels, values, dates, units, and row context.",
+    "Do not infer private facts beyond the document."
+  ].join(" ");
+});
+
+// src/workers/source-index/built-in-reasoning/manifest.ts
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+function ggmlOrgAsrFile(name, bytes, sha256) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
+var init_manifest2 = __esm(() => {
+  GIB = 1024 ** 3;
+  QWEN35_2B = {
+    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+    displayName: "Qwen3.5 2B",
+    sizeClass: "small",
+    baseRepository: "Qwen/Qwen3.5-2B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-2B-GGUF",
+    revision: QWEN35_2B_REVISION,
+    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_4B = {
+    modelId: "qwen3.5-4b-q4_k_m-e87f176",
+    displayName: "Qwen3.5 4B",
+    sizeClass: "standard",
+    baseRepository: "Qwen/Qwen3.5-4B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-4B-GGUF",
+    revision: QWEN35_4B_REVISION,
+    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_9B = {
+    modelId: "qwen3.5-9b-q4_k_m-3885219",
+    displayName: "Qwen3.5 9B",
+    sizeClass: "large",
+    baseRepository: "Qwen/Qwen3.5-9B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-9B-GGUF",
+    revision: QWEN35_9B_REVISION,
+    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+  LLAMA_SERVER_RUNTIME = {
+    release: LLAMA_CPP_RELEASE,
+    license: "MIT",
+    archives: [
+      {
+        platform: "darwin-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        bytes: 11827796,
+        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+        gpu: true
+      },
+      {
+        platform: "linux-x64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        bytes: 17544875,
+        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+        gpu: false
+      },
+      {
+        platform: "linux-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        bytes: 13590823,
+        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+        gpu: false
+      }
+    ]
+  };
+  QWEN3_ASR_06B = {
+    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+    displayName: "Qwen3-ASR 0.6B",
+    baseRepository: "Qwen/Qwen3-ASR-0.6B",
+    license: "Apache-2.0",
+    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+    revision: QWEN3_ASR_06B_REVISION,
+    files: [
+      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+    ],
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 4096
+  };
+});
+
+// src/workers/source-index/built-in-reasoning/install.ts
+var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
+var init_install = __esm(() => {
+  init_pinned_download();
+  init_olympus_layout();
+  init_manifest2();
+  STALE_LOCK_MS2 = 60 * 60000;
+  BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+  SPACE_BACKOFF_MS = 15 * 60000;
+  DOWNLOAD_STALL_MS2 = 2 * 60000;
+  VERIFY_TIMEOUT_MS = 15 * 60000;
+  EXTRACT_TIMEOUT_MS = 5 * 60000;
+});
+
+// src/workers/source-index/built-in-reasoning/server.ts
+var init_server = __esm(() => {
+  init_model_transport();
+});
+
+// src/workers/source-index/built-in-reasoning/transcription-model.ts
+var init_transcription_model = __esm(() => {
+  init_olympus_layout();
+  init_install();
+  init_manifest2();
+});
+
+// src/workers/file-extraction/extractors/audio-wav.ts
+var init_audio_wav = () => {};
+
+// src/workers/file-extraction/extractors/built-in-transcriber.ts
+var DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS;
+var init_built_in_transcriber = __esm(() => {
+  init_model_transport();
+  init_install();
+  init_manifest2();
+  init_server();
+  init_transcription_model();
+  init_audio_wav();
+  init_command_runner();
+  DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
+  DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
+  DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
+  DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
+  DEFAULT_VERIFY_WAIT_MS = 5 * 60000;
+});
+
+// src/workers/file-extraction/extractors/transcription.ts
+var init_transcription = __esm(() => {
+  init_built_in_transcriber();
+  init_bounded_text();
+  init_command_runner();
+  init_text();
+});
+
+// src/workers/file-extraction/extractors/vlm.ts
+function stripDataUrlPrefix(dataUrl) {
+  return dataUrl.replace(/^data:[^,]+,/, "");
+}
+var DEFAULT_VLM_PROMPT, DEFAULT_VLM_PDF_PROMPT, VLM_PDF_PROBE_IMAGE_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", VLM_PDF_PROBE_IMAGE_BASE64;
+var init_vlm = __esm(() => {
+  init_bounded_text();
+  init_command_runner();
+  init_pdf_render();
+  init_text();
+  init_input_limits();
+  init_model_transport();
+  DEFAULT_VLM_PROMPT = [
+    "Describe the visible content for secure-local retrieval.",
+    "Focus on document layout, headings, labels, diagrams, tables, handwriting, screenshots, and any clearly legible text.",
+    "Do not infer private facts beyond what is visible."
+  ].join(" ");
+  DEFAULT_VLM_PDF_PROMPT = [
+    "Faithfully transcribe this scanned PDF page for secure-local indexing.",
+    "Return visible text only. Preserve headings, table rows, amounts, dates, identifiers, labels, and row/column relationships.",
+    "Do not summarize, omit low-confidence visible text, or infer facts that are not visible."
+  ].join(" ");
+  VLM_PDF_PROBE_IMAGE_BASE64 = stripDataUrlPrefix(VLM_PDF_PROBE_IMAGE_DATA_URL);
+});
+
+// src/workers/file-extraction/registry.ts
+var init_registry = __esm(() => {
+  init_ocr();
+  init_apple_vision_ocr();
+  init_ocr_capability();
+  init_remote_vlm();
+  init_text();
+  init_image_prepare();
+  init_image_preparers();
+  init_still_image_readiness();
+  init_transcription();
+  init_vlm();
+});
+
+// src/workers/file-extraction/store-sink.ts
+var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued", EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets", EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = "store_item_source_version_stale", EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
+var init_store_sink = __esm(() => {
+  init_engine();
+  init_tier_classifier();
+  init_secrets_disposition();
+  init_source_ingestion_exclusions();
+  init_connector_store();
+});
+
+// src/workers/file-extraction/runner.ts
+var SINK_SKIP_SETTLEMENTS, ITEM_REF_FIELDS, PDF_MIME_TYPES;
+var init_runner = __esm(() => {
+  init_media_cache();
+  init_operation_error();
+  init_model_transport();
+  init_types();
+  init_file_extraction_source();
+  init_command_runner();
+  init_tier_classifier();
+  init_bounded_text();
+  init_job_store();
+  init_store_sink();
+  SINK_SKIP_SETTLEMENTS = Object.freeze({
+    [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
+    [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",
+    [EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE]: "failed_terminal",
+    [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: "blocked_policy",
+    [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: "blocked_policy",
+    [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: "blocked_policy",
+    [EXTRACTION_SINK_SKIPPED_SECRETS]: "blocked_policy",
+    [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: "metadata_only",
+    [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only",
+    [EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY]: "metadata_only"
+  });
+  ITEM_REF_FIELDS = new Set([
+    "corpusId",
+    "provider",
+    "accountScope",
+    "approvedScopeKey",
+    "providerItemId",
+    "localItemId",
+    "sourceVersion",
+    "contentHash",
+    "name",
+    "mimeType",
+    "sizeBytes"
+  ]);
+  PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
+});
+
+// src/workers/file-extraction/tiered-store-sink.ts
+var init_tiered_store_sink = __esm(() => {
+  init_types();
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_parent_context();
+  init_tier_placement();
+  init_secrets_disposition();
+  init_tiered_store_set();
+  init_store_sink();
+});
+
+// src/workers/connector-store/tiered-extraction.ts
+var init_tiered_extraction = __esm(() => {
+  init_tier_ledger();
+  init_tiered_store_set();
+});
+
+// src/workers/email-source/file-extraction-runtime.ts
+var init_file_extraction_runtime = __esm(() => {
+  init_credential_broker();
+  init_types();
+  init_file_extraction_source();
+  init_media_cache();
+  init_olympus_layout();
+  init_source_placement();
+  init_spool();
+  init_connector_store2();
+  init_extraction_source();
+  init_scope();
+  init_store();
+  init_drive();
+  init_drive_extraction_source();
+  init_extraction_factory();
+  init_store_sync();
+  init_job_store();
+  init_registry();
+  init_runner();
+  init_store_sink();
+  init_tiered_store_sink();
+  init_tiered_extraction();
+  init_tiered_store_set();
+});
+
+// src/workers/email-source/child-extraction-runtime.ts
+var init_child_extraction_runtime = __esm(() => {
+  init_tier_ledger();
+  init_child_visibility();
+  init_file_extraction_runtime();
+  init_connector_source();
+});
+
+// src/workers/telegram-messages/media-extraction.ts
+var init_media_extraction = __esm(() => {
+  init_file_extraction_source();
+  init_input_media();
+  init_child_extraction_runtime();
+  init_spool();
+  init_media_child();
+});
+
+// src/workers/telegram-messages/store-sync.ts
+var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram", TELEGRAM_SPOOL_CLEARED_KEY;
+var init_store_sync2 = __esm(() => {
+  init_media_child();
+  init_source_placement();
+  init_spool_file_identity();
+  init_source_storage();
+  init_tiered_store_set();
+  init_record_builder();
+  init_protection_claims();
+  init_capture_spool_secrets();
+  init_capture_freshness();
+  init_corpus_adapter4();
+  init_capture_spool_connector();
+  init_archive_target();
+  init_media_extraction();
+  init_record_builder();
+  TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
+});
+
+// src/workers/telegram-messages/index.ts
+var init_telegram_messages = __esm(() => {
+  init_corpus_adapter4();
+  init_capture_spool_connector();
+  init_store_sync2();
+});
+
+// src/workers/source-index/status.ts
+var init_status = __esm(() => {
+  init_corpus();
+  init_embedding_cost_estimates();
+  init_source_corpus_registry();
+  init_answer_ready_coverage();
+  init_corpora();
+  init_readwise();
+  init_x_bookmarks();
+  init_dropbox_files();
+  init_store();
+  init_telegram_messages();
+  init_operation_error();
+  init_secret_locations();
+});
+
+// src/core/public-source-capabilities.ts
+function publicSourceDoctorLanes() {
+  const registry = createSourceCorpusRegistry();
+  return V0_4_PUBLIC_SOURCE_CAPABILITIES.flatMap((source) => {
+    const lane = source.doctor_lane;
+    if (!lane)
+      return [];
+    return registry.list("sync").filter((corpus) => corpus.sourceId === source.source_id).map((corpus) => ({
+      provider: lane.provider,
+      capability: lane.capability,
+      sourceId: source.source_id,
+      corpusId: corpus.corpusId,
+      ...lane.env_flag ? { envFlag: lane.env_flag } : {},
+      ...lane.default_off_when_absent === true ? { defaultOffWhenAbsent: true } : {}
+    }));
+  });
+}
+var V0_4_PUBLIC_SOURCE_CAPABILITIES, CAPABILITIES_BY_SOURCE;
+var init_public_source_capabilities = __esm(() => {
+  init_source_corpus_registry();
+  V0_4_PUBLIC_SOURCE_CAPABILITIES = [
+    {
+      source_id: "gmail.email",
+      label: "Gmail",
+      authentication: { type: "oauth2", ownership: "Olympus publisher Google app with advanced BYO fallback" },
+      contextual_scopes: ["mail query", "exclude Spam and Trash"],
+      dependencies: [{ id: "google_oauth_client", label: "Google OAuth client", required_for: "authorization and refresh" }],
+      provider_ceiling: "Provider history traversal and incremental refresh remain bounded by Gmail quota and pagination.",
+      supported_formats: ["headers", "snippet", "text/plain", "text/html (stripped)", "attachment metadata"],
+      doctor_lane: {
+        provider: "gmail",
+        capability: "gmail.email.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED",
+        default_off_when_absent: true
+      }
+    },
+    {
+      source_id: "google_drive.docs",
+      label: "Google Drive",
+      authentication: { type: "oauth2", ownership: "Olympus publisher Google app with advanced BYO fallback" },
+      contextual_scopes: ["inclusion roots", "shared drives", "exclude trashed items", "fail-closed ancestry exclusions"],
+      dependencies: [{ id: "google_oauth_client", label: "Google OAuth client", required_for: "authorization and refresh" }],
+      provider_ceiling: "Provider history and change traversal remain bounded by Drive quota, pagination, and export limits.",
+      supported_formats: ["Google Docs text export", "text", "PDF", "common images"],
+      doctor_lane: {
+        provider: "google_drive",
+        capability: "google_drive.docs.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_ENABLED",
+        default_off_when_absent: true
+      }
+    },
+    {
+      source_id: "dropbox.files",
+      label: "Dropbox",
+      authentication: { type: "oauth2", ownership: "one user-owned Dropbox account" },
+      contextual_scopes: ["approved path roots", "metadata-only or full-extract policy per root"],
+      dependencies: [
+        { id: "local_document_extractors", label: "Local document extractors", required_for: "Office, table, PDF, image, and audio content" },
+        { id: "local_embedding_lane", label: "Approved local embedding lane", required_for: "optional semantic retrieval" }
+      ],
+      provider_ceiling: "Folder-ID scope is unsupported; traversal is bounded by provider pagination and configured work budgets.",
+      supported_formats: ["text", "Office documents", "tables", "PDF", "common images", "audio transcription"],
+      doctor_lane: {
+        provider: "dropbox",
+        capability: "dropbox.files.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED"
+      }
+    },
+    {
+      source_id: "local.files",
+      label: "Files on this computer",
+      authentication: { type: "none", ownership: "no account: the folders you choose on this computer" },
+      contextual_scopes: ["approved folders and disks (nothing is chosen by default)", "metadata-only or full-extract policy per folder", "system, cache, build and version-control folders off by default"],
+      dependencies: [
+        { id: "local_document_extractors", label: "Local document extractors", required_for: "Office, table, PDF, image, and audio content" },
+        { id: "file_watcher", label: "Native file watcher (@parcel/watcher)", required_for: "instant updates; without it folders are re-listed on a timer" }
+      ],
+      provider_ceiling: "Changes are seen as the operating system reports them; a folder the system will not let Olympus read (a permission prompt, an unmounted disk) is skipped and reported.",
+      supported_formats: ["text", "Office documents", "tables", "PDF", "common images", "audio transcription"]
+    },
+    {
+      source_id: "archive.imports",
+      label: "Archives",
+      authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices left out", "a chat export is a snapshot: it is not updated after the export"],
+      dependencies: [
+        { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
+      ],
+      provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names"]
+    },
+    {
+      source_id: "x.bookmarks",
+      label: "X bookmarks",
+      authentication: { type: "oauth2", ownership: "user-owned X developer application and API plan" },
+      contextual_scopes: ["bookmark folders retained as provenance"],
+      dependencies: [{ id: "x_developer_app", label: "X developer application", required_for: "OAuth and bookmark API access" }],
+      provider_ceiling: "Plan availability, cost, rate limits, pagination, and provider windows can prevent complete history.",
+      supported_formats: ["post text", "author", "URL", "folder memberships", "media URLs"],
+      doctor_lane: {
+        provider: "x",
+        capability: "x.bookmarks.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED"
+      }
+    },
+    {
+      source_id: "telegram.messages",
+      label: "Telegram",
+      authentication: { type: "paired_session", ownership: "one user-owned MTProto session" },
+      contextual_scopes: ["explicit approved chats"],
+      dependencies: [{ id: "python_telethon", label: "Python with Telethon", required_for: "pairing and capture" }],
+      provider_ceiling: "Only captured approved-chat history is available; attachment bytes are not extracted in v0.4.",
+      supported_formats: ["message text", "replies", "forwards", "reactions", "attachment metadata"],
+      doctor_lane: {
+        provider: "telegram",
+        capability: "telegram.messages.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_INDEX_ENABLED"
+      }
+    },
+    {
+      source_id: "whatsapp.personal.messages",
+      label: "WhatsApp",
+      authentication: { type: "paired_session", ownership: "one linked user device" },
+      contextual_scopes: ["live linked-device traffic", "chat exports join the same history (messages live capture holds are kept once when the match is certain, else kept as their own; WhatsApp notices left out)", "Status posts as their own kind"],
+      dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
+      provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
+      supported_formats: ["message text", "captions", "link previews", "reactions", "media metadata", "voice-note transcript sidecars", "WhatsApp chat exports (a chat .txt or .zip) with their media listed by name"],
+      doctor_lane: {
+        provider: "whatsapp_personal",
+        capability: "whatsapp.personal.messages.sync"
+      }
+    },
+    {
+      source_id: "readwise.library",
+      label: "Readwise",
+      authentication: { type: "api_key", ownership: "one user-owned Readwise API key" },
+      contextual_scopes: ["category", "location"],
+      dependencies: [{ id: "readwise_api_key", label: "Readwise API key", required_for: "Reader and Export API access" }],
+      provider_ceiling: "Reader v3 and Export v2 traversal are bounded by provider pagination and the daily request guard.",
+      supported_formats: ["document text", "highlight text", "HTML", "user annotations", "author", "tags", "URL", "category", "location"],
+      doctor_lane: {
+        provider: "readwise",
+        capability: "readwise.sync",
+        env_flag: "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED"
+      }
+    }
+  ];
+  CAPABILITIES_BY_SOURCE = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((capability) => [capability.source_id, capability]));
+});
+
+// src/workers/source-dashboard.ts
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", DASHBOARD_SUPPORTED_SOURCES;
+var init_source_dashboard = __esm(() => {
+  init_olympus_layout();
+  init_google_handle_compatibility();
+  init_publisher_oauth_client();
+  init_privacy_language();
+  init_archive_formats();
+  init_sqlite_migrations();
+  init_ingestion_throughput();
+  init_source_corpus_registry();
+  init_types();
+  init_sovereignty();
+  init_scheduler_markers();
+  init_source_failure();
+  init_answer_ready_coverage();
+  init_vocabulary();
+  init_capture_freshness();
+  init_phases();
+  init_credential_health();
+  init_status();
+  init_public_source_capabilities();
+  DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
+    DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
+    DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL,
+    DASHBOARD_UNPAIR_INCOMPLETE_LABEL
+  ]);
+  DASHBOARD_CREDENTIAL_CONTENTION_KINDS = new Set([
+    "credential_refresh_busy",
+    "credential_session_latched"
+  ]);
+  DASHBOARD_MANUAL_SYNC_SHOWN_MS = 10 * 60000;
+  MIN_PROGRESS_WINDOW_MS = 5 * 60000;
+  SAMPLE_RETENTION_MS = 24 * 60 * 60000;
+  DASHBOARD_SENSITIVITY_TIERS = {
+    policy_basis: "enforced",
+    tiers: [
+      {
+        name: SENSITIVITY_TIER_LABELS.secrets,
+        tier_label: "S5",
+        meaning: "Refused before storage — content never stored and never reaches any model",
+        local: false,
+        venice: false,
+        frontier: false
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.secure,
+        tier_label: "S4",
+        meaning: "Sensitive personal material — local models and Venice only, never frontier cloud",
+        local: true,
+        venice: true,
+        frontier: false
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.private,
+        tier_label: "S1–S3",
+        meaning: "Everyday mail, files, and notes",
+        local: true,
+        venice: true,
+        frontier: true
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.public,
+        tier_label: "S0",
+        meaning: "Freely shareable material",
+        local: true,
+        venice: true,
+        frontier: true
+      }
+    ]
+  };
+  DASHBOARD_SUPPORTED_SOURCES = [
+    {
+      source_id: "gmail.email",
+      primary_corpus_id: "internal.email",
+      corpus_source_ids: ["gmail.email"],
+      ingestion_ledger_source_id: "email",
+      label: "Gmail",
+      provider: "gmail",
+      family: "email",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "gmail" }
+    },
+    {
+      source_id: "google_drive.docs",
+      primary_corpus_id: "internal.drive.docs",
+      corpus_source_ids: ["google_drive.docs"],
+      ingestion_ledger_source_id: "google_drive",
+      label: "Google Drive",
+      provider: "google_drive",
+      family: "file",
+      trust_domain: "internal",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "google-drive" }
+    },
+    {
+      source_id: "dropbox.files",
+      primary_corpus_id: "secure_local.dropbox.files",
+      corpus_source_ids: ["dropbox.files"],
+      ingestion_ledger_source_id: "dropbox",
+      label: "Dropbox",
+      provider: "dropbox",
+      family: "file",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "dropbox" }
+    },
+    {
+      source_id: "local.files",
+      primary_corpus_id: "secure_local.local.files",
+      corpus_source_ids: ["local.files"],
+      ingestion_ledger_source_id: "local_files",
+      label: "Files on this computer",
+      provider: "local_files",
+      family: "file",
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      sync_name: { mid: "your files", start: "Your files", plural: true },
+      connect_action: { kind: "this_computer", source: "local.files" }
+    },
+    {
+      source_id: "archive.imports",
+      primary_corpus_id: "secure_local.archive.email",
+      corpus_source_ids: ["archive.imports"],
+      owns_corpus: (corpus) => corpus.corpus_id.split(".")[1] === "archive" || isArchiveProvider(corpus.provider),
+      ingestion_ledger_source_id: "archive_imports",
+      label: "Archives",
+      provider: ARCHIVE_NEUTRAL_PROVIDER,
+      family: "email",
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    },
+    {
+      source_id: "x.bookmarks",
+      primary_corpus_id: "internal.x.bookmarks",
+      corpus_source_ids: ["x.bookmarks"],
+      ingestion_ledger_source_id: "x",
+      label: "X bookmarks",
+      provider: "x",
+      family: "x",
+      trust_domain: "internal",
+      connect_kind: "oauth",
+      content_arrives_extracted: true,
+      connect_action: { kind: "oauth", source: "x" }
+    },
+    {
+      source_id: "telegram.messages",
+      primary_corpus_id: "internal.telegram.messages",
+      corpus_source_ids: ["telegram.messages"],
+      ingestion_ledger_source_id: "telegram",
+      label: "Telegram",
+      provider: "telegram",
+      family: "chat",
+      trust_domain: "internal",
+      connect_kind: "pairing",
+      content_arrives_extracted: true,
+      raw_message_copies: "messages",
+      connect_action: {
+        kind: "guided_session",
+        source: "telegram",
+        instructions: [
+          "Telegram pairs with a phone-number login on this computer.",
+          "Ask your agent to start Telegram pairing; this card updates once the login completes."
+        ]
+      }
+    },
+    {
+      source_id: "whatsapp.personal.messages",
+      primary_corpus_id: "secure_local.whatsapp.messages",
+      corpus_source_ids: ["whatsapp.personal.messages"],
+      ingestion_ledger_source_id: "whatsapp",
+      label: "WhatsApp",
+      provider: "whatsapp_personal",
+      family: "chat",
+      trust_domain: "secure_local",
+      connect_kind: "pairing",
+      content_arrives_extracted: true,
+      raw_message_copies: "messages_and_media",
+      connect_action: {
+        kind: "guided_session",
+        source: "whatsapp",
+        instructions: [
+          "WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).",
+          WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
+          "Ask your agent to start WhatsApp pairing; this card updates once the scan completes."
+        ]
+      }
+    },
+    {
+      source_id: "readwise.library",
+      primary_corpus_id: "internal.readwise.library",
+      corpus_source_ids: ["readwise.library"],
+      ingestion_ledger_source_id: "readwise",
+      label: "Readwise",
+      provider: "readwise",
+      family: "readwise",
+      trust_domain: "internal",
+      connect_kind: "api_token",
+      content_arrives_extracted: true,
+      connect_action: { kind: "api_key", source: "readwise" }
+    },
+    ...archiveSourceCards().map((card) => ({
+      source_id: card.id,
+      primary_corpus_id: card.id,
+      corpus_source_ids: [],
+      owns_corpus: () => false,
+      ingestion_ledger_source_id: card.id,
+      public_source_id: ARCHIVE_IMPORTS_CARD_ID,
+      label: card.label,
+      provider: card.formats[0].provider,
+      family: card.formats[0].family,
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    }))
+  ];
+});
+
+// src/workers/google-connectors/gmail-live-control.ts
+var GMAIL_STORE_PULL_INTERVAL_MS, GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS, GMAIL_STORE_RECONCILE_INTERVAL_MS, GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
+var init_gmail_live_control = __esm(() => {
+  GMAIL_STORE_PULL_INTERVAL_MS = 30 * 60000;
+  GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
+  GMAIL_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
+  GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+});
+
+// src/workers/google-connectors/gmail-live-sync.ts
+var GMAIL_SCOPED_CONNECTOR_PREFIX;
+var init_gmail_live_sync = __esm(() => {
+  init_tiered_store_set();
+  init_tier_rules_sweep();
+  init_embeddings();
+  init_gmail_mail_record();
+  init_gmail();
+  init_gmail_live_control();
+  GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
+});
+
+// src/workers/google-connectors/drive-live-control.ts
+var GOOGLE_DRIVE_STORE_PULL_INTERVAL_MS, GOOGLE_DRIVE_STORE_PULL_FRESHNESS_THRESHOLD_MS, GOOGLE_DRIVE_STORE_RECONCILE_INTERVAL_MS, GOOGLE_DRIVE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
+var init_drive_live_control = __esm(() => {
+  GOOGLE_DRIVE_STORE_PULL_INTERVAL_MS = 30 * 60000;
+  GOOGLE_DRIVE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
+  GOOGLE_DRIVE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
+  GOOGLE_DRIVE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+});
+
+// src/workers/google-connectors/drive-live-sync.ts
+var init_drive_live_sync = __esm(() => {
+  init_tiered_store_set();
+  init_tier_classifier();
+  init_embeddings();
+  init_drive();
+  init_drive_live_control();
+});
+
+// src/workers/google-connectors/index.ts
+var init_google_connectors = __esm(() => {
+  init_gmail();
+  init_gmail_live_control();
+  init_gmail_live_sync();
+  init_drive();
+  init_drive_live_control();
+  init_drive_live_sync();
+  init_request_budget();
+  init_corpora();
+});
+
+// src/core/pairing-session-paths.ts
+var init_pairing_session_paths = __esm(() => {
+  init_olympus_layout();
+  init_source_placement();
+  init_source_registry();
+});
+
+// src/workers/archive-import/store.ts
+var ARCHIVE_STORE_PLACEMENT;
+var init_store2 = __esm(() => {
+  init_source_placement();
+  init_archive_formats();
+  init_source_corpus_registry();
+  init_source_storage();
+  init_state();
+  ARCHIVE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
+// src/core/account-files.ts
+var STORE_ORDER, SOURCE_ALIASES;
+var init_account_files = __esm(() => {
+  init_olympus_layout();
+  init_archive_formats();
+  init_source_placement();
+  init_source_registry();
+  init_source_ingestion_policy();
+  init_messaging_capture_grant_file();
+  init_pairing_session_paths();
+  init_store2();
+  init_media_bindings();
+  init_reconcile_state();
+  STORE_ORDER = {
+    [WHATSAPP_SOURCE_ID]: ["secure_local", "internal"]
+  };
+  SOURCE_ALIASES = {
+    [WHATSAPP_SOURCE_ID]: ["whatsapp.messages"]
+  };
+});
+
+// src/workers/archive-import/record-probe.ts
+var RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES, RECORD_PROBE_MAX_FOLDER_SCAN_BYTES;
+var init_record_probe = __esm(() => {
+  init_json_stream();
+  RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
+  RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
+  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
+});
+
 // src/workers/archive-import/manifest.ts
 var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
-var init_manifest2 = __esm(() => {
+var init_manifest3 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
   init_byte_source();
@@ -21448,7 +22788,7 @@ var init_requests = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_source_storage();
-  init_manifest2();
+  init_manifest3();
   init_state();
   init_olympus_layout();
   STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
@@ -21534,14 +22874,14 @@ var init_remote_connections = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync17, mkdirSync as mkdirSync16, readFileSync as readFileSync29, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname28 } from "node:path";
+import { existsSync as existsSync18, mkdirSync as mkdirSync16, readFileSync as readFileSync29, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname29 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync17(path))
+    if (!existsSync18(path))
       return;
     const parsed = JSON.parse(readFileSync29(path, "utf8"));
     const record2 = asRecord16(parsed);
@@ -21564,7 +22904,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync16(dirname28(path), { recursive: true, mode: 448 });
+  mkdirSync16(dirname29(path), { recursive: true, mode: 448 });
   writeFileSync10(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -21663,12 +23003,6 @@ var init_this_computer = __esm(() => {
 var init_source_scheduler_state = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
-});
-
-// src/workers/file-extraction/spool.ts
-var EXTRACTION_SPOOL_STALE_MS;
-var init_spool = __esm(() => {
-  EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
 
 // src/workers/classification/tier-migration-reports.ts
@@ -24510,7 +25844,7 @@ function asRecord7(value) {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
@@ -28017,8 +29351,8 @@ init_linux_engine_layout();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync19, readFileSync as readFileSync31 } from "node:fs";
-import { join as join40 } from "node:path";
+import { existsSync as existsSync20, readFileSync as readFileSync31 } from "node:fs";
+import { join as join42 } from "node:path";
 import { homedir as homedir16 } from "node:os";
 init_openclaw_executable();
 init_worker_service();
@@ -28477,11 +29811,11 @@ init_consult_transport_zkapi();
 
 // src/core/consult-gate.ts
 init_owner_config_read();
-import { createHash as createHash13 } from "node:crypto";
-import { existsSync as existsSync18, readFileSync as readFileSync30, statSync as statSync19 } from "node:fs";
+import { createHash as createHash14 } from "node:crypto";
+import { existsSync as existsSync19, readFileSync as readFileSync30, statSync as statSync19 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
-import { basename as basename7, dirname as dirname29, join as join38 } from "node:path";
-import { fileURLToPath as fileURLToPath7 } from "node:url";
+import { basename as basename7, dirname as dirname30, join as join40 } from "node:path";
+import { fileURLToPath as fileURLToPath8 } from "node:url";
 init_opsec();
 init_types();
 var CONSULT_GATE_MAX_QUESTION_BYTES = 600;
@@ -28718,31 +30052,31 @@ var VOCABULARY_DIR = ["assets", "consult", "vocabulary"];
 var CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
 var CONSULT_VOCABULARY_MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
 function consultUserVocabularyDir(env = process.env) {
-  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || (linuxOwnerConfigPath("consult/vocabulary", env) ?? join38(env.HOME?.trim() || homedir15(), ".olympus", "consult", "vocabulary"));
+  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || (linuxOwnerConfigPath("consult/vocabulary", env) ?? join40(env.HOME?.trim() || homedir15(), ".olympus", "consult", "vocabulary"));
 }
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
-    if (!existsSync18(path))
+    if (!existsSync19(path))
       return "missing";
     if (statSync19(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync30(path);
-    return createHash13("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
+    return createHash14("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname29(fileURLToPath7(moduleUrl));
-  const root = basename7(here) === "core" && basename7(dirname29(here)) === "src" ? dirname29(dirname29(here)) : basename7(here) === "dist" ? dirname29(here) : undefined;
-  return root !== undefined && existsSync18(join38(root, ...VOCABULARY_DIR)) ? root : undefined;
+  const here = dirname30(fileURLToPath8(moduleUrl));
+  const root = basename7(here) === "core" && basename7(dirname30(here)) === "src" ? dirname30(dirname30(here)) : basename7(here) === "dist" ? dirname30(here) : undefined;
+  return root !== undefined && existsSync19(join40(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
   const root = consultVocabularyRoot();
   const status = selection.shipped.map((id) => {
-    const result = root ? verifiedPackFile(join38(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
+    const result = root ? verifiedPackFile(join40(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
     return { id, origin: "shipped", state: typeof result === "string" ? result : "verified" };
   });
   if (selection.user.length > 0) {
@@ -28750,7 +30084,7 @@ function consultVocabularyFileStatus(options = {}, env = process.env) {
     const manifest = new Map(userManifestEntries(userDir));
     for (const id of selection.user) {
       const sha256 = manifest.get(id);
-      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join38(userDir, `${id}.txt.gz`), sha256);
+      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join40(userDir, `${id}.txt.gz`), sha256);
       status.push({ id, origin: "user", state: typeof result === "string" ? result : "verified" });
     }
   }
@@ -28760,8 +30094,8 @@ function userManifestEntries(userDir) {
   if (!userDir)
     return [];
   try {
-    const path = join38(userDir, "manifest.json");
-    if (!existsSync18(path) || statSync19(path).size > 1024 * 1024)
+    const path = join40(userDir, "manifest.json");
+    if (!existsSync19(path) || statSync19(path).size > 1024 * 1024)
       return [];
     const manifest = JSON.parse(readFileSync30(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
@@ -29918,7 +31252,7 @@ init_still_image_readiness();
 init_owner_config_read();
 init_secret_store();
 import { closeSync as closeSync8, constants as constants7, fstatSync as fstatSync3, openSync as openSync7, readSync } from "node:fs";
-import { join as join39 } from "node:path";
+import { join as join41 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
@@ -29954,7 +31288,7 @@ function consultSettingsPath(env = process.env) {
   const home = env.HOME?.trim();
   if (process.platform === "linux" && home && !home.startsWith("/"))
     return;
-  return home ? linuxOwnerConfigPath("consult.json", env) ?? join39(home, ".olympus", "consult.json") : undefined;
+  return home ? linuxOwnerConfigPath("consult.json", env) ?? join41(home, ".olympus", "consult.json") : undefined;
 }
 var __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 function parseConsultSettings(value) {
@@ -30193,7 +31527,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const home = env.HOME?.trim() || homedir16();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync19(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync20(workerServicePaths(process.platform, home).unitPath) : false;
   const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths: engineServicePaths({ homeDir: home, env }), expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
@@ -30298,7 +31632,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync19(configPath))
+  if (configPath === undefined || !existsSync20(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -30310,7 +31644,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join40(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join42(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -31569,7 +32903,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync19(join40(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync20(join42(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync7(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -31586,343 +32920,9 @@ function errorDetail(error) {
 }
 
 // src/core/ocr-readiness.ts
+init_apple_vision_ocr();
+init_ocr_capability();
 import { existsSync as existsSync21, readFileSync as readFileSync32 } from "node:fs";
-
-// src/workers/file-extraction/extractors/apple-vision-ocr.ts
-import { existsSync as existsSync20 } from "node:fs";
-import { dirname as dirname30, join as join41 } from "node:path";
-import { fileURLToPath as fileURLToPath8 } from "node:url";
-
-// src/workers/file-extraction/extractors/bounded-text.ts
-var TEXT_MIME_TYPES = new Set([
-  "application/json",
-  "application/x-ndjson",
-  "application/xml",
-  "text/csv",
-  "text/html",
-  "text/markdown",
-  "text/plain",
-  "text/tab-separated-values",
-  "text/xml"
-]);
-var TABLE_MIME_TYPES = new Set([
-  "text/csv",
-  "text/tab-separated-values"
-]);
-var IMAGE_MIME_TYPES = new Set([
-  "image/bmp",
-  "image/gif",
-  "image/heic",
-  "image/heif",
-  "image/jpeg",
-  "image/png",
-  "image/tiff",
-  "image/webp"
-]);
-var GENERIC_MIME_TYPES = new Set([
-  "application/octet-stream",
-  "binary/octet-stream",
-  "application/binary"
-]);
-
-// src/workers/file-extraction/extractors/apple-vision-ocr.ts
-init_command_runner();
-var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js";
-var APPLE_VISION_OSASCRIPT = "/usr/bin/osascript";
-var OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
-function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync20) {
-  let directory = dirname30(fileURLToPath8(moduleUrl));
-  for (let depth2 = 0;depth2 < 6; depth2 += 1) {
-    const candidate = join41(directory, APPLE_VISION_OCR_SCRIPT);
-    if (exists(candidate))
-      return candidate;
-    const parent = dirname30(directory);
-    if (parent === directory)
-      break;
-    directory = parent;
-  }
-  return;
-}
-function appleVisionOcrSelected(preference, platform2 = process.platform) {
-  return preference === "auto" && platform2 === "darwin";
-}
-function parseOcrEnginePreference(value) {
-  const normalized = value?.trim().toLowerCase();
-  if (!normalized)
-    return;
-  if (OCR_ENGINE_PREFERENCES.includes(normalized)) {
-    return normalized;
-  }
-  throw new Error(`OCR engine must be one of ${OCR_ENGINE_PREFERENCES.join(", ")}; got ${value}.`);
-}
-
-// src/workers/file-extraction/extractors/ocr-capability.ts
-init_command_runner();
-import { mkdtemp, readFile as readFile3, readdir, rm as rm2, writeFile } from "node:fs/promises";
-import { tmpdir as tmpdir4 } from "node:os";
-import { join as join42 } from "node:path";
-
-// src/workers/file-extraction/extractors/ocr-probe-fixture.ts
-var OCR_PROBE_WORD = "OLYMPUS";
-var OCR_PROBE_IMAGE_WIDTH = 360;
-var OCR_PROBE_IMAGE_HEIGHT = 96;
-var OCR_PROBE_IMAGE_BASE64 = [
-  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYn",
-  "KSopGR8tMC0oMCUoKSj/wAALCABgAWgBAREA/8QAHAABAQEBAQEBAQEAAAAAAAAAAAgHBgkFBAMB/8QATxAAAQIFAQMGCAcLCwUA",
-  "AAAAAQIDAAQFBhEHCBIhEzFBUWFxFBUiNjd1gbMWGDJSkaHTVVZydJKUpLGywsMjJEJEYoKEk6K0wRcoQ+Hw/9oACAEBAAA/AKph",
-  "CEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQh",
-  "CEIQhCEIQhCEIQj89QnZanSMxOz77cvKS6C4664rdShIGSSeqJJ1P2nqpNTr0lYLTclIoJSJ+YaC3nf7SUK8lA7wT3c0Y7OaqX5O",
-  "Olx2766lROcMzq2h9CCBH17d1x1Cob6Ft3FMzrYPlNT+JhKx1Eq8oewgxU2iWuVL1DWml1FlFMuIJKgxvZbmABxLZPHI5yk8ccxO",
-  "DjY4lPaR1YvWztSV0q2614HICUad5LwVhzylZycrQT0DpjRNlu9bgvi0atO3RUPDplie5FtfIttbqOTScYQlIPEmNohGM7SlVvq2",
-  "Lel7isirrlpOWPJz8sJVl3CSfJdBWgngTukZxxB6CYw3TbaLu2XvKnfDOrieoLq+SmUmVZbLYVwDgKEA+ScEjpGenEWuhaXEJW2o",
-  "KQoZSpJyCOsR8a87jkbSteo1yqL3ZWSaLhAOCtXMlA7VEgDtMRE/tCamzc+4ZSuhoPOnkpdqQl17mTwQnLZUcZAGSTFcUdd1UXR+",
-  "dnroqhmrnbpz84t3kGkBhzkypKAlKQk7uBnIOTnowIj/AOMHqf8AfN+gSv2ca/syav3Nd18TdFu6qidQ9Jqdlf5u00UuIUCR5CU5",
-  "ykqPHPyYqCJe2mdYLntK+pai2jVRJNsyaXJr+btOlTiySB5aVYwkJPD50ZD8YPU/75v0CV+zi6LOnH6jaNDnZxzlJmZkWHnV4A3l",
-  "qbSScDgOJPNEh6ra26g0HUi4qXSrg5CQlJxbTLXgUurcSDwGVNkn2mOT+MHqf9836BK/Zx/VnaH1MbUCu4G3R1LkJf8A4QI1HSva",
-  "dfmaoxTb+lpVth5QQmpSySgNk8xcRkjd/tDGOo88VQkhSQpJBSRkEdMRXqprbqFQtR7jpdKuDkJGUnXGWWvApdW4gHgMqbJPtMUt",
-  "oLcFUurSehVmvTXhVSmeX5V7k0o3t19xCfJSAB5KQOA6I7+Jc2nNVLysrUGUpls1jwKSXTm31N+CsuZWXHATlaCeZI4Zxwjstle+",
-  "rjvmiV6Yumo+HPSsw220rkG2t1JSSR5CU59sahf13Uyx7Xm65WnCJZgAJbR8t1Z+ShI6SfqGSeAiML22iL4uGbd8WzoocgSdxiTA",
-  "3wOjecI3ie7dHZHFo1OvpDm+LxuDe6jUHSPoKsRodg7SV30KdaRcbia7TCcOJdSlD6R1pWkDJ/CBz1jnizbYr1PuegSVZoz4fkJt",
-  "vlG14weogjoIIII6CDH1IQhCEIRLG2ffD7Rp1myDpQ26gTs9un5Y3iG0HsykqI/BjKdnjTBOpF0veMi4ihU5KXJsoOFOlRO60D0Z",
-  "wST0AHmJEXPQLbotvSSJSiUuTkZdI3QlhoJz3nnJ7TkmOK1W0ety/KRMDwKWkK2Eky8+w2EKC+gOY+WnrzkjoxEEuJqVr3GtAU5J",
-  "1amTRTvJOFNOtqxwPYRHovpddSL1sGjV5ISl2aZ/lkJ5kupJSsDs3knHZiJD2wfTCv8AEGP3o1zYl8wq96z/AISIoqEfwn5SXqEj",
-  "MSc6yh+VmG1NOtLGUrQoYIPYQY87daLBmNPL4m6UoLXT3P5eReV/5GSeAJ+cn5J7RnmIim9krUT4R2qq2Km9vVWjoHIlR4uy3Mn2",
-  "oOE9xT2xm+1/qH43rzVn0x7MjTVcpOFJ4OTGOCe5AP0qPVH89kfTXx3XVXfV2c06mubsmhY4OzA473cjn/CI6jFVah+YFzerJn3S",
-  "o82KLIKqlZkKe2oJXNzDbCVHoKlBOfrjpdJ60u0tUrfqL+WRLTyWpjPApQo8m5nuSpUekUebuq1aXd2qVfqDGXhNTympfHEqQk8m",
-  "3j+6lMc1WpFVLrM/T1qC1ykw4wVDpKVFOfqj0o0+8wra9WS3ukxAmufpgu71g7+uKk2b7Ktar6M2/O1a2qJPTrpmOUmJmQadcXiY",
-  "cAypSSTgADuEdrcWjVg1ynvSrts06TUtJCX5FhMu42eggoA5uo5HWIgS8KI5bV1VeivOB1dPmnJYuAYC91RAVjoyBn2xeWzjWH63",
-  "ozbkxNrK32mlypUTkkNOKQn/AEpTEW64el67vWT37UWRsuegq2f8T/unY1SIm20PSvI+qGfevRoWxB5t3R+NtfsGPnbcc7MpbtGR",
-  "CiJRZmX1DoUtPJgfQFH8qOL2RpG0p68qgi6G5N6pBps0xqbAKFKyd/dCuBWPIwOfnI5otOYp8nMyhlZiUl3ZYjdLLjaVII6t0jES",
-  "HrPs+V9d8TEzp7QkvUSZbS9yaJllpLDpJCkJStYOOAUMcBvYHNiNc2XbVuyzLXq1Iu6nmSb8KD8oDMNO5Ck4WBuKVgZSk4OOc9sb",
-  "TCEIQhCPPvaZnFzmttylZJS0tplI6gllA/Xk+2KK2MpFuX0sm5oJ/lZqpOqUrsShCQPqP0xvUI8/9p+RbkdbbhDSd1DxZfx2qZQV",
-  "fXkxQOxbOLf0wqMsskiWqjgR2JU22cfTvH2xjG2D6YV/iDH70a5sS+YVe9Z/wkRRUIRmev2nSNQ7HeYlkJ8dSOZiQWeBKseU2T1L",
-  "Ax3hJ6IhS07iq9k3OxVqSsy1Sk1KTuuJ4cQUqQpJ5xzjEfqsm26pqDe8rSpVa3Z2feK35heVbic7zjqj2cT2nhzmPRm1qDI2xb0h",
-  "RaS1yUlJNBptPSetR6yTkk9JJj8eofmBc3qyZ90qPOiwvPm3fWUt71MdJr7Qvg9q9csolG6y7MmbaxzbroDnDsBUR7Ir34e/9uPw",
-  "v5X+deJ/l5/rOOS97Eh6AUL4Q6v21KKRvMszIm3c8260C5x7CUge2Oavvz4uL1jMe9VHoxp95hW16slvdJiBNc/TBd3rB39cULoH",
-  "rFYlq6T0SjV6ueCVKWL/ACrPgj7m7vPuKT5SUEHyVA8D0x09y7S1iU6nPOUeYm6vOBJ5JluWW0lSujeU4BgdoBPZEU16qTVer0/V",
-  "J0hU5PTC5hzdHDfWok4HVkx6E6GW3MWnpTb9KnkFucSyXn0HnQtxanCk9o3seyIe1w9L13esnv2osjZc9BVs/wCJ/wB07GqRE22h",
-  "6V5H1Qz716NC2IPNu6Pxtr9gxom0Rpw5qJZQap26K1T1mYk944DmRhTZPRvADB60jPDMQRUpCcpU+9JVKWelJxhW64y8goWg9RB4",
-  "iO0tXV++7YShum3FOLl0cAxNETDYHUAvO6O7EbdYm1VvvNS170dDaFEAztOzhPappRJ7yFdwim6LVZGt0qWqVJmmpuRmUb7TzRyl",
-  "Q/8AuBHODwj9sIQhCEI8/wDaekFyGtlw76SETBZmGz1hTSM/6goeyN+2Laq1NacVOm7w8Ikqgpak54hDiElJ9pSv6IoKEee+0jVG",
-  "qvrTcr0uoKaZdRKgg54ttpQr/UlUUdsZU9crpXOTTiSBOVN1xB60pQ2j9pKoxPbB9MK/xBj96Nc2JfMKves/4SIoqEIRBu1fSpOl",
-  "awzpkGUsicl2pp5KeYuKyFKx24ye0k9MaxsR0mSFAuGscik1BU0mU5U84aCEq3R1ZJyevA6opqOf1D8wLm9WTPulR50WF58276yl",
-  "vepjedtuhchclv11tPkzcsuUcI+c2reGe0hw/kxmovw/9ADZvKnwjxxyu7n+rbm/j/N4xpmxJQuXuK4a84jyZWWRKNk/OcVvKx2g",
-  "Nj8qMEvvz4uL1jMe9VHoxp95hW16slvdJiBNc/TBd3rB39cdLYOgF03vacjcNJn6IzJTfKcmiZedS4NxakHIS2RzpPTzR08tspXe",
-  "pY8JrVAbT0ltx5Z+gtiNa0p2daHZ1SYq1bmzW6owoLZCmuTYZUOZQTklSh0EnHTjODG6R5za6tlvWG7UnnNQcV9PH/mLD2WlBWhV",
-  "tgc6TMg/nLsatESbZygrVmTA/o0lkH/MdP8AzGj7EKCLVuVfQZ1tP0I/9xRU9UpGnp3p+dlpVPPl51KB9Zjmq1bllakU8rn5Wk11",
-  "hBLQmWVpWpsjiUh1B3kniOAPTGQ3Vsq29OBblt1iepjp4hqYSJhruHyVDvJMTdqjprXtN6qzKV1DLjMyFKlpqXUVNugYzjIBBGRk",
-  "EdPTG2bE1zzJqNctd5xS5XkPGDCSeDagpKF4799H5PfFZQhCEIQibNsTT9+rUuTu+lsl1+nNlieQgZPIZJSvuSSrPYrPMDE+aM6j",
-  "zmmt2JqTDZmZB9IZnZUKxyjecgjqUk8Qe8dMWpb2s1gVyRRMs3NT5QkZUzPuiWcQeohZGT3Ejtjh9W9oi3qFSJiUs6cbq9cdSUNu",
-  "sjeYlyf6ZVzKI5wBntxEd0Ok1S7LjlqdTm3JyqT72E5JJUonJUo9XOSTzDJj0fsK2pez7OpNAlCFNyLAbK8Y31niteO1RUfbEcbY",
-  "PphX+IMfvR1Oy3qbaNj2jVpK6Kv4DMvz3LNo8Ged3kcmkZyhCgOIMbR8YPTD75v0Ca+zh8YPTD75v0Ca+zjTabPS9Tp0rPyLnKyk",
-  "00h9le6U7yFAKScHBGQRzx+iIb2w/TAfV7H61xrOxL5h171l/CRFFxz+ofmBc3qyZ90qPOiwvPm3fWUt71MWftb0LxvpDMzaEbz1",
-  "LmWpsY590nk1ezC8/wB2ITi7dkqheJ9IJSaWjdeqkw7OKzz7ueTT7MIz/eiL778+Li9YzHvVR6MafeYVterJb3SYgTXP0wXd6wd/",
-  "XFibLXoKtvvmf9y7GrQhEIbWFvv0fV6fnVtkSlVabmmV44EhAQsZ6wpJOOpQ647XZf1ko1s0Ry1rrmPApdLynpOcUklsb3FTa8fJ",
-  "45IPNxOcYGaDqGrFgyEkqaeu6irbSM7rE0l5Z7kIJVn2RDetN7Iv/UKoVuXaWzJEJYlkL+UGkDAJ7ScnHRnEVbshUF+j6TibmkFC",
-  "6pOOTbYUMHkwEoT9O4SOwiMl2z7Wfkrxp9ytNkyVQYEu6sDgl5vOAT2oxj8E9UfJ2ZdXZKwZmdotxqcRRJ5wPJmEJK/B3sBJJSOJ",
-  "SoBOcZI3Rw54qsap2GZXwgXhQuTxnBnW9/8AIzvfVEpbUOqVKv6p0ynW4VPU2mlxZm1IKeWcVgeSDx3QE85xknsBPT7EtvTC69Xr",
-  "kWhSZRqWEg2ojgta1JWrH4IQnP4YiuYQhCEIR/i0JcQpDiQpChhSVDII6jE36nbMUhV5t6oWROtUp9wlSpGYBMvk/MUMlA7MKHVg",
-  "cIxud2c9SZd4oZo0vNpB+WzPMgH8tST9UfVt3ZjvqovoFVNOpDGfLU6+HVgdiW8gnvI74pvSXSS39NpVaqeFTlWeTuvVB9I31D5q",
-  "BzITnoHE9JOBGixOGvOhlzag36qt0aeozEoZZtncm3nUr3k5zwS2oY49cZ18VS+Purbf5w/9jD4ql8fdW2/zh/7GHxVL4+6tt/nD",
-  "/wBjFfWjTXqNalFpk0ptcxJSTEs4pskpKkNpSSCQDjI6hH1onHXrQ25dQb88d0Weo7Er4K2xuTbzqV7ySrPBLahjj1x2+ztpzV9N",
-  "raqdOrsxITD8zN+EIVJrWtITuJTg7yUnOQeiNXj5d1U92rWxWKbLKQl+ck3pdtThISFLQUgnAJxk9USjbOzHedLuSlVCYqdvKZlJ",
-  "tp9aUTDxUUoWFEDLQGcDrirLtozdw2tV6O7uhE/KOy2TzJK0kA+wnPsiQfiqXx91bb/OH/sYsC1KO3b9sUmjs4LchKtSwI6dxITn",
-  "24zEo3Lsx3nVLjqtQl6nbyWZubdfQlcw8FBKllQBw0eODFX2tT3aTbNIp0ypCn5OTZl3FNklJUhASSMgHGR1RMWpGzjd1z35Xa3I",
-  "VGgtys9NLfbQ8+8FhJPAKAaIz3ExvWjFqT1kabUi3qs7LPTsoXuUXLKUps77y1jBUAeZQ6OeO2hCOR1MsCi6h2+aXXG1BSCVy8y1",
-  "gOMLxzpPUekHgfYCJSuXZgvWnzKxRXqfV5bPkKS6GHCP7SV8Ae5Rj4DWzxqYtwJVb7bY+eqfl8fUsn6o07TfZbfbnmZ2/Z9hUugh",
-  "Xi+SUVFzsW4QMDrCc56xFUSzDMrLNS8s0hlhpAbbbQndShIGAABzACPl3bbdLuygzVHrsqmZkZgYUk8Ck9CknoUOgxKN57LFfk5p",
-  "xy0qlKVGTJJQ1NK5F5I6BnG6rvynuji/i8amcpu/B9vd+f4fL4/bz9UdpZmyxX5yabcu2pSlOkgQVtSquWfUOrON1PflXdFYWpbt",
-  "MtWgylHocsmWkJZO6hA4knpUo9KieJMfWhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhC",
-  "EIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQj//Z"
-].join("");
-function ocrProbeJpeg() {
-  return new Uint8Array(Buffer.from(OCR_PROBE_IMAGE_BASE64, "base64"));
-}
-
-// src/workers/file-extraction/extractors/ocr-capability.ts
-var OCRMYPDF_COMMAND = "ocrmypdf";
-var TESSERACT_COMMAND = "tesseract";
-var PDFTOPPM_COMMAND = "pdftoppm";
-var TESSERACT_ENV = { OMP_THREAD_LIMIT: "1" };
-var OCR_READY_TTL_MS = 10 * 60000;
-var PROBE_TESSERACT_TIMEOUT_MS = 30000;
-var PROBE_PDFTOPPM_TIMEOUT_MS = 30000;
-var PROBE_OCRMYPDF_TIMEOUT_MS = 90000;
-var PROBE_TEMP_PREFIX = "olympus-ocr-probe-";
-var PROBE_RENDER_DPI = 150;
-function ocrmypdfArguments(input) {
-  return [
-    "--force-ocr",
-    "--rotate-pages",
-    "--deskew",
-    "--clean",
-    "--jobs",
-    "1",
-    "--optimize",
-    "0",
-    "--output-type",
-    "pdf",
-    "--sidecar",
-    input.sidecarPath,
-    input.inputPath,
-    input.outputPath
-  ];
-}
-function tesseractArguments(inputPath) {
-  return [inputPath, "stdout", "-l", "eng", "--psm", "3"];
-}
-function probeWordRead(text3) {
-  let letters = "";
-  for (const char of text3.toUpperCase()) {
-    if (char >= "A" && char <= "Z" || char >= "0" && char <= "9")
-      letters += char;
-  }
-  return letters.includes(OCR_PROBE_WORD);
-}
-function commandMissing(error) {
-  return error?.code === "ENOENT";
-}
-function buildOcrProbePdf() {
-  const jpeg = ocrProbeJpeg();
-  const pageWidth = OCR_PROBE_IMAGE_WIDTH * 72 / PROBE_RENDER_DPI;
-  const pageHeight = OCR_PROBE_IMAGE_HEIGHT * 72 / PROBE_RENDER_DPI;
-  const content = `q ${pageWidth} 0 0 ${pageHeight} 0 0 cm /Im0 Do Q`;
-  const chunks = [];
-  const offsets = [];
-  let length = 0;
-  const push = (chunk) => {
-    const buffer = typeof chunk === "string" ? Buffer.from(chunk, "latin1") : chunk;
-    chunks.push(buffer);
-    length += buffer.length;
-  };
-  push(`%PDF-1.4
-`);
-  const object = (number2, body, stream) => {
-    offsets[number2] = length;
-    push(`${number2} 0 obj
-`);
-    push(body);
-    if (stream) {
-      push(`
-stream
-`);
-      push(stream);
-      push(`
-endstream`);
-    }
-    push(`
-endobj
-`);
-  };
-  object(1, "<< /Type /Catalog /Pages 2 0 R >>");
-  object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
-  object(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` + "/Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>");
-  object(4, `<< /Type /XObject /Subtype /Image /Width ${OCR_PROBE_IMAGE_WIDTH} /Height ${OCR_PROBE_IMAGE_HEIGHT} ` + `/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>`, Buffer.from(jpeg));
-  object(5, `<< /Length ${content.length} >>`, Buffer.from(content, "latin1"));
-  const xrefOffset = length;
-  push(`xref
-0 6
-0000000000 65535 f
-`);
-  for (let number2 = 1;number2 <= 5; number2 += 1) {
-    push(`${String(offsets[number2]).padStart(10, "0")} 00000 n
-`);
-  }
-  push(`trailer
-<< /Size 6 /Root 1 0 R >>
-startxref
-${xrefOffset}
-%%EOF
-`);
-  return new Uint8Array(Buffer.concat(chunks));
-}
-async function probeTesseract(input) {
-  try {
-    const result = await input.runner({
-      command: TESSERACT_COMMAND,
-      args: tesseractArguments(input.imagePath),
-      timeoutMs: PROBE_TESSERACT_TIMEOUT_MS,
-      env: TESSERACT_ENV
-    });
-    return probeWordRead(result.stdout) ? "ok" : "failed";
-  } catch (error) {
-    return commandMissing(error) ? "missing" : "failed";
-  }
-}
-async function probePdftoppm(input) {
-  const prefix = join42(input.directory, "render");
-  try {
-    await input.runner({
-      command: PDFTOPPM_COMMAND,
-      args: ["-f", "1", "-l", "1", "-r", String(PROBE_RENDER_DPI), "-png", input.pdfPath, prefix],
-      timeoutMs: PROBE_PDFTOPPM_TIMEOUT_MS
-    });
-  } catch (error) {
-    return commandMissing(error) ? "missing" : "failed";
-  }
-  const rendered = (await readdir(input.directory)).filter((name) => name.startsWith("render") && name.endsWith(".png"));
-  const first = rendered[0];
-  if (!first)
-    return "failed";
-  if (input.tesseract === "ok") {
-    const read = await probeTesseract({ runner: input.runner, imagePath: join42(input.directory, first) });
-    if (read !== "ok")
-      return "failed";
-  }
-  return "ok";
-}
-async function probeOcrmypdf(input) {
-  const sidecarPath = join42(input.directory, "probe-sidecar.txt");
-  try {
-    await input.runner({
-      command: OCRMYPDF_COMMAND,
-      args: ocrmypdfArguments({
-        inputPath: input.pdfPath,
-        outputPath: join42(input.directory, "probe-output.pdf"),
-        sidecarPath
-      }),
-      timeoutMs: PROBE_OCRMYPDF_TIMEOUT_MS
-    });
-  } catch (error) {
-    return commandMissing(error) ? "missing" : "failed";
-  }
-  try {
-    return probeWordRead(await readFile3(sidecarPath, "utf8")) ? "ok" : "failed";
-  } catch {
-    return "failed";
-  }
-}
-async function probeOcrCapability(options = {}) {
-  const runner = options.commandRunner ?? runExtractionCommand;
-  const now = options.now ?? Date.now;
-  let tesseract = "failed";
-  let pdftoppm = "failed";
-  let ocrmypdf = "failed";
-  let directory;
-  try {
-    directory = await mkdtemp(join42(tmpdir4(), PROBE_TEMP_PREFIX));
-    const imagePath = join42(directory, "probe.jpg");
-    const pdfPath = join42(directory, "probe.pdf");
-    await writeFile(imagePath, ocrProbeJpeg());
-    await writeFile(pdfPath, buildOcrProbePdf());
-    tesseract = await probeTesseract({ runner, imagePath });
-    pdftoppm = await probePdftoppm({ runner, directory, pdfPath, tesseract });
-    ocrmypdf = tesseract === "ok" ? await probeOcrmypdf({ runner, directory, pdfPath }) : "skipped";
-  } catch {} finally {
-    if (directory)
-      await rm2(directory, { recursive: true, force: true }).catch(() => {});
-  }
-  return {
-    tesseract,
-    pdftoppm,
-    ocrmypdf,
-    pdfEngine: ocrmypdf === "ok" ? "ocrmypdf" : tesseract === "ok" && pdftoppm === "ok" ? "pdftoppm_tesseract" : undefined,
-    imageEngine: tesseract === "ok" ? "tesseract" : undefined,
-    checkedAt: now()
-  };
-}
-
-// src/core/ocr-readiness.ts
 var ARCH_IDS2 = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
 var DEBIAN_IDS2 = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
 var FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
@@ -34106,7 +35106,7 @@ function sourceWatchRouteFromToolContext(context2) {
   const ownerSeed = context2.requesterSenderId?.trim() || context2.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId2 = `owner:${createHash14("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId2 = `owner:${createHash15("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context2.deliveryContext?.channel || context2.messageChannel)?.trim().toLowerCase();
   const target = context2.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

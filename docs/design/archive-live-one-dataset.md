@@ -1080,11 +1080,17 @@ Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
 - **Secrets.** A media child judged Secrets loses every file kept for its
   message at the next pull's clearing: the current file, an earlier
   attachment's, and any download of it in progress.
-- **Not yet.** Nothing reads the kept bytes until Telegram has an extraction
-  roster for its stores (the factory's per-account connector resolution).
-  `fetchItem` hands a reader a kept file whole, up to 64 MB per read; a
-  larger file is kept and listed, and its reading needs a streaming read when
-  that roster lands. That bound is on reading, never on what is kept.
+- **Read later.** One Telegram media lane (`telegram-messages/media-extraction.ts`,
+  on the shared child-reading runtime `email-source/child-extraction-runtime.ts`,
+  which Gmail's attachments use too) reads a child's bytes by its locator: a
+  file the helper kept, only from under the spool's media folder, handed to a
+  file reader as it is; or a file an export carries, from that import's own
+  folder, only while the import serves it. The text lands on the child, never
+  on the message. An export's child is held Private until judged, so its first
+  read queues the judge's move and the next pass lands it in the Private store.
+  A child named only (no kept file) has no locator and is never read. Reads
+  are bounded per read; a larger file is kept and listed, and a file reader
+  gets it as a file, never whole in memory.
 
 ## Built, step 6
 

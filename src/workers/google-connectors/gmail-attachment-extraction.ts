@@ -16,25 +16,17 @@
  * could not read. Only children are candidates: a message is read with its
  * listing, never here.
  */
-import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import type { RawItem, SourceConnector, SourceConnectorFetchOptions, SourceConnectorListPage } from '../../core/contracts.ts';
-import { FileExtractionSourceError, type ExtractionCandidateReader } from '../../core/file-extraction-source.ts';
+import { FileExtractionSourceError } from '../../core/file-extraction-source.ts';
 import { parseMboxMessage } from '../archive-import/mbox/parse.ts';
 import { readMboxPart } from '../archive-import/mbox/part-reader.ts';
 import type { ArchiveImportStateStore } from '../archive-import/state.ts';
-import { tierLedgerIdentityKey } from '../classification/tier-ledger.ts';
-import { hiddenByParentIdentity, itemVerdicts, type ChildProbe, type ChildVisibilityLane } from '../connector-store/child-visibility.ts';
-import { connectorStoreExtractionCandidateReader } from '../connector-store/extraction-candidate-reader.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
-import type { TieredExtractionView } from '../connector-store/tiered-extraction.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
-import {
-  createConnectorFileExtractionSource,
-  deferredBytesAnswerFor,
-  type BoundedFetchConnector,
-} from '../file-extraction/connector-source.ts';
+import type { BoundedFetchConnector } from '../file-extraction/connector-source.ts';
+import { createChildExtractionRuntime } from '../email-source/child-extraction-runtime.ts';
 import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
-import { createFileExtractionRuntime, type FileExtractionRuntime } from '../email-source/file-extraction-runtime.ts';
+import type { FileExtractionRuntime } from '../email-source/file-extraction-runtime.ts';
 import { GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, GMAIL_SECURE_CONNECTOR_CORPUS_ID, gmailPartLocatorPrefix } from './gmail.ts';
 import { GMAIL_ARCHIVE_SOURCE_ID } from './gmail-archive-target.ts';
 import { MBOX_PART_LOCATOR_PREFIX } from '../archive-import/mbox/gmail-input.ts';
@@ -150,32 +142,8 @@ export function gmailAttachmentConnector(input: {
 }
 
 /**
- * Whether a child may still be read and landed: its own row is not gone (not
- * tombstoned in every store) and its parent may be seen (child visibility: a
- * deleted or hidden parent hides it). Asked before its bytes are fetched and
- * again before its text is accepted; a queued job for a child that fails it is
- * closed and its text dropped.
- */
-export function gmailChildStillServed(lane: ChildVisibilityLane, child: ChildProbe): boolean {
-  const own = itemVerdicts(lane, [child]).get(tierLedgerIdentityKey(child));
-  if (!own || own.gone) return false;
-  return hiddenByParentIdentity(lane, [child]).size === 0;
-}
-
-/** Only attachment children are candidates (their ids carry the child separator). */
-export function gmailAttachmentCandidates(reader: ExtractionCandidateReader): ExtractionCandidateReader {
-  return {
-    async extractionCandidates(options) {
-      const page = await reader.extractionCandidates(options);
-      return { ...page, candidates: page.candidates.filter((row) => (row.providerItemId ?? row.localItemId).includes(CHILD_ITEM_ID_SEPARATOR)) };
-    },
-  };
-}
-
-/**
- * The Gmail attachments' extraction runtime: the shared factory over the Gmail
- * stores, with this module's one reader, the Gmail tier set to place what is
- * read, and the product's extractors and jobs file.
+ * The Gmail attachments' extraction runtime: the shared child extraction runtime over the Gmail stores, with
+ * this module's one reader.
  */
 export function createGmailAttachmentExtractionRuntime(input: {
   stores: readonly LocalConnectorStore[];
@@ -187,44 +155,10 @@ export function createGmailAttachmentExtractionRuntime(input: {
   jobsDbPath?: string;
   warn?: (message: string) => void;
 }): FileExtractionRuntime | undefined {
-  return createFileExtractionRuntime({
-    ...(input.env ? { env: input.env } : {}),
-    enabled: true,
-    connectorStores: [...input.stores],
-    corpora: GMAIL_ATTACHMENT_CORPUS_IDS.map((corpusId) => ({
-      corpusId,
-      provider: GMAIL_ATTACHMENT_EXTRACTION_PROVIDER,
-      scopes: [GMAIL_ATTACHMENT_EXTRACTION_SCOPE_KEY],
-      ownerConnectorId: GMAIL_ATTACHMENT_EXTRACTION_PROVIDER,
-      resolveAccountScope: input.accountScope,
-    })),
-    extraSourceFactories: new Map([[
-      GMAIL_ATTACHMENT_EXTRACTION_PROVIDER,
-      ({ config, store, view }: { config: { corpusId: string; provider: string }; store: LocalConnectorStore; view?: TieredExtractionView }) => {
-        const reader = view ?? store;
-        return createConnectorFileExtractionSource({
-          id: `${config.corpusId}:attachments`,
-          corpusId: config.corpusId,
-          provider: config.provider,
-          connector: input.connector,
-          deferredBytes: (ref) => deferredBytesAnswerFor(reader.deferredBytesStateOfLocalItem(ref.localItemId, ref.sourceVersion)),
-          candidates: gmailAttachmentCandidates(connectorStoreExtractionCandidateReader(reader)),
-          lanes: [{ approvedScopeKey: GMAIL_ATTACHMENT_EXTRACTION_SCOPE_KEY }],
-        });
-      },
-    ]]),
-    tierSets: new Map(GMAIL_ATTACHMENT_CORPUS_IDS.map((corpusId) => [corpusId, input.set] as const)),
-    // Rechecked before candidates are listed, before bytes are fetched and before text is accepted: a child
-    // whose parent was deleted (or which was removed itself) while its job waited is never read or landed.
-    scopeGuard: {
-      assertAuthorized: () => {},
-      allowsRef: ({ ref }) => gmailChildStillServed(
-        { ledger: () => input.set.ledger, stores: () => input.set.openStores() },
-        { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId },
-      ),
-    },
-    ...(input.extractors ? { extractors: input.extractors } : {}),
-    ...(input.jobsDbPath ? { jobsDbPath: input.jobsDbPath } : {}),
-    ...(input.warn ? { warn: input.warn } : {}),
+  return createChildExtractionRuntime({
+    ...input,
+    provider: GMAIL_ATTACHMENT_EXTRACTION_PROVIDER,
+    scopeKey: GMAIL_ATTACHMENT_EXTRACTION_SCOPE_KEY,
+    corpusIds: GMAIL_ATTACHMENT_CORPUS_IDS,
   });
 }
