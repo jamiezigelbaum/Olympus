@@ -22,8 +22,11 @@ import { createEvernoteRuntime, evernoteDashboardPass, evernoteSchedulerFailure 
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { SourceSchedulerTaskFailure } from '../src/workers/source-scheduler.ts';
+import { planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
 import { childProviderItemId } from '../src/core/child-item-id.ts';
+import { embedPendingChunks } from '../src/workers/connector-store/local-index.ts';
 import { evernoteAttachmentKeys } from '../src/workers/evernote/connector.ts';
+import { RecordingProvider } from './helpers/tier-fixtures.ts';
 import { FakeEvernoteServer, md5Hex } from './support/evernote-mcp-fake.ts';
 
 let fake: FakeEvernoteServer | undefined;
@@ -225,6 +228,21 @@ describe('the scheduler source', () => {
     const lane = runtime.existingLane()!;
     const text = [lane.secure.open(), lane.internal.open()].flatMap((store) => store.localContent(child)?.chunks ?? []).join(' ');
     expect(text).toContain('fixtureferryword');
+  });
+
+  test('a note routed to the Personal store gets its vectors from the store-wide sweep, though no pass queued it', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    fake.addNote({ title: 'Survey', created: day(2024), notebookId: fake.addNotebook('Field work').id, body: '<en-note>River survey</en-note>' });
+    const { sync, runtime } = await connected(fake);
+    await sync.pass();
+    const internal = runtime.existingLane()!.internal.open();
+    // The pass stages in the Private store and routes per item: nothing queues the Personal copy.
+    expect(internal.queuedEmbeddingItemIds()).toEqual([]);
+    const provider = new RecordingProvider('google-gemini', 'gemini-embedding-2', 'cloud');
+    const target = planStoreEmbedding({ store: internal, provider, servedByMeaning: true, scope: { allowed: true } })!;
+    expect(target.wholeStore).toBe(true);
+    const [run] = await embedPendingChunks([target], { maxItems: 32 });
+    expect(run!.chunksEmbedded).toBeGreaterThan(0);
   });
 
   test('a rate-limited pass retries later; a refused sign-in is a credential failure', () => {
