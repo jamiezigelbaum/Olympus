@@ -474,6 +474,6 @@ describe('filling the Inbox before it is crawled', () => {
     expect(await notReady(inbox, 10_000)).toEqual({ ok: false, detail: '"Ask the local model" was not ready to press (the Inbox holds 0 of 1 answers)' });
     // The question is in the Inbox at once; an answer that never comes is not counted as one.
     const silent = inboxAnswers(new InboxPage(0, true, Infinity).driver, { questions: ['One?'], ...clock() });
-    expect(await silent(inbox, 10_000)).toEqual({ ok: false, detail: 'the local model\'s answer was not finished and in the Inbox in time (no answer yet; the Inbox holds 1 of 1)' });
+    expect(await silent(inbox, 10_000)).toEqual({ ok: false, detail: 'the local model\'s answer was not finished and in the Inbox in time (no answer yet; the panel said "Answering…", the button still busy; the Inbox holds 1 of 1)' });
   });
 });
