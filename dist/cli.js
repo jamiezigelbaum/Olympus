@@ -171548,18 +171548,19 @@ function enexTime(value2) {
   const ms = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]));
   return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
 }
-function decodeBase64Range(reader, start, end, cap) {
-  const out = [];
-  let total = 0;
-  let pending = new Uint8Array(Math.min(cap, 64 * 1024) + 3);
+function decodeBase64Chunks(reader, start, end, cap, sink) {
+  const buffer = new Uint8Array(64 * 1024);
   let used = 0;
+  let total = 0;
+  const flush = () => {
+    if (used > 0)
+      sink(buffer.slice(0, used));
+    used = 0;
+  };
   const push = (byte) => {
-    if (used === pending.length) {
-      out.push(pending.subarray(0, used));
-      pending = new Uint8Array(Math.min(Math.max(64 * 1024, pending.length * 2), 16 * 1024 * 1024));
-      used = 0;
-    }
-    pending[used++] = byte;
+    if (used === buffer.length)
+      flush();
+    buffer[used++] = byte;
     total += 1;
     return total >= cap;
   };
@@ -171567,8 +171568,8 @@ function decodeBase64Range(reader, start, end, cap) {
   let count = 0;
   let padded = false;
   outer:
-    for (let at2 = start;at2 < end; at2 += FETCH_SLICE_BYTES) {
-      const slice = reader.readAt(at2, Math.min(FETCH_SLICE_BYTES, end - at2));
+    for (let at = start;at < end; at += FETCH_SLICE_BYTES) {
+      const slice = reader.readAt(at, Math.min(FETCH_SLICE_BYTES, end - at));
       for (let index = 0;index < slice.length; index += 1) {
         const byte = slice[index];
         if (byte === 32 || byte === 10 || byte === 13 || byte === 9)
@@ -171599,17 +171600,30 @@ function decodeBase64Range(reader, start, end, cap) {
     } else if (count === 1)
       throw new FileExtractionSourceError("source_content_unavailable");
   }
-  out.push(pending.subarray(0, used));
-  const bytes = new Uint8Array(Math.min(total, cap));
+  flush();
+  return Math.min(total, cap);
+}
+function decodeBase64Range(reader, start, end, cap) {
+  const parts = [];
+  const length = decodeBase64Chunks(reader, start, end, cap, (chunk) => parts.push(chunk));
+  const bytes = new Uint8Array(length);
   let at = 0;
-  for (const part of out) {
+  for (const part of parts) {
     const take = Math.min(part.length, bytes.length - at);
     bytes.set(part.subarray(0, take), at);
     at += take;
-    if (at >= bytes.length)
-      break;
   }
   return bytes;
+}
+function md5OfBase64Range(reader, start, end) {
+  const hash2 = createHash92("md5");
+  decodeBase64Chunks(reader, start, end, Number.MAX_SAFE_INTEGER, (chunk) => hash2.update(chunk));
+  return hash2.digest("hex");
+}
+function notebookOfExport(relPath) {
+  const name = relPath.split("/").pop() ?? "";
+  const notebook = name.replace(/\.enex$/i, "").trim();
+  return notebook || undefined;
 }
 function createEvernoteArchiveConnector(input) {
   const pageSizeDefault = Math.max(1, input.pageSize ?? EVERNOTE_DEFAULT_PAGE_SIZE);
@@ -171638,7 +171652,7 @@ function createEvernoteArchiveConnector(input) {
   const report = (kind, findingClass, fileIndex, offset, count) => {
     input.report({ kind, class: findingClass, fileIndex, offset, ...count !== undefined ? { count } : {} });
   };
-  const buildNote = (note, fileIndex, start, savedAt) => {
+  const buildNote = (note, fileIndex, start, savedAt, reader) => {
     const title = textOf(xmlChild(note, "title"));
     const contentElement = xmlChild(note, "content");
     const body = contentElement ? enmlToText(xmlText(contentElement)) : { text: "", unsupported: 0, media: 0 };
@@ -171661,9 +171675,11 @@ function createEvernoteArchiveConnector(input) {
       report(NOTE_FINDINGS.unsupported, "gap", fileIndex, start);
     if (built.dateAssumed)
       report(NOTE_FINDINGS.dateAssumed, "gap", fileIndex, start);
-    const parent = built.item;
+    const notebook = notebookOfExport(input.files[fileIndex].relPath);
+    const parent = notebook ? { ...built.item, metadata: Object.freeze({ ...built.item.metadata, notebook }) } : built.item;
     const items = [parent];
     const positions = [start];
+    const seen = new Map;
     resources.forEach((resource, index) => {
       const data2 = xmlChild(resource, "data");
       const mime2 = textOf(xmlChild(resource, "mime")) || "application/octet-stream";
@@ -171672,10 +171688,24 @@ function createEvernoteArchiveConnector(input) {
       const name = (fileName || `Attachment ${index + 1} (${mime2})`).slice(0, 500);
       const ranges = data2?.ranges ?? [];
       const encoding = (data2?.attributes["encoding"] ?? "base64").toLowerCase();
-      const readable = data2 !== undefined && encoding === "base64" && data2.rangeEntities !== true && ranges.length === 1;
+      let readable = data2 !== undefined && encoding === "base64" && data2.rangeEntities !== true && ranges.length === 1;
+      let md5;
+      if (readable) {
+        try {
+          md5 = md5OfBase64Range(reader, ranges[0].start, ranges[0].end);
+        } catch (error2) {
+          if (!(error2 instanceof FileExtractionSourceError))
+            throw error2;
+          readable = false;
+        }
+      }
       const range = readable ? ranges[0] : undefined;
       const locator = range ? `${prefix}${fileIndex}:${range.start}:${range.end}:${Buffer.from(mime2).toString("base64url")}` : `${prefix}none`;
-      const providerItemId = childProviderItemId(parent.identity.providerItemId, `resource-${index}`);
+      const occurrence = md5 ? (seen.get(md5) ?? 0) + 1 : 0;
+      if (md5)
+        seen.set(md5, occurrence);
+      const key2 = md5 ? occurrence === 1 ? md5 : `${md5}.${occurrence}` : `resource-${index}`;
+      const providerItemId = childProviderItemId(parent.identity.providerItemId, key2);
       const authoredAt = parent.metadata["authoredAt"];
       items.push({
         identity: {
@@ -171693,6 +171723,8 @@ function createEvernoteArchiveConnector(input) {
           title: name,
           name,
           mimeType: mime2,
+          ...md5 ? { md5 } : {},
+          ...notebook ? { notebook } : {},
           ...typeof authoredAt === "string" ? { authoredAt } : {}
         }),
         fetchedAt: new Date().toISOString(),
@@ -171784,7 +171816,7 @@ function createEvernoteArchiveConnector(input) {
           segment.next = { file: cursor.file, offset: event.end, from: 0, done: false };
           continue;
         }
-        const built = buildNote(event.element, cursor.file, event.start, savedAt);
+        const built = buildNote(event.element, cursor.file, event.start, savedAt, reader);
         const skip = event.start === cursor.offset ? Math.min(cursor.from, built.items.length) : 0;
         const left = built.items.length - skip;
         const take = Math.min(left, room - segment.items.length);
@@ -171908,7 +171940,9 @@ function createEvernoteArchiveConnector(input) {
       return readAttachment(localItemId, options.deferredBytes ? { deferredBytes: options.deferredBytes } : undefined, cap);
     },
     classificationSignals(item) {
-      return noteClassificationSignals(item);
+      const notebook = typeof item.metadata["notebook"] === "string" ? item.metadata["notebook"] : undefined;
+      const signals = noteClassificationSignals(item);
+      return notebook ? { ...signals, folderKeys: [notebook] } : signals;
     }
   };
   return connector;
