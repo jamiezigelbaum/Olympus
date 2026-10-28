@@ -124,6 +124,31 @@ describe('a pass through the tier lane', () => {
     expect(next.counts).toMatchObject({ notes_deleted: 1, items_tombstoned: 1 });
   });
 
+  test('a pass that stops after storing some notes still deletes them once they are gone', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Field work');
+    const notes = Array.from({ length: 55 }, (_, index) => fake!.addNote({ title: `Note ${index}`, created: day(2024, 1, index + 1), notebookId: book.id, body: `<en-note>Note ${index}</en-note>` }));
+    const { sync, runtime } = await connected(fake);
+    const stored = (noteId: string) => runtime.existingLane()?.set.storedItem({ provider: 'evernote', accountScope: 'personal', providerItemId: noteId }, (a, b) => a.localeCompare(b));
+
+    // The first page of notes is stored, then the server breaks.
+    fake.breakGetNoteAfter = 52;
+    await expect(sync.pass()).rejects.toBeDefined();
+    expect(sync.status()?.last_completed_at).toBeUndefined();
+    const storedNote = [notes[0]!, notes[54]!].find((note) => stored(note.id) !== undefined)!;
+    expect(storedNote).toBeDefined();
+
+    // The oldest and the newest note go before the next pass completes. Notes are read in date
+    // order, so one of them was in the stored page and the other was never read.
+    fake.breakGetNoteAfter = undefined;
+    for (const note of [notes[0]!, notes[54]!]) fake.notes.splice(fake.notes.indexOf(note), 1);
+    const next = await sync.pass();
+    expect(next.counts).toMatchObject({ notes_deleted: 1, pass_complete: 1 });
+    expect(stored(storedNote.id)).toBeUndefined();
+    const after = await sync.pass();
+    expect(after.counts).toMatchObject({ notes_deleted: 0, notes_unchanged: 53 });
+  });
+
   test('a sign-in the provider refuses marks the handle for Reconnect', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     fake.addNote({ title: 'Survey', created: day(2024), notebookId: fake.addNotebook('A').id });

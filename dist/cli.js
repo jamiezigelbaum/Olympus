@@ -157742,6 +157742,16 @@ var init_listing = __esm(() => {
 
 // src/workers/evernote/connector.ts
 import { createHash as createHash86 } from "node:crypto";
+function evernotePassWithUnfinished(record6, unfinished) {
+  if (!unfinished || Object.keys(unfinished).length === 0)
+    return record6;
+  const notes = { ...record6?.notes };
+  for (const [noteId, entry] of Object.entries(unfinished)) {
+    const children = [...new Set([...notes[noteId]?.children ?? [], ...entry.children ?? []])];
+    notes[noteId] = { v: "unfinished|", ...children.length > 0 ? { children } : {} };
+  }
+  return { version: 1, completedAt: record6?.completedAt ?? "", notes };
+}
 function evernoteNoteVersion(updatedAt, notebookId, notebookLabel) {
   return `${updatedAt}|${notebookId}|${digest4(notebookLabel)}`;
 }
@@ -157879,6 +157889,7 @@ function createEvernoteSourceConnector(options) {
         rate_limit_retries: 0
       };
       const nextNotes = {};
+      const readNotes = {};
       const pending = [];
       let stoppedBy;
       const retire = (noteId, entry) => {
@@ -157956,9 +157967,11 @@ function createEvernoteSourceConnector(options) {
         }
         pending.push(...built.items);
         nextNotes[noteId] = { v: noteVersion, ...built.childKeys.length > 0 ? { children: built.childKeys } : {} };
+        readNotes[noteId] = nextNotes[noteId];
         counts.notes_read += 1;
         counts.attachments_listed += built.childKeys.length;
         while (pending.length >= PAGE_ITEMS) {
+          options.readSoFar?.(readNotes);
           const items = pending.splice(0, PAGE_ITEMS);
           for (const item of items)
             listed.set(item.identity.localItemId, item);
@@ -157972,6 +157985,7 @@ function createEvernoteSourceConnector(options) {
         counts,
         ...stoppedBy ? { stoppedBy } : {}
       };
+      options.readSoFar?.(readNotes);
       for (const item of pending)
         listed.set(item.identity.localItemId, item);
       yield { items: pending, done: true };
@@ -158172,7 +158186,8 @@ function readPassFile(path) {
     if (parsed.version !== 1 || typeof parsed.status !== "object" || parsed.status === null)
       return { version: 1, status: {} };
     const record7 = parsed.record?.version === 1 && parsed.record.notes && typeof parsed.record.notes === "object" ? parsed.record : undefined;
-    return { version: 1, ...record7 ? { record: record7 } : {}, status: parsed.status };
+    const unfinished = parsed.unfinished && typeof parsed.unfinished === "object" ? parsed.unfinished : undefined;
+    return { version: 1, ...record7 ? { record: record7 } : {}, ...unfinished ? { unfinished } : {}, status: parsed.status };
   } catch {
     return { version: 1, status: {} };
   }
@@ -158235,7 +158250,7 @@ function createEvernoteLiveSync(options) {
   const authorizedFetch = mcpAuthorizedFetch(tokens, serverUrl, options.fetch);
   const accountScope = options.handle.accountRole ?? EVERNOTE_ACCOUNT_ROLE;
   let shouldContinue = () => true;
-  const connector = (previous) => createEvernoteSourceConnector({
+  const connector = (previous, readSoFar) => createEvernoteSourceConnector({
     accountScope,
     session: (purpose) => new McpSourceSession({
       serverUrl,
@@ -158248,6 +158263,7 @@ function createEvernoteLiveSync(options) {
       ...purpose === "pass" ? { shouldContinue: () => shouldContinue() } : {}
     }),
     ...previous ? { previous } : {},
+    ...readSoFar ? { readSoFar } : {},
     ...options.downloadHosts ? { downloadHosts: options.downloadHosts } : {},
     ...options.downloadFetch ? { downloadFetch: options.downloadFetch } : {},
     now
@@ -158265,7 +158281,11 @@ function createEvernoteLiveSync(options) {
   };
   const runPass = async () => {
     const file = readPassFile(passPath);
-    const live = connector(() => file.record);
+    const previous = evernotePassWithUnfinished(file.record, file.unfinished);
+    const live = connector(() => previous, (notes) => {
+      file.unfinished = { ...file.unfinished, ...notes };
+      writePassFile(passPath, file);
+    });
     const sync = {
       placement: EVERNOTE_STORE_PLACEMENT,
       fetchContent: true,

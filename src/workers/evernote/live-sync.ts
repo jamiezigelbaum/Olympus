@@ -14,6 +14,8 @@
  * - The pass record (raw `evernote-pass.json`): what the last complete pass
  *   held, written only once its items are stored, and the dashboard's facts
  *   about the last pass (when it completed, what it counted, what stopped it).
+ *   An unfinished pass leaves the notes it read beside it (`unfinished`), so
+ *   the next pass can still delete them.
  */
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -61,6 +63,7 @@ import {
   EVERNOTE_READ_TOOLS,
   EVERNOTE_SOURCE_ID,
   createEvernoteSourceConnector,
+  evernotePassWithUnfinished,
   type EvernotePassCounts,
   type EvernotePassRecord,
   type EvernoteSourceConnector,
@@ -151,6 +154,7 @@ export interface EvernotePassStatus {
 interface PassFile {
   version: 1;
   record?: EvernotePassRecord;
+  unfinished?: EvernotePassRecord['notes'];
   status: EvernotePassStatus;
 }
 
@@ -160,7 +164,8 @@ function readPassFile(path: string): PassFile {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<PassFile>;
     if (parsed.version !== 1 || typeof parsed.status !== 'object' || parsed.status === null) return { version: 1, status: {} };
     const record = parsed.record?.version === 1 && parsed.record.notes && typeof parsed.record.notes === 'object' ? parsed.record : undefined;
-    return { version: 1, ...(record ? { record } : {}), status: parsed.status };
+    const unfinished = parsed.unfinished && typeof parsed.unfinished === 'object' ? parsed.unfinished : undefined;
+    return { version: 1, ...(record ? { record } : {}), ...(unfinished ? { unfinished } : {}), status: parsed.status };
   } catch {
     // An unreadable record is a first pass again: it deletes nothing.
     return { version: 1, status: {} };
@@ -280,7 +285,10 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
   const authorizedFetch = mcpAuthorizedFetch(tokens, serverUrl, options.fetch);
   const accountScope = options.handle.accountRole ?? EVERNOTE_ACCOUNT_ROLE;
   let shouldContinue: () => boolean = () => true;
-  const connector = (previous?: () => EvernotePassRecord | undefined): EvernoteSourceConnector => createEvernoteSourceConnector({
+  const connector = (
+    previous?: () => EvernotePassRecord | undefined,
+    readSoFar?: (notes: EvernotePassRecord['notes']) => void,
+  ): EvernoteSourceConnector => createEvernoteSourceConnector({
     accountScope,
     session: (purpose) => new McpSourceSession({
       serverUrl,
@@ -293,6 +301,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
       ...(purpose === 'pass' ? { shouldContinue: () => shouldContinue() } : {}),
     }),
     ...(previous ? { previous } : {}),
+    ...(readSoFar ? { readSoFar } : {}),
     ...(options.downloadHosts ? { downloadHosts: options.downloadHosts } : {}),
     ...(options.downloadFetch ? { downloadFetch: options.downloadFetch } : {}),
     now,
@@ -313,7 +322,12 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
 
   const runPass = async (): Promise<EvernotePassReceipt> => {
     const file = readPassFile(passPath);
-    const live = connector(() => file.record);
+    const previous = evernotePassWithUnfinished(file.record, file.unfinished);
+    // Kept before each page is stored: a pass that stops after storing some notes still leaves them to delete.
+    const live = connector(() => previous, (notes) => {
+      file.unfinished = { ...file.unfinished, ...notes };
+      writePassFile(passPath, file);
+    });
     const sync: ConnectorStoreSyncOptions = {
       placement: EVERNOTE_STORE_PLACEMENT,
       fetchContent: true,

@@ -91,12 +91,31 @@ export interface EvernotePassOutcome {
   stoppedBy?: McpSourceErrorKind;
 }
 
+/**
+ * The last complete pass with the notes an unfinished pass read since. Those may be stored, so they
+ * count for deletions, with every attachment either pass saw, and are read again rather than skipped.
+ */
+export function evernotePassWithUnfinished(
+  record: EvernotePassRecord | undefined,
+  unfinished: EvernotePassRecord['notes'] | undefined,
+): EvernotePassRecord | undefined {
+  if (!unfinished || Object.keys(unfinished).length === 0) return record;
+  const notes = { ...record?.notes };
+  for (const [noteId, entry] of Object.entries(unfinished)) {
+    const children = [...new Set([...(notes[noteId]?.children ?? []), ...(entry.children ?? [])])];
+    notes[noteId] = { v: 'unfinished|', ...(children.length > 0 ? { children } : {}) };
+  }
+  return { version: 1, completedAt: record?.completedAt ?? '', notes };
+}
+
 export interface EvernoteConnectorOptions {
   accountScope: string;
   /** A fresh, unopened session for one pass or one attachment read. */
   session: (purpose: 'pass' | 'attachment') => McpSourceSession;
   /** The last complete pass, if any. */
   previous?: () => EvernotePassRecord | undefined;
+  /** Before each page goes out: every note this pass has read so far, kept until the pass is committed. */
+  readSoFar?: (notes: EvernotePassRecord['notes']) => void;
   downloadHosts?: readonly string[];
   downloadFetch?: typeof fetch;
   now?: () => Date;
@@ -267,6 +286,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         notes_deleted: 0, shared_not_imported: 0, notes_not_read: 0, attachments_listed: 0, tool_calls: 0, rate_limit_retries: 0,
       };
       const nextNotes: EvernotePassRecord['notes'] = {};
+      const readNotes: EvernotePassRecord['notes'] = {};
       const pending: RawItem[] = [];
       let stoppedBy: McpSourceErrorKind | undefined;
 
@@ -349,10 +369,12 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         }
         pending.push(...built.items);
         nextNotes[noteId] = { v: noteVersion, ...(built.childKeys.length > 0 ? { children: built.childKeys } : {}) };
+        readNotes[noteId] = nextNotes[noteId];
         counts.notes_read += 1;
         counts.attachments_listed += built.childKeys.length;
         // Pages go out as they fill, so a long first pass stores as it reads.
         while (pending.length >= PAGE_ITEMS) {
+          options.readSoFar?.(readNotes);
           const items = pending.splice(0, PAGE_ITEMS);
           for (const item of items) listed.set(item.identity.localItemId, item);
           yield { items, done: false };
@@ -366,6 +388,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         counts,
         ...(stoppedBy ? { stoppedBy } : {}),
       };
+      options.readSoFar?.(readNotes);
       for (const item of pending) listed.set(item.identity.localItemId, item);
       yield { items: pending, done: true };
     } finally {

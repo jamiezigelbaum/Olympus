@@ -74,6 +74,8 @@ export class FakeEvernoteServer {
   failTool: string | undefined;
   /** A tool that answers "rate limited" until cleared. */
   rateLimitTool: string | undefined;
+  /** After this many get_note calls, the server fails the request outright until cleared. */
+  breakGetNoteAfter: number | undefined;
   // OAuth state.
   accessToken = 'access-1';
   refreshToken = 'refresh-1';
@@ -215,6 +217,7 @@ export class FakeEvernoteServer {
       }
       if (this.rateLimitTool === name) return { isError: true, content: [{ type: 'text', text: 'Rate limit exceeded. Try again later.' }] };
       if (this.failTool === name) return { isError: true, content: [{ type: 'text', text: 'Internal failure' }] };
+      if (name === 'get_note' && this.breakGetNoteAfter !== undefined && this.calls[name]! > this.breakGetNoteAfter) throw new Error('Server broke');
       return this.callTool(name, args);
     });
     return server;
