@@ -37,7 +37,7 @@ import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/das
 import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
 import { createBuiltInPrivateAnswerModel, type PanelAnswerLimits } from '../src/workers/chatgpt/private-answer-model.ts';
-import { NoPrivateEvidenceError, type PrivateAnswerModel } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { NoPrivateEvidenceError, type PrivateAnswerModel, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { VERSIONED_FIXTURE_ITEMS, versionedFixtureHits } from '../eval/fixtures/versioned-documents.ts';
@@ -355,22 +355,39 @@ async function backgroundSettled(): Promise<void> {
 }
 
 describe('a waiting question whose matches may no longer be read', () => {
-  test('settles as not found instead of retrying with no outcome', async () => {
+  // The model throws NoPrivateEvidenceError when an item it read is revoked;
+  // the live check then decides: none eligible settles, some eligible searches again.
+  const setup = async (eligibleNow: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>) => {
     const spec: FixtureSpec = { id: 'owe', name: 'balance.txt', text: 'I owe Alex twenty euros.', legacyDomain: 'secure_local' };
     const local = await localFixture({ specs: [spec], privateIds: ['owe'], keywordOnly: true });
     const model: PrivateAnswerModel = {
       status: () => ({ state: 'ready' }),
       answerPrivately: async () => { throw new NoPrivateEvidenceError(); },
     };
-    const answer = (input: LocalAnswerRequest) => answerOnThisComputer(input, { lanes: (request) => local.lanes(request, 'built_in_only'), model, eligible: local.eligible });
+    const answer = (input: LocalAnswerRequest) => answerOnThisComputer(input, { lanes: (request) => local.lanes(request, 'built_in_only'), model, eligible: eligibleNow });
     const store = waitingStore();
-    const question = 'do i owe anyone anything?';
-    const ref = store.record(store.ticket('conn-chatgpt'), { question, surface: 'remote', state: 'waiting' })!;
+    const ref = store.record(store.ticket('conn-chatgpt'), { question: 'do i owe anyone anything?', surface: 'remote', state: 'waiting' })!;
     const controller = createLocalPrivateAnswers({ answer, eligible: local.eligible, store: () => store });
     await controller.tick();
-    const saved = store.get(ref.id)!;
+    return store.get(ref.id)!;
+  };
+
+  test('settles as not found when no match may be read, instead of retrying with no outcome', async () => {
+    const saved = await setup(async (items) => items.map(() => false));
     expect(saved.result?.status).toBe('not_found');
     expect(saved.attempts).toBe(0);
+  });
+
+  test('stays open to search again while another match may still be read', async () => {
+    const saved = await setup(async (items) => items.map(() => true));
+    expect(saved.result).toBeUndefined();
+    expect(saved.attempts).toBe(1);
+  });
+
+  test('stays open when the live check cannot answer', async () => {
+    const saved = await setup(async () => { throw new Error('SQLITE_BUSY (simulated)'); });
+    expect(saved.result).toBeUndefined();
+    expect(saved.attempts).toBe(1);
   });
 });
 

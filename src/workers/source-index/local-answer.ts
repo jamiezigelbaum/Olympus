@@ -198,12 +198,13 @@ export async function answerOnThisComputer(
     }, { detail: input.detail === 'full' ? 'full' : 'summary' });
   } catch (error) {
     if (!(error instanceof NoPrivateEvidenceError)) return { status: 'failed' };
-    // No match may be read now. A guard that threw ends here too, so this
-    // settles as not found only when the live check answers definitely;
-    // as `failed` the waiting question retried forever with no outcome.
+    // A match the answer read is no longer eligible (one revoked mid-answer
+    // is enough). Settled as not found only when the live check says none
+    // is; `changed` searches again; a check that throws stays `failed`.
+    // As `failed` throughout, the waiting question retried forever.
     try {
-      await options.eligible(candidates);
-      return { status: 'not_found', leftOut };
+      const ok = await options.eligible(candidates);
+      return ok.some((value) => value === true) ? { status: 'changed' } : { status: 'not_found', leftOut };
     } catch {
       return { status: 'failed' };
     }

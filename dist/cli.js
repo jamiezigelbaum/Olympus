@@ -138315,8 +138315,8 @@ async function answerOnThisComputer(input, options) {
     if (!(error2 instanceof NoPrivateEvidenceError))
       return { status: "failed" };
     try {
-      await options.eligible(candidates);
-      return { status: "not_found", leftOut };
+      const ok = await options.eligible(candidates);
+      return ok.some((value2) => value2 === true) ? { status: "changed" } : { status: "not_found", leftOut };
     } catch {
       return { status: "failed" };
     }
