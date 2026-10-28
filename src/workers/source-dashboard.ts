@@ -96,7 +96,7 @@ export interface DashboardSyncName {
   plural?: boolean;
 }
 
-export type DashboardConnectSource = 'google' | 'gmail' | 'google-drive' | 'dropbox' | 'x' | 'venice' | 'readwise';
+export type DashboardConnectSource = 'google' | 'gmail' | 'google-drive' | 'dropbox' | 'x' | 'venice' | 'readwise' | 'evernote';
 /**
  * A source that needs no account ("this computer"), by the id its Connect
  * action names (`connect_action.kind === 'this_computer'`). Derived from the
@@ -1163,6 +1163,12 @@ export interface DashboardSourceCard {
    */
   media_storage?: DashboardMediaStorage;
   /**
+   * A source read in whole passes (Evernote's MCP server): what its last
+   * completed pass counted and what stopped the latest one. Counts and closed
+   * kinds only. Absent for every other source and before the first pass.
+   */
+  live_pass?: DashboardLivePass;
+  /**
    * The metadata-sync phase's own folder-walk evidence, when the corpus
    * publishes it (`metadata_sync_folders_*`).
    *
@@ -1519,7 +1525,25 @@ export interface SourceDashboardBuildOptions {
    * by card id: the imports of its formats. Absent for a card: none.
    */
   importedArchivesByCard?: Readonly<Record<string, DashboardImportedArchives>>;
+  /** Each pass-read source's last pass (`DashboardLivePass`), by card source id. Absent: none yet. */
+  livePasses?: Readonly<Record<string, DashboardLivePass>>;
 }
+
+/**
+ * The last pass of a source read in whole passes. `completed_at` and the
+ * counts are the last pass that completed; `error` is the latest pass that did
+ * not, when it came after that one.
+ */
+export interface DashboardLivePass {
+  completed_at?: string;
+  notes: number;
+  notebooks: number;
+  /** Notes shared with the account by someone else: listed, never imported. */
+  shared_not_imported: number;
+  error?: { kind: DashboardLivePassErrorKind; at: string };
+}
+
+export type DashboardLivePassErrorKind = 'auth' | 'rate_limited' | 'listing_incomplete' | 'unavailable';
 
 /** The Archives card's whole connection: there is no account, only imports. */
 export interface DashboardImportedArchives {
@@ -2017,6 +2041,22 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     // A highlight arrives as the text the reader already selected.
     content_arrives_extracted: true,
     connect_action: { kind: 'api_key', source: 'readwise' },
+  },
+  {
+    // Evernote's own MCP server, read in hourly passes (workers/evernote/).
+    // Beside the Evernote card below, which holds the ENEX exports imported
+    // on this computer: the two are not merged (issue #568, open question).
+    source_id: 'evernote.notes',
+    primary_corpus_id: 'secure_local.evernote.notes',
+    corpus_source_ids: ['evernote.notes'],
+    ingestion_ledger_source_id: 'evernote',
+    label: 'Evernote account',
+    provider: 'evernote',
+    family: 'note',
+    trust_domain: 'secure_local',
+    connect_kind: 'oauth',
+    sync_name: { mid: 'your Evernote notes', start: 'Your Evernote notes', plural: true },
+    connect_action: { kind: 'oauth', source: 'evernote' },
   },
   // Import-only sources (archive-live-one-dataset.md, step 7): a format no live
   // connector reads names its card in the format registry. Its imports are
@@ -2516,6 +2556,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     // Four-tier facts, stamped like sync_now below: counts from the card's own
     // corpora, and the migration only when its plan touches one of them.
     const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
+    const livePass = options.livePasses?.[definition.source_id];
     const manualSync = dashboardLiveManualSync(options.manualSyncs?.[definition.source_id], built.last_sync_at, now);
     const unreadableFiles = unreadableFilesFor(built, corpora, options.unreadableFileNames);
     const card: DashboardSourceCard = {
@@ -2523,6 +2564,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       ...(tierClassification ? { tier_classification: tierClassification } : {}),
       ...(manualSync ? { last_manual_sync: { ...manualSync } } : {}),
       ...(unreadableFiles ? { unreadable_files: unreadableFiles } : {}),
+      ...(livePass ? { live_pass: { ...livePass, ...(livePass.error ? { error: { ...livePass.error } } : {}) } } : {}),
     };
     if (card.configured && options.sourceAccountBindings?.[definition.source_id as AccountBoundSourceId]?.purge_required) {
       card.account_change = {
@@ -3413,9 +3455,12 @@ function corpusMatchesDefinition(
   sourceIdByCorpusId: Map<string, string>,
 ): boolean {
   if (corpus.corpus_id === definition.primary_corpus_id) return true;
-  if (definition.owns_corpus?.(corpus) === true) return true;
   const registrySourceId = registrySourceIdForCorpus(corpus.corpus_id, sourceIdByCorpusId);
-  return registrySourceId !== undefined && definition.corpus_source_ids.includes(registrySourceId);
+  // The registry's word wins: `owns_corpus` speaks only for a corpus the
+  // registry names no source for (a live Evernote store carries the Evernote
+  // export's provider, and is still the live source's).
+  if (registrySourceId !== undefined) return definition.corpus_source_ids.includes(registrySourceId);
+  return definition.owns_corpus?.(corpus) === true;
 }
 
 function ingestionRowForDefinition(
@@ -4100,6 +4145,12 @@ function sourceAction(
   // A refusing provider earns Reauthenticate even while the broker still reads the
   // handle as connected: the refusals are the fresher evidence.
   const label: 'Connect' | 'Reauthenticate' = reauthRequired || providerRefusing ? 'Reauthenticate' : 'Connect';
+  if (definition.connect_action.kind === 'oauth' && definition.connect_action.source === 'evernote') {
+    // The MCP server registers its own client at sign-in (core/mcp-source/oauth.ts):
+    // no app key to set up, one Connect button.
+    if (connected && !reauthRequired && !providerRefusing) return { kind: 'none' };
+    return { kind: 'oauth', source: 'evernote', label, publisher_client: true as const, ...(pending ? { pending_attempt: true as const } : {}) };
+  }
   if (definition.connect_action.kind === 'oauth') {
     if (connected && !reauthRequired && !providerRefusing) return { kind: 'none' };
     const knownClientId = oauthClientIdForSource(definition.connect_action.source, oauthClientIds);

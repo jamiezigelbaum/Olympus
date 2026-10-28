@@ -48,6 +48,7 @@ import {
   type DashboardCaptureRuntime,
   type DashboardImportAttention,
   type DashboardSourceAction,
+  type DashboardLivePass,
   type DashboardSourceCard,
   type DashboardSupportedSourceDefinition,
   type SourceDashboardViewModel,
@@ -136,9 +137,9 @@ const STAGE_DETAIL: Readonly<Record<Exclude<SourceProgress['stage'], 'done'>, st
 /** Sources ChatGPT can connect: Olympus's own (publisher) OAuth apps, which return through the relay. */
 const CHATGPT_OAUTH_SOURCES = new Set<string>(['gmail', 'google-drive', 'dropbox']);
 const SCOPE_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']);
-const DISCONNECT_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library']);
+const DISCONNECT_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes']);
 /** Sources Sync now runs for from ChatGPT (olympus_sync_source). */
-const SYNC_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'local.files']);
+const SYNC_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes', 'local.files']);
 
 /** The only connection labels the engine writes; anything else becomes ''. */
 const KNOWN_CONNECTION_LABELS = new Set([
@@ -1428,6 +1429,8 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
     ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
     // A state only: the words are vocabulary.ts's.
     ...(card.media_storage?.state === 'disk_low' ? { media_storage: { state: 'disk_low' as const } } : {}),
+    // Counts and a closed kind: the words are vocabulary.ts's.
+    ...(card.live_pass ? { live_pass: scrubLivePass(card.live_pass) } : {}),
     ...(card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at)
       && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome)
       ? {
@@ -1440,6 +1443,20 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
           },
         }
       : {}),
+  };
+}
+
+const LIVE_PASS_ERROR_KINDS: ReadonlySet<string> = new Set(['auth', 'rate_limited', 'listing_incomplete', 'unavailable']);
+
+function scrubLivePass(pass: DashboardLivePass): DashboardLivePass {
+  const completedAt = isoOrUndefined(pass.completed_at);
+  const errorAt = isoOrUndefined(pass.error?.at);
+  return {
+    ...(completedAt ? { completed_at: completedAt } : {}),
+    notes: count(pass.notes),
+    notebooks: count(pass.notebooks),
+    shared_not_imported: count(pass.shared_not_imported),
+    ...(pass.error && errorAt && LIVE_PASS_ERROR_KINDS.has(pass.error.kind) ? { error: { kind: pass.error.kind, at: errorAt } } : {}),
   };
 }
 
