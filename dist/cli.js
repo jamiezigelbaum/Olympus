@@ -38775,8 +38775,6 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: "telegram.personal",
         OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(","),
         OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(","),
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES: scopes.join(","),
-        OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES: scopes.join(","),
         OLYMPUS_SOURCE_INDEX_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: "[]",
         OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: "[]"
       },
@@ -39257,6 +39255,8 @@ class MessagingCaptureSupervisor {
       return { source: grant.source, state: "blocked", reason: "session_missing" };
     }
     const childEnv = definedEnv({ ...layoutEnv2, ...grant.producer.env });
+    for (const name of GRANT_RETIRED_ENV)
+      delete childEnv[name];
     if (account.layout === "folder") {
       for (const name of folderCaptureEnvRemoved(account))
         delete childEnv[name];
@@ -39390,7 +39390,7 @@ function spawnCapture(input) {
   });
   return { exited: child.exited, kill: (signal) => child.kill(signal) };
 }
-var NativeMessagingCaptureOwnerError, MESSAGING_CAPTURE_REPEATED_EXITS = 3, UNEXPECTED_EXIT_WINDOW_MS, STABLE_RUN_MS = 60000, readGrant, accountSourceId = (source) => source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID;
+var GRANT_RETIRED_ENV, NativeMessagingCaptureOwnerError, MESSAGING_CAPTURE_REPEATED_EXITS = 3, UNEXPECTED_EXIT_WINDOW_MS, STABLE_RUN_MS = 60000, readGrant, accountSourceId = (source) => source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID;
 var init_messaging_capture = __esm(() => {
   init_messaging_runtime();
   init_atomic_file();
@@ -39403,6 +39403,7 @@ var init_messaging_capture = __esm(() => {
   init_secret_store();
   init_unpaired_sources();
   init_connected_handles();
+  GRANT_RETIRED_ENV = ["OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES", "OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES"];
   NativeMessagingCaptureOwnerError = class NativeMessagingCaptureOwnerError extends Error {
     source;
     configKey;
@@ -199345,14 +199346,6 @@ function createWorkerMessagingCaptureOwnership(options) {
 async function reconcileWorkerCaptures(input) {
   const warn = input.warn ?? ((message2) => console.warn(message2));
   const entries = Object.entries(input.captures);
-  if (input.stopAll) {
-    await Promise.all(entries.map(async ([source, capture]) => {
-      await capture.stop();
-      input.statuses[source] = { source, state: "stopped" };
-      delete input.failures[source];
-    }));
-    return;
-  }
   await Promise.all(entries.map(async ([source, capture]) => {
     try {
       input.statuses[source] = await capture.reconcile();
@@ -200477,8 +200470,7 @@ async function main() {
       await reconcileWorkerCaptures({
         captures,
         statuses: captureStatuses,
-        failures: captureFailures,
-        stopAll: sovereigntyEngine.config.routes.secure_local?.mode === "disabled" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap"
+        failures: captureFailures
       });
     } finally {
       captureReconcileRunning = false;
@@ -209155,10 +209147,6 @@ async function runConnect(args) {
   throw new OperationError("invalid_params", `Unsupported connect source: ${source}`);
 }
 async function runMessagingPairing(source, secretStore, registryPath) {
-  const policy = loadSovereigntyEngine().config;
-  if (policy.routes.secure_local?.mode === "disabled" || policy.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap") {
-    throw new OperationError("invalid_params", "This pairing flow captures messaging as Private data. Your current privacy choice excludes it; ask your agent to review that choice before pairing.");
-  }
   let terminal;
   try {
     terminal = openSync29("/dev/tty", "r+");
@@ -209167,7 +209155,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
   }
   const tell = (text6) => writeSync9(terminal, text6);
   try {
-    tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.
+    tell(`Pairing ${source} privately on this machine. Each message is judged Personal, Private or Secret by what it says. No messages are captured until you approve the scope.
 `);
     if (source === "whatsapp")
       tell(`${WHATSAPP_UNOFFICIAL_CLIENT_NOTICE}

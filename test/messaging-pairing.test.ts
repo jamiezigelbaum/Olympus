@@ -152,7 +152,9 @@ describe('packaged messaging pairing', () => {
     expect(result.sessionPath).toBe(join(root, 'home', '.local/share/openclaw/olympus/sources/telegram.messages/1/session/telegram'));
     expect(result.producer.env.OLYMPUS_TELEGRAM_SESSION_PATH).toBeUndefined();
     expect(result.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES).toBe(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES);
-    expect(result.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES).toBe(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES);
+    // No chat is protected wholesale: each message is tiered by its content.
+    expect(result.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES).toBeUndefined();
+    expect(result.producer.env.OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES).toBeUndefined();
     expect(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES)
       .toBe('telegram.personal:chat:101');
     expect(result.producer.secretEnvironment).toEqual([

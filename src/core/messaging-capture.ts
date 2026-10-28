@@ -31,6 +31,8 @@ import {
   type ConnectedCredentialHandle,
 } from '../workers/credential-broker/connected-handles.ts';
 
+const GRANT_RETIRED_ENV = ['OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES', 'OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES'] as const;
+
 export interface MessagingCaptureGrant {
   version: 1;
   source: MessagingPairingSource;
@@ -312,6 +314,10 @@ export class MessagingCaptureSupervisor {
       return { source: grant.source, state: 'blocked', reason: 'session_missing' };
     }
     const childEnv: Record<string, string> = definedEnv({ ...layoutEnv, ...grant.producer.env });
+    // Pairing before #583 marked every approved chat protected (whole chat
+    // Private). Privacy is per message by content, so a grant never protects
+    // a chat; delete once every 1.1.x grant has been re-paired or re-saved.
+    for (const name of GRANT_RETIRED_ENV) delete childEnv[name];
     // A folder account's paths come from its folder, applied after everything else so
     // nothing in the environment or the grant can move the child out of it. A legacy
     // account keeps the grant's, which are the paths it was paired at.
