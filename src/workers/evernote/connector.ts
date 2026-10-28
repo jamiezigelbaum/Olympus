@@ -44,7 +44,7 @@ import { isMcpSourceError, type McpSourceErrorKind } from '../../core/mcp-source
 import type { McpSourceSession } from '../../core/mcp-source/session.ts';
 import { cleanTags } from '../archive-import/notes/note.ts';
 import { enmlToText } from '../archive-import/evernote/enml.ts';
-import { listNotebooks, listNotes, type EvernoteNoteHit } from './listing.ts';
+import { EvernoteAccountChanged, listNotebooks, listNotes, type EvernoteNoteHit } from './listing.ts';
 
 export const EVERNOTE_SOURCE_ID = 'evernote.notes';
 export const EVERNOTE_PROVIDER = 'evernote';
@@ -103,7 +103,8 @@ export function evernotePassWithUnfinished(
   const notes = { ...record?.notes };
   for (const [noteId, entry] of Object.entries(unfinished)) {
     const children = [...new Set([...(notes[noteId]?.children ?? []), ...(entry.children ?? [])])];
-    notes[noteId] = { v: 'unfinished|', ...(children.length > 0 ? { children } : {}) };
+    // The notebook stays in the entry: an account change is judged by notebooks.
+    notes[noteId] = { v: `unfinished|${entry.v.split('|')[1] ?? ''}`, ...(children.length > 0 ? { children } : {}) };
   }
   return { version: 1, completedAt: record?.completedAt ?? '', notes };
 }
@@ -296,6 +297,13 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
           if (!byDate.has(noteId)) byDate.set(noteId, hit);
         }
       }
+
+      // Another account behind the same credential: nothing of the stored one is deleted.
+      const storedBooks = new Set(Object.values(previous?.notes ?? {})
+        .filter((entry) => !entry.v.startsWith('shared|'))
+        .map((entry) => entry.v.split('|')[1] ?? '')
+        .filter((id) => id !== ''));
+      if (storedBooks.size > 0 && !notebooks.some((book) => storedBooks.has(book.id))) throw new EvernoteAccountChanged();
 
       const counts: EvernotePassCounts = {
         notes_listed: byDate.size, notebooks: notebooks.length, notes_read: 0, notes_unchanged: 0, notes_moved: 0,

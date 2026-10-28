@@ -149,7 +149,7 @@ export function createEvernoteTierLane(options: {
 export interface EvernotePassStatus {
   last_completed_at?: string;
   counts?: EvernotePassCounts;
-  last_error?: { kind: McpSourceErrorKind | 'listing_incomplete' | 'pass_failed'; state: McpSourceDashboardState | 'provider_error'; at: string };
+  last_error?: { kind: McpSourceErrorKind | 'listing_incomplete' | 'account_changed' | 'pass_failed'; state: McpSourceDashboardState | 'provider_error'; at: string };
 }
 
 interface PassFile {
@@ -313,7 +313,11 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
   let running: Promise<EvernotePassReceipt> | undefined;
 
   const failed = (file: PassFile, error: unknown): never => {
-    const kind = isMcpSourceError(error) ? error.kind : (error as { name?: string })?.name === 'EvernoteListingIncomplete' ? 'listing_incomplete' : 'pass_failed';
+    const name = (error as { name?: string } | undefined)?.name;
+    const kind = isMcpSourceError(error) ? error.kind
+      : name === 'EvernoteListingIncomplete' ? 'listing_incomplete'
+        : name === 'EvernoteAccountChanged' ? 'account_changed'
+          : 'pass_failed';
     const state = isMcpSourceError(error) ? MCP_SOURCE_DASHBOARD_STATE[error.kind] : 'provider_error';
     writePassFile(passPath, { ...file, status: { ...file.status, last_error: { kind, state, at: now().toISOString() } } });
     // A refused or lost sign-in: the card says Reconnect.
@@ -344,18 +348,23 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
     }
     const outcome = live.lastOutcome();
     if (!outcome) return failed(file, new Error('The Evernote pass ended without its outcome.'));
-    // Stored, so the record moves: deletions are judged against it next time.
-    const completedAt = now().toISOString();
-    writePassFile(passPath, {
-      version: 1,
-      record: outcome.record,
-      status: {
-        last_completed_at: completedAt,
-        counts: outcome.counts,
-        ...(outcome.stoppedBy ? { last_error: { kind: outcome.stoppedBy, state: MCP_SOURCE_DASHBOARD_STATE[outcome.stoppedBy], at: completedAt } } : {}),
-      },
-    });
-    lastCompletedAt = completedAt;
+    // An item the source accepted that no store took (it is mid-move between tiers): the pass is not
+    // stored, so the record and the unfinished notes stay, and the next pass reads them again.
+    const stored = run.routing.itemsUnstored === 0;
+    if (stored) {
+      // Stored, so the record moves: deletions are judged against it next time.
+      const completedAt = now().toISOString();
+      writePassFile(passPath, {
+        version: 1,
+        record: outcome.record,
+        status: {
+          last_completed_at: completedAt,
+          counts: outcome.counts,
+          ...(outcome.stoppedBy ? { last_error: { kind: outcome.stoppedBy, state: MCP_SOURCE_DASHBOARD_STATE[outcome.stoppedBy], at: completedAt } } : {}),
+        },
+      });
+      lastCompletedAt = completedAt;
+    }
     const sum = (pick: (leg: TieredStoreSetRun['legs'][number]) => number): number => run.legs.reduce((total, leg) => total + pick(leg), 0);
     const indexed = sum((leg) => leg.sync.itemsIndexed);
     const tombstoned = sum((leg) => leg.sync.itemsTombstoned);
@@ -368,7 +377,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
         items_changed: sum((leg) => leg.sync.itemsChanged),
         items_tombstoned: tombstoned,
         chunks_indexed: sum((leg) => leg.sync.chunksIndexed),
-        pass_complete: outcome.stoppedBy ? 0 : 1,
+        pass_complete: outcome.stoppedBy || !stored ? 0 : 1,
         ...tieredLaneReceiptCounts({ routing: run.routing }),
       },
       policy: { counts_only: true, raw_source_exposed: false, source_text_returned: false, provider_cursor_exposed: false },

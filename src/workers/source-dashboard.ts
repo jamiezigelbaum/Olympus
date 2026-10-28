@@ -1543,7 +1543,7 @@ export interface DashboardLivePass {
   error?: { kind: DashboardLivePassErrorKind; at: string };
 }
 
-export type DashboardLivePassErrorKind = 'auth' | 'rate_limited' | 'listing_incomplete' | 'unavailable';
+export type DashboardLivePassErrorKind = 'auth' | 'rate_limited' | 'listing_incomplete' | 'account_changed' | 'unavailable';
 
 /** The Archives card's whole connection: there is no account, only imports. */
 export interface DashboardImportedArchives {

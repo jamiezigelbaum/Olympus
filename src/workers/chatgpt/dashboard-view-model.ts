@@ -1446,7 +1446,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
   };
 }
 
-const LIVE_PASS_ERROR_KINDS: ReadonlySet<string> = new Set(['auth', 'rate_limited', 'listing_incomplete', 'unavailable']);
+const LIVE_PASS_ERROR_KINDS: ReadonlySet<string> = new Set(['auth', 'rate_limited', 'listing_incomplete', 'account_changed', 'unavailable']);
 
 function scrubLivePass(pass: DashboardLivePass): DashboardLivePass {
   const completedAt = isoOrUndefined(pass.completed_at);

@@ -14424,6 +14424,7 @@ var init_vocabulary = __esm(() => {
     auth: "the last check could not sign in",
     rate_limited: "the last check was slowed by the provider and resumes on its own",
     listing_incomplete: "the last check could not list every note, so nothing was changed",
+    account_changed: "the last check found a different Evernote account than the notes stored here, so nothing was changed: reconnect the earlier account, or delete this card's indexed data first",
     unavailable: "the last check could not reach the provider"
   });
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";

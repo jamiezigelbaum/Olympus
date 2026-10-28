@@ -16,7 +16,7 @@ import {
   type EvernotePassRecord,
   type EvernoteSourceConnector,
 } from '../src/workers/evernote/connector.ts';
-import { EvernoteListingIncomplete } from '../src/workers/evernote/listing.ts';
+import { EvernoteAccountChanged, EvernoteListingIncomplete } from '../src/workers/evernote/listing.ts';
 import { FakeEvernoteServer, md5Hex } from './support/evernote-mcp-fake.ts';
 
 let fake: FakeEvernoteServer | undefined;
@@ -226,6 +226,25 @@ describe('Evernote pass', () => {
     const items = await runPass(final);
     expect(items.filter((item) => item.metadata.deleted === true).map((item) => item.identity.providerItemId))
       .toEqual([`${note.id}#child:${md5Hex(PNG)}`]);
+  });
+
+  test('another account behind the credential deletes nothing of the stored one', async () => {
+    fake = new FakeEvernoteServer().start();
+    const work = fake.addNotebook('Work');
+    fake.addNote({ title: 'Mine', notebookId: work.id, created: day(2020) });
+    let record: EvernotePassRecord | undefined;
+    const first = connectorFor(fake, { previous: () => record });
+    await runPass(first);
+    record = first.lastOutcome()!.record;
+    fake.stop();
+
+    // The same credential now reaches another account: other notebooks, other notes.
+    fake = new FakeEvernoteServer().start();
+    const theirs = fake.addNotebook('Work');
+    fake.addNote({ title: 'Theirs', notebookId: theirs.id, created: day(2021) });
+    const next = connectorFor(fake, { previous: () => record });
+    await expect(runPass(next)).rejects.toBeInstanceOf(EvernoteAccountChanged);
+    expect(fake.calls.get_note ?? 0).toBe(0);
   });
 
   test('a deletion applies only when both listings completed', async () => {

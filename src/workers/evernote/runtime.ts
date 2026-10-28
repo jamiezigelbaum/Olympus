@@ -229,18 +229,22 @@ export function evernoteSchedulerFailure(error: unknown): unknown {
         : {}),
     });
   }
+  if ((error as { name?: string } | undefined)?.name === 'EvernoteAccountChanged') {
+    return new SourceSchedulerTaskFailure('The connected Evernote account is not the one the stored notes came from; nothing was changed.', { errorKind: 'evernote_account_changed' });
+  }
   if ((error as { name?: string } | undefined)?.name === 'EvernoteListingIncomplete') {
     return new SourceSchedulerTaskFailure('The Evernote listing could not be completed; nothing was changed.', { errorKind: 'evernote_listing_incomplete' });
   }
   return error;
 }
 
-const PASS_ERROR_KIND: Readonly<Partial<Record<McpSourceErrorKind | 'listing_incomplete' | 'pass_failed', DashboardLivePassErrorKind>>> = {
+const PASS_ERROR_KIND: Readonly<Partial<Record<McpSourceErrorKind | 'listing_incomplete' | 'account_changed' | 'pass_failed', DashboardLivePassErrorKind>>> = {
   auth_missing: 'auth',
   auth_expired: 'auth',
   auth_revoked: 'auth',
   rate_limited: 'rate_limited',
   listing_incomplete: 'listing_incomplete',
+  account_changed: 'account_changed',
   permission_missing: 'unavailable',
   server_error: 'unavailable',
   tool_refused: 'unavailable',

@@ -52191,6 +52191,7 @@ var init_vocabulary = __esm(() => {
     auth: "the last check could not sign in",
     rate_limited: "the last check was slowed by the provider and resumes on its own",
     listing_incomplete: "the last check could not list every note, so nothing was changed",
+    account_changed: "the last check found a different Evernote account than the notes stored here, so nothing was changed: reconnect the earlier account, or delete this card's indexed data first",
     unavailable: "the last check could not reach the provider"
   });
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
@@ -157730,12 +157731,18 @@ async function listNotebooks(session) {
     throw new EvernoteListingIncomplete;
   return [...found.values()];
 }
-var EVERNOTE_SEARCH_CAP = 2000, PAGE = 100, NOTEBOOK_MAX = 100, FRAGMENT_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789", EvernoteListingIncomplete, record5 = (value2) => value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
+var EVERNOTE_SEARCH_CAP = 2000, PAGE = 100, NOTEBOOK_MAX = 100, FRAGMENT_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789", EvernoteListingIncomplete, EvernoteAccountChanged, record5 = (value2) => value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
 var init_listing = __esm(() => {
   EvernoteListingIncomplete = class EvernoteListingIncomplete extends Error {
     constructor() {
       super("The Evernote listing could not be completed.");
       this.name = "EvernoteListingIncomplete";
+    }
+  };
+  EvernoteAccountChanged = class EvernoteAccountChanged extends Error {
+    constructor() {
+      super("The connected Evernote account is not the one the stored notes came from.");
+      this.name = "EvernoteAccountChanged";
     }
   };
 });
@@ -157748,7 +157755,7 @@ function evernotePassWithUnfinished(record6, unfinished) {
   const notes = { ...record6?.notes };
   for (const [noteId, entry] of Object.entries(unfinished)) {
     const children = [...new Set([...notes[noteId]?.children ?? [], ...entry.children ?? []])];
-    notes[noteId] = { v: "unfinished|", ...children.length > 0 ? { children } : {} };
+    notes[noteId] = { v: `unfinished|${entry.v.split("|")[1] ?? ""}`, ...children.length > 0 ? { children } : {} };
   }
   return { version: 1, completedAt: record6?.completedAt ?? "", notes };
 }
@@ -157883,6 +157890,9 @@ function createEvernoteSourceConnector(options) {
             byDate.set(noteId, hit);
         }
       }
+      const storedBooks = new Set(Object.values(previous?.notes ?? {}).filter((entry) => !entry.v.startsWith("shared|")).map((entry) => entry.v.split("|")[1] ?? "").filter((id) => id !== ""));
+      if (storedBooks.size > 0 && !notebooks.some((book) => storedBooks.has(book.id)))
+        throw new EvernoteAccountChanged;
       const counts = {
         notes_listed: byDate.size,
         notebooks: notebooks.length,
@@ -158280,7 +158290,8 @@ function createEvernoteLiveSync(options) {
   let lastCompletedAt = readPassFile(passPath).status.last_completed_at;
   let running;
   const failed = (file, error2) => {
-    const kind = isMcpSourceError(error2) ? error2.kind : error2?.name === "EvernoteListingIncomplete" ? "listing_incomplete" : "pass_failed";
+    const name = error2?.name;
+    const kind = isMcpSourceError(error2) ? error2.kind : name === "EvernoteListingIncomplete" ? "listing_incomplete" : name === "EvernoteAccountChanged" ? "account_changed" : "pass_failed";
     const state = isMcpSourceError(error2) ? MCP_SOURCE_DASHBOARD_STATE[error2.kind] : "provider_error";
     writePassFile(passPath, { ...file, status: { ...file.status, last_error: { kind, state, at: now().toISOString() } } });
     if (isMcpSourceError(error2) && AUTH_KINDS.has(error2.kind))
@@ -158309,17 +158320,20 @@ function createEvernoteLiveSync(options) {
     const outcome = live.lastOutcome();
     if (!outcome)
       return failed(file, new Error("The Evernote pass ended without its outcome."));
-    const completedAt = now().toISOString();
-    writePassFile(passPath, {
-      version: 1,
-      record: outcome.record,
-      status: {
-        last_completed_at: completedAt,
-        counts: outcome.counts,
-        ...outcome.stoppedBy ? { last_error: { kind: outcome.stoppedBy, state: MCP_SOURCE_DASHBOARD_STATE[outcome.stoppedBy], at: completedAt } } : {}
-      }
-    });
-    lastCompletedAt = completedAt;
+    const stored = run2.routing.itemsUnstored === 0;
+    if (stored) {
+      const completedAt = now().toISOString();
+      writePassFile(passPath, {
+        version: 1,
+        record: outcome.record,
+        status: {
+          last_completed_at: completedAt,
+          counts: outcome.counts,
+          ...outcome.stoppedBy ? { last_error: { kind: outcome.stoppedBy, state: MCP_SOURCE_DASHBOARD_STATE[outcome.stoppedBy], at: completedAt } } : {}
+        }
+      });
+      lastCompletedAt = completedAt;
+    }
     const sum2 = (pick2) => run2.legs.reduce((total, leg) => total + pick2(leg), 0);
     const indexed = sum2((leg) => leg.sync.itemsIndexed);
     const tombstoned = sum2((leg) => leg.sync.itemsTombstoned);
@@ -158332,7 +158346,7 @@ function createEvernoteLiveSync(options) {
         items_changed: sum2((leg) => leg.sync.itemsChanged),
         items_tombstoned: tombstoned,
         chunks_indexed: sum2((leg) => leg.sync.chunksIndexed),
-        pass_complete: outcome.stoppedBy ? 0 : 1,
+        pass_complete: outcome.stoppedBy || !stored ? 0 : 1,
         ...tieredLaneReceiptCounts({ routing: run2.routing })
       },
       policy: { counts_only: true, raw_source_exposed: false, source_text_returned: false, provider_cursor_exposed: false }
@@ -179939,6 +179953,9 @@ function evernoteSchedulerFailure(error2) {
       ...error2.kind === "rate_limited" ? { retryAt: { at: new Date(Date.now() + (error2.retryAfterMs ?? EVERNOTE_RATE_LIMIT_RETRY_MS)).toISOString(), degradedReason: "rate_limited" } } : {}
     });
   }
+  if (error2?.name === "EvernoteAccountChanged") {
+    return new SourceSchedulerTaskFailure("The connected Evernote account is not the one the stored notes came from; nothing was changed.", { errorKind: "evernote_account_changed" });
+  }
   if (error2?.name === "EvernoteListingIncomplete") {
     return new SourceSchedulerTaskFailure("The Evernote listing could not be completed; nothing was changed.", { errorKind: "evernote_listing_incomplete" });
   }
@@ -179973,6 +179990,7 @@ var init_runtime3 = __esm(() => {
     auth_revoked: "auth",
     rate_limited: "rate_limited",
     listing_incomplete: "listing_incomplete",
+    account_changed: "account_changed",
     permission_missing: "unavailable",
     server_error: "unavailable",
     tool_refused: "unavailable",
@@ -185568,7 +185586,7 @@ var init_dashboard_view_model = __esm(() => {
   TRANSCRIPTION_DOWNLOADABLE = new Set(["not_needed", "not_downloaded", "interrupted", "failed"]);
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
   IMPORT_UNREADABLE_REASONS = new Set(["damaged", "unknown_form", "permission", "other"]);
-  LIVE_PASS_ERROR_KINDS = new Set(["auth", "rate_limited", "listing_incomplete", "unavailable"]);
+  LIVE_PASS_ERROR_KINDS = new Set(["auth", "rate_limited", "listing_incomplete", "account_changed", "unavailable"]);
   CAPTURE_STATES = new Set(["fresh", "stale", "unavailable", "awaiting"]);
   CAPTURE_SUPERVISOR_STATES = new Set(["running", "stopped", "blocked"]);
   CAPTURE_SUPERVISOR_REASONS = new Set([

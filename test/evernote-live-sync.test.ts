@@ -154,6 +154,26 @@ describe('a pass through the tier lane', () => {
     expect(after.counts).toMatchObject({ notes_deleted: 0, notes_unchanged: 53 });
   });
 
+  test('a reconnect to another account stops before deleting the stored notes, and the card says why', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Field work');
+    const kept = fake.addNote({ title: 'Survey', created: day(2024), notebookId: book.id, body: '<en-note>River</en-note>' });
+    const { sync, runtime } = await connected(fake);
+    await sync.pass();
+
+    // Same credential, another account: its notebooks share none with the stored notes.
+    fake.notes.splice(fake.notes.indexOf(kept), 1);
+    fake.notebooks.splice(0, fake.notebooks.length);
+    const theirs = fake.addNotebook('Field work');
+    fake.addNote({ title: 'Theirs', created: day(2025), notebookId: theirs.id, body: '<en-note>Other</en-note>' });
+    await expect(sync.pass()).rejects.toMatchObject({ name: 'EvernoteAccountChanged' });
+    expect(sync.status()).toMatchObject({ last_error: { kind: 'account_changed' } });
+    expect(runtime.dashboardPass()).toMatchObject({ error: { kind: 'account_changed' } });
+    const stored = runtime.existingLane()!.set.storedItem({ provider: 'evernote', accountScope: 'personal', providerItemId: kept.id }, (a, b) => a.localeCompare(b));
+    expect(stored?.tombstoned).not.toBe(true);
+    expect(stored).toBeDefined();
+  });
+
   test('a sign-in the provider refuses marks the handle for Reconnect', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     fake.addNote({ title: 'Survey', created: day(2024), notebookId: fake.addNotebook('A').id });

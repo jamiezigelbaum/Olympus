@@ -29,6 +29,18 @@ export class EvernoteListingIncomplete extends Error {
   }
 }
 
+/**
+ * The account's notebooks share none with the notes already stored: the credential now reaches
+ * another Evernote account. Every account has at least one notebook, so the same account always
+ * shares one unless all of them were replaced since the last pass.
+ */
+export class EvernoteAccountChanged extends Error {
+  constructor() {
+    super('The connected Evernote account is not the one the stored notes came from.');
+    this.name = 'EvernoteAccountChanged';
+  }
+}
+
 export interface EvernoteNoteHit {
   noteId: string;
   updatedAt: string;
