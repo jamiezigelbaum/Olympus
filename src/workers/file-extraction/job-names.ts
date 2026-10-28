@@ -228,13 +228,16 @@ export function retireExtractionJobRedaction(
       // including workers still settling the refusal. Other policy blocks
       // stay settled. Wait for the next enqueue, once the restored store copy
       // exists, so the worker has a copy to land in.
+      // A placement debt already owed to one of these jobs is widened to a
+      // restoration debt, or taking it would drop the Secrets reread.
       if (retired > 0 && rereadsTableExists(db)) {
         db.query(`
-          INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+          INSERT INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
           SELECT job_id FROM extraction_jobs
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
             AND (status IN ('indexed', 'leased')
               OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
+          ${rereadsHaveReason(db) ? 'ON CONFLICT(job_id) DO UPDATE SET reason = NULL' : 'ON CONFLICT(job_id) DO NOTHING'}
         `).run(item.provider, item.accountScope, item.providerItemId);
       }
       return { retired, stillSecret: false };
@@ -424,9 +427,10 @@ export function takeRestoredReread(db: Database, jobId: string): boolean {
     .get(jobId) as { reason: string | null } | null;
   if (!debt || !job) return false;
   db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId);
-  if (debt.reason === REREAD_AFTER_PLACEMENT) return settledByPlacement(job);
-  return job.status === 'indexed'
-    || (job.status === 'blocked_policy' && job.last_error_kind === 'store_item_secrets');
+  // A restoration debt covers a placement settlement too; a placement debt
+  // never reopens a Secrets verdict.
+  return settledByPlacement(job) || (debt.reason !== REREAD_AFTER_PLACEMENT && (job.status === 'indexed'
+    || (job.status === 'blocked_policy' && job.last_error_kind === 'store_item_secrets')));
 }
 
 function rereadsHaveReason(db: Database): boolean {

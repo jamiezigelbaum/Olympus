@@ -20,6 +20,7 @@ import {
   tieredStoreSetLedgerPath,
   type TieredStoreSet,
 } from '../src/workers/connector-store/tiered-store-set.ts';
+import { clearExtractionJobNames, retireExtractionJobRedaction } from '../src/workers/file-extraction/job-names.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import {
   EXTRACTION_SINK_SKIPPED_EMPTY_TEXT,
@@ -194,5 +195,19 @@ describe('a completed tier move', () => {
     lane.jobs.record({ jobId: leased.jobId, workerId: 'worker', leaseToken: leased.leaseToken, status: 'blocked_policy', errorKind: EXTRACTION_SINK_SKIPPED_SECRETS });
     // Only leaving Secrets reopens a Secrets verdict, never a placement debt.
     expect(enqueue(lane, 'diary')).toMatchObject({ jobsExisting: 1, jobsForced: 0 });
+  });
+
+  test('the owner restoring that Secret item still reads it again', async () => {
+    const lane = openLane();
+    await list(lane, ['diary']);
+    enqueue(lane, 'diary');
+    const leased = lane.jobs.lease({ ...LANE, workerId: 'worker' }).leasedJobs[0]!;
+    await raiseToPrivate(lane, 'diary');
+    lane.jobs.record({ jobId: leased.jobId, workerId: 'worker', leaseToken: leased.leaseToken, status: 'blocked_policy', errorKind: EXTRACTION_SINK_SKIPPED_SECRETS });
+    const item = { provider: PROVIDER, accountScope: ACCOUNT, providerItemId: 'diary' };
+    clearExtractionJobNames(lane.jobs.dbPath, { ...item, localItemId: localId('diary') }, { claimant: 'owner' });
+    expect(retireExtractionJobRedaction(lane.jobs.dbPath, item, 'owner', () => false).retired).toBe(1);
+    // The restoration's reread is not lost to the placement debt already owed.
+    expect(enqueue(lane, 'diary')).toMatchObject({ jobsForced: 1 });
   });
 });

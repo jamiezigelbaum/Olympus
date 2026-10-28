@@ -19566,11 +19566,12 @@ function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
       `).run(item.provider, item.accountScope, item.providerItemId).changes;
       if (retired > 0 && rereadsTableExists(db)) {
         db.query(`
-          INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+          INSERT INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
           SELECT job_id FROM extraction_jobs
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
             AND (status IN ('indexed', 'leased')
               OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
+          ${rereadsHaveReason(db) ? "ON CONFLICT(job_id) DO UPDATE SET reason = NULL" : "ON CONFLICT(job_id) DO NOTHING"}
         `).run(item.provider, item.accountScope, item.providerItemId);
       }
       return { retired, stillSecret: false };
