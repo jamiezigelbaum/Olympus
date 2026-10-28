@@ -581,28 +581,18 @@ export function createWorkerMessagingCaptureOwnership(options: {
  * One pass over the sources this worker runs capture for. Each source is
  * reconciled on its own: one that throws (no Python, a missing executable) is
  * recorded as a failure for the dashboard and does not stop the others, and a
- * failure clears when a later reconcile succeeds. `stopAll` is the posture
- * that forbids capture altogether (secure-local routes off): every helper is
- * stopped and reported stopped, as before.
+ * failure clears when a later reconcile succeeds. No privacy policy stops
+ * capture: each captured message is tiered by its own content, like any
+ * other source's items.
  */
 export async function reconcileWorkerCaptures(input: {
   captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
   statuses: Partial<Record<MessagingCaptureSource, MessagingCaptureStatus>>;
   failures: Partial<Record<MessagingCaptureSource, true>>;
-  stopAll?: boolean;
   warn?: (message: string) => void;
 }): Promise<void> {
   const warn = input.warn ?? ((message: string) => console.warn(message));
   const entries = Object.entries(input.captures) as Array<[MessagingCaptureSource, WorkerMessagingCaptureSupervisor]>;
-  if (input.stopAll) {
-    await Promise.all(entries.map(async ([source, capture]) => {
-      await capture.stop();
-      input.statuses[source] = { source, state: 'stopped' };
-      // An earlier failure to start is moot once capture is stopped on purpose.
-      delete input.failures[source];
-    }));
-    return;
-  }
   await Promise.all(entries.map(async ([source, capture]) => {
     try {
       input.statuses[source] = await capture.reconcile();
@@ -2382,8 +2372,6 @@ export async function main(): Promise<void> {
         captures,
         statuses: captureStatuses,
         failures: captureFailures,
-        stopAll: sovereigntyEngine.config.routes.secure_local?.mode === 'disabled'
-          || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap',
       });
     } finally { captureReconcileRunning = false; }
   };
