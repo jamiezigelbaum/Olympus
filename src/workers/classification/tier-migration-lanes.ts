@@ -90,7 +90,6 @@ export interface TierMigrationLaneSpec {
   contentArrivesLater?: boolean;
   /** The lane's per-item form of `contentArrivesLater`, as its runtime sets it. */
   contentArrivesLaterFor?: TieredLaneSetOptions['contentArrivesLaterFor'];
-  storedPlacementIsPrior?: boolean;
 }
 
 /** Every public source's lane on this install, from the same path helpers its runtime uses. */
@@ -172,9 +171,6 @@ export function installedTierMigrationLaneSpecs(
       sourceId: TELEGRAM_MESSAGES_SOURCE_ID,
       setId: TELEGRAM_MESSAGES_SOURCE_ID,
       splitLayers: false,
-      // A chat's store is its configured chat-level rule (the connector
-      // publishes it as a prior): messages are never lowered below it.
-      storedPlacementIsPrior: true,
       legs: {
         internal: { corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, dbPath: resolvedStorePath('telegram.messages', 'internal', env), family: 'chat', legacy: true },
         secure_local: { corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID, dbPath: resolvedStorePath('telegram.messages', 'secure_local', env), family: 'chat', legacy: true },
@@ -289,11 +285,7 @@ export function openTierMigrationLanes(
         ...(tierClassification ? { tierClassification } : {}),
         ...(secretLocations ? { secretLocations } : {}),
       });
-      lanes.push({
-        sourceId: spec.sourceId,
-        set,
-        ...(spec.storedPlacementIsPrior ? { storedPlacementIsPrior: true } : {}),
-      });
+      lanes.push({ sourceId: spec.sourceId, set });
     }
   } catch (error) {
     closeAll(opened);

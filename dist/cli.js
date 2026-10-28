@@ -38853,9 +38853,7 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
         ...layout === "folder" ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath },
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: "telegram.personal",
         OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(","),
-        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(","),
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: "[]",
-        OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: "[]"
+        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(",")
       },
       secretEnvironment: [
         { env: "OLYMPUS_TELEGRAM_API_ID", secretKey: TELEGRAM_API_ID_SECRET_KEY },
@@ -39334,8 +39332,6 @@ class MessagingCaptureSupervisor {
       return { source: grant.source, state: "blocked", reason: "session_missing" };
     }
     const childEnv = definedEnv({ ...layoutEnv2, ...grant.producer.env });
-    for (const name of GRANT_RETIRED_ENV)
-      delete childEnv[name];
     if (account.layout === "folder") {
       for (const name of folderCaptureEnvRemoved(account))
         delete childEnv[name];
@@ -39469,7 +39465,7 @@ function spawnCapture(input) {
   });
   return { exited: child.exited, kill: (signal) => child.kill(signal) };
 }
-var GRANT_RETIRED_ENV, NativeMessagingCaptureOwnerError, MESSAGING_CAPTURE_REPEATED_EXITS = 3, UNEXPECTED_EXIT_WINDOW_MS, STABLE_RUN_MS = 60000, readGrant, accountSourceId = (source) => source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID;
+var NativeMessagingCaptureOwnerError, MESSAGING_CAPTURE_REPEATED_EXITS = 3, UNEXPECTED_EXIT_WINDOW_MS, STABLE_RUN_MS = 60000, readGrant, accountSourceId = (source) => source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID;
 var init_messaging_capture = __esm(() => {
   init_messaging_runtime();
   init_atomic_file();
@@ -39482,7 +39478,6 @@ var init_messaging_capture = __esm(() => {
   init_secret_store();
   init_unpaired_sources();
   init_connected_handles();
-  GRANT_RETIRED_ENV = ["OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES", "OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES"];
   NativeMessagingCaptureOwnerError = class NativeMessagingCaptureOwnerError extends Error {
     source;
     configKey;
@@ -114762,7 +114757,7 @@ function batchSelectorsFor(sourceId, item) {
 function pathOf(item) {
   return item.locatorUri?.startsWith("/") ? item.locatorUri : undefined;
 }
-function signalsFromStoredItem(item, storeDomain, storedPlacementIsPrior) {
+function signalsFromStoredItem(item) {
   const folderKeys = [
     ...item.folderKeys,
     ...item.identity.providerConversationId ? [item.identity.providerConversationId] : []
@@ -114770,7 +114765,6 @@ function signalsFromStoredItem(item, storeDomain, storedPlacementIsPrior) {
   const path = pathOf(item);
   const sender = item.senderLabel ?? item.senderId;
   return {
-    ...storedPlacementIsPrior ? { prior: trustDomainPrior(storeDomain) } : {},
     ...item.title ? { title: item.title } : {},
     ...path ? { path } : {},
     ...folderKeys.length > 0 ? { folderKeys } : {},
@@ -114984,7 +114978,7 @@ async function planTierMigration(options) {
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
           const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(ledger.getCurrent(item.identity)?.reasons);
           const decision = classifyItemTiers({
-            signals: signalsFromStoredItem(item, store.trustDomain, lane.storedPlacementIsPrior === true),
+            signals: signalsFromStoredItem(item),
             ...item.locatorUri ? { locators: [item.locatorUri] } : {},
             provider: item.identity.provider,
             text: item.chunks.map((chunk) => chunk.text).join(""),
@@ -116339,7 +116333,6 @@ function installedTierMigrationLaneSpecs(env = process.env) {
       sourceId: TELEGRAM_MESSAGES_SOURCE_ID,
       setId: TELEGRAM_MESSAGES_SOURCE_ID,
       splitLayers: false,
-      storedPlacementIsPrior: true,
       legs: {
         internal: { corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, dbPath: resolvedStorePath("telegram.messages", "internal", env), family: "chat", legacy: true },
         secure_local: { corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID2, dbPath: resolvedStorePath("telegram.messages", "secure_local", env), family: "chat", legacy: true }
@@ -116436,11 +116429,7 @@ function openTierMigrationLanes(specs, options) {
         ...tierClassification ? { tierClassification } : {},
         ...secretLocations ? { secretLocations } : {}
       });
-      lanes.push({
-        sourceId: spec.sourceId,
-        set,
-        ...spec.storedPlacementIsPrior ? { storedPlacementIsPrior: true } : {}
-      });
+      lanes.push({ sourceId: spec.sourceId, set });
     }
   } catch (error) {
     closeAll(opened);
