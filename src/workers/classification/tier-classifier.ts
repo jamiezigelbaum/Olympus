@@ -441,13 +441,6 @@ export interface TierDecision {
   metadataForced: boolean;
   /** Pass 1 flagged the names as possibly private (the content pass asks the sniffer too). */
   metadataFlagged: boolean;
-  /**
-   * The owner rule that set the names' resting (prior) or fixed (force) tier,
-   * when one matched. A lane that never lets items rest below a floor unless
-   * the OWNER said so reads this (tiered-store-set.ts, `laneFloor`). Absent
-   * when no owner rule matched.
-   */
-  metadataOwnerRule?: TierOwnerRuleMatch;
   engineVersion: string;
   mapRevision: string;
   snifferId: string;
@@ -571,7 +564,6 @@ function classifyItemTiersWithPublic(
     contentPending,
     metadataForced: metadata.forced,
     metadataFlagged: metadata.flags.length > 0,
-    ...(metadata.ownerRule ? { metadataOwnerRule: metadata.ownerRule } : {}),
   };
 }
 

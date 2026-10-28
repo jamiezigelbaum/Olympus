@@ -25,12 +25,12 @@
 //   read that many bytes as UTF-8. Anything unexpected degrades the message to
 //   metadata_only instead of failing the sync.
 //
-// classify() is unconditional: personal messages are S4/secure_local, period.
-// No content scan may upgrade-or-downgrade its way around that.
+// Each message is tiered by its own content through the shared classifier,
+// like any other source's item: no source-level prior.
 
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { Database } from 'bun:sqlite';
-import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
+import { compactClassificationSignals, signalText } from '../../core/classification-signals.ts';
 import type {
   RawItem,
   SourceClassificationSignals,
@@ -196,27 +196,13 @@ export function createAppleMessagesSourceConnector(
     },
 
     classificationSignals(item: RawItem): SourceClassificationSignals {
-      // Personal messages have always rested at Private on this source; the
-      // prior keeps the recorded decision there until an owner rule says
-      // otherwise. Item-level raises (Secrets) still apply.
       return compactClassificationSignals({
-        prior: trustDomainPrior('secure_local', 'source_default'),
         sender: signalText(item.metadata, 'sender'),
         folderKeys: [signalText(item.metadata, 'chat_identifier')].filter((key): key is string => Boolean(key)),
       });
     },
   };
 }
-
-/**
- * Where an Apple Messages lane must store items: S4/secure_local, declared so
- * a lane wired to a non-secure store is refused (fail closed). No lane mounts
- * this source today.
- */
-export const APPLE_MESSAGES_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freeze({
-  trustTier: 'S4',
-  trustDomain: 'secure_local',
-});
 
 function rawItemFromMessageRow(row: AppleMessageRow, account: string, fetchedAt: string): RawItem {
   const text = messageBodyText(row);

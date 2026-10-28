@@ -3257,10 +3257,8 @@ export async function main(): Promise<void> {
   const whatsappConnectorStore = whatsappConnectorStoreLane.enabled
     ? createWhatsAppConnectorStore(process.env)
     : undefined;
-  // Per-tier stores (P1c), failing closed: every message rests Private in the
-  // lane's own store unless an OWNER chat rule set its chat to Personal (rule
-  // loading is phase P2, so none does yet), and then only a message its own
-  // text keeps Personal goes to the Personal store.
+  // Per-tier stores (P1c): each message is tiered by its own content; Private
+  // ones rest in the lane's own store and Personal ones in the Personal store.
   const whatsappSecretLocations = whatsappConnectorStore
     ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID)
     : undefined;

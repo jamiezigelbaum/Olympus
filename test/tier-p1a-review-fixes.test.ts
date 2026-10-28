@@ -19,7 +19,6 @@ import { buildSourceSensitivity, type SourceSensitivity } from '../src/core/sour
 import { classifyItemTier } from '../src/workers/classification/engine.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
-import { APPLE_MESSAGES_STORE_PLACEMENT } from '../src/workers/apple-messages/connector.ts';
 import { LocalConnectorStore, connectorStoreItemPlacement } from '../src/workers/connector-store/index.ts';
 import { scanDropboxContentPolicyText } from '../src/workers/dropbox-files/content-policy.ts';
 import { DROPBOX_STORE_PLACEMENT } from '../src/workers/dropbox-files/connector-store.ts';
@@ -159,9 +158,8 @@ describe('C: a lowering owner rule and the sniffer', () => {
 });
 
 describe('D: secure-only lanes refuse any other store', () => {
-  test('WhatsApp and Apple Messages declare secure_local placement', () => {
+  test('the WhatsApp Private store declares secure_local placement', () => {
     expect(WHATSAPP_STORE_PLACEMENT).toEqual({ trustTier: 'S4', trustDomain: 'secure_local' });
-    expect(APPLE_MESSAGES_STORE_PLACEMENT).toEqual({ trustTier: 'S4', trustDomain: 'secure_local' });
   });
 
   test('a secure-only lane wired to an internal store is rejected item by item', async () => {
@@ -258,7 +256,6 @@ describe('per-lane placement parity with the retired connector classify()', () =
     readwise: () => buildSourceSensitivity({ trustTier: 'S1', trustDomain: 'internal' }),
     x: () => buildSourceSensitivity({ trustTier: 'S1', trustDomain: 'internal' }),
     whatsapp: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
-    apple: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
     telegramInternal: () => buildSourceSensitivity({ trustTier: 'S3', trustDomain: 'internal' }),
     telegramSecure: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
     dropbox: (raw) => {
@@ -275,7 +272,6 @@ describe('per-lane placement parity with the retired connector classify()', () =
     readwise: [READWISE_STORE_PLACEMENT, 'internal'],
     x: [X_BOOKMARKS_STORE_PLACEMENT, 'internal'],
     whatsapp: [WHATSAPP_STORE_PLACEMENT, 'secure_local'],
-    apple: [APPLE_MESSAGES_STORE_PLACEMENT, 'secure_local'],
     telegramInternal: [{ trustTier: 'S3', trustDomain: 'internal' }, 'internal'],
     telegramSecure: [{ trustTier: 'S4', trustDomain: 'secure_local' }, 'secure_local'],
     dropbox: [DROPBOX_STORE_PLACEMENT, 'secure_local'],

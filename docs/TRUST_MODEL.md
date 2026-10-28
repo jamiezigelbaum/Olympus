@@ -526,30 +526,24 @@ Rules:
     is private (a private highlight, say) is raised to a Private store
     created on first need (`secure_local.readwise.library`,
     `secure_local.x.bookmarks`), or to Secrets.
-  - WhatsApp fails closed. Its store stays `secure_local.whatsapp.messages`
-    and every message rests Private there by default. A chat is a prior no
-    message is lowered below: only an explicit OWNER chat rule that sets a
-    chat to Personal lets a message whose own text stays Personal go to
-    `internal.whatsapp.messages` (the text can still raise it). A per-item
-    owner override is final by design: it sets that one message's tier and
-    the text does not change it. Owner rules load in phase P2, so until then
-    no WhatsApp message leaves the Private store.
+  - WhatsApp, like every source, is judged per message by its content
+    (owner ruling, 2026-10-28). A message starts Personal and goes to
+    `internal.whatsapp.messages`; the detectors, the sniffer or an owner's
+    always-Private chat rule raise it to `secure_local.whatsapp.messages` or
+    to Secrets. A message whose question is still open is held Private until
+    it is judged. A per-item owner override is final by design: it sets that
+    one message's tier and the text does not change it. Messages stored
+    before this ruling stay where they are until the tier migration
+    re-judges them.
 
-Current email implication: until Olympus has row/chunk sensitivity
-classification for the local Gmail index, treat the entire email index as
-local/private and cloud-embedding-ineligible.
-
-Current Telegram implication: Telegram classification is primarily per
-chat/group. Approved ordinary groups/chats belong in `internal` and should use
-the durable corpus direction `internal.telegram.messages`; Castor may receive
-their snippets, quotes, summaries, and answers through approved Olympus
-surfaces when OPSEC allows. Protected chats belong in `secure_local`, with the
-durable corpus direction `secure_local.telegram.protected.messages`: accountant, lawyer,
-Secret Chats, S4/S5 material, credential/security material,
-legal/medical/financial high-harm records, intimate or high-risk relationship
-context, and explicit owner override. Message-level OPSEC remains a secondary
-quarantine layer that withholds secrets, instructions, or high-risk snippets
-inside otherwise internal chats.
+No source, account or chat type is Private wholesale. Email, Telegram,
+WhatsApp and every other source are tiered per item by content: an item
+starts Personal and is raised to Private or Secrets by the detectors, the
+sniffer, a provider fact about that item (a Telegram Secret Chat message) or
+an owner rule the owner chose (an always-Private sender, label, folder or
+chat). Pairing or connecting a source never marks it, or any of its chats,
+Private. Personal Telegram messages live in `internal.telegram.messages`;
+Private ones in `secure_local.telegram.protected.messages`.
 
 ## macOS zkAPI route confinement
 

@@ -86,7 +86,7 @@ function lane(options: { secretLocations?: boolean } = {}) {
   const secretLocations = options.secretLocations ? new SecretLocationsIndex({ dbPath: join(root, 'secret-locations.db') }) : undefined;
   const tier = createWhatsAppTierLane({
     store,
-    env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'whatsapp-internal.db') },
+    env: { HOME: join(root, 'home') },
     ...(secretLocations ? { secretLocations } : {}),
   });
   closers.push(() => {

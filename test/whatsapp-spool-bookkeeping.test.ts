@@ -74,7 +74,7 @@ function lane() {
   const store = new LocalConnectorStore({ dbPath: join(root, 'whatsapp.db'), corpusId: WHATSAPP_LIVE_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
   const tier = createWhatsAppTierLane({
     store,
-    env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'whatsapp-internal.db') },
+    env: { HOME: join(root, 'home') },
   });
   closers.push(() => {
     tier.newStores.internal?.current()?.close();

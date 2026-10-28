@@ -20,7 +20,6 @@ import {
   createTieredLaneSet,
   onDemandTierStore,
   tieredStoreSetLedgerPath,
-  type TieredLaneFloor,
   type TieredLaneLeg,
   type TieredLaneSetOptions,
 } from '../connector-store/tiered-store-set.ts';
@@ -88,7 +87,6 @@ export interface TierMigrationLaneSpec {
   /** The lane's own classification input, as its runtime sets it; the run's shared inputs are added to it. */
   tierClassification?: TieredLaneSetOptions['tierClassification'];
   splitLayers?: boolean;
-  laneFloor?: TieredLaneFloor;
   contentArrivesLater?: boolean;
   /** The lane's per-item form of `contentArrivesLater`, as its runtime sets it. */
   contentArrivesLaterFor?: TieredLaneSetOptions['contentArrivesLaterFor'];
@@ -214,7 +212,6 @@ export function installedTierMigrationLaneSpecs(
       sourceId: WHATSAPP_PERSONAL_SOURCE_ID,
       setId: WHATSAPP_PERSONAL_SOURCE_ID,
       splitLayers: false,
-      laneFloor: { trustDomain: 'secure_local', liftedByOwnerRule: ['chat'] },
       legs: {
         internal: { corpusId: WHATSAPP_INTERNAL_CORPUS_ID, dbPath: resolvedStorePath('whatsapp.personal.messages', 'internal', env), family: 'chat' },
         secure_local: { corpusId: WHATSAPP_LIVE_CORPUS_ID, dbPath: resolvedStorePath('whatsapp.personal.messages', 'secure_local', env), family: 'chat', legacy: true },
@@ -287,7 +284,6 @@ export function openTierMigrationLanes(
         ledger,
         legs: laneLegs as TieredLaneSetOptions['legs'],
         ...(spec.splitLayers === false ? { splitLayers: false } : {}),
-        ...(spec.laneFloor ? { laneFloor: spec.laneFloor } : {}),
         ...(spec.contentArrivesLater ? { contentArrivesLater: true } : {}),
         ...(spec.contentArrivesLaterFor ? { contentArrivesLaterFor: spec.contentArrivesLaterFor } : {}),
         ...(tierClassification ? { tierClassification } : {}),

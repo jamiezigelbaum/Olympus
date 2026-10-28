@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import { compactClassificationSignals, trustDomainPrior } from '../src/core/classification-signals.ts';
+import { compactClassificationSignals } from '../src/core/classification-signals.ts';
 import { defaultDropboxIngestionPolicy, loadDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import type { SourceFamily } from '../src/core/source-index/types.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
@@ -460,9 +460,8 @@ describe('P1c Readwise and X lanes', () => {
   });
 });
 
-describe('P1c WhatsApp lane: fail closed', () => {
+describe('P1c WhatsApp lane: each message tiered by its content', () => {
   const chatSignals = (spec: Spec) => compactClassificationSignals({
-    prior: trustDomainPrior('secure_local', 'source_default'),
     title: spec.title,
     ...(spec.sharing ? { sharing: spec.sharing } : {}),
     folderKeys: spec.conversation ? [spec.conversation] : [],
@@ -484,22 +483,22 @@ describe('P1c WhatsApp lane: fail closed', () => {
     return { store, lane, sync, internal: () => lane.newStores.internal?.current() };
   }
 
-  test('with no owner chat rule every new message stays Private, whatever its text or sharing says', async () => {
+  test('with no owner rule an ordinary message goes Personal and a sensitive one stays Private', async () => {
     const root = workspace();
     const { store, sync, internal } = openLane(root);
     await sync([
       { id: 'm1', conversation: 'chat-a', title: 'Garden club', text: 'See you at the allotment on Saturday.' },
-      { id: 'm2', conversation: 'chat-a', title: 'Garden club', text: 'Photos are on the public page.', sharing: 'public_link' },
+      { id: 'm2', conversation: 'chat-a', title: 'Garden club', text: 'The lab results confirm the diagnosis; patient SSN 123-45-6789 starts treatment Monday.' },
     ]);
-    expect(internal()).toBeUndefined();
-    expect(existsSync(resolvedStorePath('whatsapp.personal.messages', 'internal', { HOME: join(root, 'home') }))).toBe(false);
-    expect(ids(store, 'allotment')).toEqual(['m1']);
-    expect(ids(store, 'photos')).toEqual(['m2']);
+    expect(ids(internal(), 'allotment')).toEqual(['m1']);
+    expect(ids(store, 'allotment')).toEqual([]);
+    expect(ids(internal(), 'diagnosis')).toEqual([]);
+    expect(ids(store, 'diagnosis')).toEqual(['m2']);
   });
 
-  test('an owner chat rule setting a chat Personal lifts the floor for that chat only, and a message\'s own text still raises it', async () => {
+  test('an owner rule that keeps a chat Private raises that chat only, and a message\'s own text still raises it elsewhere', async () => {
     const root = workspace();
-    const rules: OwnerTierRule[] = [{ id: 'garden-club', match: { kind: 'chat', value: 'chat-a' }, tier: 'private', strength: 'prior' }];
+    const rules: OwnerTierRule[] = [{ id: 'family', match: { kind: 'chat', value: 'chat-b' }, tier: 'secure', strength: 'prior' }];
     const { store, sync, internal, lane } = openLane(root, rules);
     await sync([
       { id: 'm1', conversation: 'chat-a', title: 'Garden club', text: 'See you at the allotment on Saturday.' },
@@ -535,7 +534,8 @@ describe('P1c WhatsApp lane: fail closed', () => {
 
   test('pre-conversation overrides are re-homed when the chat is derivable and reported as orphaned otherwise', async () => {
     const root = workspace();
-    const { store, sync, lane } = openLane(root);
+    // Such overrides predate per-message routing, so their messages sit in the Private store.
+    const { store, sync, lane } = openLane(root, ['chat-a', 'chat-b'].map((chat): OwnerTierRule => ({ id: chat, match: { kind: 'chat', value: chat }, tier: 'secure', strength: 'prior' })));
     await sync([
       { id: 'solo', conversation: 'chat-a', title: 'Garden club', text: 'One chat only.' },
       { id: 'dup', conversation: 'chat-a', title: 'Garden club', text: 'First chat.' },

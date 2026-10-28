@@ -68,7 +68,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, constants, existsSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeSync, type Dirent } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
-import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
+import { compactClassificationSignals, signalText } from '../../core/classification-signals.ts';
 import type {
   RawItem,
   SourceClassificationSignals,
@@ -394,14 +394,13 @@ export function createWhatsAppLiveSourceConnector(
 }
 
 /**
- * The classification signals of a WhatsApp item, whichever input built it.
- * Chat history has always rested at Private here; published as a prior so the
- * recorded decision is never less private than today's placement until an
- * owner chat rule replaces it.
+ * The classification signals of a WhatsApp item, whichever input built it:
+ * a record whose text was cleared as a Secret floored Secrets, and the chat,
+ * sender and chat id the owner's rules match. No source-level prior: each
+ * message's tier comes from its own content.
  */
 export function whatsAppClassificationSignals(item: RawItem): SourceClassificationSignals {
   return compactClassificationSignals({
-    prior: trustDomainPrior('secure_local', 'source_default'),
     ...(item.metadata['secretRedacted'] === true
       ? { floor: { tier: 'secrets' as const, basis: WHATSAPP_SECRET_REDACTED_FLOOR_BASIS } }
       : {}),
