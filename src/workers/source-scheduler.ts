@@ -1696,7 +1696,11 @@ export const CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true;
  * owner decision 2026-09-24 (embedding ledger decision-2026-09-24-readwise-hybrid).
  * Gmail: only its internal (non-secure) store, owner decision 2026-09-30
  * (embedding ledger decision-2026-09-30-gmail-catch-up), so that backlog embeds
- * once; the secure mail store stays queue-only. A list names the only corpora
+ * once; the secure mail store stays queue-only. Evernote: only its Personal
+ * store, part of the owner's 2026-10-28 decision to ship Evernote in full in
+ * 1.2.0. Its notes reach that store only by per-item routing, and a pass never
+ * lists an unchanged note again, so nothing would ever queue them; its Private
+ * store embeds through the local backfill. A list names the only corpora
  * of the source that may sweep store-wide. The file
  * lanes (Drive, Dropbox) are absent: they stay queue-only under their scope
  * binding, and Dropbox keeps its own embed tasks.
@@ -1707,6 +1711,7 @@ export const WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE: Readonly<Record<string, bool
   [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
   [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
+  [SCHEDULER_SOURCE_IDS.evernote]: ['internal.evernote.notes'],
 };
 
 /** Whether a source's store may sweep store-wide; see WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE. */

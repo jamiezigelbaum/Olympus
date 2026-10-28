@@ -166310,7 +166310,8 @@ var init_source_scheduler = __esm(() => {
     [SCHEDULER_SOURCE_IDS.gmail]: ["internal.email"],
     [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
     [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-    [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP
+    [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
+    [SCHEDULER_SOURCE_IDS.evernote]: ["internal.evernote.notes"]
   };
   HONEST_SCHEDULER_ERROR_KINDS = new Set([
     "api_request_guard",
