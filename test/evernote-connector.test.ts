@@ -4,7 +4,7 @@
 // complete, a partial pass changing nothing, shared notes counted and not
 // imported, and attachments (MD5 keys, MIME from bytes, MD5 mismatch refused).
 import { afterEach, describe, expect, test } from 'bun:test';
-import type { RawItem, SourceConnectorListPage } from '../src/core/contracts.ts';
+import type { RawItem, SourceConnectorListPage, StoredItemLookup } from '../src/core/contracts.ts';
 import { McpCallPacer } from '../src/core/mcp-source/pacer.ts';
 import { McpSourceSession } from '../src/core/mcp-source/session.ts';
 import {
@@ -156,18 +156,47 @@ describe('Evernote pass', () => {
     expect(fake.calls.get_note).toBe(5);
   });
 
-  test('the store\'s own version decides what is read when the store is asked', async () => {
+  test('a stored note with no committed pass record is read again, with its attachments', async () => {
     fake = new FakeEvernoteServer().start();
     const work = fake.addNotebook('Work');
-    fake.addNote({ title: 'A', notebookId: work.id, created: day(2020) });
+    fake.addNote({
+      title: 'A', notebookId: work.id, created: day(2020),
+      resources: [{ bytes: PNG, mime: 'image/png', name: 'a.png' }, { bytes: PNG, mime: 'image/png', name: 'b.png' }],
+    });
     const first = connectorFor(fake);
     const [note] = await runPass(first);
     const stored = note!.identity.sourceVersion;
+    // The pass stopped after the store wrote the note but before its record was committed.
     const second = connectorFor(fake);
     const items: RawItem[] = [];
     for await (const page of second.listItems({ storedItem: () => ({ version: stored!, hasContent: true }) })) items.push(...page.items);
-    expect(items).toHaveLength(0);
+    expect(fake.calls.get_note).toBe(2);
+    expect(items.map((item) => item.identity.providerItemId).sort()).toEqual([
+      note!.identity.providerItemId,
+      `${note!.identity.providerItemId}#child:${md5Hex(PNG)}`,
+      `${note!.identity.providerItemId}#child:${md5Hex(PNG)}.2`,
+    ].sort());
+  });
+
+  test('the store\'s own version decides what is read when a committed record agrees', async () => {
+    fake = new FakeEvernoteServer().start();
+    const work = fake.addNotebook('Work');
+    fake.addNote({ title: 'A', notebookId: work.id, created: day(2020) });
+    let record: EvernotePassRecord | undefined;
+    const first = connectorFor(fake, { previous: () => record });
+    const [note] = await runPass(first);
+    record = first.lastOutcome()?.record;
+    const stored = note!.identity.sourceVersion;
+    const server = fake;
+    const read = async (storedItem: StoredItemLookup) => {
+      const items: RawItem[] = [];
+      for await (const page of connectorFor(server, { previous: () => record }).listItems({ storedItem })) items.push(...page.items);
+      return items;
+    };
+    expect(await read(() => ({ version: stored!, hasContent: true }))).toHaveLength(0);
     expect(fake.calls.get_note).toBe(1);
+    expect(notesOf(await read(() => ({ version: stored!, hasContent: true, tombstoned: true })))).toHaveLength(1);
+    expect(fake.calls.get_note).toBe(2);
   });
 
   test('a deletion applies only when both listings completed', async () => {

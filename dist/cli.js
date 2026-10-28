@@ -157953,9 +157953,9 @@ function createEvernoteSourceConnector(options) {
         const version2 = book ? evernoteNoteVersion(hit.updatedAt, book.id, book.label) : undefined;
         if (version2) {
           const stored = listOptions.storedItem?.({ provider: EVERNOTE_PROVIDER, accountScope: account, providerItemId: noteId }, (a, b) => a.localeCompare(b));
-          const current2 = stored ? stored.version === version2 && stored.tombstoned !== true && stored.incomplete !== true : before?.v === version2;
-          if (current2) {
-            nextNotes[noteId] = before?.v === version2 ? before : { v: version2 };
+          const current2 = before?.v === version2 && (!stored || stored.version === version2 && stored.tombstoned !== true && stored.incomplete !== true);
+          if (current2 && before) {
+            nextNotes[noteId] = before;
             counts.notes_unchanged += 1;
             continue;
           }
