@@ -154,7 +154,8 @@ export function statusCheck(spec: LiveSourceSpec, rows: readonly CorpusRow[], no
   const maxAgeH = spec.maxSyncAgeH ?? 24;
   if (now - Date.parse(success.completed_at!) > maxAgeH * 3_600_000) return { id, title, status: 'fail', detail: `${said}: the last successful one was more than ${maxAgeH} h ago${running ? ' (one is running now)' : ''}` };
   const failedSince = newest !== undefined && newest !== success && newest.status === 'failed';
-  const degraded = own.some((row) => row.retrieval?.state === 'degraded');
+  // An empty corpus has nothing to embed, so the engine calls its search degraded for good; only one that holds items counts.
+  const degraded = own.some((row) => row.retrieval?.state === 'degraded' && (row.counts?.indexed_items ?? 0) > 0);
   return { id, title, status: degraded || failedSince ? 'fail' : 'pass', detail: `${said}${running ? '; a refresh is running' : ''}${failedSince ? `; it failed after the last success (${success.completed_at})` : ''}${degraded ? '; search is degraded' : ''}` };
 }
 
