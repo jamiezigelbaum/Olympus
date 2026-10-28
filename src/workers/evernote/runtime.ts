@@ -120,7 +120,9 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
     return live.sync;
   };
 
-  // The attachment reader over whichever stores are open, rebuilt when that changes.
+  // The attachment reader over whichever stores are open, rebuilt when that changes. It serves the
+  // Private store's corpus only: as the lane's one legacy store it lists the routed Personal store too
+  // (tieredExtractionView `home`), so an attachment is read once wherever its note rests.
   let extraction: { key: string; runtime: FileExtractionRuntime | undefined } | undefined;
   const extractionRuntime = (sync: EvernoteLiveSync, accountScope: string): FileExtractionRuntime | undefined => {
     const opened = openLane();
@@ -134,8 +136,8 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
       runtime: stores.length === 0 ? undefined : createChildExtractionRuntime({
         provider: EVERNOTE_ATTACHMENT_EXTRACTION_PROVIDER,
         scopeKey: EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY,
-        corpusIds: stores.map((store) => store.corpusId),
-        stores,
+        corpusIds: [opened.secure.corpusId],
+        stores: [opened.secure.open(), ...stores.filter((store) => store.corpusId !== opened.secure.corpusId)],
         set: opened.set,
         accountScope: () => accountScope,
         connector: (scope) => (scope === accountScope ? connector : undefined),
@@ -178,7 +180,7 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
           }
         },
       };
-      // One extraction task per store; a store the pass has not opened yet has nothing to read.
+      // One extraction task for the lane (see extractionRuntime); before the pass opens a store there is nothing to read.
       const attachmentTask = (corpusId: string, leg: () => LocalConnectorStore | undefined): SourceSchedulerTask => {
         const laneKey = { corpusId, provider: EVERNOTE_PROVIDER, accountScope, approvedScopeKey: EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY };
         const id = `evernote.attachments.${corpusId}`;
@@ -207,8 +209,7 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
         freshnessThresholdHours: config.worker.scheduler.freshnessThresholdHours,
         tasks: [
           pass,
-          attachmentTask(opened.secure.corpusId, () => opened.secure.current()),
-          attachmentTask(opened.internal.corpusId, () => opened.internal.current()),
+          attachmentTask(opened.secure.corpusId, () => opened.secure.current() ?? opened.internal.current()),
         ],
         lastSyncCompletedAt: () => sync.lastStoreRunCompletedAt(),
       };
