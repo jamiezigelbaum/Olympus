@@ -879,6 +879,20 @@ export function storeServedByMeaning(input: {
   return domain !== 'lexical_only' && domain !== 'metadata_only';
 }
 
+/**
+ * Whether any of these corpora would be indexed for meaning once its store
+ * opens: served by meaning, with an identity for its tier. Shared with
+ * startup-wiring tests.
+ */
+export function sourceStoresCouldEmbed(input: Omit<Parameters<typeof storeServedByMeaning>[0], 'store'> & {
+  corpusIds: ReadonlySet<string>;
+  providerFor: (trustDomain: string) => SourceEmbeddingProvider | undefined;
+}): boolean {
+  return input.sourceCorpusRegistry.list().some((corpus) => input.corpusIds.has(corpus.corpusId)
+    && input.providerFor(corpus.trustDomain) !== undefined
+    && storeServedByMeaning({ ...input, store: corpus }));
+}
+
 /** Sources whose stores are read only under the owner's current scope approval. */
 const SCOPE_APPROVED_SOURCE_IDS: ReadonlySet<string> = new Set([
   SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles,
@@ -5134,8 +5148,15 @@ export async function main(): Promise<void> {
         });
         return target ? [target] : [];
       });
-      // A source with no store that embeds (a keyword-only lane) gets no sweep.
-      return targets().length > 0 ? targets : undefined;
+      // A tier store opens on its first routed or imported item, after this
+      // build: a source whose stores could embed gets its sweep up front, so
+      // that first item is indexed without waiting for a rebuild. A source
+      // with no store that could embed (a keyword-only lane) gets no sweep.
+      const couldEmbed = sourceStoresCouldEmbed({
+        corpusIds, sovereigntyEngine, sourceCorpusRegistry, fullCorpusDefinitions,
+        providerFor: (trustDomain) => trustDomain === 'secure_local' ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider,
+      });
+      return couldEmbed || targets().length > 0 ? targets : undefined;
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.

@@ -8,8 +8,9 @@ import {
   storeEmbeddingCatchesUp,
 } from '../src/workers/connector-store/embedding-plan.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { defaultSourceCorpusRegistryConfig } from '../src/core/source-corpus-registry.ts';
-import { archiveImportCorpora } from '../src/workers/archive-import/store.ts';
+import { createSourceCorpusRegistry, defaultSourceCorpusRegistryConfig } from '../src/core/source-corpus-registry.ts';
+import { archiveImportCorpora, withArchiveImportCorpora } from '../src/workers/archive-import/store.ts';
+import { sourceStoresCouldEmbed } from '../src/workers/email-source/server.ts';
 import { RecordingProvider } from './helpers/tier-fixtures.ts';
 
 const store = (corpusId: string, trustDomain: string) => ({ corpusId, trustDomain }) as unknown as LocalConnectorStore;
@@ -57,5 +58,18 @@ describe('catch-up', () => {
     const queueOnly = corpora.filter((corpus) => !storeEmbeddingCatchesUp(corpus.corpusId, cloud)).map((corpus) => corpus.corpusId);
     expect(queueOnly.sort()).toEqual(Object.keys(QUEUE_ONLY_METERED_EMBEDDING).sort());
     for (const why of Object.values(QUEUE_ONLY_METERED_EMBEDDING)) expect(why).toMatch(/decision/);
+  });
+});
+
+describe('a source whose stores open later', () => {
+  test('gets its sweep before its first store exists (an archive family before its first import)', () => {
+    const registry = createSourceCorpusRegistry(withArchiveImportCorpora(undefined));
+    const corpusIds = new Set(registry.list().filter((corpus) => corpus.sourceId === 'archive.imports').map((corpus) => corpus.corpusId));
+    expect(corpusIds.size).toBeGreaterThan(0);
+    const engine = { config: { retrieval: { trustDomains: {} } } } as never;
+    const input = { corpusIds, sovereigntyEngine: engine, sourceCorpusRegistry: registry, fullCorpusDefinitions: [] };
+    expect(sourceStoresCouldEmbed({ ...input, providerFor: () => cloud })).toBe(true);
+    // No identity for any tier: keyword-only, so no sweep.
+    expect(sourceStoresCouldEmbed({ ...input, providerFor: () => undefined })).toBe(false);
   });
 });

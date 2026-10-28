@@ -203062,6 +203062,7 @@ __export(exports_server2, {
   startWorkerWithLaunch: () => startWorkerWithLaunch,
   startApprovedSourceRun: () => startApprovedSourceRun,
   sovereigntyAnalystRoutePlan: () => sovereigntyAnalystRoutePlan,
+  sourceStoresCouldEmbed: () => sourceStoresCouldEmbed,
   sourceIndexTelegramAccountFromEnv: () => sourceIndexTelegramAccountFromEnv,
   sourceIndexSemanticRelevanceBarFromEnv: () => sourceIndexSemanticRelevanceBarFromEnv,
   sourceIndexLaneStorageEnabled: () => sourceIndexLaneStorageEnabled,
@@ -203338,6 +203339,9 @@ function storeServedByMeaning(input) {
     return false;
   const domain = store.trustDomain === "public_safe" || store.trustDomain === "internal" || store.trustDomain === "secure_local" ? input.sovereigntyEngine.config.retrieval.trustDomains[store.trustDomain]?.activationMode : undefined;
   return domain !== "lexical_only" && domain !== "metadata_only";
+}
+function sourceStoresCouldEmbed(input) {
+  return input.sourceCorpusRegistry.list().some((corpus) => input.corpusIds.has(corpus.corpusId) && input.providerFor(corpus.trustDomain) !== undefined && storeServedByMeaning({ ...input, store: corpus }));
 }
 function storeEmbeddingScope(input) {
   const { store, sourceId, scopeRef: ref, authority } = input;
@@ -206075,7 +206079,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         });
         return target ? [target] : [];
       });
-      return targets().length > 0 ? targets : undefined;
+      const couldEmbed = sourceStoresCouldEmbed({
+        corpusIds,
+        sovereigntyEngine,
+        sourceCorpusRegistry: sourceCorpusRegistry2,
+        fullCorpusDefinitions,
+        providerFor: (trustDomain) => trustDomain === "secure_local" ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider
+      });
+      return couldEmbed || targets().length > 0 ? targets : undefined;
     });
     const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
