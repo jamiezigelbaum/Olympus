@@ -211,7 +211,9 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
       await Bun.sleep(250);
     }
     throw new Error('the test browser did not start');
-  });
+    // The wait above allows the browser 15 s to start; the hook's own limit
+    // must not end it at Bun's default 5 s on a loaded runner.
+  }, 20_000);
   afterAll(() => {
     server?.stop(true);
     chrome?.kill('SIGKILL');
