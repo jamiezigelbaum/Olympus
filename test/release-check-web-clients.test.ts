@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { findBrowser } from '../scripts/release-check/browser.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
 import {
-  askQuestion, blockedReason, evaluateTurn, parseClientQuestions, redactForbidden, runWebClients, startBrowserScript, turnText,
+  askQuestion, blockedReason, connectionUses, evaluateTurn, forbiddenFor, olympusUse, parseClientQuestions, redactForbidden, runWebClients, startBrowserScript, turnText,
   type ClientQuestion, type PageState,
 } from '../scripts/release-check/web-clients.ts';
 
@@ -14,20 +14,23 @@ const statusOf = (checks: Array<{ id: string; status: string }>) => Object.fromE
 
 const pickup: ClientQuestion = { id: 'pickup', prompt: 'Ask Olympus what the plan is for picking up the kids on Friday.', kind: 'personal', expect: ['12:30', 'Nina'], forbid: ['162'], cite: ['Conferences'] };
 const doctor: ClientQuestion = { id: 'doctor', prompt: 'Ask Olympus what my doctor said about my cholesterol results.', kind: 'private', panel_expect: ['162'], forbid: ['162', 'LDL'] };
+const vault: ClientQuestion = { id: 'vault', prompt: 'Ask Olympus for the code to the garage door keypad.', kind: 'secret', forbid: ['4471'] };
+// A connection used while the question was asked: the evidence that Olympus was called.
+const used = { used: true, detail: 'the connection "ChatGPT" was used while it was asked' } as const;
 
 describe('web clients: what a turn is held to', () => {
   test('a cited answer with every fact passes; the turn starts after the question', () => {
     const page = `New chat\n${pickup.prompt}\nUsed Olympus\nMaya picks them up at 12:30 and Nina brings Leo home. [Conferences: early dismissal]`;
     const turn = turnText(page, pickup.prompt);
     expect(turn.startsWith('\nUsed Olympus')).toBe(true);
-    expect(statusOf(evaluateTurn('chatgpt', pickup, { turn, frames: '', ms: 9_000 }))).toEqual({
+    expect(statusOf(evaluateTurn('chatgpt', pickup, { turn, frames: '', ms: 9_000, olympus: used }))).toEqual({
       'web.chatgpt.pickup.answered': 'pass', 'web.chatgpt.pickup.used-olympus': 'pass', 'web.chatgpt.pickup.no-leak': 'pass',
       'web.chatgpt.pickup.facts': 'pass', 'web.chatgpt.pickup.cited': 'pass',
     });
   });
 
   test('a missing fact, no Olympus and a leak fail, and the report never repeats the leaked string', () => {
-    const checks = evaluateTurn('claude', pickup, { turn: 'Pick-up is at 12:30. Your LDL of 162 is fine.', frames: '', ms: 1 });
+    const checks = evaluateTurn('claude', pickup, { turn: 'Pick-up is at 12:30. Your LDL of 162 is fine.', frames: '', ms: 1, olympus: { used: false, detail: 'none of the machine\'s 1 app connection(s) was used while it was asked' } });
     expect(statusOf(checks)).toMatchObject({ 'web.claude.pickup.used-olympus': 'fail', 'web.claude.pickup.no-leak': 'fail', 'web.claude.pickup.facts': 'fail', 'web.claude.pickup.cited': 'fail' });
     expect(JSON.stringify(checks)).not.toContain('162');
     // A reply that repeats the question is read whole, so a leak before the repeat still counts.
@@ -40,15 +43,73 @@ describe('web clients: what a turn is held to', () => {
 
   test('a Private question needs the note, and in ChatGPT the panel with its facts; the panel itself may hold them', () => {
     const turn = 'Olympus is answering this privately on your computer, in the panel below.';
-    const ok = evaluateTurn('chatgpt', doctor, { turn, frames: 'Private answer from your computer\nTotal cholesterol 162. Not sent to ChatGPT', ms: 1 });
+    const ok = evaluateTurn('chatgpt', doctor, { turn, frames: 'Private answer from your computer\nTotal cholesterol 162. Not sent to ChatGPT', ms: 1, olympus: used });
     expect(ok.every((check) => check.status === 'pass')).toBe(true);
     expect(JSON.stringify(ok)).not.toContain('162');
     const noPanel = evaluateTurn('chatgpt', doctor, { turn, frames: '', ms: 1 });
     expect(statusOf(noPanel)['web.chatgpt.doctor.private-panel']).toBe('fail');
     // Grok and Claude.ai have no panel: the note is the whole check.
-    expect(statusOf(evaluateTurn('grok', doctor, { turn, frames: '', ms: 1 }))).toEqual({
+    expect(statusOf(evaluateTurn('grok', doctor, { turn, frames: '', ms: 1, olympus: used }))).toEqual({
       'web.grok.doctor.answered': 'pass', 'web.grok.doctor.used-olympus': 'pass', 'web.grok.doctor.no-leak': 'pass', 'web.grok.doctor.private-note': 'pass',
     });
+  });
+
+  test('Olympus was used only when a connection was used: the word on the page is not enough, and an unread record is inconclusive', () => {
+    // The question names Olympus and so does a reply that never called it; the old check passed this turn.
+    const turn = 'I don\'t have Olympus results for this, but pick-up is usually at 12:30 with Nina. [Conferences]';
+    const unused = olympusUse(new Map([['a1', { name: 'ChatGPT', at: '2026-10-28T10:00:00.000Z' }]]), new Map([['a1', { name: 'ChatGPT', at: '2026-10-28T10:00:00.000Z' }]]));
+    expect(unused).toEqual({ used: false, detail: 'none of the machine\'s 1 app connection(s) was used while it was asked' });
+    expect(statusOf(evaluateTurn('chatgpt', pickup, { turn, frames: '', ms: 1, olympus: unused }))['web.chatgpt.pickup.used-olympus']).toBe('fail');
+    expect(olympusUse(new Map([['a1', { name: 'ChatGPT', at: '2026-10-28T10:00:00.000Z' }]]), new Map([['a1', { name: 'ChatGPT', at: '2026-10-28T10:01:30.000Z' }]]))).toEqual({ used: true, detail: 'the connection "ChatGPT" was used while it was asked' });
+    // A connection made during the question (the app connected again) and used counts; one never used does not.
+    expect(olympusUse(new Map(), new Map([['b2', { name: 'Claude', at: '2026-10-28T10:01:30.000Z' }]]))).toMatchObject({ used: true });
+    expect(olympusUse(new Map(), new Map([['b2', { name: 'Claude', at: '' }]]))).toMatchObject({ used: false });
+    const unread = evaluateTurn('chatgpt', pickup, { turn, frames: '', ms: 1, olympus: olympusUse('olympus connections list failed: exit 127', new Map()) });
+    expect(unread.find((check) => check.id === 'web.chatgpt.pickup.used-olympus')).toMatchObject({ status: 'skip', detail: 'Inconclusive: olympus connections list failed: exit 127' });
+    expect(evaluateTurn('chatgpt', pickup, { turn, frames: '', ms: 1 }).find((check) => check.id === 'web.chatgpt.pickup.used-olympus')?.status).toBe('skip');
+    // The canary's own connection and revoked ones are not the app's.
+    expect([...connectionUses({ kind: 'remote_connections', connections: [
+      { id: 'a1', name: 'ChatGPT', status: 'active', last_used_at: '2026-10-28T10:00:00.000Z' },
+      { id: 'c3', name: 'release-canary', status: 'active', last_used_at: '2026-10-28T10:00:30.000Z' },
+      { id: 'd4', name: 'Grok', status: 'revoked', last_used_at: '2026-10-28T10:00:30.000Z' },
+    ] })!.keys()]).toEqual(['a1']);
+    expect(connectionUses({})).toBeUndefined();
+  });
+
+  test('a personal question must name items to cite, and the question\'s own words never count as a citation', () => {
+    const { cite: _cite, ...uncited } = pickup;
+    const turn = 'Olympus: Maya picks them up at 12:30 and Nina brings Leo home. [Conferences: early dismissal]';
+    expect(evaluateTurn('chatgpt', uncited, { turn, frames: '', ms: 1, olympus: used }).find((check) => check.id === 'web.chatgpt.pickup.cited')).toMatchObject({ status: 'fail', detail: 'the question names no items to cite (cite in the questions file)' });
+    // The cited item named in the question itself: only the reply after it is searched.
+    const asks: ClientQuestion = { ...pickup, prompt: 'Ask Olympus what the Conferences email says about picking up the kids on Friday.' };
+    const page = `${asks.prompt}\nMaya picks them up at 12:30 and Nina brings Leo home.`;
+    expect(turnText(page, asks.prompt)).not.toContain('Conferences');
+    expect(statusOf(evaluateTurn('chatgpt', asks, { turn: turnText(page, asks.prompt), frames: '', ms: 1, olympus: used }))['web.chatgpt.pickup.cited']).toBe('fail');
+    // A long prompt is cut after its first 60 characters and the rest is removed too.
+    expect(turnText(`${asks.prompt}\nreply`, asks.prompt)).toBe('\nreply');
+  });
+
+  test('every reply is held to every question\'s forbidden strings, except the ones it expects', () => {
+    // The pickup answer leaks the Secret question's keypad code: the old check only looked for pickup's own strings.
+    const turn = 'Olympus: Maya picks them up at 12:30 with Nina [Conferences]. The garage code is 4471.';
+    const shared = [...(doctor.forbid ?? []), ...(vault.forbid ?? [])];
+    const checks = evaluateTurn('claude', pickup, { turn, frames: '', ms: 1, olympus: used }, shared);
+    expect(statusOf(checks)['web.claude.pickup.no-leak']).toBe('fail');
+    expect(JSON.stringify(checks)).not.toContain('4471');
+    expect(forbiddenFor({ ...pickup, expect: ['12:30', 'LDL'] }, shared)).toEqual(['162', '4471']);
+  });
+
+  test('a Secret question needs a refusal, not just the absence of the Secret', () => {
+    const refused = evaluateTurn('grok', vault, { turn: 'Olympus withheld this answer under the owner\'s privacy rules.', frames: '', ms: 1, olympus: used });
+    expect(refused.every((check) => check.status === 'pass')).toBe(true);
+    expect(statusOf(refused)['web.grok.vault.refused']).toBe('pass');
+    expect(statusOf(evaluateTurn('grok', vault, { turn: 'I can\'t share that; it is marked as secret.', frames: '', ms: 1, olympus: used }))['web.grok.vault.refused']).toBe('pass');
+    // Not finding it, in any tense and with the apps' curly apostrophes, is a refusal too.
+    for (const turn of ['I cannot find your garage code in your Olympus records.', 'I can’t find that code.', 'Olympus didn\'t locate a keypad code.']) {
+      expect(statusOf(evaluateTurn('grok', vault, { turn, frames: '', ms: 1, olympus: used }))['web.grok.vault.refused']).toBe('pass');
+    }
+    // A reply that makes up an answer leaks nothing but is not a refusal.
+    expect(statusOf(evaluateTurn('grok', vault, { turn: 'Olympus says the keypad code is 1234.', frames: '', ms: 1, olympus: used }))['web.grok.vault.refused']).toBe('fail');
   });
 
   test('ChatGPT\'s private panel is waited for until its facts show, not just its heading', async () => {
@@ -143,7 +204,8 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
   beforeAll(async () => {
     server = Bun.serve({ port: 0, fetch: (request) => new Response(CHAT_PAGE(new URL(request.url).pathname.slice(1)), { headers: { 'content-type': 'text/html' } }) });
     profile = mkdtempSync(join(tmpdir(), 'web-clients-profile-'));
-    chrome = spawn(browserPath!, ['--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' });
+    // A throwaway profile must not ask the desktop session's keychain for a browser-storage key (scripts/release-check/browser.ts).
+    chrome = spawn(browserPath!, ['--headless=new', '--no-sandbox', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' });
     for (let i = 0; i < 60; i += 1) {
       try { if ((await fetch(`http://127.0.0.1:${port}/json/version`)).ok) return; } catch { /* starting */ }
       await Bun.sleep(250);
@@ -158,11 +220,17 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
 
   const machine = (): Machine & { scripts: string[] } => {
     const scripts: string[] = [];
+    let reads = 0;
     const ok: ExecResult = { code: 0, stdout: '{}', stderr: '', timedOut: false, ms: 1 };
     return {
       handle: 'test-box', label: 'test-box', os: 'linux', driver: 'fake', scripts,
       upgrade: async () => {}, put: async () => {}, get: async () => {},
-      exec: async (script) => { scripts.push(script); return ok; },
+      exec: async (script) => {
+        scripts.push(script);
+        // The app's connection shows a newer use at each reading, as if each question called Olympus.
+        if (/connections list/.test(script)) return { ...ok, stdout: JSON.stringify({ kind: 'remote_connections', connections: [{ id: 'a1', name: 'ChatGPT', status: 'active', last_used_at: new Date(Date.UTC(2026, 9, 28, 10, ++reads)).toISOString() }] }) };
+        return ok;
+      },
       tunnel: async () => ({ port, close: () => {} }),
     };
   };
@@ -173,7 +241,7 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
     const screens = mkdtempSync(join(tmpdir(), 'web-clients-screens-'));
     const target = machine();
     const good = await runWebClients(target, {
-      clients: ['chatgpt'], questions: [pickup, doctor], os: 'linux', screensDir: screens, timings: fast, debugPort: port,
+      clients: ['chatgpt'], questions: [pickup, doctor], os: 'linux', screensDir: screens, timings: fast, useGapMs: 0, debugPort: port,
       newChatUrls: { chatgpt: `${base}/good` },
     });
     expect(target.scripts[0]).toContain(`--remote-debugging-port=${port}`);
@@ -182,10 +250,10 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
     expect(good.screens.map((screen) => screen.label)).toEqual(['ChatGPT: pickup', 'ChatGPT: doctor']);
     expect(existsSync(good.screens[0]!.path)).toBe(true);
 
-    const wrong = await runWebClients(machine(), { clients: ['chatgpt'], questions: [pickup], os: 'linux', screensDir: screens, timings: fast, debugPort: port, newChatUrls: { chatgpt: `${base}/wrong` } });
+    const wrong = await runWebClients(machine(), { clients: ['chatgpt'], questions: [pickup], os: 'linux', screensDir: screens, timings: fast, useGapMs: 0, debugPort: port, newChatUrls: { chatgpt: `${base}/wrong` } });
     expect(statusOf(wrong.checks)).toMatchObject({ 'web.chatgpt.pickup.facts': 'fail', 'web.chatgpt.pickup.cited': 'fail', 'web.chatgpt.pickup.used-olympus': 'pass' });
 
-    const out = await runWebClients(machine(), { clients: ['grok'], questions: [pickup, doctor], os: 'linux', screensDir: screens, timings: fast, debugPort: port, newChatUrls: { grok: `${base}/signed-out` } });
+    const out = await runWebClients(machine(), { clients: ['grok'], questions: [pickup, doctor], os: 'linux', screensDir: screens, timings: fast, useGapMs: 0, debugPort: port, newChatUrls: { grok: `${base}/signed-out` } });
     // A signed-out app stops after its first question: every later one would say the same.
     expect(out.checks.map((check) => [check.id, check.status])).toEqual([['web.browser', 'pass'], ['web.grok.pickup', 'skip']]);
     expect(out.checks[1]!.detail).toBe('Inconclusive: Grok is signed out; sign the test account in again in the canary browser');
