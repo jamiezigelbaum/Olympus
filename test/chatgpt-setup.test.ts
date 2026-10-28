@@ -814,6 +814,14 @@ describe('setup tools over the remote handler', () => {
         source_id: 'google_drive.docs', account_generation: 'gen-1', scope_revision: 'rev-1', whole_account_selected: true,
       });
       expect(whole.isError).toBe(true);
+      // A folder the computer cannot open yet says so, never "try again".
+      backendState.approveError = 'folder_needs_helper';
+      const refused = await call(client, 'olympus_scope_set', {
+        source_id: 'google_drive.docs', account_generation: 'gen-1', scope_revision: 'rev-1', selections: [],
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.structuredContent).toEqual({ error: 'folder_needs_helper' });
+      expect(JSON.stringify(refused.content)).toContain('Choose folders outside them');
       backendState.approveError = 'source_index_policy_violation';
       backendState.revision = 'rev-other';
       const conflict = await call(client, 'olympus_scope_set', {

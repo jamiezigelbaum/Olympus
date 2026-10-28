@@ -5524,7 +5524,12 @@ export async function main(): Promise<void> {
         state: selection.state,
       }));
       const browser = fileScopeBrowserFor(input.sourceId);
-      browser.checkApproval?.({ selections, wholeAccount: input.wholeAccount });
+      try {
+        browser.checkApproval?.({ selections, wholeAccount: input.wholeAccount });
+      } catch (error) {
+        // A choice the computer cannot read yet: a refusal with its own code, so the picker says why instead of "try again".
+        throw new EmailSourceWorkerError(409, 'folder_needs_helper', error instanceof Error ? error.message : String(error));
+      }
       const verifiedSelections = await browser.validateSelections(selections);
       const approval = fileSourceScopeAuthority.approve({
         sourceId: input.sourceId,

@@ -898,6 +898,7 @@ const BACKEND_CODES: Record<string, ChatGptErrorCode> = {
   dashboard_account_cardinality_violation: 'already_connected',
   source_index_policy_violation: 'not_connected',
   source_index_not_enabled: 'picker_unavailable',
+  folder_needs_helper: 'folder_needs_helper',
   source_dashboard_not_supported: 'unavailable',
   source_not_connected: 'source_not_connected',
   disconnect_source_busy: 'source_busy',

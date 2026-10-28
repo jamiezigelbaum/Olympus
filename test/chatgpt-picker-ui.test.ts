@@ -899,6 +899,27 @@ describe('folder picker: folders the computer asks about', () => {
     expectNoJargon(host);
   });
 
+  test('a folder the computer cannot open yet offers only Skip, says why on the row, and a refused save says why too', async () => {
+    const HELPER = { state: 'needs_helper', message: 'Olympus cannot open this folder on this Mac yet.' };
+    const host = mount({ serve: { [T.scopeList]: () => browse([node('k-desk', 'Desktop', { has_children: true, access: HELPER }), node('k-code', 'Code', { has_children: true })]), olympus_dashboard: () => ({ structuredContent: pendingDropbox }) } });
+    host.push({ structuredContent: pendingDropbox });
+    host.button('Choose folders').click();
+    await host.settle();
+    const seg = (state: string) => doc(host).querySelector(`button[data-key="picker:seg:k-desk:${state}"]`) as unknown as HTMLButtonElement;
+    expect(seg('ingest').disabled).toBe(true);
+    expect(seg('metadata_only').disabled).toBe(true);
+    expect(seg('exclude').disabled).toBe(false);
+    expect(doc(host).querySelector('li.seg-row.has-note .frow-note')!.textContent).toBe(HELPER.message);
+    expect(rowText(host, 'Code')).not.toContain(HELPER.message);
+    (doc(host).querySelector('button[data-key="picker:seg:k-code:ingest"]') as unknown as HTMLButtonElement).click();
+    const refusal = 'Olympus cannot open Desktop on this Mac yet.';
+    host.serve[T.scopeSet] = () => ({ isError: true, content: [{ type: 'text', text: refusal }], structuredContent: { error: 'folder_needs_helper' } });
+    host.button(Q.saveFolders).click();
+    await host.settle();
+    expect(host.text()).toContain(refusal);
+    expect(host.text()).not.toContain(Q.saveFailed);
+  });
+
   test('a denied folder says how to turn it back on, links to the privacy page, and Try again asks again', async () => {
     const host = await open([{ access: DENIED }, { nodes: [node('k-d1', 'Taxes')] }]);
     (doc(host).querySelector('button[data-key="picker:open:k-docs"]') as unknown as HTMLButtonElement).click();

@@ -1317,6 +1317,7 @@ type SurfaceOnlyErrorCode =
   | 'not_connected'
   | 'not_linked'
   | 'picker_unavailable'
+  | 'folder_needs_helper'
   | 'confirm_whole_account'
   | 'privacy_owner_only'
   | 'embedding_change_needs_approval'
@@ -1365,6 +1366,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   delete_incomplete: 'Olympus couldn\'t finish deleting this source\'s indexed data. Try again; the engine is reopening its stores.',
   delete_unavailable: 'Olympus can\'t delete this source\'s indexed data from here right now. Nothing was deleted. Try again in a moment.',
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',
+  folder_needs_helper: 'Olympus cannot open Desktop, Documents, Downloads, iCloud Drive or other disks on this Mac yet, or a folder that holds them. Your choices are still here. Choose folders outside them, or drag files onto the dashboard.',
   confirm_whole_account: 'Choosing the whole account needs the owner\'s confirmation in the Olympus panel.',
   privacy_owner_only: 'Only the owner can remove a privacy rule or change what they said is private, in the Olympus panel.',
   embedding_change_needs_approval: 'Changing the search model re-indexes every source and needs the owner\'s approval on the computer.',
