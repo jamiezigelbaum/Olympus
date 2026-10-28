@@ -86,6 +86,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
+  CONTAINER_MIME_TYPES,
   TierLedgerUnavailableError,
   connectorStoreItemText,
   syncAndEmbedFromConnector,
@@ -1804,16 +1805,20 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }
 
     // A lane whose text arrives later reads none at listing; an owner
-    // metadata-only disposition means none ever arrives.
+    // metadata-only disposition means none ever arrives, and neither does a
+    // container's (a folder has no text of its own), so no extraction will
+    // ever answer a question about it.
     const deferred = this.set.readsContentLater(item);
-    const text = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
+    const namesOnly = deferred
+      && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? ''));
+    const text = namesOnly ? undefined : connectorStoreItemText(item);
     // The owner's installed inputs (map, rules file, sniffer) merged with the
     // set's own (TieredStoreSet.classification()), resolved once per run.
     const classification = this.classification;
     // Names-only by the owner's choice: the text never arrives, so the names
     // are the whole decision and the item never waits on it.
     let decision = decideItemTiers(connector, item, text, classification, ledger, {
-      namesOnly: deferred && input.metadataOnly,
+      namesOnly,
       ...(input.contentFetchFailed ? { contentFetchFailed: true } : {}),
     });
     // With the owner's rules file or map unusable, the decision (made with

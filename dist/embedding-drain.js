@@ -15115,7 +15115,10 @@ class TierLedger {
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
     const rows = this.db.query(`
       SELECT * FROM tier_items
-      WHERE state = 'pending' AND routed = 1 AND content_read = 0 AND content_pending = 1 AND metadata_pending = 0
+      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')))
         AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
@@ -19579,6 +19582,25 @@ function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
 function artifactsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
 }
+function oweExtractionRereadAfterTierMove(dbPath, item) {
+  if (dbPath === ":memory:" || !existsSync16(dbPath))
+    return 0;
+  const db = new Database4(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!rereadsTableExists(db))
+      return 0;
+    const placement = PLACEMENT_SETTLEMENTS.map(() => "(status = ? AND last_error_kind = ?)").join(" OR ");
+    return db.query(`
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+      SELECT job_id FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        AND (status = 'leased' OR ${placement})
+    `).run(item.provider, item.accountScope, item.providerItemId, ...PLACEMENT_SETTLEMENTS.flatMap((settlement) => [settlement.status, settlement.kind])).changes;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
 function rereadsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
 }
@@ -19588,10 +19610,15 @@ function claimsTableExists(db) {
 function redactionsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
 }
-var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", openLedgerPaths;
+var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", openLedgerPaths, PLACEMENT_SETTLEMENTS;
 var init_job_names = __esm(() => {
   init_olympus_layout();
   openLedgerPaths = new Map;
+  PLACEMENT_SETTLEMENTS = [
+    { status: "metadata_only", kind: "store_item_metadata_only" },
+    { status: "metadata_only", kind: "store_image_content_private_only" },
+    { status: "blocked_policy", kind: "store_item_tier_move_queued" }
+  ];
 });
 
 // src/workers/connector-store/secrets-disposition.ts
@@ -30051,7 +30078,9 @@ function settleOne(set, record) {
   if (!store || !exported)
     return false;
   const locator = exported.columns["locator_uri"];
-  if (store.metadataOnlyRuleForLocator(typeof locator === "string" ? locator : undefined) === undefined)
+  const mimeType = exported.columns["mime_type"];
+  const container = typeof mimeType === "string" && CONTAINER_MIME_TYPES.includes(mimeType.trim().toLowerCase());
+  if (!container && store.metadataOnlyRuleForLocator(typeof locator === "string" ? locator : undefined) === undefined)
     return false;
   const decision = {
     metadataTier: record.metadataTier,
@@ -30099,6 +30128,7 @@ function identityOf2(record) {
 var DEFAULT_NAMES_ONLY_SETTLE_ROWS = 500, SETTLE_META_KEY = "names_only_settle_after";
 var init_tier_names_only_settle = __esm(() => {
   init_tier_ledger();
+  init_local_index();
 });
 
 // src/workers/embedding-ledger.ts
@@ -30668,6 +30698,23 @@ function copyFingerprint(copy, layers) {
   })).digest("hex");
 }
 function finishVerifiedMove(options, receipt) {
+  const result = flipVerifiedMove(options, receipt);
+  oweExtractionRereads(options.set.ledger, options.identity);
+  return result;
+}
+function oweExtractionRereads(ledger, identity) {
+  let known = [];
+  try {
+    known = ledger.knownJobLedgerPaths();
+  } catch {}
+  const item = { provider: identity.provider, accountScope: identity.accountScope, providerItemId: identity.providerItemId };
+  for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+    try {
+      oweExtractionRereadAfterTierMove(jobsPath, item);
+    } catch {}
+  }
+}
+function flipVerifiedMove(options, receipt) {
   const { set, identity } = options;
   const ledger = set.ledger;
   const contentDestination = copyServingLayer(receipt.placement, "content");
@@ -30822,6 +30869,7 @@ var init_tier_move = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_secrets_disposition();
+  init_job_names();
   init_tier_placement();
   TierMoveRefusedError = class TierMoveRefusedError extends Error {
     constructor(message2) {

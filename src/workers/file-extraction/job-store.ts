@@ -59,7 +59,7 @@ import type {
 } from './types.ts';
 
 export const FILE_EXTRACTION_JOBS_STORE_ID = 'file-extraction-jobs';
-export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 6;
+export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 7;
 export { defaultFileExtractionJobsDbPath };
 
 /**
@@ -2234,6 +2234,20 @@ function fileExtractionJobMigrations(): SqliteMigration[] {
       db.exec(`
         CREATE INDEX IF NOT EXISTS idx_extraction_jobs_identity
           ON extraction_jobs(provider, account_scope, provider_item_id, status);
+      `);
+    },
+  }, {
+    version: 7,
+    name: 'owe_reread_to_names_only_refusals',
+    up(db) {
+      // Before 1.2.0 an unread item held fail-safe Private and then judged
+      // Personal from its text was refused by its Personal store, and its job
+      // settled names-only for good (#592). Each such job is owed one re-read,
+      // taken only if its item is listed again still without text.
+      db.exec(`
+        INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+        SELECT job_id FROM extraction_jobs
+        WHERE status = 'metadata_only' AND last_error_kind = 'store_item_metadata_only';
       `);
     },
   }];
