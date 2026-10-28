@@ -26798,15 +26798,15 @@ function oweExtractionRereadAfterTierMove(dbPath, item) {
   const db = new Database4(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    if (!rereadsTableExists(db))
+    if (!rereadsTableExists(db) || !rereadsHaveReason(db))
       return 0;
     const placement = PLACEMENT_SETTLEMENTS.map(() => "(status = ? AND last_error_kind = ?)").join(" OR ");
     return db.query(`
-      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
-      SELECT job_id FROM extraction_jobs
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+      SELECT job_id, ? FROM extraction_jobs
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
         AND (status = 'leased' OR ${placement})
-    `).run(item.provider, item.accountScope, item.providerItemId, ...PLACEMENT_SETTLEMENTS.flatMap((settlement) => [settlement.status, settlement.kind])).changes;
+    `).run(REREAD_AFTER_PLACEMENT, item.provider, item.accountScope, item.providerItemId, ...PLACEMENT_SETTLEMENTS.flatMap((settlement) => [settlement.status, settlement.kind])).changes;
   } finally {
     closeSqliteStore(db);
   }
@@ -26817,8 +26817,16 @@ function takeRestoredReread(db, jobId) {
   const job = db.query(`SELECT status, last_error_kind FROM extraction_jobs WHERE job_id = ?`).get(jobId);
   if (job?.status === "leased")
     return false;
-  const owed = db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId).changes > 0;
-  return owed && job !== null && (job.status === "indexed" || job.status === "blocked_policy" && job.last_error_kind === "store_item_secrets" || settledByPlacement(job));
+  const debt = db.query(`SELECT ${rereadsHaveReason(db) ? "reason" : "NULL AS reason"} FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).get(jobId);
+  if (!debt || !job)
+    return false;
+  db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId);
+  if (debt.reason === REREAD_AFTER_PLACEMENT)
+    return settledByPlacement(job);
+  return job.status === "indexed" || job.status === "blocked_policy" && job.last_error_kind === "store_item_secrets";
+}
+function rereadsHaveReason(db) {
+  return db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all().some((column) => column.name === "reason");
 }
 function rereadsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
@@ -26829,7 +26837,7 @@ function claimsTableExists(db) {
 function redactionsTableExists(db) {
   return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
 }
-var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", openLedgerPaths, PLACEMENT_SETTLEMENTS;
+var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", REREAD_AFTER_PLACEMENT = "placement", openLedgerPaths, PLACEMENT_SETTLEMENTS;
 var init_job_names = __esm(() => {
   init_olympus_layout();
   openLedgerPaths = new Map;
@@ -57492,7 +57500,10 @@ function settleOne(set, record) {
     mapRevision: record.mapRevision,
     snifferId: "undecided"
   };
-  const recorded = set.ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), { stagedLandingAllowed: true });
+  const recorded = set.ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), {
+    stagedLandingAllowed: true,
+    guard: { generation: record.generation, override: set.ledger.getOverride(identity2) }
+  });
   return recorded.outcome === "updated" || recorded.outcome === "unchanged";
 }
 function parseIdentity(raw) {
@@ -82377,9 +82388,13 @@ function fileExtractionJobMigrations() {
     version: 7,
     name: "owe_reread_to_names_only_refusals",
     up(db) {
+      const columns = db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all();
+      if (!columns.some((column) => column.name === "reason")) {
+        db.exec(`ALTER TABLE ${SECRET_RESTORED_REREADS_TABLE} ADD COLUMN reason TEXT;`);
+      }
       db.exec(`
-        INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
-        SELECT job_id FROM extraction_jobs
+        INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+        SELECT job_id, '${REREAD_AFTER_PLACEMENT}' FROM extraction_jobs
         WHERE status = 'metadata_only' AND last_error_kind = 'store_item_metadata_only';
       `);
     }
@@ -89801,9 +89816,9 @@ function createTieredStoreExtractionSink(options) {
         });
       }
       let landingGeneration = record.generation;
-      if (contentStore === anchorStore && contentDomainOf(record) !== contentStore.trustDomain) {
+      if (contentStore === anchorStore && settledUnread && record.contentTier === "secure" && contentDomainOf(record) !== contentStore.trustDomain) {
         const unread = { ...decision, contentRead: false };
-        landingGeneration = ledger.recordRoutedPlacement(identity2, unread, set.placementFor(unread, { contentArrivesLater: true }), { guard: { generation: record.generation, override } }).record.generation;
+        landingGeneration = ledger.recordRoutedPlacement(identity2, unread, set.placementFor(unread, { contentArrivesLater: true }), { guard: { generation: record.generation, override }, stagedLandingAllowed: true }).record.generation;
       }
       const anchorScope = anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope;
       if (contentStore !== anchorStore && !contentStore.activeLocalItemRow(ref.localItemId)) {

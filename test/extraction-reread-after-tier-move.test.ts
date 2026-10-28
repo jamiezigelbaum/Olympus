@@ -25,6 +25,7 @@ import {
   EXTRACTION_SINK_SKIPPED_EMPTY_TEXT,
   EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY,
   EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
+  EXTRACTION_SINK_SKIPPED_SECRETS,
   EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
 } from '../src/workers/file-extraction/store-sink.ts';
 import type { ExtractionItemRef, ExtractionTerminalStatus } from '../src/workers/file-extraction/types.ts';
@@ -182,5 +183,16 @@ describe('a completed tier move', () => {
     await raiseToPrivate(lane, 'moved');
     expect(enqueue(lane, 'stays')).toMatchObject({ jobsExisting: 1, jobsForced: 0 });
     expect(enqueue(lane, 'moved')).toMatchObject({ jobsForced: 1 });
+  });
+
+  test('a job leased across the move that then judges its text Secret is not read again', async () => {
+    const lane = openLane();
+    await list(lane, ['diary']);
+    enqueue(lane, 'diary');
+    const leased = lane.jobs.lease({ ...LANE, workerId: 'worker' }).leasedJobs[0]!;
+    await raiseToPrivate(lane, 'diary');
+    lane.jobs.record({ jobId: leased.jobId, workerId: 'worker', leaseToken: leased.leaseToken, status: 'blocked_policy', errorKind: EXTRACTION_SINK_SKIPPED_SECRETS });
+    // Only leaving Secrets reopens a Secrets verdict, never a placement debt.
+    expect(enqueue(lane, 'diary')).toMatchObject({ jobsExisting: 1, jobsForced: 0 });
   });
 });

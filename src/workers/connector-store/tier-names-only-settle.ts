@@ -84,7 +84,10 @@ function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
     mapRevision: record.mapRevision,
     snifferId: 'undecided',
   };
-  const recorded = set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { stagedLandingAllowed: true });
+  const recorded = set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    stagedLandingAllowed: true,
+    guard: { generation: record.generation, override: set.ledger.getOverride(identity) },
+  });
   return recorded.outcome === 'updated' || recorded.outcome === 'unchanged';
 }
 

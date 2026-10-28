@@ -140,6 +140,21 @@ test('its text, judged Personal, lands in the Personal store beside its names', 
   expect(lane.stores.secure_local!.activeLocalItemRow(localId('budget'))).toBeUndefined();
 });
 
+test('a Private content tier recorded for any other reason is never lowered to land the text', async () => {
+  const lane = await failSafeUnreadLane();
+  // The same unread Private content tier, but raised on purpose, not held fail-safe.
+  const db = new Database(lane.ledger.dbPath);
+  db.query(`UPDATE tier_items SET reasons_json = ? WHERE provider_item_id = 'budget'`)
+    .run(JSON.stringify(['metadata:default:personal', 'content:unread']));
+  db.close();
+  const jobId = lane.runtime.jobs.enqueue({ refs: [REF], extractorKind: 'local_text', extractorVersion: 'v1', policyDecision: 'index_allowed' }).jobRefs[0]!.jobId;
+  await lane.runtime.runner.run(LANE);
+
+  expect(lane.runtime.jobs.get(jobId)?.status).not.toBe('indexed');
+  expect(lane.ledger.getCurrent(identityOf('budget'))).toMatchObject({ contentTier: 'secure', contentRead: false });
+  expect(lane.stores.internal!.searchItems('groceries', 5)).toEqual([]);
+});
+
 test('a job an earlier build settled names-only this way is read again once, after the upgrade', async () => {
   const lane = await failSafeUnreadLane();
   const jobs = lane.runtime.jobs;

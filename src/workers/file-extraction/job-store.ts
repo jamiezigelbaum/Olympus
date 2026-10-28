@@ -43,6 +43,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   SECRET_ITEM_REDACTION_CLAIMS_TABLE,
   SECRET_RESTORED_REREADS_TABLE,
+  REREAD_AFTER_PLACEMENT,
   SECRET_ITEM_REDACTIONS_TABLE,
   defaultFileExtractionJobsDbPath,
   itemNameRedacted,
@@ -2244,9 +2245,14 @@ function fileExtractionJobMigrations(): SqliteMigration[] {
       // Personal from its text was refused by its Personal store, and its job
       // settled names-only for good (#592). Each such job is owed one re-read,
       // taken only if its item is listed again still without text.
+      // Why a re-read is owed: a placement debt never reopens a Secrets verdict.
+      const columns = db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all() as { name: string }[];
+      if (!columns.some((column) => column.name === 'reason')) {
+        db.exec(`ALTER TABLE ${SECRET_RESTORED_REREADS_TABLE} ADD COLUMN reason TEXT;`);
+      }
       db.exec(`
-        INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
-        SELECT job_id FROM extraction_jobs
+        INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+        SELECT job_id, '${REREAD_AFTER_PLACEMENT}' FROM extraction_jobs
         WHERE status = 'metadata_only' AND last_error_kind = 'store_item_metadata_only';
       `);
     },

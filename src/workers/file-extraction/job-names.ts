@@ -58,6 +58,9 @@ export interface ExtractionJobItemKey {
 export const SECRET_ITEM_REDACTIONS_TABLE = 'secret_item_redactions';
 export const SECRET_ITEM_REDACTION_CLAIMS_TABLE = 'secret_item_redaction_claims';
 export const SECRET_RESTORED_REREADS_TABLE = 'secret_restored_rereads';
+/** A re-read owed for a placement, not for leaving Secrets: it reopens only a
+ * job its store refused for placement, never one that judged its text Secret. */
+export const REREAD_AFTER_PLACEMENT = 'placement';
 
 const openLedgerPaths = new Map<string, number>();
 
@@ -385,14 +388,15 @@ export function oweExtractionRereadAfterTierMove(
   const db = new Database(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    if (!rereadsTableExists(db)) return 0;
+    if (!rereadsTableExists(db) || !rereadsHaveReason(db)) return 0;
     const placement = PLACEMENT_SETTLEMENTS.map(() => '(status = ? AND last_error_kind = ?)').join(' OR ');
     return db.query(`
-      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
-      SELECT job_id FROM extraction_jobs
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+      SELECT job_id, ? FROM extraction_jobs
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
         AND (status = 'leased' OR ${placement})
     `).run(
+      REREAD_AFTER_PLACEMENT,
       item.provider,
       item.accountScope,
       item.providerItemId,
@@ -416,10 +420,18 @@ export function takeRestoredReread(db: Database, jobId: string): boolean {
   // A listing can overlap the old worker's settlement. Keep its debt and
   // lease intact until the outcome tells us whether a reread is needed.
   if (job?.status === 'leased') return false;
-  const owed = db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId).changes > 0;
-  return owed && job !== null && (job.status === 'indexed'
-    || (job.status === 'blocked_policy' && job.last_error_kind === 'store_item_secrets')
-    || settledByPlacement(job));
+  const debt = db.query(`SELECT ${rereadsHaveReason(db) ? 'reason' : 'NULL AS reason'} FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`)
+    .get(jobId) as { reason: string | null } | null;
+  if (!debt || !job) return false;
+  db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId);
+  if (debt.reason === REREAD_AFTER_PLACEMENT) return settledByPlacement(job);
+  return job.status === 'indexed'
+    || (job.status === 'blocked_policy' && job.last_error_kind === 'store_item_secrets');
+}
+
+function rereadsHaveReason(db: Database): boolean {
+  return (db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all() as { name: string }[])
+    .some((column) => column.name === 'reason');
 }
 
 function rereadsTableExists(db: Database): boolean {
