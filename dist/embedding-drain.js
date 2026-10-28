@@ -41123,6 +41123,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return !!data2.models && !!data2.models.embedding && installLines(data2.models).some((entry) => entry.state !== "failed");
   }
   function deletePending() {
+    for (const id of Object.keys(state.deleting))
+      if (Date.now() >= (state.deleting[id] ?? 0))
+        delete state.deleting[id];
     return Object.keys(state.deleting).length > 0;
   }
   function settleDeleting(data2) {

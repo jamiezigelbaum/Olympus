@@ -1188,6 +1188,35 @@ describe('Delete indexed data (olympus_delete_source_data): confirm in the sourc
     }
   });
 
+  test('an engine that never comes back after a delete returns to the normal back-off once the settle wait runs out', async () => {
+    jest.useFakeTimers();
+    try {
+      const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+      const dashboardCalls = (host: Host) => host.toolCalls().filter((call) => call.name === 'olympus_dashboard').length;
+      const host = mount();
+      host.push({ structuredContent: model({ sources: [dropbox([DELETE])] }) });
+      host.button('Delete indexed data').click();
+      host.button('Yes, delete indexed data').click();
+      host.respond('tools/call', { structuredContent: { status: 'deleted', source_id: 'dropbox.files', restarting: true } });
+      await flush();
+      // Refused for the whole 60 s settle wait, read again every 2 s.
+      for (let refused = 1; refused <= 30; refused++) {
+        host.respond('tools/call', undefined, { code: -32000, message: 'worker restarting' });
+        await flush();
+        jest.advanceTimersByTime(2_000);
+        await flush();
+      }
+      const settled = dashboardCalls(host);
+      host.respond('tools/call', undefined, { code: -32000, message: 'worker restarting' });
+      await flush();
+      jest.advanceTimersByTime(2_000);
+      await flush();
+      expect(dashboardCalls(host)).toBe(settled);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a read that still offers Delete after it ran is not trusted: the page re-reads soon until the row is settled', async () => {
     jest.useFakeTimers();
     try {

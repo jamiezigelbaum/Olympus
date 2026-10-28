@@ -2759,7 +2759,9 @@ export function chatgptDashboardClient(
   }
 
   /** A source whose Delete indexed data ran and whose row still offers it (or is not yet read again). */
+  /** A wait past its deadline ends here too, so an engine that never comes back returns to the normal back-off. */
   function deletePending(): boolean {
+    for (const id of Object.keys(state.deleting)) if (Date.now() >= (state.deleting[id] ?? 0)) delete state.deleting[id];
     return Object.keys(state.deleting).length > 0;
   }
 
