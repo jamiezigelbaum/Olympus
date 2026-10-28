@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.2.0 - 2026-10-28
+
+- **Import your archives.** Each source's card has Import an archive, with a picker for that source's own exports. Drop an export or a whole folder onto the dashboard and Olympus imports a copy of it; your original is never touched. Exports from anywhere else go under Other archives.
+- **One history per account.** A Gmail Takeout export joins your Gmail source, a Telegram Desktop export joins your live Telegram, and a WhatsApp chat export joins the WhatsApp history it overlaps. What both bring is stored once.
+- **Reflect, Roam and Evernote** are sources of their own. Evernote exports come with their attachments.
+- **Attachments and media are items of their own.** Gmail attachments (live mail and Takeout alike), Evernote attachments and WhatsApp pictures and videos are each read and judged on their own, so a payslip attached to a friendly email can be Private while the email stays Personal. Telegram photos and files, from live capture and from exports, are read the same way.
+- **An archive import reads everything it can,** including Telegram account details and service messages, and the dashboard tells what could not be read apart from how it was read.
+- **Live Telegram and WhatsApp capture is sturdier.** Any size of backlog is read, a lost position is recovered, dropped messages are counted, and the dashboard tells a quiet account from one that stopped.
+- **Each source keeps its data in its own folder.** Existing accounts move into their folders when Olympus starts after the update. Delete, Export and uninstall work from the same record of what each account owns.
+- Answers: a question with no matching evidence says so instead of failing, and a Private file matched only by its name, or a file Olympus never read, no longer withholds the whole answer.
+- The privacy check no longer counts files still waiting to be read as missing a question.
+- An Inbox delete that removed nothing says so and keeps the answer.
+- The archive picker hides hidden (dot) folders.
+- Every dashboard press says what happened: Ask with no question asks for one, a disabled Save says why, Connect keeps saying the sign-in opened in another tab, and a signed-out page reloads instead of going quiet.
+- Delete indexed data no longer stops the Gmail source when it runs before the source has started.
+- Open on this computer works for files whose path has spaces or other special characters.
+
 ## 1.1.0 - 2026-10-16
 
 - Questions agents send that need your Private items are answered on your computer automatically; the agent links you to the answer in Olympus, and answers wait in the new inbox.
