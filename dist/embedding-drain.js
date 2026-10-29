@@ -39131,6 +39131,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     archiveConfirm: {},
     unreadablePages: {},
     landing: "",
+    landingImport: false,
     landed: null,
     lastFailure: null
   };
@@ -39238,6 +39239,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const landing = value.landing;
     if (value.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
       state.landing = landing.sourceId;
+      state.landingImport = landing.import === true;
     }
   }
   function onComputer() {
@@ -40627,6 +40629,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!id || !state.data || state.relayDown || editorOpen() || compact())
       return;
     state.landing = "";
+    if (state.landingImport) {
+      state.landingImport = false;
+      if (!picker || !onComputer())
+        return;
+      if (id === config.archivesSourceId)
+        startArchivePick("", "");
+      else if (archiveSourceMeta(id))
+        startArchivePick("", id);
+      return;
+    }
     const sources = Array.isArray(state.data.sources) ? state.data.sources : [];
     if (!sources.some((source) => source && source.id === id))
       return;
@@ -64169,6 +64181,7 @@ var COMPUTER_HOST_PAGE_CSP = [
 
 // src/workers/dashboard/pages/local.ts
 init_source_dashboard();
+init_open_targets();
 
 // src/workers/agent-connections.ts
 init_operation_caller();

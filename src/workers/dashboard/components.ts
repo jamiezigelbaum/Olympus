@@ -271,7 +271,9 @@ export interface DashboardActionInput {
    * renders no form (a sheet toggle when `sheet` is set, else nothing). Sync
    * now, Disconnect, Unpair and the model retries are the panel's own tools.
    */
-  kind: 'oauth' | 'api_key' | 'this_computer' | 'none';
+  kind: 'oauth' | 'api_key' | 'this_computer' | 'none' | 'link';
+  /** Where a 'link' button goes: a page of this dashboard (safeHref), never another site. */
+  href?: string;
   /** The `source` value the control route expects. */
   source?: string;
   primary?: boolean;
@@ -297,6 +299,10 @@ export function actionButton(input: DashboardActionInput | undefined): string {
   if (action?.blockedReason !== undefined && (action.kind !== 'none' || action.sheet !== undefined)) {
     return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml(action.label)}</button>`
       + `<span class="hint">${escapeHtml(action.blockedReason)}</span></span>`;
+  }
+  if (action?.kind === 'link') {
+    const href = safeHref(action.href);
+    return href === undefined ? '' : `<a class="btn${action.primary ? ' primary' : ''}" href="${escapeHtml(href)}">${escapeHtml(action.label)}</a>`;
   }
   if (action === undefined || action.kind === 'none') {
     if (action?.sheet === undefined) return '';

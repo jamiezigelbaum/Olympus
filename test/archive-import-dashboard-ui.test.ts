@@ -151,6 +151,8 @@ const COMPUTER = { kind: 'computer', readOnly: false, links: LINKS };
 /** The panel on a host that answers its tool calls from `serve`; `computer: false` is ChatGPT. */
 async function mount(serve: Serve, options: {
   computer?: boolean;
+  /** The computer host's own context, in place of the plain one (a landing, say). */
+  host?: Record<string, unknown>;
   dashboard?: () => unknown;
   /** The host page's side of one file: its answer, after any progress it reports. Default: the file arrived. */
   upload?: (params: { upload_id: string; path: string; modified: number; file: File }, progress: (loaded: number) => void) => unknown;
@@ -172,7 +174,7 @@ async function mount(serve: Serve, options: {
       if (message.method === 'ui/initialize') {
         reply(message.id, {
           protocolVersion: '2026-01-26',
-          hostContext: { theme: 'light', displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'], ...(computer ? { [OLYMPUS_HOST_CONTEXT_KEY]: COMPUTER } : {}) },
+          hostContext: { theme: 'light', displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'], ...(computer ? { [OLYMPUS_HOST_CONTEXT_KEY]: options.host ?? COMPUTER } : {}) },
         });
       } else if (message.method === 'tools/call') {
         const handler = serve[message.params.name];
@@ -707,6 +709,27 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([
       { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { upload_id: page.uploads()[0]!.upload_id, source_id: 'telegram.messages' } },
     ]);
+  });
+
+  test('a Keys link lands on a card\'s Import an archive: its drop zone opens, for that card only (owner, 2026-10-29)', async () => {
+    const landed = (sourceId: string) => mount(
+      { [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]), ...uploadServe() },
+      { host: { ...COMPUTER, landing: { sourceId, import: true } } },
+    );
+    const own = await landed('telegram.messages');
+    expect(own.text()).toContain('Import an archive into Telegram');
+    expect(own.text()).toContain(TELEGRAM.intro);
+    // Other archives takes any export.
+    const other = await landed('archive.imports');
+    expect(other.text()).toContain(A.pick.intro);
+    // A card the engine does not list opens nothing, and a plain landing never opens the drop zone.
+    const unlisted = await landed('gmail.email');
+    expect(unlisted.text()).not.toContain(A.pick.back);
+    const plain = await mount(
+      { [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]) },
+      { host: { ...COMPUTER, landing: { sourceId: 'telegram.messages' } } },
+    );
+    expect(plain.text()).not.toContain(A.pick.back);
   });
 
   test('Back to Olympus from a card\'s Import an archive puts focus on that card\'s own Import button', async () => {

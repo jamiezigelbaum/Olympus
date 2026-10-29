@@ -38,6 +38,7 @@ import {
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT,
 } from './vocabulary.ts';
 import {
+  DASHBOARD_IMPORT_LANDING_PREFIX,
   DASHBOARD_OPEN_FRAGMENT_KEY,
   OPEN_PAGE_BASE_URL,
   allOpenTargets,
@@ -214,6 +215,8 @@ function hostProgram(input: {
   openFragment: string;
   /** The panel targets' tokens and the source each lands on (core/open-targets.ts). */
   landings: Record<string, string>;
+  /** `import.`: a Keys link's landing on one card's Import an archive; the panel checks the card. */
+  importLanding: string;
   hasReadToken: boolean;
   toolsCallPath: string;
   /** Where one file of an archive upload goes, and the local tool whose unlock opens the session it needs. */
@@ -377,7 +380,7 @@ function hostProgram(input: {
   }
   // An open link's place in the panel (See why on one source): read against
   // the closed list, then cleared, so a reload does not land again.
-  let landing: { sourceId: string } | undefined;
+  let landing: { sourceId: string; import?: true } | undefined;
   if (window.location.hash.indexOf(input.openFragment) === 0) {
     const wanted = window.location.hash.slice(input.openFragment.length);
     try {
@@ -386,6 +389,8 @@ function hostProgram(input: {
       // An unchangeable history keeps the fragment; it is only a place to look.
     }
     if (Object.prototype.hasOwnProperty.call(input.landings, wanted)) landing = { sourceId: input.landings[wanted]! };
+    const card = wanted.indexOf(input.importLanding) === 0 ? wanted.slice(input.importLanding.length) : '';
+    if (/^[a-z0-9_.]{1,64}$/.test(card)) landing = { sourceId: card, import: true };
   }
   handle = bridge(landing ? { ...input.bridge, landing } : input.bridge, {
     frame,
@@ -555,6 +560,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     lockedUrl: dashboardHomeHref(token),
     openFragment: `#${DASHBOARD_OPEN_FRAGMENT_KEY}=`,
     landings: panelOpenTargetSources(),
+    importLanding: DASHBOARD_IMPORT_LANDING_PREFIX,
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     uploadPath: DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH,

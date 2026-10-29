@@ -169,6 +169,8 @@ export function chatgptDashboardClient(
     archiveConfirm: Record<string, { source: string; reconfirm?: boolean }>;
     /** Computer only: the source an open link asked to land on, until the panel has landed there. */
     landing: string;
+    /** The landing opens that card's Import an archive (a Keys link), not its See why. */
+    landingImport: boolean;
     /** The source row outlined after landing, until `until` (ms). */
     landed: { id: string; until: number } | null;
     /** What the last failed read got back, for the unreachable banner's See why. */
@@ -198,6 +200,7 @@ export function chatgptDashboardClient(
     archiveConfirm: {},
     unreadablePages: {},
     landing: '',
+    landingImport: false,
     landed: null,
     lastFailure: null,
   };
@@ -305,6 +308,7 @@ export function chatgptDashboardClient(
     const landing = value.landing;
     if (value.kind === 'computer' && landing && typeof landing.sourceId === 'string' && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
       state.landing = landing.sourceId;
+      state.landingImport = landing.import === true;
     }
   }
 
@@ -1954,6 +1958,14 @@ export function chatgptDashboardClient(
     const id = state.landing;
     if (!id || !state.data || state.relayDown || editorOpen() || compact()) return;
     state.landing = '';
+    if (state.landingImport) {
+      state.landingImport = false;
+      // Only a card the engine lists imports its own exports; Other archives takes any export.
+      if (!picker || !onComputer()) return;
+      if (id === config.archivesSourceId) startArchivePick('', '');
+      else if (archiveSourceMeta(id)) startArchivePick('', id);
+      return;
+    }
     const sources = Array.isArray(state.data.sources) ? state.data.sources : [];
     if (!sources.some((source: Any) => source && source.id === id)) return;
     state.open['why:' + id] = true;

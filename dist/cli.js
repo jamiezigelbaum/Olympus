@@ -39674,7 +39674,10 @@ function panelOpenTargetSources() {
 function openUnreadableSourceFor(sourceId) {
   return Object.keys(OPEN_UNREADABLE_SOURCES).find((source) => OPEN_UNREADABLE_SOURCES[source].sourceId === sourceId);
 }
-var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+function dashboardImportLandingToken(sourceId) {
+  return `${DASHBOARD_IMPORT_LANDING_PREFIX}${sourceId}`;
+}
+var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_IMPORT_LANDING_PREFIX = "import.", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -144094,6 +144097,10 @@ function actionButton(input) {
   if (action?.blockedReason !== undefined && (action.kind !== "none" || action.sheet !== undefined)) {
     return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml2(action.label)}</button>` + `<span class="hint">${escapeHtml2(action.blockedReason)}</span></span>`;
   }
+  if (action?.kind === "link") {
+    const href = safeHref(action.href);
+    return href === undefined ? "" : `<a class="btn${action.primary ? " primary" : ""}" href="${escapeHtml2(href)}">${escapeHtml2(action.label)}</a>`;
+  }
   if (action === undefined || action.kind === "none") {
     if (action?.sheet === undefined)
       return "";
@@ -145302,6 +145309,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     archiveConfirm: {},
     unreadablePages: {},
     landing: "",
+    landingImport: false,
     landed: null,
     lastFailure: null
   };
@@ -145409,6 +145417,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const landing = value2.landing;
     if (value2.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
       state.landing = landing.sourceId;
+      state.landingImport = landing.import === true;
     }
   }
   function onComputer() {
@@ -146798,6 +146807,16 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!id || !state.data || state.relayDown || editorOpen() || compact2())
       return;
     state.landing = "";
+    if (state.landingImport) {
+      state.landingImport = false;
+      if (!picker || !onComputer())
+        return;
+      if (id === config2.archivesSourceId)
+        startArchivePick("", "");
+      else if (archiveSourceMeta(id))
+        startArchivePick("", id);
+      return;
+    }
     const sources = Array.isArray(state.data.sources) ? state.data.sources : [];
     if (!sources.some((source) => source && source.id === id))
       return;
@@ -151037,7 +151056,7 @@ function dashboardHostBridge(config2, io) {
     };
     const own3 = { kind: config2.kind, readOnly, links: config2.links };
     if (initial && landing) {
-      own3.landing = { sourceId: landing.sourceId };
+      own3.landing = landing.import ? { sourceId: landing.sourceId, import: true } : { sourceId: landing.sourceId };
       landing = undefined;
     }
     context2[config2.contextKey] = own3;
@@ -151369,6 +151388,9 @@ function hostProgram(input, bridge) {
     } catch {}
     if (Object.prototype.hasOwnProperty.call(input.landings, wanted))
       landing = { sourceId: input.landings[wanted] };
+    const card = wanted.indexOf(input.importLanding) === 0 ? wanted.slice(input.importLanding.length) : "";
+    if (/^[a-z0-9_.]{1,64}$/.test(card))
+      landing = { sourceId: card, import: true };
   }
   handle = bridge(landing ? { ...input.bridge, landing } : input.bridge, {
     frame,
@@ -151540,6 +151562,7 @@ function renderComputerHostPage(input) {
     lockedUrl: dashboardHomeHref(token),
     openFragment: `#${DASHBOARD_OPEN_FRAGMENT_KEY}=`,
     landings: panelOpenTargetSources(),
+    importLanding: DASHBOARD_IMPORT_LANDING_PREFIX,
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     uploadPath: DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH,
@@ -152433,7 +152456,7 @@ function renderDashboardKeysPage(view3, options) {
     `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySetting)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySettingHelp)}</p></section>`,
     `<section id="anonymous"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...options.controlSessionCsrfToken !== undefined ? { csrfToken: options.controlSessionCsrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true }) : `<p data-outside-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`,
     sources.length === 0 ? "" : '<div class="sect" id="sources">Sources</div>',
-    sources.length === 0 ? "" : `<div class="srows">${sources.map((source) => renderSetupRow(source, view3, blocked)).join(`
+    sources.length === 0 ? "" : `<div class="srows">${sources.map((source) => renderSetupRow(source, view3, blocked, options?.basePath ?? "/dashboard")).join(`
 `)}</div>`
   ].filter((block) => block !== "").join(`
 `);
@@ -152477,10 +152500,18 @@ function refusalNotice(source) {
     ...detail === undefined ? {} : { noticeDetail: detail }
   };
 }
-function renderSetupRow(source, view3, blocked) {
+function renderSetupRow(source, view3, blocked, basePath) {
   const action = source.connection.action;
   const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
   const id = { sourceId: source.source_id };
+  if (action.kind === "archive_import") {
+    return setupRow({
+      ...id,
+      label: source.label,
+      blurb: setupBlurb(source),
+      action: { label: action.label, kind: "link", href: `${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardImportLandingToken(source.source_id)}` }
+    });
+  }
   if (action.kind === "guided_session") {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
     const row = setupRow({
@@ -152561,8 +152592,8 @@ function setupBlurb(source) {
   if (action.kind === "this_computer")
     return "Choose the folders on this computer Olympus may read. Nothing is read until you choose.";
   if (action.kind === "archive_import") {
-    const what = source.source_id === "archive.imports" ? "an export from another app" : `your ${source.label} export`;
-    return `Import ${what} on the dashboard. Olympus copies it into its own storage to read it, and never changes the original.`;
+    const where2 = source.source_id === "archive.imports" ? "Import an export from another app under Other archives on the main page" : `Import your ${source.label} export from its card on the main page`;
+    return `${where2}. Olympus copies it into its own storage to read it, and never changes the original.`;
   }
   return "";
 }
@@ -152579,6 +152610,7 @@ function connectAction(source) {
 var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W;
 var init_local = __esm(() => {
   init_source_dashboard();
+  init_open_targets();
   init_agents();
   init_components();
   init_vocabulary();
