@@ -35,6 +35,11 @@ import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { SecretStore } from '../../core/secret-store.ts';
 import { resolvedRawPath, resolvedStorePath } from '../../core/source-placement.ts';
 import { openConnectorStore, openTierLedger } from '../../core/source-storage.ts';
+import {
+  createSourceExclusionMatcher,
+  loadSourceIngestionExclusions,
+  type SourceExclusionMatcher,
+} from '../../core/source-ingestion-exclusions.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreSyncOptions, LocalConnectorStore } from '../connector-store/index.ts';
@@ -65,10 +70,13 @@ import {
   createEvernoteSourceConnector,
   evernotePassWithUnfinished,
   evernoteUnfinishedWith,
+  type EvernoteNotebookDisposition,
+  type EvernoteNotebookGate,
   type EvernotePassCounts,
   type EvernotePassRecord,
   type EvernoteSourceConnector,
 } from './connector.ts';
+import { listNotebooks, type EvernoteNotebook } from './listing.ts';
 
 export const EVERNOTE_SECURE_CORPUS_ID = 'secure_local.evernote.notes';
 export const EVERNOTE_INTERNAL_CORPUS_ID = 'internal.evernote.notes';
@@ -84,6 +92,35 @@ export const EVERNOTE_PASS_RECEIPT_KIND = 'evernote_connector_store_pass_receipt
 export const evernoteCredentialKey = (accountRole: string = EVERNOTE_ACCOUNT_ROLE): string => `evernote.${accountRole}.mcp_credential`;
 /** Calls one attachment read may make (the tool listing and `get_attachment`). */
 const ATTACHMENT_CALL_BUDGET = 4;
+/** Calls listing the notebooks for the picker may make (more than 100 notebooks are found by name fragments). */
+const NOTEBOOKS_CALL_BUDGET = 400;
+/** What the exclusion rules can name of a notebook: its id, or `/<name>` as its path. */
+const EVERNOTE_ENFORCEABLE_EXCLUSION_CRITERIA = ['path_prefix', 'folder_id'] as const;
+
+/**
+ * The owner's exclusion rules for Evernote (source-ingestion-exclusions.json, `evernote.notes`),
+ * read at every pass. A notebook is a folder with no parent: a `folder_ids` rule names its id, a
+ * `path_prefixes` rule `/<notebook name>`. A file that cannot be read throws: the pass then reads
+ * nothing.
+ */
+export function evernoteExclusionMatcher(env: Record<string, string | undefined> = process.env): SourceExclusionMatcher {
+  return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), EVERNOTE_SOURCE_ID, {
+    enforceable: EVERNOTE_ENFORCEABLE_EXCLUSION_CRITERIA,
+  });
+}
+
+const DISPOSITION_RANK: Readonly<Record<EvernoteNotebookDisposition, number>> = { ingest: 0, metadata_only: 1, exclude: 2 };
+
+/** The picker's choice and the exclusion rules together: the stricter answer wins, and an unclear rule excludes. */
+export function evernoteNotebookGate(choice: EvernoteNotebookGate, matcher: SourceExclusionMatcher): EvernoteNotebookGate {
+  return (notebook) => {
+    const chosen = choice(notebook);
+    if (!matcher.active) return chosen;
+    const decision = matcher.evaluateItem({ path: `/${notebook.label}`, folderAncestorIds: [notebook.id] });
+    const ruled: EvernoteNotebookDisposition = decision.disposition === 'admit' ? 'ingest' : decision.disposition;
+    return DISPOSITION_RANK[ruled] > DISPOSITION_RANK[chosen] ? ruled : chosen;
+  };
+}
 
 /** Where an item rests when the router leaves it to the lane: Private. */
 export const EVERNOTE_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freeze({
@@ -261,8 +298,14 @@ export interface EvernotePassReceipt {
 }
 
 export interface EvernoteLiveSync {
-  /** One full pass. Throws when it changed nothing (a listing that could not finish, a sign-in to renew). */
-  pass(request?: { shouldContinue?: () => boolean }): Promise<EvernotePassReceipt>;
+  /**
+   * One full pass over the notebooks `notebookGate` allows (absent: all of them), with the owner's
+   * exclusion rules applied on top. Throws when it changed nothing (a listing that could not finish,
+   * a sign-in to renew).
+   */
+  pass(request?: { shouldContinue?: () => boolean; notebookGate?: EvernoteNotebookGate }): Promise<EvernotePassReceipt>;
+  /** The account's notebooks, for the picker: ids, names and ownership, nothing from a note. */
+  notebooks(): Promise<EvernoteNotebook[]>;
   /** The connector the extraction factory reads attachments with. */
   attachmentConnector(): EvernoteSourceConnector;
   status(): EvernotePassStatus | undefined;
@@ -286,21 +329,26 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
   const authorizedFetch = mcpAuthorizedFetch(tokens, serverUrl, options.fetch);
   const accountScope = options.handle.accountRole ?? EVERNOTE_ACCOUNT_ROLE;
   let shouldContinue: () => boolean = () => true;
+  let notebookChoice: EvernoteNotebookGate = () => 'ingest';
+  const session = (purpose: 'pass' | 'attachment' | 'notebooks'): McpSourceSession => new McpSourceSession({
+    serverUrl,
+    clientName: 'Olympus',
+    clientVersion: options.clientVersion ?? '1',
+    readTools: EVERNOTE_READ_TOOLS,
+    callBudget: purpose === 'pass' ? options.callBudget ?? EVERNOTE_PASS_CALL_BUDGET
+      : purpose === 'notebooks' ? NOTEBOOKS_CALL_BUDGET : ATTACHMENT_CALL_BUDGET,
+    fetch: authorizedFetch,
+    ...(options.pacer ? { pacer: options.pacer } : {}),
+    ...(purpose === 'pass' ? { shouldContinue: () => shouldContinue() } : {}),
+  });
   const connector = (
     previous?: () => EvernotePassRecord | undefined,
     readSoFar?: (notes: EvernotePassRecord['notes']) => void,
   ): EvernoteSourceConnector => createEvernoteSourceConnector({
     accountScope,
-    session: (purpose) => new McpSourceSession({
-      serverUrl,
-      clientName: 'Olympus',
-      clientVersion: options.clientVersion ?? '1',
-      readTools: EVERNOTE_READ_TOOLS,
-      callBudget: purpose === 'pass' ? options.callBudget ?? EVERNOTE_PASS_CALL_BUDGET : ATTACHMENT_CALL_BUDGET,
-      fetch: authorizedFetch,
-      ...(options.pacer ? { pacer: options.pacer } : {}),
-      ...(purpose === 'pass' ? { shouldContinue: () => shouldContinue() } : {}),
-    }),
+    session,
+    // The rules file is read at each pass, so a rule saved since applies to the next one.
+    notebookGate: () => evernoteNotebookGate(notebookChoice, evernoteExclusionMatcher(env)),
     ...(previous ? { previous } : {}),
     ...(readSoFar ? { readSoFar } : {}),
     ...(options.downloadHosts ? { downloadHosts: options.downloadHosts } : {}),
@@ -388,14 +436,25 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
     pass(request = {}) {
       running ??= (async () => {
         shouldContinue = request.shouldContinue ?? (() => true);
+        notebookChoice = request.notebookGate ?? (() => 'ingest');
         try {
           return await runPass();
         } finally {
           running = undefined;
           shouldContinue = () => true;
+          notebookChoice = () => 'ingest';
         }
       })();
       return running;
+    },
+    async notebooks() {
+      const listing = session('notebooks');
+      await listing.open();
+      try {
+        return await listNotebooks(listing);
+      } finally {
+        await listing.close();
+      }
     },
     attachmentConnector: () => attachments,
     status: () => (existsSync(passPath) ? readPassFile(passPath).status : undefined),

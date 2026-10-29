@@ -29,7 +29,8 @@ import {
   type SourceSchedulerTask,
 } from '../source-scheduler.ts';
 import { resolvedStorePath } from '../../core/source-placement.ts';
-import { EVERNOTE_PROVIDER, EVERNOTE_SOURCE_ID } from './connector.ts';
+import { EVERNOTE_PROVIDER, EVERNOTE_SOURCE_ID, type EvernoteNotebookGate } from './connector.ts';
+import type { EvernoteNotebook } from './listing.ts';
 import {
   EVERNOTE_SECURE_CORPUS_ID,
   createEvernoteLiveSync,
@@ -70,8 +71,17 @@ export interface EvernoteRuntime {
   existingLane(): EvernoteTierLane | undefined;
   /** The live pass for this handle (the same one while the handle is). */
   liveSync(handle: ConnectedCredentialHandle): EvernoteLiveSync;
-  /** The scheduler source for a connected handle: one pass task and the attachment reads. */
-  schedulerSource(input: { config: OlympusConfig; handle: ConnectedCredentialHandle }): SourceSchedulerSource;
+  /**
+   * The scheduler source for a connected handle: one pass task and the attachment reads. Each pass
+   * asks `notebookGate` which notebooks the person approved (it throws when that approval changed).
+   */
+  schedulerSource(input: {
+    config: OlympusConfig;
+    handle: ConnectedCredentialHandle;
+    notebookGate: () => EvernoteNotebookGate;
+  }): SourceSchedulerSource;
+  /** The account's notebooks for the picker (no note is read). */
+  notebooks(handle: ConnectedCredentialHandle): Promise<EvernoteNotebook[]>;
   /** The dashboard card's facts about the passes; undefined before the first. */
   dashboardPass(): DashboardLivePass | undefined;
 }
@@ -151,7 +161,8 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
   return {
     existingLane,
     liveSync,
-    schedulerSource({ config, handle }) {
+    notebooks: (handle) => liveSync(handle).notebooks(),
+    schedulerSource({ config, handle, notebookGate }) {
       const sync = liveSync(handle);
       const accountScope = handle.accountRole ?? 'personal';
       const opened = openLane();
@@ -165,7 +176,7 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
         freshnessThresholdMs,
         run: async () => {
           try {
-            const receipt = await sync.pass();
+            const receipt = await sync.pass({ notebookGate: notebookGate() });
             const stopped = sync.status()?.last_error;
             return {
               status: receipt.status,

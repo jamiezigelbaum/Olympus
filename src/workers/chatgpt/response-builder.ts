@@ -129,7 +129,10 @@ const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009fâ€‹-â€
  * may carry (enum values). Anything else falls back to checking again.
  */
 const OAUTH_SOURCES = new Set<ChatGptOAuthSource>(['gmail', 'google-drive', 'dropbox']);
-const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']);
+const FOLDER_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['google_drive.docs', 'dropbox.files', 'local.files', 'evernote.notes']);
+const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', ...FOLDER_SOURCE_IDS]);
+/** Folder sources an always-Private rule may name (privacy-profile.ts RULE_SOURCES.folder). */
+const PRIVACY_FOLDER_SOURCE_IDS = new Set<string>(['google_drive.docs', 'dropbox.files', 'evernote.notes']);
 const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes', 'local.files']);
 const DELETE_DATA_SOURCE_IDS = new Set<ChatGptDeleteSourceId>([...DISCONNECT_SOURCE_IDS, 'telegram.messages', 'whatsapp.personal.messages']);
 const SYNC_SOURCE_IDS = new Set<ChatGptSyncSourceId>(DISCONNECT_SOURCE_IDS);
@@ -1142,7 +1145,7 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
       if (!PRIVACY_RULE_KINDS.has(rule.kind) || !SCOPE_SOURCE_IDS.has(rule.source_id)) return [];
       if (rule.kind === 'sender') return [{ kind: 'sender', source_id: 'gmail.email', value: text(rule.value) }];
       if (rule.kind === 'label') return [{ kind: 'label', source_id: 'gmail.email', key: opaque(rule.key), value: text(rule.value) }];
-      const sourceId = rule.source_id === 'dropbox.files' ? 'dropbox.files' : rule.source_id === 'google_drive.docs' ? 'google_drive.docs' : undefined;
+      const sourceId = PRIVACY_FOLDER_SOURCE_IDS.has(rule.source_id) ? rule.source_id : undefined;
       if (!sourceId) return [];
       const display = text(rule.display);
       return [{ kind: 'folder', source_id: sourceId, key: opaque(rule.key), ...(display ? { display } : {}) }];
@@ -1215,7 +1218,7 @@ function copyScopeList(list: ScopeList): ScopeList {
   if (list.kind === 'folders') {
     const out: FolderScopeList = {
       kind: 'folders',
-      source_id: list.source_id === 'dropbox.files' || list.source_id === 'local.files' ? list.source_id : 'google_drive.docs',
+      source_id: FOLDER_SOURCE_IDS.has(list.source_id) ? list.source_id : 'google_drive.docs',
       account_generation: opaque(list.account_generation),
       scope_revision: opaque(list.scope_revision),
       status: list.status === 'approved' ? 'approved' : 'scope_pending',

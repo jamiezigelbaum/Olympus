@@ -451,7 +451,7 @@ import {
   requireFileScopeSource,
   type FileScopeSourceDefinition,
 } from '../../core/file-scope-sources.ts';
-import { fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
+import { fileSourceScopeAllowsContent, fileSourceScopeAllowsMetadata, fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import {
   GMAIL_IMPORT_CONNECTOR_PREFIX,
@@ -499,7 +499,10 @@ import type { OlympusMailScopeDraft } from '../../control-ui-contract.ts';
 import { gmailDailyRequestBudgetFromEnv } from '../google-connectors/gmail.ts';
 import { defaultGmailLiveSyncConfig } from '../google-connectors/gmail-live-control.ts';
 import {
+  createEvernoteNotebookScopeBrowser,
   createFileScopeBrowser,
+  registerFileScopeBrowserFactory,
+  unregisterFileScopeBrowserFactory,
   type SourceFolderScopeBrowser,
 } from '../source-scope-browser.ts';
 import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-sources.ts';
@@ -3917,6 +3920,16 @@ export async function main(): Promise<void> {
       store.trustDomain === 'secure_local' ? tierSecureEmbeddingProvider ?? null : sourceIndexEmbeddingProvider ?? null,
     ),
   });
+  // The notebook picker lists this account's notebooks through the same sign-in (replaced, not
+  // added, when the worker starts again in one process).
+  unregisterFileScopeBrowserFactory(EVERNOTE_SOURCE_ID);
+  registerFileScopeBrowserFactory(EVERNOTE_SOURCE_ID, (context) => createEvernoteNotebookScopeBrowser({
+    listNotebooks: () => {
+      const handle = readActiveConnectedHandles(process.env).find((entry) => entry.handle === context.credentialHandle);
+      if (!handle) throw new OperationError('source_index_policy_violation', 'The connected Evernote account is unavailable.');
+      return evernote.notebooks(handle);
+    },
+  }));
   try {
     if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID })) evernote.existingLane();
   } catch (error) {
@@ -5046,10 +5059,26 @@ export async function main(): Promise<void> {
         });
         // A sign-in the provider refused waits for Reconnect rather than failing every hour.
         const usable = handle && handle.backendState?.status !== 'reauth_required' ? handle : undefined;
+        // Nothing is read until the person has chosen notebooks; each pass reads the choice it was bound to.
+        const scopeRef = usable ? fileSourceScopeAuthority?.policyRef(EVERNOTE_SOURCE_ID) : undefined;
         return recordLane(
           SCHEDULER_SOURCE_IDS.evernote,
-          usable ? undefined : 'no_handle',
-          () => evernote.schedulerSource({ config: olympusConfig, handle: usable! }),
+          !usable ? 'no_handle' : !scopeRef ? 'scope_pending' : undefined,
+          () => {
+            if (!usable || !scopeRef || !fileSourceScopeAuthority) return undefined;
+            const authority = fileSourceScopeAuthority;
+            const source = evernote.schedulerSource({
+              config: olympusConfig,
+              handle: usable,
+              notebookGate: () => {
+                const approval = authority.assertCurrent(scopeRef);
+                return (notebook) => fileSourceScopeAllowsContent(approval, [notebook.id])
+                  ? 'ingest'
+                  : fileSourceScopeAllowsMetadata(approval, [notebook.id]) ? 'metadata_only' : 'exclude';
+              },
+            });
+            return scopeBoundSchedulerSource({ source, authority, ref: scopeRef });
+          },
         );
       })(),
       recordLane(

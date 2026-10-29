@@ -14,7 +14,17 @@
  *   names now is emitted deleted; so is an attachment a re-read note no
  *   longer carries.
  * - A note `get_note` gives no notebook for is shared with the person and in
- *   none of theirs: it is not imported, and it is counted.
+ *   none of theirs: it is not imported, and it is counted. So is a note in a
+ *   notebook the account does not own.
+ * - Which notebooks may be read is the person's choice (`notebookGate`, asked
+ *   once per pass, before the first call): a notebook set to Skip is never
+ *   passed to `get_note` (its notes are only counted by id, to know where they
+ *   are), and a stored copy of one of its notes is retired. A notebook set to
+ *   names only keeps each note's title from the listing; its notes are never
+ *   read either.
+ * - A listing that drops many notes at once retires at most
+ *   `evernoteDeletionCap` of them per pass; the rest wait for the next pass
+ *   (a short listing from Evernote cannot empty the index).
  * - A note: its title, notebook, tags and times above its body (ENML as plain
  *   lines). Its notebook's name is its folder key, its tags its labels.
  * - An attachment: keyed by its MD5 (the first of a note's equal attachments
@@ -61,6 +71,19 @@ export const EVERNOTE_PASS_CALL_BUDGET = 3_000;
 export const EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = 'evernote-res1:';
 const PAGE_ITEMS = 50;
 const MAX_TITLE_CHARS = 500;
+/** Notes one pass may retire because the listing no longer names them: at least this many… */
+export const EVERNOTE_DELETION_FLOOR = 50;
+/** …or this share of the notes the last pass held, whichever is more. */
+export const EVERNOTE_DELETION_SHARE = 0.1;
+
+/** How many notes one pass may retire because the listing stopped naming them. */
+export function evernoteDeletionCap(storedNotes: number): number {
+  return Math.max(EVERNOTE_DELETION_FLOOR, Math.ceil(storedNotes * EVERNOTE_DELETION_SHARE));
+}
+
+/** What may be read of one notebook: its notes, their titles only, or nothing. */
+export type EvernoteNotebookDisposition = 'ingest' | 'metadata_only' | 'exclude';
+export type EvernoteNotebookGate = (notebook: { id: string; label: string }) => EvernoteNotebookDisposition;
 
 /** What the last complete pass held, for the next pass's deletions and change checks. */
 export interface EvernotePassRecord {
@@ -77,6 +100,12 @@ export interface EvernotePassCounts {
   notes_unchanged: number;
   notes_moved: number;
   notes_deleted: number;
+  /** Notes in a notebook set to Skip: never read. */
+  notes_excluded: number;
+  /** Notes in a notebook set to names only: their titles, from the listing. */
+  notes_titles_only: number;
+  /** Notes the listing stopped naming that wait for the next pass (over `evernoteDeletionCap`). */
+  notes_deletion_held: number;
   shared_not_imported: number;
   notes_not_read: number;
   attachments_listed: number;
@@ -131,6 +160,8 @@ export interface EvernoteConnectorOptions {
   session: (purpose: 'pass' | 'attachment') => McpSourceSession;
   /** The last complete pass, if any. */
   previous?: () => EvernotePassRecord | undefined;
+  /** Which notebooks may be read, asked once at the start of each pass. Absent: every notebook. */
+  notebookGate?: () => EvernoteNotebookGate;
   /** Before each page goes out: every note this pass has read so far, kept until the pass is committed. */
   readSoFar?: (notes: EvernotePassRecord['notes']) => void;
   downloadHosts?: readonly string[];
@@ -148,9 +179,17 @@ const digest = (value: string): string => createHash('sha256').update(value).dig
 const record = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 
-/** A note's version: its `updated` and its notebook (id and name), so a move or a rename re-reads it. */
-export function evernoteNoteVersion(updatedAt: string, notebookId: string, notebookLabel: string): string {
-  return `${updatedAt}|${notebookId}|${digest(notebookLabel)}`;
+/**
+ * A note's version: its `updated`, its notebook (id and name) and whether it was read or only
+ * named, so a move, a rename or a changed notebook choice re-reads it.
+ */
+export function evernoteNoteVersion(
+  updatedAt: string,
+  notebookId: string,
+  notebookLabel: string,
+  disposition: 'ingest' | 'metadata_only' = 'ingest',
+): string {
+  return `${updatedAt}|${notebookId}|${digest(notebookLabel)}|${disposition === 'ingest' ? 'f' : 'n'}`;
 }
 
 /** The keys of a note's attachments, in its order: `<md5>`, then `<md5>.<n>` for the n-th equal one. */
@@ -210,7 +249,8 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
   });
 
   /** A note and its attachments from `get_note`'s answer. */
-  const noteItems = (note: Record<string, unknown>, version: string, notebookLabel: string): { items: RawItem[]; childKeys: string[] } => {
+  const noteItems = (note: Record<string, unknown>, version: string, notebook: { id: string; label: string }): { items: RawItem[]; childKeys: string[] } => {
+    const notebookLabel = notebook.label;
     const id = String(note.id);
     const title = (typeof note.title === 'string' ? note.title.trim() : '').slice(0, MAX_TITLE_CHARS) || '(untitled)';
     const createdAt = iso(note.created);
@@ -244,6 +284,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         title,
         tags,
         notebook: notebookLabel,
+        notebookId: notebook.id,
         folderKeys,
         authoredAt,
         ...(createdAt ? { createdAt } : {}),
@@ -265,6 +306,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
           mimeType: mime,
           authoredAt,
           notebook: notebookLabel,
+          notebookId: notebook.id,
           folderKeys,
           ...(size !== undefined ? { sizeBytes: size } : {}),
         }),
@@ -280,6 +322,8 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
   async function* pass(listOptions: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage> {
     outcome = undefined;
     listed.clear();
+    // Asked before any call: a choice that cannot be read stops the pass before Evernote is asked anything.
+    const gate = options.notebookGate?.() ?? ((): EvernoteNotebookDisposition => 'ingest');
     const previous = options.previous?.();
     const session = options.session('pass');
     await session.open();
@@ -287,14 +331,20 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
       // Both listings first. Either one failing throws here, before anything is emitted.
       const byDate = new Map<string, EvernoteNoteHit>();
       await listNotes(session, '', byDate, now().getTime());
-      const notebooks = await listNotebooks(session);
-      const notebookOf = new Map<string, { id: string; label: string }>();
+      const listedBooks = await listNotebooks(session);
+      // A notebook the account does not own is never read, whatever was chosen for it.
+      const notebooks = listedBooks.map((book) => ({ ...book, disposition: book.owned ? gate(book) : 'exclude' as const }));
+      const notebookOf = new Map<string, (typeof notebooks)[number]>();
+      // Every notebook is listed, Skip ones too: a note found in none is taken for shared and read to
+      // find out, so a skipped notebook's notes must be known to be its own. Only their ids are kept.
       for (const book of notebooks) {
         const inBook = new Map<string, EvernoteNoteHit>();
         await listNotes(session, book.filter, inBook, now().getTime());
         for (const [noteId, hit] of inBook) {
-          notebookOf.set(noteId, { id: book.id, label: book.label });
-          if (!byDate.has(noteId)) byDate.set(noteId, hit);
+          notebookOf.set(noteId, book);
+          const listedHit = byDate.get(noteId);
+          if (!listedHit) byDate.set(noteId, hit);
+          else if (listedHit.title === undefined && hit.title !== undefined) byDate.set(noteId, { ...listedHit, title: hit.title });
         }
       }
 
@@ -307,7 +357,8 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
 
       const counts: EvernotePassCounts = {
         notes_listed: byDate.size, notebooks: notebooks.length, notes_read: 0, notes_unchanged: 0, notes_moved: 0,
-        notes_deleted: 0, shared_not_imported: 0, notes_not_read: 0, attachments_listed: 0, tool_calls: 0, rate_limit_retries: 0,
+        notes_deleted: 0, notes_excluded: 0, notes_titles_only: 0, notes_deletion_held: 0, shared_not_imported: 0,
+        notes_not_read: 0, attachments_listed: 0, tool_calls: 0, rate_limit_retries: 0,
       };
       const nextNotes: EvernotePassRecord['notes'] = {};
       const readNotes: EvernotePassRecord['notes'] = {};
@@ -320,11 +371,27 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         counts.notes_deleted += 1;
       };
 
-      // Deletions: a note the last complete pass held that neither listing names now.
-      for (const [noteId, entry] of Object.entries(previous?.notes ?? {})) {
-        if (byDate.has(noteId) || entry.v.startsWith('shared|')) continue;
-        retire(noteId, entry);
+      // Deletions: a note the last complete pass held that neither listing names now. At most the cap
+      // per pass; the rest stay recorded, so the next pass judges them again.
+      const held = Object.entries(previous?.notes ?? {}).filter(([, entry]) => !entry.v.startsWith('shared|'));
+      let deletable = evernoteDeletionCap(held.length);
+      for (const [noteId, entry] of held) {
+        if (byDate.has(noteId)) continue;
+        if (deletable > 0) {
+          deletable -= 1;
+          retire(noteId, entry);
+        } else {
+          nextNotes[noteId] = entry;
+          counts.notes_deletion_held += 1;
+        }
       }
+      // A note the person chose not to have read, or one in a notebook the account does not own:
+      // a copy an earlier pass stored leaves the index, and nothing of it is recorded.
+      const withhold = (noteId: string, before: EvernotePassRecord['notes'][string] | undefined, owned: boolean) => {
+        if (before && !before.v.startsWith('shared|')) retire(noteId, before);
+        if (owned) counts.notes_excluded += 1;
+        else counts.shared_not_imported += 1;
+      };
 
       for (const [noteId, hit] of byDate) {
         const before = previous?.notes[noteId];
@@ -335,7 +402,11 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
           counts.shared_not_imported += 1;
           continue;
         }
-        const version = book ? evernoteNoteVersion(hit.updatedAt, book.id, book.label) : undefined;
+        if (book?.disposition === 'exclude') {
+          withhold(noteId, before, book.owned);
+          continue;
+        }
+        const version = book ? evernoteNoteVersion(hit.updatedAt, book.id, book.label, book.disposition) : undefined;
         if (version) {
           const stored = listOptions.storedItem?.({ provider: EVERNOTE_PROVIDER, accountScope: account, providerItemId: noteId }, (a, b) => a.localeCompare(b));
           // Skipped only when the last committed pass recorded this version: a note stored by a pass
@@ -348,6 +419,16 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
             counts.notes_unchanged += 1;
             continue;
           }
+        }
+        if (book?.disposition === 'metadata_only' && version) {
+          // Names only: the listing's title, never the note. No attachments either.
+          const built = noteItems({ id: noteId, title: hit.title ?? '', updated: hit.updatedAt }, version, book);
+          for (const key of before?.children ?? []) pending.push(deletedItem(childProviderItemId(noteId, key)));
+          pending.push(...built.items);
+          nextNotes[noteId] = { v: version };
+          readNotes[noteId] = nextNotes[noteId];
+          counts.notes_titles_only += 1;
+          continue;
         }
         if (stoppedBy) {
           if (before) nextNotes[noteId] = before;
@@ -383,9 +464,17 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
           retire(noteId, before);
           continue;
         }
-        const label = book?.id === notebookId ? book.label : notebooks.find((entry) => entry.id === notebookId)?.label ?? '';
-        const noteVersion = evernoteNoteVersion(hit.updatedAt, notebookId, label);
-        const built = noteItems(note, noteVersion, label);
+        const actual = book?.id === notebookId ? book : notebooks.find((entry) => entry.id === notebookId)
+          ?? { id: notebookId, label: '', owned: true, disposition: gate({ id: notebookId, label: '' }) };
+        if (actual.disposition !== 'ingest') {
+          // Moved into a notebook not to be read between the listing and the read: what was read is
+          // dropped unstored, and the next pass treats the note as that notebook's.
+          if (before && !before.v.startsWith('shared|')) retire(noteId, before);
+          counts.notes_excluded += 1;
+          continue;
+        }
+        const noteVersion = evernoteNoteVersion(hit.updatedAt, notebookId, actual.label);
+        const built = noteItems(note, noteVersion, actual);
         if (before && !before.v.startsWith('shared|') && before.v.split('|')[0] === hit.updatedAt) counts.notes_moved += 1;
         // An attachment the note no longer carries.
         for (const key of before?.children ?? []) {
@@ -508,9 +597,11 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
       return readAttachment(localItemId, within.deferredBytes.locator, within.maxBytes);
     },
     classificationSignals(item: RawItem): SourceClassificationSignals {
+      const notebookId = signalText(item.metadata, 'notebookId');
       return compactClassificationSignals({
         title: signalText(item.metadata, 'title'),
-        folderKeys: signalTexts(item.metadata, 'folderKeys'),
+        // The notebook's id beside its name: an always-Private notebook rule names the id.
+        folderKeys: [...(signalTexts(item.metadata, 'folderKeys') ?? []), ...(notebookId ? [notebookId] : [])],
         labels: signalTexts(item.metadata, 'tags'),
       });
     },

@@ -244,7 +244,8 @@ describe('the live Evernote source', () => {
     const children = live.filter((item) => item.identity.parent?.providerItemId === withFiles.id);
     const liveKeys = children.map(childKey);
     expect(liveKeys).toEqual([md5Hex(photo), md5Hex(PDF), `${md5Hex(photo)}.2`]);
-    for (const item of [note, ...children]) expect(connector.classificationSignals(item).folderKeys).toEqual([PRIVATE.secret]);
+    // The notebook's name first, as the export gives it; the live note adds the notebook's id.
+    for (const item of [note, ...children]) expect(connector.classificationSignals(item).folderKeys).toEqual([PRIVATE.secret, String(note.metadata.notebookId)]);
 
     // The same note exported from that notebook (Evernote names the file after it).
     const file = writeExport(cleanups, `${PRIVATE.secret}.enex`, enexExport([{
@@ -289,6 +290,7 @@ describe('the live Evernote source', () => {
       const source = runtime.schedulerSource({
         config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
         handle,
+        notebookGate: () => () => 'ingest',
       });
       for (const task of source.tasks.slice(1)) await task.run({} as never).catch(() => undefined);
     });

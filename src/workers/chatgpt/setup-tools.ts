@@ -168,7 +168,7 @@ interface ToolDefinition {
 
 const OAUTH2_REQUIRED = [{ type: 'oauth2', scopes: [] }] as const;
 const OAUTH_SOURCES = ['gmail', 'google-drive', 'dropbox'] as const;
-const FOLDER_SOURCE_IDS = ['google_drive.docs', 'dropbox.files', 'local.files'] as const;
+const FOLDER_SOURCE_IDS = ['google_drive.docs', 'dropbox.files', 'local.files', 'evernote.notes'] as const;
 const SCOPE_SOURCE_IDS = ['gmail.email', ...FOLDER_SOURCE_IDS] as const;
 const DISCONNECT_SOURCE_IDS = ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes', 'local.files'] as const;
 const SYNC_SOURCE_IDS = DISCONNECT_SOURCE_IDS;

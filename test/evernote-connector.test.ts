@@ -5,14 +5,18 @@
 // imported, and attachments (MD5 keys, MIME from bytes, MD5 mismatch refused).
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnectorListPage, StoredItemLookup } from '../src/core/contracts.ts';
+import { CHILD_ITEM_ID_SEPARATOR } from '../src/core/child-item-id.ts';
 import { McpCallPacer } from '../src/core/mcp-source/pacer.ts';
 import { McpSourceSession } from '../src/core/mcp-source/session.ts';
 import {
+  EVERNOTE_DELETION_FLOOR,
   EVERNOTE_READ_TOOLS,
   createEvernoteSourceConnector,
+  evernoteDeletionCap,
   evernoteAttachmentKeys,
   evernotePassWithUnfinished,
   evernoteUnfinishedWith,
+  type EvernoteNotebookGate,
   type EvernotePassRecord,
   type EvernoteSourceConnector,
 } from '../src/workers/evernote/connector.ts';
@@ -29,7 +33,12 @@ const day = (year: number, month = 1, date = 1): number => Date.UTC(year, month 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 1, 2, 3]);
 const PDF = new TextEncoder().encode('%PDF-1.4\nPRIVATE_EVERNOTE_MARKER\n%%EOF');
 
-function connectorFor(server: FakeEvernoteServer, options: { callBudget?: number; previous?: () => EvernotePassRecord | undefined; readSoFar?: (notes: EvernotePassRecord['notes']) => void } = {}): EvernoteSourceConnector {
+function connectorFor(server: FakeEvernoteServer, options: {
+  callBudget?: number;
+  previous?: () => EvernotePassRecord | undefined;
+  readSoFar?: (notes: EvernotePassRecord['notes']) => void;
+  notebookGate?: () => EvernoteNotebookGate;
+} = {}): EvernoteSourceConnector {
   return createEvernoteSourceConnector({
     accountScope: 'personal',
     session: () => new McpSourceSession({
@@ -43,6 +52,7 @@ function connectorFor(server: FakeEvernoteServer, options: { callBudget?: number
     }),
     ...(options.previous ? { previous: options.previous } : {}),
     ...(options.readSoFar ? { readSoFar: options.readSoFar } : {}),
+    ...(options.notebookGate ? { notebookGate: options.notebookGate } : {}),
     downloadHosts: ['127.0.0.1'],
   });
 }
@@ -131,7 +141,8 @@ describe('Evernote pass', () => {
     expect(text).toContain('Notebook: Recipes');
     expect(text).toContain('Tags: baking, home');
     expect(text).toContain('PRIVATE_EVERNOTE_MARKER');
-    expect(connector.classificationSignals(note!)).toEqual({ title: 'Bread', folderKeys: ['Recipes'], labels: ['baking', 'home'] });
+    // The notebook's id rides beside its name: an always-Private notebook rule names the id.
+    expect(connector.classificationSignals(note!)).toEqual({ title: 'Bread', folderKeys: ['Recipes', book.id], labels: ['baking', 'home'] });
     expect(await connector.fetchItem(note!.identity.localItemId)).toBe(note!);
   });
 
@@ -381,7 +392,7 @@ describe('Evernote attachments', () => {
       expect(child.content.kind).toBe('metadata_only');
       expect(child.holdContentUntilJudged).toBe(true);
       expect(child.metadata.folderKeys).toEqual(['Work']);
-      expect(connector.classificationSignals(child)).toEqual({ title: String(child.metadata.title), folderKeys: ['Work'] });
+      expect(connector.classificationSignals(child)).toEqual({ title: String(child.metadata.title), folderKeys: ['Work', work.id] });
     }
     expect(fake.calls.get_attachment).toBeUndefined();
 
@@ -422,5 +433,111 @@ describe('Evernote attachments', () => {
     const child = (await runPass(strict)).find((item) => item.identity.parent)!;
     await expect(strict.fetchItemWithin(child.identity.localItemId, { deferredBytes: { locator: child.deferredBytes!.locator } }))
       .rejects.toMatchObject({ errorKind: 'source_content_unavailable' });
+  });
+});
+
+describe('Evernote notebook choices', () => {
+  /** Two passes in a row with the gate the test sets between them. */
+  function chosen(server: FakeEvernoteServer) {
+    let record: EvernotePassRecord | undefined;
+    let gate: EvernoteNotebookGate = () => 'ingest';
+    let current: EvernoteSourceConnector | undefined;
+    return {
+      choose(next: EvernoteNotebookGate) { gate = next; },
+      outcome: () => current!.lastOutcome()!,
+      async pass() {
+        current = connectorFor(server, { previous: () => record, notebookGate: () => gate });
+        const items = await runPass(current);
+        record = current.lastOutcome()?.record;
+        return items;
+      },
+    };
+  }
+
+  test('a notebook set to Skip is never passed to get_note, and a copy stored earlier is retired with its attachments', async () => {
+    fake = new FakeEvernoteServer().start();
+    const clients = fake.addNotebook('Clients');
+    const home = fake.addNotebook('Home');
+    const secret = fake.addNote({ title: 'Client file', notebookId: clients.id, created: day(2023), body: 'PRIVATE_EVERNOTE_MARKER', resources: [{ bytes: PDF, mime: 'application/pdf', name: 'contract.pdf' }] });
+    const ordinary = fake.addNote({ title: 'Shopping', notebookId: home.id, created: day(2023, 2) });
+    const run = chosen(fake);
+
+    // Skipped from the first pass: the client note is never read and nothing of it is emitted.
+    run.choose((book) => (book.id === clients.id ? 'exclude' : 'ingest'));
+    const first = await run.pass();
+    expect(fake.notesRead).toEqual([ordinary.id]);
+    expect(first.some((item) => item.identity.providerItemId.startsWith(secret.id))).toBe(false);
+    expect(JSON.stringify(first)).not.toContain('PRIVATE_EVERNOTE_MARKER');
+    expect(run.outcome().counts).toMatchObject({ notes_excluded: 1, notes_read: 1 });
+
+    // Read, then skipped: the stored note and its attachment are retired, and the note is not read again.
+    run.choose(() => 'ingest');
+    await run.pass();
+    expect(fake.notesRead).toEqual([ordinary.id, secret.id]);
+    run.choose((book) => (book.id === clients.id ? 'exclude' : 'ingest'));
+    const third = await run.pass();
+    const deleted = third.filter((item) => item.metadata.deleted === true).map((item) => item.identity.providerItemId);
+    expect(deleted.sort()).toEqual([secret.id, `${secret.id}${CHILD_ITEM_ID_SEPARATOR}${md5Hex(PDF)}`].sort());
+    expect(fake.notesRead).toEqual([ordinary.id, secret.id]);
+    expect(run.outcome().counts).toMatchObject({ notes_excluded: 1, notes_deleted: 1, notes_unchanged: 1 });
+    // Nothing is recorded for it: choosing the notebook again reads it fresh.
+    expect(run.outcome().record.notes[secret.id]).toBeUndefined();
+  });
+
+  test('a notebook set to names only keeps each title from the listing and reads no note', async () => {
+    fake = new FakeEvernoteServer().start();
+    const journal = fake.addNotebook('Journal');
+    const note = fake.addNote({ title: 'Tuesday', notebookId: journal.id, created: day(2024), body: 'PRIVATE_EVERNOTE_MARKER', resources: [{ bytes: PNG, mime: 'image/png', name: 'photo.png' }] });
+    const run = chosen(fake);
+    run.choose(() => 'ingest');
+    await run.pass();
+    run.choose(() => 'metadata_only');
+    const items = await run.pass();
+    expect(fake.notesRead).toEqual([note.id]);
+    const [titleOnly] = notesOf(items);
+    expect(titleOnly!.metadata.title).toBe('Tuesday');
+    const text = (titleOnly!.content as { text: string }).text;
+    expect(text).toContain('Notebook: Journal');
+    expect(text).not.toContain('PRIVATE_EVERNOTE_MARKER');
+    // The attachment the full read listed leaves with the body.
+    expect(items.filter((item) => item.metadata.deleted === true).map((item) => item.identity.providerItemId))
+      .toEqual([`${note.id}${CHILD_ITEM_ID_SEPARATOR}${md5Hex(PNG)}`]);
+    expect(run.outcome().counts).toMatchObject({ notes_titles_only: 1, notes_read: 0 });
+    // Unchanged on the next pass.
+    await run.pass();
+    expect(run.outcome().counts).toMatchObject({ notes_unchanged: 1, notes_titles_only: 0 });
+    expect(fake.notesRead).toEqual([note.id]);
+  });
+
+  test('a notebook the account does not own is never read, whatever was chosen', async () => {
+    fake = new FakeEvernoteServer().start();
+    const shared = fake.addNotebook('From a friend', 'READ_NOTEBOOK');
+    fake.addNote({ title: 'Their note', notebookId: shared.id, created: day(2024) });
+    const run = chosen(fake);
+    run.choose(() => 'ingest');
+    const items = await run.pass();
+    expect(fake.notesRead).toEqual([]);
+    expect(notesOf(items)).toEqual([]);
+    expect(run.outcome().counts).toMatchObject({ shared_not_imported: 1, notes_read: 0 });
+  });
+
+  test('a listing that drops many notes retires at most the cap per pass; the rest wait', async () => {
+    fake = new FakeEvernoteServer().start();
+    const book = fake.addNotebook('Archive');
+    const total = 200;
+    for (let index = 0; index < total; index += 1) fake.addNote({ title: `n${index}`, notebookId: book.id, created: day(2020) + index * 60_000 });
+    const run = chosen(fake);
+    await run.pass();
+    // Evernote answers with nothing: one pass may retire only the cap.
+    fake.notes.length = 0;
+    const cap = evernoteDeletionCap(total);
+    expect(cap).toBe(EVERNOTE_DELETION_FLOOR);
+    const short = await run.pass();
+    expect(short.filter((item) => item.metadata.deleted === true)).toHaveLength(cap);
+    expect(run.outcome().counts).toMatchObject({ notes_deleted: cap, notes_deletion_held: total - cap });
+    // The held notes are judged again next pass.
+    await run.pass();
+    expect(run.outcome().counts.notes_deleted).toBe(evernoteDeletionCap(total - cap));
+    expect(evernoteDeletionCap(5_000)).toBe(500);
   });
 });

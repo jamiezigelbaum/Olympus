@@ -136,7 +136,7 @@ const STAGE_DETAIL: Readonly<Record<Exclude<SourceProgress['stage'], 'done'>, st
 
 /** Sources ChatGPT can connect: Olympus's own (publisher) OAuth apps, which return through the relay. */
 const CHATGPT_OAUTH_SOURCES = new Set<string>(['gmail', 'google-drive', 'dropbox']);
-const SCOPE_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']);
+const SCOPE_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files', 'evernote.notes']);
 const DISCONNECT_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes']);
 /** Sources Sync now runs for from ChatGPT (olympus_sync_source). */
 const SYNC_SOURCE_IDS = new Set<string>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes', 'local.files']);

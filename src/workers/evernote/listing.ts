@@ -44,12 +44,20 @@ export class EvernoteAccountChanged extends Error {
 export interface EvernoteNoteHit {
   noteId: string;
   updatedAt: string;
+  /** The hit's title, kept for a notebook set to names only (its note is never read). */
+  title?: string;
 }
 
 export interface EvernoteNotebook {
   id: string;
   label: string;
   filter: string;
+  /**
+   * False for a notebook the account does not own (`primaryAccess` other than `OWNED`: shared with
+   * the person, or a business notebook). Its notes are not imported. A hit with no `primaryAccess`
+   * counts as owned, as every notebook did before the field was read.
+   */
+  owned: boolean;
 }
 
 interface SearchPage {
@@ -75,7 +83,11 @@ async function searchNotes(session: McpSourceSession, query: string, startIndex:
   for (const raw of data.hits) {
     const hit = record(raw);
     if (typeof hit?.noteId !== 'string' || hit.noteId === '') throw new EvernoteListingIncomplete();
-    hits.push({ noteId: hit.noteId, updatedAt: typeof hit.updatedAt === 'string' ? hit.updatedAt : '' });
+    hits.push({
+      noteId: hit.noteId,
+      updatedAt: typeof hit.updatedAt === 'string' ? hit.updatedAt : '',
+      ...(typeof hit.title === 'string' ? { title: hit.title } : {}),
+    });
   }
   const total = typeof data.totalResultCount === 'number' && Number.isSafeInteger(data.totalResultCount) ? data.totalResultCount : -1;
   if (total < 0) throw new EvernoteListingIncomplete();
@@ -151,7 +163,8 @@ async function searchNotebooks(session: McpSourceSession, query: string, sortBy:
     const filter = typeof hit.searchFilter === 'string' && hit.searchFilter === `nbGuid:"${hit.notebookId}"`
       ? hit.searchFilter
       : `nbGuid:"${hit.notebookId}"`;
-    books.push({ id: hit.notebookId, label, filter });
+    const owned = typeof hit.primaryAccess !== 'string' || hit.primaryAccess === 'OWNED';
+    books.push({ id: hit.notebookId, label, filter, owned });
   }
   const total = typeof data.totalResultCount === 'number' && Number.isSafeInteger(data.totalResultCount) ? data.totalResultCount : books.length;
   return { books, total };

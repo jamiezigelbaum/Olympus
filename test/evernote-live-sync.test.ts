@@ -198,6 +198,7 @@ describe('the scheduler source', () => {
     const source = runtime.schedulerSource({
       config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
       handle,
+      notebookGate: () => () => 'ingest',
     });
     expect(source.sourceId).toBe('evernote.notes');
     expect(source.intervalMs).toBe(3_600_000);
@@ -220,6 +221,7 @@ describe('the scheduler source', () => {
     const source = runtime.schedulerSource({
       config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
       handle,
+      notebookGate: () => () => 'ingest',
     });
     expect((await source.tasks[0]!.run()).counts).toMatchObject({ pass_complete: 1 });
     for (const task of source.tasks.slice(1)) await task.run();
