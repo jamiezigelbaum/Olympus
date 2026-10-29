@@ -8,6 +8,7 @@ import { TierSnifferService } from '../src/workers/classification/sniffer-servic
 import { classifyItemTiers, tierSnifferInputHash, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets, settleLegacySecrets } from '../src/workers/connector-store/tier-rejudge.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { storedSignals } from '../src/workers/connector-store/stored-names.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
@@ -90,6 +91,27 @@ test('rejudging includes stored folder keys in the metadata question and its cac
   expect(question.materialHash).toBe(tierSnifferInputHash('metadata', { title: 'Notes', path: '/Files/Notes', folderKeys: ['Medical records'] }));
   expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
   expect(f.stores.internal!.localContent(localId('record'))).toBeUndefined();
+});
+
+test('rejudging a message asks about its names with its chat, as the owner-rule sweep reads them', async () => {
+  const tmp = tempDir();
+  const f = openTierFixture(tmp.dir, { embed: false });
+  cleanup.push(() => { f.close(); tmp.cleanup(); });
+  const chatIdentity = identityOf('message', 'chat-7971');
+  await f.set.sync(fixtureConnector(() => [{ id: 'message', name: 'Jamie', text, conversation: 'chat-7971' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  await moveTieredItem({ set: f.set, identity: chatIdentity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  const decision = { ...classifyItemTiers({ signals: { title: 'Jamie' }, text }),
+    metadataTier: 'secure' as const, contentTier: 'secure' as const,
+    reasons: ['metadata:sniffer:old-prompt:private', 'content:no_raise'],
+  };
+  f.ledger.recordRoutedPlacement(chatIdentity, decision, f.set.placementFor(decision));
+  const requests: TierSnifferRequest[] = [];
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(chatIdentity)!, { autoMoves: true, report: emptyTierRejudgeReport(),
+    sniffer: { id: 'new-prompt', judge(request) { requests.push(request); return { verdict: 'decided', tier: 'private', code: 'ordinary' }; } },
+  });
+  const question = requests.find(request => request.pass === 'metadata')!;
+  expect(question.material).toContain('chat-7971');
+  expect(question.materialHash).toBe(tierSnifferInputHash('metadata', storedSignals(f.stores.secure_local!.exportItemCopy(chatIdentity)!)));
 });
 
 test('a Personal answer cannot lower an old names verdict when labels were not stored; a relist can reassess it', async () => {

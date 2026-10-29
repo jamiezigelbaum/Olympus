@@ -17,7 +17,7 @@ import { resolveSnifferLane, type SnifferLane } from '../../src/workers/classifi
 import { archiveHeldCorpus } from './corpus.ts';
 import { createFakeSnifferModel } from './fake-sniffer.ts';
 import { runClassificationEval } from './run.ts';
-import { createInboxReplayModel, runInboxEval, type InboxSplit } from './inbox.ts';
+import { createInboxReplayModel, runInboxEval, type InboxSet, type InboxSplit } from './inbox.ts';
 
 const FAKE_LANE: SnifferLane = {
   kind: 'local',
@@ -31,18 +31,22 @@ async function main(): Promise<void> {
   if (process.argv.includes('--inbox')) {
     const split = (process.argv.find(arg => arg.startsWith('--split='))?.split('=')[1] ?? 'all') as InboxSplit;
     if (!['all', 'dev', 'held-out'].includes(split)) throw new Error('Invalid split');
+    const set = (process.argv.find(arg => arg.startsWith('--set='))?.split('=')[1] ?? 'inbox') as InboxSet;
+    if (!['inbox', 'owner-exemptions'].includes(set)) throw new Error('Invalid set');
+    // Only the inbox set carries frozen replay responses; the others measure a real model.
+    if (set !== 'inbox' && !real) throw new Error(`--set=${set} measures a real model: add --real --built-in.`);
     if (real && process.argv.includes('--built-in')) {
       const model = createBuiltInAnalystModel({ waitForInstall: true });
       try {
         await model.prepare();
-        const report = await runInboxEval({ model, modelId: `built_in/${model.spec.modelId}/${model.spec.file.sha256}`, split });
+        const report = await runInboxEval({ model, modelId: `built_in/${model.spec.modelId}/${model.spec.file.sha256}`, split, set });
         console.log(JSON.stringify(report, null, 2));
         if (report.mistakes.length || report.secretDispatches) process.exitCode = 1;
       } finally { await model.stop(); }
       return;
     }
     const selected = real ? realSniffer() : { model: createInboxReplayModel(), lane: { modelId: 'inbox-scripted-v1' } };
-    const report = await runInboxEval({ model: selected.model, modelId: selected.lane.modelId, split });
+    const report = await runInboxEval({ model: selected.model, modelId: selected.lane.modelId, split, set });
     console.log(JSON.stringify(report, null, 2));
     if (report.mistakes.length || report.secretDispatches) process.exitCode = 1;
     return;

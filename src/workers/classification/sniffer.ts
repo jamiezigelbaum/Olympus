@@ -279,6 +279,7 @@ export const SNIFFER_SYSTEM_PROMPT = [
   'because it names the owner or concerns money or identity. Read what it actually contains.',
   'privateKind is the kind of private information this item actually contains UNDER THE OWNER POLICY,',
   'or none when it is not covered or the owner says it is fine to share. Topic alone is insufficient.',
+  'With an owner description, privateKind is only ever a kind that description calls private; any other kind, even health or family, is none, whoever the item is about.',
   'An owner clause naming a kind of record covers every record of that kind, however small, routine or work-related:',
   'such a record has that privateKind, never none.',
   'An ownRecord with a non-none privateKind is Private. Private conversations can be Private',
