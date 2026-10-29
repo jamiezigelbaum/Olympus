@@ -34,7 +34,7 @@ const installing = new Map<string, Promise<boolean>>();
 
 /**
  * The Python Telegram's helpers run with, ready to import Telethon: a configured one as it is, the private
- * environment when it exists, a system Python that has Telethon. Otherwise the private environment is made, the
+ * environment when it imports Telethon, a system Python that has Telethon. Otherwise the private environment is made, the
  * way WhatsApp's bridge is built: without it pairing dead-ended on the hint, and capture started a Python that
  * exited at once with nothing recorded (a cleaned cache, test-omarchy 2026-10-29). Pairing and capture share
  * one install of a folder at a time.
@@ -45,16 +45,21 @@ export async function readyTelegramPython(options: {
   pythonExecutable?: string;
   onInstall?: (venvDir: string) => void;
 } & TelegramPythonSeams = {}): Promise<string> {
-  const python = telegramPythonExecutable(options);
-  if (!python) throw new Error(`Python 3 is required for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
+  if (options.pythonExecutable) return options.pythonExecutable;
   const venvDir = telegramPythonVenvDir(options);
   const isolated = join(venvDir, 'bin', 'python');
-  if (options.pythonExecutable || python === isolated) return python;
-  if (await (options.pythonHasTelethon ?? pythonImportsTelethon)(python)) return python;
+  const hasTelethon = options.pythonHasTelethon ?? pythonImportsTelethon;
+  // An install in flight owns the folder: its bin/python exists before pip has finished, so only the
+  // install's own result says the private Python is ready (pairing while capture rebuilds it, Codex on #635).
+  // Two processes can still both install; the second install reuses the venv and pip settles it.
+  if (!installing.has(venvDir) && existsSync(isolated) && await hasTelethon(isolated)) return isolated;
+  const system = Bun.which('python3') ?? undefined;
+  if (!installing.has(venvDir) && system && await hasTelethon(system)) return system;
   let install = installing.get(venvDir);
   if (!install) {
+    if (!system) throw new Error(`Python 3 is required for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
     options.onInstall?.(venvDir);
-    install = (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: python, venvDir }).finally(() => installing.delete(venvDir));
+    install = (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: system, venvDir }).finally(() => installing.delete(venvDir));
     installing.set(venvDir, install);
   }
   if (!await install || !existsSync(isolated)) throw new Error(`Olympus could not install Telethon for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);

@@ -11,6 +11,7 @@ import {
   type PairingCommandRequest,
   type PairingCommandResult,
 } from '../src/core/messaging-pairing.ts';
+import { readyTelegramPython } from '../src/core/messaging-runtime.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { readSourceRegistry, updateSourceRegistry } from '../src/core/source-registry.ts';
 import { connectGuidedSession } from '../src/core/connect.ts';
@@ -484,6 +485,38 @@ describe('Telegram pairing installs Telethon when it is missing', () => {
     expect((await result).status).toBe('scope_selection_required');
     expect(provisioned.map((input) => input.venvDir)).toEqual([venvDir(root)]);
     expect(ran).toEqual([join(venvDir(root), 'bin', 'python')]);
+  });
+
+  test('a caller that arrives while the install is still running waits for it, not for the half-made folder', async () => {
+    // Pairing while capture rebuilds the private Python: bin/python exists before pip has installed Telethon.
+    const root = packageFixture();
+    const env = { XDG_CACHE_HOME: join(root, 'xdg') };
+    let release!: (ok: boolean) => void;
+    const gate = new Promise<boolean>((resolve) => { release = resolve; });
+    let made!: () => void;
+    const folderMade = new Promise<void>((resolve) => { made = resolve; });
+    let installs = 0;
+    const seams = {
+      env,
+      pythonHasTelethon: async () => false,
+      provisionTelegramPython: async (input: { venvDir: string }) => {
+        installs += 1;
+        mkdirSync(join(input.venvDir, 'bin'), { recursive: true });
+        writeFileSync(join(input.venvDir, 'bin', 'python'), '');
+        made();
+        return gate;
+      },
+    };
+    const first = readyTelegramPython(seams);
+    await folderMade;
+    let secondDone = false;
+    const second = readyTelegramPython(seams).finally(() => { secondDone = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(secondDone).toBe(false);
+    release(true);
+    expect(await second).toBe(join(venvDir(root), 'bin', 'python'));
+    expect(await first).toBe(join(venvDir(root), 'bin', 'python'));
+    expect(installs).toBe(1);
   });
 
   test('a Python that has Telethon is used as it is', async () => {

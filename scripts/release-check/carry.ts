@@ -19,6 +19,9 @@ export function loadCarryBase(path: string, candidateSha: string | undefined): R
   if (base.machines.length !== 1 || base.machines[0]!.upgrade) throw new Error('--carry-from needs a plain run on one machine (not an upgrade run)');
   const machine = base.machines[0]!;
   if (![...machine.checks, ...machine.agents].some((item) => item.leg)) throw new Error('--carry-from names a report that does not say which leg made each result; run in full once');
+  // A leg the run never reached is recorded only in `errors` (a spent time budget), so a base with errors could lend
+  // results that do not exist and turn its fail into a pass (Codex on #635).
+  if (base.errors.length > 0) throw new Error(`--carry-from names a run that did not finish cleanly (${base.errors[0]}); run in full instead`);
   return base;
 }
 

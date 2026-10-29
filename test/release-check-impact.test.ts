@@ -120,6 +120,7 @@ describe('keeping the tested run\'s results', () => {
       expect(() => loadCarryBase(write(tested()), A)).toThrow('same commit');
       expect(() => loadCarryBase(write(tested()), undefined)).toThrow('--sha');
       expect(() => loadCarryBase(write({ ...tested(), selfTest: 'x' }), B)).toThrow('self-test');
+      expect(() => loadCarryBase(write({ ...tested(), errors: ['the run exceeded its time budget before the archive-import leg'] }), B)).toThrow('did not finish cleanly');
       expect(() => loadCarryBase(write({ ...tested(), harness: { relation: 'unpinned' } }), B)).toThrow('own commit');
       expect(() => loadCarryBase(write(tested({ checks: [{ id: 'x', title: 'x', status: 'pass' }], agents: [] })), B)).toThrow('which leg');
       // The tested run's pictures are copied beside the new report without replacing the new run's own.
