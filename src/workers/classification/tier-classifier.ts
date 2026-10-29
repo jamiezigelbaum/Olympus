@@ -708,6 +708,19 @@ interface PassResult {
  * the sniffer only because its text was read: the owner already said where
  * it belongs.
  */
+/**
+ * A resting tier a connector or deployment once published for a whole source
+ * or chat (a `source_*` prior basis). Retired 2026-10-28:
+ * only the user's own rules judge a group of items, so a stored decision that
+ * rests on one is wrong and is re-judged on its own content automatically
+ * (tier-rejudge.ts), with nobody's approval.
+ */
+export const RETIRED_SOURCE_PRIOR_REASON = 'metadata:prior:source_';
+
+export function restsOnRetiredSourcePrior(reasons: readonly string[]): boolean {
+  return reasons.some((reason) => reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
+}
+
 export function namesDecidedByOwner(reasons: readonly string[]): boolean {
   return reasons.some((reason) => reason.startsWith('metadata:owner_rule:'));
 }

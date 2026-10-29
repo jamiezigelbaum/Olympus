@@ -18763,6 +18763,9 @@ function classifyContentTier(input, options = {}) {
     contentPending: content.pending || text2 === undefined
   };
 }
+function restsOnRetiredSourcePrior(reasons) {
+  return reasons.some((reason) => reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
+}
 function namesDecidedByOwner(reasons) {
   return reasons.some((reason) => reason.startsWith("metadata:owner_rule:"));
 }
@@ -19111,7 +19114,7 @@ function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
 var TIER_CLASSIFIER_VERSION = "2026-10-13.p6", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
-Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
@@ -20107,7 +20110,7 @@ class TierLedger {
       SELECT i.*, CASE WHEN
           i.routed = 1 AND i.content_read = 1
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move')
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior')
           -- A held row's stamp names the exact decision it re-read, so it
           -- never outlives that decision (rejudgeKeyForHeld).
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
@@ -20133,6 +20136,9 @@ class TierLedger {
           )
           AND (
             i.state = 'pending'
+            -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
+            -- wrong under the owner ruling of 2026-10-28, so judged again now.
+            OR instr(i.reasons_json, '"metadata:prior:source_') > 0
             OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
@@ -60001,7 +60007,8 @@ function rejudgeStoredContent(set, record, options) {
 }
 function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false, parentContext) {
   const previous = { ...record, reasons: record.reasons.filter((reason) => !reason.startsWith("content:")) };
-  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !record.reasons.some((reason) => reason.startsWith("metadata:sniffer:") && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`)))
+  const retiredPrior = restsOnRetiredSourcePrior(record.reasons);
+  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !retiredPrior && !record.reasons.some((reason) => reason.startsWith("metadata:sniffer:") && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`)))
     return previous;
   const signals = {
     ...names.title ? { title: names.title } : {},
@@ -60010,8 +60017,8 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
     folderKeys: names.folderKeys
   };
   const fresh = classifyItemTiers({ signals, namesOnly: true });
-  const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason));
-  const baseline = maxTier(fresh.metadataTier, record.metadataTier);
+  const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
+  const baseline = retiredPrior ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === "secrets")
     return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
