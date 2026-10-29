@@ -29,6 +29,8 @@ export interface ItemRow {
   /** The tier ledger's verdicts for the item, when the ledger has a row. */
   metadataTier?: string | null;
   contentTier?: string | null;
+  /** What decided the ledger's verdict (`sniffer`, `move`, `owner_rule`, ...): names an item that landed wrong. */
+  decidedBy?: string | null;
 }
 
 export interface PolicyState {

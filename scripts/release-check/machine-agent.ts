@@ -397,10 +397,11 @@ async function settle(timeoutS: number): Promise<never> {
       last = snapshot(dash.json);
     } catch { /* engine busy */ }
     stable = isSettled(last, config, privateEmbeddedUnder(readPolicy()?.json ?? null)) ? stable + 1 : 0;
-    if (stable >= 2) emit({ ok: true, settled: true, polls, waitedMs: Date.now() - started, snapshot: last });
+    // Each stored item's tier and what decided it (synthetic ids, no content), so a tier miss names its item.
+    if (stable >= 2) emit({ ok: true, settled: true, polls, waitedMs: Date.now() - started, snapshot: last, items: readItems().items });
     await sleep(5_000);
   }
-  emit({ ok: false, settled: false, polls, waitedMs: Date.now() - started, snapshot: last ?? null });
+  emit({ ok: false, settled: false, polls, waitedMs: Date.now() - started, snapshot: last ?? null, items: readItems().items });
 }
 
 // ---------------------------------------------------------------------------
@@ -1769,14 +1770,14 @@ function readItems(): { items: ItemRow[] | null; error?: string } {
       if (!existsSync(itemsPath)) continue;
       const db = new Database(itemsPath, { readonly: true });
       db.exec('PRAGMA busy_timeout = 10000;');
-      let ledger = new Map<string, { metadataTier: string | null; contentTier: string | null }>();
+      let ledger = new Map<string, { metadataTier: string | null; contentTier: string | null; decidedBy: string | null }>();
       try {
         const ledgerPath = tierLedgerPathForStore(itemsPath);
         if (existsSync(ledgerPath)) {
           const ledgerDb = new Database(ledgerPath, { readonly: true });
           ledgerDb.exec('PRAGMA busy_timeout = 10000;');
           try {
-            ledger = new Map((ledgerDb.query('select provider_item_id as id, metadata_tier as m, content_tier as c from tier_items').all() as Array<{ id: string; m: string | null; c: string | null }>).map((r) => [r.id, { metadataTier: r.m, contentTier: r.c }]));
+            ledger = new Map((ledgerDb.query('select provider_item_id as id, metadata_tier as m, content_tier as c, decided_by as d from tier_items').all() as Array<{ id: string; m: string | null; c: string | null; d: string | null }>).map((r) => [r.id, { metadataTier: r.m, contentTier: r.c, decidedBy: r.d }]));
           } finally { ledgerDb.close(); }
         }
         for (const row of db.query('select provider_item_id as id, trust_tier as tier, tombstoned, content_hash as contentHash from items order by provider_item_id').all() as Array<{ id: string; tier: string | null; tombstoned: number | null; contentHash: string | null }>) {

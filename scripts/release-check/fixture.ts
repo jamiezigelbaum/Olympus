@@ -13,6 +13,8 @@
 
 export type FixtureTier = 'personal' | 'private' | 'secrets';
 
+import type { ItemRow } from './upgrade.ts';
+
 export interface FixtureDocument {
   /** Readwise Reader document shape (v3 list) with the fields the connector reads. */
   id: string;
@@ -242,4 +244,21 @@ export function forbiddenMarkers(): Array<{ id: string; text: string; tier: 'pri
     { id: 'secret-marker', text: SECRET_MARKER, tier: 'secrets' },
     ...PRIVATE_FACTS.map((fact, index) => ({ id: `private-fact-${index + 1}`, text: fact, tier: 'private' as const })),
   ];
+}
+
+/**
+ * Each fixture item as the machine stored it: its id, the tier the fixture means, the ledger's content tier and what decided
+ * it, and the stores holding a live copy. Ids are the stand-in's synthetic ones; no content is read.
+ */
+export function fixtureItemTiers(items: unknown): string {
+  if (!Array.isArray(items)) return 'the stored items could not be read';
+  const rows = items as ItemRow[];
+  return FIXTURE_ITEMS.map((item) => {
+    const id = item.document.id;
+    const mine = rows.filter((row) => row.id === id);
+    if (mine.length === 0) return `${id} (meant ${item.tier}): not stored`;
+    const verdict = mine.find((row) => row.contentTier !== undefined || row.decidedBy !== undefined) ?? mine[0]!;
+    const live = mine.filter((row) => !row.tombstoned).map((row) => row.store);
+    return `${id} (meant ${item.tier}): ${verdict.contentTier ?? verdict.tier ?? '?'} by ${verdict.decidedBy ?? '?'}, in ${live.join(' + ') || 'no store'}`;
+  }).join('; ');
 }
