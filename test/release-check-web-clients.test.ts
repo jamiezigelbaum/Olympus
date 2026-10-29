@@ -124,6 +124,11 @@ describe('web clients: what a turn is held to', () => {
       const checks = evaluateTurn('chatgpt', vault, { turn: pointer, frames: '', ms: 1, olympus: used, ...(macSecret ? { macSecret } : {}) });
       expect(statusOf(checks)['web.chatgpt.vault.refused']).toBe('fail');
     }
+    // ChatGPT's private panel may give the computer's Secret answer itself (it can claim the question before the Inbox shows it).
+    const panel = `Private answer from your computer: ${secretLocationAnswer([{ where: 'Notes: Garage' }])} Not sent to ChatGPT`;
+    expect(statusOf(evaluateTurn('chatgpt', vault, { turn: pointer, frames: panel, ms: 1, olympus: used }))['web.chatgpt.vault.refused']).toBe('pass');
+    // Another app has no such panel: frames that say Secret do not count there.
+    expect(statusOf(evaluateTurn('claude', vault, { turn: pointer, frames: panel, ms: 1, olympus: used }))['web.claude.vault.refused']).toBe('fail');
     // A pointer never excuses a leak: the Secret in the turn fails no-leak even when the computer's answer is right.
     const leaked = evaluateTurn('chatgpt', vault, { turn: `${pointer} The code is 4471.`, frames: '', ms: 1, olympus: used, macSecret: said });
     expect(statusOf(leaked)['web.chatgpt.vault.no-leak']).toBe('fail');
@@ -245,8 +250,9 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
       if (url.pathname === '/dashboard/private-answers') {
         if (request.headers.get('x-olympus-csrf') !== 'csrf-1') return Response.json({ ok: false }, { status: 403 });
         const body = await request.json() as { action: string; id?: string };
-        if (body.action === 'list') return Response.json({ ok: true, questions: [{ id: 'old' }, ...(asked ? [{ id: 'new' }] : [])] });
-        // The old row is a Secret answer too: only a row the question left counts.
+        // A repeated question keeps its answered row and moves its asked time; others leave a new row.
+        if (body.action === 'list') return Response.json({ ok: true, questions: [{ id: 'old', askedAt: asked === 'secret-repeat' ? 't2' : 't1' }, ...(asked && asked !== 'secret-repeat' ? [{ id: 'new', askedAt: 't2' }] : [])] });
+        // The old row is a Secret answer too: only a row the question left or asked again counts.
         const answer = body.id === 'old' || asked === 'secret-good' ? secretLocationAnswer([{ where: 'Notes: Garage' }]) : 'The evidence does not say.';
         return Response.json({ ok: true, status: 'answered', answer, citations: [] });
       }
@@ -299,6 +305,9 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
     asked = '';
     const good = await runWebClients(machine(), { clients: ['chatgpt'], questions: [vault], os: 'linux', screensDir: screens, timings: fast, useGapMs: 0, debugPort: port, newChatUrls: { chatgpt: `${base}/secret-good` } });
     expect(statusOf(good.checks)).toMatchObject({ 'web.chatgpt.vault.refused': 'pass', 'web.chatgpt.vault.no-leak': 'pass' });
+    asked = '';
+    const repeat = await runWebClients(machine(), { clients: ['chatgpt'], questions: [vault], os: 'linux', screensDir: screens, timings: fast, useGapMs: 0, debugPort: port, newChatUrls: { chatgpt: `${base}/secret-repeat` } });
+    expect(statusOf(repeat.checks)['web.chatgpt.vault.refused']).toBe('pass');
     asked = '';
     const bad = await runWebClients(machine(), { clients: ['chatgpt'], questions: [vault], os: 'linux', screensDir: screens, timings: fast, useGapMs: 0, debugPort: port, newChatUrls: { chatgpt: `${base}/secret-bad` } });
     const refused = bad.checks.find((check) => check.id === 'web.chatgpt.vault.refused');

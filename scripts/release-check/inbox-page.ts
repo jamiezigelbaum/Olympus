@@ -86,27 +86,32 @@ export function pageApi(body: unknown): string {
   return `(async () => JSON.stringify(await ${PAGE_CALL}(${JSON.stringify(body)})))()`;
 }
 
-/** The ids of the Inbox's rows as JSON { status, ids }: ids only, no question leaves the page. ids is null when it could not be listed. */
-export const INBOX_IDS = String.raw`(async () => {
+/**
+ * The Inbox's rows as JSON { status, rows }: each id with when it was last asked, nothing else (no question leaves the page).
+ * rows is null when the Inbox could not be listed.
+ */
+export const INBOX_ROWS = String.raw`(async () => {
     const listed = await ${PAGE_CALL}({ action: 'list' });
-    const rows = listed.status === 200 && listed.body && Array.isArray(listed.body.questions) ? listed.body.questions : null;
-    return JSON.stringify({ status: listed.status, ids: rows ? rows.map((row) => String(row && row.id)) : null });
+    const list = listed.status === 200 && listed.body && Array.isArray(listed.body.questions) ? listed.body.questions : null;
+    const rows = list ? Object.fromEntries(list.map((row) => [String(row && row.id), String(row && row.askedAt)])) : null;
+    return JSON.stringify({ status: listed.status, rows });
   })()`;
 
 /**
- * Reads every Inbox row that is not in `known` (the rows a remote question left) and whether one of their answers contains
- * `sentence`, as JSON { status, fresh, states, found }. The answers are compared in the page: only their states and the boolean
- * leave it. fresh is null when the Inbox could not be listed.
+ * Reads every Inbox row that is new or asked again since `known` (INBOX_ROWS before the question: a repeated question keeps
+ * its row and only moves its asked time) and whether one of their answers contains `sentence`, as JSON
+ * { status, fresh, states, found }. The answers are compared in the page: only their states and the boolean leave it.
+ * fresh is null when the Inbox could not be listed.
  */
-export function freshAnswerSays(known: readonly string[], sentence: RegExp): string {
+export function freshAnswerSays(known: Readonly<Record<string, string>>, sentence: RegExp): string {
   return String.raw`(async () => {
     const call = ${PAGE_CALL};
-    const known = new Set(${JSON.stringify(known)});
+    const known = ${JSON.stringify(known)};
     const sentence = new RegExp(${JSON.stringify(sentence.source)}, ${JSON.stringify(sentence.flags)});
     const listed = await call({ action: 'list' });
     const rows = listed.status === 200 && listed.body && Array.isArray(listed.body.questions) ? listed.body.questions : null;
     if (!rows) return JSON.stringify({ status: listed.status, fresh: null, states: [], found: false });
-    const fresh = rows.map((row) => String(row && row.id)).filter((id) => !known.has(id));
+    const fresh = rows.filter((row) => known[String(row && row.id)] !== String(row && row.askedAt)).map((row) => String(row.id));
     const states = [];
     let found = false;
     for (const id of fresh) {

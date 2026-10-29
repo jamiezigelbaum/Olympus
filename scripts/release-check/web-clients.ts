@@ -16,15 +16,16 @@
  *     Secret must not surface in any reply), except the strings this question expects;
  *   - a Private question gets the private note in the reply, and in ChatGPT the private answer panel under it;
  *   - a Secret question gets a refusal (the reply says it was withheld, or that it cannot be shared or found), or the private
- *     note together with the machine's waiting answer for it saying that the item is a Secret and where it is (read in the
- *     machine's own Inbox, in the page: only whether it says so leaves the machine).
+ *     note together with the machine's answer for it saying that the item is a Secret and where it is: in ChatGPT its private
+ *     answer panel, which may claim the question before the Inbox shows it, else the machine's own Inbox (read in the page:
+ *     only whether it says so leaves the machine).
  * A bot check, a signed-out app, an app whose Olympus connection needs renewing or a page with no message box is
  * inconclusive, not a product failure: the report says which sign-in to renew. Each question gets a picture of the page.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { secretLocationAnswer } from '../../src/core/secret-location-note.ts';
-import { freshAnswerSays, INBOX_IDS, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED } from './inbox-page.ts';
+import { freshAnswerSays, INBOX_ROWS, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED } from './inbox-page.ts';
 import type { Machine } from './machine.ts';
 import type { CheckResult } from './report.ts';
 
@@ -197,6 +198,8 @@ export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnOb
     const mac = obs.macSecret;
     if (REFUSAL.test(turn)) add('refused', title, true, 'the reply says it is withheld or cannot be shared');
     else if (!PRIVATE_NOTE.test(turn)) add('refused', title, false, `the reply neither withholds, refuses nor points to the computer: ${shown}`);
+    // ChatGPT's private panel shows the computer's answer on purpose; it may say Secret before (or instead of) the Inbox.
+    else if (panelSaysSecret(client, obs.frames)) add('refused', title, true, 'the reply points to the computer, and the private answer panel says the item is a Secret and where it is');
     else if (!mac) add('refused', title, false, 'the reply points to the computer, but the machine\'s waiting answer was not read');
     else if ('unreadable' in mac) add('refused', title, false, `the reply points to the computer, but the machine's waiting answer could not be read: ${mac.unreadable}`);
     else add('refused', title, mac.secret, mac.secret ? `the reply points to the computer, whose answer says the item is a Secret and where it is (${mac.detail})` : `the reply points to the computer, but ${mac.detail}`);
@@ -322,14 +325,14 @@ async function openMacInbox(machine: Machine, browser: BrowserSession, t: AskTim
   return tab;
 }
 
-async function macInboxIds(inbox: Tab | string): Promise<string[] | string> {
+async function macInboxRows(inbox: Tab | string): Promise<Record<string, string> | string> {
   if (typeof inbox === 'string') return inbox;
-  const listed = JSON.parse(await inbox.evaluate<string>(INBOX_IDS)) as { status: number; ids: string[] | null };
-  return listed.ids ?? `the Inbox could not be listed (http ${listed.status})`;
+  const listed = JSON.parse(await inbox.evaluate<string>(INBOX_ROWS)) as { status: number; rows: Record<string, string> | null };
+  return listed.rows ?? `the Inbox could not be listed (http ${listed.status})`;
 }
 
-/** Waits, bounded, for a row the question left in the machine's Inbox to say the item is a Secret. */
-export async function readMacSecret(inbox: Tab | string, known: string[] | string, t: AskTimings): Promise<MacSecret> {
+/** Waits, bounded, for a row the question left (or asked again) in the machine's Inbox to say the item is a Secret. */
+export async function readMacSecret(inbox: Tab | string, known: Record<string, string> | string, t: AskTimings): Promise<MacSecret> {
   if (typeof inbox === 'string') return { unreadable: inbox };
   if (typeof known === 'string') return { unreadable: known };
   const deadline = Date.now() + t.macAnswerMs;
@@ -343,6 +346,9 @@ export async function readMacSecret(inbox: Tab | string, known: string[] | strin
     await t.sleep(t.pollMs);
   }
 }
+
+/** ChatGPT's private answer panel is on the page and gives the computer's Secret answer. */
+const panelSaysSecret = (client: WebClientId, frames: string): boolean => !!CLIENT_ADAPTERS[client].privatePanel?.test(frames) && SECRET_ANSWER_LEAD.test(frames);
 
 export const isInconclusive = (check: CheckResult): boolean => check.status === 'skip' && (check.detail ?? '').startsWith('Inconclusive');
 
@@ -551,9 +557,11 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
   const panel = adapter.privatePanel;
   // The panel shows its heading while it still prepares the answer, so it is ready only once its facts are there too.
   const panelReady = (text: string): boolean => !!panel && panel.test(text) && (q.panel_expect ?? []).every((fact) => turnContains(text, fact));
-  if (q.kind === 'private' && panel && !panelReady(frames)) {
+  // A Secret question pointed to the computer: ChatGPT's panel may give the computer's Secret answer.
+  const secretPanel = q.kind === 'secret' && !!panel && !REFUSAL.test(last) && PRIVATE_NOTE.test(last);
+  if ((q.kind === 'private' || secretPanel) && panel && !(secretPanel ? panelSaysSecret(client, frames) : panelReady(frames))) {
     const deadline = Date.now() + t.panelMs;
-    while (!panelReady(frames) && Date.now() < deadline) {
+    while (!(secretPanel ? panelSaysSecret(client, frames) : panelReady(frames)) && Date.now() < deadline) {
       await t.sleep(t.pollMs);
       frames = await tab.framesText();
     }
@@ -638,13 +646,13 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
           await t.sleep(Math.max(0, gap - (Date.now() - lastAsked)));
           const before = await readConnectionUses(machine);
           if (q.kind === 'secret') macInbox ??= await openMacInbox(machine, browser, t).catch((error: unknown) => error instanceof Error ? error.message : String(error));
-          const known = q.kind === 'secret' ? await macInboxIds(macInbox!).catch((error: unknown) => error instanceof Error ? error.message : String(error)) : [];
+          const known = q.kind === 'secret' ? await macInboxRows(macInbox!).catch((error: unknown) => error instanceof Error ? error.message : String(error)) : {};
           let obs: TurnObservation | Inconclusive;
           try { obs = await askQuestion(tab, client, q, t, options.newChatUrls?.[client]); } catch (error) { obs = { inconclusive: `${CLIENT_ADAPTERS[client].label} could not be driven: ${error instanceof Error ? error.message : String(error)}` }; }
           lastAsked = Date.now();
           if (!('inconclusive' in obs)) obs = { ...obs, olympus: olympusUse(before, await readConnectionUses(machine)) };
           // A Secret question the reply points to the computer for is held to the machine's own answer for it.
-          if (!('inconclusive' in obs) && q.kind === 'secret' && !REFUSAL.test(obs.turn) && PRIVATE_NOTE.test(obs.turn)) {
+          if (!('inconclusive' in obs) && q.kind === 'secret' && !REFUSAL.test(obs.turn) && PRIVATE_NOTE.test(obs.turn) && !panelSaysSecret(client, obs.frames)) {
             obs = { ...obs, macSecret: await readMacSecret(macInbox!, known, t).catch((error: unknown) => ({ unreadable: error instanceof Error ? error.message : String(error) })) };
           }
           const picture = join(options.screensDir, `web-${client}-${q.id}.png`);
