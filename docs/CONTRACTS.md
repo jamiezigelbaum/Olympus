@@ -355,6 +355,19 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-29 (no version change): **under an owner description, only a
+  kind the owner calls private can be private.** On test-mac the owner's
+  description says Leo's appointments are fine to share and names only money
+  and legal as private, yet the built-in model judged "His check-up is
+  Saturday… with Dr. Alves" Private as health whenever the names line held
+  the owner's own name ("Jamie | Jamie"): it read the item as the owner's own
+  health and applied the no-description default. One generic line in
+  `SNIFFER_SYSTEM_PROMPT` limits privateKind to kinds the description calls
+  private. New eval set `eval/classification/fixtures/owner-exemptions.json`
+  (the description saved on test-mac, 19 items): 17/19 → 19/19 on three runs;
+  inbox set unchanged at 47/48 on two runs (inbox-32 still missed). On the
+  built-in model the new prompt is approved by default and stored items are
+  re-judged automatically.
 - 2026-10-29 (no version change): **an owner clause naming a kind of
   record covers every record of that kind.** The built-in model judged 5 of
   24 Private inbox records Personal with `privateKind` "none", every one a
