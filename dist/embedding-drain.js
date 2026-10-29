@@ -63703,11 +63703,11 @@ class MessagingCaptureSupervisor {
     const nextFingerprint = JSON.stringify(grant);
     if (this.child && this.fingerprint === nextFingerprint)
       return { source: grant.source, state: "running" };
+    const launch = await resolveCurrentLaunch(this.options, grant.source, layoutEnv);
     await this.stop();
     if (generation !== this.generation - 1)
       return { source: grant.source, state: "stopped", reason: "grant_missing" };
     const spawn3 = this.options.spawn ?? spawnCapture;
-    const launch = await resolveCurrentLaunch(this.options, grant.source, layoutEnv);
     const lock = grant.source === "whatsapp" ? tryHoldFileFlock(join29(whatsappStateDirOf(grant, account, layoutEnv), WHATSAPP_BRIDGE_LOCK_NAME)) : undefined;
     if (grant.source === "whatsapp" && !lock)
       return { source: grant.source, state: "blocked", reason: "helper_running" };

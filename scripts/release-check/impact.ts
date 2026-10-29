@@ -82,7 +82,8 @@ function relativeImports(root: string, file: string): string[] {
   if (!existsSync(path)) return [];
   const text = readFileSync(path, 'utf8');
   const found = new Set<string>();
-  for (const match of text.matchAll(/(?:from|import\()\s*['"](\.{1,2}\/[^'"]+)['"]/g)) found.add(normalize(join(dirname(file), match[1]!)));
+  // `from '…'`, `import('…')` and side-effect `import '…'` (the archive seed hooks register themselves that way).
+  for (const match of text.matchAll(/(?:\bfrom|\bimport\s*\(?)\s*['"](\.{1,2}\/[^'"]+)['"]/g)) found.add(normalize(join(dirname(file), match[1]!)));
   return [...found];
 }
 

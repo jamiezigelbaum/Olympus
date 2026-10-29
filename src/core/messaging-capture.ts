@@ -332,10 +332,12 @@ export class MessagingCaptureSupervisor {
     if (generation !== this.generation) return { source: grant.source, state: 'stopped', reason: 'grant_missing' };
     const nextFingerprint = JSON.stringify(grant);
     if (this.child && this.fingerprint === nextFingerprint) return { source: grant.source, state: 'running' };
+    // Resolved before the generation check below: making Telegram's Python ready can take minutes, and a stop
+    // (Unpair, shutdown) during it must keep this reconcile from starting a helper on the grant it read.
+    const launch = await resolveCurrentLaunch(this.options, grant.source, layoutEnv);
     await this.stop();
     if (generation !== this.generation - 1) return { source: grant.source, state: 'stopped', reason: 'grant_missing' };
     const spawn = this.options.spawn ?? spawnCapture;
-    const launch = await resolveCurrentLaunch(this.options, grant.source, layoutEnv);
     // A WhatsApp bridge holds its session's lock for its whole life: taken here and handed to it as
     // an inherited descriptor. Another bridge on the session (one left running) keeps this one from starting.
     const lock = grant.source === 'whatsapp' ? tryHoldFileFlock(join(whatsappStateDirOf(grant, account, layoutEnv), WHATSAPP_BRIDGE_LOCK_NAME)) : undefined;

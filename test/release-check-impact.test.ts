@@ -52,6 +52,11 @@ describe('which legs a change reaches', () => {
     expect(plan.files.find((f) => f.file.endsWith('web-clients.ts'))!.legs).toEqual([]);
   });
 
+  test('harness code reached only through a side-effect import still reaches its leg', () => {
+    expect(reach.has('scripts/release-check/archive-live-seed-hooks.ts')).toBe(true);
+    expect(planImpact(['scripts/release-check/archive-live-seed-hooks.ts'], reach).run).toEqual(['archive']);
+  });
+
   test('a dashboard change runs the screens and everything their pictures depend on', () => {
     const plan = planImpact(['src/workers/dashboard/inbox.ts'], reach);
     expect(plan.run).toEqual(['suite', 'relay', 'inbox', 'screenshots', 'journeys', 'explore']);
