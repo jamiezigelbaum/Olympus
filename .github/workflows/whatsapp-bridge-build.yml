@@ -47,6 +47,10 @@ jobs:
         working-directory: tools/whatsapp-bridge
         env:
           GOTOOLCHAIN: local
+          # A short temp root: the tests put the media socket in t.TempDir(),
+          # and macOS caps a socket path at 104 bytes (the runner's default
+          # /var/folders/... root exceeds it; the bridge itself falls back).
+          TMPDIR: /tmp
         run: go test -count=1 ./...
       - name: Build the bridge
         env:
