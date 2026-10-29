@@ -61,6 +61,9 @@ export const SECRET_RESTORED_REREADS_TABLE = 'secret_restored_rereads';
 /** A re-read owed for a placement, not for leaving Secrets: it reopens only a
  * job its store refused for placement, never one that judged its text Secret. */
 export const REREAD_AFTER_PLACEMENT = 'placement';
+/** A re-read owed because a retired item came back: its text went with the
+ * retirement, so a job that read it is read again. */
+export const REREAD_AFTER_REVIVE = 'revived';
 
 const openLedgerPaths = new Map<string, number>();
 
@@ -411,9 +414,38 @@ export function oweExtractionRereadAfterTierMove(
 }
 
 /**
+ * A stored item came back after it was retired (a notebook or folder chosen
+ * again, a file restored): retiring deleted its extracted text, so its jobs
+ * that read it are read again at their next enqueue. The item, back without
+ * text, is listed as a candidate again; without this its job's identity
+ * (corpus, item, version, extractor) is unchanged and it stays settled with
+ * nothing behind it. Same re-read table as a Secrets restoration.
+ */
+export function oweExtractionRereadAfterRevive(
+  dbPath: string,
+  item: Omit<ExtractionJobItemKey, 'localItemId'>,
+): number {
+  if (dbPath === ':memory:' || !existsSync(dbPath)) return 0;
+  const db = new Database(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!rereadsTableExists(db) || !rereadsHaveReason(db)) return 0;
+    return db.query(`
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+      SELECT job_id, ? FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        AND status IN ('indexed', 'leased')
+    `).run(REREAD_AFTER_REVIVE, item.provider, item.accountScope, item.providerItemId).changes;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
  * Whether an existing job is owed a re-read because its item left Secrets
- * (see `retireExtractionJobRedaction`) or completed a tier move (see
- * `oweExtractionRereadAfterTierMove`), read and consumed on the caller's own
+ * (see `retireExtractionJobRedaction`), completed a tier move (see
+ * `oweExtractionRereadAfterTierMove`) or came back after it was retired (see
+ * `oweExtractionRereadAfterRevive`), read and consumed on the caller's own
  * connection inside its enqueue transaction.
  */
 export function takeRestoredReread(db: Database, jobId: string): boolean {

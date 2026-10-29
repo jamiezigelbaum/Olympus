@@ -41,6 +41,13 @@ export interface FileScopeSourceDefinition {
   filterFamily: FileScopeFilterFamily;
   /** Applied to every selection key before it is verified and saved. */
   normalizeKey(key: string): string;
+  /**
+   * Every stored item carries its own exact scope key, written by each pass (a flat
+   * notebook, not a folder whose ancestry can change above it). Reads then filter by
+   * that key under any approval of the account, and a new approval needs no fresh
+   * traversal before stored items show. Absent: reads need the current approval's stamp.
+   */
+  itemKeysExact?: boolean;
   /** Lowercase keys that name the provider root and may be selected only as Whole account. */
   rootKeys: readonly string[];
   /** The dashboard's name for the source. */
@@ -187,6 +194,7 @@ registerBuiltIn({
   corpusIdsToInvalidate: ['secure_local.evernote.notes', 'internal.evernote.notes'],
   // A notebook is a folder with no parent; its key is the notebook id.
   filterFamily: 'folder_id',
+  itemKeysExact: true,
   normalizeKey: (key) => key.trim(),
   rootKeys: ['/'],
   label: 'Evernote',

@@ -181,10 +181,11 @@ export interface EvernoteConnectorOptions {
    */
   attachmentAllowed?: (noteId: string) => boolean;
   /**
-   * The approval this pass stores under (account generation and scope revision), part of every
-   * note's version: a new approval re-stamps each note once, as a fresh traversal does elsewhere.
+   * The account this pass stores under (its scope generation), part of every note's version: a
+   * note stored for another account is read again and stamped for this one. A new choice of
+   * notebooks for the same account needs no re-read (its notebook id is filtered on as stored).
    */
-  scopeStamp?: () => { accountGeneration: string; scopeRevision: string } | undefined;
+  scopeStamp?: () => { accountGeneration: string } | undefined;
   /** Before each page goes out: every note this pass has read so far, kept until the pass is committed. */
   readSoFar?: (notes: EvernotePassRecord['notes']) => void;
   downloadHosts?: readonly string[];
@@ -204,18 +205,18 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
 
 /**
  * A note's version: its `updated`, its notebook (id and name), whether it was read or only named,
- * and the approval it was stored under, so a move, a rename, a changed notebook choice or a new
- * approval re-reads it.
+ * and the account it was stored for, so a move, a rename, a changed notebook choice or another
+ * account re-reads it.
  */
 export function evernoteNoteVersion(
   updatedAt: string,
   notebookId: string,
   notebookLabel: string,
   disposition: 'ingest' | 'metadata_only' = 'ingest',
-  scope?: { accountGeneration: string; scopeRevision: string },
+  scope?: { accountGeneration: string },
 ): string {
   const base = `${updatedAt}|${notebookId}|${digest(notebookLabel)}|${disposition === 'ingest' ? 'f' : 'n'}`;
-  return scope ? `${base}|${digest(`${scope.accountGeneration}\u0000${scope.scopeRevision}`)}` : base;
+  return scope ? `${base}|${digest(scope.accountGeneration)}` : base;
 }
 
 /** The keys of a note's attachments, in its order: `<md5>`, then `<md5>.<n>` for the n-th equal one. */

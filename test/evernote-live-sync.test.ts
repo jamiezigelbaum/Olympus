@@ -160,28 +160,31 @@ describe('a pass through the tier lane', () => {
     // Three passes over 55 notes through the HTTP fake take ~2s alone and pass 5s on a loaded CI runner.
   }, 30_000);
 
-  test('a new approval re-stamps the unchanged notes once, so reads under it find them and reads under the old one do not', async () => {
+  test('a new notebook choice for the same account reads nothing again; another account\'s stamp is read again', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     const book = fake.addNotebook('Field work');
     const note = fake.addNote({ title: 'Survey', created: day(2024), notebookId: book.id, body: '<en-note>River</en-note>' });
     const { sync, runtime } = await connected(fake);
     const first = { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000001' };
-    const second = { ...first, scopeRevision: '00000000-0000-4000-8000-000000000002' };
     const noteId = `personal:${note.id}`;
-    const underApproval = (scope: typeof first) => {
+    const storedFor = (accountGeneration: string) => {
       const lane = runtime.existingLane()!;
       return [lane.secure.open(), lane.internal.open()].some((store) => store.itemMatchesSearchFilters(noteId, 'personal', {
-        sourceScopeGeneration: scope.accountGeneration, sourceScopeRevision: scope.scopeRevision,
+        sourceScopeGeneration: accountGeneration, sourceScopeFolderAnyKeys: [book.id],
       }));
     };
 
     expect((await sync.pass({ scope: first })).counts).toMatchObject({ notes_read: 1 });
-    expect(underApproval(first)).toBe(true);
-    expect((await sync.pass({ scope: first })).counts).toMatchObject({ notes_read: 0, notes_unchanged: 1 });
+    expect(storedFor(first.accountGeneration)).toBe(true);
+    // The person saves another choice: reads filter by the stored notebook id, nothing is fetched again.
+    expect((await sync.pass({ scope: { ...first, scopeRevision: '00000000-0000-4000-8000-000000000002' } })).counts)
+      .toMatchObject({ notes_read: 0, notes_unchanged: 1 });
 
-    expect((await sync.pass({ scope: second })).counts).toMatchObject({ notes_read: 1, notes_unchanged: 0 });
-    expect(underApproval(second)).toBe(true);
-    expect(underApproval(first)).toBe(false);
+    // Stored under another account's stamp: read again and stamped for this one.
+    const other = { accountGeneration: 'b'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000003' };
+    expect((await sync.pass({ scope: other })).counts).toMatchObject({ notes_read: 1, notes_unchanged: 0 });
+    expect(storedFor(other.accountGeneration)).toBe(true);
+    expect(storedFor(first.accountGeneration)).toBe(false);
   });
 
   test('a reconnect to another account stops before deleting the stored notes, and the card says why', async () => {
@@ -291,6 +294,41 @@ describe('the scheduler source', () => {
     expect(fake.calls.get_attachment ?? 0).toBe(attachmentCalls);
     const child = `personal:${childProviderItemId(note.id, evernoteAttachmentKeys([md5Hex(bytes)])[0]!)}`;
     expect(stores.flatMap((store) => store.localContent(child)?.chunks ?? []).join(' ')).not.toContain('fixtureclientword');
+  });
+
+  test('a notebook set to Skip and then back to read: its attachments are read again', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Projects');
+    const bytes = new TextEncoder().encode('fixturewhiteboardword: pilot with three analysts.');
+    const note = fake.addNote({ title: 'Kickoff', created: day(2024), notebookId: book.id, body: '<en-note>Kickoff</en-note>', resources: [{ bytes, mime: 'text/plain', name: 'board.txt' }] });
+    const { runtime, handle } = await connected(fake);
+    let choice: 'ingest' | 'exclude' = 'ingest';
+    const source = runtime.schedulerSource({
+      config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
+      handle,
+      notebookGate: () => () => choice,
+      assertNotebookChoiceCurrent: () => undefined,
+      scope: { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' },
+    });
+    const child = `personal:${childProviderItemId(note.id, evernoteAttachmentKeys([md5Hex(bytes)])[0]!)}`;
+    const text = () => {
+      const lane = runtime.existingLane()!;
+      return [lane.secure.open(), lane.internal.open()].flatMap((store) => store.localContent(child)?.chunks ?? []).join(' ');
+    };
+    const syncAndExtract = async () => {
+      expect((await source.tasks[0]!.run()).counts).toMatchObject({ pass_complete: 1 });
+      for (const task of source.tasks.slice(1)) await task.run();
+    };
+    await syncAndExtract();
+    expect(text()).toContain('fixturewhiteboardword');
+
+    choice = 'exclude';
+    await syncAndExtract();
+    expect(text()).not.toContain('fixturewhiteboardword');
+
+    choice = 'ingest';
+    await syncAndExtract();
+    expect(text()).toContain('fixturewhiteboardword');
   });
 
   test('after a reconnect, attachments are read under the new approval, not refused by the replaced one', async () => {
