@@ -19,6 +19,15 @@
 - Every dashboard press says what happened: Ask with no question asks for one, a disabled Save says why, Connect keeps saying the sign-in opened in another tab, and a signed-out page reloads instead of going quiet.
 - Delete indexed data no longer stops the Gmail source when it runs before the source has started.
 - Open on this computer works for files whose path has spaces or other special characters.
+- **Telegram pairing installs what it needs.** The first `olympus connect telegram --pair` sets up Telethon in Olympus's own Python environment; nothing has to be installed by hand.
+- A disconnected source keeps offering Delete indexed data while its items are still stored.
+- Asking the same Private question again later gets a fresh answer instead of the earlier one.
+- Index status names Files on this computer.
+
+Known issues:
+
+- Telegram and WhatsApp search can rank the newest messages level with the best match, so an older message that answers the question may be missed (#619).
+- Answers on your computer can take several minutes while sources are syncing (#620).
 
 ## 1.1.0 - 2026-10-16
 
