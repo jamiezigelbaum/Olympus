@@ -108,7 +108,7 @@ function answering(answer: (material: string) => { tier: string; category: strin
     requests,
     async complete(request) {
       requests.push(request);
-      const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as { i: number; names?: string; excerpt?: string });
+      const items = request.prompt.split('\n').filter((line) => line.startsWith('{"i":')).map((line) => JSON.parse(line) as { i: number; names?: string; excerpt?: string });
       return { text: JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, ownRecord: false, privateKind: 'none', ...answer(item.names ?? item.excerpt ?? '') })) }), modelId: LANE.modelId };
     },
   };
@@ -245,7 +245,7 @@ describe('2. an answer preempts the sniffer', () => {
     }
     const model = answering(() => ({ tier: 'private', category: 'financial', confidence: 0.9 }));
     await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LANE, model });
-    expect(model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{')).length)).toEqual([1, 1, 1, 1, 1]);
+    expect(model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{"i":')).length)).toEqual([1, 1, 1, 1, 1]);
   });
 });
 
@@ -365,7 +365,7 @@ describe('6. third-party material is asked alone; injection is never sent', () =
     }
     const model = answering(() => ({ tier: 'private', category: 'financial', confidence: 0.95 }));
     await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LANE, model });
-    const sizes = model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{')).length).sort();
+    const sizes = model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{"i":')).length).sort();
     expect(sizes).toEqual([1, 1, 1, 1, 1, 1]);
   });
 });
@@ -449,7 +449,7 @@ describe('6b. one item per call: no name can steer another item', () => {
     const model: AnalystModel & { batches: number[] } = {
       batches: [],
       async complete(request) {
-        const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as { i: number; names?: string });
+        const items = request.prompt.split('\n').filter((line) => line.startsWith('{"i":')).map((line) => JSON.parse(line) as { i: number; names?: string });
         model.batches.push(items.length);
         const steered = items.some((item) => /whole lot/.test(item.names ?? ''));
         return {
@@ -476,7 +476,7 @@ describe('6b. one item per call: no name can steer another item', () => {
     const seen: number[] = [];
     const model: AnalystModel = {
       async complete(request) {
-        const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as { i: number; names?: string });
+        const items = request.prompt.split('\n').filter((line) => line.startsWith('{"i":')).map((line) => JSON.parse(line) as { i: number; names?: string });
         seen.push(items.length);
         const steered = items.some((item) => /whole folder/.test(item.names ?? ''));
         return {

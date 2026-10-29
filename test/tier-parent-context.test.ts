@@ -45,7 +45,7 @@ function spyModel(respond: (items: Array<Record<string, unknown>>) => string): A
     requests,
     async complete(request) {
       requests.push(request);
-      const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as Record<string, unknown>);
+      const items = request.prompt.split('\n').filter((line) => line.startsWith('{"i":')).map((line) => JSON.parse(line) as Record<string, unknown>);
       return { text: respond(items), modelId: LOCAL_LANE.modelId };
     },
   };

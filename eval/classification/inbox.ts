@@ -19,7 +19,7 @@ export function inboxMaterial(item: typeof fixture.items[number]): string {
 export function createInboxReplayModel(): AnalystModel {
   const responses = new Map(fixture.items.map(item => [inboxMaterial(item), item.fakeJudgment]));
   return { async complete(request) {
-    const items = request.prompt.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line))
+    const items = request.prompt.split('\n').filter(line => line.startsWith('{"i":')).map(line => JSON.parse(line))
       .filter(item => typeof item.i === 'number');
     if (items.length !== 1) throw new Error('Inbox judge must isolate every item.');
     const answer = responses.get(items[0].document);

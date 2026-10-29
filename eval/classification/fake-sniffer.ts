@@ -54,7 +54,7 @@ export function createFakeSnifferModel(): AnalystModel & { stats: FakeSnifferSta
       stats.calls += 1;
       const items = request.prompt
         .split('\n')
-        .filter((line) => line.startsWith('{'))
+        .filter((line) => line.startsWith('{"i":'))
         .map((line) => JSON.parse(line) as FakeSnifferItem)
         .filter(item => typeof item.i === 'number');
       stats.items += items.length;

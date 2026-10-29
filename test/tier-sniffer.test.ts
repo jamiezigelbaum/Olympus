@@ -70,7 +70,7 @@ function spyModel(respond: (request: AnalystModelRequest, items: Array<Record<st
     requests,
     async complete(request) {
       requests.push(request);
-      const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as Record<string, unknown>);
+      const items = request.prompt.split('\n').filter((line) => line.startsWith('{"i":')).map((line) => JSON.parse(line) as Record<string, unknown>);
       const answer = respond(request, items);
       if (answer instanceof Error) throw answer;
       return { text: answer, modelId: LOCAL_LANE.modelId };
@@ -193,7 +193,7 @@ describe('batching, cache and threshold', () => {
       for (let n = 0; n < 25; n += 1) recordFlagged(ledger, store, n, `bank statement ${n}`);
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'financial', confidence: 0.97 }));
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: VENICE_LANE, model, maxCallsPerPass: 100 });
-      expect(model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{')).length)).toEqual(Array(25).fill(1));
+      expect(model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{"i":')).length)).toEqual(Array(25).fill(1));
       expect(model.requests.every((request) => request.localOnly === true)).toBe(true);
       expect(report).toMatchObject({ calls: 25, verdictsApplied: 25, resolvedPrivate: 25 });
       expect(ledger.counts().byState.pending).toBe(25); // content still unread: that is not a sniffer question
