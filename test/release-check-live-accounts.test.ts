@@ -9,10 +9,12 @@ import {
 } from '../scripts/release-check/live-accounts.ts';
 
 const statusOf = (checks: Array<{ id: string; status: string }>) => Object.fromEntries(checks.map((check) => [check.id, check.status]));
-const NOW = Date.parse('2026-10-28T08:00:00Z');
+// Relative to the real clock: runLiveAccounts reads Date.now(), so fixed dates age out of its 24 h window.
+const NOW = Date.now();
+const ago = (minutes: number): string => new Date(NOW - minutes * 60_000).toISOString();
 const corpus = (label: string, extra: Partial<CorpusRow> = {}): CorpusRow => ({
   corpus_id: `${label.toLowerCase()}.items`, label, configured: true, retrieval: { mode: 'hybrid', state: 'ready' },
-  last_refresh: { status: 'completed', completed_at: '2026-10-28T07:40:00Z' }, counts: { indexed_items: 12 }, ...extra,
+  last_refresh: { status: 'completed', completed_at: ago(20) }, counts: { indexed_items: 12 }, ...extra,
 });
 
 describe('live accounts: what each source is held to', () => {
@@ -21,17 +23,17 @@ describe('live accounts: what each source is held to', () => {
     expect(statusCheck(gmail, [corpus('Gmail')], NOW).status).toBe('pass');
     expect(statusCheck(gmail, [corpus('Dropbox')], NOW)).toMatchObject({ status: 'fail', detail: 'Olympus has no Gmail source set up (it has Dropbox)' });
     expect(statusCheck(gmail, [corpus('Gmail', { counts: { indexed_items: 0 } })], NOW).detail).toContain('nothing indexed yet');
-    expect(statusCheck(gmail, [corpus('Gmail', { last_refresh: { status: 'failed', completed_at: '2026-10-28T07:40:00Z' } })], NOW).detail).toContain('every refresh failed');
-    expect(statusCheck(gmail, [corpus('Gmail', { last_refresh: { status: 'completed', completed_at: '2026-10-26T07:40:00Z' } })], NOW).detail).toContain('more than 24 h ago');
+    expect(statusCheck(gmail, [corpus('Gmail', { last_refresh: { status: 'failed', completed_at: ago(20) } })], NOW).detail).toContain('every refresh failed');
+    expect(statusCheck(gmail, [corpus('Gmail', { last_refresh: { status: 'completed', completed_at: ago(2 * 24 * 60 + 20) } })], NOW).detail).toContain('more than 24 h ago');
     // A running refresh is not a success: an old last success still fails, and a first refresh still running is inconclusive.
-    expect(statusCheck(gmail, [corpus('Gmail', { last_refresh: { status: 'completed', completed_at: '2026-10-26T07:40:00Z' } }), corpus('Gmail', { corpus_id: 'gmail.private', last_refresh: { status: 'running' } })], NOW)).toMatchObject({ status: 'fail', detail: expect.stringContaining('more than 24 h ago (one is running now)') });
+    expect(statusCheck(gmail, [corpus('Gmail', { last_refresh: { status: 'completed', completed_at: ago(2 * 24 * 60 + 20) } }), corpus('Gmail', { corpus_id: 'gmail.private', last_refresh: { status: 'running' } })], NOW)).toMatchObject({ status: 'fail', detail: expect.stringContaining('more than 24 h ago (one is running now)') });
     expect(statusCheck(gmail, [corpus('Gmail', { last_refresh: { status: 'running' } })], NOW)).toMatchObject({ status: 'skip', detail: expect.stringMatching(/^Inconclusive: .*the first refresh is still running$/) });
     expect(statusCheck(gmail, [corpus('Gmail'), corpus('Gmail', { corpus_id: 'gmail.private', last_refresh: { status: 'running' } })], NOW).status).toBe('pass');
     expect(statusCheck(gmail, [corpus('Gmail', { retrieval: { mode: 'keyword', state: 'degraded' } })], NOW)).toMatchObject({ status: 'fail', detail: expect.stringContaining('search is degraded') });
     // An empty tier corpus (a source with no Private items yet) is degraded for good: it has nothing to embed, and is no fault.
     expect(statusCheck(gmail, [corpus('Gmail'), corpus('Gmail', { corpus_id: 'gmail.private', counts: { indexed_items: 0 }, retrieval: { mode: 'keyword', state: 'degraded' } })], NOW).status).toBe('pass');
     // Cached items are not syncing: a failure newer than the last success fails, and no finished refresh at all fails.
-    expect(statusCheck(gmail, [corpus('Gmail'), corpus('Gmail', { corpus_id: 'gmail.private', last_refresh: { status: 'failed', completed_at: '2026-10-28T07:59:00Z' } })], NOW)).toMatchObject({ status: 'fail', detail: expect.stringContaining('it failed after the last success') });
+    expect(statusCheck(gmail, [corpus('Gmail'), corpus('Gmail', { corpus_id: 'gmail.private', last_refresh: { status: 'failed', completed_at: ago(1) } })], NOW)).toMatchObject({ status: 'fail', detail: expect.stringContaining('it failed after the last success') });
     expect(statusCheck(gmail, [(({ last_refresh: _none, ...row }) => row)(corpus('Gmail'))], NOW).detail).toContain('no refresh has finished');
   });
 
