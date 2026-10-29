@@ -34,7 +34,7 @@ import { copyServingLayer, isFailSafeMissingContentQuestion, placementIsRaise, t
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import { parentNamesContext } from '../connector-store/parent-context.ts';
 import { secretFencedSniffer, type ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
-import type { MediaJudgment } from '../source-index/media-judge.ts';
+import { imageJudgmentSignal, type MediaJudgment } from '../source-index/media-judge.ts';
 import { settleSecretsCopies, settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
 import {
   TIER_DOMAIN_ORDER,
@@ -199,7 +199,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           ...(itemTitle ? { title: itemTitle } : {}),
           ...(itemPath ? { path: itemPath } : {}),
           mimeType: plan.item.mimeType,
-          ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
+          ...(imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {}),
           ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
           // A child is judged on its own text, with its parent's names as context for the model.
           ...(parentContext ? { parentContext } : {}),

@@ -17943,6 +17943,8 @@ var init_sniffer = __esm(() => {
     "because it names the owner or concerns money or identity. Read what it actually contains.",
     "privateKind is the kind of private information this item actually contains UNDER THE OWNER POLICY,",
     "or none when it is not covered or the owner says it is fine to share. Topic alone is insufficient.",
+    "An owner clause naming a kind of record covers every record of that kind, however small, routine or work-related:",
+    "such a record has that privateKind, never none.",
     "An ownRecord with a non-none privateKind is Private. Private conversations can be Private",
     "without being records. Work/reference topic never lowers an otherwise Private verdict.",
     "Use names as context, not proof of the contents. If materially uncertain, answer Private.",
@@ -18108,8 +18110,9 @@ var init_embeddings = __esm(() => {
 });
 
 // src/workers/source-index/media-judge.ts
-var MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
+var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
 var init_media_judge = __esm(() => {
+  MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
   MEDIA_JUDGE_PROMPTS = Object.freeze({
     id_document: "a photo of a passport, national identity card or driving licence",
     bank_card: "a photo of a credit card, debit card or bank card",
@@ -18768,6 +18771,7 @@ var init_tier_row_rehome = __esm(() => {
 
 // src/workers/connector-store/tier-rejudge.ts
 var init_tier_rejudge = __esm(() => {
+  init_media_judge();
   init_parent_context();
   init_tier_classifier();
   init_tier_ledger();
@@ -22273,6 +22277,7 @@ var init_tiered_store_sink = __esm(() => {
   init_tier_ledger();
   init_parent_context();
   init_tier_placement();
+  init_media_judge();
   init_secrets_disposition();
   init_tiered_store_set();
   init_store_sink();
