@@ -24,7 +24,7 @@ import { NoPrivateEvidenceError, PRIVATE_ANSWER_META_KEY, type PrivateAnswerMode
 import { generatePanelKeyPair } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS, PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { SEARCH_TOOL, SOURCE_ANSWER_TOOL, callChatGptTool, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
-import { copyPrivateMatch } from '../src/workers/chatgpt/response-builder.ts';
+import { copyPrivateMatch, PRIVATE_CHECK_PENDING_NOTE } from '../src/workers/chatgpt/response-builder.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 
 /** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
@@ -402,6 +402,9 @@ describe('a private match probe that is slow or fails', () => {
     expect(result.isError).not.toBe(true);
     expect((result._meta as Record<string, unknown> | undefined)?.[PRIVATE_ANSWER_META_KEY]).toEqual({ v: 1, count: 0, state: 'none' });
     expect(lines).toEqual(['[chatgpt] private match probe timed_out stage=search timeout_ms=30']);
+    // Never silent: the model says any Private answer will wait on the computer.
+    expect((result.structuredContent as { notes: string[] }).notes).toContain(PRIVATE_CHECK_PENDING_NOTE);
+    expect(JSON.stringify(result.content)).toContain('waiting in Olympus on their computer');
   });
 
   test('a probe that matches after its deadline still leaves the question waiting on the computer', async () => {

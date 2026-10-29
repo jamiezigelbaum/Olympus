@@ -491,7 +491,7 @@ async function runChatGptTool(
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const ticket = waitingTicket(ctx, options);
         // A match found after the deadline still waits on the computer (no panel: the result is out).
-        const late = () => { recordWaiting(ticket, question, detail, options); };
+        const late: { onMatch: () => void; timedOut?: boolean } = { onMatch: () => { recordWaiting(ticket, question, detail, options); } };
         const [raw, probed] = await Promise.all([
           options.evidenceSearch({ question, ...(limit ? { limit } : {}) }, signal),
           probeWithinDeadline(probe, question, ctx, options, 'search', late),
@@ -505,7 +505,7 @@ async function runChatGptTool(
         const privateMatch = match.count > 0
           ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, waiting }, options)
           : undefined;
-        const result = searchToolResult(raw, privateMatch ? { privateMatch } : {});
+        const result = searchToolResult(raw, privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {});
         // A new install's first question: say nothing is connected rather
         // than "no evidence in N searched sources" (zigelbot fresh install,
         // 2026-10-04). Best effort: an unreadable dashboard keeps the result.
@@ -522,6 +522,8 @@ async function runChatGptTool(
         const detail = detailArgument(args.detail);
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const ticket = waitingTicket(ctx, options);
+        // A match found after the deadline still waits on the computer (no panel: the result is out).
+        const late: { onMatch: () => void; timedOut?: boolean } = { onMatch: () => { recordWaiting(ticket, question, detail, options); } };
         const [raw, probed] = await Promise.all([
           // Public and Personal evidence only: nothing Private, not even a
           // bounded derivative, is answered from on this surface.
@@ -531,8 +533,7 @@ async function runChatGptTool(
             include_secure_local_content: false,
             timeoutMs: SOURCE_ANSWER_TIMEOUT_MS,
           }),
-          // A match found after the deadline still waits on the computer (no panel: the result is out).
-          probeWithinDeadline(probe, question, ctx, options, 'search', () => { recordWaiting(ticket, question, detail, options); }),
+          probeWithinDeadline(probe, question, ctx, options, 'search', late),
         ]);
         const match = normalizeProbe(probed);
         // Recorded at the match, handed off or not: a collector that never
@@ -550,7 +551,7 @@ async function runChatGptTool(
           return answerToolResult(raw);
         }
         const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
-        return answerToolResult(raw, privateMatch ? { privateMatch } : {});
+        return answerToolResult(raw, privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {});
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
         if (!answerToolsListed(ctx, options) && !askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
@@ -612,8 +613,9 @@ function normalizeProbe(value: boolean | number | PrivateMatchProbeResult): Priv
  * no match, so a slow Private search never holds up the tool result. Either
  * leaves one counts-only line (no question, no evidence), so a missing panel
  * can be told apart from a question that matched nothing Private. A probe
- * that times out keeps running: `onLateMatch` gets its match when it finds
- * one after all, so the question still waits on the computer.
+ * that times out keeps running: `late.onMatch` runs when it finds a match
+ * after all, so the question still waits on the computer, and
+ * `late.timedOut` tells the caller to say so.
  */
 function probeWithinDeadline(
   probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>,
@@ -621,7 +623,7 @@ function probeWithinDeadline(
   ctx: OperationContext,
   options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'privateMatchProbeLog'> = {},
   stage: 'search' | 'refresh' = 'search',
-  onLateMatch?: () => void,
+  late?: { onMatch: () => void; timedOut?: boolean },
 ): Promise<boolean | number | PrivateMatchProbeResult> {
   const timeoutMs = options.privateMatchProbeTimeoutMs ?? PROBE_TIMEOUT_MS;
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
@@ -631,15 +633,16 @@ function probeWithinDeadline(
   const timeout = new Promise<false>((resolve) => {
     timer = setTimeout(() => {
       timedOut = true;
+      if (late) late.timedOut = true;
       log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
       resolve(false);
     }, timeoutMs);
     (timer as { unref?: () => void }).unref?.();
   });
   const probed = probe(question, ctx).then((value) => {
-    if (timedOut && onLateMatch && normalizeProbe(value).count > 0) {
+    if (timedOut && late && normalizeProbe(value).count > 0) {
       log(`[chatgpt] private match probe matched_late stage=${stage} elapsed_ms=${Date.now() - startedAt}`);
-      try { onLateMatch(); } catch { /* best effort: the tool result is already out */ }
+      try { late.onMatch(); } catch { /* best effort: the tool result is already out */ }
     }
     return value;
   }).then(
