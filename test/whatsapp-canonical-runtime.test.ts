@@ -22,6 +22,7 @@ import {
   defaultWhatsAppStateDir,
 } from '../src/workers/whatsapp/index.ts';
 import { pinMessagingLegacy } from './fixtures/legacy-messaging-registry.ts';
+import { itemsInSet, whatsappTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const roots: string[] = [];
 
@@ -60,6 +61,7 @@ describe('WhatsApp canonical product runtime', () => {
     try {
       const sync = createWhatsAppConnectorStoreSyncHandler({
         store,
+        tierSet: whatsappTestTierSet(store),
         env,
         spoolStaleThresholdSeconds: 3_600,
         now: () => new Date('2026-08-26T10:30:00Z'),
@@ -83,17 +85,17 @@ describe('WhatsApp canonical product runtime', () => {
         capture_stale_threshold_seconds: 3_600,
       });
       expect(first.warnings).toContain(WHATSAPP_MALFORMED_SPOOL_WARNING);
-      expect(store.status().counts.items).toBe(1);
+      expect(itemsInSet(whatsappTestTierSet(store))).toBe(1);
 
       const idle = await source!.tasks[0]!.run();
       expect(idle.status).toBe('idle');
-      expect(store.status().counts.items).toBe(1);
+      expect(itemsInSet(whatsappTestTierSet(store))).toBe(1);
 
       appendFileSync(spool, spoolLine('second'));
       const resumed = await source!.tasks[0]!.run();
       expect(resumed.status).toBe('progress');
       expect(resumed.counts?.items_changed).toBe(1);
-      expect(store.status().counts.items).toBe(2);
+      expect(itemsInSet(whatsappTestTierSet(store))).toBe(2);
       expect(source!.lastSyncCompletedAt?.()).toBeDefined();
     } finally {
       store.close();
@@ -109,6 +111,7 @@ describe('WhatsApp canonical product runtime', () => {
     try {
       const unavailable = createWhatsAppConnectorStoreSyncHandler({
         store,
+        tierSet: whatsappTestTierSet(store),
         env,
         now: () => new Date('2026-08-26T12:00:00Z'),
       });
@@ -119,6 +122,7 @@ describe('WhatsApp canonical product runtime', () => {
       writeFileSync(join(spoolDir, '2026-08-26.jsonl'), spoolLine('stale'));
       const stale = createWhatsAppConnectorStoreSyncHandler({
         store,
+        tierSet: whatsappTestTierSet(store),
         env,
         spoolStaleThresholdSeconds: 60,
         now: () => new Date('2026-08-26T12:00:00Z'),
@@ -169,7 +173,7 @@ describe('WhatsApp canonical product runtime', () => {
     });
     expect(runtime).toBeDefined();
     try {
-      const sync = createWhatsAppConnectorStoreSyncHandler({ store, env });
+      const sync = createWhatsAppConnectorStoreSyncHandler({ store, tierSet: whatsappTestTierSet(store), env });
       const source = createWhatsAppSchedulerSource({
         config: schedulerConfig(),
         sync,

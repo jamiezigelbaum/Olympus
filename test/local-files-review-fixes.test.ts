@@ -35,6 +35,7 @@ import {
 } from '../src/workers/local-files/store.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { WatchHub, ignoreGlobsForRoot, watchIgnoreGlobs, type ParcelWatcherModule, type WatchEvent } from '../src/workers/local-files/watch-hub.ts';
+import { localFilesTestTierSet } from './helpers/lane-tier-sets.ts';
 
 type Selection = { key: string; state: 'ingest' | 'metadata_only' | 'exclude' };
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -89,7 +90,7 @@ function fixture(select: (home: string) => string, platform: NodeJS.Platform = '
   cleanups.push(async () => { await hub.close(); store.close(); rmSync(base, { recursive: true, force: true }); });
   const handler = (options: { ignore?: readonly string[]; useHub?: boolean } = {}): LocalFilesProviderStoreSyncHandler =>
     createLocalFilesProviderStoreSyncHandler({
-      store, scope, volumes, snapshotDir,
+      store, tierSet: localFilesTestTierSet(store), scope, volumes, snapshotDir,
       ...(options.useHub === false ? {} : { hub }),
       ...(options.ignore ? { ignore: options.ignore } : {}),
     });

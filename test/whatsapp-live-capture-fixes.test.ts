@@ -23,6 +23,7 @@ import {
   createWhatsAppConnectorStore,
   createWhatsAppConnectorStoreSyncHandler,
 } from '../src/workers/whatsapp/store-sync.ts';
+import { itemsInSet, whatsappTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const roots: string[] = [];
 
@@ -233,6 +234,7 @@ describe('the pull receipt', () => {
     try {
       const sync = createWhatsAppConnectorStoreSyncHandler({
         store,
+        tierSet: whatsappTestTierSet(store),
         env,
         spoolStaleThresholdSeconds: 3_600,
         now: () => new Date('2026-10-25T12:00:00Z'),
@@ -243,7 +245,7 @@ describe('the pull receipt', () => {
       rmSync(join(dir, cursorFile));
       writeFileSync(join(dir, cursorFile), line('after-restart', { timestamp: '2026-10-25T11:59:00Z' }));
       const second = await sync.pull();
-      return { first, second, items: store.status().counts.items };
+      return { first, second, items: itemsInSet(whatsappTestTierSet(store)) };
     } finally {
       store.close();
     }
@@ -297,7 +299,7 @@ describe('the pull receipt', () => {
     const env = { OLYMPUS_WHATSAPP_STATE_DIR: stateDir };
     const store = createWhatsAppConnectorStore(env);
     try {
-      const sync = createWhatsAppConnectorStoreSyncHandler({ store, env, now: () => new Date('2026-10-25T12:00:00Z') });
+      const sync = createWhatsAppConnectorStoreSyncHandler({ store, tierSet: whatsappTestTierSet(store), env, now: () => new Date('2026-10-25T12:00:00Z') });
       const first = await sync.pull();
       expect(first.counts).toMatchObject({ malformed_spool_lines: 1, oversized_spool_records: 1, items_seen: 1 });
       expect(first.warnings).toContain(WHATSAPP_OVERSIZED_SPOOL_WARNING);

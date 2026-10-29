@@ -26,6 +26,7 @@ import { defaultConfig } from '../src/core/config.ts';
 import type { ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import { createReadwiseSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { DeterministicSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { readwiseTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'person@example.com';
 const NOW = new Date('2026-07-26T10:00:00.000Z');
@@ -200,6 +201,7 @@ describe('Readwise thin connector and canonical store', () => {
     });
     const sync = createReadwiseConnectorStoreSyncHandler({
       store,
+      tierSet: readwiseTestTierSet(store),
       embeddingProvider: provider,
       account: ACCOUNT,
       credentialBroker: readwiseBroker(),
@@ -211,13 +213,14 @@ describe('Readwise thin connector and canonical store', () => {
     try {
       const first = await sync.sync();
       const unembeddedStatus = store.status();
-      // The sync commits items and chunks and queues them (owner decision
-      // 2026-09-24: decouple embedding from sync); the embedding sweep embeds.
-      const embedded = await embedPendingChunks([{ store, provider }], { maxItems: 32 });
+      // The sync commits items and chunks (owner decision 2026-09-24:
+      // decouple embedding from sync); the embedding sweep embeds what the
+      // store still owes, as it does for every store.
+      const embedded = await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 32 });
       const firstStatus = store.status();
       const second = await sync.sync();
       const secondStatus = store.status();
-      const reEmbedded = await embedPendingChunks([{ store, provider }], { maxItems: 32 });
+      const reEmbedded = await embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 32 });
 
       expect(unembeddedStatus.counts).toMatchObject({ chunks: 2, embeddedChunks: 0 });
       expect(embedded).toEqual([expect.objectContaining({ chunksEmbedded: 2 })]);
@@ -274,6 +277,7 @@ describe('Readwise thin connector and canonical store', () => {
     const store = createReadwiseConnectorStore(':memory:');
     const sync = createReadwiseConnectorStoreSyncHandler({
       store,
+      tierSet: readwiseTestTierSet(store),
       embeddingProvider: new DeterministicSourceEmbeddingProvider({
         modelId: 'readwise-admin-test',
       }),
@@ -331,7 +335,7 @@ describe('Readwise thin connector and canonical store', () => {
     // key was connected from the dashboard eleven minutes later, and the lane
     // logged lane_disabled on every pass until a manual worker restart.
     const root = mkdtempSync(join(tmpdir(), 'olympus-readwise-hot-connect-'));
-    const lane = createRefreshableReadwiseConnectorStoreRuntime({
+    const lane = createRefreshableReadwiseConnectorStoreRuntime({ tierSetFor: (store) => readwiseTestTierSet(store),
       enabled: true,
       embeddingProvider: new DeterministicSourceEmbeddingProvider(),
       dbPath: join(root, 'readwise.sqlite'),
@@ -379,7 +383,7 @@ describe('Readwise thin connector and canonical store', () => {
     const dbPath = join(root, 'readwise-dark.sqlite');
     const embeddingProvider = new DeterministicSourceEmbeddingProvider();
     try {
-      expect(createReadwiseConnectorStoreRuntime({
+      expect(createReadwiseConnectorStoreRuntime({ tierSetFor: (store) => readwiseTestTierSet(store),
         enabled: false,
         embeddingProvider,
         dbPath,
@@ -388,7 +392,7 @@ describe('Readwise thin connector and canonical store', () => {
         },
       })).toBeUndefined();
       expect(existsSync(dbPath)).toBe(false);
-      expect(() => createReadwiseConnectorStoreRuntime({
+      expect(() => createReadwiseConnectorStoreRuntime({ tierSetFor: (store) => readwiseTestTierSet(store),
         enabled: true,
         embeddingProvider,
         dbPath,
@@ -400,7 +404,7 @@ describe('Readwise thin connector and canonical store', () => {
       );
       expect(existsSync(dbPath)).toBe(false);
 
-      const runtime = createReadwiseConnectorStoreRuntime({
+      const runtime = createReadwiseConnectorStoreRuntime({ tierSetFor: (store) => readwiseTestTierSet(store),
         enabled: true,
         embeddingProvider,
         dbPath,

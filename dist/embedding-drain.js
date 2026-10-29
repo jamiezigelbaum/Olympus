@@ -29870,94 +29870,6 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 
-// src/workers/connector-store/principal.ts
-function isCanonicalConnectorStoreProvider(provider) {
-  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
-}
-function isCanonicalConnectorStoreAccountScope(accountScope) {
-  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
-}
-var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
-var init_principal = __esm(() => {
-  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
-  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
-});
-
-// src/workers/connector-store/filter-capabilities.ts
-function connectorStoreFilterCapabilityRegistry(entries) {
-  const familyEntries = new Map;
-  const providerEntries = new Map;
-  for (const [scope, capabilities] of entries) {
-    const provider = "provider" in scope ? scope.provider : undefined;
-    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
-      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
-    }
-    const registry = provider === undefined ? familyEntries : providerEntries;
-    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
-    if (registry.has(key2)) {
-      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
-      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
-    }
-    registry.set(key2, Object.freeze({ ...capabilities }));
-  }
-  return Object.freeze({
-    resolve(identity) {
-      const familyCapabilities = familyEntries.get(identity.family);
-      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
-      if (!familyCapabilities)
-        return providerCapabilities;
-      if (!providerCapabilities)
-        return familyCapabilities;
-      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
-    }
-  });
-}
-function providerScopeKey(family, provider) {
-  return `${family}\x00${provider}`;
-}
-var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
-var init_filter_capabilities = __esm(() => {
-  init_principal();
-  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
-    "corpus_id",
-    "query",
-    "retrieval_mode",
-    "max_results",
-    "account",
-    "conversation_id",
-    "sender_id",
-    "sender_label",
-    "authored_after",
-    "authored_before",
-    "after",
-    "before",
-    "trust_domain",
-    "all_tiers"
-  ];
-  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
-    "approved_scope_key",
-    "chat_scope",
-    "participant_id",
-    "include_deleted",
-    "attachment_type",
-    "include_locators",
-    "chat_title",
-    "chat_title_hint",
-    "folder_id",
-    "folder_name"
-  ];
-  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
-    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
-    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
-  ]);
-});
-
-// src/workers/connector-store/index.ts
-var init_connector_store = __esm(() => {
-  init_local_index();
-  init_filter_capabilities();
-});
-
 // src/workers/connector-store/tier-set-registry.ts
 function tierSetForLedger(ledgerPath) {
   return tierSets?.get(ledgerPath);
@@ -32665,7 +32577,6 @@ var init_tiered_store_set = __esm(() => {
 
 // src/workers/readwise/live-sync.ts
 var init_live_sync = __esm(() => {
-  init_connector_store();
   init_tiered_store_set();
   init_api();
   init_connector();
@@ -32679,6 +32590,94 @@ var init_readwise = __esm(() => {
   init_connector();
   init_live_control();
   init_live_sync();
+});
+
+// src/workers/connector-store/principal.ts
+function isCanonicalConnectorStoreProvider(provider) {
+  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
+}
+function isCanonicalConnectorStoreAccountScope(accountScope) {
+  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
+}
+var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
+var init_principal = __esm(() => {
+  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
+  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
+});
+
+// src/workers/connector-store/filter-capabilities.ts
+function connectorStoreFilterCapabilityRegistry(entries) {
+  const familyEntries = new Map;
+  const providerEntries = new Map;
+  for (const [scope, capabilities] of entries) {
+    const provider = "provider" in scope ? scope.provider : undefined;
+    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
+      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
+    }
+    const registry = provider === undefined ? familyEntries : providerEntries;
+    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
+    if (registry.has(key2)) {
+      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
+      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
+    }
+    registry.set(key2, Object.freeze({ ...capabilities }));
+  }
+  return Object.freeze({
+    resolve(identity) {
+      const familyCapabilities = familyEntries.get(identity.family);
+      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
+      if (!familyCapabilities)
+        return providerCapabilities;
+      if (!providerCapabilities)
+        return familyCapabilities;
+      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
+    }
+  });
+}
+function providerScopeKey(family, provider) {
+  return `${family}\x00${provider}`;
+}
+var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
+var init_filter_capabilities = __esm(() => {
+  init_principal();
+  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
+    "corpus_id",
+    "query",
+    "retrieval_mode",
+    "max_results",
+    "account",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "authored_after",
+    "authored_before",
+    "after",
+    "before",
+    "trust_domain",
+    "all_tiers"
+  ];
+  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
+    "approved_scope_key",
+    "chat_scope",
+    "participant_id",
+    "include_deleted",
+    "attachment_type",
+    "include_locators",
+    "chat_title",
+    "chat_title_hint",
+    "folder_id",
+    "folder_name"
+  ];
+  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
+    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
+    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
+  ]);
+});
+
+// src/workers/connector-store/index.ts
+var init_connector_store = __esm(() => {
+  init_local_index();
+  init_filter_capabilities();
 });
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS;
@@ -33306,7 +33305,6 @@ var init_window_diagnostic = __esm(() => {
 
 // src/workers/x-bookmarks/live-sync.ts
 var init_live_sync2 = __esm(() => {
-  init_connector_store();
   init_tiered_store_set();
   init_api_connector();
   init_live_control2();

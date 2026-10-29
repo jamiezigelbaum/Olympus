@@ -30,6 +30,7 @@ import {
   type XBookmarksLiveSyncConfig,
 } from '../src/workers/x-bookmarks/index.ts';
 import { X_BOOKMARKS_STORE_PLACEMENT } from '../src/workers/x-bookmarks/connector.ts';
+import { xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const HANDLE = 'x.bookmarks.personal';
 const ACCOUNT = 'personal';
@@ -352,6 +353,7 @@ function fixture() {
     handler(reconcileStateStore?: LocalXBookmarksReconcileStateStore, userId = USER_ID) {
       return createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         ...(reconcileStateStore ? { reconcileStateStore } : {}),
         embeddingProvider: fakeEmbeddingProvider(),

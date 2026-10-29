@@ -33,6 +33,7 @@ import { VolumeResolver, probeIgnoresCaseIn } from '../src/workers/local-files/v
 import {
   WatchHub, watchIgnoreGlobs, watchWouldIgnore, type ParcelWatcherModule, type WatchEvent,
 } from '../src/workers/local-files/watch-hub.ts';
+import { localFilesTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
@@ -354,7 +355,7 @@ describe('files directly under the whole computer\'s top', () => {
       generation: 'a'.repeat(64), revision: '11111111-2222-4333-8444-555555555555', assertCurrent() {},
       decide: () => 'content', snapshotDecider: () => () => 'content', roots: () => [{ scopePath: root, state: 'ingest' }],
     };
-    const handler = createLocalFilesProviderStoreSyncHandler({ store, scope, volumes: new VolumeResolver(), snapshotDir: join(base, 'watch') });
+    const handler = createLocalFilesProviderStoreSyncHandler({ store, tierSet: localFilesTestTierSet(store), scope, volumes: new VolumeResolver(), snapshotDir: join(base, 'watch') });
     await handler.pull({ approved_scope_key: `${LOCAL_FILES_POLICY_SOURCE}:${root}` });
     const query = { provider: 'local_files', accountScope: 'this_computer', limit: 100 };
     expect(store.activeItemsDirectlyUnderRootIfIndexed(query)).toEqual([]);

@@ -49,6 +49,7 @@ import {
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { WatchHub, watchIgnoreGlobs } from '../src/workers/local-files/watch-hub.ts';
 import { fileSourceScopeContentFilters, fileSourceScopeMetadataFilters } from '../src/workers/source-scope-runtime.ts';
+import { localFilesTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
@@ -351,7 +352,7 @@ describe('a pass over home, with a Telegram spool moved to ~/capture', () => {
     const snapshotDir = join(base, `watch-${passes}`);
     mkdirSync(snapshotDir, { recursive: true });
     const handler = createLocalFilesProviderStoreSyncHandler({
-      store, scope, volumes: new VolumeResolver(), snapshotDir, hub, ignore: watchIgnoreGlobs(context), pageSize: 50,
+      store, tierSet: localFilesTestTierSet(store), scope, volumes: new VolumeResolver(), snapshotDir, hub, ignore: watchIgnoreGlobs(context), pageSize: 50,
     });
     const out = await handler.pull({ approved_scope_key: `${LOCAL_FILES_POLICY_SOURCE}:${home}` });
     expect(out.receipt.counts.traversal_complete).toBe(1);
@@ -463,7 +464,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
 
     const context = ownContext();
     expect(context.ownRoots).toContain(`${home}/.config/olympus`);
-    const result = await createLocalFilesOwnRootsCleanup({ store, context }).run();
+    const result = await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context }).run();
 
     expect(result).toEqual({ removed: 2, complete: true });
     expect(await search(store, approval, 'zzsecretbody')).toHaveLength(0);
@@ -482,7 +483,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     expect(localFilesRoots(approval, context)).toEqual([]);
     expect(await search(store, approval, 'zzsecretbody')).toHaveLength(1);
 
-    await createLocalFilesOwnRootsCleanup({ store, context }).run();
+    await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context }).run();
 
     expect(await search(store, approval, 'zzsecretbody')).toHaveLength(0);
     expect(present(store, secret)).toBe(false);
@@ -502,7 +503,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const keeping = await indexedStore(files);
     const caseKeeping = { ...ownContext(env), volumeIgnoresCase: () => false };
     expect(caseKeeping.ownRoots).toContain(`${home}/capture`);
-    const first = await createLocalFilesOwnRootsCleanup({ store: keeping, context: caseKeeping }).run();
+    const first = await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(keeping), context: caseKeeping }).run();
     expect(first).toEqual({ removed: 1, complete: true });
     expect(present(keeping, `${home}/capture/${day}`)).toBe(false);
     expect(present(keeping, `${home}/Capture/notes.txt`)).toBe(true);
@@ -514,7 +515,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     // A volume that ignores case: they are the same folder, and all go.
     const ignoring = await indexedStore(files);
     const caseIgnoring = { ...ownContext(env), volumeIgnoresCase: () => true };
-    const second = await createLocalFilesOwnRootsCleanup({ store: ignoring, context: caseIgnoring }).run();
+    const second = await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(ignoring), context: caseIgnoring }).run();
     expect(second).toEqual({ removed: 3, complete: true });
     for (const [path] of files) expect(present(ignoring, path)).toBe(false);
   });
@@ -525,7 +526,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const spool: [string, string] = [`${home}/capture/zspool.jsonl`, 'zzspoolbody'];
     const store = await indexedStore([...siblings, spool]);
     const context = { ...ownContext({ OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: `${home}/capture` }), volumeIgnoresCase: () => false };
-    expect(await createLocalFilesOwnRootsCleanup({ store, context, pageSize: 50 }).run()).toEqual({ removed: 1, complete: true });
+    expect(await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context, pageSize: 50 }).run()).toEqual({ removed: 1, complete: true });
     expect(present(store, spool[0])).toBe(false);
     expect(siblings.every(([path]) => present(store, path))).toBe(true);
   });
@@ -541,7 +542,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
   test('reaches an own file behind more siblings than one look can hold: the walk has no ceiling that ends it', async () => {
     const { siblings, spool, context } = siblingsBeforeSpool(40);
     const store = await indexedStore([...siblings, spool]);
-    expect(await createLocalFilesOwnRootsCleanup({ store, context, pageSize: 6 }).run()).toEqual({ removed: 1, complete: true });
+    expect(await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context, pageSize: 6 }).run()).toEqual({ removed: 1, complete: true });
     expect(present(store, spool[0])).toBe(false);
     expect(siblings.every(([path]) => present(store, path))).toBe(true);
   });
@@ -550,7 +551,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const { siblings, spool, context } = siblingsBeforeSpool(40);
     const store = await indexedStore([...siblings, spool]);
     // Each run may read only 12 stored paths: from the start again, none would ever get past the siblings.
-    const cleanup = createLocalFilesOwnRootsCleanup({ store, context, pageSize: 6, maxScanned: 12 });
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context, pageSize: 6, maxScanned: 12 });
     const first = await cleanup.run();
     expect(first).toEqual({ removed: 0, complete: false });
     expect(present(store, spool[0])).toBe(true);
@@ -595,7 +596,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
   test('a file that is named like an own folder, apart from case, is never touched', async () => {
     const store = await indexedStore([[`${home}/Capture`, 'zzfilenamedlikeafolder'], [`${home}/capture/${day}`, 'zzspoolbody']]);
     const context = { ...ownContext({ OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: `${home}/capture` }), volumeIgnoresCase: () => false };
-    await createLocalFilesOwnRootsCleanup({ store, context }).run();
+    await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context }).run();
     expect(present(store, `${home}/Capture`)).toBe(true);
     expect(present(store, `${home}/capture/${day}`)).toBe(false);
     expect(await search(store, approved(home), 'zzfilenamedlikeafolder')).toHaveLength(1);
@@ -637,13 +638,13 @@ describe('5. what an earlier version indexed inside an own folder', () => {
   }
   const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
 
-  test('goes through the lane\'s tier set when it has one, and moves no folder\'s cursor', async () => {
+  test('goes through the lane\'s tier set, and moves no folder\'s cursor', async () => {
     const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody the session token'], [budget, 'zzbudgetbody']]);
     const runs: unknown[][] = [];
     const sync = lane.set.sync.bind(lane.set);
     lane.set.sync = (...args: Parameters<typeof sync>) => { runs.push(args.slice(2)); return sync(...args); };
 
-    const result = await createLocalFilesOwnRootsCleanup({ store: secure, tierSet: lane.set, context: ownContext() }).run();
+    const result = await createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext() }).run();
 
     expect(result).toEqual({ removed: 1, complete: true });
     expect(runs).toEqual([[{ commitCursor: false, settle: false }]]);
@@ -659,7 +660,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const listRoutedOverrides = lane.set.ledger.listRoutedOverrides.bind(lane.set.ledger);
     lane.set.ledger.listRoutedOverrides = () => { reads += 1; return listRoutedOverrides(); };
 
-    expect(await createLocalFilesOwnRootsCleanup({ store: secure, tierSet: lane.set, context: ownContext() }).run()).toEqual({ removed: 1, complete: true });
+    expect(await createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext() }).run()).toEqual({ removed: 1, complete: true });
     expect(present(secure, secret)).toBe(false);
     expect(reads).toBe(0);
 
@@ -676,7 +677,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody the session token']]);
     const sync = lane.set.sync.bind(lane.set);
     lane.set.sync = async (...args: Parameters<typeof sync>) => { await sleep(700); return sync(...args); };
-    const cleanup = createLocalFilesOwnRootsCleanup({ store: secure, tierSet: lane.set, context: ownContext(), maxMs: 100 });
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext(), maxMs: 100 });
 
     const asked = Date.now();
     expect(await cleanup.run()).toEqual({ removed: 0, complete: false });
@@ -696,7 +697,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
       inFlight = true;
       try { await sleep(400); return await sync(...args); } finally { inFlight = false; }
     };
-    const cleanup = createLocalFilesOwnRootsCleanup({ store: secure, tierSet: lane.set, context: ownContext(), maxMs: 50 });
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext(), maxMs: 50 });
 
     expect(await cleanup.run()).toEqual({ removed: 0, complete: false });
     expect(inFlight).toBe(true);
@@ -709,7 +710,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const files: Array<[string, string]> = [1, 2, 3].map((n) => [`${home}/.config/olympus/zzown${n}.txt`, `zzownbody${n}`]);
     const store = await indexedStore(files);
     const context = ownContext();
-    const cleanup = createLocalFilesOwnRootsCleanup({ store, context, maxItems: 2, batchSize: 1 });
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context, maxItems: 2, batchSize: 1 });
     expect(await cleanup.run()).toEqual({ removed: 2, complete: false });
     expect(files.filter(([path]) => present(store, path))).toHaveLength(1);
 
@@ -724,7 +725,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
       generation, revision, assertCurrent() {}, decide, snapshotDecider: () => decide, roots: () => localFilesRoots(approval),
     };
     const handler = createLocalFilesProviderStoreSyncHandler({
-      store, scope, volumes: new VolumeResolver(), snapshotDir: join(base, 'watch'), beforePull: () => cleanup.run(),
+      store, tierSet: localFilesTestTierSet(store), scope, volumes: new VolumeResolver(), snapshotDir: join(base, 'watch'), beforePull: () => cleanup.run(),
     });
     await handler.pull({ approved_scope_key: `${LOCAL_FILES_POLICY_SOURCE}:${docs}` });
 
@@ -736,10 +737,10 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const files: Array<[string, string]> = [1, 2].map((n) => [`${home}/.config/olympus/zztimed${n}.txt`, `zztimedbody${n}`]);
     const store = await indexedStore(files);
     const context = ownContext();
-    const stopped = await createLocalFilesOwnRootsCleanup({ store, context, maxMs: 0 }).run();
+    const stopped = await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context, maxMs: 0 }).run();
     expect(stopped).toEqual({ removed: 0, complete: false });
     expect(files.every(([path]) => present(store, path))).toBe(true);
-    expect(await createLocalFilesOwnRootsCleanup({ store, context }).run()).toEqual({ removed: 2, complete: true });
+    expect(await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context }).run()).toEqual({ removed: 2, complete: true });
   });
 
   test('a run whose time is up does not read the index at all', async () => {
@@ -747,7 +748,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     let looks = 0;
     const page = store.pageActiveItemsUnderLocatorIfIndexed.bind(store);
     store.pageActiveItemsUnderLocatorIfIndexed = (input) => { looks += 1; return page(input); };
-    expect(await createLocalFilesOwnRootsCleanup({ store, context: ownContext(), maxMs: 0 }).run()).toEqual({ removed: 0, complete: false });
+    expect(await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context: ownContext(), maxMs: 0 }).run()).toEqual({ removed: 0, complete: false });
     expect(looks).toBe(0);
     expect(present(store, secret)).toBe(true);
   });
@@ -763,7 +764,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
       while (Date.now() < until) { /* a page that takes a while */ }
       return page(input);
     };
-    const cleanup = createLocalFilesOwnRootsCleanup({ store, context, pageSize: 2, maxMs: 80 });
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context, pageSize: 2, maxMs: 80 });
     const asked = Date.now();
     const result = await cleanup.run();
     expect(result.complete).toBe(false);
@@ -781,7 +782,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const store = await indexedStore([[secret, 'zzsecretbody']]);
     store.locatorIdentityIndexReady = () => false;
     const told: string[] = [];
-    expect(await createLocalFilesOwnRootsCleanup({ store, context: ownContext(), log: (message) => told.push(message) }).run())
+    expect(await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context: ownContext(), log: (message) => told.push(message) }).run())
       .toEqual({ removed: 0, complete: false });
     expect(told).toHaveLength(1);
     expect(present(store, secret)).toBe(true);
@@ -789,7 +790,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
 
   test('has nothing to do, and asks the store nothing, when there are no own folders', async () => {
     const store = await indexedStore([[secret, 'zzsecretbody']]);
-    expect(await createLocalFilesOwnRootsCleanup({ store, context: { platform: 'linux' } }).run()).toEqual({ removed: 0, complete: true });
+    expect(await createLocalFilesOwnRootsCleanup({ tierSet: localFilesTestTierSet(store), context: { platform: 'linux' } }).run()).toEqual({ removed: 0, complete: true });
     expect(present(store, secret)).toBe(true);
   });
 });

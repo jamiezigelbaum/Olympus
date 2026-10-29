@@ -20,6 +20,7 @@ import {
   type XBookmarksLiveSyncConfig,
 } from '../src/workers/x-bookmarks/index.ts';
 import { seedCanonicalXBookmarksSnapshot } from './helpers/x-bookmarks-reconcile.ts';
+import { xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'personal';
 const ATTEMPT_1 = new Date('2026-07-18T12:00:00.000Z');
@@ -191,6 +192,7 @@ describe('X daily reconciliation restart state', () => {
       };
       const firstHandler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         sourceClient: firstClient,
         embeddingProvider: fakeEmbeddingProvider(),
@@ -235,6 +237,7 @@ describe('X daily reconciliation restart state', () => {
       };
       const resumedHandler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         sourceClient: resumedClient,
         embeddingProvider: fakeEmbeddingProvider(),

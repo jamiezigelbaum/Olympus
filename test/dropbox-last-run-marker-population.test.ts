@@ -11,6 +11,7 @@ import {
   type DropboxMetadataClient,
   type DropboxMetadataPage,
 } from '../src/workers/dropbox-files/index.ts';
+import { dropboxTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACTIVE_SCOPE = 'dropbox.personal:/Active';
 const RETIRED_SCOPE = 'dropbox.personal:/Retired';
@@ -20,6 +21,7 @@ describe('Dropbox canonical last-completed-run marker', () => {
     await withStore(async (store) => {
       const handler = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient: pathCursorClient(),
@@ -56,6 +58,7 @@ describe('Dropbox canonical last-completed-run marker', () => {
       };
       const handler = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient: client,
@@ -82,6 +85,7 @@ describe('Dropbox canonical last-completed-run marker', () => {
     await withStore(async (store) => {
       const handler = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient: pathCursorClient(),
