@@ -38,6 +38,7 @@ import {
   answerReadyEligibleItems,
   answerReadyPercent,
   corpusAnswerReadyEligibleItems,
+  corpusOwnIndexedItems,
   notReadByPolicyFromCounts,
 } from './dashboard/answer-ready-coverage.ts';
 // Words only. vocabulary.ts imports nothing from this module at runtime — its
@@ -4942,7 +4943,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
   const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   return {
-    indexed_items: indexedItems,
+    indexed_items: corpusOwnIndexedItems(counts, indexedItems),
     content_ready_items: contentReadyItems,
     embedded_items: embeddedItems,
     ...(embeddedFiles !== undefined ? { embedded_files: embeddedFiles } : {}),
