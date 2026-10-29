@@ -31,6 +31,14 @@
       "material": "His check-up is Saturday at 10:30 with Dr. Alves. Can you take him? The vaccine booklet is in his blue backpack"
     },
     {
+      "id": "owner-19",
+      "templateFamily": "child-appointment-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The exact test-mac material (hash c30535cd, verified by the testing thread).",
+      "material": "Names: Jamie | Jamie\nExcerpt: His check-up is Saturday at 10:30 with Dr. Alves. Can you take him? The vaccine booklet is in his blue backpack"
+    },
+    {
       "id": "owner-02",
       "templateFamily": "clinic-reminder-email",
       "split": "dev",
