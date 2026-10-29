@@ -57,7 +57,10 @@ export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // document (a medical one) is decided by the text read off it, held Private until
 // the privacy-safe model has read that text; with too little text it stays
 // Private on the picture. Pictures decided under p6 are judged again.
-export const TIER_CLASSIFIER_VERSION = '2026-10-29.p7';
+// p8 (2026-10-29): on the small built-in model a Personal answer holds an item
+// whose text shows a populated record Private (sniffer.ts, snifferVerdictTier).
+// Items decided under p7 are judged again; cached answers settle them at once.
+export const TIER_CLASSIFIER_VERSION = '2026-10-29.p8';
 
 /**
  * The `mapRevision` every decision records. The legacy sensitivity map was
@@ -208,6 +211,18 @@ export const SNIFFER_EXCERPT_MAX_CHARS = 1_200;
 export const CONTENT_READ_SNIFFER_FLAG = 'content:read';
 /** An open model question that does not hold the content (owner-approved). */
 export const PERSONAL_FIRST_REASON = 'content:personal_first';
+
+/**
+ * Whether a decision's content waits, held Private, for its model question:
+ * placement keeps the copy in Private and release treats it as Private, even
+ * though the recorded content tier is the Personal default. Personal-first
+ * content is the one open question that does not hold it.
+ */
+export function contentHeldForJudgment(
+  decision: Pick<TierDecision, 'contentPending'> & { readonly reasons?: readonly string[] },
+): boolean {
+  return decision.contentPending && decision.reasons?.includes(PERSONAL_FIRST_REASON) !== true;
+}
 /**
  * Recorded with the content reasons of every non-Secrets decision about an
  * item whose lane holds content until judged (`holdUntilJudged`). It names
@@ -230,6 +245,22 @@ export function heldUntilJudged(reasons: readonly string[] | undefined): boolean
  * queued moves, rejudges and late metadata updates without a schema migration. */
 export function contentDigestReason(text: string): string {
   return `content:sha256:${createHash('sha256').update(text.trim()).digest('hex')}`;
+}
+
+/**
+ * Recorded beside the content digest: a digest of the names a content verdict
+ * was made with (title, path, sender) and the parent's context. A listing
+ * reuses a recorded verdict only while both are unchanged, so a renamed or
+ * moved item (into a records folder, under a new title) is judged again.
+ * Labels and folder keys are left out: a re-judge reads names back from the
+ * stored copy, which keeps only these, and must record the same digest.
+ */
+export function contentNamesReason(
+  names: { readonly title?: string | undefined; readonly path?: string | undefined; readonly sender?: string | undefined },
+  parentContext?: string,
+): string {
+  const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? '');
+  return `content:names:${createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 16)}`;
 }
 
 /**
@@ -487,7 +518,9 @@ export function classifyItemTiers(
   options: TierClassificationOptions = {},
 ): TierDecision {
   const decision = classifyItemTiersWithPublic(input, options);
-  if (input.text !== undefined && decision.contentTier !== 'secrets') decision.reasons.push(contentDigestReason(input.text));
+  if (input.text !== undefined && decision.contentTier !== 'secrets') {
+    decision.reasons.push(contentDigestReason(input.text), contentNamesReason(input.signals, input.parentContext));
+  }
   return options.retirePublic ? withPublicRetired(decision) : decision;
 }
 
@@ -651,7 +684,7 @@ export function classifyContentTier(
       contentTier: tier,
       decidedBy: 'override',
       reasons: [`override:item:${options.override.tier}`, ...(tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : []),
-        ...heldMark(holdUntilJudged, tier), contentDigestReason(input.text)],
+        ...heldMark(holdUntilJudged, tier), contentDigestReason(input.text), contentNamesReason(input, input.parentContext)],
       contentPending: false,
     };
   }
@@ -698,7 +731,7 @@ export function classifyContentTier(
     contentTier: lifted ? 'private' : content.tier,
     decidedBy: content.decidedBy,
     reasons: [...content.reasons, ...(lifted ? [PUBLIC_RETIRED_REASON] : []),
-      ...(content.tier !== 'secrets' ? [contentDigestReason(input.text)] : [])],
+      ...(content.tier !== 'secrets' ? [contentDigestReason(input.text), contentNamesReason(input, input.parentContext)] : [])],
     contentPending: content.pending || text === undefined,
   };
 }

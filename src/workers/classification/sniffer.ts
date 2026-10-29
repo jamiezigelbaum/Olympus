@@ -26,6 +26,7 @@
 
 import { createHash } from 'node:crypto';
 import { canonicalizeScreeningText } from '../../core/secret-patterns.ts';
+import { BUILT_IN_REASONING_MODELS } from '../source-index/built-in-reasoning/manifest.ts';
 import { detectSecretFindingKinds } from './engine.ts';
 import { isUnitConfidence, parseStrictJsonObject } from './delphi-scorer.ts';
 import {
@@ -96,6 +97,41 @@ export function snifferTierKey(
 ): 'private' | 'secure' {
   if (verdict.failSafe || verdict.tier === 'private' || recordRequiresPrivate(verdict)) return 'secure';
   return verdict.confidence >= SNIFFER_PERSONAL_MIN_CONFIDENCE ? 'private' : 'secure';
+}
+
+/**
+ * The tier and reason code a verdict gives one question. The small built-in
+ * model (the 8 GB class) cannot lower an item whose own text shows a
+ * populated record (the content pass's `content:own_record:` flags: values
+ * with units, reference ranges, a named holder, a filled form, a records
+ * folder or a dated record title): its Personal answer holds the item
+ * Private. Release check 2026-10-29: Qwen3.5 2B judged a cardiology note
+ * with a heart rate and a prescription "work 0.95" Personal, five of five,
+ * when no label named it private; the 4B judged it Private. Every other
+ * model's verdict stands as `snifferTierKey` reads it.
+ */
+export function snifferVerdictTier(
+  verdict: Parameters<typeof snifferTierKey>[0] & Pick<StoredSnifferVerdict, 'category' | 'confidence' | 'failSafe'>,
+  lane: SnifferLaneIdentity,
+  flags: readonly string[],
+): { tier: 'private' | 'secure'; code: string } {
+  const tier = snifferTierKey(verdict);
+  const code = snifferReasonCode(verdict);
+  if (tier === 'private' && snifferLaneIsSmall(lane) && flags.some((flag) => flag.startsWith(OWN_RECORD_FLAG_PREFIX))) {
+    return { tier: 'secure', code: `${SNIFFER_RECORD_HELD_CODE_PREFIX}${code}` };
+  }
+  return { tier, code };
+}
+
+/** The prefix of the content pass's own-record flags (tier-classifier.ts). */
+const OWN_RECORD_FLAG_PREFIX = 'content:own_record:';
+/** Leads the reason code of a small-model Personal answer held Private for its record. */
+export const SNIFFER_RECORD_HELD_CODE_PREFIX = 'record_held:';
+
+/** Whether the lane's model is a small built-in one, by the pinned weights it names. */
+function snifferLaneIsSmall(lane: SnifferLaneIdentity): boolean {
+  const id = snifferCacheModelId(lane);
+  return BUILT_IN_REASONING_MODELS.some((model) => model.sizeClass === 'small' && (id === model.modelId || id.startsWith(`${model.modelId}:`)));
 }
 
 function recordRequiresPrivate(verdict: Partial<Pick<SnifferVerdict, 'ownRecord' | 'privateKind'>>): boolean {
@@ -253,6 +289,39 @@ export const SNIFFER_SYSTEM_PROMPT = [
   'Output ONLY one JSON object with exactly one verdict for the supplied item index:',
   `{"verdicts":[{"i":1,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map(c => `"${c}"`).join('|')},"ownRecord":true|false,"privateKind":${SNIFFER_PRIVATE_KINDS.map(c => `"${c}"`).join('|')},"confidence":<number from 0 to 1>}]}`,
 ].join('\n');
+
+/**
+ * The reply shape as a JSON Schema, for a model that decodes under a grammar
+ * (the built-in llama-server): every field is bounded to its allowed values,
+ * so a small model cannot answer a privateKind of "work" or leave a field out
+ * (2026-10-29, Qwen3.5 2B on the release check). Not part of the prompt, so the
+ * prompt version and the verdict cache are unchanged; other models ignore it.
+ */
+export const SNIFFER_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    verdicts: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 1,
+      items: {
+        type: 'object',
+        properties: {
+          i: { type: 'integer', minimum: 1, maximum: 1 },
+          tier: { enum: ['personal', 'private'] },
+          category: { enum: [...SNIFFER_CATEGORIES] },
+          ownRecord: { type: 'boolean' },
+          privateKind: { enum: [...SNIFFER_PRIVATE_KINDS] },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
+        },
+        required: ['i', 'tier', 'category', 'ownRecord', 'privateKind', 'confidence'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['verdicts'],
+  additionalProperties: false,
+};
 
 export interface SnifferBatchItem {
   /** 1-based position in the batch. */
@@ -496,7 +565,7 @@ export class CachedTierSniffer implements TierSniffer {
         mapRevision,
       });
       if (cached && cachedSnifferVerdictHolds(cached)) {
-        return { verdict: 'decided', tier: snifferTierKey(cached), code: snifferReasonCode(cached) };
+        return { verdict: 'decided', ...snifferVerdictTier(cached, this.lane, request.flags) };
       }
       if (request.subject) {
         const queued = this.store.enqueue({

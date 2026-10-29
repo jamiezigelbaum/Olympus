@@ -914,6 +914,15 @@ export class TierLedgerUnavailableError extends Error {
 
 export const TIER_SET_BINDING_RUN_ID = 'tiered-store-set-binding';
 export const TIER_SET_BINDING_CONNECTOR_ID = 'tiered_store_set_binding';
+/** The writer a tier move copies an item into its new tier's store under (tier-move.ts). */
+export const TIER_MOVE_CONNECTOR_ID = 'olympus_tier_move';
+/**
+ * Writers that record a `sync_runs` row but are not a sync of the source: the
+ * embedding write authority, the set binding and a tier move. A store's
+ * status counts and its last run leave them out, so a source card never says
+ * its last sync saw the one item a tier move copied.
+ */
+const NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
 
 export class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
   constructor() {
@@ -1354,6 +1363,12 @@ export interface ConnectorStoreStatus {
      * when positive.
      */
     outsideContentWindowItems?: number;
+    /**
+     * Live items the store holds whatever the scope reads, present only when
+     * the scope hides some of them. A disconnected source reads nothing, yet
+     * its data is still here to delete.
+     */
+    storedItems?: number;
   };
   /**
    * Embedding parity PER MODEL: for each model that holds any vector here,
@@ -11899,6 +11914,7 @@ export class LocalConnectorStore {
     const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${hiddenNotIn}) AS stored_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
           AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
@@ -11916,7 +11932,7 @@ export class LocalConnectorStore {
             ${parityWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
-          WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
+          WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
         ) AS sync_runs,
         -- EXISTS rather than COUNT(DISTINCT ...) so the per-item probe stops at
         -- the first chunk row instead of walking every chunk of every item.
@@ -11932,6 +11948,7 @@ export class LocalConnectorStore {
         ) AS full_ingestion_files
     `).get(
       ...itemParams,
+      ...jsonList(tier.hidden),
       ...itemParams, JSON.stringify(keptNamesOnlyPks),
       ...itemParams,
       ...itemParams,
@@ -11942,6 +11959,7 @@ export class LocalConnectorStore {
       ...fileScopeParams,
     ) as {
       items: number;
+      stored_items: number;
       content_elsewhere_items: number;
       files: number;
       folders: number;
@@ -12048,7 +12066,7 @@ export class LocalConnectorStore {
     // insertion, so it breaks the tie by true recency.
     const last = this.db.query(
       `SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
+       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
        ORDER BY started_at DESC, rowid DESC LIMIT 1`,
     ).get() as SyncRunRow | null;
     return {
@@ -12079,6 +12097,7 @@ export class LocalConnectorStore {
             }
           : {}),
         ...(outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {}),
+        ...(counts.stored_items > counts.items ? { storedItems: counts.stored_items } : {}),
       },
       embeddingByModel: byModel.map((row) => ({
         modelId: row.model_id,

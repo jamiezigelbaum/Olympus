@@ -11,7 +11,7 @@ import {
   type WaitingQuestionInput,
   type WaitingQuestionStore,
 } from '../src/core/waiting-private-questions.ts';
-import { createLocalPrivateAnswers, type LocalPrivateAnswersOptions } from '../src/workers/email-source/local-private-answers.ts';
+import { AUTO_ANSWER_DEFER_MS, createLocalPrivateAnswers, type LocalPrivateAnswersOptions } from '../src/workers/email-source/local-private-answers.ts';
 import { createLocalModelActivity, runBackgroundInference } from '../src/workers/answer-activity.ts';
 import type { LocalAnswerResult } from '../src/workers/source-index/local-answer.ts';
 
@@ -212,20 +212,21 @@ describe('private inbox automatic answering', () => {
 });
 
 describe('private inbox persistence and fencing', () => {
-  test('answered rows survive seven days, remain owner-only and respect the per-connection cap', () => {
+  test('answered rows survive seven days, remain owner-only, and are all kept however many there are', () => {
     const f = fixture();
     const oldest = record(f.store, { question: 'Answered oldest' });
     expect(f.store.saveAnswer(oldest, stored())).toBe(true);
     record(f.store, { question: 'Unanswered oldest' });
     f.advance(8 * 24 * 60 * 60_000);
     expect(f.store.list().questions.map(q => q.id)).toEqual([oldest.id]);
-    for (let i = 0; i < WAITING_QUESTION_LIMITS.answeredPerConnection; i++) {
+    for (let i = 0; i < 120; i++) {
       f.advance(1);
       expect(f.store.saveAnswer(record(f.store, { question: `Answered ${i}` }), stored())).toBe(true);
     }
-    expect(f.store.list().questions).toHaveLength(WAITING_QUESTION_LIMITS.answeredPerConnection);
-    expect(f.store.get(oldest.id)).toBeUndefined();
-    expect(f.store.list().olderRemoved).toBe(true);
+    // No count or byte limit drops anything (owner ruling, 2026-10-29).
+    expect(f.store.list().questions).toHaveLength(121);
+    expect(f.store.get(oldest.id)).toBeDefined();
+    expect(f.store.list().olderRemoved).toBe(false);
     expect(statSync(f.dbPath).mode & 0o777).toBe(0o600);
     expect(statSync(join(f.dir, 'data')).mode & 0o777).toBe(0o700);
   });
@@ -457,28 +458,14 @@ test('re-asking an answered row refreshes only its timestamp and preserves its o
   expect((await api.handle({ action: 'open', token }, 'owner')).status).toBe(200);
 });
 
-test('per-connection automatic budget survives reopen and re-asks; queued rows resume next hour', async () => {
+test('one connection\'s questions are all answered: automatic answers have no hourly allowance', async () => {
   const f = fixture();
   let calls = 0;
   const api = service(f, { answer: async () => { calls++; return result(); } });
-  for (let i = 0; i < WAITING_QUESTION_LIMITS.autoAnswersPerWindow; i++) {
-    record(f.store, { question: `Budget ${i}` });
-    await api.tick();
-  }
-  const queued = record(f.store, { question: 'Queued question' });
-  await api.tick();
-  expect(calls).toBe(5);
-  expect(api.waiting()?.questions.find(q => q.id === queued.id)?.state).toBe('queued');
-  expect((await api.handle({ action: 'read', id: queued.id }, 'owner')).body.status).toBe('queued');
-  const second = openWaitingPrivateQuestionStore(f.dbPath, { now: f.now });
-  cleanups.push(() => second.close());
-  expect(second.reserveAutoAnswer(record(second, { question: 'Queued question' }))).toBe(false);
-  const other = record(f.store, { question: 'Other connection' }, 'another-agent');
-  await api.tick();
-  expect(f.store.get(other.id)?.result).toBeDefined();
-  f.advance(WAITING_QUESTION_LIMITS.autoAnswerWindowMs);
-  await api.tick();
-  expect(f.store.get(queued.id)?.result).toBeDefined();
+  const refs = Array.from({ length: 12 }, (_, i) => record(f.store, { question: `Question ${i}` }));
+  for (let i = 0; i < refs.length; i++) await api.tick();
+  expect(calls).toBe(12);
+  for (const ref of refs) expect(f.store.get(ref.id)?.result).toBeDefined();
 });
 
 test('metadata listing succeeds under a writer lock and never parses answer bodies', () => {
@@ -493,20 +480,6 @@ test('metadata listing succeeds under a writer lock and never parses answer bodi
     expect(listed.questions[0]).toMatchObject({ id: ref.id, hasResult: true });
     expect(listed.questions[0]!.result).toBeUndefined();
   } finally { lock.exec('ROLLBACK'); lock.close(); }
-});
-
-test('byte quota evicts only the saving connection even below the row quota', () => {
-  const f = fixture();
-  const victim = record(f.store, { question: 'Another connection answer' }, 'other');
-  f.store.saveAnswer(victim, stored());
-  for (let i = 0; i < 15; i++) {
-    f.advance(1);
-    f.store.saveAnswer(record(f.store, { question: `Large ${i}` }), { ...stored(), answer: 'x'.repeat(100 * 1024) });
-  }
-  expect(f.store.get(victim.id)?.result?.answer).toBe(ANSWER);
-  const own = f.store.list().questions.filter(q => q.connectionId === 'synthetic-agent');
-  expect(own.length).toBeLessThan(15);
-  expect(own.length).toBeGreaterThan(0);
 });
 
 test('an unavailable open check hides the source but preserves answer, generation and token for retry', async () => {
@@ -537,4 +510,24 @@ test('classification holds automatic answers visibly queued without spending the
   sorting = false;
   await api.tick();
   expect(f.store.get(ref.id)?.result).toBeDefined();
+});
+
+test('a question queued behind classification for a minute makes classification yield until its answer is done', async () => {
+  const f = fixture(); const ref = record(f.store);
+  const gate = deferred<ReturnType<typeof result>>();
+  let sorting = true;
+  const api = service(f, { backgroundBusy: () => sorting, answer: async () => gate.promise });
+  await api.tick();
+  expect(api.overdue()).toBe(false);
+  f.advance(AUTO_ANSWER_DEFER_MS);
+  // The sniffer reads this between questions and stops its pass.
+  expect(api.overdue()).toBe(true);
+  sorting = false;
+  const pass = api.tick();
+  // Still yielding while the answer runs, so classification cannot cut in between its model calls.
+  await until(() => api.overdue());
+  gate.resolve(result());
+  await pass;
+  expect(f.store.get(ref.id)?.result).toBeDefined();
+  expect(api.overdue()).toBe(false);
 });

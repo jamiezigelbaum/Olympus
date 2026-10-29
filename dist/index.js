@@ -6770,6 +6770,10 @@ import { dirname as dirname17, join as join25, resolve as resolve8 } from "node:
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID as randomUUID6 } from "node:crypto";
+function isStandaloneEngineProcess(env) {
+  const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+  return (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine");
+}
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
   if (options.inlineConfig !== undefined) {
@@ -6787,8 +6791,7 @@ function loadSovereigntyEngine(options = {}) {
         return false;
       }
     };
-    const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
-    const standaloneDefault = (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
+    const standaloneDefault = isStandaloneEngineProcess(env) && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {
         const backup = migratePrivateMeaningSearch(configPath);
@@ -14391,7 +14394,7 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "A folder you chose is in Desktop, Documents, Downloads, iCloud Drive or another disk, which Olympus cannot open on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -17857,6 +17860,110 @@ var init_tier_placement = __esm(() => {
   init_tier_classifier();
 });
 
+// src/workers/source-index/built-in-reasoning/manifest.ts
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+function ggmlOrgAsrFile(name, bytes, sha256) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
+var init_manifest2 = __esm(() => {
+  GIB = 1024 ** 3;
+  QWEN35_2B = {
+    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+    displayName: "Qwen3.5 2B",
+    sizeClass: "small",
+    baseRepository: "Qwen/Qwen3.5-2B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-2B-GGUF",
+    revision: QWEN35_2B_REVISION,
+    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_4B = {
+    modelId: "qwen3.5-4b-q4_k_m-e87f176",
+    displayName: "Qwen3.5 4B",
+    sizeClass: "standard",
+    baseRepository: "Qwen/Qwen3.5-4B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-4B-GGUF",
+    revision: QWEN35_4B_REVISION,
+    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_9B = {
+    modelId: "qwen3.5-9b-q4_k_m-3885219",
+    displayName: "Qwen3.5 9B",
+    sizeClass: "large",
+    baseRepository: "Qwen/Qwen3.5-9B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-9B-GGUF",
+    revision: QWEN35_9B_REVISION,
+    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+  LLAMA_SERVER_RUNTIME = {
+    release: LLAMA_CPP_RELEASE,
+    license: "MIT",
+    archives: [
+      {
+        platform: "darwin-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        bytes: 11827796,
+        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+        gpu: true
+      },
+      {
+        platform: "linux-x64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        bytes: 17544875,
+        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+        gpu: false
+      },
+      {
+        platform: "linux-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        bytes: 13590823,
+        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+        gpu: false
+      }
+    ]
+  };
+  QWEN3_ASR_06B = {
+    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+    displayName: "Qwen3-ASR 0.6B",
+    baseRepository: "Qwen/Qwen3-ASR-0.6B",
+    license: "Apache-2.0",
+    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+    revision: QWEN3_ASR_06B_REVISION,
+    files: [
+      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+    ],
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 4096
+  };
+});
+
 // src/workers/classification/delphi-scorer.ts
 var SCORER_SYSTEM_PROMPT;
 var init_delphi_scorer = __esm(() => {
@@ -17902,9 +18009,10 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, INSTRUCTION_VERBS, OBJECT_GLUE, SNIFFER_SYSTEM_PROMPT, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
+var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, INSTRUCTION_VERBS, OBJECT_GLUE, SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
+  init_manifest2();
   init_engine();
   init_delphi_scorer();
   init_sniffer_store();
@@ -17954,6 +18062,31 @@ var init_sniffer = __esm(() => {
     `{"verdicts":[{"i":1,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map((c) => `"${c}"`).join("|")},"ownRecord":true|false,"privateKind":${SNIFFER_PRIVATE_KINDS.map((c) => `"${c}"`).join("|")},"confidence":<number from 0 to 1>}]}`
   ].join(`
 `);
+  SNIFFER_RESPONSE_SCHEMA = {
+    type: "object",
+    properties: {
+      verdicts: {
+        type: "array",
+        minItems: 1,
+        maxItems: 1,
+        items: {
+          type: "object",
+          properties: {
+            i: { type: "integer", minimum: 1, maximum: 1 },
+            tier: { enum: ["personal", "private"] },
+            category: { enum: [...SNIFFER_CATEGORIES] },
+            ownRecord: { type: "boolean" },
+            privateKind: { enum: [...SNIFFER_PRIVATE_KINDS] },
+            confidence: { type: "number", minimum: 0, maximum: 1 }
+          },
+          required: ["i", "tier", "category", "ownRecord", "privateKind", "confidence"],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ["verdicts"],
+    additionalProperties: false
+  };
   SNIFFER_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
   SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 });
@@ -18132,7 +18265,7 @@ var init_media_judge = __esm(() => {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
+var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_job_names();
   init_keyword_context();
@@ -18204,6 +18337,7 @@ var init_local_index = __esm(() => {
     ORDER BY i.item_pk, c.chunk_index;
   `
   };
+  NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
   lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_V4_ITEM_COLUMNS = [
     "item_pk",
@@ -18502,6 +18636,7 @@ var init_tier_move = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_embedding_ledger();
+  init_local_index();
   init_secrets_disposition();
   init_job_names();
   init_tier_placement();
@@ -22021,110 +22156,6 @@ var init_remote_vlm = __esm(() => {
   ].join(" ");
 });
 
-// src/workers/source-index/built-in-reasoning/manifest.ts
-function unslothQwen(size, revision, bytes, sha256) {
-  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
-  return {
-    name,
-    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
-    bytes,
-    sha256
-  };
-}
-function ggmlOrgAsrFile(name, bytes, sha256) {
-  return {
-    name,
-    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
-    bytes,
-    sha256
-  };
-}
-var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
-var init_manifest2 = __esm(() => {
-  GIB = 1024 ** 3;
-  QWEN35_2B = {
-    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
-    displayName: "Qwen3.5 2B",
-    sizeClass: "small",
-    baseRepository: "Qwen/Qwen3.5-2B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-2B-GGUF",
-    revision: QWEN35_2B_REVISION,
-    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_4B = {
-    modelId: "qwen3.5-4b-q4_k_m-e87f176",
-    displayName: "Qwen3.5 4B",
-    sizeClass: "standard",
-    baseRepository: "Qwen/Qwen3.5-4B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-4B-GGUF",
-    revision: QWEN35_4B_REVISION,
-    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_9B = {
-    modelId: "qwen3.5-9b-q4_k_m-3885219",
-    displayName: "Qwen3.5 9B",
-    sizeClass: "large",
-    baseRepository: "Qwen/Qwen3.5-9B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-9B-GGUF",
-    revision: QWEN35_9B_REVISION,
-    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-  LLAMA_SERVER_RUNTIME = {
-    release: LLAMA_CPP_RELEASE,
-    license: "MIT",
-    archives: [
-      {
-        platform: "darwin-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        bytes: 11827796,
-        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
-        gpu: true
-      },
-      {
-        platform: "linux-x64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        bytes: 17544875,
-        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
-        gpu: false
-      },
-      {
-        platform: "linux-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        bytes: 13590823,
-        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
-        gpu: false
-      }
-    ]
-  };
-  QWEN3_ASR_06B = {
-    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
-    displayName: "Qwen3-ASR 0.6B",
-    baseRepository: "Qwen/Qwen3-ASR-0.6B",
-    license: "Apache-2.0",
-    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
-    revision: QWEN3_ASR_06B_REVISION,
-    files: [
-      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
-      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
-    ],
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 4096
-  };
-});
-
 // src/workers/source-index/built-in-reasoning/install.ts
 var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
 var init_install = __esm(() => {
@@ -22955,17 +22986,9 @@ var init_waiting_private_questions = __esm(() => {
     questionBytes: 2048,
     localQuestionBytes: 8 * 1024,
     selectorBytes: 4096,
-    perConnection: 20,
-    total: 50,
-    totalBytes: 256 * 1024,
-    answeredPerConnection: 50,
-    answeredBytesPerConnection: 1024 * 1024,
-    autoAnswersPerWindow: 5,
-    autoAnswerWindowMs: 60 * 60000,
-    answeredTotal: 500,
-    answeredBytes: 16 * 1024 * 1024,
     answerBytes: 128 * 1024,
-    ttlMs: 7 * 24 * 60 * 60000
+    ttlMs: 7 * 24 * 60 * 60000,
+    reanswerAfterMs: 10 * 60000
   });
 });
 
@@ -27364,6 +27387,12 @@ var PROOF_HEADER = "X-Olympus-Owner-Proof";
 var FORM_PROOF = "_olympus_owner_proof";
 var STORAGE = "olympus-desktop-owner-v1";
 var TICKET_MS = 60000;
+var CLAIM_HEADER = "X-Olympus-Owner-Claim";
+var CODE_HEADER = "X-Olympus-Owner-Code";
+var APPROVAL_HEADER = "X-Olympus-Owner-Approval";
+var DECLINED_HEADER = "X-Olympus-Owner-Declined";
+var WAIT_STORAGE = "olympus-desktop-owner-wait-v1";
+var CLAIM_MS = 3 * 60000;
 var SESSION_MS = 12 * 60 * 60 * 1000;
 var DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open";
 var DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.";
@@ -27385,6 +27414,11 @@ function randomOwnerHostname() {
   return `${text2}.localhost`;
 }
 var secret = () => randomBytes4(32).toString("base64url");
+function matchCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const [a, b, c, d, e, f] = [...randomBytes4(6)].map((byte) => alphabet[byte & 31]);
+  return `${a}${b}${c}-${d}${e}${f}`;
+}
 function equal(a, b) {
   return typeof a === "string" && /^[A-Za-z0-9_-]+$/.test(a) && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
@@ -27487,11 +27521,11 @@ class OwnerOpenLimited extends Error {
   }
 }
 function confirmation() {
-  return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
+  return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><p id="code" hidden></p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
 (async function(){
- const message=document.getElementById('message'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
- let resuming=false, opening=false, waiting=false, poll, timeout;
- const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;confirm.disabled=opening;};
+ const message=document.getElementById('message'), code=document.getElementById('code'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
+ let resuming=false, opening=false, waiting=false, claim='', claiming=false, poll, timeout;
+ const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;claim='';code.hidden=true;confirm.disabled=opening;};
  async function resume(){
   if(resuming||!localStorage.getItem(key))return;
   resuming=true;
@@ -27500,6 +27534,18 @@ function confirmation() {
   }catch{resuming=false;}
  }
  function onStorage(event){if(event.key===key)void resume();}
+ // An Olympus window in another browser cannot share this page's storage: once
+ // the owner approves there (codes matching), the engine hands this claim its own proof.
+ async function collect(){
+  if(!claim||claiming||resuming)return;
+  claiming=true;
+  try{const r=await fetch('/owner-claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({claim})});
+   if(r.status===202||r.status===503)return;
+   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);await resume();return;}
+   const declined=r.headers.has(${JSON.stringify(DECLINED_HEADER)});stopWaiting();
+   message.textContent=declined?"The Olympus window said this wasn't you. Press Confirm it's you to try again.":"This confirmation expired or was replaced. Press Confirm it's you to try again.";
+  }catch{}finally{claiming=false;}
+ }
  confirm.onclick=async function(){
   if(opening||waiting)return;
   opening=true;confirm.disabled=true;
@@ -27507,12 +27553,14 @@ function confirmation() {
    if(!r.ok){message.textContent=r.status!==429?${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)}:r.headers.get(${JSON.stringify(OWNER_LIMIT_HEADER)})==='hourly'?${JSON.stringify(BROWSER_OPEN_LIMIT_MESSAGE)}:${JSON.stringify(BROWSER_OPEN_RECENT_MESSAGE)};return;}
    // A refused replacement must leave the current wait intact. Only a
    // successful open replaces its ticket and starts a fresh 60-second wait.
-   stopWaiting();waiting=true;confirm.disabled=true;
+   stopWaiting();waiting=true;confirm.disabled=true;claim=r.headers.get(${JSON.stringify(CLAIM_HEADER)})||'';
+   const approval=r.headers.get(${JSON.stringify(APPROVAL_HEADER)});if(approval)try{localStorage.setItem(${JSON.stringify(WAIT_STORAGE)},approval);}catch{}
+   const shown=r.headers.get(${JSON.stringify(CODE_HEADER)});if(shown){code.textContent='If the Olympus window asks, it shows this code: '+shown;code.hidden=false;}
    message.textContent='Approve in the Olympus window that just opened. This page continues by itself.';
    // Check storage after subscribing too: the opener may already have proved.
    addEventListener('storage',onStorage);
-   poll=setInterval(resume,1000);
-   timeout=setTimeout(()=>{stopWaiting();message.textContent='Open this page again from the Olympus window.';},${TICKET_MS});
+   poll=setInterval(()=>{void resume();void collect();},1000);
+   timeout=setTimeout(()=>{stopWaiting();message.textContent="This confirmation timed out. Press Confirm it's you to try again.";},${CLAIM_MS});
    await resume();
   }catch{message.textContent=${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)};}
   finally{opening=false;confirm.disabled=waiting;}
@@ -27527,11 +27575,31 @@ html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px -apple-s
 }
 function proofPage() {
   const response = page(`${openingView()}<script>
+// A page in another browser asked for this window. Its own browser keeps the
+// approval id, so a page in this browser continues by itself with no question.
+function approve(request,proof){return new Promise(function(done){
+ const wait=${JSON.stringify(WAIT_STORAGE)}, same=()=>{try{return localStorage.getItem(wait)===request.id;}catch{return false;}};
+ if(same()){done();return;}
+ const panel=document.createElement('div'), text=document.createElement('p'), code=document.createElement('p'), yes=document.createElement('button'), no=document.createElement('button');
+ text.textContent="A page in another browser is waiting for you to confirm it's you. Approve only if that page shows this code:";
+ code.id='approval-code';code.style.cssText='font-size:1.5rem;font-weight:600;letter-spacing:.1em';code.textContent=request.code;
+ yes.id='approve';yes.textContent='Approve';no.id='decline';no.textContent='Not me';no.style.marginLeft='.5rem';
+ panel.append(text,code,yes,no);document.querySelector('main').append(panel);
+ const message=document.getElementById('message'), opening=message.textContent;message.textContent='Olympus';message.hidden=true;
+ const finish=()=>{removeEventListener('storage',onStorage);panel.remove();message.textContent=opening;message.hidden=false;done();};
+ function onStorage(event){if(event.key===wait&&same())finish();}
+ addEventListener('storage',onStorage);
+ const answer=async approved=>{yes.disabled=no.disabled=true;
+  try{await fetch('/owner-approve',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json',${JSON.stringify(PROOF_HEADER)}:proof},body:JSON.stringify({id:request.id,approve:approved})});}catch{}
+  finish();};
+ yes.onclick=()=>answer(true);no.onclick=()=>answer(false);
+});}
 (async function(){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
  try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ if(result.approval)await approve(result.approval,result.proof);
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
  // header-only worker CSP directives cannot be carried through document.write.
@@ -27558,6 +27626,7 @@ class LinuxOwnerBridge {
   entryOrigin;
   tickets = new Map;
   sessions = [];
+  claim;
   lastOpen = { control: -Infinity, browser: -Infinity };
   browserOpens = [];
   closed = false;
@@ -27575,6 +27644,7 @@ class LinuxOwnerBridge {
   close() {
     this.closed = true;
     this.sessions = [];
+    this.claim = undefined;
     this.clearTicket();
   }
   clearTicket(ticket) {
@@ -27644,14 +27714,44 @@ class LinuxOwnerBridge {
     this.tickets.set(lane, ticket);
     ticket.timer = setTimeout(() => this.clearTicket(ticket), TICKET_MS);
     ticket.timer.unref();
+    if (lane === "browser") {
+      const claimSecret = secret();
+      this.claim = { secret: claimSecret, record: { hash: hashSecret(claimSecret), code: matchCode(), approvalId: secret(), ticket, expires: this.now() + CLAIM_MS, state: "waiting" } };
+    }
     try {
       await (this.options.openFile ?? openLinuxOwnerTicketFile)(path);
       if (!this.live())
         throw new Error("Graphical session ended.");
     } catch (error) {
+      if (this.claim?.record.ticket === ticket)
+        this.claim = undefined;
       this.clearTicket(ticket);
       throw error;
     }
+  }
+  cookieSession(request) {
+    const cookie = request.headers.get("cookie")?.split(";").map((v) => v.trim()).find((v) => v.startsWith(COOKIE + "="))?.slice(COOKIE.length + 1);
+    if (this.sessions.some((s) => s.expires <= this.now()))
+      this.sessions = this.sessions.filter((s) => s.expires > this.now()).slice(-15);
+    return this.sessions.find((s) => equalHash(cookie, s.cookieHash));
+  }
+  provenSession(request) {
+    const session = this.cookieSession(request);
+    return !!session && equalHash(request.headers.get(PROOF_HEADER), session.proofHash);
+  }
+  grantSession(dashboardCookies, extra) {
+    const cookie = secret(), proof = secret();
+    const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
+    this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-14), session];
+    const response = Response.json({ proof, ...extra }, { headers: {
+      "Set-Cookie": `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
+      "Cache-Control": "no-store",
+      "Clear-Site-Data": '"cache"',
+      "Content-Security-Policy": CSP
+    } });
+    for (const cookie2 of dashboardCookies)
+      response.headers.append("Set-Cookie", cookie2);
+    return response;
   }
   async handle(request, ownerRequestAdmitted) {
     if (!this.live())
@@ -27729,23 +27829,79 @@ class LinuxOwnerBridge {
         return refusal(503);
       }
       this.clearTicket(ticket);
-      const cookie2 = secret(), proof2 = secret();
-      const session2 = { cookieHash: hashSecret(cookie2), proofHash: hashSecret(proof2), expires: this.now() + SESSION_MS };
-      this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-14), session2];
-      const response2 = Response.json({ proof: proof2, target: ticket.target }, { headers: {
-        "Set-Cookie": `${COOKIE}=${cookie2}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
-        "Cache-Control": "no-store",
-        "Clear-Site-Data": '"cache"',
-        "Content-Security-Policy": CSP
-      } });
-      for (const cookie3 of dashboardCookies)
-        response2.headers.append("Set-Cookie", cookie3);
-      return response2;
+      const claim = this.claim?.record;
+      const asking = claim?.ticket === ticket && claim.state === "waiting" && claim.expires > this.now();
+      if (asking)
+        claim.state = "asked";
+      return this.grantSession(dashboardCookies, { target: ticket.target, ...asking ? { approval: { id: claim.approvalId, code: claim.code } } : {} });
+    }
+    if (url.pathname === "/owner-claim" && request.method === "POST") {
+      let body2;
+      try {
+        body2 = JSON.parse(await boundedBody(request, 1024));
+      } catch {
+        return refusal();
+      }
+      const claim = this.claim?.record;
+      if (!claim || claim.expires <= this.now() || !equalHash(body2.claim, claim.hash))
+        return refusal();
+      if (claim.state === "declined") {
+        this.claim = undefined;
+        const declined = refusal();
+        declined.headers.set(DECLINED_HEADER, "1");
+        return declined;
+      }
+      if (claim.state !== "approved")
+        return new Response(null, { status: 202, headers: { "Cache-Control": "no-store" } });
+      if (claim.collecting)
+        return restarting();
+      claim.collecting = true;
+      const current2 = () => this.claim?.record === claim && claim.expires > this.now();
+      let dashboardCookies;
+      try {
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (result === null) {
+          if (current2())
+            this.claim = undefined;
+          return refusal();
+        }
+        dashboardCookies = result;
+      } catch {
+        if (this.live() && current2()) {
+          claim.collecting = false;
+          return restarting();
+        }
+        return refusal(503);
+      }
+      if (!this.live() || !current2())
+        return refusal(503);
+      this.claim = undefined;
+      return this.grantSession(dashboardCookies, {});
+    }
+    if (url.pathname === "/owner-approve" && request.method === "POST") {
+      let body2;
+      try {
+        body2 = JSON.parse(await boundedBody(request, 1024));
+      } catch {
+        return refusal();
+      }
+      const claim = this.claim?.record;
+      if (!this.provenSession(request) || !claim || claim.state !== "asked" || claim.expires <= this.now() || !equal(body2.id, claim.approvalId))
+        return refusal();
+      claim.state = body2.approve === true ? "approved" : "declined";
+      return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
     }
     if (url.pathname === "/owner-open" && request.method === "POST") {
       try {
         await this.openTicket("/dashboard", "browser");
-        return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
+        const claim = this.claim;
+        const headers2 = new Headers({ "Cache-Control": "no-store" });
+        if (claim) {
+          headers2.set(CLAIM_HEADER, claim.secret);
+          headers2.set(CODE_HEADER, claim.record.code);
+          headers2.set(APPROVAL_HEADER, claim.record.approvalId);
+        }
+        return new Response(null, { status: 204, headers: headers2 });
       } catch (error) {
         if (!(error instanceof OwnerOpenLimited)) {
           const failed = page(`<p>${BROWSER_OPEN_FAILED_MESSAGE}</p>`, 503);
@@ -27762,10 +27918,7 @@ class LinuxOwnerBridge {
     }
     if (url.pathname === DESKTOP_OWNER_OPEN_PATH || url.pathname.startsWith("/owner-"))
       return refusal();
-    const cookie = request.headers.get("cookie")?.split(";").map((v) => v.trim()).find((v) => v.startsWith(COOKIE + "="))?.slice(COOKIE.length + 1);
-    if (this.sessions.some((s) => s.expires <= this.now()))
-      this.sessions = this.sessions.filter((s) => s.expires > this.now()).slice(-15);
-    const session = this.sessions.find((s) => equalHash(cookie, s.cookieHash));
+    const session = this.cookieSession(request);
     let proof = request.headers.get(PROOF_HEADER);
     let body;
     const binary = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() === "application/octet-stream";
@@ -31649,7 +31802,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   };
 }
 var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.";
-var EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.";
+var EMAIL_WORKER_HINT = "Run olympus engine status and olympus engine logs, then olympus engine restart. On a host without the engine, run olympus worker status, then olympus worker start.";
 var SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.";
 var SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.";
 var CREDENTIAL_HINT2 = "Run the matching olympus connect command again for each handle that needs reauthorization.";
@@ -31867,6 +32020,8 @@ async function ocrReadingCheck(deps) {
 }
 async function hostCheck(deps) {
   const facts = await deps.hostProbe();
+  if (facts.engine.installed && facts.legacyWorkerUnit)
+    return { name: "host", ok: false, detail: "A worker service from olympus worker install is installed beside the engine and competes with it for the same data and port.", hint: "Run olympus worker uninstall. The engine keeps running and owns the worker." };
   if (facts.engine.installed && (facts.engine.healthy === false || facts.engine.linger === false))
     return { name: "host", ok: false, detail: facts.engine.detail || "The Linux engine has not proved healthy and persistent.", hint: "Run olympus engine status and olympus engine logs. Repair configuration, then run systemctl --user reset-failed olympus-engine.service followed by olympus engine start." };
   const hosts = [];

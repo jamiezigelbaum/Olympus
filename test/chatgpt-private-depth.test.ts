@@ -24,7 +24,7 @@ import { NoPrivateEvidenceError, PRIVATE_ANSWER_META_KEY, type PrivateAnswerMode
 import { generatePanelKeyPair } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS, PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { SEARCH_TOOL, SOURCE_ANSWER_TOOL, callChatGptTool, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
-import { copyPrivateMatch } from '../src/workers/chatgpt/response-builder.ts';
+import { copyPrivateMatch, PRIVATE_CHECK_PENDING_NOTE } from '../src/workers/chatgpt/response-builder.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 
 /** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
@@ -212,7 +212,16 @@ describe('reading leading items in depth', () => {
       calls += 1;
       return { answer: 'x', citations: [], unanswered: [], modelId: 'm' };
     }, { readItem: async () => undefined });
-    await expect(panel.answerPrivately('q', [hit('a', 'a.pdf', 'SENTINEL_REFUSED_PASSAGE_4d1b')])).rejects.toBeInstanceOf(NoPrivateEvidenceError);
+    await expect(panel.answerPrivately('q', [hit('a', 'a.pdf', 'SENTINEL_REFUSED_PASSAGE_4d1b')])).rejects.toMatchObject({ reason: 'none_readable' });
+    expect(calls).toBe(0);
+    // Revoked by the live guard before synthesis instead: a fresh search may find another match.
+    const revoked = panelWith(async () => {
+      calls += 1;
+      return { answer: 'x', citations: [], unanswered: [], modelId: 'm' };
+    }, { eligible: async (items) => items.map(() => false), readItem: async () => ['deep a'] });
+    const thrown = await revoked.answerPrivately('q', [hit('a', 'a.pdf', 'passage a')]).catch((error: unknown) => error);
+    expect(thrown).toBeInstanceOf(NoPrivateEvidenceError);
+    expect(thrown).toMatchObject({ reason: 'revoked' });
     expect(calls).toBe(0);
 
     // Through the jobs: the claim fails, and the log says no evidence.
@@ -402,6 +411,28 @@ describe('a private match probe that is slow or fails', () => {
     expect(result.isError).not.toBe(true);
     expect((result._meta as Record<string, unknown> | undefined)?.[PRIVATE_ANSWER_META_KEY]).toEqual({ v: 1, count: 0, state: 'none' });
     expect(lines).toEqual(['[chatgpt] private match probe timed_out stage=search timeout_ms=30']);
+    // Never silent: the model says any Private answer will wait on the computer.
+    expect((result.structuredContent as { notes: string[] }).notes).toContain(PRIVATE_CHECK_PENDING_NOTE);
+    expect(JSON.stringify(result.content)).toContain('waiting in Olympus on their computer');
+  });
+
+  test('a probe that matches after its deadline still leaves the question waiting on the computer', async () => {
+    const lines: string[] = [];
+    const recorded: unknown[] = [];
+    let finish: (value: { count: number; evidence: [] }) => void = () => {};
+    const slow = new Promise<{ count: number; evidence: [] }>((resolve) => { finish = resolve; });
+    const waitingQuestions = () => ({
+      ticket: (connectionId: string) => ({ connectionId }),
+      record: (ticket: unknown, input: unknown) => { recorded.push({ ticket, input }); return { id: 'w1', generation: 1, connectionId: 'conn-1' }; },
+    }) as never;
+    const ctx = { caller: { surface: 'remote', connectionId: 'conn-1' } } as unknown as OperationContext;
+    const result = await callChatGptTool(SEARCH_TOOL.name, { question: QUESTION }, ctx, { ...options(() => slow, lines), waitingQuestions });
+    expect((result._meta as Record<string, unknown> | undefined)?.[PRIVATE_ANSWER_META_KEY]).toEqual({ v: 1, count: 0, state: 'none' });
+    expect(recorded).toEqual([]);
+    finish({ count: 2, evidence: [] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(recorded).toEqual([{ ticket: { connectionId: 'conn-1' }, input: { question: QUESTION, surface: 'chatgpt', state: 'waiting', detail: 'summary' } }]);
+    expect(lines[1]).toMatch(/^\[chatgpt\] private match probe matched_late stage=search elapsed_ms=\d+$/);
   });
 
   test('only tools that render the panel carry a panel outcome', async () => {

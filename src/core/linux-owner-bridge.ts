@@ -14,6 +14,14 @@ const PROOF_HEADER = 'X-Olympus-Owner-Proof';
 const FORM_PROOF = '_olympus_owner_proof';
 const STORAGE = 'olympus-desktop-owner-v1';
 const TICKET_MS = 60_000;
+// A waiting page in another browser: its claim, the code both windows show,
+// and the approval id its own browser keeps (same-browser windows need no approval).
+const CLAIM_HEADER = 'X-Olympus-Owner-Claim';
+const CODE_HEADER = 'X-Olympus-Owner-Code';
+const APPROVAL_HEADER = 'X-Olympus-Owner-Approval';
+const DECLINED_HEADER = 'X-Olympus-Owner-Declined';
+const WAIT_STORAGE = 'olympus-desktop-owner-wait-v1';
+const CLAIM_MS = 3 * 60_000;
 const SESSION_MS = 12 * 60 * 60 * 1000;
 export const DESKTOP_OWNER_OPEN_PATH = '/desktop-owner/open';
 export const DESKTOP_BRIDGE_REMEDY = 'Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.';
@@ -31,6 +39,12 @@ export function randomOwnerHostname(): string {
   return `${text}.localhost`;
 }
 const secret = () => randomBytes(32).toString('base64url');
+function matchCode(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  // 32 symbols, so each random byte's low five bits pick one without bias.
+  const [a, b, c, d, e, f] = [...randomBytes(6)].map(byte => alphabet[byte & 31]);
+  return `${a}${b}${c}-${d}${e}${f}`;
+}
 function equal(a: string | undefined | null, b: string): boolean {
   return typeof a === 'string' && /^[A-Za-z0-9_-]+$/.test(a) && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
@@ -135,11 +149,11 @@ class OwnerOpenLimited extends Error {
 }
 
 function confirmation(): Response {
-  return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
+  return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><p id="code" hidden></p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
 (async function(){
- const message=document.getElementById('message'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
- let resuming=false, opening=false, waiting=false, poll, timeout;
- const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;confirm.disabled=opening;};
+ const message=document.getElementById('message'), code=document.getElementById('code'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
+ let resuming=false, opening=false, waiting=false, claim='', claiming=false, poll, timeout;
+ const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;claim='';code.hidden=true;confirm.disabled=opening;};
  async function resume(){
   if(resuming||!localStorage.getItem(key))return;
   resuming=true;
@@ -148,6 +162,18 @@ function confirmation(): Response {
   }catch{resuming=false;}
  }
  function onStorage(event){if(event.key===key)void resume();}
+ // An Olympus window in another browser cannot share this page's storage: once
+ // the owner approves there (codes matching), the engine hands this claim its own proof.
+ async function collect(){
+  if(!claim||claiming||resuming)return;
+  claiming=true;
+  try{const r=await fetch('/owner-claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({claim})});
+   if(r.status===202||r.status===503)return;
+   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);await resume();return;}
+   const declined=r.headers.has(${JSON.stringify(DECLINED_HEADER)});stopWaiting();
+   message.textContent=declined?"The Olympus window said this wasn't you. Press Confirm it's you to try again.":"This confirmation expired or was replaced. Press Confirm it's you to try again.";
+  }catch{}finally{claiming=false;}
+ }
  confirm.onclick=async function(){
   if(opening||waiting)return;
   opening=true;confirm.disabled=true;
@@ -155,12 +181,14 @@ function confirmation(): Response {
    if(!r.ok){message.textContent=r.status!==429?${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)}:r.headers.get(${JSON.stringify(OWNER_LIMIT_HEADER)})==='hourly'?${JSON.stringify(BROWSER_OPEN_LIMIT_MESSAGE)}:${JSON.stringify(BROWSER_OPEN_RECENT_MESSAGE)};return;}
    // A refused replacement must leave the current wait intact. Only a
    // successful open replaces its ticket and starts a fresh 60-second wait.
-   stopWaiting();waiting=true;confirm.disabled=true;
+   stopWaiting();waiting=true;confirm.disabled=true;claim=r.headers.get(${JSON.stringify(CLAIM_HEADER)})||'';
+   const approval=r.headers.get(${JSON.stringify(APPROVAL_HEADER)});if(approval)try{localStorage.setItem(${JSON.stringify(WAIT_STORAGE)},approval);}catch{}
+   const shown=r.headers.get(${JSON.stringify(CODE_HEADER)});if(shown){code.textContent='If the Olympus window asks, it shows this code: '+shown;code.hidden=false;}
    message.textContent='Approve in the Olympus window that just opened. This page continues by itself.';
    // Check storage after subscribing too: the opener may already have proved.
    addEventListener('storage',onStorage);
-   poll=setInterval(resume,1000);
-   timeout=setTimeout(()=>{stopWaiting();message.textContent='Open this page again from the Olympus window.';},${TICKET_MS});
+   poll=setInterval(()=>{void resume();void collect();},1000);
+   timeout=setTimeout(()=>{stopWaiting();message.textContent="This confirmation timed out. Press Confirm it's you to try again.";},${CLAIM_MS});
    await resume();
   }catch{message.textContent=${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)};}
   finally{opening=false;confirm.disabled=waiting;}
@@ -177,11 +205,31 @@ html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px -apple-s
 }
 function proofPage(): Response {
   const response = page(`${openingView()}<script>
+// A page in another browser asked for this window. Its own browser keeps the
+// approval id, so a page in this browser continues by itself with no question.
+function approve(request,proof){return new Promise(function(done){
+ const wait=${JSON.stringify(WAIT_STORAGE)}, same=()=>{try{return localStorage.getItem(wait)===request.id;}catch{return false;}};
+ if(same()){done();return;}
+ const panel=document.createElement('div'), text=document.createElement('p'), code=document.createElement('p'), yes=document.createElement('button'), no=document.createElement('button');
+ text.textContent="A page in another browser is waiting for you to confirm it's you. Approve only if that page shows this code:";
+ code.id='approval-code';code.style.cssText='font-size:1.5rem;font-weight:600;letter-spacing:.1em';code.textContent=request.code;
+ yes.id='approve';yes.textContent='Approve';no.id='decline';no.textContent='Not me';no.style.marginLeft='.5rem';
+ panel.append(text,code,yes,no);document.querySelector('main').append(panel);
+ const message=document.getElementById('message'), opening=message.textContent;message.textContent='Olympus';message.hidden=true;
+ const finish=()=>{removeEventListener('storage',onStorage);panel.remove();message.textContent=opening;message.hidden=false;done();};
+ function onStorage(event){if(event.key===wait&&same())finish();}
+ addEventListener('storage',onStorage);
+ const answer=async approved=>{yes.disabled=no.disabled=true;
+  try{await fetch('/owner-approve',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json',${JSON.stringify(PROOF_HEADER)}:proof},body:JSON.stringify({id:request.id,approve:approved})});}catch{}
+  finish();};
+ yes.onclick=()=>answer(true);no.onclick=()=>answer(false);
+});}
 (async function(){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
  try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ if(result.approval)await approve(result.approval,result.proof);
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
  // header-only worker CSP directives cannot be carried through document.write.
@@ -215,6 +263,8 @@ export interface LinuxOwnerBridgeOptions {
 }
 interface Ticket { value: string; challenge: string; target: string; path: string; expires: number; claimed?: boolean; timer?: ReturnType<typeof setTimeout> }
 interface Session { cookieHash: string; proofHash: string; expires: number }
+/** The browser lane's one waiting page: approved in an Olympus window, then collected once by its claim. */
+interface Claim { hash: string; code: string; approvalId: string; ticket: Ticket; expires: number; state: 'waiting' | 'asked' | 'approved' | 'declined'; collecting?: boolean }
 const hashSecret = (value: string) => createHash('sha256').update(value).digest('hex');
 function equalHash(value: string | null | undefined, hash: string): boolean {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value)
@@ -226,6 +276,7 @@ export class LinuxOwnerBridge {
   readonly entryOrigin: string;
   private tickets = new Map<'control' | 'browser', Ticket>();
   private sessions: Session[] = [];
+  private claim: { secret: string; record: Claim } | undefined;
   private lastOpen = { control: -Infinity, browser: -Infinity };
   private browserOpens: number[] = [];
   private closed = false;
@@ -238,7 +289,7 @@ export class LinuxOwnerBridge {
   }
   private live(): boolean { return !this.closed && this.options.ready(); }
   close(): void {
-    this.closed = true; this.sessions = []; this.clearTicket();
+    this.closed = true; this.sessions = []; this.claim = undefined; this.clearTicket();
   }
   private clearTicket(ticket?: Ticket): void {
     for (const [lane, current] of this.tickets) {
@@ -293,10 +344,38 @@ export class LinuxOwnerBridge {
     const ticket: Ticket = { value, challenge, target, path, expires: this.now() + TICKET_MS };
     this.tickets.set(lane, ticket);
     ticket.timer = setTimeout(() => this.clearTicket(ticket), TICKET_MS); ticket.timer.unref();
+    // Made before the window opens, so its redemption always finds the claim. A new browser open replaces it.
+    if (lane === 'browser') {
+      const claimSecret = secret();
+      this.claim = { secret: claimSecret, record: { hash: hashSecret(claimSecret), code: matchCode(), approvalId: secret(), ticket, expires: this.now() + CLAIM_MS, state: 'waiting' } };
+    }
     try {
       await (this.options.openFile ?? openLinuxOwnerTicketFile)(path);
       if (!this.live()) throw new Error('Graphical session ended.');
-    } catch (error) { this.clearTicket(ticket); throw error; }
+    } catch (error) {
+      if (this.claim?.record.ticket === ticket) this.claim = undefined;
+      this.clearTicket(ticket); throw error;
+    }
+  }
+  private cookieSession(request: Request): Session | undefined {
+    const cookie = request.headers.get('cookie')?.split(';').map(v => v.trim()).find(v => v.startsWith(COOKIE + '='))?.slice(COOKIE.length + 1);
+    if (this.sessions.some(s => s.expires <= this.now())) this.sessions = this.sessions.filter(s => s.expires > this.now()).slice(-15);
+    return this.sessions.find(s => equalHash(cookie, s.cookieHash));
+  }
+  private provenSession(request: Request): boolean {
+    const session = this.cookieSession(request);
+    return !!session && equalHash(request.headers.get(PROOF_HEADER), session.proofHash);
+  }
+  private grantSession(dashboardCookies: readonly string[], extra: Record<string, unknown>): Response {
+    const cookie = secret(), proof = secret();
+    const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
+    this.sessions = [...this.sessions.filter(s => s.expires > this.now()).slice(-14), session];
+    const response = Response.json({ proof, ...extra }, { headers: {
+      'Set-Cookie': `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
+      'Cache-Control': 'no-store', 'Clear-Site-Data': '"cache"', 'Content-Security-Policy': CSP,
+    } });
+    for (const cookie of dashboardCookies) response.headers.append('Set-Cookie', cookie);
+    return response;
   }
   async handle(request: Request, ownerRequestAdmitted?: () => void): Promise<Response> {
     if (!this.live()) return refusal(503);
@@ -353,22 +432,55 @@ export class LinuxOwnerBridge {
       }
       if (!this.live() || !current()) { this.clearTicket(ticket); return refusal(503); }
       this.clearTicket(ticket); // successful redemption is now permanently spent
-      const cookie = secret(), proof = secret();
-      const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
-      this.sessions = [...this.sessions.filter(s => s.expires > this.now()).slice(-14), session];
-      const response = Response.json({ proof, target: ticket.target }, { headers: {
-        'Set-Cookie': `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
-        'Cache-Control': 'no-store', 'Clear-Site-Data': '"cache"', 'Content-Security-Policy': CSP,
-      } });
-      for (const cookie of dashboardCookies) response.headers.append('Set-Cookie', cookie);
-      return response;
+      const claim = this.claim?.record;
+      const asking = claim?.ticket === ticket && claim.state === 'waiting' && claim.expires > this.now();
+      if (asking) claim.state = 'asked';
+      return this.grantSession(dashboardCookies, { target: ticket.target, ...(asking ? { approval: { id: claim.approvalId, code: claim.code } } : {}) });
+    }
+    if (url.pathname === '/owner-claim' && request.method === 'POST') {
+      let body: { claim?: string };
+      try { body = JSON.parse(await boundedBody(request, 1024)); } catch { return refusal(); }
+      const claim = this.claim?.record;
+      if (!claim || claim.expires <= this.now() || !equalHash(body.claim, claim.hash)) return refusal();
+      if (claim.state === 'declined') {
+        this.claim = undefined;
+        const declined = refusal(); declined.headers.set(DECLINED_HEADER, '1'); return declined;
+      }
+      if (claim.state !== 'approved') return new Response(null, { status: 202, headers: { 'Cache-Control': 'no-store' } });
+      if (claim.collecting) return restarting();
+      claim.collecting = true; // exclusive, like a ticket's claim
+      const current = () => this.claim?.record === claim && claim.expires > this.now();
+      let dashboardCookies: readonly string[];
+      try {
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (result === null) { if (current()) this.claim = undefined; return refusal(); }
+        dashboardCookies = result;
+      } catch {
+        if (this.live() && current()) { claim.collecting = false; return restarting(); }
+        return refusal(503);
+      }
+      if (!this.live() || !current()) return refusal(503);
+      this.claim = undefined; // collected once
+      return this.grantSession(dashboardCookies, {});
+    }
+    if (url.pathname === '/owner-approve' && request.method === 'POST') {
+      let body: { id?: string; approve?: boolean };
+      try { body = JSON.parse(await boundedBody(request, 1024)); } catch { return refusal(); }
+      // Only a proven Olympus window answers, and only for the claim its own ticket was asked about.
+      const claim = this.claim?.record;
+      if (!this.provenSession(request) || !claim || claim.state !== 'asked' || claim.expires <= this.now() || !equal(body.id, claim.approvalId)) return refusal();
+      claim.state = body.approve === true ? 'approved' : 'declined';
+      return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
     }
     if (url.pathname === '/owner-open' && request.method === 'POST') {
       try {
         // This unauthenticated confirmation button can only open the dashboard.
         // Its limiter and pending ticket cannot replace or starve a CLI ticket.
         await this.openTicket('/dashboard', 'browser');
-        return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
+        const claim = this.claim;
+        const headers = new Headers({ 'Cache-Control': 'no-store' });
+        if (claim) { headers.set(CLAIM_HEADER, claim.secret); headers.set(CODE_HEADER, claim.record.code); headers.set(APPROVAL_HEADER, claim.record.approvalId); }
+        return new Response(null, { status: 204, headers });
       } catch (error) {
         if (!(error instanceof OwnerOpenLimited)) {
           // No window opened (launcher, session or socket failure): not the limit.
@@ -387,9 +499,7 @@ export class LinuxOwnerBridge {
     }
     // Private control endpoint is NEVER forwarded from TCP, even by an owner.
     if (url.pathname === DESKTOP_OWNER_OPEN_PATH || url.pathname.startsWith('/owner-')) return refusal();
-    const cookie = request.headers.get('cookie')?.split(';').map(v => v.trim()).find(v => v.startsWith(COOKIE + '='))?.slice(COOKIE.length + 1);
-    if (this.sessions.some(s => s.expires <= this.now())) this.sessions = this.sessions.filter(s => s.expires > this.now()).slice(-15);
-    const session = this.sessions.find(s => equalHash(cookie, s.cookieHash));
+    const session = this.cookieSession(request);
     let proof = request.headers.get(PROOF_HEADER);
     let body: string | ReadableStream<Uint8Array> | undefined;
     // Binary bodies (a dropped archive's pieces, up to the upload route's own cap) are never text: once the owner is

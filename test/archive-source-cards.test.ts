@@ -25,6 +25,7 @@ import { roamJson, roamPages } from './support/archive-fixtures-roam.ts';
 import { enexExport, evernoteNotes } from './support/archive-fixtures-evernote.ts';
 import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import { DASHBOARD_DISCONNECTED_DATA_KEPT } from '../src/workers/dashboard/vocabulary.ts';
+import { renderDashboardKeysPage } from '../src/workers/dashboard/pages/local.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -97,6 +98,31 @@ describe('the import-only sources the format registry names', () => {
     expect(evernote.map((entry) => ({ id: entry.source_id, label: entry.label, action: entry.connect_action.kind }))).toEqual([
       { id: 'evernote.notes', label: 'Evernote', action: 'oauth' },
     ]);
+  });
+});
+
+describe('Keys, for an import-only source (owner, 2026-10-29)', () => {
+  test('each row says the import is on the main page, from the card, and its button goes there and opens it', () => {
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: { generated_at: '2026-10-29T12:00:00.000Z', corpora: [] } as never,
+      sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+      now: new Date('2026-10-29T12:00:00.000Z'),
+    });
+    // The cards are on the main page before anything is imported.
+    const main = buildChatGptDashboardViewModel(view, {}).sources.map((source) => source.id);
+    expect(main).toEqual(expect.arrayContaining(['reflect.archive', 'roam.archive', 'archive.imports']));
+    const keys = renderDashboardKeysPage(view, { basePath: '/dashboard?token=dash_x' });
+    const row = (id: string) => {
+      const at = keys.indexOf(`data-source-id="${id}"`);
+      expect(at).toBeGreaterThan(0);
+      return keys.slice(at, keys.indexOf('</div>', at));
+    };
+    expect(row('reflect.archive')).toContain('Import your Reflect export from its card on the main page.');
+    expect(row('reflect.archive')).toContain('<a class="btn" href="/dashboard?token=dash_x#olympus-open=import.reflect.archive">Import an archive</a>');
+    expect(row('roam.archive')).toContain('<a class="btn" href="/dashboard?token=dash_x#olympus-open=import.roam.archive">Import an archive</a>');
+    expect(row('archive.imports')).toContain('under Other archives on the main page');
+    expect(row('archive.imports')).toContain('href="/dashboard?token=dash_x#olympus-open=import.archive.imports">Import another archive</a>');
+    expect(keys).not.toContain('on the dashboard. Olympus copies');
   });
 });
 

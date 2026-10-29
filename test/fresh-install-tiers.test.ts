@@ -286,6 +286,22 @@ describe('fresh install: Personal by default, flagged items wait, Secrets never 
     const noSensitive = loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET) });
     expect(resolveTierSnifferRuntime({ engine: noSensitive })).toEqual({ source: 'off', reason: 'no_private_lane' });
   });
+
+  test('on the standalone engine, local-only sorts with the built-in model unless the owner declared a classifier', () => {
+    const builtIn: BuiltInPrivateModel = { model: { complete: async () => ({ text: '', modelId: 'built_in' }) }, available: () => true };
+    const localOnly = loadSovereigntyPreset('local-only');
+    const engine = loadSovereigntyEngine({ inlineConfig: localOnly });
+    // The private host keeps its configured server (and the approval it already has).
+    expect(resolveTierSnifferRuntime({ engine, builtIn }).source).toBe('configured');
+    // A standalone install has no such server: waiting on its approval would hold every flagged item forever.
+    expect(resolveTierSnifferRuntime({ engine, builtIn, standaloneEngine: true })).toMatchObject({ source: 'built_in', lane: { profileId: 'built_in' } });
+    expect(resolveTierSnifferRuntime({ engine, standaloneEngine: true }).source).toBe('configured');
+    const poolLocal = engine.resolveAnalystPool({ trustDomain: 'secure_local' }).members.find((member) => member.profile.provider === 'local-openai-compatible')!;
+    const declared = loadSovereigntyEngine({ inlineConfig: { ...localOnly, modelProfiles: {
+      ...localOnly.modelProfiles, classifier: { ...poolLocal.profile, purpose: 'classification' },
+    } } });
+    expect(resolveTierSnifferRuntime({ engine: declared, builtIn, standaloneEngine: true })).toMatchObject({ source: 'configured', lane: { profileId: 'classifier' } });
+  });
 });
 
 describe('Public is retired on a fresh install', () => {
@@ -567,7 +583,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     // Read, no detector fired, Personal at once (no private model yet).
     expect(before.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({
       state: 'current', contentTier: 'private', decidedBy: 'default',
-      reasons: ['metadata:default:personal', 'content:no_raise', expect.stringMatching(/^content:sha256:[a-f0-9]{64}$/)],
+      reasons: ['metadata:default:personal', 'content:no_raise', expect.stringMatching(/^content:sha256:[a-f0-9]{64}$/), expect.stringMatching(/^content:names:[a-f0-9]{16}$/)],
     });
     expect(JSON.stringify((await olympusSearch(before, 'orchard')).result)).toContain('pruning plan');
 

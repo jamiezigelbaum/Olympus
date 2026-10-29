@@ -242,11 +242,14 @@ export async function checkPrivateEvidence(
 
 /**
  * Thrown by `answerPrivately` when none of the evidence it was given may be
- * read any more (a depth re-read found every picked item refused or gone):
- * the job ends with its no-evidence outcome, and no model was called.
+ * read any more: the job ends with its no-evidence outcome.
+ *  - `none_readable`: before any model call, every picked item was refused
+ *    or gone (a depth re-read). Searching again finds the same items.
+ *  - `revoked`: an item in a model call's prompt stopped being eligible
+ *    mid-answer; the others may still be, so a fresh search may answer.
  */
 export class NoPrivateEvidenceError extends Error {
-  constructor() {
+  constructor(readonly reason: 'none_readable' | 'revoked' = 'none_readable') {
     super('no private evidence may be read');
     this.name = 'NoPrivateEvidenceError';
   }

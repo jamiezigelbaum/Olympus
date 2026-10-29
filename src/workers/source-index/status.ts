@@ -557,6 +557,7 @@ function connectorStoreStatus(
       indexed_items: status.counts.files ?? status.counts.items,
       ...(status.counts.folders === undefined ? {} : { folders: status.counts.folders }),
       tombstoned_items: status.counts.tombstonedItems,
+      ...(status.counts.storedItems === undefined ? {} : { stored_items: status.counts.storedItems }),
       chunks: status.counts.chunks,
       embedded_chunks: forModel?.embeddedChunks ?? status.counts.embeddedChunks,
       sync_runs: status.counts.syncRuns,
@@ -797,6 +798,8 @@ function providerFromCorpusId(corpusId: string): string {
   if (parts[0] === 'secure_local' || parts[0] === 'public_safe' || parts[0] === 'internal') {
     if (parts[1] === 'email') return 'gmail';
     if (parts[1] === 'drive') return 'google_drive';
+    // `*.local.files` is the Files on this computer source, whose provider id is local_files (remote-result.ts).
+    if (parts[1] === 'local' && parts[2] === 'files') return 'local_files';
     return parts[1] ?? 'unknown';
   }
   return parts[0] || 'unknown';

@@ -74,6 +74,7 @@ import {
   DASHBOARD_CHATGPT_PAGE_COPY,
   DASHBOARD_CHATGPT_PICKER_COPY,
   DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
+  DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
   DASHBOARD_MANY_UNREADABLE_LABEL,
   dashboardUnreadableMoreLabel,
@@ -193,7 +194,11 @@ export interface ChatGptDashboardOptions {
    */
   embedding?: DashboardViewModelV1['models']['embedding'];
   /** The owner's privacy settings, counts only (olympus_privacy_get). Absent: not reported. */
-  privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
+  privacy?: {
+    configured: boolean; pendingCount: number; ruleCount: number;
+    /** The privacy check waits for the owner to approve its model (sniffer-service `awaiting_owner_approval`). */
+    classifierAwaitingApproval?: boolean;
+  };
   /**
    * The built-in private model (analyst-built-in.ts builtInPrivateModelStatus),
    * when it is on for this machine. It is the answer model shown when no
@@ -325,6 +330,16 @@ export function buildChatGptDashboardViewModel(
       id: 'privacy:setup',
       sentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
       fix: { label: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} },
+    });
+  }
+
+  // Approving the model that checks what is private is the owner's step on
+  // the computer; until then flagged items wait unseen, so it is never silent.
+  if (options.privacy?.classifierAwaitingApproval) {
+    needsYou.push({
+      id: 'privacy:classifier_approval',
+      sentence: DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.sentence,
+      fix: checkAgainFix(openOnComputer(undefined, 'models')),
     });
   }
 
@@ -508,14 +523,15 @@ function sourceEntry(
   }
   // Delete indexed data (owner, 2026-10-23): only once the source is
   // disconnected (the engine enforces it too) and there is indexed data left
-  // to delete. A source whose index is empty has nothing to offer.
+  // to delete. A source whose index is empty has nothing to offer. A
+  // disconnected source reads nothing, so its stored count speaks for it.
   // A paired-session source (guided_session: Telegram, WhatsApp) has no
   // Disconnect; its disconnect is Unpair. It qualifies only after a CLEAN
   // Unpair (the card's `unpaired` label, never an incomplete or unreadable
   // one), and the engine re-checks the durable record and the disk.
   const cleanlyUnpaired = definition.connect_action.kind === 'guided_session'
     && card.connection.label === DASHBOARD_UNPAIRED_LABEL;
-  if (notConnected && (disconnectable || cleanlyUnpaired) && card.coverage.indexed_items > 0) {
+  if (notConnected && (disconnectable || cleanlyUnpaired) && (card.coverage.stored_items ?? card.coverage.indexed_items) > 0) {
     menu.push({
       label: CHATGPT_SETUP_LABELS.deleteData,
       tool: DELETE_SOURCE_DATA_TOOL_NAME,
@@ -1345,6 +1361,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       ...(finite(card.coverage.unreadable_items)
         ? { unreadable_items: count(card.coverage.unreadable_items) }
         : {}),
+      ...(finite(card.coverage.stored_items) ? { stored_items: count(card.coverage.stored_items) } : {}),
     },
     ingestion_health: {
       coverage_percent: finite(card.ingestion_health.coverage_percent) ? card.ingestion_health.coverage_percent : 0,

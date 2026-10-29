@@ -13,6 +13,8 @@
 
 export type FixtureTier = 'personal' | 'private' | 'secrets';
 
+import type { ItemRow } from './upgrade.ts';
+
 export interface FixtureDocument {
   /** Readwise Reader document shape (v3 list) with the fields the connector reads. */
   id: string;
@@ -108,21 +110,23 @@ export const FIXTURE_ITEMS: readonly FixtureItem[] = [
     },
   },
   {
-    key: 'invoice',
+    // A Personal file is reference material, not one of the owner's own records: an invoice to the owner is their financial
+    // record, which the default policy (and the owner's, 2026-10-29: invoices, bills and receipts) keeps Private.
+    key: 'manual',
     tier: 'personal',
     file: true,
     document: {
-      id: 'rc-doc-invoice',
-      title: 'Invoice 2026-0417 from Brackenridge Plumbing (PDF)',
-      author: 'Brackenridge Plumbing',
+      id: 'rc-doc-manual',
+      title: 'Halvorsen K24 boiler service manual (PDF)',
+      author: 'Halvorsen Heating',
       category: 'pdf',
       location: 'later',
       tags: {},
-      source_url: 'https://example.invalid/invoice-0417.pdf',
+      source_url: 'https://example.invalid/halvorsen-k24-manual.pdf',
       created_at: '2026-10-04T09:00:00Z',
       updated_at: '2026-10-04T09:00:00Z',
-      summary: 'Invoice total 1,284.50 EUR due 15 November 2026.',
-      html_content: '<p>Invoice 2026-0417, Brackenridge Plumbing. Total 1,284.50 EUR, due 15 November 2026.</p>',
+      summary: 'Service the Halvorsen K24 boiler every 18 months; its pressure gauge should read 1.3 bar when cold.',
+      html_content: '<p>Halvorsen K24 boiler service manual. Have the boiler serviced every 18 months. When the system is cold the pressure gauge should read 1.3 bar.</p>',
     },
   },
 ];
@@ -156,11 +160,11 @@ export const SUITE_QUESTIONS: readonly SuiteQuestion[] = [
   {
     id: 'file-fact',
     kind: 'file',
-    text: 'How much is the Brackenridge Plumbing invoice and when is it due? Use my Olympus records.',
-    facts: ['1,284.50', '15 November 2026'],
+    text: 'How often should the Halvorsen K24 boiler be serviced, and what should its pressure read when cold? Use my Olympus records.',
+    facts: ['18 months', '1.3 bar'],
     privateFacts: [],
-    citedTitle: 'Invoice 2026-0417 from Brackenridge Plumbing',
-    expectation: 'The invoice total is 1,284.50 EUR and it is due on 15 November 2026.',
+    citedTitle: 'Halvorsen K24 boiler service manual',
+    expectation: 'The boiler should be serviced every 18 months and its pressure should read 1.3 bar when cold.',
   },
   {
     id: 'private-medical',
@@ -240,4 +244,21 @@ export function forbiddenMarkers(): Array<{ id: string; text: string; tier: 'pri
     { id: 'secret-marker', text: SECRET_MARKER, tier: 'secrets' },
     ...PRIVATE_FACTS.map((fact, index) => ({ id: `private-fact-${index + 1}`, text: fact, tier: 'private' as const })),
   ];
+}
+
+/**
+ * Each fixture item as the machine stored it: its id, the tier the fixture means, the ledger's content tier and what decided
+ * it, and the stores holding a live copy. Ids are the stand-in's synthetic ones; no content is read.
+ */
+export function fixtureItemTiers(items: unknown): string {
+  if (!Array.isArray(items)) return 'the stored items could not be read';
+  const rows = items as ItemRow[];
+  return FIXTURE_ITEMS.map((item) => {
+    const id = item.document.id;
+    const mine = rows.filter((row) => row.id === id);
+    if (mine.length === 0) return `${id} (meant ${item.tier}): not stored`;
+    const verdict = mine.find((row) => row.contentTier !== undefined || row.decidedBy !== undefined) ?? mine[0]!;
+    const live = mine.filter((row) => !row.tombstoned).map((row) => row.store);
+    return `${id} (meant ${item.tier}): ${verdict.contentTier ?? verdict.tier ?? '?'} by ${verdict.decidedBy ?? '?'}, in ${live.join(' + ') || 'no store'}`;
+  }).join('; ');
 }

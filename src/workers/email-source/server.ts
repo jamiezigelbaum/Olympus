@@ -132,6 +132,7 @@ import { DelphiClient } from '../../core/delphi.ts';
 import {
   describeSovereigntyPolicy,
   isPublicTierRetired,
+  isStandaloneEngineProcess,
   loadSovereigntyEngine,
   type SovereigntyEngine,
   type LoadSovereigntyOptions,
@@ -1462,6 +1463,22 @@ export function applyBuiltInPrivateAnalyst(
   return wired;
 }
 
+/**
+ * Whether the built-in model answers for this Private-pool analyst when its
+ * server is down, as applyBuiltInPrivateAnalyst wires it: a local member of a
+ * pool without Venice. Judged by install state, not by "prepared in this
+ * process": boot re-verifies the model while the first readiness check runs,
+ * and that check locked every source (#591).
+ */
+export function builtInBacksPrivateAnalyst(
+  id: string,
+  state: ReturnType<BuiltInAnalystModel['status']>['state'] | undefined,
+  members: readonly { id: string; profile: SovereigntyModelProfile }[],
+): boolean {
+  if (!state || state === 'failed') return false;
+  return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === 'venice');
+}
+
 /** Whether this computer's configured local answer model answers /models within a few seconds. */
 async function probeLocalAnalystService(olympusConfig: ReturnType<typeof loadConfig>): Promise<boolean> {
   try {
@@ -2343,6 +2360,7 @@ export async function main(): Promise<void> {
   const snifferRuntime = resolveTierSnifferRuntime({
     engine: sovereigntyEngine,
     ...(registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel()! } : {}),
+    standaloneEngine: isStandaloneEngineProcess(process.env),
   });
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
   if (snifferRuntime.source === 'off') {
@@ -2544,6 +2562,13 @@ export async function main(): Promise<void> {
       const internal = sovereigntyEngine.resolveEmbeddingProfile('internal');
       if (internal?.id === id) return internalPolicyEmbeddingProvider?.dimension;
       return undefined;
+    },
+    builtInAnswers: (id) => {
+      try {
+        return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members);
+      } catch {
+        return false;
+      }
     },
   });
   const getModelSetup = () => {
@@ -5506,7 +5531,12 @@ export async function main(): Promise<void> {
         state: selection.state,
       }));
       const browser = fileScopeBrowserFor(input.sourceId);
-      browser.checkApproval?.({ selections, wholeAccount: input.wholeAccount });
+      try {
+        browser.checkApproval?.({ selections, wholeAccount: input.wholeAccount });
+      } catch (error) {
+        // A choice the computer cannot read yet: a refusal with its own code, so the picker says why instead of "try again".
+        throw new EmailSourceWorkerError(409, 'folder_needs_helper', error instanceof Error ? error.message : String(error));
+      }
       const verifiedSelections = await browser.validateSelections(selections);
       const approval = fileSourceScopeAuthority.approve({
         sourceId: input.sourceId,
@@ -5858,19 +5888,12 @@ export async function main(): Promise<void> {
   // Turn on / Turn off remote access: the config change through the host's
   // own config write.
   if (authToken) {
-    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      // Under OpenClaw the Gateway writes. The standalone engine has no
-      // config writer yet: it says how to change engine.json instead of
-      // calling a Gateway that is not there.
-      setEnabled: remoteAccessHostKind === 'standalone'
-        ? async (enabled: boolean) => ({
-            ok: false as const,
-            status: 501,
-            code: 'config_write_unsupported',
-            message: `Set "remote": {"enabled": ${enabled}} in ~/.olympus/engine.json, then run: olympus engine restart`,
-          })
-        : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
-    });
+    // Under OpenClaw the Gateway writes. The standalone engine has no
+    // config writer yet: the panel says how to change engine.json instead of
+    // offering a button that could only be refused.
+    dashboardRemoteAccessControl = remoteAccessHostKind === 'standalone'
+      ? { manual: (enabled: boolean) => `To turn remote access ${enabled ? 'on' : 'off'}, set "remote": {"enabled": ${enabled}} in ~/.olympus/engine.json, then run: olympus engine restart` }
+      : createDashboardRemoteAccessControl({ setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }) });
   }
   // A background connection: a live remote agent that is not ChatGPT (the
   // owner's ChatGPT is the owner's own work). An unknown id is not one.
@@ -5969,7 +5992,7 @@ export async function main(): Promise<void> {
   let askAnonymouslyNow: ((input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>) | undefined;
   const localAnonymousAsk = (input: import('../../core/consult-ask.ts').ConsultAskInput) => {
     return askWithAnonymousInbox({ ...input, level: consultAskLevelOrSaved(input.level, readConsultSettings()) }, {
-      store: waitingQuestionStore, connectionId: '@local:You', local: true, isActive: connectionActive,
+      store: waitingQuestionStore, connectionId: '@local:You', isActive: connectionActive,
       ask: request => askAnonymouslyNow ? askAnonymouslyNow(request) : Promise.resolve({ ok: false, code: 'transport_unavailable', message: PRIVATE_ANSWERS_COPY.anonymousNotSetUp }),
     });
   };
@@ -6526,7 +6549,10 @@ export async function main(): Promise<void> {
     },
     privacy: () => {
       const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
-      return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
+      return {
+        configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length,
+        classifierAwaitingApproval: tierSnifferBacklog?.().awaitingOwnerApproval === true,
+      };
     },
   };
   const { withEngineBriefRoute } = await import('../engine-brief-route.ts');
@@ -6723,6 +6749,8 @@ export async function main(): Promise<void> {
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
         answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
+        // A waiting Inbox question past its deferral stops the pass, so its answer runs, then classification resumes.
+        shouldYield: () => localPrivateAnswers?.overdue() ?? false,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
         log: (line) => console.log(line),
         // Owner defaults 2026-10-01: the built-in private model is approved

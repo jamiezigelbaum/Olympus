@@ -814,6 +814,14 @@ describe('setup tools over the remote handler', () => {
         source_id: 'google_drive.docs', account_generation: 'gen-1', scope_revision: 'rev-1', whole_account_selected: true,
       });
       expect(whole.isError).toBe(true);
+      // A folder the computer cannot open yet says so, never "try again".
+      backendState.approveError = 'folder_needs_helper';
+      const refused = await call(client, 'olympus_scope_set', {
+        source_id: 'google_drive.docs', account_generation: 'gen-1', scope_revision: 'rev-1', selections: [],
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.structuredContent).toEqual({ error: 'folder_needs_helper' });
+      expect(JSON.stringify(refused.content)).toContain('Choose folders outside them');
       backendState.approveError = 'source_index_policy_violation';
       backendState.revision = 'rev-other';
       const conflict = await call(client, 'olympus_scope_set', {
@@ -1367,5 +1375,19 @@ describe('dashboard privacy field', () => {
     const none = buildChatGptDashboardViewModel(emptyView(), {});
     expect(none.privacy).toBeUndefined();
     expect(none.needsYou.some((item) => item.id === 'privacy:setup')).toBe(false);
+  });
+
+  test('a privacy check waiting on the owner to approve its model is in needsYou, never silent', () => {
+    const waiting = copyDashboardViewModel(buildChatGptDashboardViewModel(emptyView(), {
+      privacy: { configured: true, pendingCount: 4, ruleCount: 0, classifierAwaitingApproval: true },
+    }));
+    const item = waiting.needsYou.find((entry) => entry.id === 'privacy:classifier_approval');
+    expect(item?.sentence).toContain('olympus tier classifier approve --why');
+    expect(item?.fix.tool).toBe('olympus_dashboard');
+    expect(item?.fix.href).toContain('/open/fix/models/');
+    // The view's privacy field is unchanged: the approval is an ask, not a count.
+    expect(waiting.privacy).toEqual({ configured: true, pendingCount: 4, ruleCount: 0 });
+    const approved = buildChatGptDashboardViewModel(emptyView(), { privacy: { configured: true, pendingCount: 0, ruleCount: 0, classifierAwaitingApproval: false } });
+    expect(approved.needsYou.some((entry) => entry.id === 'privacy:classifier_approval')).toBe(false);
   });
 });

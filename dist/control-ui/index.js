@@ -77,7 +77,7 @@ function dashboardHostBridge(config, io) {
     };
     const own = { kind: config.kind, readOnly, links: config.links };
     if (initial && landing) {
-      own.landing = { sourceId: landing.sourceId };
+      own.landing = landing.import ? { sourceId: landing.sourceId, import: true } : { sourceId: landing.sourceId };
       landing = undefined;
     }
     context[config.contextKey] = own;

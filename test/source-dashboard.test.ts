@@ -91,6 +91,25 @@ describe('multi-source source dashboard', () => {
     expect(source.unreadable?.reasons).toEqual([{ code: 'privacy_check_missing', count: 2 }]);
   });
 
+  test('a disconnected source whose stored items its scope no longer reads still offers Delete indexed data', () => {
+    // test-omarchy 2026-10-29: after Disconnect the card read 0 items, so the
+    // menu had no Delete and the stored data could be removed only by the CLI.
+    const deleteOffered = (counts: Record<string, number>) => {
+      const status = fixtureStatus();
+      const internal = status.corpora[0]!;
+      if (!internal.configured) throw new Error('fixture');
+      internal.counts = { indexed_items: 0, items_with_text: 0, chunks: 0, embedded_chunks: 0, sync_runs: 1, tombstoned_items: 0, ...counts };
+      status.corpora = [internal];
+      const now = new Date('2026-07-02T12:00:00.000Z');
+      const view = buildSourceDashboardViewModel({ sourceIndexStatus: status, sovereigntyEngine: fixtureSovereigntyEngine(),
+        connectedHandleRegistry: { version: 1, handles: [] }, now });
+      const gmail = buildChatGptDashboardViewModel(view, { now }).sources.find(source => source.id === 'gmail.email')!;
+      return (gmail.menu ?? []).some(fix => fix.tool === 'olympus_delete_source_data');
+    };
+    expect(deleteOffered({ stored_items: 150 })).toBe(true);
+    expect(deleteOffered({})).toBe(false);
+  });
+
   test('an item whose text moved to the Private store counts once: there, not also where its names stay', () => {
     // Release check 2026-10-29: three items, two moved to Private, read as five.
     const status = fixtureStatus();

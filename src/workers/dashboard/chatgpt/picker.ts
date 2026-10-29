@@ -1387,7 +1387,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
         leave(fill(Q.saved, { source: p.label }), true);
         return;
       }
-      p.saveError = Q.saveFailed;
+      // A choice the computer cannot read yet says why; trying again would not help.
+      const refusal = result && result.isError && result.structuredContent && result.structuredContent.error === 'folder_needs_helper'
+        ? String((result.content && result.content[0] && result.content[0].text) || '') : '';
+      p.saveError = refusal || Q.saveFailed;
       kit.render(focus);
     }, () => {
       if (mine !== session || !p) return;
@@ -1501,12 +1504,15 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const now = effective(key);
     const selectable = !node || node.selectable !== false;
     const capped = !own && p.own.size >= MAX_RULES;
+    // The computer cannot open this folder yet: only Skip can be saved for it.
+    const unreadable = node && node.access && node.access.state === 'needs_helper' ? String(node.access.message || Q.cannotChoose) : '';
     return segControl(name, 'picker:seg:' + key + ':', {
       pressed: own,
       // An own choice a stricter parent overrides shows the winning choice beside it.
       inherited: own ? (now !== own ? now : '') : from.state,
       blocked: (state) => {
         if (!selectable) return Q.cannotChoose;
+        if (unreadable && state !== 'exclude') return unreadable;
         if (!allowed(key, state)) return fill(Q.notPossible, { parent: sourceName(from.from), state: (Q.statesLower as Any)[from.state] });
         if (capped) return fill(Q.capReached, { max: kit.count(MAX_RULES) });
         return '';
@@ -1623,6 +1629,11 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     label.title = node.name;
     nameParts(label, node.name, key, node);
     add(li, label, folderControl(key, node.name, node));
+    // Why Full and Names only are off, on the row itself rather than only on hover.
+    if (node.access && node.access.state === 'needs_helper' && node.access.message) {
+      li.className += ' has-note';
+      add(li, el('p', 'muted frow-note', String(node.access.message)));
+    }
     return li;
   }
 

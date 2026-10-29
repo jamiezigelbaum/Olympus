@@ -17,11 +17,12 @@
  * worker listens on an owner-only Unix socket that a bridge forwards to the port
  * a browser expects; on macOS the engine itself listens on that loopback port.
  */
+import { olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import { spawn, spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SourceFamily } from '../../src/core/source-index/types.ts';
@@ -397,10 +398,11 @@ async function settle(timeoutS: number): Promise<never> {
       last = snapshot(dash.json);
     } catch { /* engine busy */ }
     stable = isSettled(last, config, privateEmbeddedUnder(readPolicy()?.json ?? null)) ? stable + 1 : 0;
-    if (stable >= 2) emit({ ok: true, settled: true, polls, waitedMs: Date.now() - started, snapshot: last });
+    // Each stored item's tier and what decided it (synthetic ids, no content), so a tier miss names its item.
+    if (stable >= 2) emit({ ok: true, settled: true, polls, waitedMs: Date.now() - started, snapshot: last, items: readItems().items });
     await sleep(5_000);
   }
-  emit({ ok: false, settled: false, polls, waitedMs: Date.now() - started, snapshot: last ?? null });
+  emit({ ok: false, settled: false, polls, waitedMs: Date.now() - started, snapshot: last ?? null, items: readItems().items });
 }
 
 // ---------------------------------------------------------------------------
@@ -1740,7 +1742,58 @@ function collectLogs(outDir: string): never {
   written.push('doctor.json');
   const fakeLog = join(WORKDIR, 'fake-readwise.log');
   if (existsSync(fakeLog)) { writeFileSync(join(outDir, 'fake-readwise.log'), readFileSync(fakeLog)); written.push('fake-readwise.log'); }
+  writeFileSync(join(outDir, 'tier-decisions.json'), JSON.stringify(tierDecisions(), null, 1));
+  written.push('tier-decisions.json');
   emit({ ok: true, files: written });
+}
+
+/** The tier ledger and sniffer tables whose rows are content-free (tiers, flags, reason codes, digests, verdicts); the sniffer's queued material is left out. */
+const TIER_DIAGNOSTIC_TABLES: Record<string, { tables: readonly string[]; omit: readonly string[] }> = {
+  '.tier-ledger.sqlite': { tables: ['tier_items', 'tier_history', 'tier_copies'], omit: [] },
+  '.tier-sniffer.sqlite': { tables: ['sniffer_verdicts', 'sniffer_questions'], omit: ['material'] },
+};
+
+/**
+ * Every tier ledger and sniffer database under the data root, as rows, so a failed leg can tell an item still held for the model
+ * from one the model judged (2026-10-29: a Mac report could not). The report's marker scan still reads this file like any log.
+ */
+function tierDecisions(): Array<{ file: string; table: string; rows?: unknown[]; error?: string }> {
+  const out: Array<{ file: string; table: string; rows?: unknown[]; error?: string }> = [];
+  const root = olympusDataRoot();
+  const walk = (dir: string, depth: number): string[] => {
+    if (depth > 6 || !existsSync(dir)) return [];
+    const found: string[] = [];
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      const stat = lstatSync(path);
+      if (stat.isDirectory()) found.push(...walk(path, depth + 1));
+      else if (stat.isFile() && Object.keys(TIER_DIAGNOSTIC_TABLES).some((suffix) => name.endsWith(suffix))) found.push(path);
+    }
+    return found;
+  };
+  for (const path of walk(root, 0)) {
+    const spec = Object.entries(TIER_DIAGNOSTIC_TABLES).find(([suffix]) => path.endsWith(suffix))![1];
+    const file = path.slice(root.length + 1);
+    let db: Database | undefined;
+    try {
+      db = new Database(path, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000;');
+      for (const table of spec.tables) {
+        try {
+          const columns = (db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name).filter((name) => !spec.omit.includes(name));
+          if (columns.length === 0) continue;
+          out.push({ file, table, rows: db.query(`SELECT ${columns.map((name) => `"${name}"`).join(', ')} FROM ${table}`).all() });
+        } catch (error) {
+          out.push({ file, table, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    } catch (error) {
+      out.push({ file, table: '*', error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      db?.close();
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1769,14 +1822,14 @@ function readItems(): { items: ItemRow[] | null; error?: string } {
       if (!existsSync(itemsPath)) continue;
       const db = new Database(itemsPath, { readonly: true });
       db.exec('PRAGMA busy_timeout = 10000;');
-      let ledger = new Map<string, { metadataTier: string | null; contentTier: string | null }>();
+      let ledger = new Map<string, { metadataTier: string | null; contentTier: string | null; decidedBy: string | null }>();
       try {
         const ledgerPath = tierLedgerPathForStore(itemsPath);
         if (existsSync(ledgerPath)) {
           const ledgerDb = new Database(ledgerPath, { readonly: true });
           ledgerDb.exec('PRAGMA busy_timeout = 10000;');
           try {
-            ledger = new Map((ledgerDb.query('select provider_item_id as id, metadata_tier as m, content_tier as c from tier_items').all() as Array<{ id: string; m: string | null; c: string | null }>).map((r) => [r.id, { metadataTier: r.m, contentTier: r.c }]));
+            ledger = new Map((ledgerDb.query('select provider_item_id as id, metadata_tier as m, content_tier as c, decided_by as d from tier_items').all() as Array<{ id: string; m: string | null; c: string | null; d: string | null }>).map((r) => [r.id, { metadataTier: r.m, contentTier: r.c, decidedBy: r.d }]));
           } finally { ledgerDb.close(); }
         }
         for (const row of db.query('select provider_item_id as id, trust_tier as tier, tombstoned, content_hash as contentHash from items order by provider_item_id').all() as Array<{ id: string; tier: string | null; tombstoned: number | null; contentHash: string | null }>) {

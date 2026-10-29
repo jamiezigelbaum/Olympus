@@ -137,7 +137,7 @@ import {
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import { readThisComputerHandles } from './core/this-computer.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
-import { engineDataCustody, inspectEngine } from './core/engine-service.ts';
+import { engineDataCustody, engineServicePaths, inspectEngine, restartEngine } from './core/engine-service.ts';
 import {
   reachableLoopbackWorkerOrigin,
   readRemoteAccessStatus,
@@ -1822,6 +1822,7 @@ async function runWorkerCommand(args: string[]): Promise<void> {
   }
   if (command === 'install' || command === 'upgrade') {
     const parsed = parseWorkerInstallArgs(command, args.slice(1));
+    if (!parsed.dryRun) refuseWorkerServiceBesideEngine(parsed);
     const options = command === 'install' ? withWorkerInstallAuth(parsed) : parsed;
     const result = runWorkerLifecycle(command, options);
     const handler = command === 'install' && !options.dryRun ? linuxDesktopOpenHandler('install', options) : undefined;
@@ -1830,6 +1831,7 @@ async function runWorkerCommand(args: string[]): Promise<void> {
   }
   if (['status', 'start', 'stop', 'restart', 'uninstall'].includes(command)) {
     const actionOptions = parseWorkerActionArgs(args.slice(1));
+    if (command === 'start' || command === 'restart') refuseWorkerServiceBesideEngine(actionOptions);
     const workerHttp = command === 'status' ? await readWorkerHttpState() : undefined;
     const result = runWorkerLifecycle(
       command as Extract<WorkerLifecycleAction, 'status' | 'start' | 'stop' | 'restart' | 'uninstall'>,
@@ -1845,7 +1847,10 @@ async function runWorkerCommand(args: string[]): Promise<void> {
       }, null, 2));
       return;
     }
-    const handler = command === 'uninstall' ? linuxDesktopOpenHandler('uninstall', actionOptions) : undefined;
+    // The engine owns the olympus:// handler where it runs the worker: removing a leftover worker service keeps it.
+    const handler = command === 'uninstall' && !engineRunsWorkerHere(actionOptions)
+      ? linuxDesktopOpenHandler('uninstall', actionOptions)
+      : undefined;
     console.log(JSON.stringify(handler ? { ...result, open_handler: handler } : result, null, 2));
     return;
   }
@@ -1853,10 +1858,33 @@ async function runWorkerCommand(args: string[]): Promise<void> {
 }
 
 /**
+ * Where `olympus engine install` runs the worker, a second worker service
+ * competes with it for the same data and port: it exits in a loop and the
+ * engine's worker cannot become ready. Stop, status and uninstall stay open so
+ * one installed earlier can still be removed.
+ */
+function refuseWorkerServiceBesideEngine(options: { platform?: WorkerServicePlatform; homeDir?: string }): void {
+  if (!engineRunsWorkerHere(options)) return;
+  throw new OperationError(
+    'config_error',
+    'The Olympus engine already runs the worker on this computer; a separate worker service would compete with it for the same data and port. Use olympus engine status, olympus engine logs or olympus engine restart instead. To remove a worker service installed earlier, run olympus worker uninstall.',
+  );
+}
+
+/** Whether `olympus engine install` runs the worker on this computer (its service file is there). */
+function engineRunsWorkerHere(options: { platform?: WorkerServicePlatform; homeDir?: string }): boolean {
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'darwin' && platform !== 'linux') return false;
+  // An explicit --home names the whole layout, as the worker lifecycle reads it; no ambient XDG selectors.
+  const env = options.homeDir ? { HOME: options.homeDir } : process.env;
+  return existsSync(engineServicePaths({ env, platform }).plistPath);
+}
+
+/**
  * On a Linux desktop the worker service is how Olympus runs, so the
  * olympus:// link handler comes and goes with it (macOS's comes with
  * `olympus engine install`). A headless host (no display) gets none on
- * install; uninstall always removes one that is there.
+ * install; uninstall removes one that is there, unless the engine owns it.
  */
 function linuxDesktopOpenHandler(
   action: 'install' | 'uninstall',
@@ -2474,7 +2502,7 @@ async function runMessagingPairing(
   catch { throw new OperationError('invalid_params', 'Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.'); }
   const tell = (text: string) => writeSync(terminal, text);
   try {
-    tell(`Pairing ${source} privately on this machine. Each message is judged Personal, Private or Secret by what it says. No messages are captured until you approve the scope.\n`);
+    tell(`Pairing ${source} privately on this machine. Each message is judged Personal, Private or Secret by what it says.\n`);
     if (source === 'whatsapp') tell(`${WHATSAPP_UNOFFICIAL_CLIENT_NOTICE}\n`);
     const paired = await pairMessagingSource({
       source,
@@ -2482,30 +2510,25 @@ async function runMessagingPairing(
       ...(secretStore ? { secretStore } : {}),
       ...(registryPath ? { registryPath } : {}),
       whatsappQrMode: 'terminal',
+      // Every chat is read, with no question to answer (owner, 2026-10-29): typing a hundred chat numbers made no sense.
+      // Running the pairing is the approval; each message is still judged by what it says.
       requestCaptureScope: async ({ chats }): Promise<MessagingCaptureScopeApproval | undefined> => {
         if (source === 'telegram') {
-          if (chats.length === 0) { tell('No chats were available to select. Nothing will be captured.\n'); return undefined; }
-          chats.forEach((chat, index) => tell(`${index + 1}. ${chat.title.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '')}\n`));
-          const answer = await readSecretFromTerminal('Choose chat numbers separated by commas, or type CANCEL (input hidden): ');
-          if (answer.trim().toUpperCase() === 'CANCEL') return undefined;
-          const indices = answer.split(',').map((value) => Number(value.trim()) - 1);
-          if (indices.some((index) => !Number.isInteger(index) || index < 0 || index >= chats.length)) {
-            throw new OperationError('invalid_params', 'Chat selection was invalid; no capture scope was approved. Run pairing again to choose chats.');
-          }
-          return { source: 'telegram', explicitApproval: true, chatScopes: [...new Set(indices.map((index) => chats[index]!.chatScope))] };
+          if (chats.length === 0) { tell('No chats were available to read. Nothing will be captured.\n'); return undefined; }
+          tell(`Olympus reads all ${chats.length} of your most recent Telegram chats. Each message is still judged Personal, Private or Secret by what it says. A chat you start after pairing is read once you pair again.\n`);
+          return { source: 'telegram', explicitApproval: true, chatScopes: [...new Set(chats.map((chat) => chat.chatScope))] };
         }
-        tell('WhatsApp captures new messages delivered for the linked account while its bridge runs; this does not import the full historical archive.\n');
-        const answer = await readSecretFromTerminal('Type ALL to approve this account, or CANCEL to leave capture off (input hidden): ');
-        return answer.trim() === 'ALL' ? { source: 'whatsapp', explicitApproval: true, wholeAccount: true } : undefined;
+        tell('Olympus reads every WhatsApp chat on this account, from new messages delivered while its bridge runs; this does not import the full historical archive. Each message is still judged Personal, Private or Secret by what it says.\n');
+        return { source: 'whatsapp', explicitApproval: true, wholeAccount: true };
       },
     });
     if (!paired.registered) return paired;
     saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, registryPath), pairing: paired });
-    tell('Pairing and scope verified. Restarting the managed Olympus worker to start capture.\n');
-    const activation = runWorkerLifecycle('restart');
+    tell('Pairing and scope verified. Restarting the Olympus worker to start capture.\n');
+    const activation = restartCaptureWorker();
     return { ...paired, captureStarted: false, captureActivation: activation.ok ? 'requested' : 'needs_attention', next: activation.ok
       ? 'Open this source in the Olympus dashboard to monitor capture and initial indexing.'
-      : 'Pairing is saved. Ask your agent to repair the managed worker before capture can start.' };
+      : `Pairing is saved. Capture starts once the worker restarts: ${activation.next}` };
   } finally { closeSync(terminal); }
 }
 
@@ -2614,6 +2637,33 @@ function parseConnectOptions(args: string[]): {
     }
   }
   return options;
+}
+
+/**
+ * Restarts the worker that runs capture, so it reads a new capture grant. On a standalone install that is the
+ * engine's own worker: restarting the legacy worker unit left capture off and hit a job that cannot bind (#588).
+ */
+export function restartCaptureWorker(deps: {
+  platform?: NodeJS.Platform;
+  engineLoaded?: () => boolean;
+  restartEngine?: () => unknown;
+  restartWorker?: () => { ok: boolean };
+} = {}): { ok: boolean; next: string } {
+  const platform = deps.platform ?? process.platform;
+  const engineLoaded = deps.engineLoaded ?? (() => engineDataCustody(inspectEngine()) === 'loaded');
+  if ((platform === 'darwin' || platform === 'linux') && engineLoaded()) {
+    try {
+      (deps.restartEngine ?? restartEngine)();
+      return { ok: true, next: '' };
+    } catch (error) {
+      return { ok: false, next: `${error instanceof Error ? error.message : String(error)} Then run: olympus engine restart` };
+    }
+  }
+  try {
+    return { ok: (deps.restartWorker ?? (() => runWorkerLifecycle('restart')))().ok, next: 'run olympus worker restart.' };
+  } catch (error) {
+    return { ok: false, next: `${error instanceof Error ? error.message : String(error)} Then run: olympus worker restart` };
+  }
 }
 
 /** The supervised worker state delete custody reads, or `unknown` if unreadable. */

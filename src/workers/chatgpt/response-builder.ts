@@ -484,7 +484,16 @@ export interface AnswerResultOptions {
   privateMatch?: PrivateMatchSummary & { jobId?: string };
   /** No source is connected yet: an empty result says so instead of counting searched sources. */
   noSourcesConnected?: boolean;
+  /**
+   * The Private check outlasted its deadline and goes on on the computer: the
+   * model says, in one line, that any Private answer will wait there.
+   */
+  privateCheckPending?: boolean;
 }
+
+/** A Private check still running when the result went out: never silent about where its answer goes. */
+export const PRIVATE_CHECK_PENDING_NOTE = 'Olympus is still checking this question against the user\'s Private items on their computer. '
+  + 'Tell the user, in one short sentence, that if any match, the answer will be waiting in Olympus on their computer.';
 
 /** An empty search on a new install, before any source is connected. */
 export const NO_SOURCES_CONNECTED_TEXT = 'No sources are connected to Olympus yet, so there is nothing to search. '
@@ -735,6 +744,7 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   // A released answer with citations is evidence the model answers from.
   const privateNote = privateMatchNote(options.privateMatch, 0, !usedPrivate && shownCitations.length > 0);
   const notes = privateNote ? [privateNote] : privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
+  if (!privateNote && options.privateCheckPending) notes.push(PRIVATE_CHECK_PENDING_NOTE);
   const textParts = [answer];
   if (shownCitations.length > 0) {
     textParts.push('', 'Sources:', ...shownCitations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
@@ -856,6 +866,7 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   const privateNote = privateMatchNote(options.privateMatch, whole(coverageRecord.content_private_items), !nothingRead);
   if (privateNote) notes.push(privateNote);
   else if (privateMatched) notes.push(DASHBOARD_CHATGPT_VOCABULARY.privateMatches);
+  if (!privateNote && options.privateCheckPending) notes.push(PRIVATE_CHECK_PENDING_NOTE);
   const structured: SearchResult = { status: evidence.length > 0 ? 'found' : 'none', evidence, coverage, notes };
   const lines: string[] = [];
   if (evidence.length === 0) {
@@ -1320,6 +1331,7 @@ type SurfaceOnlyErrorCode =
   | 'not_connected'
   | 'not_linked'
   | 'picker_unavailable'
+  | 'folder_needs_helper'
   | 'confirm_whole_account'
   | 'privacy_owner_only'
   | 'embedding_change_needs_approval'
@@ -1368,6 +1380,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   delete_incomplete: 'Olympus couldn\'t finish deleting this source\'s indexed data. Try again; the engine is reopening its stores.',
   delete_unavailable: 'Olympus can\'t delete this source\'s indexed data from here right now. Nothing was deleted. Try again in a moment.',
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',
+  folder_needs_helper: 'Olympus cannot open Desktop, Documents, Downloads, iCloud Drive or other disks on this Mac yet, or a folder that holds them. Your choices are still here. Choose folders outside them, or drag files onto the dashboard.',
   confirm_whole_account: 'Choosing the whole account needs the owner\'s confirmation in the Olympus panel.',
   privacy_owner_only: 'Only the owner can remove a privacy rule or change what they said is private, in the Olympus panel.',
   embedding_change_needs_approval: 'Changing the search model re-indexes every source and needs the owner\'s approval on the computer.',

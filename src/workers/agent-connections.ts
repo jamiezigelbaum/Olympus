@@ -117,6 +117,8 @@ export interface DashboardAgentsView {
   connections: DashboardAgentConnection[];
   /** The connection database could not be opened; the list is unknown, not empty. */
   unavailable?: boolean;
+  /** This host cannot switch remote access from the dashboard: how the owner does it instead. */
+  remoteAccessManual?: string;
 }
 
 export interface DashboardAgentConnectionsBackend {
@@ -134,10 +136,11 @@ export type RemoteAccessConfigWrite =
   | { ok: true; unchanged?: boolean }
   | { ok: false; status: number; code: string; message: string };
 
-export interface DashboardRemoteAccessControl {
+export type DashboardRemoteAccessControl =
   /** Change `remote.enabled` through the host's own config path. */
-  setEnabled(enabled: boolean): Promise<RemoteAccessConfigWrite>;
-}
+  | { setEnabled(enabled: boolean): Promise<RemoteAccessConfigWrite> }
+  /** A host with no config writer: how the owner changes it, which the panel says instead of offering a button. */
+  | { manual(enabled: boolean): string };
 
 /**
  * The adapter from the relay's status (`olympus connections status`,
@@ -198,14 +201,18 @@ function relayNotConnected(
 
 export function dashboardAgentsView(backend: DashboardAgentConnectionsBackend): DashboardAgentsView {
   const remoteAccess = backend.remoteAccess();
+  const control = backend.remoteAccessControl;
+  // The switch the row would offer: on when off, off otherwise.
+  const manual = control && 'manual' in control ? { remoteAccessManual: control.manual(remoteAccess.state === 'off') } : {};
   let records: RemoteConnectionRecord[];
   try {
     records = backend.store()?.list() ?? [];
   } catch {
-    return { remoteAccess, connections: [], unavailable: true };
+    return { remoteAccess, connections: [], unavailable: true, ...manual };
   }
   return {
     remoteAccess,
+    ...manual,
     connections: records
       .filter((record) => record.revokedAt === null)
       .map((record) => ({
@@ -313,6 +320,7 @@ async function setRemoteAccess(
   if (!control) {
     return refusal(501, 'remote_access_control_not_supported', 'This Olympus cannot turn remote access on or off from the dashboard.');
   }
+  if ('manual' in control) return refusal(501, 'config_write_unsupported', control.manual(body.enabled));
   // A tunnel named in worker.env is outside plugin config: writing
   // remote.enabled would change nothing (off) or conflict with it (on).
   const before = currentAccess(backend);

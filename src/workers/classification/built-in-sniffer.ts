@@ -71,16 +71,27 @@ export type TierSnifferRuntime =
 export function resolveTierSnifferRuntime(input: {
   engine: Pick<SovereigntyEngine, 'config' | 'resolveAnalystPool'>;
   builtIn?: BuiltInPrivateModel;
+  /**
+   * The standalone engine (no OpenClaw host). Its local-only preset names the
+   * private host's local server, which nothing serves there, so a local lane
+   * taken from the Private pool would wait forever on an owner approval no
+   * screen shows. There the built-in model sorts instead, as it answers for
+   * that pool (#591). A model the owner declared for classification still wins.
+   */
+  standaloneEngine?: boolean;
 }): TierSnifferRuntime {
+  const builtInLane = (builtIn: BuiltInPrivateModel): TierSnifferRuntime => ({ source: 'built_in', lane: { ...BUILT_IN_SNIFFER_LANE,
+    ...(builtIn.cacheModelId ? { cacheModelId: builtIn.cacheModelId } : {}),
+  }, builtIn });
   try {
-    return { source: 'configured', lane: resolveSnifferLane(input.engine) };
+    const lane = resolveSnifferLane(input.engine);
+    if (input.standaloneEngine && input.builtIn && lane.kind === 'local' && lane.profile.purpose !== 'classification') {
+      return builtInLane(input.builtIn);
+    }
+    return { source: 'configured', lane };
   } catch (error) {
     if (!(error instanceof SnifferLaneRefusedError)) throw error;
-    if (error.reason === 'no_private_lane' && input.builtIn) {
-      return { source: 'built_in', lane: { ...BUILT_IN_SNIFFER_LANE,
-        ...(input.builtIn.cacheModelId ? { cacheModelId: input.builtIn.cacheModelId } : {}),
-      }, builtIn: input.builtIn };
-    }
+    if (error.reason === 'no_private_lane' && input.builtIn) return builtInLane(input.builtIn);
     return { source: 'off', reason: error.reason };
   }
 }

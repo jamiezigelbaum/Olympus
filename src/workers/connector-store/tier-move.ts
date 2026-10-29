@@ -44,13 +44,13 @@ import {
   type EmbeddingLedgerEntry,
 } from '../embedding-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
-import type { ConnectorStoreItemCopy } from './local-index.ts';
+import { TIER_MOVE_CONNECTOR_ID, type ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies, type SecretsDisposition } from './secrets-disposition.ts';
 import { extractionJobsDbPaths, oweExtractionRereadAfterTierMove } from '../file-extraction/job-names.ts';
 import { defaultStoreTrustTier } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
-export const TIER_MOVE_CONNECTOR_ID = 'olympus_tier_move';
+export { TIER_MOVE_CONNECTOR_ID };
 
 /** Reason code the Private-row re-home pass puts on the raises it queues (tier-row-rehome.ts). */
 export const ROW_REHOME_REASON = 'row_tier:private_rehome';

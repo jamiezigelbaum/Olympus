@@ -12,7 +12,7 @@ import { findChange, outline } from '../scripts/release-check/visual-boxes.ts';
 import { journeyChecks, runJourney, screenshotWithin, type ElementInfo, type Journey, type JourneyDriver, type PageEvents } from '../scripts/release-check/journey.ts';
 import { PROBE_SOURCE, describeTarget, type WireTarget } from '../scripts/release-check/probe.ts';
 import { JOURNEYS, selectJourneys } from '../scripts/release-check/journeys.ts';
-import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL, DASHBOARD_CHATGPT_PRIVACY_COPY as PRIVACY } from '../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL, DASHBOARD_CHATGPT_PRIVACY_COPY as PRIVACY, DASHBOARD_PRIVATE_ANSWERS_COPY as ASK } from '../src/workers/dashboard/vocabulary.ts';
 import { DEFAULT_TOLERANCE, SCREENS, compareImages, APPROVAL_FILE, approvalDigestOf, compareScreens, maskScript, normaliseDynamicText, screenName, visualChecks } from '../scripts/release-check/visual.ts';
 import { parseCli } from '../scripts/release-check/run.ts';
 import { buildReport, renderHtml, visualSection, type MachineReport } from '../scripts/release-check/report.ts';
@@ -617,6 +617,46 @@ describe('visual baselines', () => {
     expect(window.document.querySelector('p')!.textContent).toBe('Updated 0 min ago');
     expect(evalIn(window, maskScript())).toBe(0);
     expect(window.document.getElementById('rc-visual-mask')!.textContent).toContain('display:none');
+  });
+});
+
+/**
+ * The Inbox page on the host, as the delete journey needs it: rows the server lists, a Delete per row that removes it and records
+ * what the worker removed, and a reload that lists what the server holds then. "Not checked yet" rows the background re-check
+ * found nothing Private for are gone from the server by the reload, as in the product (waiting-private-questions.ts).
+ */
+class InboxDriver extends DomDriver {
+  constructor(private server: Array<{ id: string; unchecked?: boolean }>) { super({}); }
+  private render(): void {
+    const rows = this.server.map((row) => `<li data-pa-question="${row.id}"><span class="paq">${row.id}?</span><span class="pafrom"> · You${row.unchecked ? ` · ${ASK.unchecked}` : ''}</span><button type="button">${ASK.delete}</button></li>`).join('');
+    this.host.document.body.innerHTML = `<ul data-pa-list>${rows}</ul>`;
+    evalIn(this.host, PROBE_SOURCE);
+  }
+  async hasPanel(): Promise<boolean> { return false; }
+  async open(): Promise<void> { this.render(); }
+  async reload(): Promise<void> { this.server = this.server.filter((row) => !row.unchecked); this.render(); }
+  async click(frame: 'host' | 'panel', target: WireTarget): Promise<ElementInfo | null> {
+    const info = await super.click(frame, target);
+    if (!info) return null;
+    const first = this.host.document.querySelector('[data-pa-question]')!;
+    this.server = this.server.filter((row) => row.id !== first.getAttribute('data-pa-question'));
+    first.remove();
+    this.host.document.body.insertAdjacentHTML('beforeend', '<p data-pa-removed="1"></p>');
+    return info;
+  }
+}
+
+describe('the Inbox delete journey', () => {
+  const journey = JOURNEYS.find((candidate) => candidate.id === 'inbox-delete-one')!;
+  test('unchecked rows the re-check drops at the reload are not counted against the delete; a settled one must survive', async () => {
+    // 2026-10-28, Linux: 8 rows, one deleted (7), and the reload showed 4 because three "not checked yet" rows had been re-checked away.
+    const trace = await runJourney(new InboxDriver([{ id: 'a' }, { id: 'b', unchecked: true }, { id: 'c', unchecked: true }, { id: 'd' }]), journey, options());
+    expect(trace.steps.map((step) => step.ok)).toEqual([true, true, true]);
+  });
+  test('an Inbox whose answers below the first are all still being checked says so', async () => {
+    const trace = await runJourney(new InboxDriver([{ id: 'a' }, { id: 'b', unchecked: true }]), journey, options());
+    expect(trace.steps[0]!.ok).toBe(false);
+    expect(trace.steps[0]!.actual).toContain('every answer below the first is still being checked');
   });
 });
 

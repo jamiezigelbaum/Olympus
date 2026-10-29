@@ -165,30 +165,56 @@ for (const kind of ['chromium', 'firefox']) {
           expect(exchanged.status).toBe(200);
         } finally { await unproven.close(); }
       }
-      // A ticket proven in another browser profile cannot resume this page.
-      clockAdvance += 10_001;
-      console.log(`${kind}: separate-profile timeout starts`);
-      const otherProfile = await browser.newContext();
-      try {
-        const stranded = await otherProfile.newPage();
-        await stranded.goto(entry + '/connect/authorize?' + query);
-        // Use the real ticket lifetime in Firefox, avoiding a fake browser
-        // clock while also covering the actual timeout duration.
-        if (kind === 'chromium') await stranded.clock.install();
-        await stranded.locator('#confirm').click();
-        await stranded.waitForFunction(() => document.getElementById('message')?.textContent?.includes('This page continues by itself.'));
-        const elsewhere = await context.newPage();
-        await elsewhere.goto(pathToFileURL(ticketPath).href);
-        await elsewhere.waitForURL(bridge.origin + '/dashboard');
-        await elsewhere.waitForFunction(() => document.body.dataset.loaded === 'yes');
-        console.log(`${kind}: separate-profile ticket proved; checking timeout`);
-        if (kind === 'chromium') await stranded.clock.fastForward(60_000);
-        await stranded.waitForFunction(() => document.getElementById('message')?.textContent === 'Open this page again from the Olympus window.', undefined, { timeout: 65_000 });
-        expect(await stranded.locator('#confirm').isEnabled()).toBe(true);
-        expect(await stranded.locator('h1').textContent()).toBe("Confirm it's you on this computer");
-        expect(await stranded.evaluate(() => localStorage.getItem('olympus-desktop-owner-v1'))).toBeNull();
-        await elsewhere.close();
-      } finally { await otherProfile.close(); }
+      // A page in another browser profile cannot read this window's storage: the Olympus window asks,
+      // showing the waiting page's code, and only an approval there lets the page continue.
+      for (const approved of [true, false]) {
+        clockAdvance += 10_001;
+        console.log(`${kind}: separate-profile ${approved ? 'approval' : 'decline'} starts`);
+        const otherProfile = await browser.newContext();
+        try {
+          const waiting = await otherProfile.newPage();
+          const flowQuery = new URLSearchParams(query); flowQuery.set('state', `other-${approved}`);
+          await waiting.goto(entry + '/connect/authorize?' + flowQuery);
+          await waiting.locator('#confirm').click();
+          await waiting.waitForFunction(() => document.getElementById('code')?.textContent?.includes('it shows this code'));
+          const shown = (await waiting.locator('#code').textContent())!.match(/[A-Z2-9]{3}-[A-Z2-9]{3}/)![0];
+          const elsewhere = await context.newPage();
+          await elsewhere.goto(pathToFileURL(ticketPath).href);
+          await elsewhere.locator('#approval-code').waitFor();
+          expect(await elsewhere.locator('#approval-code').textContent()).toBe(shown);
+          // Unanswered, the waiting page holds no proof.
+          expect(await waiting.evaluate(() => localStorage.getItem('olympus-desktop-owner-v1'))).toBeNull();
+          await elsewhere.locator(approved ? '#approve' : '#decline').click();
+          await elsewhere.waitForURL(bridge.origin + '/dashboard');
+          await elsewhere.waitForFunction(() => document.body.dataset.loaded === 'yes');
+          if (approved) {
+            await waiting.locator('button[name="action"][value="approve"]').waitFor();
+            expect(await waiting.evaluate(() => !!localStorage.getItem('olympus-desktop-owner-v1'))).toBe(true);
+          } else {
+            await waiting.waitForFunction(() => document.getElementById('message')?.textContent?.includes("said this wasn't you"));
+            expect(await waiting.locator('#confirm').isEnabled()).toBe(true);
+            expect(await waiting.evaluate(() => localStorage.getItem('olympus-desktop-owner-v1'))).toBeNull();
+          }
+          await elsewhere.close();
+        } finally { await otherProfile.close(); }
+      }
+      // Left unanswered, the waiting page times out with a way to try again (fake clock: Chromium only).
+      if (kind === 'chromium') {
+        clockAdvance += 10_001;
+        const otherProfile = await browser.newContext();
+        try {
+          const stranded = await otherProfile.newPage();
+          await stranded.goto(entry + '/connect/authorize?' + query);
+          await stranded.clock.install();
+          await stranded.locator('#confirm').click();
+          await stranded.waitForFunction(() => document.getElementById('message')?.textContent?.includes('This page continues by itself.'));
+          await stranded.clock.fastForward(180_000);
+          await stranded.waitForFunction(() => document.getElementById('message')?.textContent?.startsWith('This confirmation timed out.'));
+          expect(await stranded.locator('#confirm').isEnabled()).toBe(true);
+          expect(await stranded.locator('h1').textContent()).toBe("Confirm it's you on this computer");
+          expect(await stranded.evaluate(() => localStorage.getItem('olympus-desktop-owner-v1'))).toBeNull();
+        } finally { await otherProfile.close(); }
+      }
       console.log(`${kind}: separate-profile timeout passed`);
       const oldOrigin = bridge.origin;
       // The worker disappears, but the host retains the SAME listening socket.

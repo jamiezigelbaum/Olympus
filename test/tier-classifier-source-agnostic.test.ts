@@ -68,6 +68,8 @@ const IMPORT_ALLOWLIST = new Set([
   './sniffer-store.ts',
   './tier-ledger.ts',
   './tier-rules.ts',
+  // The pinned built-in model list (pure data, no imports): which lanes are the small model.
+  '../source-index/built-in-reasoning/manifest.ts',
 ]);
 
 const SOURCE_NAMES = [

@@ -83,7 +83,7 @@ export interface MacPermissionsOptions {
  *  - `engine_helper`: the standalone engine, started through the signed helper:
  *    the Mac names "Olympus Engine".
  *  - `engine_without_helper`: the standalone engine with no helper installed
- *    (olympus engine install-helper fixes it).
+ *    (the signed helper app fixes it; release builds do not ship it yet).
  *  - `managed_worker`: the worker OpenClaw's Gateway supervises as its own
  *    LaunchAgent. It is never started through the helper, so installing the
  *    helper for the standalone engine does not change what the Mac names.
@@ -100,11 +100,11 @@ const OTHER_APP = 'the app that runs Olympus (the one your Mac named when it ask
 export const MAC_ACCESS_COPY = {
   needsPermission: 'Your Mac will ask before Olympus opens this folder.',
   waiting: 'Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.',
-  needsHelper: 'To open this folder, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then choose Try again.',
-  needsHelperWholeComputer: 'To read the whole computer, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then open this list again.',
+  needsHelper: 'Olympus cannot open this folder on this Mac yet. Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.',
+  needsHelperWholeComputer: 'Olympus cannot read the whole computer on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.',
   /** Olympus runs as OpenClaw's own worker: the helper is not part of that setup, so say what does work. */
-  needsHelperManagedWorker: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. To use it, run Olympus Engine instead ("olympus engine install", then "olympus engine install-helper"), or choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks.',
-  needsHelperManagedWorkerWholeComputer: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. To use it, run Olympus Engine instead ("olympus engine install", then "olympus engine install-helper"), or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.',
+  needsHelperManagedWorker: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. Choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.',
+  needsHelperManagedWorkerWholeComputer: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.',
   denied: (kind: GuardedFolderKind, app: string = ENGINE_APP) =>
     `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under ${app}. Then choose Try again.`,
   fullDiskAccess: (app: string = ENGINE_APP) =>

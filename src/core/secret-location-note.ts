@@ -9,6 +9,21 @@ export function secretLocationCoverageNote(count: number): string {
   return `${count} Secret(s) matched by location only; their contents are never read into an answer.`;
 }
 
+/**
+ * What an answer on this computer says when the question matched Secrets
+ * (owner, 2026-10-29: never "the evidence does not contain it"): that each
+ * is a Secret, that no AI is shown it, and where it is. `where` is the
+ * screened locator or title the secret-locations index releases, else the
+ * source alone. Never a byte of the item's content.
+ */
+export function secretLocationAnswer(locations: ReadonlyArray<{ where: string }>): string {
+  if (locations.length === 0) return '';
+  const lead = locations.length === 1
+    ? 'A matching item is stored as a Secret, so Olympus never shows it to an AI, this one included. Open it on this Mac:'
+    : `${locations.length} matching items are stored as Secrets, so Olympus never shows them to an AI, this one included. Open them on this Mac:`;
+  return [lead, ...locations.map((location) => `- ${location.where}`)].join('\n');
+}
+
 const NOTE_LINE = /^- \d+ Secret\(s\) matched by location only; their contents are never read into an answer\.$/;
 const NOTES_HEADING = 'Coverage notes:';
 

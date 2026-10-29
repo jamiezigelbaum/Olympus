@@ -41,7 +41,7 @@ export interface DashboardHostBridgeConfig {
    * Where an open link asked the panel to land (See why on one source),
    * said in the first `ui/initialize` answer only.
    */
-  landing?: { sourceId: string };
+  landing?: { sourceId: string; import?: true };
 }
 
 export interface DashboardHostBridgeIo {
@@ -92,7 +92,7 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
     };
     const own: Any = { kind: config.kind, readOnly, links: config.links };
     if (initial && landing) {
-      own.landing = { sourceId: landing.sourceId };
+      own.landing = landing.import ? { sourceId: landing.sourceId, import: true } : { sourceId: landing.sourceId };
       landing = undefined;
     }
     context[config.contextKey] = own;

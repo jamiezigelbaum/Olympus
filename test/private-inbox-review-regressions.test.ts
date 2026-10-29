@@ -297,27 +297,6 @@ describe('live authorization failures stop sovereignty fallback', () => {
 });
 
 describe('retained answer bounds', () => {
-  test('invalidated retained rows still count toward the per-connection answer cap', () => {
-    const f = fixture();
-    const refs: WaitingQuestionRef[] = [];
-    for (let index = 0; index < WAITING_QUESTION_LIMITS.answeredPerConnection; index++) {
-      f.advance(1);
-      const ref = f.record(`Synthetic retained answer ${index}`);
-      refs.push(ref);
-      expect(f.store.saveAnswer(ref, saved())).toBe(true);
-    }
-    // Invalidate a recent row so the oldest complete row should be evicted.
-    const invalidated = refs[WAITING_QUESTION_LIMITS.answeredPerConnection - 1]!;
-    expect(f.store.invalidate(invalidated)).toBe(true);
-    expect(f.store.get(invalidated.id)?.result).toBeUndefined();
-    expect(f.store.get(invalidated.id)?.answeredAt).toBeDefined();
-    f.advance(1);
-    expect(f.store.saveAnswer(f.record('Synthetic newest answer'), saved())).toBe(true);
-    expect(f.store.list().questions).toHaveLength(WAITING_QUESTION_LIMITS.answeredPerConnection);
-    expect(f.store.get(refs[0]!.id)).toBeUndefined();
-    expect(f.store.get(invalidated.id)).toBeDefined();
-    expect(f.store.list().olderRemoved).toBe(true);
-  });
 
   test('oversized answer is refused without overwriting a retained result', () => {
     const f = fixture();

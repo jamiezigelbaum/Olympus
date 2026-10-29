@@ -45,6 +45,12 @@ export function localInboxLabel(id: string): string | undefined {
 
 export const LOCAL_PRIVATE_ANSWERS_PATH = '/dashboard/private-answers';
 const TOKEN_TTL_MS = 30 * 60_000;
+/**
+ * How long an automatic answer defers to privacy classification. Beyond it the
+ * sniffer stops at its next question (overdue()): on a fresh install its
+ * backlog outlasts any reasonable wait (release check 2026-10-29: queued past 10 min).
+ */
+export const AUTO_ANSWER_DEFER_MS = 60_000;
 const MAX_TOKENS = 400;
 const MAX_QUESTION_CHARS = 2_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,64}$/;
@@ -112,6 +118,11 @@ export interface LocalPrivateAnswers {
   /** One page action, by the local control session `session`. */
   start(): void;
   tick(): Promise<void>;
+  /**
+   * An automatic answer has waited long enough that privacy classification
+   * should stop at its next question and let it run.
+   */
+  overdue(): boolean;
   close(): void;
   handle(body: Readonly<Record<string, unknown>>, session: string): Promise<LocalPrivateAnswersResponse>;
 }
@@ -228,6 +239,8 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   let timer: ReturnType<typeof setInterval> | undefined;
   let unsubscribe: (() => void) | undefined;
   const abort = new AbortController();
+  // An automatic answer in progress: classification keeps yielding between its model calls.
+  let autoAnswering = false;
   const store = () => { try { return options.store(); } catch { return undefined; } };
   const refOf = (q: WaitingQuestion): WaitingQuestionRef => ({ id: q.id, generation: q.generation, connectionId: q.connectionId });
   const active = (q: WaitingQuestion) => {
@@ -236,6 +249,8 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   const hidden = (q: WaitingQuestion) => q.surface === 'chatgpt' && (
     now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true
   );
+  const autoAnswerable = (q: WaitingQuestion) => q.path !== 'anonymous' && q.path !== 'venice' && !q.hasResult && !q.result
+    && q.state === 'waiting' && q.nextAttemptAt <= now() && !hidden(q) && active(q);
   const current = (q: WaitingQuestion) => {
     const fresh = store()?.get(q.id);
     return fresh && fresh.generation === q.generation && active(fresh) && !hidden(fresh) ? fresh : undefined;
@@ -300,14 +315,11 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         // Oldest first avoids starving a retry behind a busy connection.
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
           if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.()) break;
-          if (q.path === 'anonymous' || q.path === 'venice' || q.hasResult || q.result || q.state !== 'waiting' || q.nextAttemptAt > now() || hidden(q) || !active(q)) continue;
-          let modelCalled = false;
-          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q))) continue;
-          const reservedAt = now();
-          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal, onModelCall: () => { modelCalled = true; } }, true);
-          if (result.status === 'no_model' || result.status === 'model_downloading' || (result.status === 'failed' && !modelCalled)) {
-            currentStore.refundAutoAnswer?.(refOf(q), reservedAt);
-          }
+          if (!autoAnswerable(q)) continue;
+          // No allowance per connection (Jamie, 2026-10-29): every question an agent asks is answered.
+          autoAnswering = true;
+          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true)
+            .finally(() => { autoAnswering = false; });
           if (!current(q)) continue;
           if ((result.status === 'answered' && await eligible(result.read) === 'eligible') || result.status === 'not_found') {
             if (!current(q)) continue;
@@ -319,6 +331,15 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         }
       })().catch(() => undefined).finally(() => { pass = undefined; });
       return pass;
+    },
+    overdue() {
+      if (closed) return false;
+      if (autoAnswering) return true;
+      try {
+        const questions = store()?.list({ includeResults: false }).questions ?? [];
+        return questions.some(q => autoAnswerable(q)
+          && now() - Date.parse(q.askedAt) >= AUTO_ANSWER_DEFER_MS);
+      } catch { return false; }
     },
     close() {
       closed = true;
@@ -474,7 +495,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
  * Anonymous questions have no retrieval context, source identities or citations. */
 export async function askWithAnonymousInbox(
   input: import('../../core/consult-ask.ts').ConsultAskInput,
-  options: { deliveredToPanel?: boolean; local?: boolean; isActive?: (id: string) => boolean; store: () => WaitingQuestionStore | undefined; connectionId: string; ask: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult> },
+  options: { deliveredToPanel?: boolean; isActive?: (id: string) => boolean; store: () => WaitingQuestionStore | undefined; connectionId: string; ask: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult> },
 ): Promise<import('../../core/consult-ask.ts').ConsultAskResult> {
   if (options.deliveredToPanel) return options.ask(input);
   if (typeof input.question !== 'string' || !input.question.trim()) return { ok: false, code: 'transport_unavailable', message: 'Type a question first.' };
@@ -482,10 +503,6 @@ export async function askWithAnonymousInbox(
   const ref = store?.record(store.ticket(options.connectionId), { question: W.anonymousPending, surface: 'remote', state: 'waiting', path: 'anonymous' });
   if (!store || !ref) return { ok: false, code: 'transport_unavailable', message: W.inboxBeforeSend };
   const acknowledge = () => { try { store.acknowledge(ref); } catch { /* Closed/deleted store: never restore the row. */ } };
-  if (!options.local && !store.reserveAutoAnswer(ref, 'anonymous')) {
-    acknowledge();
-    return { ok: false, code: 'transport_unavailable', message: W.anonymousRateLimit };
-  }
   try {
     const result = await options.ask({ ...input, stillAuthorized: () => {
       try {
