@@ -156,7 +156,8 @@ describe('a pass through the tier lane', () => {
     expect(stored(storedNote.id)).toBeUndefined();
     const after = await sync.pass();
     expect(after.counts).toMatchObject({ notes_deleted: 0, notes_unchanged: 53 });
-  });
+    // Three passes over 55 notes through the HTTP fake take ~2s alone and pass 5s on a loaded CI runner.
+  }, 30_000);
 
   test('a reconnect to another account stops before deleting the stored notes, and the card says why', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
