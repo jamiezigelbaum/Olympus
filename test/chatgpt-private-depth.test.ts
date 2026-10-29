@@ -212,7 +212,16 @@ describe('reading leading items in depth', () => {
       calls += 1;
       return { answer: 'x', citations: [], unanswered: [], modelId: 'm' };
     }, { readItem: async () => undefined });
-    await expect(panel.answerPrivately('q', [hit('a', 'a.pdf', 'SENTINEL_REFUSED_PASSAGE_4d1b')])).rejects.toBeInstanceOf(NoPrivateEvidenceError);
+    await expect(panel.answerPrivately('q', [hit('a', 'a.pdf', 'SENTINEL_REFUSED_PASSAGE_4d1b')])).rejects.toMatchObject({ reason: 'none_readable' });
+    expect(calls).toBe(0);
+    // Revoked by the live guard before synthesis instead: a fresh search may find another match.
+    const revoked = panelWith(async () => {
+      calls += 1;
+      return { answer: 'x', citations: [], unanswered: [], modelId: 'm' };
+    }, { eligible: async (items) => items.map(() => false), readItem: async () => ['deep a'] });
+    const thrown = await revoked.answerPrivately('q', [hit('a', 'a.pdf', 'passage a')]).catch((error: unknown) => error);
+    expect(thrown).toBeInstanceOf(NoPrivateEvidenceError);
+    expect(thrown).toMatchObject({ reason: 'revoked' });
     expect(calls).toBe(0);
 
     // Through the jobs: the claim fails, and the log says no evidence.

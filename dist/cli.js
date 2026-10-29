@@ -137790,8 +137790,11 @@ function createBuiltInPrivateAnswerModel(options) {
       const selection = await panelSelection(question, liveRead, limits, scores ? async () => scores : undefined, signal);
       let picked = selection.items.map((position) => live[position]);
       const deepItems = new Map;
+      let pickedRevoked = false;
       if (options.readItem && picked.length > 0) {
+        const before = picked.length;
         picked = await admit(picked);
+        pickedRevoked = picked.length < before;
         const deep = await readInDepth(question, picked.map((index) => read.items[index]), picked.map(hitOf), full ? limits.deepEvidenceChars : selection.leading ? limits.leadingEvidenceChars : limits.summaryEvidenceChars, options.readItem, signal);
         const kept = deep.flatMap((item, position) => item ? [{ item, index: picked[position] }] : []);
         picked = kept.map((entry) => entry.index);
@@ -137805,11 +137808,14 @@ function createBuiltInPrivateAnswerModel(options) {
       {
         const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...siblings.map(hitOf), ...unreadableHits]);
         eligibleSiblings = siblings.filter((_, position) => ok[picked.length + position]);
+        const before = picked.length;
         picked = picked.filter((_, position) => ok[position]);
+        pickedRevoked ||= picked.length < before;
         unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
       }
-      if (hadReadable && picked.length === 0 && (readableMatch || unreadable === 0))
-        throw new NoPrivateEvidenceError;
+      if (hadReadable && picked.length === 0 && (readableMatch || unreadable === 0)) {
+        throw new NoPrivateEvidenceError(pickedRevoked ? "revoked" : "none_readable");
+      }
       const items = picked.map((index) => deepItems.get(index) ?? read.items[index]);
       try {
         observe?.evidence?.({
