@@ -53,8 +53,8 @@ export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // The archive hold (`holdUntilJudged`, 2026-10-23) keeps p6: it changes only
 // decisions in a lane that sets it, and no such lane existed before it, so no
 // recorded decision differs under it (docs/CONTRACTS.md change log).
-// p7 (2026-10-29): a picture the photo judge placed nearest a financial or
-// medical document is decided by the text read off it, held Private until
+// p7 (2026-10-29): a picture the photo judge placed nearest a text-decided
+// document (a medical one) is decided by the text read off it, held Private until
 // the privacy-safe model has read that text; with too little text it stays
 // Private on the picture. Pictures decided under p6 are judged again.
 export const TIER_CLASSIFIER_VERSION = '2026-10-29.p7';
@@ -364,7 +364,7 @@ export interface TierClassificationInput {
 export interface ImageJudgmentSignal {
   verdict: 'sensitive' | 'ordinary' | 'unjudged';
   category?: string;
-  /** An ordinary verdict on a picture of a financial or medical document: its text decides (media-judge.ts). */
+  /** An ordinary verdict on a picture of a text-decided document (a medical one): its text decides (media-judge.ts). */
   textDecides?: true;
 }
 
@@ -387,7 +387,7 @@ export const IMAGE_SENSITIVE_REASON_PREFIX = 'content:image_sensitive:';
  */
 export const IMAGE_ORDINARY_REASON = 'content:image_ordinary';
 /**
- * A picture the judge placed nearest a financial or medical document whose
+ * A picture the judge placed nearest a text-decided (medical) document whose
  * read text decides: `content:image_text_decides:<category>`. Its content is
  * held Private (`content:own_record:image_document`) until the privacy-safe
  * model has read the text, never Personal first.
@@ -940,7 +940,7 @@ function contentPass(args: {
   // An ordinary picture's text goes through the usual rules below, so an
   // account or card number read off it still makes it Private.
   //
-  // A picture of a financial or medical document is decided by its text,
+  // A picture of a text-decided (medical) document is decided by its text,
   // like any document, but held Private until the model has read it. With
   // too little text to judge, the picture's own verdict stands.
   const imageOrdinary = args.image === true && args.imageJudgment?.verdict === 'ordinary';

@@ -202,7 +202,9 @@ describe('the judge: thresholds and categories', () => {
   test('the closest sensitive description must beat the ordinary one by the margin', () => {
     const passport = judgeMediaScores(PASSPORT, 'j');
     expect(passport).toMatchObject({ verdict: 'sensitive', category: 'id_document', margin: 0.1 });
-    expect(judgeMediaScores(scores(0.6, { bank_card: 0.6 + MEDIA_JUDGE_THRESHOLDS.margin }), 'j')).toMatchObject({ verdict: 'sensitive', category: 'bank_card' });
+    for (const category of ['bank_card', 'financial_document'] as const) {
+      expect(judgeMediaScores(scores(0.6, { [category]: 0.6 + MEDIA_JUDGE_THRESHOLDS.margin }), 'j')).toMatchObject({ verdict: 'sensitive', category });
+    }
     // Just under the margin, with intimate far below: ordinary.
     const close = judgeMediaScores(scores(0.6, { medical_document: 0.639, intimate: 0.5 }), 'j');
     expect(close).toMatchObject({ verdict: 'ordinary', category: 'medical_document', margin: 0.039 });
@@ -210,8 +212,8 @@ describe('the judge: thresholds and categories', () => {
     expect(judgeMediaScores(ORDINARY, 'j').verdict).toBe('ordinary');
   });
 
-  test('a picture nearest a financial or medical document is left to its text, unless it is also near intimate', () => {
-    for (const category of ['financial_document', 'medical_document'] as const) {
+  test('a picture nearest a medical document is left to its text, unless it is also near intimate', () => {
+    for (const category of ['medical_document'] as const) {
       const judged = judgeMediaScores(scores(0.6, { [category]: 0.6 + MEDIA_JUDGE_THRESHOLDS.margin, intimate: 0.5 }), 'j');
       expect(judged).toMatchObject({ verdict: 'ordinary', category, reason: MEDIA_JUDGE_TEXT_DECIDES });
       expect(imageJudgmentSignal(judged)).toEqual({ verdict: 'ordinary', category, textDecides: true });

@@ -361,16 +361,22 @@ section consolidates and supersedes all other policy wording.
   misjudgments generally, not one at a time). The 2026-10-08 photo judge
   compared a picture with one description of an ordinary photo, so any
   picture of writing (the demo kit's whiteboard, slides, screenshots, notes)
-  could land nearest the financial or medical document description and rest
-  Private on the picture alone, whatever it said. Financial and medical
-  documents are named by what they say, so a picture nearest one of them is
-  now `ordinary` with the reason `text_decides`, and the classifier decides
+  could land nearest the medical document description and rest Private on
+  the picture alone, whatever it said (calibration with the real model,
+  `eval/photo-judge/`: both whiteboards; rewording the ordinary description
+  cleared all 17 writing pictures but missed 6 to 7 of 22 sensitive
+  specimens, so the descriptions are unchanged). A medical document is named
+  by what it says, so a picture nearest it is now `ordinary` with the reason
+  `text_decides`, and the classifier decides
   it by the text read off it: held Private (an own-record hold, never
   `content:personal_first`) until the privacy-safe model reads that text,
   Private at once on a structured identifier, and Private on the picture
   (`content:image_sensitive:<category>`) when fewer than eight words were
-  read. With no model the hold never lifts. Identity documents, bank cards
-  and intimate pictures stay `sensitive` on the picture alone. Stored data:
+  read. With no model the hold never lifts. Identity documents, bank cards,
+  intimate pictures and, for now, financial documents stay `sensitive` on the
+  picture alone: the built-in model still judges some small invoices and
+  receipts Personal against the owner's words (classification inbox eval,
+  5 of 24 Private records), so financial text cannot yet decide. Stored data:
   the new judge id makes every stored judgment stale, so each picture is
   judged again and a changed verdict re-decides its items through the
   existing judgment sweep; the classifier version re-judges routed items

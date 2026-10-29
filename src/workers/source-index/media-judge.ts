@@ -13,15 +13,17 @@
 // the encoder fails on) is `unjudged`, and an unjudged picture stays Private.
 // A missed sensitive photo is worse than a wrongly Private one.
 //
-// Financial and medical documents are named by what they SAY, which a picture
-// alone cannot tell: any page of writing (a whiteboard, a slide, notes) can
-// land nearest one of those descriptions (2026-10-29: the demo kit's
-// whiteboard was judged a medical document). A picture whose closest
-// description is one of them is therefore `ordinary` with the reason
-// MEDIA_JUDGE_TEXT_DECIDES: the text read off it decides, as for any document,
-// and it is held Private until that text is judged (tier-classifier.ts). Only
-// identity documents, bank cards and intimate pictures, which the picture
-// itself shows, are `sensitive` on the picture alone.
+// A medical document is named by what it SAYS, which a picture alone cannot
+// tell: any page of writing (a whiteboard, a slide, notes) can land nearest
+// that description (2026-10-29: both demo-kit whiteboards were judged medical
+// documents; calibration in eval/photo-judge/). A picture whose closest
+// description is a text-decided category is therefore `ordinary` with the
+// reason MEDIA_JUDGE_TEXT_DECIDES: the text read off it decides, as for any
+// document, and it is held Private until that text is judged
+// (tier-classifier.ts). Financial documents stay `sensitive` on the picture
+// for now: the privacy-safe model still judges some small invoices and
+// receipts Personal against the owner's words (classification eval,
+// 2026-10-29), so their text cannot yet be trusted to decide.
 
 import type { ImageJudgmentSignal } from '../classification/tier-classifier.ts';
 import type { SourceEmbeddingImageInput, SourceEmbeddingProvider } from './embeddings.ts';
@@ -38,7 +40,7 @@ export const MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
 export type MediaJudgeSensitiveCategory = (typeof MEDIA_JUDGE_SENSITIVE_CATEGORIES)[number];
 export type MediaJudgeCategory = MediaJudgeSensitiveCategory | 'ordinary';
 /** The sensitive categories named by what a document says: the picture's text decides them. */
-export const MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES: ReadonlySet<MediaJudgeSensitiveCategory> = new Set(['financial_document', 'medical_document']);
+export const MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES: ReadonlySet<MediaJudgeSensitiveCategory> = new Set(['medical_document']);
 /** The reason an ordinary verdict carries when its picture's text decides (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES). */
 export const MEDIA_JUDGE_TEXT_DECIDES = 'text_decides';
 
@@ -46,8 +48,8 @@ export const MEDIA_JUDGE_TEXT_DECIDES = 'text_decides';
  * One description per category, embedded as a classification query. The
  * version names this exact prompt set and the rules that read it: a judgment
  * records it, and a change to either is a new judge, so every picture is
- * judged again. 2026-10-29: financial and medical documents are decided by
- * their text (MEDIA_JUDGE_TEXT_DECIDES).
+ * judged again. 2026-10-29: medical documents are decided by their text
+ * (MEDIA_JUDGE_TEXT_DECIDES).
  */
 export const MEDIA_JUDGE_PROMPT_SET = 'photo-judge-2026-10-29';
 export const MEDIA_JUDGE_PROMPTS: Readonly<Record<MediaJudgeCategory, string>> = Object.freeze({
