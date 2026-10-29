@@ -52,6 +52,8 @@ import {
   hasCredentialUrl,
   namesWithParentContext,
   namesDecidedByOwner,
+  RETIRED_SOURCE_PRIOR_REASON,
+  restsOnRetiredSourcePrior,
   TIER_CLASSIFIER_VERSION,
   type TierDecision,
   type TierSniffer,
@@ -316,8 +318,11 @@ function rejudgeMetadata(
   parentContext?: string,
 ): Pick<TierDecision, 'metadataTier' | 'metadataForced' | 'metadataFlagged' | 'metadataPending' | 'reasons'> {
   const previous = { ...record, reasons: record.reasons.filter(reason => !reason.startsWith('content:')) };
+  // Names resting on a retired whole-source prior were never judged at all:
+  // they are judged now, and may come out lower than the prior held them.
+  const retiredPrior = restsOnRetiredSourcePrior(record.reasons);
   if (!sniffer || record.state !== 'current' || record.metadataForced || namesDecidedByOwner(record.reasons)
-    || !record.reasons.some(reason => reason.startsWith('metadata:sniffer:') && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`))) return previous;
+    || (!retiredPrior && !record.reasons.some(reason => reason.startsWith('metadata:sniffer:') && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`)))) return previous;
   const signals = {
     ...(names.title ? { title: names.title } : {}),
     ...(names.path ? { path: names.path } : {}),
@@ -329,8 +334,8 @@ function rejudgeMetadata(
   // facts). An old model verdict may have relied on those missing signals.
   // Re-judging may raise it, but only a connector relist with complete signals
   // can lower the names and therefore their content floor.
-  const providerReasons = previous.reasons.filter(reason => /^metadata:(floor|prior):/.test(reason));
-  const baseline = maxTier(fresh.metadataTier, record.metadataTier);
+  const providerReasons = previous.reasons.filter(reason => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
+  const baseline = retiredPrior ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({ pass: 'metadata', material: namesWithParentContext(material, parentContext), flags: ['names:rejudge'], subject,
