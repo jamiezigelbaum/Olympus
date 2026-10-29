@@ -5619,16 +5619,21 @@ var init_package_root = () => {};
 import { existsSync as existsSync5 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { join as join12 } from "node:path";
+function telegramPythonVenvDir(options = {}) {
+  const env = options.env ?? process.env;
+  const home = options.homeDir ?? env.HOME ?? homedir6();
+  return join12(env.XDG_CACHE_HOME ?? join12(home, ".cache"), "olympus", "telegram-python");
+}
 function telegramPythonExecutable(options = {}) {
   if (options.pythonExecutable)
     return options.pythonExecutable;
-  const env = options.env ?? process.env;
-  const home = options.homeDir ?? env.HOME ?? homedir6();
-  const isolated = join12(env.XDG_CACHE_HOME ?? join12(home, ".cache"), "olympus", "telegram-python", "bin", "python");
+  const isolated = join12(telegramPythonVenvDir(options), "bin", "python");
   return existsSync5(isolated) ? isolated : Bun.which("python3") ?? undefined;
 }
-var TELEGRAM_DEPENDENCY_HINT = 'Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "Telethon==1.45.0". Re-run olympus connect telegram --pair.';
-var init_messaging_runtime = () => {};
+var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0", TELEGRAM_DEPENDENCY_HINT;
+var init_messaging_runtime = __esm(() => {
+  TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
+});
 
 // src/core/linux-secret-service.ts
 var LINUX_SECRET_SERVICE_HELPER;
@@ -38837,7 +38842,19 @@ async function resolveHelper(options, packageRoot) {
     if (!python) {
       throw new Error(`Python 3 is required for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
     }
-    return python;
+    const venvDir = telegramPythonVenvDir(options);
+    const isolated = join35(venvDir, "bin", "python");
+    if (options.pythonExecutable || python === isolated)
+      return python;
+    if (await (options.pythonHasTelethon ?? pythonImportsTelethon)(python))
+      return python;
+    process.stderr.write(`Installing ${TELEGRAM_TELETHON_REQUIREMENT} for Telegram into ${venvDir} (once; about a minute)...
+`);
+    const ready = await (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: python, venvDir });
+    if (!ready || !existsSync30(isolated)) {
+      throw new Error(`Olympus could not install Telethon for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
+    }
+    return isolated;
   }
   if (options.whatsappBridgePath) {
     if (!existsSync30(options.whatsappBridgePath))
@@ -38896,6 +38913,35 @@ function assertTrustedBridge(path, message2) {
   if (!stat2.isFile() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid() || (stat2.mode & 18) !== 0 || (stat2.mode & 64) === 0) {
     throw new Error(message2);
   }
+}
+async function pythonImportsTelethon(python) {
+  const child = Bun.spawn([python, "-c", "import telethon"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  return await child.exited === 0;
+}
+async function provisionTelegramPython(input) {
+  const run = async (argv) => {
+    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    let timeout;
+    const result = await Promise.race([
+      child.exited,
+      new Promise((resolve14) => {
+        timeout = setTimeout(() => resolve14("timeout"), 5 * 60 * 1000);
+      })
+    ]);
+    if (timeout)
+      clearTimeout(timeout);
+    if (result === "timeout")
+      child.kill("SIGKILL");
+    return result === 0;
+  };
+  const cacheHome = dirname29(dirname29(input.venvDir));
+  ensurePrivateRootDirectorySync(cacheHome);
+  ensurePrivateDirectoryTreeSync(cacheHome, dirname29(input.venvDir));
+  const python = join35(input.venvDir, "bin", "python");
+  const ok = await run([input.python3, "-m", "venv", input.venvDir]) && await run([python, "-m", "pip", "install", "--quiet", TELEGRAM_TELETHON_REQUIREMENT]) && await run([python, "-c", "import telethon"]);
+  if (!ok)
+    rmSync9(input.venvDir, { recursive: true, force: true });
+  return ok;
 }
 async function buildWhatsAppBridge(input) {
   const temporary = `${input.outputPath}.tmp.${process.pid}`;

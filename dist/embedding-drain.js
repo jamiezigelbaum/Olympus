@@ -63351,14 +63351,19 @@ init_package_root();
 import { existsSync as existsSync20 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { join as join28 } from "node:path";
+function telegramPythonVenvDir(options = {}) {
+  const env = options.env ?? process.env;
+  const home = options.homeDir ?? env.HOME ?? homedir12();
+  return join28(env.XDG_CACHE_HOME ?? join28(home, ".cache"), "olympus", "telegram-python");
+}
 function telegramPythonExecutable(options = {}) {
   if (options.pythonExecutable)
     return options.pythonExecutable;
-  const env = options.env ?? process.env;
-  const home = options.homeDir ?? env.HOME ?? homedir12();
-  const isolated = join28(env.XDG_CACHE_HOME ?? join28(home, ".cache"), "olympus", "telegram-python", "bin", "python");
+  const isolated = join28(telegramPythonVenvDir(options), "bin", "python");
   return existsSync20(isolated) ? isolated : Bun.which("python3") ?? undefined;
 }
+var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0";
+var TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
 
 // src/core/messaging-capture.ts
 init_atomic_file();

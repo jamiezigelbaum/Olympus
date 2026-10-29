@@ -454,6 +454,55 @@ describe('packaged messaging pairing', () => {
   });
 });
 
+describe('Telegram pairing installs Telethon when it is missing', () => {
+  // test-omarchy 2026-10-29: every new Telegram user hit the venv hint and stopped; nothing provisioned it.
+  const pair = async (root: string, seams: { has: boolean; provision?: (input: { python3: string; venvDir: string }) => Promise<boolean> }) => {
+    const ran: string[] = [];
+    const provisioned: Array<{ python3: string; venvDir: string }> = [];
+    const result = pairMessagingSource({
+      source: 'telegram',
+      packageRoot: root,
+      homeDir: join(root, 'home'),
+      env: { XDG_CACHE_HOME: join(root, 'xdg') },
+      secretStore: memorySecretStore(),
+      pythonHasTelethon: async () => seams.has,
+      provisionTelegramPython: async (input) => { provisioned.push(input); return seams.provision ? seams.provision(input) : false; },
+      runCommand: async (request) => { ran.push(request.executable); return telegramReady(request.env.OLYMPUS_TELEGRAM_SESSION_PATH); },
+      registerSession: async () => { throw new Error('must not register'); },
+    });
+    return { result, ran, provisioned };
+  };
+  const venvDir = (root: string) => join(root, 'xdg', 'olympus', 'telegram-python');
+
+  test('without Telethon, the private environment is made and the helper runs in it', async () => {
+    const root = packageFixture();
+    const { result, ran, provisioned } = await pair(root, { has: false, provision: async (input) => {
+      mkdirSync(join(input.venvDir, 'bin'), { recursive: true });
+      writeFileSync(join(input.venvDir, 'bin', 'python'), '');
+      return true;
+    } });
+    expect((await result).status).toBe('scope_selection_required');
+    expect(provisioned.map((input) => input.venvDir)).toEqual([venvDir(root)]);
+    expect(ran).toEqual([join(venvDir(root), 'bin', 'python')]);
+  });
+
+  test('a Python that has Telethon is used as it is', async () => {
+    const root = packageFixture();
+    const { result, ran, provisioned } = await pair(root, { has: true });
+    expect((await result).status).toBe('scope_selection_required');
+    expect(provisioned).toEqual([]);
+    expect(ran).toHaveLength(1);
+    expect(ran[0]).not.toContain('telegram-python');
+  });
+
+  test('an install that fails says so, with the manual steps, and runs nothing', async () => {
+    const root = packageFixture();
+    const { result, ran } = await pair(root, { has: false });
+    await expect(result).rejects.toThrow(/could not install Telethon.*python3 -m venv/);
+    expect(ran).toEqual([]);
+  });
+});
+
 describe('a Telegram history keeps its account (storage step 4e)', () => {
   const PROVED = 'telegram:abcdef0123456789';
   const folderSession = (root: string) => join(root, 'home', '.local/share/openclaw/olympus/sources/telegram.messages/1/session/telegram');

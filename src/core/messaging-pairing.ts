@@ -1,5 +1,5 @@
 import { ensurePrivateRootDirectorySync, ensurePrivateDirectoryTreeSync } from './atomic-file.ts';
-import { telegramPythonExecutable, TELEGRAM_DEPENDENCY_HINT } from './messaging-runtime.ts';
+import { telegramPythonExecutable, telegramPythonVenvDir, TELEGRAM_DEPENDENCY_HINT, TELEGRAM_TELETHON_REQUIREMENT } from './messaging-runtime.ts';
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync } from 'node:fs';
 import { spawn as spawnChild } from 'node:child_process';
@@ -122,6 +122,10 @@ export interface PairMessagingSourceOptions {
   registerSession?: MessagingSessionRegistrar;
   which?: (command: string) => string | null;
   buildWhatsAppBridge?: (input: { go: string; sourceDir: string; outputPath: string }) => Promise<boolean>;
+  /** Test seam: whether a Python already imports Telethon. */
+  pythonHasTelethon?: (python: string) => Promise<boolean>;
+  /** Test seam: makes the private Telegram environment with the pinned Telethon; true when it is ready. */
+  provisionTelegramPython?: (input: { python3: string; venvDir: string }) => Promise<boolean>;
   /** Test seam: replaces the transport to the running worker, which decides a new account's layout while it owns the data. */
   workerFetch?: typeof fetch;
 }
@@ -413,7 +417,18 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
     if (!python) {
       throw new Error(`Python 3 is required for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
     }
-    return python;
+    const venvDir = telegramPythonVenvDir(options);
+    const isolated = join(venvDir, 'bin', 'python');
+    if (options.pythonExecutable || python === isolated) return python;
+    // A missing default is provisioned, the way WhatsApp's bridge is built: every new Telegram user needs
+    // Telethon, and the hint alone was a dead end (test-omarchy, 2026-10-29). A Python that has it already is used.
+    if (await (options.pythonHasTelethon ?? pythonImportsTelethon)(python)) return python;
+    process.stderr.write(`Installing ${TELEGRAM_TELETHON_REQUIREMENT} for Telegram into ${venvDir} (once; about a minute)...\n`);
+    const ready = await (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: python, venvDir });
+    if (!ready || !existsSync(isolated)) {
+      throw new Error(`Olympus could not install Telethon for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
+    }
+    return isolated;
   }
   if (options.whatsappBridgePath) {
     if (!existsSync(options.whatsappBridgePath)) throw new Error('The configured WhatsApp pairing bridge does not exist.');
@@ -485,6 +500,35 @@ function assertTrustedBridge(path: string, message: string): void {
   }
 }
 
+
+async function pythonImportsTelethon(python: string): Promise<boolean> {
+  const child = Bun.spawn([python, '-c', 'import telethon'], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' });
+  return await child.exited === 0;
+}
+
+/** A fresh private venv with the pinned Telethon. A half-made one is removed, so the next pairing starts clean. */
+async function provisionTelegramPython(input: { python3: string; venvDir: string }): Promise<boolean> {
+  const run = async (argv: string[]): Promise<boolean> => {
+    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: '1' }, stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      child.exited,
+      new Promise<'timeout'>((resolve) => { timeout = setTimeout(() => resolve('timeout'), 5 * 60 * 1000); }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+    if (result === 'timeout') child.kill('SIGKILL');
+    return result === 0;
+  };
+  const cacheHome = dirname(dirname(input.venvDir));
+  ensurePrivateRootDirectorySync(cacheHome);
+  ensurePrivateDirectoryTreeSync(cacheHome, dirname(input.venvDir));
+  const python = join(input.venvDir, 'bin', 'python');
+  const ok = await run([input.python3, '-m', 'venv', input.venvDir])
+    && await run([python, '-m', 'pip', 'install', '--quiet', TELEGRAM_TELETHON_REQUIREMENT])
+    && await run([python, '-c', 'import telethon']);
+  if (!ok) rmSync(input.venvDir, { recursive: true, force: true });
+  return ok;
+}
 
 async function buildWhatsAppBridge(input: { go: string; sourceDir: string; outputPath: string }): Promise<boolean> {
   const temporary = `${input.outputPath}.tmp.${process.pid}`;
