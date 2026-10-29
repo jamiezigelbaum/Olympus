@@ -4,7 +4,6 @@
 // checkpoints cross this boundary).
 
 import {
-  syncAndEmbedFromConnector,
   type ConnectorStoreSyncAndEmbedSummary,
   type ConnectorStoreSyncOptions,
   type LocalConnectorStore,
@@ -165,7 +164,7 @@ export interface XBookmarksConnectorStoreSyncHandlerOptions {
    * The lane's per-tier stores (tier-set.ts), whose internal leg is `store`.
    * Absent: the single-store lane exactly as before per-item routing.
    */
-  tierSet?: TieredStoreSet;
+  tierSet: TieredStoreSet;
 }
 
 type XBookmarksLaneRun = ConnectorStoreSyncAndEmbedSummary & { tiered?: TieredLaneReceiptCounts };
@@ -208,7 +207,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
   };
 
   const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec('internal')?.store !== options.store) {
+  if (tierSet.legSpec('internal')?.store !== options.store) {
     throw new Error('The X tier set\'s internal leg must be the lane\'s own store.');
   }
   // One traversal feeds every tier store. Existing bookmarks keep the lane's
@@ -220,9 +219,6 @@ export function createXBookmarksConnectorStoreSyncHandler(
     sync: ConnectorStoreSyncOptions,
     commitCursor = true,
   ): Promise<XBookmarksLaneRun> => {
-    if (!tierSet) {
-      return syncAndEmbedFromConnector({ store: options.store, connector, embeddingProvider: options.embeddingProvider, sync });
-    }
     const run = await tierSet.sync(connector, sync, { commitCursor });
     const merged = mergedTieredLaneRun(run, 'internal');
     return {

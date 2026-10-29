@@ -559,8 +559,6 @@ function producerLaunch(
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: 'telegram.personal',
         OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(','),
         OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(','),
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: '[]',
-        OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: '[]',
       },
       secretEnvironment: [
         { env: 'OLYMPUS_TELEGRAM_API_ID', secretKey: TELEGRAM_API_ID_SECRET_KEY },

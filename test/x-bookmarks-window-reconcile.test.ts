@@ -26,6 +26,7 @@ import {
   type XBookmarksProviderWindowBoundaryPolicy,
   type XBookmarksReconcileLimits,
 } from '../src/workers/x-bookmarks/index.ts';
+import { xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'personal';
 const ATTEMPTED_AT = new Date('2026-07-24T10:00:00.000Z');
@@ -282,6 +283,7 @@ describe('X provider-window reconciliation', () => {
     try {
       const handler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         embeddingProvider: fakeEmbeddingProvider(),
         sourceClient: client,
@@ -339,6 +341,7 @@ describe('X provider-window reconciliation', () => {
     try {
       const handler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         embeddingProvider: fakeEmbeddingProvider(),
         sourceClient: client,
@@ -382,6 +385,7 @@ describe('X provider-window reconciliation', () => {
     try {
       const handler = createXBookmarksConnectorStoreSyncHandler({
         store: fallbackStore,
+        tierSet: xBookmarksTestTierSet(fallbackStore, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: fallbackUsage,
         embeddingProvider: fakeEmbeddingProvider(),
         sourceClient: {
@@ -427,6 +431,7 @@ describe('X provider-window reconciliation', () => {
       try {
         const handler = createXBookmarksConnectorStoreSyncHandler({
           store,
+          tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
           usageStore: usage,
           embeddingProvider: fakeEmbeddingProvider(),
           sourceClient: {
@@ -476,6 +481,7 @@ describe('X provider-window reconciliation', () => {
     }), { fetchContent: true, ownershipKind: 'preservation' });
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       sourceClient: {
@@ -528,6 +534,7 @@ describe('X provider-window reconciliation', () => {
     const usage = new LocalXBookmarksApiUsageStore(':memory:');
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       sourceClient: {
@@ -624,6 +631,7 @@ describe('X provider-window reconciliation', () => {
     try {
       const handler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         embeddingProvider: fakeEmbeddingProvider(),
         sourceClient: client,

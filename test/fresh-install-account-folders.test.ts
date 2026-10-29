@@ -23,6 +23,7 @@ import {
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
 import { LocalXBookmarksApiUsageStore } from '../src/workers/x-bookmarks/index.ts';
+import { readwiseTestTierSet, xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts');
 const REPO = join(import.meta.dir, '..');
@@ -170,7 +171,7 @@ describe('a fresh install: Readwise, X and an imported archive connect (with fak
       connectedAt: '2026-07-18T00:00:00.000Z',
     };
 
-    const readwise = createRefreshableReadwiseConnectorStoreRuntime({ enabled: true, embeddingProvider, env });
+    const readwise = createRefreshableReadwiseConnectorStoreRuntime({ tierSetFor: (store) => readwiseTestTierSet(store, { embeddingProvider, env }), enabled: true, embeddingProvider, env });
     expect(readwise).toBeDefined();
     openConnectorStore({ sourceId: 'readwise.library' }, {
       dbPath: resolvedStorePath('readwise.library', 'secure_local', env),
@@ -180,7 +181,7 @@ describe('a fresh install: Readwise, X and an imported archive connect (with fak
     }, env).close();
     // The X runtime builds its reconcile state beside the usage ledger it is given, as the worker does.
     const usage = new LocalXBookmarksApiUsageStore(defaultXBookmarksApiUsageDbPath(env));
-    const x = createXBookmarksConnectorStoreRuntime({ enabled: true, handle: xHandle, embeddingProvider, usageStore: usage, env });
+    const x = createXBookmarksConnectorStoreRuntime({ tierSetFor: (store) => xBookmarksTestTierSet(store, { embeddingProvider, env }), enabled: true, handle: xHandle, embeddingProvider, usageStore: usage, env });
     expect(x).toBeDefined();
     const family = archiveImportFamilies()[0]!;
     createArchiveConnectorStore('secure_local', family, env).close();

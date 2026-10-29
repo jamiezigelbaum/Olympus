@@ -10,7 +10,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import { defaultLocalFilesIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
-import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { connectThisComputerSource, disconnectThisComputerSource } from '../src/core/this-computer.ts';
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { connectorStoreExtractionCandidateReader } from '../src/workers/email-source/file-extraction-runtime.ts';
@@ -18,7 +17,7 @@ import { createConnectorFileExtractionSource } from '../src/workers/file-extract
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { buildExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
 import { createFileExtractionRunner } from '../src/workers/file-extraction/runner.ts';
-import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
+import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import type { Extractor } from '../src/workers/file-extraction/types.ts';
 import { createLocalFilesSourceConnector } from '../src/workers/local-files/connector.ts';
 import { defaultExclusionContext, type DefaultExclusionContext } from '../src/workers/local-files/paths.ts';
@@ -37,6 +36,7 @@ import {
 } from '../src/workers/local-files/store.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
+import { localFilesTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
@@ -84,7 +84,7 @@ describe('local files from Connect to an answer', () => {
     const scope = createScopeBoundLocalFilesContentScope({ authority, ref, context });
     const volumes = new VolumeResolver();
     const providerSync = createLocalFilesProviderStoreSyncHandler({
-      store, scope, volumes, snapshotDir: join(base, 'watch'),
+      store, tierSet: localFilesTestTierSet(store), scope, volumes, snapshotDir: join(base, 'watch'),
     });
     const approvedPolicy = fileSourceScopeLocalFilesPolicy(policy, authority.assertCurrent(ref));
     expect(approvedPolicy.roots.map((root) => root.path)).toEqual([proj]);
@@ -125,9 +125,8 @@ describe('local files from Connect to an answer', () => {
           candidates: connectorStoreExtractionCandidateReader(store),
           lanes: [{ approvedScopeKey: lane.approvedScopeKey }],
         }),
-        sink: createConnectorStoreExtractionSink({
-          store,
-          classify: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
+        sink: createTieredStoreExtractionSink({
+          set: localFilesTestTierSet(store),
           syncConnectorId: 'file-extraction-factory',
           ownerConnectorId: LOCAL_FILES_PROVIDER,
           ownershipKind: 'observed',

@@ -7,7 +7,7 @@ import { defaultTelegramCaptureSpoolDir } from '../src/workers/telegram-messages
 
 const SCRIPT = join(import.meta.dir, '..', 'scripts', 'telegram-telethon-reader.py');
 const ORDINARY_SCOPE = 'telegram.personal:chat:101';
-const PROTECTED_SCOPE = 'telegram.personal:chat:202';
+const SECOND_SCOPE = 'telegram.personal:chat:202';
 const SAVED_MESSAGES_SCOPE = 'telegram.personal:chat:me';
 const SECRET_TEXT = 'TELEGRAM_GATEWAY_SECRET_CONTENT';
 const PYTHON = Bun.which('python3');
@@ -51,12 +51,12 @@ describe('long-lived read-only Telethon capture gateway', () => {
       expect(readJsonLines(fixture.callLog)).toEqual([]);
     } finally { rmSync(fixture.root, { recursive: true, force: true }); }
   }, 30_000);
-  pythonTest('connects once, captures exact approved chats, tags protected records, and keeps forward/backfill cursors separate', async () => {
+  pythonTest('connects once, captures exact approved chats alike, and keeps forward/backfill cursors separate', async () => {
     const fixture = gatewayFixture();
     try {
       writeFileSync(fixture.backfillPath, `${JSON.stringify({
         request_id: 'history-window-1',
-        chat_scope: PROTECTED_SCOPE,
+        chat_scope: SECOND_SCOPE,
         provider_cursor: 'offset_id:50',
         max_messages: 5,
       })}\n`);
@@ -69,7 +69,6 @@ describe('long-lived read-only Telethon capture gateway', () => {
         status: 'ok',
         credential_endpoint_id: 'telegram_local_telethon_reader',
         approved_chats: 2,
-        protected_chats: 1,
         records_captured: 4,
         spool_records: 4,
         spool_newest_age_seconds: 0,
@@ -96,14 +95,10 @@ describe('long-lived read-only Telethon capture gateway', () => {
       const firstSpool = readFileSync(spoolPath, 'utf8');
       const records = readJsonLines(spoolPath);
       expect(records).toHaveLength(4);
-      expect(records.filter((record) => record.trust_domain === 'internal')).toHaveLength(2);
-      const protectedRecords = records.filter((record) => record.trust_domain === 'secure_local');
-      expect(protectedRecords).toHaveLength(2);
-      expect(protectedRecords[0]).toMatchObject({
-        corpus_id: 'secure_local.telegram.protected.messages',
-        classification: { reason: 'lawyer', owner: 'owner' },
-      });
-      expect(protectedRecords[1]).toMatchObject({ sync_direction: 'backfill', backfill_request_id: 'history-window-1' });
+      // No chat is Private as a whole: every record is captured alike and
+      // each message is judged by its own content downstream.
+      expect(records.every((record) => record.trust_domain === 'internal' && record.corpus_id === 'internal.telegram.messages')).toBe(true);
+      expect(records.filter((record) => record.chat_scope === SECOND_SCOPE)[1]).toMatchObject({ sync_direction: 'backfill', backfill_request_id: 'history-window-1' });
       expect(records.find((record) => record.message.id === '101')).toMatchObject({
         message: {
           senderId: '7',
@@ -140,7 +135,7 @@ describe('long-lived read-only Telethon capture gateway', () => {
         expect.objectContaining({ entity: 202, min_id: 202, offset_id: 0, reverse: true }),
       ]);
       expect(JSON.parse(readFileSync(fixture.statePath, 'utf8'))).toMatchObject({
-        forward_cursors: { [ORDINARY_SCOPE]: 'min_id:102', [PROTECTED_SCOPE]: 'min_id:202' }, backfill_request_line: 1,
+        forward_cursors: { [ORDINARY_SCOPE]: 'min_id:102', [SECOND_SCOPE]: 'min_id:202' }, backfill_request_line: 1,
       });
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
@@ -190,7 +185,7 @@ describe('long-lived read-only Telethon capture gateway', () => {
     }
   }, 30_000);
 
-  pythonTest('drops unapproved events without provider amplification and routes protected events to secure-local', async () => {
+  pythonTest('drops unapproved events without provider amplification and captures Saved Messages like any chat, whatever a leftover setting says', async () => {
     const fixture = gatewayFixture();
     try {
       const result = await runGateway(fixture, {
@@ -225,8 +220,8 @@ describe('long-lived read-only Telethon capture gateway', () => {
       expect(records[0]).toMatchObject({
         chat_scope: SAVED_MESSAGES_SCOPE,
         conversation_id: 'me',
-        trust_domain: 'secure_local',
-        corpus_id: 'secure_local.telegram.protected.messages',
+        trust_domain: 'internal',
+        corpus_id: 'internal.telegram.messages',
         message: { id: '203' },
       });
       const calls = readJsonLines(fixture.callLog);
@@ -347,7 +342,7 @@ describe('long-lived read-only Telethon capture gateway', () => {
       // The cursor is the sweep's alone: untouched by the lane that bypassed it.
       expect(JSON.parse(readFileSync(fixture.statePath, 'utf8')).forward_cursors).toEqual({
         [ORDINARY_SCOPE]: 'min_id:102',
-        [PROTECTED_SCOPE]: 'min_id:202',
+        [SECOND_SCOPE]: 'min_id:202',
       });
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
@@ -453,7 +448,7 @@ describe('long-lived read-only Telethon capture gateway', () => {
     }
   }, 30_000);
 
-  pythonTest('ignores partial requests and rejects wildcard or unapproved classification scope before provider access', async () => {
+  pythonTest('ignores partial requests and rejects a wildcard scope before provider access', async () => {
     const fixture = gatewayFixture();
     try {
       writeFileSync(fixture.backfillPath, JSON.stringify({ request_id: 'partial', chat_scope: ORDINARY_SCOPE, provider_cursor: 'offset_id:50' }));
@@ -467,19 +462,6 @@ describe('long-lived read-only Telethon capture gateway', () => {
       expect(denied.code).toBe(2);
       expect(lastLine(denied.stderr)).toBe('{"error":"wildcard_chat_scope_denied"}');
       expect(denied.stderr).not.toContain(SECRET_TEXT);
-
-      writeFileSync(fixture.callLog, '');
-      const unapprovedClassification = await runGateway(fixture, {
-        OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: JSON.stringify([{
-          chatScope: 'telegram.personal:chat:303',
-          trustDomain: 'secure_local',
-          reason: 'protected',
-        }]),
-      });
-      expect(unapprovedClassification.code).toBe(2);
-      expect(lastLine(unapprovedClassification.stderr)).toBe('{"error":"classification_scope_not_approved"}');
-      expect(unapprovedClassification.stderr).not.toContain(SECRET_TEXT);
-      expect(readJsonLines(fixture.callLog)).toHaveLength(0);
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }
@@ -528,14 +510,7 @@ async function runGateway(fixture: ReturnType<typeof gatewayFixture>, overrides:
       OLYMPUS_TELEGRAM_API_ID: '12345',
       OLYMPUS_TELEGRAM_API_HASH: 'hash',
       OLYMPUS_TELEGRAM_SESSION_PATH: join(fixture.root, 'telegram.session'),
-      OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: `${ORDINARY_SCOPE},${PROTECTED_SCOPE}`,
-      OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: JSON.stringify([{
-        chatScope: PROTECTED_SCOPE,
-        trustDomain: 'secure_local',
-        reason: 'lawyer',
-        owner: 'owner',
-        reviewedAt: '2026-07-22',
-      }]),
+      OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: `${ORDINARY_SCOPE},${SECOND_SCOPE}`,
       OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: fixture.stateDir,
       OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: fixture.spoolDir,
       OLYMPUS_TELEGRAM_GATEWAY_BACKFILL_REQUESTS_PATH: fixture.backfillPath,

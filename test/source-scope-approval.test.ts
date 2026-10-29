@@ -32,6 +32,7 @@ import { createDropboxProviderStoreSyncHandler } from '../src/workers/dropbox-fi
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { SourceScheduler } from '../src/workers/source-scheduler.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { dropboxTestTierSet } from './helpers/lane-tier-sets.ts';
 
 function registry(connectedAt = '2026-09-10T10:00:00.000Z') {
   return {
@@ -431,6 +432,7 @@ test('provider syncs stamp trusted generation and Drive ancestry observations', 
   });
   const dropbox = createDropboxProviderStoreSyncHandler({
     store: dropboxStore,
+    tierSet: dropboxTestTierSet(dropboxStore),
     account: 'personal',
     broker: {
       async issueSession() { return { kind: 'bearer_token' as const, token: 'fixture-token' }; },
@@ -438,7 +440,7 @@ test('provider syncs stamp trusted generation and Drive ancestry observations', 
     metadataClient: {
       supportsNativeRecursive: true,
       async listFolder() {
-        return { entries: [{ tag: 'file', id: 'id:1', name: 'One.txt', pathLower: '/work/one.txt' }] };
+        return { entries: [{ tag: 'file', id: 'id:1', name: 'One.txt', pathLower: '/work/one.txt', pathDisplay: '/Work/One.txt' }] };
       },
       async listFolderContinue() { throw new Error('unexpected continuation'); },
     },

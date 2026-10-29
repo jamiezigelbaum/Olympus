@@ -84,6 +84,7 @@ import {
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import type { OlympusConfig } from '../src/core/config.ts';
+import { readwiseTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const DAY_START = new Date('2026-08-19T09:00:00.000Z');
 /** Not the union member: the point is that a near-miss is refused. */
@@ -883,6 +884,7 @@ function readwiseHarness(options: {
   const calls: string[] = [];
   const handler = createReadwiseConnectorStoreSyncHandler({
     store,
+    tierSet: readwiseTestTierSet(store),
     embeddingProvider: testEmbeddingProvider(),
     account: 'person@example.com',
     credentialBroker: new StaticCredentialBroker([{

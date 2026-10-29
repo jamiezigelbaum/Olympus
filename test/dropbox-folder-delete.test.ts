@@ -4,7 +4,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
-import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
@@ -16,9 +15,9 @@ import {
   type DropboxMetadataEntry,
   type DropboxMetadataPage,
 } from '../src/workers/dropbox-files/index.ts';
-import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
+import { dropboxTestTierSet } from './helpers/lane-tier-sets.ts';
 
 // A deleted Dropbox folder arrives as ONE entry for its whole subtree: the
 // descendants' own paths are never listed. These tests pin that the entry is
@@ -66,7 +65,7 @@ describe('a folder moved outside approved scope', () => {
     test(`removes its old searchable contents and locator (${label})`, async () => {
       const store = laneStore(join(workspace(), 'store.sqlite'));
       const sync = createDropboxProviderStoreSyncHandler({
-        store, account: 'personal', broker: broker(), metadataClient: client(script),
+        store, tierSet: dropboxTestTierSet(store), account: 'personal', broker: broker(), metadataClient: client(script),
         scope: fakeScope((path) => path === '/approved' || path.startsWith('/approved/')),
       });
       await sync.pull({ approved_scope_key: SCOPE });
@@ -92,7 +91,7 @@ describe('deleting an unselected parent', () => {
     const dbPath = join(workspace(), 'store.sqlite');
     const store = laneStore(dbPath);
     const sync = createDropboxProviderStoreSyncHandler({
-      store, account: 'personal', broker: broker(),
+      store, tierSet: dropboxTestTierSet(store), account: 'personal', broker: broker(),
       scope: fakeScope((path) => path === '/approved/docs' || path.startsWith('/approved/docs/')),
       metadataClient: client({ initial: TREE, deltas: { 'cursor-1': [deleted('Approved', '/Approved')] } }),
     });
@@ -139,7 +138,7 @@ describe('deleting an unselected parent', () => {
     await seed.pull({ approved_scope_key: SCOPE });
     expect((await landText(store, 'id:b', 'The pelican nests here.')).accepted).toBe(true);
     const sync = createDropboxProviderStoreSyncHandler({
-      store, account: 'personal', broker: broker(),
+      store, tierSet: dropboxTestTierSet(store), account: 'personal', broker: broker(),
       scope: fakeScope((path) => path === '/approved/docs/sub' || path.startsWith('/approved/docs/sub/')),
       metadataClient: client({ initial: [deleted('Approved', '/Approved')] }),
     });
@@ -206,6 +205,7 @@ describe('a deleted Dropbox folder takes its indexed descendants with it', () =>
     const store = laneStore(join(root, 'store.sqlite'));
     const sync = createDropboxProviderStoreSyncHandler({
       store,
+      tierSet: dropboxTestTierSet(store),
       account: 'personal',
       broker: broker(),
       metadataClient: client({ initial: TREE, deltas: { 'cursor-1': [deleted('Docs', '/Approved/Docs')] } }),
@@ -885,7 +885,7 @@ function broker(): StaticCredentialBroker {
 }
 
 function handler(store: LocalConnectorStore, account: string, metadataClient: DropboxMetadataClient) {
-  return createDropboxProviderStoreSyncHandler({ store, account, broker: broker(), metadataClient });
+  return createDropboxProviderStoreSyncHandler({ store, tierSet: dropboxTestTierSet(store), account, broker: broker(), metadataClient });
 }
 
 interface Script {
@@ -924,9 +924,8 @@ function singleStoreLane(script: Script) {
 
 /** Lands extracted text on an item of the lane's one store, as the extraction runner does. */
 function landText(store: LocalConnectorStore, providerItemId: string, text: string) {
-  return createConnectorStoreExtractionSink({
-    store,
-    classify: () => buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'secure_local' }),
+  return createTieredStoreExtractionSink({
+    set: dropboxTestTierSet(store),
     syncConnectorId: 'extraction',
     ownerConnectorId: 'dropbox',
     ownershipKind: 'observed',

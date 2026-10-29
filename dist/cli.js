@@ -38928,9 +38928,7 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
         ...layout === "folder" ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath },
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: "telegram.personal",
         OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(","),
-        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(","),
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: "[]",
-        OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: "[]"
+        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(",")
       },
       secretEnvironment: [
         { env: "OLYMPUS_TELEGRAM_API_ID", secretKey: TELEGRAM_API_ID_SECRET_KEY },
@@ -39410,8 +39408,6 @@ class MessagingCaptureSupervisor {
       return { source: grant.source, state: "blocked", reason: "session_missing" };
     }
     const childEnv = definedEnv({ ...layoutEnv2, ...grant.producer.env });
-    for (const name of GRANT_RETIRED_ENV)
-      delete childEnv[name];
     if (account.layout === "folder") {
       for (const name of folderCaptureEnvRemoved(account))
         delete childEnv[name];
@@ -39545,7 +39541,7 @@ function spawnCapture(input) {
   });
   return { exited: child.exited, kill: (signal) => child.kill(signal) };
 }
-var GRANT_RETIRED_ENV, NativeMessagingCaptureOwnerError, MESSAGING_CAPTURE_REPEATED_EXITS = 3, UNEXPECTED_EXIT_WINDOW_MS, STABLE_RUN_MS = 60000, readGrant, accountSourceId = (source) => source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID;
+var NativeMessagingCaptureOwnerError, MESSAGING_CAPTURE_REPEATED_EXITS = 3, UNEXPECTED_EXIT_WINDOW_MS, STABLE_RUN_MS = 60000, readGrant, accountSourceId = (source) => source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID;
 var init_messaging_capture = __esm(() => {
   init_messaging_runtime();
   init_atomic_file();
@@ -39558,7 +39554,6 @@ var init_messaging_capture = __esm(() => {
   init_secret_store();
   init_unpaired_sources();
   init_connected_handles();
-  GRANT_RETIRED_ENV = ["OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES", "OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES"];
   NativeMessagingCaptureOwnerError = class NativeMessagingCaptureOwnerError extends Error {
     source;
     configKey;
@@ -57333,129 +57328,6 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 
-// src/workers/connector-store/principal.ts
-function isCanonicalConnectorStoreProvider(provider) {
-  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
-}
-function isCanonicalConnectorStoreAccountScope(accountScope) {
-  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
-}
-function canonicalConnectorStoreChatPrincipal(provider, accountScope) {
-  if (typeof provider !== "string" || typeof accountScope !== "string" || !provider || !accountScope) {
-    throw new Error("Connector store principalProvider and principalAccountScope must be non-empty strings.");
-  }
-  if (!isCanonicalConnectorStoreProvider(provider)) {
-    throw new Error("Connector store principalProvider must be a canonical lowercase provider id with no whitespace.");
-  }
-  if (!isCanonicalConnectorStoreAccountScope(accountScope)) {
-    throw new Error("Connector store principalAccountScope must be a canonical lowercase account scope with no whitespace.");
-  }
-  const providerPrefix = accountScope.includes(".") ? accountScope.split(".", 1)[0] : undefined;
-  if (providerPrefix !== undefined && providerPrefix !== provider) {
-    throw new Error("Connector store principalAccountScope provider prefix must match principalProvider.");
-  }
-  return { provider, accountScope };
-}
-var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
-var init_principal = __esm(() => {
-  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
-  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
-});
-
-// src/workers/connector-store/filter-capabilities.ts
-function connectorStoreFilterCapabilityRegistry(entries) {
-  const familyEntries = new Map;
-  const providerEntries = new Map;
-  for (const [scope, capabilities] of entries) {
-    const provider = "provider" in scope ? scope.provider : undefined;
-    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
-      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
-    }
-    const registry = provider === undefined ? familyEntries : providerEntries;
-    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
-    if (registry.has(key2)) {
-      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
-      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
-    }
-    registry.set(key2, Object.freeze({ ...capabilities }));
-  }
-  return Object.freeze({
-    resolve(identity2) {
-      const familyCapabilities = familyEntries.get(identity2.family);
-      const providerCapabilities = identity2.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity2.family, identity2.provider));
-      if (!familyCapabilities)
-        return providerCapabilities;
-      if (!providerCapabilities)
-        return familyCapabilities;
-      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
-    }
-  });
-}
-function providerScopeKey(family, provider) {
-  return `${family}\x00${provider}`;
-}
-function undeclaredConnectorStoreSearchRequestFields(record) {
-  return Object.keys(record).filter((field) => !CONNECTOR_STORE_SEARCH_REQUEST_FIELDS.has(field)).sort();
-}
-function unsupportedConnectorStoreFilterFields(record, capabilities) {
-  return CONNECTOR_STORE_DECLARED_FILTER_FIELDS.filter((field) => {
-    if (!Object.prototype.hasOwnProperty.call(record, field))
-      return false;
-    if ((field === "folder_id" || field === "folder_name") && capabilities?.folder) {
-      return false;
-    }
-    if (field === "chat_scope" && capabilities?.chatScope)
-      return false;
-    if (field === "approved_scope_key" && capabilities?.approvedScope)
-      return false;
-    if (field === "include_locators" && capabilities?.resultProjector)
-      return false;
-    return true;
-  });
-}
-var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
-var init_filter_capabilities = __esm(() => {
-  init_principal();
-  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
-    "corpus_id",
-    "query",
-    "retrieval_mode",
-    "max_results",
-    "account",
-    "conversation_id",
-    "sender_id",
-    "sender_label",
-    "authored_after",
-    "authored_before",
-    "after",
-    "before",
-    "trust_domain",
-    "all_tiers"
-  ];
-  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
-    "approved_scope_key",
-    "chat_scope",
-    "participant_id",
-    "include_deleted",
-    "attachment_type",
-    "include_locators",
-    "chat_title",
-    "chat_title_hint",
-    "folder_id",
-    "folder_name"
-  ];
-  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
-    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
-    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
-  ]);
-});
-
-// src/workers/connector-store/index.ts
-var init_connector_store = __esm(() => {
-  init_local_index();
-  init_filter_capabilities();
-});
-
 // src/workers/connector-store/tier-set-registry.ts
 function registerTierSetForLedger(ledgerPath, set) {
   (tierSets ??= new Map).set(ledgerPath, set);
@@ -62257,19 +62129,10 @@ function createReadwiseConnectorStoreSyncHandler(options) {
     ...options.now ? { now: options.now } : {}
   });
   const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec("internal")?.store !== options.store) {
+  if (tierSet.legSpec("internal")?.store !== options.store) {
     throw new Error("The Readwise tier set's internal leg must be the lane's own store.");
   }
   const runLane = async (connector, sync, commitCursor = true) => {
-    if (!tierSet) {
-      return syncAndEmbedFromConnector({
-        store: options.store,
-        connector,
-        embeddingProvider: options.embeddingProvider,
-        sync,
-        embed: false
-      });
-    }
     const run = await tierSet.sync(connector, sync, { commitCursor, embed: false });
     const merged = mergedTieredLaneRun(run, "internal");
     return {
@@ -62312,7 +62175,7 @@ function createReadwiseConnectorStoreSyncHandler(options) {
     async pull(request = {}) {
       const maxItems = boundedMaxItems(request.max_items, config.storePullMaxItems);
       const warnings = [];
-      const candidate = tierSet?.committedCursor(READWISE_CONNECTOR_ID)?.cursor ?? options.store.lastCompletedSyncRun(READWISE_CONNECTOR_ID)?.cursor ?? request.checkpoint?.trim() ?? undefined;
+      const candidate = tierSet.committedCursor(READWISE_CONNECTOR_ID)?.cursor ?? options.store.lastCompletedSyncRun(READWISE_CONNECTOR_ID)?.cursor ?? request.checkpoint?.trim() ?? undefined;
       let resume = isReadwiseConnectorCursor(candidate) ? candidate : undefined;
       if (candidate !== undefined && resume === undefined) {
         warnings.push(READWISE_RESUME_REJECTED_WARNING);
@@ -62448,7 +62311,6 @@ function boundedMaxItems(value, fallback) {
 }
 var READWISE_STORE_PULL_RECEIPT_KIND = "readwise_connector_store_pull_receipt", READWISE_STORE_RECONCILE_RECEIPT_KIND = "readwise_connector_store_reconcile_receipt", READWISE_RESUME_REJECTED_WARNING = "readwise_store_resume_cursor_rejected";
 var init_live_sync = __esm(() => {
-  init_connector_store();
   init_tiered_store_set();
   init_api();
   init_connector2();
@@ -62462,6 +62324,129 @@ var init_readwise = __esm(() => {
   init_connector2();
   init_live_control();
   init_live_sync();
+});
+
+// src/workers/connector-store/principal.ts
+function isCanonicalConnectorStoreProvider(provider) {
+  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
+}
+function isCanonicalConnectorStoreAccountScope(accountScope) {
+  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
+}
+function canonicalConnectorStoreChatPrincipal(provider, accountScope) {
+  if (typeof provider !== "string" || typeof accountScope !== "string" || !provider || !accountScope) {
+    throw new Error("Connector store principalProvider and principalAccountScope must be non-empty strings.");
+  }
+  if (!isCanonicalConnectorStoreProvider(provider)) {
+    throw new Error("Connector store principalProvider must be a canonical lowercase provider id with no whitespace.");
+  }
+  if (!isCanonicalConnectorStoreAccountScope(accountScope)) {
+    throw new Error("Connector store principalAccountScope must be a canonical lowercase account scope with no whitespace.");
+  }
+  const providerPrefix = accountScope.includes(".") ? accountScope.split(".", 1)[0] : undefined;
+  if (providerPrefix !== undefined && providerPrefix !== provider) {
+    throw new Error("Connector store principalAccountScope provider prefix must match principalProvider.");
+  }
+  return { provider, accountScope };
+}
+var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
+var init_principal = __esm(() => {
+  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
+  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
+});
+
+// src/workers/connector-store/filter-capabilities.ts
+function connectorStoreFilterCapabilityRegistry(entries) {
+  const familyEntries = new Map;
+  const providerEntries = new Map;
+  for (const [scope, capabilities] of entries) {
+    const provider = "provider" in scope ? scope.provider : undefined;
+    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
+      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
+    }
+    const registry = provider === undefined ? familyEntries : providerEntries;
+    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
+    if (registry.has(key2)) {
+      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
+      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
+    }
+    registry.set(key2, Object.freeze({ ...capabilities }));
+  }
+  return Object.freeze({
+    resolve(identity2) {
+      const familyCapabilities = familyEntries.get(identity2.family);
+      const providerCapabilities = identity2.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity2.family, identity2.provider));
+      if (!familyCapabilities)
+        return providerCapabilities;
+      if (!providerCapabilities)
+        return familyCapabilities;
+      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
+    }
+  });
+}
+function providerScopeKey(family, provider) {
+  return `${family}\x00${provider}`;
+}
+function undeclaredConnectorStoreSearchRequestFields(record) {
+  return Object.keys(record).filter((field) => !CONNECTOR_STORE_SEARCH_REQUEST_FIELDS.has(field)).sort();
+}
+function unsupportedConnectorStoreFilterFields(record, capabilities) {
+  return CONNECTOR_STORE_DECLARED_FILTER_FIELDS.filter((field) => {
+    if (!Object.prototype.hasOwnProperty.call(record, field))
+      return false;
+    if ((field === "folder_id" || field === "folder_name") && capabilities?.folder) {
+      return false;
+    }
+    if (field === "chat_scope" && capabilities?.chatScope)
+      return false;
+    if (field === "approved_scope_key" && capabilities?.approvedScope)
+      return false;
+    if (field === "include_locators" && capabilities?.resultProjector)
+      return false;
+    return true;
+  });
+}
+var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
+var init_filter_capabilities = __esm(() => {
+  init_principal();
+  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
+    "corpus_id",
+    "query",
+    "retrieval_mode",
+    "max_results",
+    "account",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "authored_after",
+    "authored_before",
+    "after",
+    "before",
+    "trust_domain",
+    "all_tiers"
+  ];
+  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
+    "approved_scope_key",
+    "chat_scope",
+    "participant_id",
+    "include_deleted",
+    "attachment_type",
+    "include_locators",
+    "chat_title",
+    "chat_title_hint",
+    "folder_id",
+    "folder_name"
+  ];
+  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
+    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
+    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
+  ]);
+});
+
+// src/workers/connector-store/index.ts
+var init_connector_store = __esm(() => {
+  init_local_index();
+  init_filter_capabilities();
 });
 
 // src/core/names-only-coverage.ts
@@ -70231,13 +70216,10 @@ function createXBookmarksConnectorStoreSyncHandler(options) {
     env
   };
   const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec("internal")?.store !== options.store) {
+  if (tierSet.legSpec("internal")?.store !== options.store) {
     throw new Error("The X tier set's internal leg must be the lane's own store.");
   }
   const runLane = async (connector, sync, commitCursor = true) => {
-    if (!tierSet) {
-      return syncAndEmbedFromConnector({ store: options.store, connector, embeddingProvider: options.embeddingProvider, sync });
-    }
     const run = await tierSet.sync(connector, sync, { commitCursor });
     const merged = mergedTieredLaneRun(run, "internal");
     return {
@@ -70574,7 +70556,6 @@ function validSnapshotTimestamp(value) {
   return timestamp;
 }
 var init_live_sync2 = __esm(() => {
-  init_connector_store();
   init_tiered_store_set();
   init_api_connector();
   init_live_control2();
@@ -72125,10 +72106,10 @@ function createDropboxProviderStoreSyncHandler(options) {
   }
   const connectorIdForScope = (approvedScopeKey) => dropboxConnectorIdForScope(account, approvedScopeKey, options.scope);
   const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec("secure_local")?.store !== options.store) {
+  if (tierSet.legSpec("secure_local")?.store !== options.store) {
     throw new Error("The Dropbox tier set's secure leg must be the lane's own store.");
   }
-  const deletedItemIdentityResolver = tierSet ? {
+  const deletedItemIdentityResolver = {
     activeIdentityForLocatorIfIndexed(input) {
       for (const domain of ["secure_local", "internal", "public_safe"]) {
         const identity2 = tierSet.store(domain)?.activeIdentityForLocatorIfIndexed(input);
@@ -72150,13 +72131,13 @@ function createDropboxProviderStoreSyncHandler(options) {
     lookupsReady() {
       return ["secure_local", "internal", "public_safe"].every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
     }
-  } : options.store;
+  };
   return {
     connectorIdForScope,
     async pull(request) {
       const approvedScopeKey = required2(request.approved_scope_key, "Dropbox approved scope key");
       const connectorId = connectorIdForScope(approvedScopeKey);
-      const candidate = tierSet?.committedCursor(connectorId)?.cursor ?? options.store.lastCompletedSyncRun(connectorId)?.cursor ?? dropboxCheckpointCursor(request.checkpoint, connectorId, options.scope !== undefined) ?? undefined;
+      const candidate = tierSet.committedCursor(connectorId)?.cursor ?? options.store.lastCompletedSyncRun(connectorId)?.cursor ?? dropboxCheckpointCursor(request.checkpoint, connectorId, options.scope !== undefined) ?? undefined;
       const maxItems = request.max_items === undefined ? undefined : positiveInteger6(request.max_items);
       const runTraversal = async (cursor) => {
         let pageDigestRestarts = 0;
@@ -72190,10 +72171,6 @@ function createDropboxProviderStoreSyncHandler(options) {
           ...maxItems !== undefined ? { maxItems } : {},
           ...cursor ? { cursor } : {}
         };
-        if (!tierSet) {
-          const sync2 = await options.store.syncFromConnector(observed.connector, syncOptions);
-          return { sync: sync2, legs: [sync2], completed: observed.completed(), pageDigestRestarts };
-        }
         const run2 = await tierSet.sync(observed.connector, syncOptions);
         const secure = run2.byDomain.secure_local;
         if (!secure)
@@ -80975,12 +80952,12 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
   const staleThresholdSeconds = whatsappCaptureStaleThresholdSeconds(options.spoolStaleThresholdSeconds, env);
   const now = options.now ?? (() => new Date);
   const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec("secure_local")?.store !== options.store) {
+  if (tierSet.legSpec("secure_local")?.store !== options.store) {
     throw new Error("The WhatsApp tier set's secure leg must be the lane's own store.");
   }
   return {
     async pull(request = {}) {
-      const cursor = sanitizeWhatsAppLiveCursor(tierSet?.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? options.store.lastCompletedSyncRun(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined);
+      const cursor = sanitizeWhatsAppLiveCursor(tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? options.store.lastCompletedSyncRun(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined);
       const maxItems = request.max_items ?? options.maxItems;
       const sync = {
         placement: WHATSAPP_STORE_PLACEMENT,
@@ -80996,52 +80973,48 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
       let redacted;
       let redactionFailed = false;
       let mediaWaitingForDisk = false;
-      if (tierSet) {
-        const mediaState = WhatsAppMediaFetchState.open(spoolDir);
+      const mediaState = WhatsAppMediaFetchState.open(spoolDir);
+      try {
+        findings.onWaitingMedia = (media) => mediaState.note(media);
+        const setRun = await tierSet.sync(connector, sync);
+        run = mergedTieredLaneRun(setRun, "secure_local").sync;
+        tiered = tieredLaneReceiptCounts({ routing: setRun.routing });
         try {
-          findings.onWaitingMedia = (media) => mediaState.note(media);
-          const setRun = await tierSet.sync(connector, sync);
-          run = mergedTieredLaneRun(setRun, "secure_local").sync;
-          tiered = tieredLaneReceiptCounts({ routing: setRun.routing });
+          const committed = sanitizeWhatsAppLiveCursor(tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined);
+          redacted = clearWhatsAppSpoolSecrets({
+            spoolDir,
+            account,
+            mediaDir,
+            mediaDirs,
+            relocateMediaPath: whatsappMovedPathMapper(env),
+            ledger: tierSet.ledger,
+            through: lineCursorOf(committed),
+            ...byteOffsetOf(committed) !== undefined ? { throughOffset: byteOffsetOf(committed) } : {}
+          });
+        } catch (error) {
+          redactionFailed = true;
+          console.error(`[olympus:whatsapp] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : "unknown"}`);
+        }
+        if (!redactionFailed) {
           try {
-            const committed = sanitizeWhatsAppLiveCursor(tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined);
-            redacted = clearWhatsAppSpoolSecrets({
+            mediaWaitingForDisk = (await runWhatsAppMediaFetch({
+              state: mediaState,
               spoolDir,
               account,
-              mediaDir,
-              mediaDirs,
-              relocateMediaPath: whatsappMovedPathMapper(env),
-              ledger: tierSet.ledger,
-              through: lineCursorOf(committed),
-              ...byteOffsetOf(committed) !== undefined ? { throughOffset: byteOffsetOf(committed) } : {}
-            });
+              folder: defaultWhatsAppFetchedMediaDir(env),
+              tierSet,
+              findings,
+              sync,
+              call: options.mediaCall ?? bridgeMediaCall(defaultWhatsAppStateDir(env)),
+              readChild,
+              ...options.mediaVolumeSpace ? { space: options.mediaVolumeSpace } : {}
+            })).waitingForDisk;
           } catch (error) {
-            redactionFailed = true;
-            console.error(`[olympus:whatsapp] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : "unknown"}`);
+            console.error(`[olympus:whatsapp] media_fetch_failed reason=${error instanceof Error ? error.name : "unknown"}`);
           }
-          if (!redactionFailed) {
-            try {
-              mediaWaitingForDisk = (await runWhatsAppMediaFetch({
-                state: mediaState,
-                spoolDir,
-                account,
-                folder: defaultWhatsAppFetchedMediaDir(env),
-                tierSet,
-                findings,
-                sync,
-                call: options.mediaCall ?? bridgeMediaCall(defaultWhatsAppStateDir(env)),
-                readChild,
-                ...options.mediaVolumeSpace ? { space: options.mediaVolumeSpace } : {}
-              })).waitingForDisk;
-            } catch (error) {
-              console.error(`[olympus:whatsapp] media_fetch_failed reason=${error instanceof Error ? error.name : "unknown"}`);
-            }
-          }
-        } finally {
-          mediaState.close();
         }
-      } else {
-        run = await options.store.syncFromConnector(connector, sync);
+      } finally {
+        mediaState.close();
       }
       return whatsappSyncReceipt(run, findings, readWhatsAppLiveCaptureState(spoolDir), now().getTime(), staleThresholdSeconds, tiered, redacted, redactionFailed, mediaWaitingForDisk);
     },
@@ -114871,7 +114844,7 @@ function batchSelectorsFor(sourceId, item) {
 function pathOf(item) {
   return item.locatorUri?.startsWith("/") ? item.locatorUri : undefined;
 }
-function signalsFromStoredItem(item, storeDomain, storedPlacementIsPrior) {
+function signalsFromStoredItem(item) {
   const folderKeys = [
     ...item.folderKeys,
     ...item.identity.providerConversationId ? [item.identity.providerConversationId] : []
@@ -114879,7 +114852,6 @@ function signalsFromStoredItem(item, storeDomain, storedPlacementIsPrior) {
   const path = pathOf(item);
   const sender = item.senderLabel ?? item.senderId;
   return {
-    ...storedPlacementIsPrior ? { prior: trustDomainPrior(storeDomain) } : {},
     ...item.title ? { title: item.title } : {},
     ...path ? { path } : {},
     ...folderKeys.length > 0 ? { folderKeys } : {},
@@ -115093,7 +115065,7 @@ async function planTierMigration(options) {
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
           const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(ledger.getCurrent(item.identity)?.reasons);
           const decision = classifyItemTiers({
-            signals: signalsFromStoredItem(item, store.trustDomain, lane.storedPlacementIsPrior === true),
+            signals: signalsFromStoredItem(item),
             ...item.locatorUri ? { locators: [item.locatorUri] } : {},
             provider: item.identity.provider,
             text: item.chunks.map((chunk) => chunk.text).join(""),
@@ -116448,7 +116420,6 @@ function installedTierMigrationLaneSpecs(env = process.env) {
       sourceId: TELEGRAM_MESSAGES_SOURCE_ID,
       setId: TELEGRAM_MESSAGES_SOURCE_ID,
       splitLayers: false,
-      storedPlacementIsPrior: true,
       legs: {
         internal: { corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, dbPath: resolvedStorePath("telegram.messages", "internal", env), family: "chat", legacy: true },
         secure_local: { corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID2, dbPath: resolvedStorePath("telegram.messages", "secure_local", env), family: "chat", legacy: true }
@@ -116545,11 +116516,7 @@ function openTierMigrationLanes(specs, options) {
         ...tierClassification ? { tierClassification } : {},
         ...secretLocations ? { secretLocations } : {}
       });
-      lanes.push({
-        sourceId: spec.sourceId,
-        set,
-        ...spec.storedPlacementIsPrior ? { storedPlacementIsPrior: true } : {}
-      });
+      lanes.push({ sourceId: spec.sourceId, set });
     }
   } catch (error) {
     closeAll(opened);
@@ -164382,8 +164349,8 @@ function localFilesConnectorIdForScope(approvedScopeKey, scope) {
   const hash = createHash90("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `local.files.${hash}`;
 }
-function localFilesStoreView(store, tierSet) {
-  return tierSet ? {
+function localFilesStoreView(tierSet) {
+  return {
     activeIdentityForLocatorIfIndexed(input) {
       for (const domain of TIER_DOMAIN_ORDER) {
         const identity2 = tierSet.store(domain)?.activeIdentityForLocatorIfIndexed(input);
@@ -164415,11 +164382,6 @@ function localFilesStoreView(store, tierSet) {
     lookupsReady() {
       return TIER_DOMAIN_ORDER.every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
     }
-  } : {
-    activeIdentityForLocatorIfIndexed: (input) => store.activeIdentityForLocatorIfIndexed(input),
-    activeItemsUnderLocatorIfIndexed: (input) => store.activeItemsUnderLocatorIfIndexed(input),
-    activeItemsDirectlyUnderRootIfIndexed: (input) => store.activeItemsDirectlyUnderRootIfIndexed(input),
-    lookupsReady: () => store.locatorIdentityIndexReady()
   };
 }
 function createLocalFilesProviderStoreSyncHandler(options) {
@@ -164427,11 +164389,11 @@ function createLocalFilesProviderStoreSyncHandler(options) {
     throw new Error("Local files secure_local embeddings require a local/private or approved Venice embedding provider.");
   }
   const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec("secure_local")?.store !== options.store) {
+  if (tierSet.legSpec("secure_local")?.store !== options.store) {
     throw new Error("The local files tier set's secure leg must be the lane's own store.");
   }
   const connectorIdFor = (approvedScopeKey) => localFilesConnectorIdForScope(approvedScopeKey, options.scope);
-  const storeView = localFilesStoreView(options.store, tierSet);
+  const storeView = localFilesStoreView(tierSet);
   return {
     connectorIdForScope: connectorIdFor,
     async pull(request) {
@@ -164443,7 +164405,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
       const approvedScopeKey = request.approved_scope_key.trim();
       const root = localFilesRootOfApprovedScopeKey(approvedScopeKey);
       const connectorId = connectorIdFor(approvedScopeKey);
-      const priorCursor = tierSet?.committedCursor(connectorId)?.cursor ?? options.store.lastCompletedSyncRun(connectorId)?.cursor ?? checkpointCursor(request.checkpoint, connectorId) ?? undefined;
+      const priorCursor = tierSet.committedCursor(connectorId)?.cursor ?? options.store.lastCompletedSyncRun(connectorId)?.cursor ?? checkpointCursor(request.checkpoint, connectorId) ?? undefined;
       const resumable = priorCursor !== undefined && priorCursor.startsWith(LOCAL_FILES_CURSOR_PREFIX) && priorCursor !== LOCAL_FILES_POLL_CURSOR;
       const runTraversal = async (cursor) => {
         const walk = { directories: 0, files: 0, unreadable: 0 };
@@ -164470,10 +164432,6 @@ function createLocalFilesProviderStoreSyncHandler(options) {
           }),
           ...cursor ? { cursor } : {}
         };
-        if (!tierSet) {
-          const sync2 = await options.store.syncFromConnector(observed.connector, syncOptions);
-          return { sync: sync2, legs: [sync2], completed: observed.completed(), walk, full };
-        }
         const run3 = await tierSet.sync(observed.connector, syncOptions);
         const secure = run3.byDomain.secure_local;
         if (!secure)
@@ -164596,17 +164554,17 @@ var init_provider_store_sync2 = __esm(() => {
 
 // src/workers/local-files/own-roots-cleanup.ts
 function createLocalFilesOwnRootsCleanup(options) {
-  const { store, tierSet, context: context2 } = options;
+  const { tierSet, context: context2 } = options;
   const maxItems = Math.max(1, options.maxItems ?? DEFAULT_MAX_ITEMS);
   const maxMs = Math.max(0, options.maxMs ?? DEFAULT_MAX_MS);
   const batchSize = Math.max(1, options.batchSize ?? DEFAULT_BATCH);
   const pageSize = Math.max(1, options.pageSize ?? DEFAULT_PAGE);
   const maxScanned = Math.max(1, options.maxScanned ?? DEFAULT_MAX_SCANNED);
-  const view3 = localFilesStoreView(store, tierSet);
-  const stores = tierSet ? TIER_DOMAIN_ORDER.flatMap((domain) => {
+  const view3 = localFilesStoreView(tierSet);
+  const stores = TIER_DOMAIN_ORDER.flatMap((domain) => {
     const leg = tierSet.store(domain);
     return leg ? [leg] : [];
-  }) : [store];
+  });
   const walks = stores.flatMap((leg) => (context2.ownRoots ?? []).map((root) => ({ store: leg, root, done: false })));
   let finished = walks.length === 0;
   let running;
@@ -164637,10 +164595,7 @@ function createLocalFilesOwnRootsCleanup(options) {
     const at = new Date;
     const connector = deletionsConnector(batch.map((item) => localFilesDeletedItem(item.identity, item.locatorUri, at)));
     const sync = { placement: LOCAL_FILES_STORE_PLACEMENT, fetchContent: false };
-    if (tierSet)
-      await tierSet.sync(connector, sync, { commitCursor: false, settle: false });
-    else
-      await store.syncFromConnector(connector, sync);
+    await tierSet.sync(connector, sync, { commitCursor: false, settle: false });
   };
   const once = async () => {
     if (view3.lookupsReady && !view3.lookupsReady()) {
@@ -205180,8 +205135,8 @@ ${key2}`;
   const dropboxExtractionView = dropboxTierLane ? tieredExtractionView(dropboxTierLane.set) : undefined;
   const isDropboxTierStore = (store) => store === dropboxConnectorStore || dropboxTierLane !== undefined && (store === dropboxTierLane.internal.current() || store === dropboxTierLane.public.current());
   const dropboxScopeRef = dropboxHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("dropbox.files") : undefined;
-  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority ? createDropboxProviderStoreSyncHandler({
-    ...dropboxTierLane ? { tierSet: dropboxTierLane.set } : {},
+  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxTierLane && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority ? createDropboxProviderStoreSyncHandler({
+    tierSet: dropboxTierLane.set,
     store: dropboxConnectorStore,
     account: dropboxProviderAccount,
     credentialHandle: dropboxHandle.handle,
@@ -205226,22 +205181,21 @@ ${key2}`;
     volumeIgnoresCase: (volumeId, path) => localFilesVolumes.ignoresCase(volumeId, path)
   };
   const localFilesWatchIgnore = watchIgnoreGlobs(localFilesExclusionContext);
-  const localFilesOwnRootsCleanup = localFilesConnectorStore ? createLocalFilesOwnRootsCleanup({
-    store: localFilesConnectorStore,
-    ...localFilesTierLane ? { tierSet: localFilesTierLane.set } : {},
+  const localFilesOwnRootsCleanup = localFilesConnectorStore && localFilesTierLane ? createLocalFilesOwnRootsCleanup({
+    tierSet: localFilesTierLane.set,
     context: localFilesExclusionContext,
     log: (message2) => console.warn(`[local-files] ${message2}`)
   }) : undefined;
   let localFilesSyncCache;
   const localFilesSyncFor = (ref) => {
-    if (!localFilesConnectorStore || !fileSourceScopeAuthority)
+    if (!localFilesConnectorStore || !localFilesTierLane || !fileSourceScopeAuthority)
       return;
     const key2 = `${ref.accountGeneration}:${ref.revision}`;
     if (localFilesSyncCache?.key === key2)
       return localFilesSyncCache.handler;
     recordAccountPlacement({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesWatchDir(process.env));
     const handler = createLocalFilesProviderStoreSyncHandler({
-      ...localFilesTierLane ? { tierSet: localFilesTierLane.set } : {},
+      tierSet: localFilesTierLane.set,
       store: localFilesConnectorStore,
       scope: createScopeBoundLocalFilesContentScope({ authority: fileSourceScopeAuthority, ref, context: localFilesExclusionContext }),
       volumes: localFilesVolumes,
@@ -205325,8 +205279,8 @@ ${key2}`;
     },
     readChild: whatsappReadChild
   }));
-  const whatsappConnectorStoreSync = whatsappConnectorStore ? createWhatsAppConnectorStoreSyncHandler({
-    ...whatsappTierSet ? { tierSet: whatsappTierSet } : {},
+  const whatsappConnectorStoreSync = whatsappConnectorStore && whatsappTierSet ? createWhatsAppConnectorStoreSyncHandler({
+    tierSet: whatsappTierSet,
     store: whatsappConnectorStore,
     account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
     env: process.env,
@@ -206325,8 +206279,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const currentGoogleDriveScopeRef = currentGoogleDriveHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("google_drive.docs") : undefined;
     const currentGoogleDriveConnectorStoreSync = createGoogleDriveConnectorStoreSyncForHandle(currentGoogleDriveHandle);
     const currentDropboxScopeRef = currentDropboxHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("dropbox.files") : undefined;
-    const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef && fileSourceScopeAuthority && dropboxConnectorStore ? currentDropboxHandle.handle === dropboxHandle?.handle && currentDropboxScopeRef.sourceId === dropboxScopeRef?.sourceId && currentDropboxScopeRef.accountGeneration === dropboxScopeRef?.accountGeneration && currentDropboxScopeRef.revision === dropboxScopeRef?.revision && dropboxProviderStoreSync ? dropboxProviderStoreSync : createDropboxProviderStoreSyncHandler({
-      ...dropboxTierLane ? { tierSet: dropboxTierLane.set } : {},
+    const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef && fileSourceScopeAuthority && dropboxConnectorStore && dropboxTierLane ? currentDropboxHandle.handle === dropboxHandle?.handle && currentDropboxScopeRef.sourceId === dropboxScopeRef?.sourceId && currentDropboxScopeRef.accountGeneration === dropboxScopeRef?.accountGeneration && currentDropboxScopeRef.revision === dropboxScopeRef?.revision && dropboxProviderStoreSync ? dropboxProviderStoreSync : createDropboxProviderStoreSyncHandler({
+      tierSet: dropboxTierLane.set,
       store: dropboxConnectorStore,
       account: currentDropboxHandle.accountRole?.trim() || dropboxFilesAccount || "personal",
       credentialHandle: currentDropboxHandle.handle,
@@ -207997,11 +207951,11 @@ function createRefreshableReadwiseConnectorStoreRuntime(options) {
     ...options.requestBudgetStatePath ? { statePath: options.requestBudgetStatePath } : {}
   });
   const store = createReadwiseConnectorStore(options.dbPath ?? resolvedStorePath(READWISE_SOURCE_ID, "internal", env), env);
-  const tierSet = options.tierSetFor?.(store);
+  const tierSet = options.tierSetFor(store);
   const buildSync = (handle) => createReadwiseConnectorStoreSyncHandler({
     store,
     embeddingProvider,
-    ...tierSet ? { tierSet } : {},
+    tierSet,
     account: options.account?.trim() || handle?.accountRole?.trim() || "personal",
     requestBudget,
     ...env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE?.trim() ? { credentialHandle: env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE.trim() } : handle?.handle ? { credentialHandle: handle.handle } : {},
@@ -208043,7 +207997,7 @@ function createRefreshableXBookmarksConnectorStoreRuntime(options) {
     return;
   const env = options.env ?? process.env;
   const store = createXBookmarksConnectorStore(options.dbPath ?? resolvedStorePath(X_BOOKMARKS_SOURCE_ID, "internal", env), env);
-  const tierSet = options.tierSetFor?.(store);
+  const tierSet = options.tierSetFor(store);
   let usageStore = options.usageStore;
   let reconcileStateStore = options.reconcileStateStore;
   let cachedKey;
@@ -208074,7 +208028,7 @@ function createRefreshableXBookmarksConnectorStoreRuntime(options) {
         usageStore,
         reconcileStateStore,
         env,
-        ...tierSet ? { tierSet } : {}
+        tierSet
       });
       cachedKey = key2;
       return cachedRuntime;
@@ -208100,7 +208054,7 @@ function bindXBookmarksConnectorStoreRuntime(options) {
   const sync = createXBookmarksConnectorStoreSyncHandler({
     store: options.store,
     embeddingProvider: options.embeddingProvider,
-    ...options.tierSet ? { tierSet: options.tierSet } : {},
+    tierSet: options.tierSet,
     credentialHandle: options.handle.handle,
     account: options.principalAccount,
     userId: options.providerUserId,
@@ -208112,7 +208066,7 @@ function bindXBookmarksConnectorStoreRuntime(options) {
   });
   const contentRecovery = createXBookmarksContentRecoveryHandler({
     store: options.store,
-    ...options.tierSet ? { tierLedger: options.tierSet.ledger } : {},
+    tierLedger: options.tierSet.ledger,
     usageStore: options.usageStore,
     reconcileStateStore: options.reconcileStateStore,
     embeddingProvider: options.embeddingProvider,
