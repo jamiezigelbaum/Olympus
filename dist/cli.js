@@ -137661,8 +137661,10 @@ var init_private_answer_contract = __esm(() => {
   PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
   PRIVATE_ANSWER_NONE_META = Object.freeze({ v: 1, count: 0, state: "none" });
   NoPrivateEvidenceError = class NoPrivateEvidenceError extends Error {
-    constructor() {
+    reason;
+    constructor(reason = "none_readable") {
       super("no private evidence may be read");
+      this.reason = reason;
       this.name = "NoPrivateEvidenceError";
     }
   };
@@ -137799,7 +137801,7 @@ function createBuiltInPrivateAnswerModel(options) {
             const ok = await checkPrivateEvidence(options.eligible, prompted);
             if (!ok.every(Boolean)) {
               revoked = true;
-              throw new NoPrivateEvidenceError;
+              throw new NoPrivateEvidenceError("revoked");
             }
           };
           return runWithLocalInferenceGuard(guard, async () => {
@@ -137822,11 +137824,11 @@ function createBuiltInPrivateAnswerModel(options) {
         });
       } catch (error2) {
         if (revoked)
-          throw new NoPrivateEvidenceError;
+          throw new NoPrivateEvidenceError("revoked");
         throw error2;
       }
       if (revoked)
-        throw new NoPrivateEvidenceError;
+        throw new NoPrivateEvidenceError("revoked");
       const byId = new Map(items.map((item, position) => [item.id, { item, hit: hitOf(picked[position]) }]));
       const citations = [];
       const seen = new Set;
@@ -138324,7 +138326,7 @@ async function answerOnThisComputer(input, options) {
       return { status: "failed" };
     try {
       const ok = await options.eligible(candidates);
-      return ok.some((value2) => value2 === true) ? { status: "changed" } : { status: "not_found", leftOut };
+      return error2.reason === "revoked" && ok.some((value2) => value2 === true) ? { status: "changed" } : { status: "not_found", leftOut };
     } catch {
       return { status: "failed" };
     }
@@ -190056,9 +190058,12 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
           throw new ChatGptSurfaceError("unavailable");
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const ticket = waitingTicket(ctx, options);
+        const late = () => {
+          recordWaiting(ticket, question, detail, options);
+        };
         const [raw, probed] = await Promise.all([
           options.evidenceSearch({ question, ...limit2 ? { limit: limit2 } : {} }, signal),
-          probeWithinDeadline(probe, question, ctx, options, "search")
+          probeWithinDeadline(probe, question, ctx, options, "search", late)
         ]);
         const match = normalizeProbe(probed);
         const waiting = match.count > 0 ? recordWaiting(ticket, question, detail, options) : undefined;
@@ -190089,7 +190094,9 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
             include_secure_local_content: false,
             timeoutMs: SOURCE_ANSWER_TIMEOUT_MS
           }),
-          probeWithinDeadline(probe, question, ctx, options, "search")
+          probeWithinDeadline(probe, question, ctx, options, "search", () => {
+            recordWaiting(ticket, question, detail, options);
+          })
         ]);
         const match = normalizeProbe(probed);
         const waiting = match.count > 0 ? recordWaiting(ticket, question, detail, options) : undefined;
@@ -190164,19 +190171,29 @@ function normalizeProbe(value2) {
   }
   return { count: 0, evidence: [] };
 }
-function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search") {
+function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search", onLateMatch) {
   const timeoutMs = options.privateMatchProbeTimeoutMs ?? PROBE_TIMEOUT_MS2;
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
   let timer;
+  let timedOut = false;
   const timeout = new Promise((resolve27) => {
     timer = setTimeout(() => {
+      timedOut = true;
       log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
       resolve27(false);
     }, timeoutMs);
     timer.unref?.();
   });
-  const probed = probe(question, ctx).then((value2) => value2, () => {
+  const probed = probe(question, ctx).then((value2) => {
+    if (timedOut && onLateMatch && normalizeProbe(value2).count > 0) {
+      log(`[chatgpt] private match probe matched_late stage=${stage} elapsed_ms=${Date.now() - startedAt}`);
+      try {
+        onLateMatch();
+      } catch {}
+    }
+    return value2;
+  }).then((value2) => value2, () => {
     log(`[chatgpt] private match probe failed stage=${stage} elapsed_ms=${Date.now() - startedAt}`);
     return false;
   });

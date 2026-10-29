@@ -404,6 +404,25 @@ describe('a private match probe that is slow or fails', () => {
     expect(lines).toEqual(['[chatgpt] private match probe timed_out stage=search timeout_ms=30']);
   });
 
+  test('a probe that matches after its deadline still leaves the question waiting on the computer', async () => {
+    const lines: string[] = [];
+    const recorded: unknown[] = [];
+    let finish: (value: { count: number; evidence: [] }) => void = () => {};
+    const slow = new Promise<{ count: number; evidence: [] }>((resolve) => { finish = resolve; });
+    const waitingQuestions = () => ({
+      ticket: (connectionId: string) => ({ connectionId }),
+      record: (ticket: unknown, input: unknown) => { recorded.push({ ticket, input }); return { id: 'w1', generation: 1, connectionId: 'conn-1' }; },
+    }) as never;
+    const ctx = { caller: { surface: 'remote', connectionId: 'conn-1' } } as unknown as OperationContext;
+    const result = await callChatGptTool(SEARCH_TOOL.name, { question: QUESTION }, ctx, { ...options(() => slow, lines), waitingQuestions });
+    expect((result._meta as Record<string, unknown> | undefined)?.[PRIVATE_ANSWER_META_KEY]).toEqual({ v: 1, count: 0, state: 'none' });
+    expect(recorded).toEqual([]);
+    finish({ count: 2, evidence: [] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(recorded).toEqual([{ ticket: { connectionId: 'conn-1' }, input: { question: QUESTION, surface: 'chatgpt', state: 'waiting', detail: 'summary' } }]);
+    expect(lines[1]).toMatch(/^\[chatgpt\] private match probe matched_late stage=search elapsed_ms=\d+$/);
+  });
+
   test('only tools that render the panel carry a panel outcome', async () => {
     const result = await callChatGptTool('not_a_tool', {}, {} as OperationContext, options(async () => ({ count: 0, evidence: [] }), []));
     expect(result.isError).toBe(true);
