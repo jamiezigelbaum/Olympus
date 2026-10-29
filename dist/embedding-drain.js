@@ -45733,11 +45733,11 @@ var init_source_ingestion_ledger = __esm(() => {
 
 // src/workers/classification-ledger.ts
 import { mkdir as mkdir4, open as open3, readFile as readFile4 } from "node:fs/promises";
-import { dirname as dirname29 } from "node:path";
+import { dirname as dirname30 } from "node:path";
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname29(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname30(path), { recursive: true, mode: 448 });
   const handle = await open3(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -46085,7 +46085,7 @@ var init_file_mime = __esm(() => {
 // src/workers/local-files/mac-permissions.ts
 import { existsSync as existsSync24, mkdirSync as mkdirSync16, opendirSync, readFileSync as readFileSync21 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname31, join as join33 } from "node:path";
+import { dirname as dirname32, join as join33 } from "node:path";
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -46278,7 +46278,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync16(dirname31(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync16(dirname32(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -62870,7 +62870,7 @@ init_worker_auth();
 init_worker_transport();
 import { createHash as createHash26 } from "node:crypto";
 import { existsSync as existsSync28, lstatSync as lstatSync14, mkdirSync as mkdirSync18, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname33, isAbsolute as isAbsolute14 } from "node:path";
+import { dirname as dirname34, isAbsolute as isAbsolute14 } from "node:path";
 
 // src/workers/email-source/server.ts
 init_source_placement();
@@ -63132,7 +63132,7 @@ class LinuxOwnerBridge {
   tickets = new Map;
   sessions = [];
   claim;
-  lastOpen = { control: -Infinity, browser: -Infinity };
+  lastBrowserOpen = -Infinity;
   browserOpens = [];
   closed = false;
   now;
@@ -63167,27 +63167,24 @@ class LinuxOwnerBridge {
   async openTicket(target, lane = "control") {
     if (!safeTarget(target) || !this.live())
       throw new Error("Desktop owner confirmation is unavailable.");
-    const openedAt = this.now(), previousOpen = this.lastOpen[lane];
-    if (lane === "browser") {
-      this.browserOpens = this.browserOpens.filter((time) => time > openedAt - 60 * 60 * 1000);
-      if (this.browserOpens.length >= 6)
-        throw new OwnerOpenLimited("Wait before opening another owner ticket.", true);
-    }
-    if (openedAt - this.lastOpen[lane] < 1e4)
+    if (lane === "control")
+      return this.launchTicket(target, lane);
+    const openedAt = this.now(), previousOpen = this.lastBrowserOpen;
+    this.browserOpens = this.browserOpens.filter((time) => time > openedAt - 60 * 60 * 1000);
+    if (this.browserOpens.length >= 6)
+      throw new OwnerOpenLimited("Wait before opening another owner ticket.", true);
+    if (openedAt - this.lastBrowserOpen < 1e4)
       throw new OwnerOpenLimited("Wait ten seconds before opening another owner ticket.", false);
-    if (lane === "browser")
-      this.browserOpens.push(openedAt);
-    this.lastOpen[lane] = openedAt;
+    this.browserOpens.push(openedAt);
+    this.lastBrowserOpen = openedAt;
     try {
       await this.launchTicket(target, lane);
     } catch (error) {
-      if (this.lastOpen[lane] === openedAt)
-        this.lastOpen[lane] = previousOpen;
-      if (lane === "browser") {
-        const index = this.browserOpens.lastIndexOf(openedAt);
-        if (index >= 0)
-          this.browserOpens.splice(index, 1);
-      }
+      if (this.lastBrowserOpen === openedAt)
+        this.lastBrowserOpen = previousOpen;
+      const index = this.browserOpens.lastIndexOf(openedAt);
+      if (index >= 0)
+        this.browserOpens.splice(index, 1);
       throw error;
     }
   }
@@ -63416,7 +63413,7 @@ class LinuxOwnerBridge {
         const response2 = page(`<p>${error.hourly ? BROWSER_OPEN_LIMIT_MESSAGE : BROWSER_OPEN_RECENT_MESSAGE}</p>`, 429);
         response2.headers.set("X-Olympus-Owner-Refused", "1");
         response2.headers.set(OWNER_LIMIT_HEADER, error.hourly ? "hourly" : "recent");
-        const retryAt = Math.max(this.lastOpen.browser + 1e4, this.browserOpens.length >= 6 ? this.browserOpens[0] + 60 * 60 * 1000 : 0);
+        const retryAt = Math.max(this.lastBrowserOpen + 1e4, this.browserOpens.length >= 6 ? this.browserOpens[0] + 60 * 60 * 1000 : 0);
         response2.headers.set("Retry-After", String(Math.max(1, Math.ceil((retryAt - this.now()) / 1000))));
         return response2;
       }
@@ -63533,9 +63530,10 @@ init_worker_transport();
 init_package_root();
 
 // src/core/messaging-runtime.ts
-import { existsSync as existsSync20 } from "node:fs";
+init_atomic_file();
+import { existsSync as existsSync20, rmSync as rmSync6 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
-import { join as join28 } from "node:path";
+import { dirname as dirname27, join as join28 } from "node:path";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir12();
@@ -63549,6 +63547,56 @@ function telegramPythonExecutable(options = {}) {
 }
 var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0";
 var TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
+var installing = new Map;
+async function readyTelegramPython(options = {}) {
+  const python = telegramPythonExecutable(options);
+  if (!python)
+    throw new Error(`Python 3 is required for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
+  const venvDir = telegramPythonVenvDir(options);
+  const isolated = join28(venvDir, "bin", "python");
+  if (options.pythonExecutable || python === isolated)
+    return python;
+  if (await (options.pythonHasTelethon ?? pythonImportsTelethon)(python))
+    return python;
+  let install = installing.get(venvDir);
+  if (!install) {
+    options.onInstall?.(venvDir);
+    install = (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: python, venvDir }).finally(() => installing.delete(venvDir));
+    installing.set(venvDir, install);
+  }
+  if (!await install || !existsSync20(isolated))
+    throw new Error(`Olympus could not install Telethon for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
+  return isolated;
+}
+async function pythonImportsTelethon(python) {
+  const child = Bun.spawn([python, "-c", "import telethon"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  return await child.exited === 0;
+}
+async function provisionTelegramPython(input) {
+  const run = async (argv) => {
+    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    let timeout;
+    const result = await Promise.race([
+      child.exited,
+      new Promise((resolve10) => {
+        timeout = setTimeout(() => resolve10("timeout"), 5 * 60 * 1000);
+      })
+    ]);
+    if (timeout)
+      clearTimeout(timeout);
+    if (result === "timeout")
+      child.kill("SIGKILL");
+    return result === 0;
+  };
+  const cacheHome = dirname27(dirname27(input.venvDir));
+  ensurePrivateRootDirectorySync(cacheHome);
+  ensurePrivateDirectoryTreeSync(cacheHome, dirname27(input.venvDir));
+  const python = join28(input.venvDir, "bin", "python");
+  const ok = await run([input.python3, "-m", "venv", input.venvDir]) && await run([python, "-m", "pip", "install", "--quiet", TELEGRAM_TELETHON_REQUIREMENT]) && await run([python, "-c", "import telethon"]);
+  if (!ok)
+    rmSync6(input.venvDir, { recursive: true, force: true });
+  return ok;
+}
 
 // src/core/messaging-capture.ts
 init_atomic_file();
@@ -63561,9 +63609,9 @@ init_source_storage();
 init_secret_store();
 init_unpaired_sources();
 init_connected_handles();
-import { existsSync as existsSync21, mkdirSync as mkdirSync14, rmSync as rmSync6 } from "node:fs";
+import { existsSync as existsSync21, mkdirSync as mkdirSync14, rmSync as rmSync7 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
-import { dirname as dirname27, join as join29 } from "node:path";
+import { dirname as dirname28, join as join29 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return captureGrantPathBeside(source, registryPath);
@@ -63659,7 +63707,7 @@ class MessagingCaptureSupervisor {
     if (generation !== this.generation - 1)
       return { source: grant.source, state: "stopped", reason: "grant_missing" };
     const spawn3 = this.options.spawn ?? spawnCapture;
-    const launch = resolveCurrentLaunch(this.options, grant.source);
+    const launch = await resolveCurrentLaunch(this.options, grant.source, layoutEnv);
     const lock = grant.source === "whatsapp" ? tryHoldFileFlock(join29(whatsappStateDirOf(grant, account, layoutEnv), WHATSAPP_BRIDGE_LOCK_NAME)) : undefined;
     if (grant.source === "whatsapp" && !lock)
       return { source: grant.source, state: "blocked", reason: "helper_running" };
@@ -63711,12 +63759,15 @@ async function observeChildExit(child, timeoutMs) {
   return observed;
 }
 var readGrant = readCaptureGrantFile;
-function resolveCurrentLaunch(options, source) {
+async function resolveCurrentLaunch(options, source, env) {
   if (source === "telegram") {
-    const executable = telegramPythonExecutable({ ...options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {} });
-    if (!executable)
-      throw new Error("Python 3 is required to start Telegram capture.");
-    const packageRoot = options.packageRoot ?? join29(dirname27(fileURLToPath2(import.meta.url)), "..", "..");
+    const executable = await readyTelegramPython({
+      env,
+      ...options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {},
+      ...options.pythonHasTelethon ? { pythonHasTelethon: options.pythonHasTelethon } : {},
+      ...options.provisionTelegramPython ? { provisionTelegramPython: options.provisionTelegramPython } : {}
+    });
+    const packageRoot = options.packageRoot ?? join29(dirname28(fileURLToPath2(import.meta.url)), "..", "..");
     return { executable, args: [join29(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
   return {
@@ -63845,12 +63896,12 @@ import {
   mkdirSync as mkdirSync15,
   readFileSync as readFileSync19,
   renameSync as renameSync5,
-  rmSync as rmSync7,
+  rmSync as rmSync8,
   writeFileSync as writeFileSync6
 } from "node:fs";
 import { randomUUID as randomUUID6 } from "node:crypto";
 import { homedir as homedir14 } from "node:os";
-import { dirname as dirname28, isAbsolute as isAbsolute13, join as join30 } from "node:path";
+import { dirname as dirname29, isAbsolute as isAbsolute13, join as join30 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -64067,7 +64118,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID6()}.tmp`;
   try {
-    mkdirSync15(dirname28(path), { recursive: true, mode: 448 });
+    mkdirSync15(dirname29(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync6(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -64078,7 +64129,7 @@ function writeCatalogCache(path, catalog) {
 `, { mode: 384 });
     renameSync5(tempPath, path);
   } catch {} finally {
-    rmSync7(tempPath, { force: true });
+    rmSync8(tempPath, { force: true });
   }
 }
 function parsePrivacyCategory(value) {
@@ -65138,7 +65189,7 @@ init_scope();
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire6 } from "node:module";
 import { existsSync as existsSync23, readFileSync as readFileSync20 } from "node:fs";
-import { dirname as dirname30, join as join32 } from "node:path";
+import { dirname as dirname31, join as join32 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
   constructor(detail) {
@@ -65330,7 +65381,7 @@ async function loadParcelWatcher(extraDirs = []) {
     if (!existsSync23(join32(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire6(join32(dirname30(candidate), "package.json"));
+      const requireFrom = createRequire6(join32(dirname31(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
@@ -68644,7 +68695,7 @@ init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
 import { mkdirSync as mkdirSync17, readFileSync as readFileSync23 } from "node:fs";
-import { dirname as dirname32 } from "node:path";
+import { dirname as dirname33 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
@@ -68682,7 +68733,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync17(dirname32(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync17(dirname33(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -70717,7 +70768,7 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute14(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname33(readinessPath);
+  const directory = dirname34(readinessPath);
   mkdirSync18(directory, { recursive: true, mode: 448 });
   const parent = lstatSync14(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
@@ -70748,7 +70799,7 @@ if (__require.main == __require.module) {
     }
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync18(dirname33(args.reportPath), { recursive: true });
+      mkdirSync18(dirname34(args.reportPath), { recursive: true });
       writeFileSync7(args.reportPath, `${json}
 `);
     }
@@ -70758,7 +70809,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync18(dirname33(args.reportPath), { recursive: true });
+      mkdirSync18(dirname34(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync7(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);

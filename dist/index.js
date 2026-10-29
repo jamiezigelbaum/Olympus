@@ -27627,7 +27627,7 @@ class LinuxOwnerBridge {
   tickets = new Map;
   sessions = [];
   claim;
-  lastOpen = { control: -Infinity, browser: -Infinity };
+  lastBrowserOpen = -Infinity;
   browserOpens = [];
   closed = false;
   now;
@@ -27662,27 +27662,24 @@ class LinuxOwnerBridge {
   async openTicket(target, lane = "control") {
     if (!safeTarget(target) || !this.live())
       throw new Error("Desktop owner confirmation is unavailable.");
-    const openedAt = this.now(), previousOpen = this.lastOpen[lane];
-    if (lane === "browser") {
-      this.browserOpens = this.browserOpens.filter((time) => time > openedAt - 60 * 60 * 1000);
-      if (this.browserOpens.length >= 6)
-        throw new OwnerOpenLimited("Wait before opening another owner ticket.", true);
-    }
-    if (openedAt - this.lastOpen[lane] < 1e4)
+    if (lane === "control")
+      return this.launchTicket(target, lane);
+    const openedAt = this.now(), previousOpen = this.lastBrowserOpen;
+    this.browserOpens = this.browserOpens.filter((time) => time > openedAt - 60 * 60 * 1000);
+    if (this.browserOpens.length >= 6)
+      throw new OwnerOpenLimited("Wait before opening another owner ticket.", true);
+    if (openedAt - this.lastBrowserOpen < 1e4)
       throw new OwnerOpenLimited("Wait ten seconds before opening another owner ticket.", false);
-    if (lane === "browser")
-      this.browserOpens.push(openedAt);
-    this.lastOpen[lane] = openedAt;
+    this.browserOpens.push(openedAt);
+    this.lastBrowserOpen = openedAt;
     try {
       await this.launchTicket(target, lane);
     } catch (error) {
-      if (this.lastOpen[lane] === openedAt)
-        this.lastOpen[lane] = previousOpen;
-      if (lane === "browser") {
-        const index = this.browserOpens.lastIndexOf(openedAt);
-        if (index >= 0)
-          this.browserOpens.splice(index, 1);
-      }
+      if (this.lastBrowserOpen === openedAt)
+        this.lastBrowserOpen = previousOpen;
+      const index = this.browserOpens.lastIndexOf(openedAt);
+      if (index >= 0)
+        this.browserOpens.splice(index, 1);
       throw error;
     }
   }
@@ -27911,7 +27908,7 @@ class LinuxOwnerBridge {
         const response2 = page(`<p>${error.hourly ? BROWSER_OPEN_LIMIT_MESSAGE : BROWSER_OPEN_RECENT_MESSAGE}</p>`, 429);
         response2.headers.set("X-Olympus-Owner-Refused", "1");
         response2.headers.set(OWNER_LIMIT_HEADER, error.hourly ? "hourly" : "recent");
-        const retryAt = Math.max(this.lastOpen.browser + 1e4, this.browserOpens.length >= 6 ? this.browserOpens[0] + 60 * 60 * 1000 : 0);
+        const retryAt = Math.max(this.lastBrowserOpen + 1e4, this.browserOpens.length >= 6 ? this.browserOpens[0] + 60 * 60 * 1000 : 0);
         response2.headers.set("Retry-After", String(Math.max(1, Math.ceil((retryAt - this.now()) / 1000))));
         return response2;
       }
