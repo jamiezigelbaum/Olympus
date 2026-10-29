@@ -29408,6 +29408,7 @@ var init_local_index = __esm(() => {
       const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${hiddenNotIn}) AS stored_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
           AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
@@ -29439,7 +29440,7 @@ var init_local_index = __esm(() => {
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${fileScopeWhere}
         ) AS full_ingestion_files
-    `).get(...itemParams, ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
+    `).get(...itemParams, ...jsonList(tier.hidden), ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
       const outsideContentWindowItems = outsideWindowSql ? this.db.query(`
           SELECT COUNT(*) AS n FROM items i
           WHERE i.tombstoned = 0
@@ -29535,7 +29536,8 @@ var init_local_index = __esm(() => {
             contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems - outsideContentWindowItems),
             policyDeferredItems
           } : {},
-          ...outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {}
+          ...outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {},
+          ...counts.stored_items > counts.items ? { storedItems: counts.stored_items } : {}
         },
         embeddingByModel: byModel.map((row) => ({
           modelId: row.model_id,

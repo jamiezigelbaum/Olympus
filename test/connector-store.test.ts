@@ -2161,6 +2161,15 @@ describe('LocalConnectorStore sync', () => {
     expect(store.status().counts.syncRuns).toBe(1);
     store.close();
   });
+
+  test('a scope that reads nothing still says how many items are stored, so they can be deleted', async () => {
+    // test-omarchy 2026-10-29: a disconnected Dropbox read 0 items while 150 were stored, and Delete was never offered.
+    const store = newStore();
+    await store.syncFromConnector(createFakeConnector([[RETRO, GROCERIES]]), { fetchContent: true });
+    expect(store.status({ itemsAllowed: false, contentAllowed: false }).counts).toMatchObject({ items: 0, storedItems: 2 });
+    expect(store.status().counts.storedItems).toBeUndefined();
+    store.close();
+  });
 });
 
 // --- Reactions ----------------------------------------------------------------

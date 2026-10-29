@@ -37669,6 +37669,7 @@ var init_local_index = __esm(() => {
       const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${hiddenNotIn}) AS stored_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
           AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
@@ -37700,7 +37701,7 @@ var init_local_index = __esm(() => {
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${fileScopeWhere}
         ) AS full_ingestion_files
-    `).get(...itemParams, ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
+    `).get(...itemParams, ...jsonList(tier.hidden), ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
       const outsideContentWindowItems = outsideWindowSql ? this.db.query(`
           SELECT COUNT(*) AS n FROM items i
           WHERE i.tombstoned = 0
@@ -37796,7 +37797,8 @@ var init_local_index = __esm(() => {
             contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems - outsideContentWindowItems),
             policyDeferredItems
           } : {},
-          ...outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {}
+          ...outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {},
+          ...counts.stored_items > counts.items ? { storedItems: counts.stored_items } : {}
         },
         embeddingByModel: byModel.map((row) => ({
           modelId: row.model_id,
@@ -93273,6 +93275,7 @@ function connectorStoreStatus(corpus, status, readinessCounts, extractionThrough
       indexed_items: status.counts.files ?? status.counts.items,
       ...status.counts.folders === undefined ? {} : { folders: status.counts.folders },
       tombstoned_items: status.counts.tombstonedItems,
+      ...status.counts.storedItems === undefined ? {} : { stored_items: status.counts.storedItems },
       chunks: status.counts.chunks,
       embedded_chunks: forModel?.embeddedChunks ?? status.counts.embeddedChunks,
       sync_runs: status.counts.syncRuns,
@@ -94702,7 +94705,8 @@ function aggregateCoverage(cards) {
     ...notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {},
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
     ...cards.some((card) => card.coverage.settled_unreadable_items !== undefined) ? { settled_unreadable_items: cards.reduce((sum2, card) => sum2 + (card.coverage.settled_unreadable_items ?? 0), 0) } : {},
-    ...unreadable !== undefined ? { unreadable_items: unreadable } : {}
+    ...unreadable !== undefined ? { unreadable_items: unreadable } : {},
+    ...cards.some((card) => card.coverage.stored_items !== undefined) ? { stored_items: cards.reduce((sum2, card) => sum2 + (card.coverage.stored_items ?? card.coverage.indexed_items), 0) } : {}
   });
 }
 function aggregateQueueHealth(cards, _schedulers) {
@@ -95404,7 +95408,8 @@ function coverageFromCounts(counts) {
     ...notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {},
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
     ...counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items },
-    ...unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {}
+    ...unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {},
+    ...counts.stored_items === undefined ? {} : { stored_items: counts.stored_items }
   };
 }
 function metadataSyncFromCounts(counts) {
@@ -185296,7 +185301,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     });
   }
   const cleanlyUnpaired = definition.connect_action.kind === "guided_session" && card.connection.label === DASHBOARD_UNPAIRED_LABEL;
-  if (notConnected && (disconnectable || cleanlyUnpaired) && card.coverage.indexed_items > 0) {
+  if (notConnected && (disconnectable || cleanlyUnpaired) && (card.coverage.stored_items ?? card.coverage.indexed_items) > 0) {
     menu.push({
       label: DASHBOARD_CHATGPT_SETUP_LABELS.deleteData,
       tool: DELETE_SOURCE_DATA_TOOL_NAME,
@@ -185812,7 +185817,8 @@ function scrubCard(definition, card) {
       ...finite(card.coverage.not_read_by_policy_items) ? { not_read_by_policy_items: count(card.coverage.not_read_by_policy_items) } : {},
       ...finite(card.coverage.answer_ready_eligible_items) ? { answer_ready_eligible_items: count(card.coverage.answer_ready_eligible_items) } : {},
       ...finite(card.coverage.settled_unreadable_items) ? { settled_unreadable_items: count(card.coverage.settled_unreadable_items) } : {},
-      ...finite(card.coverage.unreadable_items) ? { unreadable_items: count(card.coverage.unreadable_items) } : {}
+      ...finite(card.coverage.unreadable_items) ? { unreadable_items: count(card.coverage.unreadable_items) } : {},
+      ...finite(card.coverage.stored_items) ? { stored_items: count(card.coverage.stored_items) } : {}
     },
     ingestion_health: {
       coverage_percent: finite(card.ingestion_health.coverage_percent) ? card.ingestion_health.coverage_percent : 0,

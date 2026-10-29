@@ -959,6 +959,12 @@ export interface DashboardSourceCard {
      */
     answer_ready_eligible_items?: number;
     /**
+     * Items still stored when the read scope hides them (a disconnected source
+     * reads nothing, so `indexed_items` is 0). Delete indexed data is offered
+     * on it. Absent when every stored item is in scope.
+     */
+    stored_items?: number;
+    /**
      * In-scope items extraction gave up on for good — a damaged file, or a
      * format nothing reads — with nothing left to retry. Owner ruling,
      * 2026-10-08: a fact the row states ("2 files can't be read"), never a
@@ -3636,6 +3642,8 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     ...(cards.some(card => card.coverage.settled_unreadable_items !== undefined)
       ? { settled_unreadable_items: cards.reduce((sum, card) => sum + (card.coverage.settled_unreadable_items ?? 0), 0) } : {}),
     ...(unreadable !== undefined ? { unreadable_items: unreadable } : {}),
+    ...(cards.some((card) => card.coverage.stored_items !== undefined)
+      ? { stored_items: cards.reduce((sum, card) => sum + (card.coverage.stored_items ?? card.coverage.indexed_items), 0) } : {}),
   });
 }
 
@@ -4952,6 +4960,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
     ...(eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {}),
     ...(counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items }),
     ...(unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {}),
+    ...(counts.stored_items === undefined ? {} : { stored_items: counts.stored_items }),
   };
 }
 

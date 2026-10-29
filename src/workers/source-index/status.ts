@@ -557,6 +557,7 @@ function connectorStoreStatus(
       indexed_items: status.counts.files ?? status.counts.items,
       ...(status.counts.folders === undefined ? {} : { folders: status.counts.folders }),
       tombstoned_items: status.counts.tombstonedItems,
+      ...(status.counts.storedItems === undefined ? {} : { stored_items: status.counts.storedItems }),
       chunks: status.counts.chunks,
       embedded_chunks: forModel?.embeddedChunks ?? status.counts.embeddedChunks,
       sync_runs: status.counts.syncRuns,
