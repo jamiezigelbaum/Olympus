@@ -156,6 +156,18 @@ export function corpusAnswerReadyEligibleItems(
 }
 
 /**
+ * The rows one corpus counts as its own items. A row whose text a move took to
+ * another store of the same set (`content_elsewhere_items`: its names stay
+ * here) is that store's item, and is counted there: counting it in both read
+ * one moved item as two (release check 2026-10-29, three items read as five).
+ */
+export function corpusOwnIndexedItems(counts: Record<string, number>, indexedItems: number): number {
+  const elsewhere = counts['content_elsewhere_items'];
+  if (typeof elsewhere !== 'number' || !Number.isFinite(elsewhere)) return indexedItems;
+  return Math.max(0, indexedItems - Math.max(0, Math.trunc(elsewhere)));
+}
+
+/**
  * Indexed items the system is actually meant to read. Never negative.
  *
  * `publishedEligibleItems` wins outright when the corpus reported one: it was

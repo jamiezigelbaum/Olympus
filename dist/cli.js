@@ -51589,6 +51589,12 @@ function corpusAnswerReadyEligibleItems(counts, indexedItems) {
     return;
   return Math.max(0, indexedItems - (notReadByPolicyFromCounts(counts) ?? 0) - Math.max(0, Math.trunc(elsewhere)));
 }
+function corpusOwnIndexedItems(counts, indexedItems) {
+  const elsewhere = counts["content_elsewhere_items"];
+  if (typeof elsewhere !== "number" || !Number.isFinite(elsewhere))
+    return indexedItems;
+  return Math.max(0, indexedItems - Math.max(0, Math.trunc(elsewhere)));
+}
 function answerReadyEligibleItems(indexedItems, notReadByPolicyItems, publishedEligibleItems) {
   if (typeof publishedEligibleItems === "number" && Number.isFinite(publishedEligibleItems)) {
     return Math.max(0, Math.trunc(publishedEligibleItems));
@@ -95390,7 +95396,7 @@ function coverageFromCounts(counts) {
   const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   return {
-    indexed_items: indexedItems,
+    indexed_items: corpusOwnIndexedItems(counts, indexedItems),
     content_ready_items: contentReadyItems,
     embedded_items: embeddedItems,
     ...embeddedFiles !== undefined ? { embedded_files: embeddedFiles } : {},
