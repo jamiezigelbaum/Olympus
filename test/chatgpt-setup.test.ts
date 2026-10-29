@@ -1376,4 +1376,18 @@ describe('dashboard privacy field', () => {
     expect(none.privacy).toBeUndefined();
     expect(none.needsYou.some((item) => item.id === 'privacy:setup')).toBe(false);
   });
+
+  test('a privacy check waiting on the owner to approve its model is in needsYou, never silent', () => {
+    const waiting = copyDashboardViewModel(buildChatGptDashboardViewModel(emptyView(), {
+      privacy: { configured: true, pendingCount: 4, ruleCount: 0, classifierAwaitingApproval: true },
+    }));
+    const item = waiting.needsYou.find((entry) => entry.id === 'privacy:classifier_approval');
+    expect(item?.sentence).toContain('olympus tier classifier approve --why');
+    expect(item?.fix.tool).toBe('olympus_dashboard');
+    expect(item?.fix.href).toContain('/open/fix/models/');
+    // The view's privacy field is unchanged: the approval is an ask, not a count.
+    expect(waiting.privacy).toEqual({ configured: true, pendingCount: 4, ruleCount: 0 });
+    const approved = buildChatGptDashboardViewModel(emptyView(), { privacy: { configured: true, pendingCount: 0, ruleCount: 0, classifierAwaitingApproval: false } });
+    expect(approved.needsYou.some((entry) => entry.id === 'privacy:classifier_approval')).toBe(false);
+  });
 });

@@ -132,6 +132,7 @@ import { DelphiClient } from '../../core/delphi.ts';
 import {
   describeSovereigntyPolicy,
   isPublicTierRetired,
+  isStandaloneEngineProcess,
   loadSovereigntyEngine,
   type SovereigntyEngine,
   type LoadSovereigntyOptions,
@@ -2359,6 +2360,7 @@ export async function main(): Promise<void> {
   const snifferRuntime = resolveTierSnifferRuntime({
     engine: sovereigntyEngine,
     ...(registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel()! } : {}),
+    standaloneEngine: isStandaloneEngineProcess(process.env),
   });
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
   if (snifferRuntime.source === 'off') {
@@ -6548,7 +6550,10 @@ export async function main(): Promise<void> {
     },
     privacy: () => {
       const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
-      return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
+      return {
+        configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length,
+        classifierAwaitingApproval: tierSnifferBacklog?.().awaitingOwnerApproval === true,
+      };
     },
   };
   const { withEngineBriefRoute } = await import('../engine-brief-route.ts');

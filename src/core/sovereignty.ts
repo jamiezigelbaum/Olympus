@@ -185,6 +185,18 @@ const TRUST_ORDER: Record<SovereigntyProfileTrust, number> = {
   standard_cloud: 1,
 };
 
+/**
+ * Whether this process belongs to the standalone engine rather than an
+ * OpenClaw host. Both supervise workers (instance id), and a gateway can
+ * inherit the engine markers, so a supervised worker must also be told by its
+ * supervisor that it is the engine's (native-worker-service WORKER_SUPERVISOR_ENV).
+ */
+export function isStandaloneEngineProcess(env: NodeJS.ProcessEnv): boolean {
+  const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+  return (env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1')
+    && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === 'engine');
+}
+
 export function loadSovereigntyEngine(options: LoadSovereigntyOptions = {}): SovereigntyEngine {
   const env = options.env ?? process.env;
   if (options.inlineConfig !== undefined) {
@@ -203,12 +215,7 @@ export function loadSovereigntyEngine(options: LoadSovereigntyOptions = {}): Sov
     const isDefaultPath = (path: string) => {
       try { return resolve(path) === resolve(defaultSovereigntyConfigPath(env)); } catch { return false; }
     };
-    // Both the engine host and an OpenClaw gateway supervise workers (instance id), and a
-    // gateway can inherit the engine markers, so a supervised worker must also be told by
-    // its supervisor that it is the engine's (native-worker-service WORKER_SUPERVISOR_ENV).
-    const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
-    const standaloneDefault = (env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1')
-      && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === 'engine')
+    const standaloneDefault = isStandaloneEngineProcess(env)
       && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {

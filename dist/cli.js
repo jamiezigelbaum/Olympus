@@ -23325,6 +23325,10 @@ import { dirname as dirname24, join as join29, resolve as resolve9 } from "node:
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID as randomUUID4 } from "node:crypto";
+function isStandaloneEngineProcess(env) {
+  const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+  return (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine");
+}
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
   if (options.inlineConfig !== undefined) {
@@ -23342,8 +23346,7 @@ function loadSovereigntyEngine(options = {}) {
         return false;
       }
     };
-    const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
-    const standaloneDefault = (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
+    const standaloneDefault = isStandaloneEngineProcess(env) && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {
         const backup = migratePrivateMeaningSearch(configPath);
@@ -24293,17 +24296,21 @@ function registeredBuiltInPrivateModel() {
   return registered;
 }
 function resolveTierSnifferRuntime(input) {
+  const builtInLane = (builtIn) => ({ source: "built_in", lane: {
+    ...BUILT_IN_SNIFFER_LANE,
+    ...builtIn.cacheModelId ? { cacheModelId: builtIn.cacheModelId } : {}
+  }, builtIn });
   try {
-    return { source: "configured", lane: resolveSnifferLane(input.engine) };
+    const lane = resolveSnifferLane(input.engine);
+    if (input.standaloneEngine && input.builtIn && lane.kind === "local" && lane.profile.purpose !== "classification") {
+      return builtInLane(input.builtIn);
+    }
+    return { source: "configured", lane };
   } catch (error) {
     if (!(error instanceof SnifferLaneRefusedError))
       throw error;
-    if (error.reason === "no_private_lane" && input.builtIn) {
-      return { source: "built_in", lane: {
-        ...BUILT_IN_SNIFFER_LANE,
-        ...input.builtIn.cacheModelId ? { cacheModelId: input.builtIn.cacheModelId } : {}
-      }, builtIn: input.builtIn };
-    }
+    if (error.reason === "no_private_lane" && input.builtIn)
+      return builtInLane(input.builtIn);
     return { source: "off", reason: error.reason };
   }
 }
@@ -52126,7 +52133,7 @@ function archiveFindingList(kind) {
   const lists = DASHBOARD_ARCHIVE_COPY.listOf;
   return Object.prototype.hasOwnProperty.call(lists, kind) ? lists[kind] : "not_imported";
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "A folder you chose is in Desktop, Documents, Downloads, iCloud Drive or another disk, which Olympus cannot open on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "A folder you chose is in Desktop, Documents, Downloads, iCloud Drive or another disk, which Olympus cannot open on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -53127,6 +53134,9 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
     sentence: "Tell Olympus what's private for you",
     label: "Set up privacy"
+  };
+  DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
+    sentence: "Approve the model that checks what's private. Until you do, new items it would check wait. On your computer, run olympus tier classifier approve --why, followed by your reason"
   };
   DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
     pageTitle: "Olympus private answer",
@@ -185037,6 +185047,13 @@ function buildChatGptDashboardViewModel(view3, options = {}) {
       fix: { label: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} }
     });
   }
+  if (options.privacy?.classifierAwaitingApproval) {
+    needsYou.push({
+      id: "privacy:classifier_approval",
+      sentence: DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.sentence,
+      fix: checkAgainFix(openOnComputer(undefined, "models"))
+    });
+  }
   const transcription = transcriptionModel(options.transcription);
   const progress = overallProgress(rows);
   const connected2 = rows.some(({ card }) => dashboardIsConnectedSource(card));
@@ -204561,7 +204578,8 @@ async function main() {
   registerBuiltInPrivateModel(workerBuiltInModel ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle } : undefined);
   const snifferRuntime = resolveTierSnifferRuntime({
     engine: sovereigntyEngine,
-    ...registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel() } : {}
+    ...registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel() } : {},
+    standaloneEngine: isStandaloneEngineProcess(process.env)
   });
   const snifferLane = snifferRuntime.source === "off" ? undefined : snifferRuntime.lane;
   if (snifferRuntime.source === "off") {
@@ -207508,7 +207526,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     privacy: () => {
       const settings = readChatGptPrivacySettings2(process.env, pendingClassificationCount());
-      return { configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length };
+      return {
+        configured: settings.configured,
+        pendingCount: settings.pendingCount,
+        ruleCount: settings.rules.length,
+        classifierAwaitingApproval: tierSnifferBacklog?.().awaitingOwnerApproval === true
+      };
     }
   };
   const { withEngineBriefRoute: withEngineBriefRoute2 } = await Promise.resolve().then(() => (init_engine_brief_route(), exports_engine_brief_route));

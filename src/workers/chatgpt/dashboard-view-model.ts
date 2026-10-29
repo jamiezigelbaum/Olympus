@@ -74,6 +74,7 @@ import {
   DASHBOARD_CHATGPT_PAGE_COPY,
   DASHBOARD_CHATGPT_PICKER_COPY,
   DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
+  DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
   DASHBOARD_MANY_UNREADABLE_LABEL,
   dashboardUnreadableMoreLabel,
@@ -193,7 +194,11 @@ export interface ChatGptDashboardOptions {
    */
   embedding?: DashboardViewModelV1['models']['embedding'];
   /** The owner's privacy settings, counts only (olympus_privacy_get). Absent: not reported. */
-  privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
+  privacy?: {
+    configured: boolean; pendingCount: number; ruleCount: number;
+    /** The privacy check waits for the owner to approve its model (sniffer-service `awaiting_owner_approval`). */
+    classifierAwaitingApproval?: boolean;
+  };
   /**
    * The built-in private model (analyst-built-in.ts builtInPrivateModelStatus),
    * when it is on for this machine. It is the answer model shown when no
@@ -325,6 +330,16 @@ export function buildChatGptDashboardViewModel(
       id: 'privacy:setup',
       sentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
       fix: { label: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} },
+    });
+  }
+
+  // Approving the model that checks what is private is the owner's step on
+  // the computer; until then flagged items wait unseen, so it is never silent.
+  if (options.privacy?.classifierAwaitingApproval) {
+    needsYou.push({
+      id: 'privacy:classifier_approval',
+      sentence: DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.sentence,
+      fix: checkAgainFix(openOnComputer(undefined, 'models')),
     });
   }
 

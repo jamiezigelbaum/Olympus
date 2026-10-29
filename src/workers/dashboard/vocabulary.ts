@@ -2884,6 +2884,11 @@ export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
   label: 'Set up privacy',
 } as const;
 
+/** needsYou while the privacy check waits for the owner to approve its model (approved on the computer only). */
+export const DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
+  sentence: 'Approve the model that checks what\'s private. Until you do, new items it would check wait. On your computer, run olympus tier classifier approve --why, followed by your reason',
+} as const;
+
 /**
  * The private answer panel under a ChatGPT search result
  * (src/workers/dashboard/chatgpt/private-answer.ts). `{n}`, `{percent}`,

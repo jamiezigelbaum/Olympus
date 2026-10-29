@@ -6770,6 +6770,10 @@ import { dirname as dirname17, join as join25, resolve as resolve8 } from "node:
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID as randomUUID6 } from "node:crypto";
+function isStandaloneEngineProcess(env) {
+  const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+  return (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine");
+}
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
   if (options.inlineConfig !== undefined) {
@@ -6787,8 +6791,7 @@ function loadSovereigntyEngine(options = {}) {
         return false;
       }
     };
-    const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
-    const standaloneDefault = (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine") && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
+    const standaloneDefault = isStandaloneEngineProcess(env) && (!requestedConfigPath || isDefaultPath(requestedConfigPath));
     if (options.migratePrivateMeaning && standaloneDefault) {
       try {
         const backup = migratePrivateMeaningSearch(configPath);
