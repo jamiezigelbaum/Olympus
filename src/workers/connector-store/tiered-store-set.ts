@@ -63,7 +63,7 @@ import type { SecretLocationsIndex } from '../classification/secret-locations.ts
 import {
   maxTier,
   hasCredentialUrl,
-  PERSONAL_FIRST_REASON,
+  contentHeldForJudgment,
   type TierDecidedBy,
   type TierDecision,
   type TierKey,
@@ -635,7 +635,7 @@ export class TieredStoreSet {
         stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) },
       };
     }
-    const contentHeld = decision.contentPending && !decision.reasons?.includes(PERSONAL_FIRST_REASON);
+    const contentHeld = contentHeldForJudgment(decision);
     const contentDomain = contentHeld
       ? this.domainAtLeast('secure_local')
       : this.domainAtLeast(

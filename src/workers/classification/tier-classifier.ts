@@ -208,6 +208,18 @@ export const SNIFFER_EXCERPT_MAX_CHARS = 1_200;
 export const CONTENT_READ_SNIFFER_FLAG = 'content:read';
 /** An open model question that does not hold the content (owner-approved). */
 export const PERSONAL_FIRST_REASON = 'content:personal_first';
+
+/**
+ * Whether a decision's content waits, held Private, for its model question:
+ * placement keeps the copy in Private and release treats it as Private, even
+ * though the recorded content tier is the Personal default. Personal-first
+ * content is the one open question that does not hold it.
+ */
+export function contentHeldForJudgment(
+  decision: Pick<TierDecision, 'contentPending'> & { readonly reasons?: readonly string[] },
+): boolean {
+  return decision.contentPending && decision.reasons?.includes(PERSONAL_FIRST_REASON) !== true;
+}
 /**
  * Recorded with the content reasons of every non-Secrets decision about an
  * item whose lane holds content until judged (`holdUntilJudged`). It names

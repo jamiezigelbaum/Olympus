@@ -18553,6 +18553,9 @@ function tierRank(tier) {
 function maxTier(a, b) {
   return TIER_RANK[a] >= TIER_RANK[b] ? a : b;
 }
+function contentHeldForJudgment(decision) {
+  return decision.contentPending && decision.reasons?.includes(PERSONAL_FIRST_REASON) !== true;
+}
 function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
 }
@@ -26495,8 +26498,10 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
   const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
+  const recorded = ledger?.getCurrent(item.identity);
+  const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
+  const sniffer = fenced && recordedContentVerdictSniffer(fenced, recorded, text2);
+  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
@@ -26514,6 +26519,21 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...override ? { override } : {},
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
+}
+function recordedContentVerdictSniffer(sniffer, recorded, text2) {
+  if (!recorded || !text2?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
+    return sniffer;
+  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text2)))
+    return sniffer;
+  const tier = recorded.contentTier;
+  const prefix = `content:sniffer:${sniffer.id}:`;
+  const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
+  if (tier !== "private" && tier !== "secure" || !code || code === "undecided")
+    return sniffer;
+  return {
+    id: sniffer.id,
+    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
+  };
 }
 function secretFencedSniffer(sniffer, ledger, identity2, read, options = {}) {
   const stillAsk = () => {
@@ -61148,7 +61168,7 @@ class TieredStoreSet {
         stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) }
       };
     }
-    const contentHeld = decision.contentPending && !decision.reasons?.includes(PERSONAL_FIRST_REASON);
+    const contentHeld = contentHeldForJudgment(decision);
     const contentDomain = contentHeld ? this.domainAtLeast("secure_local") : this.domainAtLeast(TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier)]);
     const copies = !this.splitLayers || metadataDomain === contentDomain ? [{ corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: "both" }] : [
       { corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: "metadata" },
@@ -180716,8 +180736,9 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault) {
           const { record: record7, copies } = state;
           const namesOnly = inputs[index].layer === "names";
           const tiers = namesOnly ? [record7.metadataTier, record7.targetMetadataTier] : [record7.metadataTier, record7.contentTier, record7.targetMetadataTier, record7.targetContentTier];
+          const held = record7.metadataPending || !namesOnly && contentHeldForJudgment(record7);
           verdicts[index] = {
-            tier: tiers.includes("secrets") ? "secret" : tiers.includes("secure") ? "private" : "public_or_personal",
+            tier: tiers.includes("secrets") ? "secret" : held || tiers.includes("secure") ? "private" : "public_or_personal",
             gone: record7.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata"))
           };
         }
@@ -180744,6 +180765,7 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault) {
   };
 }
 var init_tier_visibility = __esm(() => {
+  init_tier_classifier();
   init_tier_ledger();
   init_child_visibility();
 });

@@ -2,11 +2,14 @@ import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts
 import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { TIER_CLASSIFIER_VERSION } from '../src/workers/classification/tier-classifier.ts';
+import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { createReleaseTierCheck } from '../src/workers/connector-store/tier-visibility.ts';
 import { afterEach, expect, test } from 'bun:test';
 import { classifyItemTiers, classifyContentTier, type TierSniffer, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
-import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { ACCOUNT, CORPORA, FIXTURE_PLACEMENT, PROVIDER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const requests: TierSnifferRequest[] = [];
 const waiting: TierSniffer = { id: 'fixture-waiting', judge(request) { requests.push(request); return { verdict: 'undecided', queued: true }; } };
@@ -160,4 +163,58 @@ test('failed rejudge enqueue leaves a held row eligible for retry', async () => 
   expect(rejudgeRoutedItems({ set: f.set, autoMoves: true }).report).toMatchObject({ failed: 0, asked: 1 });
   expect(q.queue.questionFor(identityOf('retry'), 'content')).toBeDefined();
   expect(candidates()).not.toContain('retry');
+});
+
+test('a held own record is Private to every answer release until its model answers; Personal-first content is not', async () => {
+  const f = lane();
+  await f.set.sync(fixtureConnector(() => [
+    { id: 'held', name: 'Cardiology notes', text: 'Resting heart rate 52 bpm. Prescribed lisinopril 5 mg daily.' },
+    { id: 'usable', name: 'Orchard notes', text: 'Please remember bananas and oranges for tomorrow.' },
+  ]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  // Both wait on the model with the Personal default recorded; only the own record is held.
+  expect(f.ledger.getCurrent(identityOf('held'))).toMatchObject({ state: 'pending', contentTier: 'private', contentPending: true });
+  const check = createReleaseTierCheck(() => [{ ledger: f.ledger, corpusIds: new Set([CORPORA.internal, CORPORA.secure_local]) }], () => 'approval');
+  const input = (id: string, corpusId: string, layer?: 'names') => ({
+    corpusId, provider: PROVIDER, accountScope: ACCOUNT, providerItemId: id, privateAtAnswer: corpusId === CORPORA.secure_local, ...(layer ? { layer } : {}),
+  });
+  expect(check.inputs([
+    input('held', CORPORA.secure_local),
+    input('held', CORPORA.internal, 'names'),
+    input('usable', CORPORA.internal),
+  ]).map((verdict) => verdict.tier)).toEqual(['private', 'public_or_personal', 'public_or_personal']);
+});
+
+test('an unchanged item keeps its model verdict on every later listing, whichever names the re-judge asked with', async () => {
+  const queue = new TierSnifferStore({ dbPath: ':memory:' });
+  cleanups.push(() => queue.close());
+  const f = lane(new CachedTierSniffer(queue, BUILT_IN_SNIFFER_LANE));
+  // The listing names the item's author too; the stored copy the re-judge reads its names back from does not.
+  const base = fixtureConnector(() => [{ id: 'record', name: 'Cardiology notes', text: 'Resting heart rate 52 bpm. Prescribed lisinopril 5 mg daily.' }]);
+  const listing = { ...base, classificationSignals: (item: Parameters<typeof base.classificationSignals>[0]) => ({ ...base.classificationSignals(item), sender: 'Dr Brindle' }) };
+  const sync = () => f.set.sync(listing, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  let calls = 0;
+  const model = { async complete() {
+    calls += 1;
+    return { modelId: BUILT_IN_SNIFFER_LANE.modelId, text: JSON.stringify({ verdicts: [{ i: 1, tier: 'private', category: 'health', ownRecord: true, privateKind: 'health', confidence: 0.99 }] }) };
+  } };
+  const tick = async () => {
+    rejudgeRoutedItems({ set: f.set, autoMoves: true });
+    await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: queue, placementFor: (d) => f.set.placementFor(d) }], lane: BUILT_IN_SNIFFER_LANE, model });
+    const row = f.ledger.getCurrent(identityOf('record'))!;
+    if (row.state === 'moving') {
+      await moveTieredItem({ set: f.set, identity: identityOf('record'), target: { metadataTier: row.targetMetadataTier!, contentTier: row.targetContentTier! }, expectedGeneration: row.generation });
+    }
+  };
+  await sync();
+  await tick();
+  const judged = f.ledger.getCurrent(identityOf('record'))!;
+  expect(judged).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer' });
+  for (let round = 0; round < 3; round++) {
+    await sync();
+    expect(f.ledger.getCurrent(identityOf('record'))).toMatchObject({ state: 'current', contentTier: 'secure', generation: judged.generation });
+    await tick();
+  }
+  expect(f.ledger.getCurrent(identityOf('record'))!.generation).toBe(judged.generation);
+  expect(queue.counts().questions).toBe(0);
+  expect(calls).toBe(1);
 });

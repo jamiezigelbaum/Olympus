@@ -22,13 +22,15 @@ import {
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import {
+  TIER_CLASSIFIER_VERSION,
   classifyItemTiers,
+  contentDigestReason,
   heldUntilJudged,
   type OwnerTierRule,
   type TierDecision,
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
-import type { TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import type { TierLedger, TierLedgerIdentity, TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
 
 /**
@@ -197,16 +199,18 @@ export function decideItemTiers(
   // item recorded Secrets (an unread one keeps the recorded content tier).
   // Blank text counts as unread, exactly as the classifier treats it.
   const fresh = text?.trim() ? extra.contentFetchFailed !== true : false;
-  const sniffer = options?.sniffer && ledger && read
+  const recorded = ledger?.getCurrent(item.identity);
+  const fenced = options?.sniffer && ledger && read
     ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh })
     : options?.sniffer;
+  const sniffer = fenced && recordedContentVerdictSniffer(fenced, recorded, text);
   // The lane's hold, the item's own (an item built from an archive record
   // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
   // (a store whose recording did not bring the lane's option still holds the
   // same way, and a later version of a held item stays held until judged).
   const holdUntilJudged = options?.holdContentUntilJudged === true
     || item.holdContentUntilJudged === true
-    || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
+    || heldUntilJudged(recorded?.reasons);
   const parentContext = item.identity.parent
     ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId)
     : undefined;
@@ -230,6 +234,35 @@ export function decideItemTiers(
       ...(options?.retirePublic ? { retirePublic: true } : {}),
     },
   );
+}
+
+/**
+ * The sniffer for a listing of an item whose content question was already
+ * answered for exactly these bytes, under this sniffer, classifier and map:
+ * the recorded verdict answers again, and the item keeps it. The verdict
+ * cache alone can miss it, since a re-judge asks with the names the stored
+ * copy kept, which need not match the listing's; the unchanged item would
+ * otherwise fall back to pending, and be asked again, on every listing.
+ * Every other question goes to `sniffer`.
+ */
+export function recordedContentVerdictSniffer(
+  sniffer: TierSniffer,
+  recorded: TierLedgerRecord | undefined,
+  text: string | undefined,
+): TierSniffer {
+  if (!recorded || !text?.trim() || recorded.state !== 'current' || recorded.contentPending || !recorded.contentRead) return sniffer;
+  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text))) return sniffer;
+  // The sniffer's verdict is the content tier, unless something else raised it: kept as recorded, never lower.
+  const tier = recorded.contentTier;
+  const prefix = `content:sniffer:${sniffer.id}:`;
+  const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
+  if ((tier !== 'private' && tier !== 'secure') || !code || code === 'undecided') return sniffer;
+  return {
+    id: sniffer.id,
+    judge: (request) => request.pass === 'content' && (request.mapRevision ?? 'none') === recorded.mapRevision
+      ? { verdict: 'decided', tier, code }
+      : sniffer.judge(request),
+  };
 }
 
 /**

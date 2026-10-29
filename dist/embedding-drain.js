@@ -19283,8 +19283,10 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
   const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
+  const recorded = ledger?.getCurrent(item.identity);
+  const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
+  const sniffer = fenced && recordedContentVerdictSniffer(fenced, recorded, text2);
+  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
@@ -19302,6 +19304,21 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...override ? { override } : {},
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
+}
+function recordedContentVerdictSniffer(sniffer, recorded, text2) {
+  if (!recorded || !text2?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
+    return sniffer;
+  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text2)))
+    return sniffer;
+  const tier = recorded.contentTier;
+  const prefix = `content:sniffer:${sniffer.id}:`;
+  const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
+  if (tier !== "private" && tier !== "secure" || !code || code === "undecided")
+    return sniffer;
+  return {
+    id: sniffer.id,
+    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
+  };
 }
 function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
   const stillAsk = () => {
@@ -68212,6 +68229,7 @@ init_tier_ledger();
 init_child_visibility();
 
 // src/workers/connector-store/tier-visibility.ts
+init_tier_classifier();
 init_tier_ledger();
 init_child_visibility();
 

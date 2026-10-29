@@ -196,8 +196,10 @@ describe('a child is hidden the moment its parent is, on every read path', () =>
     const { lane, identityOf, archiveId } = await importAndRead();
     const check = createReleaseTierCheck(() => [scopeOf(lane)], () => 'allow');
     const namesCorpus = lane.set.openStores().find((store) => store.trustDomain === 'internal')!.corpusId;
+    // The archive holds every child's text Private until the model judges it, so an answer drew on it as Private
+    // content, released here under the owner's posture ('allow').
     const input = (providerItemId: string, extra: Partial<ReleaseInput> = {}): ReleaseInput => ({
-      corpusId: namesCorpus, provider: format.provider, accountScope: archiveId, providerItemId, privateAtAnswer: false, ...extra,
+      corpusId: namesCorpus, provider: format.provider, accountScope: archiveId, providerItemId, privateAtAnswer: true, ...extra,
     });
     const cites = (providerItemId: string): Record<string, unknown> => ({
       corpus_id: namesCorpus, trust_domain: 'internal', family: format.family, provider: format.provider,
