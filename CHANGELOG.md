@@ -3,6 +3,7 @@
 ## 1.2.1 - 2026-10-29
 
 - On Linux, an Olympus link opened right after another Olympus window now opens. Before, a second open within ten seconds was refused, so the link did nothing until it was clicked again.
+- When you describe what is private to you, only the kinds you name are Private. A message about a child's check-up stays Personal if you said appointments are fine to share (#625).
 - Telegram keeps syncing when its private Python environment is removed, for example by clearing the cache: Olympus installs it again on its own. If it cannot, the dashboard says Telegram capture could not start, instead of Telegram going quiet.
 
 ## 1.2.0 - 2026-10-28
