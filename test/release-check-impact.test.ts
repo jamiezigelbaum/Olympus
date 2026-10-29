@@ -57,10 +57,15 @@ describe('which legs a change reaches', () => {
     expect(planImpact(['scripts/release-check/archive-live-seed-hooks.ts'], reach).run).toEqual(['archive']);
   });
 
-  test('a dashboard change runs the screens and everything their pictures depend on', () => {
-    const plan = planImpact(['src/workers/dashboard/inbox.ts'], reach);
-    expect(plan.run).toEqual(['suite', 'relay', 'inbox', 'screenshots', 'journeys', 'explore']);
-    expect(plan.carry).toEqual(['archive']);
+  test('a dashboard change runs the screens, the archive leg that drives them, and everything their pictures depend on', () => {
+    expect(planImpact(['src/workers/dashboard/inbox.ts'], reach).mode).toBe('full');
+  });
+
+  test('test support the harness imports reaches the machine; other tests do not', () => {
+    const fixture = [...reach].find((file) => file.startsWith('test/support/archive-fixtures'));
+    expect(fixture).toBeDefined();
+    expect(planImpact([fixture!], reach).mode).toBe('full');
+    expect(planImpact(['test/release-check-impact.test.ts'], reach).mode).toBe('none');
   });
 
   test('a file no rule maps, or the harness core, is a full run', () => {

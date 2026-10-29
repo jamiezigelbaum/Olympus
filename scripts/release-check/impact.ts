@@ -31,7 +31,8 @@ const NEEDS: Partial<Record<Leg, Leg[]>> = {
   journeys: ['suite', 'relay', 'inbox', 'screenshots'],
 };
 
-const SCREEN_LEGS: Leg[] = ['screenshots', 'inbox', 'journeys', 'explore'];
+// The archive leg drives the dashboard too: it presses Import on the pending request and removes imports there.
+const SCREEN_LEGS: Leg[] = ['screenshots', 'inbox', 'journeys', 'explore', 'archive'];
 
 interface Rule { test: (file: string) => boolean; legs: Leg[] | 'all'; why: string }
 
@@ -87,13 +88,16 @@ function relativeImports(root: string, file: string): string[] {
   return [...found];
 }
 
-/** Harness files a VM leg runs: everything run.ts and the in-machine agent reach. The rest (the canary, the web clients) never run there. */
+/**
+ * Harness files a VM leg runs: everything run.ts and the in-machine agent reach, the test-support fixture builders
+ * the archive leg makes its archives with included. The rest (the canary, the web clients) never run there.
+ */
 export function harnessReach(root: string): Set<string> {
   const seen = new Set<string>();
   const queue = ['scripts/release-check/run.ts', 'scripts/release-check/machine-agent.ts'];
   while (queue.length > 0) {
     const file = queue.pop()!;
-    if (seen.has(file) || !file.startsWith('scripts/release-check/')) continue;
+    if (seen.has(file) || !(file.startsWith('scripts/release-check/') || file.startsWith('test/'))) continue;
     seen.add(file);
     queue.push(...relativeImports(root, file));
   }
@@ -101,6 +105,8 @@ export function harnessReach(root: string): Set<string> {
 }
 
 function impactOf(file: string, reach: Set<string> | undefined): FileImpact {
+  // Test code the harness imports builds what the machine is given, so it is harness input, not a unit test.
+  if (reach?.has(file) && file.startsWith('test/')) return { file, legs: 'all', why: 'test support the harness imports' };
   if (reach && file.startsWith('scripts/release-check/') && file.endsWith('.ts') && !reach.has(file) && file !== 'scripts/release-check/run.ts') {
     return { file, legs: [], why: 'harness code no VM leg runs (not reached from run.ts or the in-machine agent)' };
   }
