@@ -803,7 +803,7 @@ describe('a picture of writing judged nearest a document reaches Personal throug
     const sniffer: TierSniffer = {
       id: 'fixture-model',
       judge(request) {
-        return /Patient:/.test(request.material) ? { verdict: 'decided', tier: 'secure', code: 'private' } : { verdict: 'decided', tier: 'private', code: 'personal' };
+        return /Patient:/.test(request.material ?? '') ? { verdict: 'decided', tier: 'secure', code: 'private' } : { verdict: 'decided', tier: 'private', code: 'personal' };
       },
     };
     const lane = openLane(temporaryDir(), { sniffer });
