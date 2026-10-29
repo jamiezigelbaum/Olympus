@@ -20,7 +20,9 @@ import {
   publishLinuxToSite,
   prepareLinuxLocalBundle,
   publishToSite,
+  releaseBridgePath,
   readBunPins,
+  readInstallScriptBridgePins,
   readInstallScriptPins,
   readLinuxRuntimePins,
   releaseTarballPath,
@@ -30,6 +32,7 @@ import {
   verifyLinuxRuntimeArchive,
   type LinuxRuntimePins,
 } from '../scripts/publish-release-to-site.ts';
+import { whatsappBridgeFileName } from '../src/core/whatsapp-bridge-name.ts';
 
 const REPO = resolve(import.meta.dir, '..');
 const TEMPLATE = readFileSync(join(REPO, 'scripts', 'install-macos.sh'), 'utf8');
@@ -105,7 +108,7 @@ function linuxFixture(qualification: LinuxRuntimePins['bun']['qualification'] = 
 }
 
 describe('renderInstallScript', () => {
-  test('fills exactly the three pin lines and changes nothing else', () => {
+  test('fills exactly the pin lines and changes nothing else', () => {
     const rendered = renderInstallScript(TEMPLATE, PINS);
     const before = TEMPLATE.split('\n');
     const after = rendered.split('\n');
@@ -115,7 +118,15 @@ describe('renderInstallScript', () => {
       ['OLYMPUS_VERSION=@OLYMPUS_VERSION@', 'OLYMPUS_VERSION=1.0.0-rc.1'],
       ['OLYMPUS_SHA256=@OLYMPUS_SHA256@', `OLYMPUS_SHA256=${'a'.repeat(64)}`],
       ['OLYMPUS_BYTES=@OLYMPUS_BYTES@', 'OLYMPUS_BYTES=1234'],
+      // No prebuilt WhatsApp bridge unless one is given.
+      ['WHATSAPP_BRIDGE_NAME=@WHATSAPP_BRIDGE_NAME@', 'WHATSAPP_BRIDGE_NAME=none'],
+      ['WHATSAPP_BRIDGE_SHA256=@WHATSAPP_BRIDGE_SHA256@', 'WHATSAPP_BRIDGE_SHA256=none'],
+      ['WHATSAPP_BRIDGE_BYTES=@WHATSAPP_BRIDGE_BYTES@', 'WHATSAPP_BRIDGE_BYTES=0'],
     ]);
+    expect(readInstallScriptBridgePins(rendered)).toBeUndefined();
+    const bridge = { name: 'olympus-whatsapp-bridge-0123456789abcdef', sha256: 'b'.repeat(64), bytes: 99 };
+    expect(readInstallScriptBridgePins(renderInstallScript(TEMPLATE, PINS, bridge))).toEqual(bridge);
+    expect(() => renderInstallScript(TEMPLATE, PINS, { ...bridge, name: 'bridge;rm' })).toThrow('fingerprint');
     expect(readInstallScriptPins(rendered)).toEqual(PINS);
     expect(readInstallScriptPins(TEMPLATE)).toBeUndefined();
     // The rendered installer parses.
@@ -136,6 +147,48 @@ describe('renderInstallScript', () => {
   test('refuses a template whose pin lines are missing or repeated', () => {
     expect(() => renderInstallScript(TEMPLATE.replace('OLYMPUS_BYTES=@OLYMPUS_BYTES@\n', ''), PINS)).toThrow('exactly once');
     expect(() => renderInstallScript(`${TEMPLATE}OLYMPUS_SHA256=@OLYMPUS_SHA256@\n`, PINS)).toThrow('exactly once');
+  });
+});
+
+describe('the prebuilt WhatsApp bridge', () => {
+  /** A release tarball with bridge source, and an arm64 Mach-O stand-in named for that source or not. */
+  function bridgeFixture() {
+    const { root } = fixture();
+    const source = join(root, 'build', 'package', 'tools', 'whatsapp-bridge');
+    mkdirSync(source, { recursive: true });
+    for (const name of ['main.go', 'go.mod', 'go.sum']) writeFileSync(join(source, name), `${name} fixture`);
+    const artifact = join(root, 'olympus-1.0.0-rc.1.tgz');
+    expect(spawnSync('tar', ['-czf', artifact, '-C', join(root, 'build'), 'package']).status).toBe(0);
+    const machO = Buffer.alloc(64);
+    machO.writeUInt32LE(0xfeedfacf, 0);
+    machO.writeUInt32LE(0x0100000c, 4);
+    const bridge = join(root, `${whatsappBridgeFileName(source)}-darwin-arm64`);
+    writeFileSync(bridge, machO);
+    return { root, artifact, bridge, machO };
+  }
+
+  test('is served beside the tarball, pinned in install.sh, and checked before deploy', () => {
+    const { root, artifact, bridge } = bridgeFixture();
+    const result = publishToSite({ root, artifact, bridge });
+    expect(result.bridge?.name).toMatch(/^olympus-whatsapp-bridge-[0-9a-f]{16}$/);
+    const served = join(root, releaseBridgePath('1.0.0-rc.1', result.bridge!.name));
+    expect(readFileSync(served)).toEqual(readFileSync(bridge));
+    expect(readInstallScriptBridgePins(readFileSync(join(root, 'site', 'install.sh'), 'utf8'))).toEqual(result.bridge);
+    expect(checkSiteRelease(root)).toEqual([]);
+    writeFileSync(served, 'changed');
+    expect(checkSiteRelease(root).join('\n')).toContain('does not match the installer\'s WhatsApp bridge pins');
+    rmSync(served);
+    expect(checkSiteRelease(root).join('\n')).toContain('-darwin-arm64 is missing');
+  });
+
+  test('is refused when built from other source or for another machine', () => {
+    const { root, artifact, bridge, machO } = bridgeFixture();
+    const misnamed = join(root, 'olympus-whatsapp-bridge-0000000000000000-darwin-arm64');
+    writeFileSync(misnamed, machO);
+    expect(() => publishToSite({ root, artifact, bridge: misnamed })).toThrow('was not built from this release');
+    writeFileSync(bridge, '#!/bin/sh\n');
+    expect(() => publishToSite({ root, artifact, bridge })).toThrow('not an Apple-silicon');
+    expect(existsSync(join(root, 'site', 'install.sh'))).toBe(false);
   });
 });
 

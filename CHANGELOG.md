@@ -8,6 +8,7 @@
 - **Choose which Evernote notebooks Olympus reads.** Only notebooks you own are offered, and a notebook can be marked always Private. An Evernote account connected before this update waits until its notebooks are chosen once (#601).
 - **Attachments and media are items of their own.** Gmail attachments (live mail and Takeout alike), Evernote attachments and WhatsApp pictures and videos are each read and judged on their own, so a payslip attached to a friendly email can be Private while the email stays Personal. Telegram photos and files, from live capture and from exports, are read the same way.
 - **An archive import reads everything it can,** including Telegram account details and service messages, and the dashboard tells what could not be read apart from how it was read.
+- **WhatsApp pairs on a Mac without developer tools.** The installer brings a prebuilt, checksummed WhatsApp bridge, so pairing no longer needs Go and a C compiler on Apple silicon.
 - **Live Telegram and WhatsApp capture is sturdier.** Any size of backlog is read, a lost position is recovered, dropped messages are counted, and the dashboard tells a quiet account from one that stopped.
 - **Each source keeps its data in its own folder.** Existing accounts move into their folders when Olympus starts after the update. Delete, Export and uninstall work from the same record of what each account owns.
 - **Every store indexes for meaning the same way,** whatever source filled it, and catches up on items still missing vectors (#600).

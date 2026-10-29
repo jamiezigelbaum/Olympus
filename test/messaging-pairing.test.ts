@@ -2,9 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   pairMessagingSource,
+  whatsappBridgePathForPackage,
   TELEGRAM_API_HASH_SECRET_KEY,
   TELEGRAM_API_ID_SECRET_KEY,
   type PairingCommandRequest,
@@ -14,6 +15,7 @@ import type { SecretStore } from '../src/core/secret-store.ts';
 import { readSourceRegistry, updateSourceRegistry } from '../src/core/source-registry.ts';
 import { connectGuidedSession } from '../src/core/connect.ts';
 import { isFileLeaseSidecarName } from '../src/core/file-lease.ts';
+import { whatsappBridgeFileName } from '../src/core/whatsapp-bridge-name.ts';
 
 function memorySecretStore(): SecretStore & { values: Map<string, string> } {
   const values = new Map<string, string>();
@@ -399,6 +401,38 @@ describe('packaged messaging pairing', () => {
     });
     expect(builtPath).toMatch(/fresh-cache\/olympus\/bin\/olympus-whatsapp-bridge-[0-9a-f]{16}$/);
     expect(result.status).toBe('scope_selection_required');
+  });
+
+  test('the release\'s prebuilt bridge in the package is used with no Go or C compiler, for pairing and capture alike', async () => {
+    const root = packageFixture();
+    const name = whatsappBridgeFileName(join(root, 'tools', 'whatsapp-bridge'));
+    const packaged = join(root, 'tools', 'whatsapp-bridge', 'bin', name);
+    mkdirSync(dirname(packaged), { recursive: true });
+    writeFileSync(packaged, '#!/bin/sh\n');
+    chmodSync(packaged, 0o700);
+    let executable = '';
+    const result = await pairMessagingSource({
+      source: 'whatsapp',
+      packageRoot: root,
+      homeDir: join(root, 'home'),
+      env: { XDG_CACHE_HOME: join(root, 'fresh-cache') },
+      which: () => null,
+      buildWhatsAppBridge: async () => { throw new Error('must not build'); },
+      runCommand: async (command) => { executable = command.executable; return whatsappReady('/private/qr.png'); },
+    });
+    expect(executable).toBe(packaged);
+    expect(result.status).toBe('scope_selection_required');
+    expect(whatsappBridgePathForPackage(root, { env: { XDG_CACHE_HOME: join(root, 'fresh-cache') } })).toBe(packaged);
+    // Built from other source: not this package's bridge, so the build path applies.
+    writeFileSync(join(root, 'tools', 'whatsapp-bridge', 'main.go'), 'changed');
+    expect(whatsappBridgePathForPackage(root, { env: { XDG_CACHE_HOME: join(root, 'fresh-cache') } })).toContain('fresh-cache');
+    // Writable by others: refused, never run.
+    writeFileSync(join(root, 'tools', 'whatsapp-bridge', 'main.go'), 'main.go');
+    chmodSync(packaged, 0o722);
+    await expect(pairMessagingSource({
+      source: 'whatsapp', packageRoot: root, homeDir: join(root, 'home'), env: {}, which: () => null,
+      runCommand: async () => whatsappReady('/private/qr.png'),
+    })).rejects.toThrow(/installed WhatsApp bridge is not a trusted/);
   });
 
   test('missing Telethon maps to a fixed command and does not echo helper stderr', async () => {

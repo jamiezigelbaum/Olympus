@@ -16,6 +16,7 @@ import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, sourceAc
 import { tryHoldFileFlock, type HeldFileFlock } from './data-owner-lock.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedLogins, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
 import { recordPairingAccount, settlePairingPlacement } from './pairing-placement.ts';
+import { whatsappBridgeFileName } from './whatsapp-bridge-name.ts';
 import { assertTelegramHistoryAccount, telegramHistoryAccount, telegramHistoryAccountError } from './provider-account-history.ts';
 
 export type MessagingPairingSource = 'telegram' | 'whatsapp';
@@ -419,7 +420,13 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
     return options.whatsappBridgePath;
   }
   const sourceDir = join(packageRoot, 'tools', 'whatsapp-bridge');
-  const output = whatsappBridgePathForPackage(packageRoot, options);
+  // The release's prebuilt bridge, placed by the installer: no Go or C compiler needed.
+  const packaged = packagedWhatsAppBridgePath(packageRoot);
+  if (existsSync(packaged)) {
+    assertTrustedBridge(packaged, 'The installed WhatsApp bridge is not a trusted owner-controlled executable. Reinstall Olympus and retry.');
+    return packaged;
+  }
+  const output = whatsappBridgeCachePath(packageRoot, options);
   const cacheHome = options.env?.XDG_CACHE_HOME ?? join(options.homeDir ?? options.env?.HOME ?? homedir(), '.cache');
   ensurePrivateRootDirectorySync(cacheHome);
   ensurePrivateDirectoryTreeSync(cacheHome, dirname(output));
@@ -430,10 +437,7 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
     }
   }
   if (existsSync(output)) {
-    const stat = lstatSync(output);
-    if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === 'function' && stat.uid !== process.getuid()) || (stat.mode & 0o022) !== 0 || (stat.mode & 0o100) === 0) {
-      throw new Error('The cached WhatsApp bridge is not a trusted owner-controlled executable.');
-    }
+    assertTrustedBridge(output, 'The cached WhatsApp bridge is not a trusted owner-controlled executable.');
     return output;
   }
   const which = options.which ?? ((command: string) => Bun.which(command));
@@ -451,30 +455,36 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
   return output;
 }
 
+/** The bridge this package runs: the release's prebuilt one when the installer placed it, else the per-user build. */
 export function whatsappBridgePathForPackage(
   packageRoot: string,
   context: { homeDir?: string; env?: Record<string, string | undefined> } = {},
 ): string {
-  const home = context.homeDir ?? context.env?.HOME ?? homedir();
-  const cacheHome = context.env?.XDG_CACHE_HOME ?? join(home, '.cache');
-  const fingerprint = whatsappBridgeFingerprint(join(packageRoot, 'tools', 'whatsapp-bridge'));
-  return join(cacheHome, 'olympus', 'bin', `olympus-whatsapp-bridge-${fingerprint}`);
+  const packaged = packagedWhatsAppBridgePath(packageRoot);
+  return existsSync(packaged) ? packaged : whatsappBridgeCachePath(packageRoot, context);
 }
 
-function whatsappBridgeFingerprint(sourceDir: string): string {
-  const hash = createHash('sha256');
-  for (const name of ['main.go', 'go.mod', 'go.sum']) {
-    const path = join(sourceDir, name);
-    if (!existsSync(path)) throw new Error(`The packaged WhatsApp bridge source is incomplete: missing ${name}.`);
-    hash.update(name).update('\0').update(readFileSync(path)).update('\0');
-  }
-  // Every other source file the bridge is built from: a change to any of them is a new bridge.
-  const others = readdirSync(sourceDir)
-    .filter((name) => name.endsWith('.go') && !name.endsWith('_test.go') && name !== 'main.go')
-    .sort();
-  for (const name of others) hash.update(name).update('\0').update(readFileSync(join(sourceDir, name))).update('\0');
-  return hash.digest('hex').slice(0, 16);
+function packagedWhatsAppBridgePath(packageRoot: string): string {
+  const sourceDir = join(packageRoot, 'tools', 'whatsapp-bridge');
+  return join(sourceDir, 'bin', whatsappBridgeFileName(sourceDir));
 }
+
+function whatsappBridgeCachePath(
+  packageRoot: string,
+  context: { homeDir?: string; env?: Record<string, string | undefined> },
+): string {
+  const home = context.homeDir ?? context.env?.HOME ?? homedir();
+  const cacheHome = context.env?.XDG_CACHE_HOME ?? join(home, '.cache');
+  return join(cacheHome, 'olympus', 'bin', whatsappBridgeFileName(join(packageRoot, 'tools', 'whatsapp-bridge')));
+}
+
+function assertTrustedBridge(path: string, message: string): void {
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === 'function' && stat.uid !== process.getuid()) || (stat.mode & 0o022) !== 0 || (stat.mode & 0o100) === 0) {
+    throw new Error(message);
+  }
+}
+
 
 async function buildWhatsAppBridge(input: { go: string; sourceDir: string; outputPath: string }): Promise<boolean> {
   const temporary = `${input.outputPath}.tmp.${process.pid}`;

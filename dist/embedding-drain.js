@@ -63220,6 +63220,10 @@ init_source_placement();
 init_source_registry();
 init_source_storage();
 
+// src/core/whatsapp-bridge-name.ts
+if (false)
+  ;
+
 // src/core/messaging-pairing.ts
 init_provider_account_history();
 

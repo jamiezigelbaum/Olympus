@@ -31,12 +31,26 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { whatsappBridgeFileName } from '../src/core/whatsapp-bridge-name.ts';
 
 export interface ReleasePins {
   version: string;
+  sha256: string;
+  bytes: number;
+}
+
+/**
+ * The release's prebuilt WhatsApp bridge for Apple silicon
+ * (.github/workflows/whatsapp-bridge-build.yml). The installer downloads it
+ * beside the tarball and places it in the package, so pairing needs no Go or
+ * C compiler. `name` is the bridge's source fingerprint name.
+ */
+export interface WhatsAppBridgePins {
+  name: string;
   sha256: string;
   bytes: number;
 }
@@ -73,6 +87,14 @@ const PLACEHOLDERS = {
   sha256: 'OLYMPUS_SHA256=@OLYMPUS_SHA256@',
   bytes: 'OLYMPUS_BYTES=@OLYMPUS_BYTES@',
 } as const;
+const BRIDGE_PLACEHOLDERS = {
+  name: 'WHATSAPP_BRIDGE_NAME=@WHATSAPP_BRIDGE_NAME@',
+  sha256: 'WHATSAPP_BRIDGE_SHA256=@WHATSAPP_BRIDGE_SHA256@',
+  bytes: 'WHATSAPP_BRIDGE_BYTES=@WHATSAPP_BRIDGE_BYTES@',
+} as const;
+/** Pins an installer without a prebuilt bridge carries: pairing then builds the bridge from source. */
+const NO_BRIDGE = { name: 'none', sha256: 'none', bytes: 0 } as const;
+const BRIDGE_NAME_PATTERN = /^olympus-whatsapp-bridge-[0-9a-f]{16}$/;
 const LINUX_PLACEHOLDERS = {
   OLYMPUS_VERSION: (release: ReleasePins) => release.version,
   OLYMPUS_SHA256: (release: ReleasePins) => release.sha256,
@@ -88,6 +110,17 @@ const LINUX_PLACEHOLDERS = {
 
 export function releaseTarballPath(version: string): string {
   return `${SITE_RELEASES}/${version}/olympus-${version}.tgz`;
+}
+
+/** Where the site serves a release's Apple-silicon bridge. */
+export function releaseBridgePath(version: string, name: string): string {
+  return `${SITE_RELEASES}/${version}/${name}-darwin-arm64`;
+}
+
+export function assertBridgePins(pins: WhatsAppBridgePins): void {
+  if (!BRIDGE_NAME_PATTERN.test(pins.name)) throw new Error(`WhatsApp bridge name ${JSON.stringify(pins.name)} is not olympus-whatsapp-bridge-<fingerprint>.`);
+  if (!/^[0-9a-f]{64}$/.test(pins.sha256)) throw new Error('WhatsApp bridge SHA-256 must be 64 lowercase hex characters.');
+  if (!Number.isSafeInteger(pins.bytes) || pins.bytes <= 0) throw new Error('WhatsApp bridge size must be a positive byte count.');
 }
 
 export function assertReleasePins(pins: ReleasePins): void {
@@ -145,17 +178,58 @@ export function readLinuxRuntimePins(path: string): LinuxRuntimePins {
   return validateLinuxRuntimePins(parsed);
 }
 
-/** The template with its three pin lines filled in; nothing else changes. */
-export function renderInstallScript(template: string, pins: ReleasePins): string {
+/**
+ * The template with its pin lines filled in; nothing else changes. Without
+ * `bridge` the installer carries no prebuilt WhatsApp bridge (`none`).
+ */
+export function renderInstallScript(template: string, pins: ReleasePins, bridge?: WhatsAppBridgePins): string {
   assertReleasePins(pins);
+  if (bridge) assertBridgePins(bridge);
+  const bridgePins = bridge ?? NO_BRIDGE;
   let rendered = template;
-  for (const [key, line] of Object.entries(PLACEHOLDERS) as Array<[keyof ReleasePins, string]>) {
+  const fill = (line: string, value: string | number): void => {
     const lines = rendered.split('\n').filter((candidate) => candidate === line);
     if (lines.length !== 1) throw new Error(`${INSTALL_TEMPLATE} must contain the line ${line} exactly once.`);
-    rendered = rendered.replace(`\n${line}\n`, `\n${line.split('=')[0]}=${pins[key]}\n`);
-  }
-  if (rendered.includes('@OLYMPUS_')) throw new Error(`${INSTALL_TEMPLATE} has a placeholder this script does not fill.`);
+    rendered = rendered.replace(`\n${line}\n`, `\n${line.split('=')[0]}=${value}\n`);
+  };
+  for (const [key, line] of Object.entries(PLACEHOLDERS) as Array<[keyof ReleasePins, string]>) fill(line, pins[key]);
+  for (const [key, line] of Object.entries(BRIDGE_PLACEHOLDERS) as Array<[keyof WhatsAppBridgePins, string]>) fill(line, bridgePins[key]);
+  if (/@(OLYMPUS|WHATSAPP)_/.test(rendered)) throw new Error(`${INSTALL_TEMPLATE} has a placeholder this script does not fill.`);
   return rendered;
+}
+
+/** The prebuilt-bridge pins a rendered installer carries; undefined for `none` or none at all. */
+export function readInstallScriptBridgePins(script: string): WhatsAppBridgePins | undefined {
+  const name = /^WHATSAPP_BRIDGE_NAME=(\S+)$/m.exec(script)?.[1];
+  const sha256 = /^WHATSAPP_BRIDGE_SHA256=(\S+)$/m.exec(script)?.[1];
+  const bytes = /^WHATSAPP_BRIDGE_BYTES=(\S+)$/m.exec(script)?.[1];
+  if (!name || name === 'none' || !sha256 || !bytes || !/^[0-9]+$/.test(bytes)) return undefined;
+  return { name, sha256, bytes: Number(bytes) };
+}
+
+/**
+ * Pins for a prebuilt bridge, once it is an Apple-silicon Mach-O program
+ * whose name is the fingerprint of the bridge source inside `artifact`: a
+ * bridge built from other source is never published beside this tarball.
+ */
+export function bridgePinsFor(bridgePath: string, artifact: string): WhatsAppBridgePins {
+  if (!existsSync(bridgePath) || !lstatSync(bridgePath).isFile()) throw new Error(`${bridgePath} is not a file.`);
+  const data = readFileSync(bridgePath);
+  // MH_MAGIC_64 then CPU_TYPE_ARM64, little-endian.
+  if (data.length < 8 || data.readUInt32LE(0) !== 0xfeedfacf || data.readUInt32LE(4) !== 0x0100000c) {
+    throw new Error(`${bridgePath} is not an Apple-silicon (arm64 Mach-O) program.`);
+  }
+  const unpacked = mkdtempSync(join(tmpdir(), 'olympus-bridge-source-'));
+  try {
+    const result = spawnSync('tar', ['-xzf', artifact, '-C', unpacked, 'package/tools/whatsapp-bridge'], { encoding: 'utf8' });
+    if (result.status !== 0) throw new Error(`${artifact} has no package/tools/whatsapp-bridge: ${result.stderr.trim()}`);
+    const name = whatsappBridgeFileName(join(unpacked, 'package', 'tools', 'whatsapp-bridge'));
+    const given = basename(bridgePath).replace(/-darwin-arm64$/, '');
+    if (given !== name) throw new Error(`${basename(bridgePath)} was not built from this release's bridge source (expected ${name}-darwin-arm64).`);
+    return { name, ...fileDigest(bridgePath) };
+  } finally {
+    rmSync(unpacked, { recursive: true, force: true });
+  }
 }
 
 /** Fill every release/runtime pin in the Linux template; pending pins may be rendered for tests. */
@@ -268,7 +342,7 @@ export function sourceVersion(root: string): string {
 }
 
 /** Copy a tarball into site/releases and write site/install.sh pinned to it. */
-export function publishToSite(input: { root: string; artifact: string }): ReleasePins & { tarball: string; installScript: string } {
+export function publishToSite(input: { root: string; artifact: string; bridge?: string }): ReleasePins & { tarball: string; installScript: string; bridge?: WhatsAppBridgePins } {
   if (!existsSync(input.artifact)) throw new Error(`${input.artifact} does not exist.`);
   const version = sourceVersion(input.root);
   const expectedName = `olympus-${version}.tgz`;
@@ -280,8 +354,9 @@ export function publishToSite(input: { root: string; artifact: string }): Releas
     throw new Error(`${input.artifact} packages ${packaged.name}@${packaged.version}, not olympus@${version}.`);
   }
   const pins = { version, ...fileDigest(input.artifact) };
+  const bridge = input.bridge ? bridgePinsFor(input.bridge, input.artifact) : undefined;
   const template = readFileSync(join(input.root, INSTALL_TEMPLATE), 'utf8');
-  const script = renderInstallScript(template, pins);
+  const script = renderInstallScript(template, pins, bridge);
   const tarball = join(input.root, releaseTarballPath(version));
   let preserveLinuxAsset = false;
   const linuxInstaller = join(input.root, SERVED_LINUX_INSTALL_SCRIPT);
@@ -302,12 +377,17 @@ export function publishToSite(input: { root: string; artifact: string }): Releas
     chmodSync(tarball, 0o644);
     writeFileSync(`${tarball}.sha256`, `${pins.sha256}  ${expectedName}\n`, { mode: 0o644 });
   }
+  if (bridge && input.bridge) {
+    const served = join(input.root, releaseBridgePath(version, bridge.name));
+    if (resolve(input.bridge) !== resolve(served)) copyFileSync(input.bridge, served);
+    chmodSync(served, 0o644);
+  }
   const installScript = join(input.root, SERVED_INSTALL_SCRIPT);
   writeFileSync(installScript, script, { mode: 0o644 });
   chmodSync(installScript, 0o644);
   const problems = checkSiteRelease(input.root);
   if (problems.length > 0) throw new Error(`The site release does not check out:\n${problems.map((line) => `  - ${line}`).join('\n')}`);
-  return { ...pins, tarball, installScript };
+  return { ...pins, tarball, installScript, ...(bridge ? { bridge } : {}) };
 }
 
 function linuxQualificationProblem(pins: LinuxRuntimePins): string | undefined {
@@ -402,13 +482,24 @@ export function checkSiteRelease(root: string): string[] {
     problems.push(`${SERVED_INSTALL_SCRIPT} carries no release pins.`);
     return finish();
   }
+  const bridge = readInstallScriptBridgePins(served);
   try {
-    const expected = renderInstallScript(readFileSync(join(root, INSTALL_TEMPLATE), 'utf8'), pins);
+    const expected = renderInstallScript(readFileSync(join(root, INSTALL_TEMPLATE), 'utf8'), pins, bridge);
     if (expected !== served) {
       problems.push(`${SERVED_INSTALL_SCRIPT} differs from ${INSTALL_TEMPLATE} rendered with its pins: run bun scripts/publish-release-to-site.ts again.`);
     }
   } catch (error) {
     problems.push(error instanceof Error ? error.message : String(error));
+  }
+  if (bridge) {
+    const bridgePath = join(root, releaseBridgePath(pins.version, bridge.name));
+    if (!existsSync(bridgePath)) problems.push(`${releaseBridgePath(pins.version, bridge.name)} is missing.`);
+    else {
+      const digest = fileDigest(bridgePath);
+      if (digest.sha256 !== bridge.sha256 || digest.bytes !== bridge.bytes) {
+        problems.push(`${releaseBridgePath(pins.version, bridge.name)} does not match the installer's WhatsApp bridge pins.`);
+      }
+    }
   }
   const version = sourceVersion(root);
   if (pins.version !== version) problems.push(`${SERVED_INSTALL_SCRIPT} pins ${pins.version}, but package.json is ${version}.`);
@@ -519,16 +610,18 @@ export function prepareLinuxLocalBundle(input: { root: string; artifact: string;
  * check serves the two files from a stand-in for the site inside a throwaway machine and runs the
  * published command there, so the installer itself is never edited for a test.
  */
-export function prepareMacLocalBundle(input: { root: string; artifact: string; output: string }): ReleasePins & { directory: string } {
+export function prepareMacLocalBundle(input: { root: string; artifact: string; output: string; bridge?: string }): ReleasePins & { directory: string } {
   const version = sourceVersion(input.root);
   const packaged = tarballPackage(input.artifact);
   if (packaged.name !== 'olympus' || packaged.version !== version) throw new Error('Local tarball identity does not match the source package version.');
   const pins = { version, ...fileDigest(input.artifact) };
-  const script = renderInstallScript(readFileSync(join(input.root, INSTALL_TEMPLATE), 'utf8'), pins);
+  const bridge = input.bridge ? bridgePinsFor(input.bridge, input.artifact) : undefined;
+  const script = renderInstallScript(readFileSync(join(input.root, INSTALL_TEMPLATE), 'utf8'), pins, bridge);
   // Refuse an existing output rather than accidentally mixing two candidates.
   mkdirSync(input.output, { mode: 0o700 });
   const name = `olympus-${version}.tgz`;
   copyFileSync(input.artifact, join(input.output, name), constants.COPYFILE_EXCL);
+  if (bridge && input.bridge) copyFileSync(input.bridge, join(input.output, `${bridge.name}-darwin-arm64`), constants.COPYFILE_EXCL);
   writeFileSync(join(input.output, 'install.sh'), script, { mode: 0o644, flag: 'wx' });
   copyFileSync(join(input.root, SERVED_UNINSTALL_SCRIPT), join(input.output, 'uninstall.sh'), constants.COPYFILE_EXCL);
   writeFileSync(join(input.output, 'SHA256SUMS'), `${pins.sha256}  ${name}\n`, { flag: 'wx' });
@@ -540,8 +633,8 @@ export function prepareMacLocalBundle(input: { root: string; artifact: string; o
 
 function main(args: string[]): void {
   if (args[0] === '--mac-local' && args[1] === '--artifact' && args[2]
-    && args[3] === '--output' && args[4] && args.length === 5) {
-    const result = prepareMacLocalBundle({ root: ROOT, artifact: resolve(args[2]), output: resolve(args[4]) });
+    && args[3] === '--output' && args[4] && (args.length === 5 || (args.length === 7 && args[5] === '--whatsapp-bridge' && args[6]))) {
+    const result = prepareMacLocalBundle({ root: ROOT, artifact: resolve(args[2]), output: resolve(args[4]), ...(args[6] ? { bridge: resolve(args[6]) } : {}) });
     console.log(`Local macOS release-check bundle: ${result.directory}`);
     console.log(`SHA-256 ${result.sha256}; ${result.bytes} bytes. Not published.`);
     return;
@@ -598,10 +691,19 @@ function main(args: string[]): void {
     console.log(`Pinned the bun program in ${INSTALL_TEMPLATE}: ${exeSha256} (was ${pins.exeSha256}).`);
     return;
   }
+  // The Mac release carries its prebuilt WhatsApp bridge; leaving it out is said out loud.
+  let bridge: string | undefined;
+  const bridgeFlag = args.indexOf('--whatsapp-bridge');
+  if (bridgeFlag >= 0 && args[bridgeFlag + 1]) {
+    bridge = resolve(args[bridgeFlag + 1]!);
+    args = [...args.slice(0, bridgeFlag), ...args.slice(bridgeFlag + 2)];
+  }
+  const noBridge = args.includes('--no-whatsapp-bridge');
+  args = args.filter((arg) => arg !== '--no-whatsapp-bridge');
   let artifact: string | undefined;
   if (args[0] === '--artifact' && args[1] && args.length === 2) artifact = resolve(args[1]);
-  else if (args.length > 0) {
-    console.error('Usage: bun scripts/publish-release-to-site.ts [--artifact <olympus-<version>.tgz> | --check | --pin-bun <bun-darwin-aarch64.zip> | --linux --artifact <olympus-<version>.tgz> | --linux --check | --mac-local --artifact <olympus-<version>.tgz> --output <new dir>]');
+  else if (args.length > 0 || (!bridge && !noBridge)) {
+    console.error('Usage: bun scripts/publish-release-to-site.ts [--artifact <olympus-<version>.tgz>] (--whatsapp-bridge <olympus-whatsapp-bridge-<fingerprint>-darwin-arm64> | --no-whatsapp-bridge) | --check | --pin-bun <bun-darwin-aarch64.zip> | --linux --artifact <olympus-<version>.tgz> | --linux --check | --mac-local --artifact <olympus-<version>.tgz> --output <new dir> [--whatsapp-bridge <bridge>]');
     process.exit(2);
   }
   if (!artifact) {
@@ -609,10 +711,13 @@ function main(args: string[]): void {
     if (built.status !== 0) process.exit(built.status ?? 1);
     artifact = join(ROOT, 'release-artifacts', `olympus-${sourceVersion(ROOT)}.tgz`);
   }
-  const result = publishToSite({ root: ROOT, artifact });
+  const result = publishToSite({ root: ROOT, artifact, ...(bridge ? { bridge } : {}) });
   console.log(`Wrote ${result.tarball}`);
   console.log(`Wrote ${result.installScript}`);
   console.log(`Pinned olympus ${result.version}: SHA-256 ${result.sha256}, ${result.bytes} bytes.`);
+  console.log(result.bridge
+    ? `Pinned the WhatsApp bridge ${result.bridge.name}: SHA-256 ${result.bridge.sha256}, ${result.bridge.bytes} bytes.`
+    : 'No prebuilt WhatsApp bridge: pairing on this release needs Go and a C compiler.');
   console.log('Publish with: site/deploy/deploy.sh --dry-run, then site/deploy/deploy.sh');
 }
 

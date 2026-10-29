@@ -35,3 +35,6 @@ eval/consult-pii/out/
 # Python bytecode cache from helper scripts
 __pycache__/
 *.pyc
+
+# Prebuilt WhatsApp bridge the installer places (never committed).
+tools/whatsapp-bridge/bin/
