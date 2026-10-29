@@ -9874,6 +9874,27 @@ var init_file_scope_sources = __esm(() => {
       needConfirm: "Confirm the whole computer first."
     }
   });
+  registerBuiltIn({
+    sourceId: "evernote.notes",
+    provider: "evernote",
+    account: "provider_account",
+    credentialCapability: "evernote.notes.sync",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_EVERNOTE_CREDENTIAL_HANDLE",
+    corpusIdsToInvalidate: ["secure_local.evernote.notes", "internal.evernote.notes"],
+    filterFamily: "folder_id",
+    normalizeKey: (key) => key.trim(),
+    rootKeys: ["/"],
+    label: "Evernote",
+    dispositionSourceId: "evernote.notes",
+    wholeScopeWords: {
+      row: "All notebooks",
+      prompt: "Olympus will read every notebook you own, including notebooks added later, except notebooks you set to Names only or Skip.",
+      confirm: "Yes, read all my notebooks",
+      summary: "Every other notebook you own: fully read, including notebooks added later.",
+      onlyFull: "All notebooks is all or nothing. Set Names only or Skip on notebooks instead.",
+      needConfirm: "Confirm all notebooks first."
+    }
+  });
 });
 
 // src/core/source-scope-approval.ts
@@ -36554,7 +36575,11 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "evernote.notes",
       label: "Evernote",
       authentication: { type: "oauth2", ownership: "sign-in with Evernote on this computer (read permission only)" },
-      contextual_scopes: ["notebooks the person owns", "notes shared with the person are counted, not imported"],
+      contextual_scopes: [
+        "the notebooks the person chooses after signing in (nothing is read before the choice): each read, names only, or Skip",
+        "a Skip notebook's notes are never read",
+        "notebooks the person does not own and notes shared with the person are counted, not imported"
+      ],
       dependencies: [{ id: "evernote_mcp", label: "Evernote's own MCP server", required_for: "listing notes and reading notes and attachments" }],
       provider_ceiling: "An hourly full pass, paced at about one call a second; a large first import finishes over several passes.",
       supported_formats: ["note text", "title", "notebook", "tags", "created and updated times", "attachments read on their own"],
@@ -44378,7 +44403,8 @@ var init_privacy = __esm(() => {
   CHATGPT_PRIVACY_META_KEY = PRIVACY_META_KEY;
   CHATGPT_PRIVACY_FOLDER_SOURCES = {
     "dropbox.files": "Dropbox",
-    "google_drive.docs": "Google Drive"
+    "google_drive.docs": "Google Drive",
+    "evernote.notes": "Evernote"
   };
 });
 
@@ -62103,9 +62129,11 @@ var init_live_sync3 = __esm(() => {
   init_session();
   init_source_placement();
   init_source_storage();
+  init_source_ingestion_exclusions();
   init_tiered_store_set();
   init_connected_handles();
   init_connector5();
+  init_listing();
   EVERNOTE_TIER_CORPUS_IDS = Object.freeze({
     secure_local: EVERNOTE_SECURE_CORPUS_ID,
     internal: EVERNOTE_INTERNAL_CORPUS_ID

@@ -177,3 +177,26 @@ registerBuiltIn({
     needConfirm: 'Confirm the whole computer first.',
   },
 });
+
+registerBuiltIn({
+  sourceId: 'evernote.notes',
+  provider: 'evernote',
+  account: 'provider_account',
+  credentialCapability: 'evernote.notes.sync',
+  pinEnvName: 'OLYMPUS_SOURCE_INDEX_EVERNOTE_CREDENTIAL_HANDLE',
+  corpusIdsToInvalidate: ['secure_local.evernote.notes', 'internal.evernote.notes'],
+  // A notebook is a folder with no parent; its key is the notebook id.
+  filterFamily: 'folder_id',
+  normalizeKey: (key) => key.trim(),
+  rootKeys: ['/'],
+  label: 'Evernote',
+  dispositionSourceId: 'evernote.notes',
+  wholeScopeWords: {
+    row: 'All notebooks',
+    prompt: 'Olympus will read every notebook you own, including notebooks added later, except notebooks you set to Names only or Skip.',
+    confirm: 'Yes, read all my notebooks',
+    summary: 'Every other notebook you own: fully read, including notebooks added later.',
+    onlyFull: 'All notebooks is all or nothing. Set Names only or Skip on notebooks instead.',
+    needConfirm: 'Confirm all notebooks first.',
+  },
+});

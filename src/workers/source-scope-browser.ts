@@ -286,6 +286,47 @@ function normalizeDropboxNodeKey(value: string): string {
 }
 
 /**
+ * Evernote's notebooks for the picker. A notebook is a folder with no parent,
+ * keyed by its id, so the list is one level. A notebook the account does not
+ * own is shown, marked, and cannot be chosen: its notes are never read.
+ */
+export function createEvernoteNotebookScopeBrowser(options: {
+  listNotebooks: () => Promise<ReadonlyArray<{ id: string; label: string; owned: boolean }>>;
+}): SourceFolderScopeBrowser {
+  return {
+    sourceId: 'evernote.notes',
+    async browse(request) {
+      if (request.cursor !== undefined) throw new Error('Folder browse cursor is invalid for this source and parent.');
+      if (request.parentKey !== undefined) return { nodes: [] };
+      const notebooks = [...await options.listNotebooks()]
+        .sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
+      return {
+        nodes: notebooks.map((book): OlympusFolderScopeNode => ({
+          key: book.id,
+          name: book.label || 'Untitled notebook',
+          kind: 'folder',
+          has_children: false,
+          selectable: book.owned,
+          ...(book.owned ? {} : {
+            excluded_by_default: true,
+            default_exclusion_reason: 'Shared with you, not yours: Olympus does not read it.',
+          }),
+        })),
+      };
+    },
+    async validateSelections(selections) {
+      const owned = new Set((await options.listNotebooks()).filter((book) => book.owned).map((book) => book.id));
+      return selections.map((selection) => {
+        if (!owned.has(selection.key)) {
+          throw new Error('A chosen notebook is no longer one of your notebooks in this Evernote account. Reload the picker.');
+        }
+        return { key: selection.key, state: selection.state, ancestorKeys: [] };
+      });
+    },
+  };
+}
+
+/**
  * What a browser factory is given. A source that binds to a provider account
  * receives the selected credential handle; one with no account receives none.
  */

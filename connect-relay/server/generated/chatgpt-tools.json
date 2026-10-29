@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=cf2e695cf230"
+          "resourceUri": "ui://olympus/dashboard?v=d1572907fe8d"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=cf2e695cf230",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=d1572907fe8d",
         "openai/ui": {
           "entrypoints": [
             {
@@ -322,7 +322,8 @@
               "gmail.email",
               "google_drive.docs",
               "dropbox.files",
-              "local.files"
+              "local.files",
+              "evernote.notes"
             ]
           },
           "parent_key": {
@@ -450,7 +451,8 @@
               "gmail.email",
               "google_drive.docs",
               "dropbox.files",
-              "local.files"
+              "local.files",
+              "evernote.notes"
             ]
           },
           "account_generation": {
@@ -840,7 +842,8 @@
                     "gmail.email",
                     "google_drive.docs",
                     "dropbox.files",
-                    "local.files"
+                    "local.files",
+                    "evernote.notes"
                   ]
                 },
                 "key": {
@@ -950,7 +953,7 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=cf2e695cf230",
+      "uri": "ui://olympus/dashboard?v=d1572907fe8d",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },

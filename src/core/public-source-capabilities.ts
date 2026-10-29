@@ -169,7 +169,11 @@ export const V0_4_PUBLIC_SOURCE_CAPABILITIES: readonly PublicSourceCapability[] 
     source_id: 'evernote.notes',
     label: 'Evernote',
     authentication: { type: 'oauth2', ownership: 'sign-in with Evernote on this computer (read permission only)' },
-    contextual_scopes: ['notebooks the person owns', 'notes shared with the person are counted, not imported'],
+    contextual_scopes: [
+      'the notebooks the person chooses after signing in (nothing is read before the choice): each read, names only, or Skip',
+      'a Skip notebook\'s notes are never read',
+      'notebooks the person does not own and notes shared with the person are counted, not imported',
+    ],
     dependencies: [{ id: 'evernote_mcp', label: 'Evernote\'s own MCP server', required_for: 'listing notes and reading notes and attachments' }],
     provider_ceiling: 'An hourly full pass, paced at about one call a second; a large first import finishes over several passes.',
     supported_formats: ['note text', 'title', 'notebook', 'tags', 'created and updated times', 'attachments read on their own'],
