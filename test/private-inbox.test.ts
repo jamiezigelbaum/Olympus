@@ -11,7 +11,7 @@ import {
   type WaitingQuestionInput,
   type WaitingQuestionStore,
 } from '../src/core/waiting-private-questions.ts';
-import { createLocalPrivateAnswers, type LocalPrivateAnswersOptions } from '../src/workers/email-source/local-private-answers.ts';
+import { AUTO_ANSWER_DEFER_MS, createLocalPrivateAnswers, type LocalPrivateAnswersOptions } from '../src/workers/email-source/local-private-answers.ts';
 import { createLocalModelActivity, runBackgroundInference } from '../src/workers/answer-activity.ts';
 import type { LocalAnswerResult } from '../src/workers/source-index/local-answer.ts';
 
@@ -537,4 +537,34 @@ test('classification holds automatic answers visibly queued without spending the
   sorting = false;
   await api.tick();
   expect(f.store.get(ref.id)?.result).toBeDefined();
+});
+
+test('a question queued behind classification for a minute makes classification yield until its answer is done', async () => {
+  const f = fixture(); const ref = record(f.store);
+  const gate = deferred<ReturnType<typeof result>>();
+  let sorting = true;
+  const api = service(f, { backgroundBusy: () => sorting, answer: async () => gate.promise });
+  await api.tick();
+  expect(api.overdue()).toBe(false);
+  f.advance(AUTO_ANSWER_DEFER_MS);
+  // The sniffer reads this between questions and stops its pass.
+  expect(api.overdue()).toBe(true);
+  sorting = false;
+  const pass = api.tick();
+  // Still yielding while the answer runs, so classification cannot cut in between its model calls.
+  await until(() => api.overdue());
+  gate.resolve(result());
+  await pass;
+  expect(f.store.get(ref.id)?.result).toBeDefined();
+  expect(api.overdue()).toBe(false);
+});
+
+test('a question its hourly allowance refused never holds classification off', async () => {
+  const f = fixture(); record(f.store);
+  const api = service(f, { answer: async () => result() });
+  const store = f.store as unknown as { reserveAutoAnswer: () => boolean };
+  store.reserveAutoAnswer = () => false;
+  f.advance(AUTO_ANSWER_DEFER_MS);
+  await api.tick();
+  expect(api.overdue()).toBe(false);
 });

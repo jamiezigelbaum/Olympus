@@ -6749,6 +6749,8 @@ export async function main(): Promise<void> {
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
         answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
+        // A waiting Inbox question past its deferral stops the pass, so its answer runs, then classification resumes.
+        shouldYield: () => localPrivateAnswers?.overdue() ?? false,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
         log: (line) => console.log(line),
         // Owner defaults 2026-10-01: the built-in private model is approved

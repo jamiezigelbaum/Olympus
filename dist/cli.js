@@ -138665,7 +138665,8 @@ __export(exports_local_private_answers, {
   askWithAnonymousInbox: () => askWithAnonymousInbox,
   anonymousInboxConnectionId: () => anonymousInboxConnectionId,
   LOCAL_PRIVATE_ANSWERS_PATH: () => LOCAL_PRIVATE_ANSWERS_PATH,
-  LOCAL_AGENT_INBOX_ID: () => LOCAL_AGENT_INBOX_ID
+  LOCAL_AGENT_INBOX_ID: () => LOCAL_AGENT_INBOX_ID,
+  AUTO_ANSWER_DEFER_MS: () => AUTO_ANSWER_DEFER_MS
 });
 import { lstatSync as lstatSync42 } from "node:fs";
 import { randomBytes as randomBytes23 } from "node:crypto";
@@ -138749,6 +138750,8 @@ function createLocalPrivateAnswers(options) {
   let timer;
   let unsubscribe;
   const abort = new AbortController;
+  const refusedAt = new Map;
+  let autoAnswering = false;
   const store = () => {
     try {
       return options.store();
@@ -138765,6 +138768,7 @@ function createLocalPrivateAnswers(options) {
     }
   };
   const hidden = (q) => q.surface === "chatgpt" && (now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true);
+  const autoAnswerable = (q) => q.path !== "anonymous" && q.path !== "venice" && !q.hasResult && !q.result && q.state === "waiting" && q.nextAttemptAt <= now() && !hidden(q) && active(q);
   const current2 = (q) => {
     const fresh2 = store()?.get(q.id);
     return fresh2 && fresh2.generation === q.generation && active(fresh2) && !hidden(fresh2) ? fresh2 : undefined;
@@ -138852,15 +138856,21 @@ function createLocalPrivateAnswers(options) {
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
           if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.())
             break;
-          if (q.path === "anonymous" || q.path === "venice" || q.hasResult || q.result || q.state !== "waiting" || q.nextAttemptAt > now() || hidden(q) || !active(q))
+          if (!autoAnswerable(q))
             continue;
           let modelCalled = false;
-          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q)))
+          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q))) {
+            refusedAt.set(q.id, now());
             continue;
+          }
+          refusedAt.delete(q.id);
           const reservedAt = now();
+          autoAnswering = true;
           const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal, onModelCall: () => {
             modelCalled = true;
-          } }, true);
+          } }, true).finally(() => {
+            autoAnswering = false;
+          });
           if (result.status === "no_model" || result.status === "model_downloading" || result.status === "failed" && !modelCalled) {
             currentStore.refundAutoAnswer?.(refOf(q), reservedAt);
           }
@@ -138881,6 +138891,18 @@ function createLocalPrivateAnswers(options) {
         pass = undefined;
       });
       return pass;
+    },
+    overdue() {
+      if (closed)
+        return false;
+      if (autoAnswering)
+        return true;
+      try {
+        const questions = store()?.list({ includeResults: false }).questions ?? [];
+        return questions.some((q) => autoAnswerable(q) && now() - Date.parse(q.askedAt) >= AUTO_ANSWER_DEFER_MS && !(now() - (refusedAt.get(q.id) ?? -Infinity) < REFUSED_HOLD_MS));
+      } catch {
+        return false;
+      }
     },
     close() {
       closed = true;
@@ -139121,7 +139143,7 @@ async function askWithAnonymousInbox(input, options) {
     return { ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousFailed };
   }
 }
-var LOCAL_AGENT_INBOX_ID = "@local:agents", LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, MAX_TOKENS = 400, MAX_QUESTION_CHARS = 2000, TOKEN_PATTERN3;
+var LOCAL_AGENT_INBOX_ID = "@local:agents", LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, AUTO_ANSWER_DEFER_MS = 60000, REFUSED_HOLD_MS, MAX_TOKENS = 400, MAX_QUESTION_CHARS = 2000, TOKEN_PATTERN3;
 var init_local_private_answers = __esm(() => {
   init_vocabulary();
   init_tier_ledger();
@@ -139131,6 +139153,7 @@ var init_local_private_answers = __esm(() => {
   init_private_answer_model();
   init_local_answer();
   TOKEN_TTL_MS = 30 * 60000;
+  REFUSED_HOLD_MS = 10 * 60000;
   TOKEN_PATTERN3 = /^[A-Za-z0-9_-]{32,64}$/;
 });
 
@@ -207900,6 +207923,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
     answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
+    shouldYield: () => localPrivateAnswers?.overdue() ?? false,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line2) => console.log(line2),
     ...snifferRuntime.source === "built_in" ? { autoApproveBuiltIn: true } : {},

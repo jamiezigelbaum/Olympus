@@ -38425,7 +38425,7 @@ var init_local_answer = __esm(() => {
 });
 
 // src/workers/email-source/local-private-answers.ts
-var TOKEN_TTL_MS;
+var TOKEN_TTL_MS, REFUSED_HOLD_MS;
 var init_local_private_answers = __esm(() => {
   init_vocabulary();
   init_tier_ledger();
@@ -38435,6 +38435,7 @@ var init_local_private_answers = __esm(() => {
   init_private_answer_model();
   init_local_answer();
   TOKEN_TTL_MS = 30 * 60000;
+  REFUSED_HOLD_MS = 10 * 60000;
 });
 
 // src/core/local-open.ts

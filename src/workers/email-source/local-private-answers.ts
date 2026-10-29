@@ -45,6 +45,14 @@ export function localInboxLabel(id: string): string | undefined {
 
 export const LOCAL_PRIVATE_ANSWERS_PATH = '/dashboard/private-answers';
 const TOKEN_TTL_MS = 30 * 60_000;
+/**
+ * How long an automatic answer defers to privacy classification. Beyond it the
+ * sniffer stops at its next question (overdue()): on a fresh install its
+ * backlog outlasts any reasonable wait (release check 2026-10-29: queued past 10 min).
+ */
+export const AUTO_ANSWER_DEFER_MS = 60_000;
+/** A question the hourly allowance refused never holds classification off for this long. */
+const REFUSED_HOLD_MS = 10 * 60_000;
 const MAX_TOKENS = 400;
 const MAX_QUESTION_CHARS = 2_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,64}$/;
@@ -112,6 +120,11 @@ export interface LocalPrivateAnswers {
   /** One page action, by the local control session `session`. */
   start(): void;
   tick(): Promise<void>;
+  /**
+   * An automatic answer has waited long enough that privacy classification
+   * should stop at its next question and let it run.
+   */
+  overdue(): boolean;
   close(): void;
   handle(body: Readonly<Record<string, unknown>>, session: string): Promise<LocalPrivateAnswersResponse>;
 }
@@ -228,6 +241,10 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   let timer: ReturnType<typeof setInterval> | undefined;
   let unsubscribe: (() => void) | undefined;
   const abort = new AbortController();
+  // Questions the hourly allowance refused, by id: they wait without holding classification off.
+  const refusedAt = new Map<string, number>();
+  // An automatic answer in progress: classification keeps yielding between its model calls.
+  let autoAnswering = false;
   const store = () => { try { return options.store(); } catch { return undefined; } };
   const refOf = (q: WaitingQuestion): WaitingQuestionRef => ({ id: q.id, generation: q.generation, connectionId: q.connectionId });
   const active = (q: WaitingQuestion) => {
@@ -236,6 +253,8 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   const hidden = (q: WaitingQuestion) => q.surface === 'chatgpt' && (
     now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true
   );
+  const autoAnswerable = (q: WaitingQuestion) => q.path !== 'anonymous' && q.path !== 'venice' && !q.hasResult && !q.result
+    && q.state === 'waiting' && q.nextAttemptAt <= now() && !hidden(q) && active(q);
   const current = (q: WaitingQuestion) => {
     const fresh = store()?.get(q.id);
     return fresh && fresh.generation === q.generation && active(fresh) && !hidden(fresh) ? fresh : undefined;
@@ -300,11 +319,17 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         // Oldest first avoids starving a retry behind a busy connection.
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
           if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.()) break;
-          if (q.path === 'anonymous' || q.path === 'venice' || q.hasResult || q.result || q.state !== 'waiting' || q.nextAttemptAt > now() || hidden(q) || !active(q)) continue;
+          if (!autoAnswerable(q)) continue;
           let modelCalled = false;
-          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q))) continue;
+          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q))) {
+            refusedAt.set(q.id, now());
+            continue;
+          }
+          refusedAt.delete(q.id);
           const reservedAt = now();
-          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal, onModelCall: () => { modelCalled = true; } }, true);
+          autoAnswering = true;
+          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal, onModelCall: () => { modelCalled = true; } }, true)
+            .finally(() => { autoAnswering = false; });
           if (result.status === 'no_model' || result.status === 'model_downloading' || (result.status === 'failed' && !modelCalled)) {
             currentStore.refundAutoAnswer?.(refOf(q), reservedAt);
           }
@@ -319,6 +344,16 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         }
       })().catch(() => undefined).finally(() => { pass = undefined; });
       return pass;
+    },
+    overdue() {
+      if (closed) return false;
+      if (autoAnswering) return true;
+      try {
+        const questions = store()?.list({ includeResults: false }).questions ?? [];
+        return questions.some(q => autoAnswerable(q)
+          && now() - Date.parse(q.askedAt) >= AUTO_ANSWER_DEFER_MS
+          && !(now() - (refusedAt.get(q.id) ?? -Infinity) < REFUSED_HOLD_MS));
+      } catch { return false; }
     },
     close() {
       closed = true;
