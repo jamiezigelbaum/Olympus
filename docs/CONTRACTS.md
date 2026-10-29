@@ -360,7 +360,7 @@ section consolidates and supersedes all other policy wording.
   description says Leo's appointments are fine to share and names only money
   and legal as private, yet the built-in model judged "His check-up is
   Saturday… with Dr. Alves" Private as health whenever the names line held
-  the owner's own name ("Jamie | Jamie"): it read the item as the owner's own
+  the owner's own name (as chat and sender): it read the item as the owner's own
   health and applied the no-description default. One generic line in
   `SNIFFER_SYSTEM_PROMPT` limits privateKind to kinds the description calls
   private. New eval set `eval/classification/fixtures/owner-exemptions.json`
