@@ -29,6 +29,8 @@ const NEEDS: Partial<Record<Leg, Leg[]>> = {
   // The approved pictures show the pages as a full run leaves them: after the relay, every agent's questions and the Inbox
   // leg (run.ts, --update-baselines). Journeys also take their setup from the suite and the Inbox (journeys.ts `needs`).
   journeys: ['suite', 'relay', 'inbox', 'screenshots'],
+  // The Inbox leg lists the tools with the connection token the suite creates.
+  inbox: ['suite'],
 };
 
 // The archive leg drives the dashboard too: it presses Import on the pending request and removes imports there.
@@ -37,9 +39,8 @@ const SCREEN_LEGS: Leg[] = ['screenshots', 'inbox', 'journeys', 'explore', 'arch
 interface Rule { test: (file: string) => boolean; legs: Leg[] | 'all'; why: string }
 
 const under = (prefix: string) => (file: string) => file.startsWith(prefix);
-const harness = (pattern: RegExp) => (file: string) => file.startsWith('scripts/release-check/') && pattern.test(file.slice('scripts/release-check/'.length));
 
-/** First match wins. Product files reach what a user (or agent) sees through them; harness files reach the leg they implement. */
+/** First match wins. Product files reach what a user (or agent) sees through them. Harness code a VM leg runs reaches every leg (impactOf). */
 const RULES: Rule[] = [
   { test: (f) => f === 'scripts/release-check/impact.ts', legs: [], why: 'the planner itself does not run on the machine' },
   { test: under('test/'), legs: [], why: 'tests are not in the package' },
@@ -58,11 +59,6 @@ const RULES: Rule[] = [
   { test: (f) => f === 'src/core/linux-owner-bridge.ts', legs: SCREEN_LEGS, why: 'how the owner\'s browser opens the dashboard' },
   { test: (f) => f === 'src/workers/email-source/local-private-answers.ts' || f === 'src/core/waiting-private-questions.ts', legs: ['inbox', ...SCREEN_LEGS], why: 'Private questions and the Inbox' },
   { test: under('skills/'), legs: ['suite', 'relay', 'inbox'], why: 'what agents are told' },
-  { test: harness(/^(inbox|inbox-page|private-note)\.ts$/), legs: ['inbox'], why: 'the Inbox leg' },
-  { test: harness(/^explore[\w-]*\.ts$/), legs: ['explore'], why: 'the control exploration' },
-  { test: harness(/^archive-[\w-]+\.ts$/), legs: ['archive'], why: 'the archive-import leg' },
-  { test: harness(/^(journey|journeys|journey-driver|visual|visual-boxes|visual-capture|layout-rules|reviewer|reviewer-plants)\.ts$/), legs: ['journeys'], why: 'the journeys and screens' },
-  { test: harness(/^(agents|cli-agents|judge|suite|probe|mcp-proxy)\.ts$/), legs: ['suite', 'relay'], why: 'the agent suite' },
 ];
 
 export interface FileImpact { file: string; legs: Leg[] | 'all'; why: string }
@@ -105,8 +101,9 @@ export function harnessReach(root: string): Set<string> {
 }
 
 function impactOf(file: string, reach: Set<string> | undefined): FileImpact {
-  // Test code the harness imports builds what the machine is given, so it is harness input, not a unit test.
-  if (reach?.has(file) && file.startsWith('test/')) return { file, legs: 'all', why: 'test support the harness imports' };
+  // Harness modules are shared across legs (the suite uses the Inbox checks, the archive leg walks journeys), so
+  // any harness code a VM leg runs, test-support fixture builders included, reaches every leg.
+  if (reach?.has(file)) return { file, legs: 'all', why: 'harness code a VM leg runs' };
   if (reach && file.startsWith('scripts/release-check/') && file.endsWith('.ts') && !reach.has(file) && file !== 'scripts/release-check/run.ts') {
     return { file, legs: [], why: 'harness code no VM leg runs (not reached from run.ts or the in-machine agent)' };
   }

@@ -52,9 +52,11 @@ describe('which legs a change reaches', () => {
     expect(plan.files.find((f) => f.file.endsWith('web-clients.ts'))!.legs).toEqual([]);
   });
 
-  test('harness code reached only through a side-effect import still reaches its leg', () => {
+  test('harness code a VM leg runs, even through a side-effect import, reaches every leg; the Inbox brings the suite', () => {
     expect(reach.has('scripts/release-check/archive-live-seed-hooks.ts')).toBe(true);
-    expect(planImpact(['scripts/release-check/archive-live-seed-hooks.ts'], reach).run).toEqual(['archive']);
+    expect(planImpact(['scripts/release-check/archive-live-seed-hooks.ts'], reach).mode).toBe('full');
+    expect(planImpact(['scripts/release-check/inbox.ts'], reach).mode).toBe('full');
+    expect(planImpact(['src/workers/email-source/local-private-answers.ts'], reach).run).toContain('suite');
   });
 
   test('a dashboard change runs the screens, the archive leg that drives them, and everything their pictures depend on', () => {
