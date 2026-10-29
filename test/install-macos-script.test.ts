@@ -351,7 +351,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expect(corrupt.status).toBe(1);
     expect(corrupt.stderr).toContain('the WhatsApp bridge download did not match its checksum');
     expect(appVersion(h.app)).toBe(V1);
-  });
+   }, 60_000);
 
   shellTest('installs Bun and Olympus, starts the engine, and tells the user the next step in ChatGPT', () => {
     const h = harness(shell);

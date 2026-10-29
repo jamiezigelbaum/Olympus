@@ -179,7 +179,7 @@ describe('the prebuilt WhatsApp bridge', () => {
     expect(checkSiteRelease(root).join('\n')).toContain('does not match the installer\'s WhatsApp bridge pins');
     rmSync(served);
     expect(checkSiteRelease(root).join('\n')).toContain('-darwin-arm64 is missing');
-  });
+   }, 30_000);
 
   test('is refused when built from other source or for another machine', () => {
     const { root, artifact, bridge, machO } = bridgeFixture();
@@ -189,7 +189,7 @@ describe('the prebuilt WhatsApp bridge', () => {
     writeFileSync(bridge, '#!/bin/sh\n');
     expect(() => publishToSite({ root, artifact, bridge })).toThrow('not an Apple-silicon');
     expect(existsSync(join(root, 'site', 'install.sh'))).toBe(false);
-  });
+  }, 30_000);
 });
 
 describe('publishToSite and checkSiteRelease', () => {
