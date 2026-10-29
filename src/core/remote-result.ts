@@ -124,6 +124,11 @@ const FAMILY_LABELS: Readonly<Record<string, string>> = {
 
 const OTHER_SOURCE_LABEL = 'Other source';
 
+/** A provider's product name (`dropbox` → Dropbox), or undefined for one this list does not name. */
+export function providerSourceLabel(provider: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
+}
+
 export const REMOTE_SOURCE_LABELS: readonly string[] = Object.freeze([...new Set([
   ...Object.values(PROVIDER_LABELS),
   ...Object.values(FAMILY_LABELS),

@@ -32,7 +32,9 @@
  * can reach the output: the items read and the other versions the answer's
  * version note names (the model's `used`).
  */
-import { buildEvidencePackDetailed, type LocalContentProvider } from '../../core/evidence-pack.ts';
+import { buildEvidencePackDetailed, type LocalContentProvider, type SecretLocationNote } from '../../core/evidence-pack.ts';
+import { providerSourceLabel } from '../../core/remote-result.ts';
+import { secretLocationAnswer } from '../../core/secret-location-note.ts';
 import type { EvidenceCandidate } from '../../core/contracts.ts';
 import { assertEvidencePackModelEligible, assertModelTrustTierAllowed } from '../../core/source-model-policy.ts';
 import type { SourceIndexProvenance, SourceTrustDomain } from '../../core/source-index/types.ts';
@@ -175,9 +177,15 @@ export async function answerOnThisComputer(
     evidenceByteBudget: LOCAL_EVIDENCE_BYTE_BUDGET,
     ...(options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {}),
     ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
+    ...(lanes.secretLocations ? { secretLocations: lanes.secretLocations } : {}),
   });
   assertEvidencePackModelEligible(detail.pack);
   const leftOut = leftOutSources(detail.skippedCorpora, lanes.excludedCorpusIds, options.sourceName);
+  // Matching Secrets, by location only (no model sees them): said beside the answer, or as the answer.
+  const secrets = secretLocationAnswer((detail.secretLocations ?? []).map((location) => ({ where: secretWhere(location) })));
+  const notFound = (): LocalAnswerResult => (secrets
+    ? { status: 'answered', answer: secrets, citations: [], unanswered: [], leftOut, read: [] }
+    : { status: 'not_found', leftOut });
   // Items kept as names only, and Personal names whose contents are Private
   // (read from their Private copy instead), carry no text to answer from.
   const skip = new Set([...(detail.namesOnlyCandidateIndexes ?? []), ...(detail.contentPrivateCandidateIndexes ?? [])]);
@@ -186,7 +194,7 @@ export async function answerOnThisComputer(
     if (skip.has(index) || !corpusId || !LOCAL_TRUST_DOMAINS.includes(candidate.trustDomain)) return [];
     return [{ ...candidate, corpusId } as unknown as PrivateEvidenceItem];
   });
-  if (candidates.length === 0) return { status: 'not_found', leftOut };
+  if (candidates.length === 0) return notFound();
   let used: readonly number[] | undefined;
   let result: Awaited<ReturnType<PrivateAnswerModel['answerPrivately']>>;
   try {
@@ -206,7 +214,7 @@ export async function answerOnThisComputer(
     // searched and answered again until its deadline, holding the model.
     try {
       const ok = await options.eligible(candidates);
-      return error.reason === 'revoked' && ok.some((value) => value === true) ? { status: 'changed' } : { status: 'not_found', leftOut };
+      return error.reason === 'revoked' && ok.some((value) => value === true) ? { status: 'changed' } : notFound();
     } catch {
       return { status: 'failed' };
     }
@@ -225,12 +233,19 @@ export async function answerOnThisComputer(
   }
   return {
     status: 'answered',
-    answer: result.answer,
+    answer: secrets ? `${result.answer}\n\n${secrets}` : result.answer,
     citations: result.citations,
     unanswered: result.unanswered ?? [],
     leftOut,
     read,
   };
+}
+
+/** Where a Secret is, as the index releases it: its locator or title, else its source by name. */
+function secretWhere(location: SecretLocationNote): string {
+  const named = location.locator ?? location.title;
+  if (named) return named;
+  return `In ${providerSourceLabel(location.source) ?? 'one of your sources'} (its name is Private, so it is not shown here)`;
 }
 
 /**

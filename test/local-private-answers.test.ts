@@ -291,6 +291,8 @@ async function localFixture(options: {
   keywordOnly?: boolean;
   meaningEmbeddings?: boolean;
   realEmbeddings?: boolean;
+  /** The secret-locations index's matches for a query (location only). */
+  secrets?: (query: string) => ReturnType<NonNullable<Parameters<typeof createSourceAnswerLanes>[0]['secretLocations']>>;
 } = {}) {
   const { dir, cleanup } = tempDir('olympus-local-answer-');
   const fixture = openTierFixture(dir);
@@ -323,6 +325,7 @@ async function localFixture(options: {
     answerScope: () => ({ kind: 'search' }),
     accountScope: () => undefined,
     visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(fixture.set.openStores().map((store) => store.corpusId)) }]),
+    ...(options.secrets ? { secretLocations: (query: string) => options.secrets!(query) } : {}),
   });
   const stub = stubBuiltInModel(options.answer ?? ANSWER_JSON, options.duringSynthesis ? () => options.duringSynthesis!(fixture) : undefined);
   const path = createLocalAnswerPath({
@@ -741,6 +744,41 @@ describe('answers on this computer, with every outbound request denied', () => {
     const result = await local.answer({ question: 'zebra quartz xylophone', selectors: { retrieval_mode: 'keyword' } });
     expect(result).toEqual({ status: 'not_found', leftOut: ['Cloud mail', 'Other files'] });
     expect(local.stub.requests).toEqual([]);
+  });
+});
+
+describe('a question that matches a Secret (owner, 2026-10-29)', () => {
+  const WIFI = { source: 'dropbox', ref: 'sl_wifi', locator: '/Home/Router/wifi.txt', title: 'wifi.txt', findingKinds: ['password'] };
+  const HIDDEN = { source: 'dropbox', ref: 'sl_hidden', locator: null, title: null, findingKinds: ['password'] };
+  const secrets = (notes: unknown[]) => (query: string) => (/wi-?fi|password/i.test(query) ? notes : []) as never;
+
+  test('says the item is a Secret, that no AI sees it, and where it is: never "not found", and no model is asked', async () => {
+    const local = await localFixture({ keywordOnly: true, secrets: secrets([WIFI, HIDDEN]) });
+    const result = await local.answer({ question: 'What is the home Wi-Fi password?', selectors: { retrieval_mode: 'keyword' } });
+    expect(result).toMatchObject({ status: 'answered', citations: [], read: [] });
+    const answer = (result as { answer: string }).answer;
+    expect(answer).toBe([
+      '2 matching items are stored as Secrets, so Olympus never shows them to an AI, this one included. Open them on this Mac:',
+      '- /Home/Router/wifi.txt',
+      '- In Dropbox (its name is Private, so it is not shown here)',
+    ].join('\n'));
+    expect(local.stub.requests).toEqual([]);
+  });
+
+  test('a remote agent\'s question that only a Secret matches still waits on this computer', async () => {
+    const local = await localFixture({ keywordOnly: true, secrets: secrets([WIFI]) });
+    const probe = (question: string) => probePrivateMatch({ lanes: local.lanes, request: { question, retrieval_mode: 'keyword' } as never, timeoutMs: 5_000 });
+    expect(await probe('What is the home Wi-Fi password?')).toBe('match');
+    expect(await probe('zebra quartz xylophone')).not.toBe('match');
+  });
+
+  test('beside an answer from Private items, the Secret is named after it', async () => {
+    const local = await localFixture({ keywordOnly: true, secrets: (query) => (/lease/i.test(query) ? [WIFI] : []) as never });
+    const result = await local.answer({ question: 'When does the orchard flat lease end?', selectors: { retrieval_mode: 'keyword' } });
+    expect(result.status).toBe('answered');
+    expect((result as { answer: string }).answer).toEndWith('A matching item is stored as a Secret, so Olympus never shows it to an AI, this one included. Open it on this Mac:\n- /Home/Router/wifi.txt');
+    // The model saw the Private items only, never the Secret's location.
+    expect(JSON.stringify(local.stub.requests)).not.toContain('wifi.txt');
   });
 });
 

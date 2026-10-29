@@ -65535,6 +65535,13 @@ var init_release_manifest = __esm(() => {
 function secretLocationCoverageNote(count) {
   return `${count} Secret(s) matched by location only; their contents are never read into an answer.`;
 }
+function secretLocationAnswer(locations) {
+  if (locations.length === 0)
+    return "";
+  const lead = locations.length === 1 ? "A matching item is stored as a Secret, so Olympus never shows it to an AI, this one included. Open it on this Mac:" : `${locations.length} matching items are stored as Secrets, so Olympus never shows them to an AI, this one included. Open them on this Mac:`;
+  return [lead, ...locations.map((location) => `- ${location.where}`)].join(`
+`);
+}
 function withoutSecretLocationCoverageNotes(answer) {
   const lines = answer.split(`
 `);
@@ -67444,6 +67451,10 @@ async function probePrivateMatch(input) {
     let routed = await withCachedKeywordExpansion(translation, () => search({}));
     if (matched(routed))
       return "match";
+    try {
+      if ((lanes.secretLocations?.(question, routed.searchedCorpora) ?? []).length > 0)
+        return "match";
+    } catch {}
     if (translation.missing) {
       routed = await search({});
       if (matched(routed))
@@ -134687,6 +134698,9 @@ var init_stdio2 = __esm(() => {
 });
 
 // src/core/remote-result.ts
+function providerSourceLabel(provider) {
+  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
+}
 function sourceLabel3(provider, family) {
   if (typeof provider === "string" && Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider))
     return PROVIDER_LABELS[provider];
@@ -138379,10 +138393,13 @@ async function answerOnThisComputer(input, options) {
     maxCharsPerCandidate: LOCAL_MAX_CHARS_PER_CANDIDATE,
     evidenceByteBudget: LOCAL_EVIDENCE_BYTE_BUDGET,
     ...options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {},
-    ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}
+    ...lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {},
+    ...lanes.secretLocations ? { secretLocations: lanes.secretLocations } : {}
   });
   assertEvidencePackModelEligible(detail.pack);
   const leftOut = leftOutSources(detail.skippedCorpora, lanes.excludedCorpusIds, options.sourceName);
+  const secrets = secretLocationAnswer((detail.secretLocations ?? []).map((location) => ({ where: secretWhere(location) })));
+  const notFound = () => secrets ? { status: "answered", answer: secrets, citations: [], unanswered: [], leftOut, read: [] } : { status: "not_found", leftOut };
   const skip = new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []]);
   const candidates = detail.pack.candidates.flatMap((candidate, index) => {
     const corpusId = detail.candidateCorpusIds[index] ?? "";
@@ -138391,7 +138408,7 @@ async function answerOnThisComputer(input, options) {
     return [{ ...candidate, corpusId }];
   });
   if (candidates.length === 0)
-    return { status: "not_found", leftOut };
+    return notFound();
   let used;
   let result;
   try {
@@ -138406,7 +138423,7 @@ async function answerOnThisComputer(input, options) {
       return { status: "failed" };
     try {
       const ok = await options.eligible(candidates);
-      return error2.reason === "revoked" && ok.some((value2) => value2 === true) ? { status: "changed" } : { status: "not_found", leftOut };
+      return error2.reason === "revoked" && ok.some((value2) => value2 === true) ? { status: "changed" } : notFound();
     } catch {
       return { status: "failed" };
     }
@@ -138424,12 +138441,20 @@ async function answerOnThisComputer(input, options) {
   }
   return {
     status: "answered",
-    answer: result.answer,
+    answer: secrets ? `${result.answer}
+
+${secrets}` : result.answer,
     citations: result.citations,
     unanswered: result.unanswered ?? [],
     leftOut,
     read
   };
+}
+function secretWhere(location) {
+  const named = location.locator ?? location.title;
+  if (named)
+    return named;
+  return `In ${providerSourceLabel(location.source) ?? "one of your sources"} (its name is Private, so it is not shown here)`;
 }
 function leftOutSources(skipped2, excluded, sourceName) {
   const names = new Set;
@@ -138516,6 +138541,8 @@ async function readLocalEvidenceItem(input) {
 var LOCAL_TRUST_DOMAINS, LOCAL_MAX_RESULTS = 16, LOCAL_MAX_CHARS_PER_CANDIDATE = 3000, LOCAL_EVIDENCE_BYTE_BUDGET = 24000, LOCAL_DEPTH_MAX_PASSAGES = 24, IN_SCOPE_SKIPS;
 var init_local_answer = __esm(() => {
   init_evidence_pack();
+  init_remote_result();
+  init_secret_location_note();
   init_source_model_policy();
   init_private_answer_contract();
   init_analyst_answer();

@@ -3067,6 +3067,12 @@ export async function probePrivateMatch(input: {
     if (request.retrieval_mode === 'hybrid' && matched(await withCachedKeywordExpansion(translation, () => search({ lexicalOnly: true })))) return 'match';
     let routed = await withCachedKeywordExpansion(translation, () => search({}));
     if (matched(routed)) return 'match';
+    // A matching Secret (location only, never content) waits on this computer too: its answer there says where it is.
+    try {
+      if ((lanes.secretLocations?.(question, routed.searchedCorpora) ?? []).length > 0) return 'match';
+    } catch {
+      // The index unreadable: the search's own verdict stands.
+    }
     if (translation.missing) {
       routed = await search({});
       if (matched(routed)) return 'match';
