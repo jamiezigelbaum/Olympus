@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import {
   formatCliFatalError,
@@ -682,6 +682,42 @@ describe('CLI tool surface', () => {
       expect(existsSync(join(home, 'Library', 'LaunchAgents', 'com.openclaw.olympus.worker.plist'))).toBe(false);
       // A dry run only previews, so it still answers.
       expect((await runBinExit(['worker', 'install', '--dry-run', '--platform', 'darwin', '--home', home])).code).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('removing a worker service left beside the engine keeps the engine\'s olympus:// link handler', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-worker-uninstall-handler-'));
+    const binDir = join(dir, 'bin');
+    const home = join(dir, 'home');
+    try {
+      mkdirSync(binDir, { recursive: true });
+      for (const tool of ['systemctl', 'xdg-mime', 'update-desktop-database']) {
+        writeFileSync(join(binDir, tool), '#!/bin/sh\nexit 0\n');
+        chmodSync(join(binDir, tool), 0o755);
+      }
+      const handlerPath = join(home, '.local', 'share', 'applications', 'ai.olympusplugin.open.desktop');
+      const engineUnit = join(home, '.config', 'systemd', 'user', 'olympus-engine.service');
+      mkdirSync(dirname(handlerPath), { recursive: true });
+      mkdirSync(dirname(engineUnit), { recursive: true });
+      writeFileSync(handlerPath, '[Desktop Entry]\nName=Olympus\n');
+      const uninstall = async () => {
+        const proc = Bun.spawn([process.execPath, 'src/cli.ts', 'worker', 'uninstall', '--platform', 'linux', '--home', home], {
+          cwd: process.cwd(),
+          env: { HOME: home, PATH: `${binDir}:${process.env.PATH ?? ''}` },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
+        const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+        if (code !== 0) throw new Error(stderr || stdout);
+        return JSON.parse(stdout) as Record<string, unknown>;
+      };
+      // The engine is installed and owns the handler: the leftover worker service goes, the handler stays.
+      writeFileSync(engineUnit, '[Unit]\n');
+      const besideEngine = await uninstall();
+      expect(besideEngine.open_handler).toBeUndefined();
+      expect(existsSync(handlerPath)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

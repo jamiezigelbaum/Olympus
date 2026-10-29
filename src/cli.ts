@@ -1847,7 +1847,10 @@ async function runWorkerCommand(args: string[]): Promise<void> {
       }, null, 2));
       return;
     }
-    const handler = command === 'uninstall' ? linuxDesktopOpenHandler('uninstall', actionOptions) : undefined;
+    // The engine owns the olympus:// handler where it runs the worker: removing a leftover worker service keeps it.
+    const handler = command === 'uninstall' && !engineRunsWorkerHere(actionOptions)
+      ? linuxDesktopOpenHandler('uninstall', actionOptions)
+      : undefined;
     console.log(JSON.stringify(handler ? { ...result, open_handler: handler } : result, null, 2));
     return;
   }
@@ -1861,22 +1864,27 @@ async function runWorkerCommand(args: string[]): Promise<void> {
  * one installed earlier can still be removed.
  */
 function refuseWorkerServiceBesideEngine(options: { platform?: WorkerServicePlatform; homeDir?: string }): void {
-  const platform = options.platform ?? process.platform;
-  if (platform !== 'darwin' && platform !== 'linux') return;
-  // An explicit --home names the whole layout, as the worker lifecycle reads it; no ambient XDG selectors.
-  const env = options.homeDir ? { HOME: options.homeDir } : process.env;
-  if (!existsSync(engineServicePaths({ env, platform }).plistPath)) return;
+  if (!engineRunsWorkerHere(options)) return;
   throw new OperationError(
     'config_error',
     'The Olympus engine already runs the worker on this computer; a separate worker service would compete with it for the same data and port. Use olympus engine status, olympus engine logs or olympus engine restart instead. To remove a worker service installed earlier, run olympus worker uninstall.',
   );
 }
 
+/** Whether `olympus engine install` runs the worker on this computer (its service file is there). */
+function engineRunsWorkerHere(options: { platform?: WorkerServicePlatform; homeDir?: string }): boolean {
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'darwin' && platform !== 'linux') return false;
+  // An explicit --home names the whole layout, as the worker lifecycle reads it; no ambient XDG selectors.
+  const env = options.homeDir ? { HOME: options.homeDir } : process.env;
+  return existsSync(engineServicePaths({ env, platform }).plistPath);
+}
+
 /**
  * On a Linux desktop the worker service is how Olympus runs, so the
  * olympus:// link handler comes and goes with it (macOS's comes with
  * `olympus engine install`). A headless host (no display) gets none on
- * install; uninstall always removes one that is there.
+ * install; uninstall removes one that is there, unless the engine owns it.
  */
 function linuxDesktopOpenHandler(
   action: 'install' | 'uninstall',

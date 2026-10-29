@@ -213069,20 +213069,23 @@ async function runWorkerCommand(args) {
       }, null, 2));
       return;
     }
-    const handler = command === "uninstall" ? linuxDesktopOpenHandler("uninstall", actionOptions) : undefined;
+    const handler = command === "uninstall" && !engineRunsWorkerHere(actionOptions) ? linuxDesktopOpenHandler("uninstall", actionOptions) : undefined;
     console.log(JSON.stringify(handler ? { ...result, open_handler: handler } : result, null, 2));
     return;
   }
   throw new OperationError("invalid_params", `Unknown worker command: ${command}`);
 }
 function refuseWorkerServiceBesideEngine(options) {
-  const platform2 = options.platform ?? process.platform;
-  if (platform2 !== "darwin" && platform2 !== "linux")
-    return;
-  const env = options.homeDir ? { HOME: options.homeDir } : process.env;
-  if (!existsSync98(engineServicePaths({ env, platform: platform2 }).plistPath))
+  if (!engineRunsWorkerHere(options))
     return;
   throw new OperationError("config_error", "The Olympus engine already runs the worker on this computer; a separate worker service would compete with it for the same data and port. Use olympus engine status, olympus engine logs or olympus engine restart instead. To remove a worker service installed earlier, run olympus worker uninstall.");
+}
+function engineRunsWorkerHere(options) {
+  const platform2 = options.platform ?? process.platform;
+  if (platform2 !== "darwin" && platform2 !== "linux")
+    return false;
+  const env = options.homeDir ? { HOME: options.homeDir } : process.env;
+  return existsSync98(engineServicePaths({ env, platform: platform2 }).plistPath);
 }
 function linuxDesktopOpenHandler(action, options) {
   if ((options.platform ?? process.platform) !== "linux")
