@@ -200,6 +200,7 @@ describe('the scheduler source', () => {
       handle,
       notebookGate: () => () => 'ingest',
       assertNotebookChoiceCurrent: () => undefined,
+      scope: { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' },
     });
     expect(source.sourceId).toBe('evernote.notes');
     expect(source.intervalMs).toBe(3_600_000);
@@ -224,6 +225,7 @@ describe('the scheduler source', () => {
       handle,
       notebookGate: () => () => 'ingest',
       assertNotebookChoiceCurrent: () => undefined,
+      scope: { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' },
     });
     expect((await source.tasks[0]!.run()).counts).toMatchObject({ pass_complete: 1 });
     for (const task of source.tasks.slice(1)) await task.run();
@@ -231,6 +233,38 @@ describe('the scheduler source', () => {
     const lane = runtime.existingLane()!;
     const text = [lane.secure.open(), lane.internal.open()].flatMap((store) => store.localContent(child)?.chunks ?? []).join(' ');
     expect(text).toContain('fixtureferryword');
+  });
+
+  test('a notebook set to Skip after a pass: its attachments are not read, and its stored notes fall outside the approved reads', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Clients');
+    const bytes = new TextEncoder().encode('fixtureclientword: the contract terms.');
+    const note = fake.addNote({ title: 'Contract', created: day(2024), notebookId: book.id, body: '<en-note>Terms</en-note>', resources: [{ bytes, mime: 'text/plain', name: 'terms.txt' }] });
+    const { runtime, handle } = await connected(fake);
+    let choice: 'ingest' | 'exclude' = 'ingest';
+    const source = runtime.schedulerSource({
+      config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
+      handle,
+      notebookGate: () => () => choice,
+      assertNotebookChoiceCurrent: () => undefined,
+      scope: { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' },
+    });
+    expect((await source.tasks[0]!.run()).counts).toMatchObject({ pass_complete: 1 });
+    const lane = runtime.existingLane()!;
+    const stores = [lane.secure.open(), lane.internal.open()];
+    const noteId = `personal:${note.id}`;
+    // Every stored copy records its notebook, which is what the approved scope filters reads by.
+    const holder = stores.find((store) => store.itemMatchesSearchFilters(noteId, 'personal', { sourceScopeFolderAnyKeys: [book.id] }))!;
+    expect(holder).toBeDefined();
+    expect(holder.itemMatchesSearchFilters(noteId, 'personal', { sourceScopeFolderNoneKeys: [book.id] })).toBe(false);
+
+    // Set to Skip before the attachment is read: the read is refused before any link is asked for.
+    choice = 'exclude';
+    const attachmentCalls = fake.calls.get_attachment ?? 0;
+    for (const task of source.tasks.slice(1)) await task.run();
+    expect(fake.calls.get_attachment ?? 0).toBe(attachmentCalls);
+    const child = `personal:${childProviderItemId(note.id, evernoteAttachmentKeys([md5Hex(bytes)])[0]!)}`;
+    expect(stores.flatMap((store) => store.localContent(child)?.chunks ?? []).join(' ')).not.toContain('fixtureclientword');
   });
 
   test('a note routed to the Personal store gets its vectors from the store-wide sweep, though no pass queued it', async () => {

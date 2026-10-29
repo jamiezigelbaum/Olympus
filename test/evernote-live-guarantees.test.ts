@@ -292,6 +292,7 @@ describe('the live Evernote source', () => {
         handle,
         notebookGate: () => () => 'ingest',
       assertNotebookChoiceCurrent: () => undefined,
+      scope: { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' },
       });
       for (const task of source.tasks.slice(1)) await task.run({} as never).catch(() => undefined);
     });

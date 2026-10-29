@@ -296,7 +296,7 @@ import {
   type TieredStoreSet,
 } from '../connector-store/tiered-store-set.ts';
 import { EVERNOTE_SOURCE_ID } from '../evernote/connector.ts';
-import { EVERNOTE_SYNC_CAPABILITY } from '../evernote/live-sync.ts';
+import { EVERNOTE_SYNC_CAPABILITY, EVERNOTE_TIER_CORPUS_IDS } from '../evernote/live-sync.ts';
 import { createEvernoteRuntime } from '../evernote/runtime.ts';
 import {
   READWISE_SECURE_LIBRARY_CORPUS_ID,
@@ -3759,6 +3759,8 @@ export async function main(): Promise<void> {
       : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore
         || (store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current())
         ? 'google_drive.docs' as const
+      : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId)
+        ? EVERNOTE_SOURCE_ID
         : undefined;
     if (!sourceId) return { allowed: true, contentAllowed: true };
     const approval = fileSourceScopeAuthority?.snapshot(sourceId);
@@ -3768,12 +3770,22 @@ export async function main(): Promise<void> {
     const contentScope = fileSourceScopeContentFilters(approval);
     const scopeAccount = fileScopeAccount(sourceId);
     if (!scopeAccount) return { allowed: false };
+    // Evernote rewrites only the notes that changed, so a note keeps the approval it was stored
+    // under: its notebook id decides, not the stamp's revision (a re-approval would hide every
+    // unchanged note). Another account behind the sign-in stops the pass before it stores anything.
+    const scoped = (filters: import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined) => {
+      if (!filters || sourceId !== EVERNOTE_SOURCE_ID) return filters;
+      const { sourceScopeGeneration: _generation, sourceScopeRevision: _revision, ...byNotebook } = filters;
+      return byNotebook;
+    };
+    const contentFilters = contentScope.allowed ? scoped(contentScope.filters) : undefined;
+    const filters = scoped(metadataScope.filters);
     return {
       allowed: true,
       accountScope: scopeAccount.accountScope,
-      filters: metadataScope.filters,
+      ...(filters ? { filters } : {}),
       contentAllowed: contentScope.allowed,
-      ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
+      ...(contentFilters ? { contentFilters } : {}),
     };
   };
   const connectorStoreStatusScope = (store: LocalConnectorStore):
@@ -5077,6 +5089,7 @@ export async function main(): Promise<void> {
                   : fileSourceScopeAllowsMetadata(approval, [notebook.id]) ? 'metadata_only' : 'exclude';
               },
               assertNotebookChoiceCurrent: () => { authority.assertCurrent(scopeRef); },
+              scope: { accountGeneration: scopeRef.accountGeneration, scopeRevision: scopeRef.revision },
             });
             return scopeBoundSchedulerSource({ source, authority, ref: scopeRef });
           },

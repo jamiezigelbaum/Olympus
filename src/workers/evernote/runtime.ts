@@ -81,6 +81,8 @@ export interface EvernoteRuntime {
     notebookGate: () => EvernoteNotebookGate;
     /** Throws once that approval is no longer the saved one: a running pass stops before its next read or write. */
     assertNotebookChoiceCurrent: () => void;
+    /** That approval, recorded on every item a pass stores so reads can be held to it. */
+    scope: { accountGeneration: string; scopeRevision: string };
   }): SourceSchedulerSource;
   /** The account's notebooks for the picker (no note is read). */
   notebooks(handle: ConnectedCredentialHandle): Promise<EvernoteNotebook[]>;
@@ -164,8 +166,10 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
     existingLane,
     liveSync,
     notebooks: (handle) => liveSync(handle).notebooks(),
-    schedulerSource({ config, handle, notebookGate, assertNotebookChoiceCurrent }) {
+    schedulerSource({ config, handle, notebookGate, assertNotebookChoiceCurrent, scope }) {
       const sync = liveSync(handle);
+      // Attachment reads are held to the same choice as the pass.
+      sync.bindNotebookChoice({ gate: notebookGate, assertCurrent: assertNotebookChoiceCurrent });
       const accountScope = handle.accountRole ?? 'personal';
       const opened = openLane();
       const intervalMs = config.worker.scheduler.syncIntervalSeconds * 1_000;
@@ -178,7 +182,7 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
         freshnessThresholdMs,
         run: async () => {
           try {
-            const receipt = await sync.pass({ notebookGate: notebookGate(), assertNotebookChoiceCurrent });
+            const receipt = await sync.pass({ notebookGate: notebookGate(), assertNotebookChoiceCurrent, scope });
             const stopped = sync.status()?.last_error;
             return {
               status: receipt.status,

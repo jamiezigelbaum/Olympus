@@ -69,6 +69,7 @@ import {
   EVERNOTE_SOURCE_ID,
   createEvernoteSourceConnector,
   evernotePassWithUnfinished,
+  evernoteRecordedNotebookId,
   evernoteUnfinishedWith,
   type EvernoteNotebookDisposition,
   type EvernoteNotebookGate,
@@ -308,7 +309,17 @@ export interface EvernoteLiveSync {
     notebookGate?: EvernoteNotebookGate;
     /** Throws once the notebook choice changed; the pass then stops before its next read or write. */
     assertNotebookChoiceCurrent?: () => void;
+    /**
+     * The approval the pass reads under. Each item it stores records it with the note's notebook id,
+     * which is what the approved scope filters reads of stored notes by.
+     */
+    scope?: { accountGeneration: string; scopeRevision: string };
   }): Promise<EvernotePassReceipt>;
+  /**
+   * The notebook choice attachment reads are held to: an attachment is read only while its note's
+   * notebook is chosen to be read, and the choice is current. Unbound: every notebook, rules aside.
+   */
+  bindNotebookChoice(choice: { gate: () => EvernoteNotebookGate; assertCurrent: () => void } | undefined): void;
   /** The account's notebooks, for the picker: ids, names and ownership, nothing from a note. */
   notebooks(): Promise<EvernoteNotebook[]>;
   /** The connector the extraction factory reads attachments with. */
@@ -336,6 +347,8 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
   let shouldContinue: () => boolean = () => true;
   let notebookChoice: EvernoteNotebookGate = () => 'ingest';
   let notebookChoiceCurrent: () => void = () => undefined;
+  let passScope: { accountGeneration: string; scopeRevision: string } | undefined;
+  let boundChoice: { gate: () => EvernoteNotebookGate; assertCurrent: () => void } | undefined;
   const session = (purpose: 'pass' | 'attachment' | 'notebooks'): McpSourceSession => new McpSourceSession({
     serverUrl,
     clientName: 'Olympus',
@@ -362,7 +375,22 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
     ...(options.downloadFetch ? { downloadFetch: options.downloadFetch } : {}),
     now,
   });
-  const attachments = connector();
+  const attachments = createEvernoteSourceConnector({
+    accountScope,
+    session,
+    attachmentAllowed: (noteId) => {
+      const file = readPassFile(passPath);
+      const held = evernotePassWithUnfinished(file.record, file.unfinished);
+      const notebookId = evernoteRecordedNotebookId(held?.notes[noteId]);
+      if (!notebookId) return false;
+      boundChoice?.assertCurrent();
+      const gate = evernoteNotebookGate(boundChoice?.gate() ?? (() => 'ingest'), evernoteExclusionMatcher(env));
+      return gate({ id: notebookId, label: held?.notebooks?.[notebookId] ?? '' }) === 'ingest';
+    },
+    ...(options.downloadHosts ? { downloadHosts: options.downloadHosts } : {}),
+    ...(options.downloadFetch ? { downloadFetch: options.downloadFetch } : {}),
+    now,
+  });
   let lastCompletedAt: string | undefined = readPassFile(passPath).status.last_completed_at;
   // One pass at a time: a manual sync beside the scheduled one waits for it.
   let running: Promise<EvernotePassReceipt> | undefined;
@@ -392,6 +420,12 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
       placement: EVERNOTE_STORE_PLACEMENT,
       fetchContent: true,
       deferMetadataOnlyContent: true,
+      ...(passScope ? {
+        sourceScopeObservation: (item: RawItem) => {
+          const notebookId = item.metadata['notebookId'];
+          return { ...passScope!, folderKeys: typeof notebookId === 'string' && notebookId !== '' ? [notebookId] : [] };
+        },
+      } : {}),
     };
     let run: TieredStoreSetRun;
     try {
@@ -445,6 +479,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
         shouldContinue = request.shouldContinue ?? (() => true);
         notebookChoice = request.notebookGate ?? (() => 'ingest');
         notebookChoiceCurrent = request.assertNotebookChoiceCurrent ?? (() => undefined);
+        passScope = request.scope;
         try {
           return await runPass();
         } finally {
@@ -452,6 +487,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
           shouldContinue = () => true;
           notebookChoice = () => 'ingest';
           notebookChoiceCurrent = () => undefined;
+          passScope = undefined;
         }
       })();
       return running;
@@ -466,6 +502,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
       }
     },
     attachmentConnector: () => attachments,
+    bindNotebookChoice: (choice) => { boundChoice = choice; },
     status: () => (existsSync(passPath) ? readPassFile(passPath).status : undefined),
     lastStoreRunCompletedAt: () => lastCompletedAt,
   };

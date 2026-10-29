@@ -91,6 +91,14 @@ export interface EvernotePassRecord {
   completedAt: string;
   /** Note id → its version; a shared note's starts with `shared|`. `children`: its attachments' keys. */
   notes: Record<string, { v: string; children?: string[] }>;
+  /** Notebook id → its name, as the pass listed them (an attachment read judges its note's notebook by both). */
+  notebooks?: Record<string, string>;
+}
+
+/** The notebook a recorded note was in (its version's second field), if it was one of the account's own. */
+export function evernoteRecordedNotebookId(entry: EvernotePassRecord['notes'][string] | undefined): string | undefined {
+  if (!entry || entry.v.startsWith('shared|')) return undefined;
+  return entry.v.split('|')[1] || undefined;
 }
 
 export interface EvernotePassCounts {
@@ -135,7 +143,7 @@ export function evernotePassWithUnfinished(
     // The notebook stays in the entry: an account change is judged by notebooks.
     notes[noteId] = { v: `unfinished|${entry.v.split('|')[1] ?? ''}`, ...(children.length > 0 ? { children } : {}) };
   }
-  return { version: 1, completedAt: record?.completedAt ?? '', notes };
+  return { version: 1, completedAt: record?.completedAt ?? '', notes, ...(record?.notebooks ? { notebooks: record.notebooks } : {}) };
 }
 
 /**
@@ -167,6 +175,11 @@ export interface EvernoteConnectorOptions {
    * read and each page goes out, so a pass never reads or stores under a choice the person replaced.
    */
   assertNotebookChoiceCurrent?: () => void;
+  /**
+   * Whether an attachment of this note may be read now: asked before its link is fetched and again
+   * before its bytes are handed on. Absent: every attachment.
+   */
+  attachmentAllowed?: (noteId: string) => boolean;
   /** Before each page goes out: every note this pass has read so far, kept until the pass is committed. */
   readSoFar?: (notes: EvernotePassRecord['notes']) => void;
   downloadHosts?: readonly string[];
@@ -504,7 +517,12 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
       counts.rate_limit_retries = session.rateLimitRetries;
       // Set before the last page: the spine stops reading at a done page.
       outcome = {
-        record: { version: 1, completedAt: now().toISOString(), notes: nextNotes },
+        record: {
+          version: 1,
+          completedAt: now().toISOString(),
+          notes: nextNotes,
+          notebooks: Object.fromEntries(notebooks.map((book) => [book.id, book.label])),
+        },
         counts,
         ...(stoppedBy ? { stoppedBy } : {}),
       };
@@ -524,6 +542,11 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
     const [parentId] = providerItemId.split(CHILD_ITEM_ID_SEPARATOR);
     if (!match || parentId !== match[1]) throw new FileExtractionSourceError('source_content_unavailable');
     const [, noteId, hash] = match;
+    // A notebook set to Skip or names only since the note was listed: its attachments are not read.
+    const allowed = (): void => {
+      if (options.attachmentAllowed && !options.attachmentAllowed(noteId!)) throw new FileExtractionSourceError('source_unavailable');
+    };
+    allowed();
     const session = options.session('attachment');
     let link: Record<string, unknown> | undefined;
     try {
@@ -579,6 +602,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
     }
     // Bytes that are not the attachment the note lists are refused, never read.
     if (createHash('md5').update(bytes).digest('hex') !== hash) throw new FileExtractionSourceError('source_content_unavailable');
+    allowed();
     const mimeType = fileMimeTypeFromBytes(bytes) ?? 'application/octet-stream';
     return {
       identity: identity(providerItemId, hash),

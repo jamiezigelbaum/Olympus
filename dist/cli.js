@@ -157844,6 +157844,11 @@ import { createHash as createHash86 } from "node:crypto";
 function evernoteDeletionCap(storedNotes) {
   return Math.max(EVERNOTE_DELETION_FLOOR, Math.ceil(storedNotes * EVERNOTE_DELETION_SHARE));
 }
+function evernoteRecordedNotebookId(entry) {
+  if (!entry || entry.v.startsWith("shared|"))
+    return;
+  return entry.v.split("|")[1] || undefined;
+}
 function evernotePassWithUnfinished(record6, unfinished) {
   if (!unfinished || Object.keys(unfinished).length === 0)
     return record6;
@@ -157852,7 +157857,7 @@ function evernotePassWithUnfinished(record6, unfinished) {
     const children = [...new Set([...notes[noteId]?.children ?? [], ...entry.children ?? []])];
     notes[noteId] = { v: `unfinished|${entry.v.split("|")[1] ?? ""}`, ...children.length > 0 ? { children } : {} };
   }
-  return { version: 1, completedAt: record6?.completedAt ?? "", notes };
+  return { version: 1, completedAt: record6?.completedAt ?? "", notes, ...record6?.notebooks ? { notebooks: record6.notebooks } : {} };
 }
 function evernoteUnfinishedWith(unfinished, notes) {
   const next = { ...unfinished };
@@ -158143,7 +158148,12 @@ function createEvernoteSourceConnector(options) {
       counts.tool_calls = session.calls;
       counts.rate_limit_retries = session.rateLimitRetries;
       outcome = {
-        record: { version: 1, completedAt: now().toISOString(), notes: nextNotes },
+        record: {
+          version: 1,
+          completedAt: now().toISOString(),
+          notes: nextNotes,
+          notebooks: Object.fromEntries(notebooks.map((book) => [book.id, book.label]))
+        },
         counts,
         ...stoppedBy ? { stoppedBy } : {}
       };
@@ -158163,6 +158173,11 @@ function createEvernoteSourceConnector(options) {
     if (!match || parentId !== match[1])
       throw new FileExtractionSourceError("source_content_unavailable");
     const [, noteId, hash] = match;
+    const allowed = () => {
+      if (options.attachmentAllowed && !options.attachmentAllowed(noteId))
+        throw new FileExtractionSourceError("source_unavailable");
+    };
+    allowed();
     const session = options.session("attachment");
     let link;
     try {
@@ -158224,6 +158239,7 @@ function createEvernoteSourceConnector(options) {
     }
     if (createHash86("md5").update(bytes).digest("hex") !== hash)
       throw new FileExtractionSourceError("source_content_unavailable");
+    allowed();
     const mimeType = fileMimeTypeFromBytes(bytes) ?? "application/octet-stream";
     return {
       identity: identity2(providerItemId, hash),
@@ -158435,6 +158451,8 @@ function createEvernoteLiveSync(options) {
   let notebookChoiceCurrent = () => {
     return;
   };
+  let passScope;
+  let boundChoice;
   const session = (purpose) => new McpSourceSession({
     serverUrl,
     clientName: "Olympus",
@@ -158456,7 +158474,23 @@ function createEvernoteLiveSync(options) {
     ...options.downloadFetch ? { downloadFetch: options.downloadFetch } : {},
     now
   });
-  const attachments = connector();
+  const attachments = createEvernoteSourceConnector({
+    accountScope,
+    session,
+    attachmentAllowed: (noteId) => {
+      const file = readPassFile(passPath);
+      const held = evernotePassWithUnfinished(file.record, file.unfinished);
+      const notebookId = evernoteRecordedNotebookId(held?.notes[noteId]);
+      if (!notebookId)
+        return false;
+      boundChoice?.assertCurrent();
+      const gate = evernoteNotebookGate(boundChoice?.gate() ?? (() => "ingest"), evernoteExclusionMatcher(env));
+      return gate({ id: notebookId, label: held?.notebooks?.[notebookId] ?? "" }) === "ingest";
+    },
+    ...options.downloadHosts ? { downloadHosts: options.downloadHosts } : {},
+    ...options.downloadFetch ? { downloadFetch: options.downloadFetch } : {},
+    now
+  });
   let lastCompletedAt = readPassFile(passPath).status.last_completed_at;
   let running;
   const failed = (file, error2) => {
@@ -158478,7 +158512,13 @@ function createEvernoteLiveSync(options) {
     const sync = {
       placement: EVERNOTE_STORE_PLACEMENT,
       fetchContent: true,
-      deferMetadataOnlyContent: true
+      deferMetadataOnlyContent: true,
+      ...passScope ? {
+        sourceScopeObservation: (item) => {
+          const notebookId = item.metadata["notebookId"];
+          return { ...passScope, folderKeys: typeof notebookId === "string" && notebookId !== "" ? [notebookId] : [] };
+        }
+      } : {}
     };
     let run2;
     try {
@@ -158530,6 +158570,7 @@ function createEvernoteLiveSync(options) {
         notebookChoiceCurrent = request.assertNotebookChoiceCurrent ?? (() => {
           return;
         });
+        passScope = request.scope;
         try {
           return await runPass();
         } finally {
@@ -158539,6 +158580,7 @@ function createEvernoteLiveSync(options) {
           notebookChoiceCurrent = () => {
             return;
           };
+          passScope = undefined;
         }
       })();
       return running;
@@ -158553,6 +158595,9 @@ function createEvernoteLiveSync(options) {
       }
     },
     attachmentConnector: () => attachments,
+    bindNotebookChoice: (choice) => {
+      boundChoice = choice;
+    },
     status: () => existsSync85(passPath) ? readPassFile(passPath).status : undefined,
     lastStoreRunCompletedAt: () => lastCompletedAt
   };
@@ -180114,8 +180159,9 @@ function createEvernoteRuntime(options) {
     existingLane,
     liveSync,
     notebooks: (handle) => liveSync(handle).notebooks(),
-    schedulerSource({ config: config2, handle, notebookGate, assertNotebookChoiceCurrent }) {
+    schedulerSource({ config: config2, handle, notebookGate, assertNotebookChoiceCurrent, scope }) {
       const sync = liveSync(handle);
+      sync.bindNotebookChoice({ gate: notebookGate, assertCurrent: assertNotebookChoiceCurrent });
       const accountScope = handle.accountRole ?? "personal";
       const opened = openLane();
       const intervalMs = config2.worker.scheduler.syncIntervalSeconds * 1000;
@@ -180128,7 +180174,7 @@ function createEvernoteRuntime(options) {
         freshnessThresholdMs,
         run: async () => {
           try {
-            const receipt = await sync.pass({ notebookGate: notebookGate(), assertNotebookChoiceCurrent });
+            const receipt = await sync.pass({ notebookGate: notebookGate(), assertNotebookChoiceCurrent, scope });
             const stopped = sync.status()?.last_error;
             return {
               status: receipt.status,
@@ -205449,7 +205495,7 @@ ${key2}`;
     }
   }
   const connectorStoreReadScope = (store) => {
-    const sourceId = isDropboxTierStore(store) ? "dropbox.files" : isLocalFilesTierStore(store) ? LOCAL_FILES_SOURCE_ID : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore || store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current() ? "google_drive.docs" : undefined;
+    const sourceId = isDropboxTierStore(store) ? "dropbox.files" : isLocalFilesTierStore(store) ? LOCAL_FILES_SOURCE_ID : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore || store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current() ? "google_drive.docs" : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId) ? EVERNOTE_SOURCE_ID : undefined;
     if (!sourceId)
       return { allowed: true, contentAllowed: true };
     const approval = fileSourceScopeAuthority?.snapshot(sourceId);
@@ -205462,12 +205508,20 @@ ${key2}`;
     const scopeAccount = fileScopeAccount(sourceId);
     if (!scopeAccount)
       return { allowed: false };
+    const scoped = (filters2) => {
+      if (!filters2 || sourceId !== EVERNOTE_SOURCE_ID)
+        return filters2;
+      const { sourceScopeGeneration: _generation, sourceScopeRevision: _revision, ...byNotebook } = filters2;
+      return byNotebook;
+    };
+    const contentFilters = contentScope.allowed ? scoped(contentScope.filters) : undefined;
+    const filters = scoped(metadataScope.filters);
     return {
       allowed: true,
       accountScope: scopeAccount.accountScope,
-      filters: metadataScope.filters,
+      ...filters ? { filters } : {},
       contentAllowed: contentScope.allowed,
-      ...contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}
+      ...contentFilters ? { contentFilters } : {}
     };
   };
   const connectorStoreStatusScope = (store) => {
@@ -206308,7 +206362,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             },
             assertNotebookChoiceCurrent: () => {
               authority.assertCurrent(scopeRef);
-            }
+            },
+            scope: { accountGeneration: scopeRef.accountGeneration, scopeRevision: scopeRef.revision }
           });
           return scopeBoundSchedulerSource({ source, authority, ref: scopeRef });
         });
