@@ -26845,6 +26845,8 @@ var init_sniffer = __esm(() => {
     "because it names the owner or concerns money or identity. Read what it actually contains.",
     "privateKind is the kind of private information this item actually contains UNDER THE OWNER POLICY,",
     "or none when it is not covered or the owner says it is fine to share. Topic alone is insufficient.",
+    "An owner clause naming a kind of record covers every record of that kind, however small, routine or work-related:",
+    "such a record has that privateKind, never none.",
     "An ownRecord with a non-none privateKind is Private. Private conversations can be Private",
     "without being records. Work/reference topic never lowers an otherwise Private verdict.",
     "Use names as context, not proof of the contents. If materially uncertain, answer Private.",
