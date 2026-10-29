@@ -99,8 +99,6 @@ export interface LocalAnswerRequest {
   signal?: AbortSignal;
   /** Owner inbox generation; checked at a remote dispatch, never accepted from the wire. */
   stillAuthorized?: () => boolean;
-  /** Marks the start of synthesis so pre-model failures do not spend the inbox budget. */
-  onModelCall?: () => void;
 }
 
 export interface LocalAnswerOptions {
@@ -202,7 +200,6 @@ export async function answerOnThisComputer(
       evidence: (stats) => {
         used = stats.used;
       },
-      ...(input.onModelCall ? { modelStarting: input.onModelCall } : {}),
     }, { detail: input.detail === 'full' ? 'full' : 'summary' });
   } catch (error) {
     if (!(error instanceof NoPrivateEvidenceError)) return { status: 'failed' };

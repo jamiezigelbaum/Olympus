@@ -48772,9 +48772,6 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         return true;
       }).immediate();
     },
-    refundAutoAnswer(ref, reservedAt) {
-      db.query("UPDATE auto_answer_budgets SET attempts = MAX(0, attempts - 1) WHERE connection_id = ? AND started_at <= ?").run(ref.connectionId, reservedAt);
-    },
     saveAnswer(ref, result, sent) {
       const serialized = JSON.stringify(result);
       if (utf8Length(serialized) + utf8Length(sent ?? "") > WAITING_QUESTION_LIMITS.answerBytes)
@@ -138709,8 +138706,7 @@ async function answerOnThisComputer(input, options) {
     result = await options.model.answerPrivately(question, candidates, input.signal, {
       evidence: (stats) => {
         used = stats.used;
-      },
-      ...input.onModelCall ? { modelStarting: input.onModelCall } : {}
+      }
     }, { detail: input.detail === "full" ? "full" : "summary" });
   } catch (error2) {
     if (!(error2 instanceof NoPrivateEvidenceError))
@@ -138940,7 +138936,6 @@ function createLocalPrivateAnswers(options) {
   let timer;
   let unsubscribe;
   const abort = new AbortController;
-  const refusedAt = new Map;
   let autoAnswering = false;
   const store = () => {
     try {
@@ -139048,22 +139043,10 @@ function createLocalPrivateAnswers(options) {
             break;
           if (!autoAnswerable(q))
             continue;
-          let modelCalled = false;
-          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q))) {
-            refusedAt.set(q.id, now());
-            continue;
-          }
-          refusedAt.delete(q.id);
-          const reservedAt = now();
           autoAnswering = true;
-          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal, onModelCall: () => {
-            modelCalled = true;
-          } }, true).finally(() => {
+          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true).finally(() => {
             autoAnswering = false;
           });
-          if (result.status === "no_model" || result.status === "model_downloading" || result.status === "failed" && !modelCalled) {
-            currentStore.refundAutoAnswer?.(refOf(q), reservedAt);
-          }
           if (!current2(q))
             continue;
           if (result.status === "answered" && await eligible(result.read) === "eligible" || result.status === "not_found") {
@@ -139089,7 +139072,7 @@ function createLocalPrivateAnswers(options) {
         return true;
       try {
         const questions = store()?.list({ includeResults: false }).questions ?? [];
-        return questions.some((q) => autoAnswerable(q) && now() - Date.parse(q.askedAt) >= AUTO_ANSWER_DEFER_MS && !(now() - (refusedAt.get(q.id) ?? -Infinity) < REFUSED_HOLD_MS));
+        return questions.some((q) => autoAnswerable(q) && now() - Date.parse(q.askedAt) >= AUTO_ANSWER_DEFER_MS);
       } catch {
         return false;
       }
@@ -139333,7 +139316,7 @@ async function askWithAnonymousInbox(input, options) {
     return { ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousFailed };
   }
 }
-var LOCAL_AGENT_INBOX_ID = "@local:agents", LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, AUTO_ANSWER_DEFER_MS = 60000, REFUSED_HOLD_MS, MAX_TOKENS = 400, MAX_QUESTION_CHARS = 2000, TOKEN_PATTERN3;
+var LOCAL_AGENT_INBOX_ID = "@local:agents", LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, AUTO_ANSWER_DEFER_MS = 60000, MAX_TOKENS = 400, MAX_QUESTION_CHARS = 2000, TOKEN_PATTERN3;
 var init_local_private_answers = __esm(() => {
   init_vocabulary();
   init_tier_ledger();
@@ -139343,7 +139326,6 @@ var init_local_private_answers = __esm(() => {
   init_private_answer_model();
   init_local_answer();
   TOKEN_TTL_MS = 30 * 60000;
-  REFUSED_HOLD_MS = 10 * 60000;
   TOKEN_PATTERN3 = /^[A-Za-z0-9_-]{32,64}$/;
 });
 

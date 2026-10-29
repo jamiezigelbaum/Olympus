@@ -51,8 +51,6 @@ const TOKEN_TTL_MS = 30 * 60_000;
  * backlog outlasts any reasonable wait (release check 2026-10-29: queued past 10 min).
  */
 export const AUTO_ANSWER_DEFER_MS = 60_000;
-/** A question the hourly allowance refused never holds classification off for this long. */
-const REFUSED_HOLD_MS = 10 * 60_000;
 const MAX_TOKENS = 400;
 const MAX_QUESTION_CHARS = 2_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,64}$/;
@@ -241,8 +239,6 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   let timer: ReturnType<typeof setInterval> | undefined;
   let unsubscribe: (() => void) | undefined;
   const abort = new AbortController();
-  // Questions the hourly allowance refused, by id: they wait without holding classification off.
-  const refusedAt = new Map<string, number>();
   // An automatic answer in progress: classification keeps yielding between its model calls.
   let autoAnswering = false;
   const store = () => { try { return options.store(); } catch { return undefined; } };
@@ -320,19 +316,10 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
           if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.()) break;
           if (!autoAnswerable(q)) continue;
-          let modelCalled = false;
-          if (currentStore.reserveAutoAnswer && !currentStore.reserveAutoAnswer(refOf(q))) {
-            refusedAt.set(q.id, now());
-            continue;
-          }
-          refusedAt.delete(q.id);
-          const reservedAt = now();
+          // No allowance per connection (Jamie, 2026-10-29): every question an agent asks is answered.
           autoAnswering = true;
-          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal, onModelCall: () => { modelCalled = true; } }, true)
+          const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true)
             .finally(() => { autoAnswering = false; });
-          if (result.status === 'no_model' || result.status === 'model_downloading' || (result.status === 'failed' && !modelCalled)) {
-            currentStore.refundAutoAnswer?.(refOf(q), reservedAt);
-          }
           if (!current(q)) continue;
           if ((result.status === 'answered' && await eligible(result.read) === 'eligible') || result.status === 'not_found') {
             if (!current(q)) continue;
@@ -351,8 +338,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
       try {
         const questions = store()?.list({ includeResults: false }).questions ?? [];
         return questions.some(q => autoAnswerable(q)
-          && now() - Date.parse(q.askedAt) >= AUTO_ANSWER_DEFER_MS
-          && !(now() - (refusedAt.get(q.id) ?? -Infinity) < REFUSED_HOLD_MS));
+          && now() - Date.parse(q.askedAt) >= AUTO_ANSWER_DEFER_MS);
       } catch { return false; }
     },
     close() {

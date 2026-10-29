@@ -1757,23 +1757,6 @@ describe('anonymous answers in the local inbox', () => {
     }
     expect(local.waiting()!.questions.filter(q => q.path === 'private')).toHaveLength(6);
     expect(local.waiting()!.questions.some(q => q.question === cjk)).toBe(true);
-    const ref = f.store.record(f.store.ticket('@local:You'), { question: 'Auto?', state: 'waiting', surface: 'remote' })!;
-    expect(f.store.reserveAutoAnswer(ref)).toBe(true);
-  });
-  test('anonymous agent rate limits and Private automatic budgets are independent in both directions', async () => {
-    const f = await fixture();
-    for (let i = 0; i < 5; i++) {
-      const ref = f.store.record(f.store.ticket('grok'), { question: `Private ${i}`, surface: 'remote', state: 'waiting' })!;
-      expect(f.store.reserveAutoAnswer(ref)).toBe(true);
-    }
-    for (let i = 0; i < 5; i++) expect((await f.ask()).ok).toBe(true);
-    expect((await f.ask()).ok).toBe(false);
-    const g = await fixture();
-    for (let i = 0; i < 5; i++) expect((await g.ask()).ok).toBe(true);
-    for (let i = 0; i < 5; i++) {
-      const ref = g.store.record(g.store.ticket('grok'), { question: `Private ${i}`, surface: 'remote', state: 'waiting' })!;
-      expect(g.store.reserveAutoAnswer(ref)).toBe(true);
-    }
   });
   test('the inbox rate limit refuses a sixth send without calling outside help', async () => {
     const f = await fixture();
@@ -1826,7 +1809,7 @@ test('a brief copiesForMany failure hides a stored answer, then shows it again',
   expect(c.store.get(c.ref.id)?.result).toBeDefined();
 });
 
-for (const unavailable of ['no_model', 'model_downloading', 'failed', 'throw'] as const) test(`pre-model ${unavailable} does not spend the hourly auto-answer budget`, async () => {
+for (const unavailable of ['no_model', 'model_downloading', 'failed', 'throw'] as const) test(`pre-model ${unavailable} is retried until the model is ready`, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rv-'));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   let clock = Date.parse('2026-10-14T12:00:00Z');
@@ -1847,23 +1830,17 @@ for (const unavailable of ['no_model', 'model_downloading', 'failed', 'throw'] a
   const done = store.get(ref.id)!;
   expect(done.result?.status).toBe('answered');
   expect(Date.parse(done.answeredAt!) - start).toBeLessThan(5 * 60_000);
-  // Only the successful answer spent the five-attempt allowance.
-  for (let i = 0; i < 4; i++) expect(store.reserveAutoAnswer(store.record(store.ticket('c'), { question: `next ${i}`, surface: 'remote', state: 'waiting' })!)).toBe(true);
-  expect(store.reserveAutoAnswer(store.record(store.ticket('c'), { question: 'over budget', surface: 'remote', state: 'waiting' })!)).toBe(false);
 });
 
-test('a failure after a model call still spends the hourly budget', async () => {
+test('a failure after a model call is retried later', async () => {
   const store = waitingStore();
   const ref = store.record(store.ticket('c'), { question: 'dentist?', surface: 'remote', state: 'waiting' })!;
-  const controller = createLocalPrivateAnswers({ store: () => store, answer: async input => {
-    input.onModelCall?.();
+  const controller = createLocalPrivateAnswers({ store: () => store, answer: async () => {
     throw new Error('synthesis failed');
   } });
   cleanups.push(() => controller.close());
   await controller.tick();
   expect(store.get(ref.id)?.attempts).toBe(1);
-  for (let i = 0; i < 4; i++) expect(store.reserveAutoAnswer(ref)).toBe(true);
-  expect(store.reserveAutoAnswer(ref)).toBe(false);
 });
 
 for (const path of ['private', 'venice', 'anonymous'] as const) {

@@ -457,28 +457,14 @@ test('re-asking an answered row refreshes only its timestamp and preserves its o
   expect((await api.handle({ action: 'open', token }, 'owner')).status).toBe(200);
 });
 
-test('per-connection automatic budget survives reopen and re-asks; queued rows resume next hour', async () => {
+test('one connection\'s questions are all answered: automatic answers have no hourly allowance', async () => {
   const f = fixture();
   let calls = 0;
   const api = service(f, { answer: async () => { calls++; return result(); } });
-  for (let i = 0; i < WAITING_QUESTION_LIMITS.autoAnswersPerWindow; i++) {
-    record(f.store, { question: `Budget ${i}` });
-    await api.tick();
-  }
-  const queued = record(f.store, { question: 'Queued question' });
-  await api.tick();
-  expect(calls).toBe(5);
-  expect(api.waiting()?.questions.find(q => q.id === queued.id)?.state).toBe('queued');
-  expect((await api.handle({ action: 'read', id: queued.id }, 'owner')).body.status).toBe('queued');
-  const second = openWaitingPrivateQuestionStore(f.dbPath, { now: f.now });
-  cleanups.push(() => second.close());
-  expect(second.reserveAutoAnswer(record(second, { question: 'Queued question' }))).toBe(false);
-  const other = record(f.store, { question: 'Other connection' }, 'another-agent');
-  await api.tick();
-  expect(f.store.get(other.id)?.result).toBeDefined();
-  f.advance(WAITING_QUESTION_LIMITS.autoAnswerWindowMs);
-  await api.tick();
-  expect(f.store.get(queued.id)?.result).toBeDefined();
+  const refs = Array.from({ length: 12 }, (_, i) => record(f.store, { question: `Question ${i}` }));
+  for (let i = 0; i < refs.length; i++) await api.tick();
+  expect(calls).toBe(12);
+  for (const ref of refs) expect(f.store.get(ref.id)?.result).toBeDefined();
 });
 
 test('metadata listing succeeds under a writer lock and never parses answer bodies', () => {
@@ -556,15 +542,5 @@ test('a question queued behind classification for a minute makes classification 
   gate.resolve(result());
   await pass;
   expect(f.store.get(ref.id)?.result).toBeDefined();
-  expect(api.overdue()).toBe(false);
-});
-
-test('a question its hourly allowance refused never holds classification off', async () => {
-  const f = fixture(); record(f.store);
-  const api = service(f, { answer: async () => result() });
-  const store = f.store as unknown as { reserveAutoAnswer: () => boolean };
-  store.reserveAutoAnswer = () => false;
-  f.advance(AUTO_ANSWER_DEFER_MS);
-  await api.tick();
   expect(api.overdue()).toBe(false);
 });

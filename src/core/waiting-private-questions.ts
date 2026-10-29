@@ -47,6 +47,7 @@ export const WAITING_QUESTION_LIMITS = Object.freeze({
   totalBytes: 256 * 1024,
   answeredPerConnection: 50,
   answeredBytesPerConnection: 1024 * 1024,
+  /** Anonymous outside help only: each send spends the owner's zkAPI deposit. Private answers have no allowance. */
   autoAnswersPerWindow: 5,
   autoAnswerWindowMs: 60 * 60_000,
   answeredTotal: 500,
@@ -195,8 +196,7 @@ export interface WaitingQuestionStore {
   /** Generation fences every completion, retry and invalidation against delete/revoke/re-ask. */
   subscribe(listener: () => void): () => void;
   markRead(ref: WaitingQuestionRef): boolean;
-  reserveAutoAnswer(ref: WaitingQuestionRef, lane?: 'anonymous'): boolean;
-  refundAutoAnswer(ref: WaitingQuestionRef, reservedAt: number): void;
+  reserveAutoAnswer(ref: WaitingQuestionRef, lane: 'anonymous'): boolean;
   saveAnswer(ref: WaitingQuestionRef, result: StoredPrivateAnswer, sent?: string): boolean;
   retry(ref: WaitingQuestionRef): boolean;
   invalidate(ref: WaitingQuestionRef): boolean;
@@ -585,12 +585,6 @@ export function openWaitingPrivateQuestionStore(
           .run(budgetKey, fresh ? at : budget.started_at, fresh ? 1 : budget.attempts + 1);
         return true;
       }).immediate();
-    },
-
-    refundAutoAnswer(ref, reservedAt) {
-      // Never refund a newer window if an old model attempt finishes late.
-      db.query('UPDATE auto_answer_budgets SET attempts = MAX(0, attempts - 1) WHERE connection_id = ? AND started_at <= ?')
-        .run(ref.connectionId, reservedAt);
     },
 
     saveAnswer(ref, result, sent) {
