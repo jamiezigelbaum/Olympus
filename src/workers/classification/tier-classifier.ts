@@ -245,6 +245,22 @@ export function contentDigestReason(text: string): string {
 }
 
 /**
+ * Recorded beside the content digest: a digest of the names a content verdict
+ * was made with (title, path, sender) and the parent's context. A listing
+ * reuses a recorded verdict only while both are unchanged, so a renamed or
+ * moved item (into a records folder, under a new title) is judged again.
+ * Labels and folder keys are left out: a re-judge reads names back from the
+ * stored copy, which keeps only these, and must record the same digest.
+ */
+export function contentNamesReason(
+  names: { readonly title?: string | undefined; readonly path?: string | undefined; readonly sender?: string | undefined },
+  parentContext?: string,
+): string {
+  const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? '');
+  return `content:names:${createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 16)}`;
+}
+
+/**
  * What the sniffer reads in pass 2: the item's names (title, folder path,
  * sender), when known, then the excerpt. The names are a signal of their own
  * (a records folder, a dated test title) that the text alone may not carry.
@@ -499,7 +515,9 @@ export function classifyItemTiers(
   options: TierClassificationOptions = {},
 ): TierDecision {
   const decision = classifyItemTiersWithPublic(input, options);
-  if (input.text !== undefined && decision.contentTier !== 'secrets') decision.reasons.push(contentDigestReason(input.text));
+  if (input.text !== undefined && decision.contentTier !== 'secrets') {
+    decision.reasons.push(contentDigestReason(input.text), contentNamesReason(input.signals, input.parentContext));
+  }
   return options.retirePublic ? withPublicRetired(decision) : decision;
 }
 
@@ -663,7 +681,7 @@ export function classifyContentTier(
       contentTier: tier,
       decidedBy: 'override',
       reasons: [`override:item:${options.override.tier}`, ...(tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : []),
-        ...heldMark(holdUntilJudged, tier), contentDigestReason(input.text)],
+        ...heldMark(holdUntilJudged, tier), contentDigestReason(input.text), contentNamesReason(input, input.parentContext)],
       contentPending: false,
     };
   }
@@ -710,7 +728,7 @@ export function classifyContentTier(
     contentTier: lifted ? 'private' : content.tier,
     decidedBy: content.decidedBy,
     reasons: [...content.reasons, ...(lifted ? [PUBLIC_RETIRED_REASON] : []),
-      ...(content.tier !== 'secrets' ? [contentDigestReason(input.text)] : [])],
+      ...(content.tier !== 'secrets' ? [contentDigestReason(input.text), contentNamesReason(input, input.parentContext)] : [])],
     contentPending: content.pending || text === undefined,
   };
 }

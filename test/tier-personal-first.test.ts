@@ -188,9 +188,9 @@ test('an unchanged item keeps its model verdict on every later listing, whicheve
   const queue = new TierSnifferStore({ dbPath: ':memory:' });
   cleanups.push(() => queue.close());
   const f = lane(new CachedTierSniffer(queue, BUILT_IN_SNIFFER_LANE));
-  // The listing names the item's author too; the stored copy the re-judge reads its names back from does not.
+  // The listing names the item's labels too; the stored copy the re-judge reads its names back from does not keep them.
   const base = fixtureConnector(() => [{ id: 'record', name: 'Cardiology notes', text: 'Resting heart rate 52 bpm. Prescribed lisinopril 5 mg daily.' }]);
-  const listing = { ...base, classificationSignals: (item: Parameters<typeof base.classificationSignals>[0]) => ({ ...base.classificationSignals(item), sender: 'Dr Brindle' }) };
+  const listing = { ...base, classificationSignals: (item: Parameters<typeof base.classificationSignals>[0]) => ({ ...base.classificationSignals(item), labels: ['rc-private'] }) };
   const sync = () => f.set.sync(listing, { fetchContent: true, placement: FIXTURE_PLACEMENT });
   let calls = 0;
   const model = { async complete() {
@@ -217,4 +217,33 @@ test('an unchanged item keeps its model verdict on every later listing, whicheve
   expect(f.ledger.getCurrent(identityOf('record'))!.generation).toBe(judged.generation);
   expect(queue.counts().questions).toBe(0);
   expect(calls).toBe(1);
+});
+
+test('a judged item that is renamed or moved is judged again, even with the same text', async () => {
+  const queue = new TierSnifferStore({ dbPath: ':memory:' });
+  cleanups.push(() => queue.close());
+  const f = lane(new CachedTierSniffer(queue, BUILT_IN_SNIFFER_LANE));
+  let name = 'Visit notes';
+  const connector = fixtureConnector(() => [{ id: 'note', name, text: 'Saw the doctor on Tuesday; everything looked fine.' }]);
+  const sync = () => f.set.sync(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  let calls = 0;
+  const model = { async complete() {
+    calls += 1;
+    return { modelId: BUILT_IN_SNIFFER_LANE.modelId, text: JSON.stringify({ verdicts: [{ i: 1, tier: 'personal', category: 'ordinary', ownRecord: false, privateKind: 'none', confidence: 0.99 }] }) };
+  } };
+  const pass = () => runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: queue, placementFor: (d) => f.set.placementFor(d) }], lane: BUILT_IN_SNIFFER_LANE, model });
+  await sync();
+  await pass();
+  expect(f.ledger.getCurrent(identityOf('note'))).toMatchObject({ state: 'current', contentPending: false });
+  expect(f.ledger.getCurrent(identityOf('note'))!.reasons.some((reason) => reason.endsWith(':ordinary:0.99'))).toBe(true);
+  // Unchanged: the recorded verdict stands, nothing is asked.
+  await sync();
+  expect(f.ledger.getCurrent(identityOf('note'))).toMatchObject({ state: 'current', contentPending: false });
+  expect(queue.counts().questions).toBe(0);
+  // Same text under a new name and folder: the model is asked about it again.
+  name = 'Medical records 2026';
+  await sync();
+  expect(queue.counts().questions).toBe(1);
+  await pass();
+  expect(calls).toBe(2);
 });

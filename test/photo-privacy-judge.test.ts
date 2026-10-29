@@ -259,10 +259,10 @@ describe('the tier a judged photo gets', () => {
 
   test('unjudged stays Private; sensitive is Private with its category; ordinary is Personal', () => {
     const unjudged = classifyContentTier({ ...base, text: 'Photo' });
-    expect(unjudged).toMatchObject({ contentTier: 'secure', reasons: [IMAGE_PRIVATE_DEFAULT_REASON, `content:sha256:${createHash('sha256').update('Photo').digest('hex')}`] });
+    expect(unjudged).toMatchObject({ contentTier: 'secure', reasons: [IMAGE_PRIVATE_DEFAULT_REASON, `content:sha256:${createHash('sha256').update('Photo').digest('hex')}`, expect.stringMatching(/^content:names:[a-f0-9]{16}$/)] });
     expect(classifyContentTier({ ...base, text: 'Photo', imageJudgment: { verdict: 'unjudged' } }).contentTier).toBe('secure');
     const sensitive = classifyContentTier({ ...base, text: 'Photo', imageJudgment: { verdict: 'sensitive', category: 'id_document' } });
-    expect(sensitive).toMatchObject({ contentTier: 'secure', reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}id_document`, `content:sha256:${createHash('sha256').update('Photo').digest('hex')}`] });
+    expect(sensitive).toMatchObject({ contentTier: 'secure', reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}id_document`, `content:sha256:${createHash('sha256').update('Photo').digest('hex')}`, expect.stringMatching(/^content:names:[a-f0-9]{16}$/)] });
     const ordinary = classifyContentTier({ ...base, text: 'Photo', imageJudgment: { verdict: 'ordinary' } });
     expect(ordinary.contentTier).toBe('private');
     expect(ordinary.reasons).toContain(IMAGE_ORDINARY_REASON);

@@ -583,7 +583,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     // Read, no detector fired, Personal at once (no private model yet).
     expect(before.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({
       state: 'current', contentTier: 'private', decidedBy: 'default',
-      reasons: ['metadata:default:personal', 'content:no_raise', expect.stringMatching(/^content:sha256:[a-f0-9]{64}$/)],
+      reasons: ['metadata:default:personal', 'content:no_raise', expect.stringMatching(/^content:sha256:[a-f0-9]{64}$/), expect.stringMatching(/^content:names:[a-f0-9]{16}$/)],
     });
     expect(JSON.stringify((await olympusSearch(before, 'orchard')).result)).toContain('pruning plan');
 

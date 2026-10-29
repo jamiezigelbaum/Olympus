@@ -13478,6 +13478,10 @@ function heldUntilJudged(reasons) {
 function contentDigestReason(text2) {
   return `content:sha256:${createHash9("sha256").update(text2.trim()).digest("hex")}`;
 }
+function contentNamesReason(names, parentContext) {
+  const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
+  return `content:names:${createHash9("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
+}
 function snifferContentMaterial(names, excerpt, parentContext) {
   const trimmed = names.trim();
   const context = parentContextLine(parentContext);
@@ -13534,8 +13538,9 @@ function withPublicRetired(decision) {
 }
 function classifyItemTiers(input, options = {}) {
   const decision = classifyItemTiersWithPublic(input, options);
-  if (input.text !== undefined && decision.contentTier !== "secrets")
-    decision.reasons.push(contentDigestReason(input.text));
+  if (input.text !== undefined && decision.contentTier !== "secrets") {
+    decision.reasons.push(contentDigestReason(input.text), contentNamesReason(input.signals, input.parentContext));
+  }
   return options.retirePublic ? withPublicRetired(decision) : decision;
 }
 function classifyItemTiersWithPublic(input, options) {
@@ -13632,7 +13637,8 @@ function classifyContentTier(input, options = {}) {
         `override:item:${options.override.tier}`,
         ...tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [],
         ...heldMark(holdUntilJudged, tier),
-        contentDigestReason(input.text)
+        contentDigestReason(input.text),
+        contentNamesReason(input, input.parentContext)
       ],
       contentPending: false
     };
@@ -13682,7 +13688,7 @@ function classifyContentTier(input, options = {}) {
     reasons: [
       ...content.reasons,
       ...lifted ? [PUBLIC_RETIRED_REASON] : [],
-      ...content.tier !== "secrets" ? [contentDigestReason(input.text)] : []
+      ...content.tier !== "secrets" ? [contentDigestReason(input.text), contentNamesReason(input, input.parentContext)] : []
     ],
     contentPending: content.pending || text2 === undefined
   };
@@ -19285,11 +19291,12 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
   const recorded = ledger?.getCurrent(item.identity);
   const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
-  const sniffer = fenced && recordedContentVerdictSniffer(fenced, recorded, text2);
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
+  const signals = connector.classificationSignals(item);
   const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
+  const sniffer = fenced && recordedContentVerdictSniffer(fenced, recorded, text2, contentNamesReason(signals, parentContext));
+  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
-    signals: connector.classificationSignals(item),
+    signals,
     locators: ["locatorUri", "url", "pathDisplay"].map((key2) => item.metadata[key2]).filter((value) => typeof value === "string"),
     provider: item.identity.provider,
     ...text2 !== undefined ? { text: text2 } : {},
@@ -19305,10 +19312,10 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
 }
-function recordedContentVerdictSniffer(sniffer, recorded, text2) {
+function recordedContentVerdictSniffer(sniffer, recorded, text2, names) {
   if (!recorded || !text2?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
     return sniffer;
-  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text2)))
+  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text2)) || !recorded.reasons.includes(names))
     return sniffer;
   const tier = recorded.contentTier;
   const prefix = `content:sniffer:${sniffer.id}:`;

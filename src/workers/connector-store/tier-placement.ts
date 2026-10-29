@@ -25,6 +25,7 @@ import {
   TIER_CLASSIFIER_VERSION,
   classifyItemTiers,
   contentDigestReason,
+  contentNamesReason,
   heldUntilJudged,
   type OwnerTierRule,
   type TierDecision,
@@ -203,7 +204,11 @@ export function decideItemTiers(
   const fenced = options?.sniffer && ledger && read
     ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh })
     : options?.sniffer;
-  const sniffer = fenced && recordedContentVerdictSniffer(fenced, recorded, text);
+  const signals = connector.classificationSignals(item);
+  const parentContext = item.identity.parent
+    ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId)
+    : undefined;
+  const sniffer = fenced && recordedContentVerdictSniffer(fenced, recorded, text, contentNamesReason(signals, parentContext));
   // The lane's hold, the item's own (an item built from an archive record
   // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
   // (a store whose recording did not bring the lane's option still holds the
@@ -211,12 +216,9 @@ export function decideItemTiers(
   const holdUntilJudged = options?.holdContentUntilJudged === true
     || item.holdContentUntilJudged === true
     || heldUntilJudged(recorded?.reasons);
-  const parentContext = item.identity.parent
-    ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId)
-    : undefined;
   return classifyItemTiers(
     {
-      signals: connector.classificationSignals(item),
+      signals,
       locators: ['locatorUri', 'url', 'pathDisplay'].map(key => item.metadata[key])
         .filter((value): value is string => typeof value === 'string'),
       provider: item.identity.provider,
@@ -238,7 +240,7 @@ export function decideItemTiers(
 
 /**
  * The sniffer for a listing of an item whose content question was already
- * answered for exactly these bytes, under this sniffer, classifier and map:
+ * answered for exactly these bytes and names, under this sniffer, classifier and map:
  * the recorded verdict answers again, and the item keeps it. The verdict
  * cache alone can miss it, since a re-judge asks with the names the stored
  * copy kept, which need not match the listing's; the unchanged item would
@@ -249,9 +251,11 @@ export function recordedContentVerdictSniffer(
   sniffer: TierSniffer,
   recorded: TierLedgerRecord | undefined,
   text: string | undefined,
+  names: string,
 ): TierSniffer {
   if (!recorded || !text?.trim() || recorded.state !== 'current' || recorded.contentPending || !recorded.contentRead) return sniffer;
-  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text))) return sniffer;
+  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text))
+    || !recorded.reasons.includes(names)) return sniffer;
   // The sniffer's verdict is the content tier, unless something else raised it: kept as recorded, never lower.
   const tier = recorded.contentTier;
   const prefix = `content:sniffer:${sniffer.id}:`;
