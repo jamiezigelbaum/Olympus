@@ -22,6 +22,7 @@ import { InstalledTierClassification } from '../src/workers/classification/insta
 import {
   CachedTierSniffer,
   SNIFFER_PROMPT_VERSION,
+  SNIFFER_RESPONSE_SCHEMA,
   parseSnifferBatchResponse,
   snifferId,
   snifferTierKey,
@@ -195,6 +196,7 @@ describe('batching, cache and threshold', () => {
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: VENICE_LANE, model, maxCallsPerPass: 100 });
       expect(model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{')).length)).toEqual(Array(25).fill(1));
       expect(model.requests.every((request) => request.localOnly === true)).toBe(true);
+      expect(model.requests.every((request) => request.responseSchema === SNIFFER_RESPONSE_SCHEMA)).toBe(true);
       expect(report).toMatchObject({ calls: 25, verdictsApplied: 25, resolvedPrivate: 25 });
       expect(ledger.counts().byState.pending).toBe(25); // content still unread: that is not a sniffer question
       const record = ledger.getCurrent(subject(7))!;
@@ -593,6 +595,37 @@ describe('bounds and the owner-approval gate', () => {
       release?.();
       service.stop();
       hanging.stop();
+
+      // A pass in flight gives up its priority over Inbox answers the moment
+      // the caller asks it to yield, not only once it reaches a question.
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 3, 'medical letter');
+      let overdue = false;
+      let enter: () => void = () => {};
+      const entered = new Promise<void>((resolve) => { enter = resolve; });
+      let finish: () => void = () => {};
+      const blocked = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: {
+          async complete() {
+            enter();
+            await new Promise<void>((resolve) => { finish = resolve; });
+            throw new Error('released');
+          },
+        },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        shouldYield: () => overdue,
+        now: () => new Date(clock),
+      });
+      const running = blocked.runOnce();
+      await entered;
+      expect(blocked.hasPriority).toBe(true);
+      overdue = true;
+      expect(blocked.hasPriority).toBe(false);
+      finish();
+      await running;
+      blocked.stop();
     } finally {
       installed.close();
       ledger.close();

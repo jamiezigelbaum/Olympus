@@ -25,6 +25,7 @@ import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-
 import { DeterministicSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { OlympusConfig } from '../src/core/config.ts';
+import { readwiseTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'person@example.com';
 const DAY = '2026-07-26';
@@ -345,6 +346,7 @@ function storeHarness(options: {
   const now = options.now ?? (() => START);
   const handler = createReadwiseConnectorStoreSyncHandler({
     store,
+    tierSet: readwiseTestTierSet(store),
     embeddingProvider: new DeterministicSourceEmbeddingProvider({
       modelId: 'readwise-t3-test',
       epochId: 'cloud:test:readwise-t3-test:v1',

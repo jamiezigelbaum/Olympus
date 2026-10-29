@@ -55,6 +55,8 @@ const RULE_SOURCES: Readonly<Record<PrivacyRuleKind, Readonly<Record<string, { p
   folder: {
     'dropbox.files': { provider: 'dropbox', match: 'pathPrefix' },
     'google_drive.docs': { provider: 'google_drive', match: 'folderKey' },
+    // A notebook's key is its id, which the Evernote connector publishes among an item's folder keys.
+    'evernote.notes': { provider: 'evernote', match: 'folderKey' },
   },
   label: {
     'gmail.email': { provider: 'gmail', match: 'label' },
@@ -64,7 +66,7 @@ const RULE_SOURCES: Readonly<Record<PrivacyRuleKind, Readonly<Record<string, { p
   },
 };
 
-export type PrivacyRuleSourceId = 'dropbox.files' | 'google_drive.docs' | 'gmail.email';
+export type PrivacyRuleSourceId = 'dropbox.files' | 'google_drive.docs' | 'evernote.notes' | 'gmail.email';
 
 /**
  * One always-Private rule, in the dashboard contract's shape

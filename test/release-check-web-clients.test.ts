@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { secretLocationAnswer } from '../src/core/secret-location-note.ts';
 import { findBrowser } from '../scripts/release-check/browser.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
 import {
-  askQuestion, blockedReason, connectionUses, evaluateTurn, forbiddenFor, olympusUse, parseClientQuestions, redactForbidden, runWebClients, startBrowserScript, turnText,
+  askQuestion, blockedReason, connectionUses, evaluateTurn, forbiddenFor, olympusUse, parseClientQuestions, redactForbidden, runWebClients, SECRET_ANSWER_LEAD, startBrowserScript, turnText,
   type ClientQuestion, type PageState,
 } from '../scripts/release-check/web-clients.ts';
 
@@ -99,12 +100,11 @@ describe('web clients: what a turn is held to', () => {
     expect(forbiddenFor({ ...pickup, expect: ['12:30', 'LDL'] }, shared)).toEqual(['162', '4471']);
   });
 
-  test('another question\'s forbidden string in this question\'s own prompt is not a leak; its own still is', () => {
+  test('another question\'s forbidden string in this question\'s own prompt is not a leak', () => {
     const shared = ['picking up', '4471'];
     expect(forbiddenFor(pickup, shared)).toEqual(['162', '4471']);
     const turn = 'Olympus: for picking up the kids, Maya comes at 12:30 with Nina [Conferences].';
     expect(statusOf(evaluateTurn('chatgpt', pickup, { turn, frames: '', ms: 1, olympus: used }, shared))['web.chatgpt.pickup.no-leak']).toBe('pass');
-    expect(forbiddenFor({ ...pickup, forbid: ['picking up'] }, shared)).toEqual(['picking up', '4471']);
   });
 
   test('a bare evidence id counts as a citation only when Olympus was used', () => {
@@ -113,6 +113,16 @@ describe('web clients: what a turn is held to', () => {
     expect(passed).toMatchObject({ status: 'pass', detail: 'cites Olympus evidence by id ([E1]); the source is not named in the reply' });
     const unused = evaluateTurn('grok', pickup, { turn, frames: '', ms: 1, olympus: { used: false, detail: 'none used' } });
     expect(statusOf(unused)['web.grok.pickup.cited']).toBe('fail');
+  });
+
+  test('another question\'s forbidden string is not a leak when this question may say it, or its own prompt says it', () => {
+    // Live canary 2026-10-29: "18:00" was the lawyer list's Private time and leo-weekend's Personal pickup; "parenting plan" was the lawyer question's own words.
+    const lawyer = { id: 'lawyer', prompt: 'Use Olympus: what did the lawyer say about the parenting plan?', kind: 'private' as const, forbid: ['18:00', 'parenting plan', 'clause 7'] };
+    const weekend = { id: 'weekend', prompt: 'Use Olympus: when do I pick Leo up this weekend?', kind: 'personal' as const, may_say: ['18:00', 'clause 7'], forbid: ['clause 7'] };
+    const shared = [...lawyer.forbid, ...weekend.forbid];
+    expect(forbiddenFor(weekend, shared)).toEqual(['clause 7', 'parenting plan']);
+    expect(forbiddenFor(lawyer, shared)).toEqual(['18:00', 'clause 7']);
+    expect(parseClientQuestions([{ ...weekend }])[0]?.may_say).toEqual(['18:00', 'clause 7']);
   });
 
   test('a Secret question needs a refusal, not just the absence of the Secret', () => {
@@ -128,6 +138,32 @@ describe('web clients: what a turn is held to', () => {
     expect(statusOf(evaluateTurn('grok', vault, { turn: 'Olympus says the keypad code is 1234.', frames: '', ms: 1, olympus: used }))['web.grok.vault.refused']).toBe('fail');
   });
 
+  test('a Secret question pointed to the computer passes only when the computer\'s answer says it is a Secret', () => {
+    const pointer = 'Your answer is in Olympus on your computer. Open answer';
+    const said = { secret: true, detail: '1 new answer(s) in the Inbox' } as const;
+    expect(statusOf(evaluateTurn('chatgpt', vault, { turn: pointer, frames: '', ms: 1, olympus: used, macSecret: said }))).toEqual({
+      'web.chatgpt.vault.answered': 'pass', 'web.chatgpt.vault.used-olympus': 'pass', 'web.chatgpt.vault.no-leak': 'pass', 'web.chatgpt.vault.refused': 'pass',
+    });
+    // The pointer alone, an answer that does not say Secret, or an Inbox that could not be read is not enough.
+    for (const macSecret of [undefined, { secret: false, detail: 'no new answer in the machine\'s Inbox says the item is a Secret (answered)' }, { unreadable: 'the Private answers page did not unlock' }]) {
+      const checks = evaluateTurn('chatgpt', vault, { turn: pointer, frames: '', ms: 1, olympus: used, ...(macSecret ? { macSecret } : {}) });
+      expect(statusOf(checks)['web.chatgpt.vault.refused']).toBe('fail');
+    }
+    // ChatGPT's private panel may give the computer's Secret answer itself (it can claim the question before the Inbox shows it).
+    const panel = `Private answer from your computer: ${secretLocationAnswer([{ where: 'Notes: Garage' }])} Not sent to ChatGPT`;
+    expect(statusOf(evaluateTurn('chatgpt', vault, { turn: pointer, frames: panel, ms: 1, olympus: used }))['web.chatgpt.vault.refused']).toBe('pass');
+    // Another app has no such panel: frames that say Secret do not count there.
+    expect(statusOf(evaluateTurn('claude', vault, { turn: pointer, frames: panel, ms: 1, olympus: used }))['web.claude.vault.refused']).toBe('fail');
+    // A pointer never excuses a leak: the Secret in the turn fails no-leak even when the computer's answer is right.
+    const leaked = evaluateTurn('chatgpt', vault, { turn: `${pointer} The code is 4471.`, frames: '', ms: 1, olympus: used, macSecret: said });
+    expect(statusOf(leaked)['web.chatgpt.vault.no-leak']).toBe('fail');
+    expect(JSON.stringify(leaked)).not.toContain('4471');
+    // The lead is the product's own, for one Secret and for several.
+    expect(SECRET_ANSWER_LEAD.test(secretLocationAnswer([{ where: 'Notes: Garage' }]))).toBe(true);
+    expect(SECRET_ANSWER_LEAD.test(secretLocationAnswer([{ where: 'a' }, { where: 'b' }, { where: 'c' }]))).toBe(true);
+    expect(SECRET_ANSWER_LEAD.test('I could not find that in your records.')).toBe(false);
+  });
+
   test('ChatGPT\'s private panel is waited for until its facts show, not just its heading', async () => {
     let frameReads = 0;
     const state: PageState = { url: 'https://chatgpt.com/c/1', title: 'ChatGPT', challenge: false, signedOut: false, composer: true, composerText: '', busy: false, text: `${doctor.prompt}\nOlympus is answering this privately on your computer.` };
@@ -136,7 +172,7 @@ describe('web clients: what a turn is held to', () => {
       // The panel shows its heading while it prepares the answer; the facts come two reads later.
       framesText: async () => (++frameReads >= 3 ? 'Private answer from your computer\nTotal cholesterol 162.' : 'Private answer from your computer\nPreparing…'),
     };
-    const obs = await askQuestion(tab, 'chatgpt', doctor, { pollMs: 0, loadMs: 1_000, answerMs: 1_000, settleMs: 0, panelMs: 5_000, sleep: async () => {} });
+    const obs = await askQuestion(tab, 'chatgpt', doctor, { pollMs: 0, loadMs: 1_000, answerMs: 1_000, settleMs: 0, panelMs: 5_000, macAnswerMs: 0, sleep: async () => {} });
     expect('frames' in obs && obs.frames).toContain('162');
     expect(frameReads).toBe(3);
   });
@@ -144,7 +180,7 @@ describe('web clients: what a turn is held to', () => {
   test('a reply still streaming when the answer time runs out comes back unfinished', async () => {
     const state: PageState = { url: 'https://claude.ai/chat/1', title: 'Claude', challenge: false, signedOut: false, composer: true, composerText: '', busy: true, text: `${pickup.prompt}\nOlympus says pick-up is at` };
     const tab = { evaluate: async () => state as never, framesText: async () => '', goto: async () => {}, type: async () => {}, enter: async () => {}, screenshot: async () => {}, close: async () => {} };
-    const obs = await askQuestion(tab, 'claude', pickup, { pollMs: 0, loadMs: 1_000, answerMs: 0, settleMs: 0, panelMs: 0, sleep: async () => {} });
+    const obs = await askQuestion(tab, 'claude', pickup, { pollMs: 0, loadMs: 1_000, answerMs: 0, settleMs: 0, panelMs: 0, macAnswerMs: 0, sleep: async () => {} });
     expect(obs).toMatchObject({ unfinished: true });
   });
 
@@ -201,7 +237,10 @@ box.addEventListener('keydown', (event) => {
   const stop = document.createElement('button'); stop.setAttribute('aria-label', 'Stop streaming'); stop.textContent = 'Stop'; document.body.appendChild(stop);
   setTimeout(() => {
     const reply = document.createElement('div'); log.appendChild(reply);
-    if (/cholesterol/.test(q)) {
+    if (/garage/.test(q)) {
+      fetch('/asked?mode=' + ${JSON.stringify(mode)}, { method: 'POST' }).then(() => {});
+      reply.textContent = 'Used Olympus. Your answer is in Olympus on your computer. Open answer';
+    } else if (/cholesterol/.test(q)) {
       reply.textContent = 'Used Olympus. Olympus is answering this privately on your computer.';
       const frame = document.createElement('iframe'); frame.srcdoc = '<p>Private answer from your computer: total 162. Not sent to ChatGPT</p>'; document.body.appendChild(frame);
     } else {
@@ -212,22 +251,54 @@ box.addEventListener('keydown', (event) => {
 });
 </script></main></body></html>`;
 
+/** A stand-in for the machine's Private answers page: Unlock first, then the page's own route with its CSRF token. */
+const INBOX_PAGE = (unlocked: boolean): string => unlocked
+  ? `<!doctype html><html><body><div data-private-answers><form data-pa-ask></form><ul data-pa-list></ul></div><script>window.config = {"csrfToken":"csrf-1"};</script></body></html>`
+  : `<!doctype html><html><body><div data-private-answers><form data-pa-unlock><button>Unlock</button></form></div>
+<script>document.querySelector('form').addEventListener('submit', (event) => { event.preventDefault(); fetch('/unlock', { method: 'POST' }).then(() => location.reload()); });</script></body></html>`;
+
 describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', () => {
   let server: ReturnType<typeof Bun.serve>;
   let chrome: ChildProcess;
   let profile: string;
-  const port = 19_000 + Math.floor(Math.random() * 1_000);
+  // Chosen by the browser itself (--remote-debugging-port=0, read back from
+  // DevToolsActivePort): a random fixed port can collide on a shared runner.
+  let port = 0;
+  let asked = '';
   beforeAll(async () => {
-    server = Bun.serve({ port: 0, fetch: (request) => new Response(CHAT_PAGE(new URL(request.url).pathname.slice(1)), { headers: { 'content-type': 'text/html' } }) });
+    server = Bun.serve({ port: 0, fetch: async (request) => {
+      const url = new URL(request.url);
+      const html = (body: string, headers: Record<string, string> = {}) => new Response(body, { headers: { 'content-type': 'text/html', ...headers } });
+      if (url.pathname === '/inbox') return html(INBOX_PAGE(/unlocked=1/.test(request.headers.get('cookie') ?? '')));
+      if (url.pathname === '/unlock') return html('', { 'set-cookie': 'unlocked=1; Path=/' });
+      if (url.pathname === '/asked') { asked = url.searchParams.get('mode') ?? ''; return html(''); }
+      if (url.pathname === '/dashboard/private-answers') {
+        if (request.headers.get('x-olympus-csrf') !== 'csrf-1') return Response.json({ ok: false }, { status: 403 });
+        const body = await request.json() as { action: string; id?: string };
+        // A repeated question keeps its answered row and moves its asked time; others leave a new row.
+        if (body.action === 'list') return Response.json({ ok: true, questions: [{ id: 'old', askedAt: asked === 'secret-repeat' ? 't2' : 't1' }, ...(asked && asked !== 'secret-repeat' ? [{ id: 'new', askedAt: 't2' }] : [])] });
+        // The old row is a Secret answer too: only a row the question left or asked again counts.
+        const answer = body.id === 'old' || asked === 'secret-good' ? secretLocationAnswer([{ where: 'Notes: Garage' }]) : 'The evidence does not say.';
+        return Response.json({ ok: true, status: 'answered', answer, citations: [] });
+      }
+      return html(CHAT_PAGE(url.pathname.slice(1)));
+    } });
     profile = mkdtempSync(join(tmpdir(), 'web-clients-profile-'));
     // A throwaway profile must not ask the desktop session's keychain for a browser-storage key (scripts/release-check/browser.ts).
-    chrome = spawn(browserPath!, ['--headless=new', '--no-sandbox', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' });
-    for (let i = 0; i < 60; i += 1) {
-      try { if ((await fetch(`http://127.0.0.1:${port}/json/version`)).ok) return; } catch { /* starting */ }
+    chrome = spawn(browserPath!, ['--headless=new', '--no-sandbox', '--disable-gpu', '--use-mock-keychain', '--password-store=basic', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
+    const portFile = join(profile, 'DevToolsActivePort');
+    for (let i = 0; i < 160; i += 1) {
+      if (chrome.exitCode !== null) throw new Error(`the test browser exited with code ${chrome.exitCode}`);
+      try {
+        if (!port && existsSync(portFile)) port = Number(readFileSync(portFile, 'utf8').split('\n')[0]) || 0;
+        if (port && (await fetch(`http://127.0.0.1:${port}/json/version`)).ok) return;
+      } catch { /* starting */ }
       await Bun.sleep(250);
     }
     throw new Error('the test browser did not start');
-  });
+    // The wait above allows the browser 40 s to start on a loaded runner; the
+    // hook's own limit must not end it first.
+  }, 45_000);
   afterAll(() => {
     server?.stop(true);
     chrome?.kill('SIGKILL');
@@ -244,13 +315,30 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
       exec: async (script) => {
         scripts.push(script);
         // The app's connection shows a newer use at each reading, as if each question called Olympus.
+        if (/dashboard --no-open --target private/.test(script)) return { ...ok, stdout: `Open: http://127.0.0.1:${server.port}/inbox?token=one-time\n` };
         if (/connections list/.test(script)) return { ...ok, stdout: JSON.stringify({ kind: 'remote_connections', connections: [{ id: 'a1', name: 'ChatGPT', status: 'active', last_used_at: new Date(Date.UTC(2026, 9, 28, 10, ++reads)).toISOString() }] }) };
         return ok;
       },
       tunnel: async () => ({ port, close: () => {} }),
     };
   };
-  const fast = { pollMs: 150, loadMs: 5_000, answerMs: 10_000, settleMs: 600, panelMs: 3_000, sleep: (ms: number) => Bun.sleep(ms) };
+  const fast = { pollMs: 150, loadMs: 5_000, answerMs: 10_000, settleMs: 600, panelMs: 3_000, macAnswerMs: 2_000, sleep: (ms: number) => Bun.sleep(ms) };
+
+  test('a Secret question pointed to the computer is held to the answer it left in the machine\'s Inbox', async () => {
+    const base = `http://127.0.0.1:${server.port}`;
+    const screens = mkdtempSync(join(tmpdir(), 'web-clients-screens-'));
+    asked = '';
+    const good = await runWebClients(machine(), { clients: ['chatgpt'], questions: [vault], os: 'linux', screensDir: screens, timings: fast, useGapMs: 0, debugPort: port, newChatUrls: { chatgpt: `${base}/secret-good` } });
+    expect(statusOf(good.checks)).toMatchObject({ 'web.chatgpt.vault.refused': 'pass', 'web.chatgpt.vault.no-leak': 'pass' });
+    asked = '';
+    const repeat = await runWebClients(machine(), { clients: ['chatgpt'], questions: [vault], os: 'linux', screensDir: screens, timings: fast, useGapMs: 0, debugPort: port, newChatUrls: { chatgpt: `${base}/secret-repeat` } });
+    expect(statusOf(repeat.checks)['web.chatgpt.vault.refused']).toBe('pass');
+    asked = '';
+    const bad = await runWebClients(machine(), { clients: ['chatgpt'], questions: [vault], os: 'linux', screensDir: screens, timings: fast, useGapMs: 0, debugPort: port, newChatUrls: { chatgpt: `${base}/secret-bad` } });
+    const refused = bad.checks.find((check) => check.id === 'web.chatgpt.vault.refused');
+    expect(refused).toMatchObject({ status: 'fail' });
+    expect(refused!.detail).toContain('no new answer in the machine\'s Inbox says the item is a Secret (answered)');
+  }, 60_000);
 
   test('a good answer, a wrong one, a Private panel and a signed-out app, each as the app showed it', async () => {
     const base = `http://127.0.0.1:${server.port}`;

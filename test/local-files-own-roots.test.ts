@@ -49,6 +49,7 @@ import {
 import { createLocalFilesConnectorStore } from '../src/workers/local-files/store.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { WatchHub, ignoreGlobsForRoot, watchIgnoreGlobs } from '../src/workers/local-files/watch-hub.ts';
+import { localFilesTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
@@ -604,7 +605,7 @@ describe('a pass over the person\'s home folder', () => {
     const snapshotDir = join(f.base, `watch-${passes}`);
     mkdirSync(snapshotDir, { recursive: true });
     const handler = createLocalFilesProviderStoreSyncHandler({
-      store, scope, volumes: new VolumeResolver(), snapshotDir, hub, ignore: watchIgnoreGlobs(f.context), pageSize: 50,
+      store, tierSet: localFilesTestTierSet(store), scope, volumes: new VolumeResolver(), snapshotDir, hub, ignore: watchIgnoreGlobs(f.context), pageSize: 50,
     });
     const out = await handler.pull({ approved_scope_key: `${LOCAL_FILES_POLICY_SOURCE}:${rootKey}` });
     const indexed = (query: string): string[] => store.searchItems(query, 50, 'this_computer').map((row) => String(row.title ?? '')).sort();

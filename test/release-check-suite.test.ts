@@ -1,7 +1,7 @@
 // How agent observations become checks: the exact rules of the question suite.
 
 import { describe, expect, test } from 'bun:test';
-import { PRIVATE_FACTS, PRIVATE_MARKER, SECRET_MARKER, SUITE_QUESTIONS, forbiddenMarkers } from '../scripts/release-check/fixture.ts';
+import { FIXTURE_ITEMS, PRIVATE_FACTS, PRIVATE_MARKER, SECRET_MARKER, SUITE_QUESTIONS, fixtureItemTiers, forbiddenMarkers } from '../scripts/release-check/fixture.ts';
 import { citedEvidenceIds, evaluateArtifactScan, evaluateObservation, evaluateSmokeVerdict, type QuestionObservation } from '../scripts/release-check/suite.ts';
 
 const markers = forbiddenMarkers();
@@ -32,7 +32,7 @@ describe('release-check suite rules', () => {
   });
 
   test('an answer without the expected citation fails the cited check', () => {
-    const checks = evaluateObservation(observation('file-fact', { answerText: '1,284.50 EUR due 15 November 2026', evidenceTitles: ['Something else'] }), markers);
+    const checks = evaluateObservation(observation('file-fact', { answerText: 'Every 18 months; 1.3 bar when cold', evidenceTitles: ['Something else'] }), markers);
     expect(status(checks, 'file-fact.facts')).toBe('pass');
     expect(status(checks, 'file-fact.cited')).toBe('fail');
   });
@@ -148,5 +148,23 @@ describe('the ChatGPT live smoke verdict', () => {
     expect(evaluateSmokeVerdict(undefined, [], markers).status).toBe('fail');
     expect(evaluateSmokeVerdict('0', [], markers).status).toBe('fail');
     expect(evaluateSmokeVerdict(undefined, [], markers).detail).toContain('unknown');
+  });
+});
+
+describe('ingest.tiers names each fixture item', () => {
+  test('each item is listed with its meant tier, the ledger\'s tier, what decided it and where it lives', () => {
+    const [garden, cardio, vault, manual] = FIXTURE_ITEMS.map((item) => item.document.id);
+    const detail = fixtureItemTiers([
+      { store: 'readwise-connector-store', id: garden!, tier: 'S2', tombstoned: 0, contentHash: 'h', metadataTier: 'personal', contentTier: 'personal', decidedBy: 'sniffer' },
+      { store: 'readwise-secure-connector-store', id: cardio!, tier: 'S4', tombstoned: 0, contentHash: 'h', contentTier: 'secure', decidedBy: 'owner_rule' },
+      // A moved item keeps its tombstoned old copy: only the live store is named.
+      { store: 'readwise-connector-store', id: manual!, tier: 'S2', tombstoned: 1, contentHash: 'h' },
+      { store: 'readwise-secure-connector-store', id: manual!, tier: 'S4', tombstoned: 0, contentHash: 'h', contentTier: 'secure', decidedBy: 'move' },
+    ]);
+    expect(detail).toContain(`${garden} (meant personal): personal by sniffer, in readwise-connector-store`);
+    expect(detail).toContain(`${cardio} (meant private): secure by owner_rule, in readwise-secure-connector-store`);
+    expect(detail).toContain(`${vault} (meant secrets): not stored`);
+    expect(detail).toContain(`${manual} (meant personal): secure by move, in readwise-secure-connector-store`);
+    expect(fixtureItemTiers(null)).toBe('the stored items could not be read');
   });
 });

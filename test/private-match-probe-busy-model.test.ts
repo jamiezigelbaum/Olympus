@@ -26,8 +26,8 @@ import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.
 import { expandSourceIndexKeywords } from '../src/core/source-index/keyword-expansion.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
 import { registerBuiltInPrivateModel } from '../src/workers/classification/built-in-sniffer.ts';
-import { LocalConnectorStore, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
-import { probePrivateMatch, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
+import { LocalConnectorStore, createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
+import { probePrivateMatch, searchPrivateEvidence, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
 import { ARCTIC_EMBED_M_V1_5 } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
@@ -224,6 +224,34 @@ describe('the Private-match probe with the local model busy', () => {
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(waiting.list().questions.map((question) => [question.surface, question.state])).toEqual([['remote', 'waiting']]);
     expect(busy.translationCalls()).toBe(0);
+  });
+});
+
+describe('ChatGPT\'s Private search, for the private answer panel, with the local model busy (test-mac, 2026-10-29)', () => {
+  // The panel reads each match's passages from the store, as the computer's lanes do.
+  const panelLanes = (request: unknown): AnalystAnswerLanes => ({
+    ...lanes(request),
+    contentProviders: { [CORPUS_ID]: createConnectorStoreContentProvider({ store }) },
+  }) as unknown as AnalystAnswerLanes;
+
+  test('a first-time wording whose words are in the Private item matches without waiting on the held translation', async () => {
+    busy.holdSlot();
+    const found = await Promise.race([
+      searchPrivateEvidence({ lanes: panelLanes, question: FIRST_TIME_WORDING }),
+      Bun.sleep(2_000).then(() => undefined),
+    ]);
+    expect(found?.matched).toBeGreaterThan(0);
+    expect(JSON.stringify(found?.candidates)).toContain('PRIVMARK-lantern-moth-4417');
+    expect(busy.translationCalls()).toBe(0);
+  });
+
+  test('a match only the translation finds still waits for it, then matches', async () => {
+    const question = 'Tell me about the dawn.';
+    busy.holdSlot();
+    const pending = searchPrivateEvidence({ lanes: panelLanes, question });
+    setTimeout(() => busy.release(), 300);
+    expect((await pending).matched).toBe(1);
+    expect(busy.translationCalls()).toBe(1);
   });
 });
 

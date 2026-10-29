@@ -237,6 +237,22 @@ function scopeKeyFilter(
   return { [FILTER_KEYS[definition.filterFamily][role]]: [...keys] } as ConnectorStoreSearchFilters;
 }
 
+/**
+ * The stamp a stored item must carry to be read: this account, and, unless each item
+ * carries its own exact key (`itemKeysExact`), this approval.
+ */
+function scopeStampFilter(
+  definition: FileScopeSourceDefinition,
+  accountGeneration: string,
+  revision: string,
+): ConnectorStoreSearchFilters {
+  return {
+    provider: definition.provider,
+    sourceScopeGeneration: accountGeneration,
+    ...(definition.itemKeysExact ? {} : { sourceScopeRevision: revision }),
+  };
+}
+
 export function fileSourceScopeContentFilters(
   approval: FileSourceScopeApprovalSnapshot,
 ): { allowed: false } | { allowed: true; filters?: ConnectorStoreSearchFilters } {
@@ -246,11 +262,7 @@ export function fileSourceScopeContentFilters(
   const deniedKeys = approval.selections
     .filter((selection) => selection.state !== 'ingest')
     .map((selection) => selection.key);
-  const base: ConnectorStoreSearchFilters = {
-    provider: definition.provider,
-    sourceScopeGeneration: approval.accountGeneration,
-    sourceScopeRevision: approval.revision,
-  };
+  const base = scopeStampFilter(definition, approval.accountGeneration, approval.revision);
   if (approval.wholeAccount) {
     return {
       allowed: true,
@@ -284,9 +296,7 @@ export function fileSourceScopeMetadataFilters(
     .filter((selection) => selection.state === 'metadata_only')
     .map((selection) => selection.key);
   const base: ConnectorStoreSearchFilters = {
-    provider: definition.provider,
-    sourceScopeGeneration: approval.accountGeneration,
-    sourceScopeRevision: approval.revision,
+    ...scopeStampFilter(definition, approval.accountGeneration, approval.revision),
     ...scopeKeyFilter(definition, 'exclude', excludedKeys),
     ...scopeKeyFilter(definition, 'metadataOnly', metadataOnlyKeys),
   };

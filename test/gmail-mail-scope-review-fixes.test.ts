@@ -44,7 +44,7 @@ import { classifyItemTiers } from '../src/workers/classification/tier-classifier
 import { mailScopeOwnerTierRules } from '../src/core/mail-source-scope.ts';
 import { closeSqliteStore } from '../src/core/sqlite-store.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
-import { withLocalPrivateEmbeddingBackfill } from '../src/workers/source-scheduler.ts';
+import { withEmbeddingSweep } from '../src/workers/source-scheduler.ts';
 import { createGmailConnectorStoreSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { defaultConfig } from '../src/core/config.ts';
 
@@ -253,7 +253,7 @@ describe('no existing embeddings are thrown away by a scope', () => {
     for (const id of ['skip-sender', 'skip-label', 'older']) expect(stores.secureStore.itemOwnerPresent(identity(id), currentId, 'observed')).toBe(false);
     const inputs: string[] = [];
     const provider = { ...recordingProvider('local', inputs), provider: 'built-in' };
-    const task = withLocalPrivateEmbeddingBackfill([{ sourceId: 'gmail.email', corpusId: stores.secureStore.corpusId, cadence: 'continuous', intervalMs: 1_000, freshnessThresholdHours: 1, tasks: [] }], () => [{ store: stores.secureStore, provider, accountScope: 'personal', filters: { provider: 'gmail', observedConnectorId: currentId } }])[0]!.tasks[0]!;
+    const task = withEmbeddingSweep([{ sourceId: 'gmail.email', corpusId: stores.secureStore.corpusId, cadence: 'continuous', intervalMs: 1_000, freshnessThresholdHours: 1, tasks: [] }], () => () => [{ store: stores.secureStore, provider, wholeStore: true, accountScope: 'personal', filters: { provider: 'gmail', observedConnectorId: currentId } }])[0]!.tasks[0]!;
     expect(await task.run()).toMatchObject({ counts: { chunks_embedded: 1 } });
     expect(inputs.join('')).toContain('Body of allowed');
     expect(inputs.join('')).not.toContain('Body of skip-');

@@ -22,7 +22,12 @@ import { createEvernoteRuntime, evernoteDashboardPass, evernoteSchedulerFailure 
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { SourceSchedulerTaskFailure } from '../src/workers/source-scheduler.ts';
-import { FakeEvernoteServer } from './support/evernote-mcp-fake.ts';
+import { planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
+import { childProviderItemId } from '../src/core/child-item-id.ts';
+import { embedPendingChunks } from '../src/workers/connector-store/local-index.ts';
+import { evernoteAttachmentKeys } from '../src/workers/evernote/connector.ts';
+import { RecordingProvider } from './helpers/tier-fixtures.ts';
+import { FakeEvernoteServer, md5Hex } from './support/evernote-mcp-fake.ts';
 
 let fake: FakeEvernoteServer | undefined;
 const dirs: string[] = [];
@@ -152,6 +157,34 @@ describe('a pass through the tier lane', () => {
     expect(stored(storedNote.id)).toBeUndefined();
     const after = await sync.pass();
     expect(after.counts).toMatchObject({ notes_deleted: 0, notes_unchanged: 53 });
+    // Three passes over 55 notes through the HTTP fake take ~2s alone and pass 5s on a loaded CI runner.
+  }, 30_000);
+
+  test('a new notebook choice for the same account reads nothing again; another account\'s stamp is read again', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Field work');
+    const note = fake.addNote({ title: 'Survey', created: day(2024), notebookId: book.id, body: '<en-note>River</en-note>' });
+    const { sync, runtime } = await connected(fake);
+    const first = { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000001' };
+    const noteId = `personal:${note.id}`;
+    const storedFor = (accountGeneration: string) => {
+      const lane = runtime.existingLane()!;
+      return [lane.secure.open(), lane.internal.open()].some((store) => store.itemMatchesSearchFilters(noteId, 'personal', {
+        sourceScopeGeneration: accountGeneration, sourceScopeFolderAnyKeys: [book.id],
+      }));
+    };
+
+    expect((await sync.pass({ scope: first })).counts).toMatchObject({ notes_read: 1 });
+    expect(storedFor(first.accountGeneration)).toBe(true);
+    // The person saves another choice: reads filter by the stored notebook id, nothing is fetched again.
+    expect((await sync.pass({ scope: { ...first, scopeRevision: '00000000-0000-4000-8000-000000000002' } })).counts)
+      .toMatchObject({ notes_read: 0, notes_unchanged: 1 });
+
+    // Stored under another account's stamp: read again and stamped for this one.
+    const other = { accountGeneration: 'b'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000003' };
+    expect((await sync.pass({ scope: other })).counts).toMatchObject({ notes_read: 1, notes_unchanged: 0 });
+    expect(storedFor(other.accountGeneration)).toBe(true);
+    expect(storedFor(first.accountGeneration)).toBe(false);
   });
 
   test('a reconnect to another account stops before deleting the stored notes, and the card says why', async () => {
@@ -188,24 +221,162 @@ describe('a pass through the tier lane', () => {
 });
 
 describe('the scheduler source', () => {
-  test('one pass task at the scheduler interval, and an attachment read per store', async () => {
+  test('one pass task at the scheduler interval, and one attachment read for the whole lane', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     const { runtime, handle } = await connected(fake);
     const source = runtime.schedulerSource({
       config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
       handle,
+      notebookGate: () => () => 'ingest',
+      assertNotebookChoiceCurrent: () => undefined,
+      scope: { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' },
     });
     expect(source.sourceId).toBe('evernote.notes');
     expect(source.intervalMs).toBe(3_600_000);
     expect(source.tasks.map((task) => task.id)).toEqual([
       'evernote.notes_pass',
       'evernote.attachments.secure_local.evernote.notes',
-      'evernote.attachments.internal.evernote.notes',
     ]);
-    // A store the pass has not opened has nothing to read.
-    expect(await source.tasks[2]!.run()).toEqual({ status: 'idle', counts: {} });
+    // Before the pass has opened a store there is nothing to read.
+    expect(await source.tasks[1]!.run()).toEqual({ status: 'idle', counts: {} });
     const run = await source.tasks[0]!.run();
     expect(run.counts).toMatchObject({ pass_complete: 1 });
+  });
+
+  test('an attachment of an ordinary note is read and its text lands, whichever store the note rests in', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Field work');
+    const bytes = new TextEncoder().encode('fixtureferryword: the ferry leaves the quay at seven.');
+    const note = fake.addNote({ title: 'Timetable', created: day(2024), notebookId: book.id, body: '<en-note>Ferry times</en-note>', resources: [{ bytes, mime: 'text/plain', name: 'timetable.txt' }] });
+    const { runtime, handle } = await connected(fake);
+    const source = runtime.schedulerSource({
+      config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
+      handle,
+      notebookGate: () => () => 'ingest',
+      assertNotebookChoiceCurrent: () => undefined,
+      scope: { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' },
+    });
+    expect((await source.tasks[0]!.run()).counts).toMatchObject({ pass_complete: 1 });
+    for (const task of source.tasks.slice(1)) await task.run();
+    const child = `personal:${childProviderItemId(note.id, evernoteAttachmentKeys([md5Hex(bytes)])[0]!)}`;
+    const lane = runtime.existingLane()!;
+    const text = [lane.secure.open(), lane.internal.open()].flatMap((store) => store.localContent(child)?.chunks ?? []).join(' ');
+    expect(text).toContain('fixtureferryword');
+  });
+
+  test('a notebook set to Skip after a pass: its attachments are not read, and its stored notes fall outside the approved reads', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Clients');
+    const bytes = new TextEncoder().encode('fixtureclientword: the contract terms.');
+    const note = fake.addNote({ title: 'Contract', created: day(2024), notebookId: book.id, body: '<en-note>Terms</en-note>', resources: [{ bytes, mime: 'text/plain', name: 'terms.txt' }] });
+    const { runtime, handle } = await connected(fake);
+    let choice: 'ingest' | 'exclude' = 'ingest';
+    const source = runtime.schedulerSource({
+      config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
+      handle,
+      notebookGate: () => () => choice,
+      assertNotebookChoiceCurrent: () => undefined,
+      scope: { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' },
+    });
+    expect((await source.tasks[0]!.run()).counts).toMatchObject({ pass_complete: 1 });
+    const lane = runtime.existingLane()!;
+    const stores = [lane.secure.open(), lane.internal.open()];
+    const noteId = `personal:${note.id}`;
+    // Every stored copy records its notebook, which is what the approved scope filters reads by.
+    const holder = stores.find((store) => store.itemMatchesSearchFilters(noteId, 'personal', { sourceScopeFolderAnyKeys: [book.id] }))!;
+    expect(holder).toBeDefined();
+    expect(holder.itemMatchesSearchFilters(noteId, 'personal', { sourceScopeFolderNoneKeys: [book.id] })).toBe(false);
+
+    // Set to Skip before the attachment is read: the read is refused before any link is asked for.
+    choice = 'exclude';
+    const attachmentCalls = fake.calls.get_attachment ?? 0;
+    for (const task of source.tasks.slice(1)) await task.run();
+    expect(fake.calls.get_attachment ?? 0).toBe(attachmentCalls);
+    const child = `personal:${childProviderItemId(note.id, evernoteAttachmentKeys([md5Hex(bytes)])[0]!)}`;
+    expect(stores.flatMap((store) => store.localContent(child)?.chunks ?? []).join(' ')).not.toContain('fixtureclientword');
+  });
+
+  test('a notebook set to Skip and then back to read: its attachments are read again', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Projects');
+    const bytes = new TextEncoder().encode('fixturewhiteboardword: pilot with three analysts.');
+    const note = fake.addNote({ title: 'Kickoff', created: day(2024), notebookId: book.id, body: '<en-note>Kickoff</en-note>', resources: [{ bytes, mime: 'text/plain', name: 'board.txt' }] });
+    const { runtime, handle } = await connected(fake);
+    let choice: 'ingest' | 'exclude' = 'ingest';
+    const source = runtime.schedulerSource({
+      config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
+      handle,
+      notebookGate: () => () => choice,
+      assertNotebookChoiceCurrent: () => undefined,
+      scope: { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' },
+    });
+    const child = `personal:${childProviderItemId(note.id, evernoteAttachmentKeys([md5Hex(bytes)])[0]!)}`;
+    const text = () => {
+      const lane = runtime.existingLane()!;
+      return [lane.secure.open(), lane.internal.open()].flatMap((store) => store.localContent(child)?.chunks ?? []).join(' ');
+    };
+    const syncAndExtract = async () => {
+      expect((await source.tasks[0]!.run()).counts).toMatchObject({ pass_complete: 1 });
+      for (const task of source.tasks.slice(1)) await task.run();
+    };
+    await syncAndExtract();
+    expect(text()).toContain('fixturewhiteboardword');
+
+    choice = 'exclude';
+    await syncAndExtract();
+    expect(text()).not.toContain('fixturewhiteboardword');
+
+    choice = 'ingest';
+    await syncAndExtract();
+    expect(text()).toContain('fixturewhiteboardword');
+  });
+
+  test('after a reconnect, attachments are read under the new approval, not refused by the replaced one', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Field work');
+    const { runtime, handle } = await connected(fake);
+    const config = { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never;
+    const scope = { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' };
+    let replaced = false;
+    const before = runtime.schedulerSource({
+      config, handle, scope,
+      notebookGate: () => () => 'ingest',
+      assertNotebookChoiceCurrent: () => { if (replaced) throw new Error('approval replaced'); },
+    });
+    fake.addNote({ title: 'Timetable', created: day(2024), notebookId: book.id, body: '<en-note>Ferry times</en-note>', resources: [{ bytes: new TextEncoder().encode('ferry at seven'), mime: 'text/plain', name: 'a.txt' }] });
+    expect((await before.tasks[0]!.run()).counts).toMatchObject({ pass_complete: 1 });
+    for (const task of before.tasks.slice(1)) await task.run();
+
+    // Connected again: a new sign-in and a new approval; the old one no longer holds.
+    replaced = true;
+    const bytes = new TextEncoder().encode('fixturequayword: the quay closes at nine.');
+    const note = fake.addNote({ title: 'Quay', created: day(2024, 2), notebookId: book.id, body: '<en-note>Quay</en-note>', resources: [{ bytes, mime: 'text/plain', name: 'quay.txt' }] });
+    const after = runtime.schedulerSource({
+      config, scope,
+      handle: { ...handle, connectedAt: '2099-01-01T00:00:00.000Z' },
+      notebookGate: () => () => 'ingest',
+      assertNotebookChoiceCurrent: () => undefined,
+    });
+    expect((await after.tasks[0]!.run()).counts).toMatchObject({ pass_complete: 1 });
+    for (const task of after.tasks.slice(1)) await task.run();
+    const child = `personal:${childProviderItemId(note.id, evernoteAttachmentKeys([md5Hex(bytes)])[0]!)}`;
+    const lane = runtime.existingLane()!;
+    expect([lane.secure.open(), lane.internal.open()].flatMap((store) => store.localContent(child)?.chunks ?? []).join(' ')).toContain('fixturequayword');
+  });
+
+  test('a note routed to the Personal store gets its vectors from the store-wide sweep, though no pass queued it', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    fake.addNote({ title: 'Survey', created: day(2024), notebookId: fake.addNotebook('Field work').id, body: '<en-note>River survey</en-note>' });
+    const { sync, runtime } = await connected(fake);
+    await sync.pass();
+    const internal = runtime.existingLane()!.internal.open();
+    // The pass stages in the Private store and routes per item: nothing queues the Personal copy.
+    expect(internal.queuedEmbeddingItemIds()).toEqual([]);
+    const provider = new RecordingProvider('google-gemini', 'gemini-embedding-2', 'cloud');
+    const target = planStoreEmbedding({ store: internal, provider, servedByMeaning: true, scope: { allowed: true } })!;
+    expect(target.wholeStore).toBe(true);
+    const [run] = await embedPendingChunks([target], { maxItems: 32 });
+    expect(run!.chunksEmbedded).toBeGreaterThan(0);
   });
 
   test('a rate-limited pass retries later; a refused sign-in is a credential failure', () => {

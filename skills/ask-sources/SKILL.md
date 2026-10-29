@@ -261,8 +261,8 @@ private content, but private subject matter is not a Dropbox routing rule. Use
 Dropbox-specific calls when the user asks for files, file paths, file locators,
 or a prior result is a Dropbox item. A folder-only locator request is
 unsupported. For broad private questions, start with
-unified `source_answer` and `include_secure_local: true` so email, Dropbox, and
-protected Telegram can all be considered. Olympus should release only an
+unified `source_answer` and `include_secure_local: true` so Private email,
+Dropbox files and Telegram messages can all be considered. Olympus should release only an
 OPSEC-scanned bounded derivative answer with citations and gaps. It still must
 not return source packets, database rows, provider cursors, OAuth material, raw
 secure-local file text, or secret values.
@@ -373,7 +373,7 @@ channel, use the secure-local/Argus path instead and do not set
 
 ## Private-tier Examples (`secure_local`)
 
-Unified private ask across private email, Dropbox, and protected Telegram:
+Unified private ask across Private email, Dropbox files and Telegram messages:
 
 - tool: `source_answer`
 - `question: "What happened with the Lexidy credit?"`

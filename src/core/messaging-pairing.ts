@@ -1,5 +1,5 @@
 import { ensurePrivateRootDirectorySync, ensurePrivateDirectoryTreeSync } from './atomic-file.ts';
-import { telegramPythonExecutable, TELEGRAM_DEPENDENCY_HINT } from './messaging-runtime.ts';
+import { telegramPythonExecutable, telegramPythonVenvDir, TELEGRAM_DEPENDENCY_HINT, TELEGRAM_TELETHON_REQUIREMENT } from './messaging-runtime.ts';
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync } from 'node:fs';
 import { spawn as spawnChild } from 'node:child_process';
@@ -16,6 +16,7 @@ import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, sourceAc
 import { tryHoldFileFlock, type HeldFileFlock } from './data-owner-lock.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedLogins, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
 import { recordPairingAccount, settlePairingPlacement } from './pairing-placement.ts';
+import { whatsappBridgeFileName } from './whatsapp-bridge-name.ts';
 import { assertTelegramHistoryAccount, telegramHistoryAccount, telegramHistoryAccountError } from './provider-account-history.ts';
 
 export type MessagingPairingSource = 'telegram' | 'whatsapp';
@@ -121,6 +122,10 @@ export interface PairMessagingSourceOptions {
   registerSession?: MessagingSessionRegistrar;
   which?: (command: string) => string | null;
   buildWhatsAppBridge?: (input: { go: string; sourceDir: string; outputPath: string }) => Promise<boolean>;
+  /** Test seam: whether a Python already imports Telethon. */
+  pythonHasTelethon?: (python: string) => Promise<boolean>;
+  /** Test seam: makes the private Telegram environment with the pinned Telethon; true when it is ready. */
+  provisionTelegramPython?: (input: { python3: string; venvDir: string }) => Promise<boolean>;
   /** Test seam: replaces the transport to the running worker, which decides a new account's layout while it owns the data. */
   workerFetch?: typeof fetch;
 }
@@ -412,14 +417,31 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
     if (!python) {
       throw new Error(`Python 3 is required for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
     }
-    return python;
+    const venvDir = telegramPythonVenvDir(options);
+    const isolated = join(venvDir, 'bin', 'python');
+    if (options.pythonExecutable || python === isolated) return python;
+    // A missing default is provisioned, the way WhatsApp's bridge is built: every new Telegram user needs
+    // Telethon, and the hint alone was a dead end (test-omarchy, 2026-10-29). A Python that has it already is used.
+    if (await (options.pythonHasTelethon ?? pythonImportsTelethon)(python)) return python;
+    process.stderr.write(`Installing ${TELEGRAM_TELETHON_REQUIREMENT} for Telegram into ${venvDir} (once; about a minute)...\n`);
+    const ready = await (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: python, venvDir });
+    if (!ready || !existsSync(isolated)) {
+      throw new Error(`Olympus could not install Telethon for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
+    }
+    return isolated;
   }
   if (options.whatsappBridgePath) {
     if (!existsSync(options.whatsappBridgePath)) throw new Error('The configured WhatsApp pairing bridge does not exist.');
     return options.whatsappBridgePath;
   }
   const sourceDir = join(packageRoot, 'tools', 'whatsapp-bridge');
-  const output = whatsappBridgePathForPackage(packageRoot, options);
+  // The release's prebuilt bridge, placed by the installer: no Go or C compiler needed.
+  const packaged = packagedWhatsAppBridgePath(packageRoot);
+  if (existsSync(packaged)) {
+    assertTrustedBridge(packaged, 'The installed WhatsApp bridge is not a trusted owner-controlled executable. Reinstall Olympus and retry.');
+    return packaged;
+  }
+  const output = whatsappBridgeCachePath(packageRoot, options);
   const cacheHome = options.env?.XDG_CACHE_HOME ?? join(options.homeDir ?? options.env?.HOME ?? homedir(), '.cache');
   ensurePrivateRootDirectorySync(cacheHome);
   ensurePrivateDirectoryTreeSync(cacheHome, dirname(output));
@@ -430,10 +452,7 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
     }
   }
   if (existsSync(output)) {
-    const stat = lstatSync(output);
-    if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === 'function' && stat.uid !== process.getuid()) || (stat.mode & 0o022) !== 0 || (stat.mode & 0o100) === 0) {
-      throw new Error('The cached WhatsApp bridge is not a trusted owner-controlled executable.');
-    }
+    assertTrustedBridge(output, 'The cached WhatsApp bridge is not a trusted owner-controlled executable.');
     return output;
   }
   const which = options.which ?? ((command: string) => Bun.which(command));
@@ -451,29 +470,64 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
   return output;
 }
 
+/** The bridge this package runs: the release's prebuilt one when the installer placed it, else the per-user build. */
 export function whatsappBridgePathForPackage(
   packageRoot: string,
   context: { homeDir?: string; env?: Record<string, string | undefined> } = {},
 ): string {
-  const home = context.homeDir ?? context.env?.HOME ?? homedir();
-  const cacheHome = context.env?.XDG_CACHE_HOME ?? join(home, '.cache');
-  const fingerprint = whatsappBridgeFingerprint(join(packageRoot, 'tools', 'whatsapp-bridge'));
-  return join(cacheHome, 'olympus', 'bin', `olympus-whatsapp-bridge-${fingerprint}`);
+  const packaged = packagedWhatsAppBridgePath(packageRoot);
+  return existsSync(packaged) ? packaged : whatsappBridgeCachePath(packageRoot, context);
 }
 
-function whatsappBridgeFingerprint(sourceDir: string): string {
-  const hash = createHash('sha256');
-  for (const name of ['main.go', 'go.mod', 'go.sum']) {
-    const path = join(sourceDir, name);
-    if (!existsSync(path)) throw new Error(`The packaged WhatsApp bridge source is incomplete: missing ${name}.`);
-    hash.update(name).update('\0').update(readFileSync(path)).update('\0');
+function packagedWhatsAppBridgePath(packageRoot: string): string {
+  const sourceDir = join(packageRoot, 'tools', 'whatsapp-bridge');
+  return join(sourceDir, 'bin', whatsappBridgeFileName(sourceDir));
+}
+
+function whatsappBridgeCachePath(
+  packageRoot: string,
+  context: { homeDir?: string; env?: Record<string, string | undefined> },
+): string {
+  const home = context.homeDir ?? context.env?.HOME ?? homedir();
+  const cacheHome = context.env?.XDG_CACHE_HOME ?? join(home, '.cache');
+  return join(cacheHome, 'olympus', 'bin', whatsappBridgeFileName(join(packageRoot, 'tools', 'whatsapp-bridge')));
+}
+
+function assertTrustedBridge(path: string, message: string): void {
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || (typeof process.getuid === 'function' && stat.uid !== process.getuid()) || (stat.mode & 0o022) !== 0 || (stat.mode & 0o100) === 0) {
+    throw new Error(message);
   }
-  // Every other source file the bridge is built from: a change to any of them is a new bridge.
-  const others = readdirSync(sourceDir)
-    .filter((name) => name.endsWith('.go') && !name.endsWith('_test.go') && name !== 'main.go')
-    .sort();
-  for (const name of others) hash.update(name).update('\0').update(readFileSync(join(sourceDir, name))).update('\0');
-  return hash.digest('hex').slice(0, 16);
+}
+
+
+async function pythonImportsTelethon(python: string): Promise<boolean> {
+  const child = Bun.spawn([python, '-c', 'import telethon'], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' });
+  return await child.exited === 0;
+}
+
+/** A fresh private venv with the pinned Telethon. A half-made one is removed, so the next pairing starts clean. */
+async function provisionTelegramPython(input: { python3: string; venvDir: string }): Promise<boolean> {
+  const run = async (argv: string[]): Promise<boolean> => {
+    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: '1' }, stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      child.exited,
+      new Promise<'timeout'>((resolve) => { timeout = setTimeout(() => resolve('timeout'), 5 * 60 * 1000); }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+    if (result === 'timeout') child.kill('SIGKILL');
+    return result === 0;
+  };
+  const cacheHome = dirname(dirname(input.venvDir));
+  ensurePrivateRootDirectorySync(cacheHome);
+  ensurePrivateDirectoryTreeSync(cacheHome, dirname(input.venvDir));
+  const python = join(input.venvDir, 'bin', 'python');
+  const ok = await run([input.python3, '-m', 'venv', input.venvDir])
+    && await run([python, '-m', 'pip', 'install', '--quiet', TELEGRAM_TELETHON_REQUIREMENT])
+    && await run([python, '-c', 'import telethon']);
+  if (!ok) rmSync(input.venvDir, { recursive: true, force: true });
+  return ok;
 }
 
 async function buildWhatsAppBridge(input: { go: string; sourceDir: string; outputPath: string }): Promise<boolean> {
@@ -487,7 +541,7 @@ async function buildWhatsAppBridge(input: { go: string; sourceDir: string; outpu
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const result = await Promise.race([
     child.exited,
-    new Promise<'timeout'>((resolve) => { timeout = setTimeout(() => resolve('timeout'), 2 * 60 * 1000); }),
+    new Promise<'timeout'>((resolve) => { timeout = setTimeout(() => resolve('timeout'), 10 * 60 * 1000); }),
   ]);
   if (timeout) clearTimeout(timeout);
   if (result === 'timeout') {
@@ -549,8 +603,6 @@ function producerLaunch(
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: 'telegram.personal',
         OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(','),
         OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(','),
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: '[]',
-        OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: '[]',
       },
       secretEnvironment: [
         { env: 'OLYMPUS_TELEGRAM_API_ID', secretKey: TELEGRAM_API_ID_SECRET_KEY },

@@ -90,10 +90,12 @@ export function compactClassificationSignals(signals: {
 }
 
 /**
- * The resting tier an OWNER- or deployment-configured trust domain implies
- * (a Telegram chat the owner protected, say), as a `prior`: item-level raises
- * still apply and no automatic signal lowers it. Never a whole source's
- * default: every source's items are tiered by their own content.
+ * The resting tier a capture record's trust domain implies, as a `prior`:
+ * item-level raises still apply and no automatic signal lowers it. Only
+ * Telegram capture records written before 2026-10-28 carry anything but
+ * `internal` (a deployment's protected-chat setting, now retired); nothing
+ * new may use this. Never a whole source's default: every source's items are
+ * tiered by their own content, and only the user's own rules rest a group.
  */
 export function trustDomainPrior(trustDomain: SourceTrustDomain): SourceClassificationPrior {
   return {

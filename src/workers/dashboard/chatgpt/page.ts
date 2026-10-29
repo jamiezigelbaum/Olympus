@@ -301,6 +301,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .seg-row>.fname>.fopen{font-size:1.375rem;color:var(--muted)}
 .seg-row>button.fname:hover:not(:disabled)>.fopen{color:var(--text)}
 .seg-row>.seg{margin-left:auto}
+.frow.seg-row.has-note{flex-wrap:wrap}
+.frow-note{flex:1 0 100%;margin:0 0 0.5rem 1.4375rem;font-size:0.8125rem;line-height:1.25rem}
 .seg{flex:none;display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;background:var(--bg)}
 .seg-opt{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:2.75rem;height:2rem;margin:0;padding:0 0.75rem;font:inherit;font-size:0.8125rem;font-weight:500;color:var(--text);background:none;border:0;border-radius:999px;cursor:pointer;white-space:nowrap}
 .seg-opt::before{content:"";position:absolute;inset:-0.4375rem 0}

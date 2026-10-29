@@ -252,7 +252,9 @@ describe('release artifact packaging', () => {
       rmSync(artifactPath, { force: true });
       rmSync(extractDir, { recursive: true, force: true });
     }
-  }, 60_000);
+  // The artifact build alone takes about 57 s on an idle CI runner (static
+  // checks' release-artifact step), so 60 s timed out on a busy deploy shard.
+  }, 180_000);
 });
 
 async function run(

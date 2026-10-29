@@ -1,6 +1,7 @@
 // Settle stored items the owner keeps names-only (review fix 2026-10-02,
 // classifier p4 follow-up). Source-agnostic: it reads only the tier ledger
-// and each store's own folder dispositions.
+// and each store's own folder dispositions, and settles containers (folders),
+// which have no text of their own, the same way.
 //
 // Since classifier p4 a names-only item is decided on its names when it is
 // listed (`TierClassificationInput.namesOnly`): its text never arrives, so
@@ -18,6 +19,7 @@
 
 import type { TierDecision } from '../classification/tier-classifier.ts';
 import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { CONTAINER_MIME_TYPES } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export const DEFAULT_NAMES_ONLY_SETTLE_ROWS = 500;
@@ -62,7 +64,11 @@ function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   const exported = store?.exportItemCopy(identity);
   if (!store || !exported) return false;
   const locator = exported.columns['locator_uri'];
-  if (store.metadataOnlyRuleForLocator(typeof locator === 'string' ? locator : undefined) === undefined) return false;
+  const mimeType = exported.columns['mime_type'];
+  // A container (a folder) has no text of its own: listed today it is
+  // decided on its names, and one listed before is settled the same way here.
+  const container = typeof mimeType === 'string' && CONTAINER_MIME_TYPES.includes(mimeType.trim().toLowerCase());
+  if (!container && store.metadataOnlyRuleForLocator(typeof locator === 'string' ? locator : undefined) === undefined) return false;
   const decision: TierDecision = {
     metadataTier: record.metadataTier,
     contentTier: record.metadataTier,
@@ -78,7 +84,10 @@ function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
     mapRevision: record.mapRevision,
     snifferId: 'undecided',
   };
-  const recorded = set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { stagedLandingAllowed: true });
+  const recorded = set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    stagedLandingAllowed: true,
+    guard: { generation: record.generation, override: set.ledger.getOverride(identity) },
+  });
   return recorded.outcome === 'updated' || recorded.outcome === 'unchanged';
 }
 

@@ -21,6 +21,7 @@ import {
   createWhatsAppConnectorStore,
   createWhatsAppConnectorStoreSyncHandler,
 } from '../src/workers/whatsapp/index.ts';
+import { whatsappTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'personal';
 const TRANSCRIPT = 'preserved voicemail transcript';
@@ -96,7 +97,7 @@ async function extractTranscript(
   try {
     const source = createWhatsAppSchedulerSource({
       config: schedulerConfig(),
-      sync: createWhatsAppConnectorStoreSyncHandler({ store, env }),
+      sync: createWhatsAppConnectorStoreSyncHandler({ store, tierSet: whatsappTestTierSet(store), env }),
       fileExtraction: runtime!.runner,
       extractionPlanLimit: 1,
       extractionBatchSize: 1,

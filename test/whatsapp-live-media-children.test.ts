@@ -50,6 +50,7 @@ import {
   createWhatsAppTierLane,
   defaultWhatsAppMediaRoots,
 } from '../src/workers/whatsapp/store-sync.ts';
+import { whatsappTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const roots: string[] = [];
 const closers: Array<() => void> = [];
@@ -452,7 +453,7 @@ describe('every piece of media is kept; the one safeguard is free disk space (ow
     }));
     const store = new LocalConnectorStore({ dbPath: join(root, 'whatsapp.db'), corpusId: WHATSAPP_LIVE_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
     closers.push(() => store.close());
-    const sync = createWhatsAppConnectorStoreSyncHandler({ store, spoolDir, now: () => new Date('2026-07-01T13:05:00Z') });
+    const sync = createWhatsAppConnectorStoreSyncHandler({ store, tierSet: whatsappTestTierSet(store), spoolDir, now: () => new Date('2026-07-01T13:05:00Z') });
     const receipt = await sync.pull();
     expect(receipt.counts.capture_media_waiting_for_disk).toBe(1);
     expect(receipt.warnings).toContain(WHATSAPP_MEDIA_WAITING_FOR_DISK_WARNING);

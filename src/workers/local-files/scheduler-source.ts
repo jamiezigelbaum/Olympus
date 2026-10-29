@@ -1,18 +1,16 @@
 // The local files lane as a scheduler source: one sync task per approved
-// folder, extraction per folder that is read in full, and embedding. Instant
+// folder, extraction per folder that is read in full. Its stores get
+// their vectors from the shared embedding sweep (withEmbeddingSweep). Instant
 // updates come from the watch hub (`subscribeChanges`); the interval is the
 // backstop and, where the watcher cannot run, the way changes are found.
 
 import type { OlympusConfig } from '../../core/config.ts';
 import type { SourceIngestionPolicy } from '../../core/source-ingestion-policy.ts';
-import { isApprovedSecureSourceEmbeddingProvider, type SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import type { FileExtractionRunner } from '../file-extraction/runner.ts';
 import {
-  DROPBOX_EMBED_MAX_CHUNKS_PER_PASS,
   SCHEDULER_SOURCE_IDS,
   SourceSchedulerTaskFailure,
-  embedPassResult,
   fileExtractionSchedulerTask,
   progressFromCounts,
   schedulerScopeHash,
@@ -42,12 +40,6 @@ export interface LocalFilesSchedulerSourceInput {
   providerSync?: LocalFilesProviderStoreSyncHandler;
   store?: LocalConnectorStore;
   fileExtraction?: FileExtractionRunner;
-  embeddingProvider?: SourceEmbeddingProvider;
-  tierEmbeddings?: ReadonlyArray<{
-    corpusId: string;
-    store: () => LocalConnectorStore | undefined;
-    provider: SourceEmbeddingProvider;
-  }>;
   /** Live change notifications for the approved folders, and what they must not report. */
   watch?: { hub: WatchHub; volumes: VolumeResolver; ignore: readonly string[] };
   /** The Mac's folder rules; defaults to this computer's. */
@@ -66,9 +58,6 @@ function retryTomorrow(context: SourceSchedulerTaskRunContext | undefined, reaso
 
 export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSourceInput): SourceSchedulerSource | undefined {
   if (!input.providerSync || !input.store) return undefined;
-  if (input.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(input.embeddingProvider)) {
-    throw new Error('Local files secure_local embeddings require a local/private or approved Venice embedding provider.');
-  }
   const roots = input.policy.roots;
   const tasks: SourceSchedulerTask[] = [];
   // Defence in depth: whatever was saved, a guarded folder is not read unless
@@ -164,38 +153,6 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
         batchSize: input.policy.content.batch_size,
       }));
     }
-  }
-
-  if (input.embeddingProvider) {
-    tasks.push({
-      id: 'local.files_embeddings',
-      kind: 'embed',
-      writer: true,
-      run: async () => {
-        const result = await input.store!.embedChunks({
-          provider: input.embeddingProvider!,
-          limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS,
-        });
-        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
-      },
-    });
-  }
-
-  for (const tier of input.tierEmbeddings ?? []) {
-    tasks.push({
-      id: `local.files_embeddings.${schedulerScopeHash(tier.corpusId)}`,
-      kind: 'embed',
-      writer: true,
-      run: async () => {
-        const store = tier.store();
-        if (!store) return progressFromCounts({ chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0 });
-        if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(tier.provider)) {
-          throw new Error('A secure_local tier store requires a local/private or approved Venice embedding provider.');
-        }
-        const result = await store.embedChunks({ provider: tier.provider, limit: DROPBOX_EMBED_MAX_CHUNKS_PER_PASS });
-        return embedPassResult(result, DROPBOX_EMBED_MAX_CHUNKS_PER_PASS);
-      },
-    });
   }
 
   if (input.watch) watchApprovedFolders(input.watch, roots.filter((root) => !blockedRoots.has(root.path)).map((root) => root.path));

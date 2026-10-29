@@ -279,8 +279,13 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       // best passages (results pages, not page headers) within a
       // summary-sized budget, the leading items' own when they lead. The
       // search-time passages were cut to share a pack with every match.
+      // A picked item the live guard drops was revoked mid-answer (a fresh
+      // search may find another); one the store will not read in depth is not.
+      let pickedRevoked = false;
       if (options.readItem && picked.length > 0) {
+        const before = picked.length;
         picked = await admit(picked);
+        pickedRevoked = picked.length < before;
         const deep = await readInDepth(
           question,
           picked.map((index) => read.items[index]!),
@@ -309,10 +314,14 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       {
         const ok = await checkPrivateEvidence(options.eligible, [...picked.map(hitOf), ...siblings.map(hitOf), ...unreadableHits]);
         eligibleSiblings = siblings.filter((_, position) => ok[picked.length + position]);
+        const before = picked.length;
         picked = picked.filter((_, position) => ok[position]);
+        pickedRevoked ||= picked.length < before;
         unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
       }
-      if (hadReadable && picked.length === 0 && (readableMatch || unreadable === 0)) throw new NoPrivateEvidenceError();
+      if (hadReadable && picked.length === 0 && (readableMatch || unreadable === 0)) {
+        throw new NoPrivateEvidenceError(pickedRevoked ? 'revoked' : 'none_readable');
+      }
       const items = picked.map((index) => deepItems.get(index) ?? read.items[index]!);
       try {
         observe?.evidence?.({
@@ -350,7 +359,7 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
             const ok = await checkPrivateEvidence(options.eligible, prompted);
             if (!ok.every(Boolean)) {
               revoked = true;
-              throw new NoPrivateEvidenceError();
+              throw new NoPrivateEvidenceError('revoked');
             }
           };
           return runWithLocalInferenceGuard(guard, async () => {
@@ -372,10 +381,10 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           ...(signal ? { signal } : {}),
         });
       } catch (error) {
-        if (revoked) throw new NoPrivateEvidenceError();
+        if (revoked) throw new NoPrivateEvidenceError('revoked');
         throw error;
       }
-      if (revoked) throw new NoPrivateEvidenceError();
+      if (revoked) throw new NoPrivateEvidenceError('revoked');
       const byId = new Map(items.map((item, position) => [item.id, { item, hit: hitOf(picked[position]!) }]));
       const citations: PrivateAnswerSourceCitation[] = [];
       const seen = new Set<string>();

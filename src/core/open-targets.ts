@@ -208,4 +208,14 @@ export function openUnreadableSourceFor(sourceId: string): OpenUnreadableSource 
 }
 
 export const DASHBOARD_OPEN_FRAGMENT_KEY = 'olympus-open';
+
+/**
+ * The panel's own landing on one card's Import an archive (`#olympus-open=import.<card id>`), linked from
+ * Keys only: never an olympus:// target. The panel opens the picker only for a card its engine lists.
+ */
+export const DASHBOARD_IMPORT_LANDING_PREFIX = 'import.';
+
+export function dashboardImportLandingToken(sourceId: string): string {
+  return `${DASHBOARD_IMPORT_LANDING_PREFIX}${sourceId}`;
+}
 export const DASHBOARD_LAUNCH_OPEN_KEY = 'olympus_open';

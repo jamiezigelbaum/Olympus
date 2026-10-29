@@ -28,6 +28,7 @@ import type {
   SourceDashboardViewModel,
 } from '../../source-dashboard.ts';
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
+import { DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken } from '../../../core/open-targets.ts';
 import { renderDashboardAgentsSection, type AgentConnectHost } from '../agents.ts';
 import {
   connectorSheet,
@@ -161,7 +162,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
     sources.length === 0 ? '' : '<div class="sect" id="sources">Sources</div>',
     sources.length === 0
       ? ''
-      : `<div class="srows">${sources.map((source) => renderSetupRow(source, view, blocked)).join('\n')}</div>`,
+      : `<div class="srows">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard')).join('\n')}</div>`,
   ].filter((block) => block !== '').join('\n');
   return localShell({
     crumb: W.keys.title,
@@ -212,10 +213,19 @@ function refusalNotice(source: DashboardSourceCard): { notice?: string; noticeDe
   };
 }
 
-function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewModel, blocked: boolean): string {
+function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewModel, blocked: boolean, basePath: string): string {
   const action = source.connection.action;
   const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
   const id = { sourceId: source.source_id };
+  // Imports happen on the main page, from the source's card: the button goes there and opens its Import an archive.
+  if (action.kind === 'archive_import') {
+    return setupRow({
+      ...id,
+      label: source.label,
+      blurb: setupBlurb(source),
+      action: { label: action.label, kind: 'link', href: `${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardImportLandingToken(source.source_id)}` },
+    });
+  }
   if (action.kind === 'guided_session') {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
     const row = setupRow({
@@ -313,8 +323,10 @@ function setupBlurb(source: DashboardSourceCard): string {
   if (action.kind === 'this_computer') return 'Choose the folders on this computer Olympus may read. Nothing is read until you choose.';
   if (action.kind === 'archive_import') {
     // Import-only sources (Reflect, Roam, Evernote) and Archives, for exports from anywhere else; none is mail only.
-    const what = source.source_id === 'archive.imports' ? 'an export from another app' : `your ${source.label} export`;
-    return `Import ${what} on the dashboard. Olympus copies it into its own storage to read it, and never changes the original.`;
+    const where = source.source_id === 'archive.imports'
+      ? 'Import an export from another app under Other archives on the main page'
+      : `Import your ${source.label} export from its card on the main page`;
+    return `${where}. Olympus copies it into its own storage to read it, and never changes the original.`;
   }
   return '';
 }

@@ -110,7 +110,7 @@ export interface DropboxProviderStoreSyncHandlerOptions {
    * The lane's per-tier stores (tier-set.ts), whose secure leg is `store`.
    * Absent: the single-store lane exactly as before per-item routing.
    */
-  tierSet?: TieredStoreSet;
+  tierSet: TieredStoreSet;
 }
 
 export function createDropboxProviderStoreSyncHandler(
@@ -124,7 +124,7 @@ export function createDropboxProviderStoreSyncHandler(
   const connectorIdForScope = (approvedScopeKey: string): string =>
     dropboxConnectorIdForScope(account, approvedScopeKey, options.scope);
   const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec('secure_local')?.store !== options.store) {
+  if (tierSet.legSpec('secure_local')?.store !== options.store) {
     throw new Error('The Dropbox tier set\'s secure leg must be the lane\'s own store.');
   }
   // A deleted entry names a path; the file's row may sit in any tier store.
@@ -132,33 +132,31 @@ export function createDropboxProviderStoreSyncHandler(
   // stores, one item possibly held by several of them (a names copy and a
   // content copy): the union below lists each item once, and the deletion the
   // connector emits for it reaches every store through the tier router.
-  const deletedItemIdentityResolver: DropboxDeletedItemIdentityResolver = tierSet
-    ? {
-        activeIdentityForLocatorIfIndexed(input: Parameters<LocalConnectorStore['activeIdentityForLocatorIfIndexed']>[0]) {
-          for (const domain of ['secure_local', 'internal', 'public_safe'] as const) {
-            const identity = tierSet.store(domain)?.activeIdentityForLocatorIfIndexed(input);
-            if (identity) return identity;
-          }
-          return undefined;
-        },
-        activeItemsUnderLocatorIfIndexed(input: Parameters<LocalConnectorStore['activeItemsUnderLocatorIfIndexed']>[0]) {
-          const union = new Map<string, DropboxDeletedDescendant>();
-          for (const domain of ['secure_local', 'internal', 'public_safe'] as const) {
-            for (const descendant of tierSet.store(domain)?.activeItemsUnderLocatorIfIndexed(input) ?? []) {
-              if (!union.has(descendant.identity.providerItemId)) union.set(descendant.identity.providerItemId, descendant);
-            }
-          }
-          return [...union.values()];
-        },
-        // A store still building its locator index answers "nothing" for a
-        // deletion it holds; the connector waits a pass instead (the store
-        // converges when its leg runs).
-        lookupsReady() {
-          return (['secure_local', 'internal', 'public_safe'] as const)
-            .every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
-        },
+  const deletedItemIdentityResolver: DropboxDeletedItemIdentityResolver = {
+    activeIdentityForLocatorIfIndexed(input: Parameters<LocalConnectorStore['activeIdentityForLocatorIfIndexed']>[0]) {
+      for (const domain of ['secure_local', 'internal', 'public_safe'] as const) {
+        const identity = tierSet.store(domain)?.activeIdentityForLocatorIfIndexed(input);
+        if (identity) return identity;
       }
-    : options.store;
+      return undefined;
+    },
+    activeItemsUnderLocatorIfIndexed(input: Parameters<LocalConnectorStore['activeItemsUnderLocatorIfIndexed']>[0]) {
+      const union = new Map<string, DropboxDeletedDescendant>();
+      for (const domain of ['secure_local', 'internal', 'public_safe'] as const) {
+        for (const descendant of tierSet.store(domain)?.activeItemsUnderLocatorIfIndexed(input) ?? []) {
+          if (!union.has(descendant.identity.providerItemId)) union.set(descendant.identity.providerItemId, descendant);
+        }
+      }
+      return [...union.values()];
+    },
+    // A store still building its locator index answers "nothing" for a
+    // deletion it holds; the connector waits a pass instead (the store
+    // converges when its leg runs).
+    lookupsReady() {
+      return (['secure_local', 'internal', 'public_safe'] as const)
+        .every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
+    },
+  };
 
   return {
     connectorIdForScope,
@@ -169,7 +167,7 @@ export function createDropboxProviderStoreSyncHandler(
       // The tier set's committed resume point first: it is written only after
       // every tier store committed, so a run that died between stores resumes
       // behind the item it had not finished placing.
-      const candidate = tierSet?.committedCursor(connectorId)?.cursor
+      const candidate = tierSet.committedCursor(connectorId)?.cursor
         ?? options.store.lastCompletedSyncRun(connectorId)?.cursor
         ?? dropboxCheckpointCursor(request.checkpoint, connectorId, options.scope !== undefined)
         ?? undefined;
@@ -211,10 +209,6 @@ export function createDropboxProviderStoreSyncHandler(
           ...(maxItems !== undefined ? { maxItems } : {}),
           ...(cursor ? { cursor } : {}),
         };
-        if (!tierSet) {
-          const sync = await options.store.syncFromConnector(observed.connector, syncOptions);
-          return { sync, legs: [sync], completed: observed.completed(), pageDigestRestarts };
-        }
         // One traversal feeds every tier store. Existing files keep the lane
         // placement above; a new file's names are routed by its metadata tier.
         const run = await tierSet.sync(observed.connector, syncOptions);

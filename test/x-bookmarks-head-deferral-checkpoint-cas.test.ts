@@ -16,6 +16,7 @@ import {
   type XBookmarkPost,
   type XBookmarksLiveSyncConfig,
 } from '../src/workers/x-bookmarks/index.ts';
+import { xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'personal';
 const NOW = new Date('2026-08-18T15:00:00.000Z');
@@ -134,6 +135,7 @@ function handlerFor(
 ) {
   return createXBookmarksConnectorStoreSyncHandler({
     store,
+    tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
     usageStore: usage,
     embeddingProvider: fakeEmbeddingProvider(),
     account: ACCOUNT,

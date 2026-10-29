@@ -29,6 +29,7 @@ import {
 } from '../src/workers/local-files/store.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { WatchHub } from '../src/workers/local-files/watch-hub.ts';
+import { localFilesTestTierSet } from './helpers/lane-tier-sets.ts';
 
 type Selection = { key: string; state: 'ingest' | 'metadata_only' | 'exclude' };
 
@@ -88,6 +89,7 @@ function fixture(selectionFor: (proj: string) => Selection[] = (proj) => [{ key:
     approvedKey: `${LOCAL_FILES_POLICY_SOURCE}:${proj}`,
     handler: (useHub: WatchHub | null = hub) => createLocalFilesProviderStoreSyncHandler({
       store,
+      tierSet: localFilesTestTierSet(store),
       scope,
       volumes,
       snapshotDir,

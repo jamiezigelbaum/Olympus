@@ -26,6 +26,7 @@
 export const PRIVACY_FOLDER_SOURCE_NAMES: Readonly<Record<string, string>> = {
   'dropbox.files': 'Dropbox',
   'google_drive.docs': 'Google Drive',
+  'evernote.notes': 'Evernote',
 };
 
 /** Any rule-shaped value: what an editor holds, what the engine saved. */
@@ -106,7 +107,7 @@ export function privacyLogic(config: PrivacyLogicConfig) {
    * One rule exactly as the engine serializes it (dashboard-contract.ts
    * PrivacyRuleView, response-builder.ts copyPrivacySettings): a sender is
    * {gmail.email, value}; a label {gmail.email, key, value}; a folder
-   * {dropbox.files | google_drive.docs, key, display?}. `display` is only
+   * {dropbox.files | google_drive.docs | evernote.notes, key, display?}. `display` is only
    * ever a folder's, and optional.
    */
   function validRule(rule: any): boolean {

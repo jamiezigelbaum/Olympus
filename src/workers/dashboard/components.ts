@@ -7,6 +7,7 @@
  * rather than stubbed so the three pages cannot each grow their own copy.
  */
 import { createHash } from 'node:crypto';
+import { olympusOpenUrl } from '../../core/open-targets.ts';
 import { mountDashboardController } from '../../control-ui/browser-controller.ts';
 import { DASHBOARD_SAVED_SECRET_FIELD_VALUE, isGoogleOAuthSource } from '../source-dashboard.ts';
 import type {
@@ -18,7 +19,7 @@ import type {
   SourceDashboardViewModel,
 } from '../source-dashboard.ts';
 import { DASHBOARD_STATUS_COLORS, DASHBOARD_THEME_CSS } from './theme.ts';
-import { DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, dashboardActionLabel, type DashboardStatus } from './vocabulary.ts';
+import { DASHBOARD_HOST_GATE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, dashboardActionLabel, type DashboardStatus } from './vocabulary.ts';
 
 export function escapeHtml(value: string): string {
   return value
@@ -183,6 +184,7 @@ export function pageShell(input: DashboardPageShellInput): string {
       signature: dashboardPageSignature(input.body),
       session: sessionMarker,
       intervalMs: input.poll?.intervalMs ?? 15_000,
+      lockedHtml: standaloneLockedNotice(),
     })];
   const scripts = !useController
     ? [...(input.scripts ?? [])].join('\n    ')
@@ -269,7 +271,9 @@ export interface DashboardActionInput {
    * renders no form (a sheet toggle when `sheet` is set, else nothing). Sync
    * now, Disconnect, Unpair and the model retries are the panel's own tools.
    */
-  kind: 'oauth' | 'api_key' | 'this_computer' | 'none';
+  kind: 'oauth' | 'api_key' | 'this_computer' | 'none' | 'link';
+  /** Where a 'link' button goes: a page of this dashboard (safeHref), never another site. */
+  href?: string;
   /** The `source` value the control route expects. */
   source?: string;
   primary?: boolean;
@@ -295,6 +299,10 @@ export function actionButton(input: DashboardActionInput | undefined): string {
   if (action?.blockedReason !== undefined && (action.kind !== 'none' || action.sheet !== undefined)) {
     return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml(action.label)}</button>`
       + `<span class="hint">${escapeHtml(action.blockedReason)}</span></span>`;
+  }
+  if (action?.kind === 'link') {
+    const href = safeHref(action.href);
+    return href === undefined ? '' : `<a class="btn${action.primary ? ' primary' : ''}" href="${escapeHtml(href)}">${escapeHtml(action.label)}</a>`;
   }
   if (action === undefined || action.kind === 'none') {
     if (action?.sheet === undefined) return '';
@@ -835,6 +843,17 @@ interface StandaloneDashboardControllerScriptInput {
   signature: string;
   session: string;
   intervalMs: number;
+  /** What the page shows once it can no longer read (locked with no reader's token in its link). */
+  lockedHtml: string;
+}
+
+/** The locked notice: the host page's own words and one-click open link (host-page.ts, lockedGate). */
+function standaloneLockedNotice(): string {
+  const C = DASHBOARD_HOST_GATE_COPY;
+  return `<div class="attncard" data-dashboard-control-gate data-state="locked"><div class="grow">`
+    + `<span class="name">${escapeHtml(C.title)}</span>`
+    + `<span class="why"> — <a href="${escapeHtml(olympusOpenUrl({ kind: 'dashboard' }))}">${escapeHtml(C.open)}</a> `
+    + `${escapeHtml(C.fallbackBefore)}<code>${escapeHtml(C.fallbackCommand)}</code>${escapeHtml(C.fallbackAfter)}</span></div></div>`;
 }
 
 /**
@@ -856,6 +875,16 @@ export function standaloneDashboardControllerScript(
       if (!root) return;
       var abort = new AbortController();
       var mount = ${mountSource};
+      // A page opened with a reader's token still reads once locked; one opened by its session alone reads
+      // nothing more, so it locks in place instead of asking again (every ask would be refused).
+      var readable = new URL(window.location.href).searchParams.has('token');
+      function showLocked() {
+        abort.abort();
+        var page = root.querySelector('.page') || root;
+        var top = page.querySelector('.top');
+        page.innerHTML = config.lockedHtml;
+        if (top) page.insertBefore(top, page.firstChild);
+      }
       function route(params) {
         var action = params.action;
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
@@ -904,14 +933,15 @@ export function standaloneDashboardControllerScript(
               headers: { 'X-Olympus-CSRF': csrfToken },
             });
             if (response.ok) csrfToken = '';
+            if (response.ok && !readable) showLocked();
             return response.ok;
           },
         },
         navigate: function (href) { window.location.assign(href); },
         refresh: async function () {
           var response = await fetch(window.location.href, { cache: 'no-store' });
-          // Locked (here or in another tab): load the page again so it shows the locked gate, not stale controls.
-          if (response.status === 401) { window.location.reload(); return undefined; }
+          // Locked (here or in another tab): show the locked gate, not stale controls.
+          if (response.status === 401) { if (readable) window.location.reload(); else showLocked(); return undefined; }
           if (!response.ok) return undefined;
           var next = new DOMParser().parseFromString(await response.text(), 'text/html');
           var nextRoot = next.querySelector('[data-olympus-dashboard-root]');

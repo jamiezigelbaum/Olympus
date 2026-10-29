@@ -51,7 +51,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
-  FIXTURE_ITEMS, INBOX_ASK, PRIVATE_FACTS, SUITE_QUESTIONS, fixtureDocuments, forbiddenMarkers, leakyFixture, tierRules,
+  FIXTURE_ITEMS, INBOX_ASK, PRIVATE_FACTS, SUITE_QUESTIONS, fixtureDocuments, fixtureItemTiers, forbiddenMarkers, leakyFixture, tierRules,
   type SuiteQuestion,
 } from './fixture.ts';
 import { FAKE_READWISE_PORT, FAKE_READWISE_TOKEN } from './readwise-fake.ts';
@@ -386,7 +386,8 @@ async function settleIngest(run: Run): Promise<{ settled: boolean; snap?: Record
       id: 'ingest.tiers',
       title: 'Each item landed in its intended tier',
       status: ok ? 'pass' : 'fail',
-      detail: `Personal ${snap.personal}/${expected.personal}, Private ${snap.privateItems}/${expected.private}, Secrets refused ${snap.secretsLocated}/${expected.secrets}`,
+      detail: `Personal ${snap.personal}/${expected.personal}, Private ${snap.privateItems}/${expected.private}, Secrets refused ${snap.secretsLocated}/${expected.secrets}`
+        + `; ${fixtureItemTiers(settled.result?.items)}`,
     });
   }
   return { settled: settled.result?.settled === true, ...(snap ? { snap } : {}) };

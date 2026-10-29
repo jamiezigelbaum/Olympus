@@ -22,6 +22,7 @@ import {
   DropboxRateLimitError,
   isDropboxCursorResetError,
 } from '../src/workers/dropbox-files/provider-client.ts';
+import { dropboxTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const roots: string[] = [];
 
@@ -160,6 +161,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       const sync = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient,
@@ -215,6 +217,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       const sync = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient,
@@ -279,6 +282,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       const sync = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient,
@@ -343,6 +347,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       const first = await createDropboxProviderStoreSyncHandler({
         store: seeded,
+        tierSet: dropboxTestTierSet(seeded),
         account: 'personal',
         broker: broker(),
         metadataClient,
@@ -363,6 +368,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
       });
       const second = await createDropboxProviderStoreSyncHandler({
         store: upgraded,
+        tierSet: dropboxTestTierSet(upgraded),
         account: 'personal',
         broker: broker(),
         metadataClient,
@@ -390,6 +396,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       await createDropboxProviderStoreSyncHandler({
         store: seeded,
+        tierSet: dropboxTestTierSet(seeded),
         account: 'personal',
         broker: broker(),
         metadataClient: {
@@ -453,6 +460,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       const sync = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient,
@@ -503,6 +511,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       const r1 = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient,
@@ -513,6 +522,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
 
       const r2 = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient,
@@ -574,6 +584,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       const sync = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient,
@@ -607,6 +618,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       const sync = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient: {
@@ -644,6 +656,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       const nonNative = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient: {
@@ -661,6 +674,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
 
       const overBound = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient: {
@@ -699,6 +713,7 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     try {
       const sync = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: broker(),
         metadataClient: {

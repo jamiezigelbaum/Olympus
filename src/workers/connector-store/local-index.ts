@@ -1,4 +1,5 @@
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
+import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
@@ -913,6 +914,15 @@ export class TierLedgerUnavailableError extends Error {
 
 export const TIER_SET_BINDING_RUN_ID = 'tiered-store-set-binding';
 export const TIER_SET_BINDING_CONNECTOR_ID = 'tiered_store_set_binding';
+/** The writer a tier move copies an item into its new tier's store under (tier-move.ts). */
+export const TIER_MOVE_CONNECTOR_ID = 'olympus_tier_move';
+/**
+ * Writers that record a `sync_runs` row but are not a sync of the source: the
+ * embedding write authority, the set binding and a tier move. A store's
+ * status counts and its last run leave them out, so a source card never says
+ * its last sync saw the one item a tier move copied.
+ */
+const NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
 
 export class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
   constructor() {
@@ -1353,6 +1363,12 @@ export interface ConnectorStoreStatus {
      * when positive.
      */
     outsideContentWindowItems?: number;
+    /**
+     * Live items the store holds whatever the scope reads, present only when
+     * the scope hides some of them. A disconnected source reads nothing, yet
+     * its data is still here to delete.
+     */
+    storedItems?: number;
   };
   /**
    * Embedding parity PER MODEL: for each model that holds any vector here,
@@ -1543,14 +1559,10 @@ export interface ConnectorStoreEmbeddingTarget {
   provider: SourceEmbeddingProvider;
   /**
    * true: besides its queue, embed any chunk in the store with no current
-   * vector (the store-wide sweep). Only for a store whose corpus is served
-   * hybrid, whose embedding policy is not disabled, and whose source the
-   * owner approved for it (withEmbeddingSweep decides). Scoped file and mail
-   * lanes stay queue-only, embedding under their scope binding.
+   * vector (the store-wide sweep), within `accountScope` and `filters`.
+   * planStoreEmbedding decides, the same way for every store.
    */
   wholeStore?: boolean;
-  /** Backfill only on the current provider; never replay historical queue providers. */
-  missingOnly?: boolean;
   accountScope?: string;
   filters?: ConnectorStoreSearchFilters;
   assertAuthorized?: () => void | Promise<void>;
@@ -1577,7 +1589,9 @@ export interface ConnectorStoreEmbedStoreRun {
  *      embedded with the exact provider it was queued with, so a scoped lane
  *      embeds under the scope binding its sync used; a group whose binding is
  *      no longer current (the owner narrowed the scope) is dropped, and the
- *      next traversal under the new scope queues what is still in it;
+ *      next traversal under the new scope queues what is still in it; on a
+ *      `wholeStore` target a group queued under another identity is dropped
+ *      too and caught up by step 2 on the current one;
  *   2. for a `wholeStore` target, then any item with a chunk missing a vector,
  *      up to the same `maxItems` bound — which is what recovers a backlog after
  *      a restart emptied the in-memory queue.
@@ -1602,7 +1616,14 @@ export async function embedPendingChunks(
       itemsOutOfScope: 0,
     };
     runs.push(run);
-    const groups = target.missingOnly ? [] : store.queuedEmbeddingGroups(options.maxItems);
+    const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
+      // A store that catches up never replays a queue left under another
+      // identity (the owner changed the tier's model): its items are missing
+      // vectors on the current one and are picked up below instead.
+      if (target.wholeStore !== true || sameEmbeddingIdentity(group.provider, target.provider)) return true;
+      store.completeQueuedEmbedding(group.localItemIds);
+      return false;
+    });
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
@@ -1638,6 +1659,10 @@ export async function embedPendingChunks(
     else if (answered) store.setEmbeddingDeferral(undefined);
   }
   return runs;
+}
+
+function sameEmbeddingIdentity(a: SourceEmbeddingProvider, b: SourceEmbeddingProvider): boolean {
+  return a.provider === b.provider && a.backend === b.backend && a.modelId === b.modelId && a.epochId === b.epochId;
 }
 
 /**
@@ -6611,7 +6636,8 @@ export class LocalConnectorStore {
           -- The same judgment again leaves a pending re-decision pending: only
           -- the sweep closes it (re-deciding twice is harmless).
           WHEN media_judgments.verdict = excluded.verdict
-            AND media_judgments.category IS excluded.category THEN media_judgments.tier_applied
+            AND media_judgments.category IS excluded.category
+            AND media_judgments.reason IS excluded.reason THEN media_judgments.tier_applied
           -- A changed judgment (an ordinary verdict that no longer holds, or
           -- a sensitive one a newer judge could not make) is re-decided by the
           -- sweep, whatever the writer thought, so every item's tier and its
@@ -8541,7 +8567,7 @@ export class LocalConnectorStore {
     preserveStoredSearchTextOwnedFacets = false,
     preserveStoredContentHash = false,
     sourceScopeObservation?: { accountGeneration: string; scopeRevision: string; folderKeys: readonly string[] },
-  ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean } {
+  ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean; revived: boolean } {
     // The structural half of "exclusion beats inclusion". Every write into
     // this store reaches this line, and there is no option, scope, or
     // allowlist consulted after it that can put an excluded item back. A
@@ -8705,6 +8731,7 @@ export class LocalConnectorStore {
     return {
       itemPk,
       ftsMetadataChanged,
+      revived: existing?.tombstoned === 1,
       // Did this upsert change anything, or did it rewrite the row it already
       // had? Every health signal the store publishes counts writes, so a lane
       // re-indexing byte-identical rows forever reads as healthy progress —
@@ -8758,7 +8785,7 @@ export class LocalConnectorStore {
     requiredLayer: TierSearchLayer = textFromRawItem(item) === undefined ? 'metadata' : 'content',
   ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean } {
     const tierLedgerForWrite = this.visibilityLedger();
-    return this.db.transaction(() => {
+    const written = this.db.transaction(() => {
       if (!this.tierWriteAllowed(item.identity, requiredLayer, tierLedgerForWrite)) throw new ConnectorStoreTierWriteRefusedError();
       const upsert = this.upsertItem(
         item,
@@ -8795,6 +8822,28 @@ export class LocalConnectorStore {
       if (upsert.ftsMetadataChanged || missingScopeMetadataRow) this.refreshFtsForItem(upsert.itemPk);
       return upsert;
     }).immediate();
+    // Retiring the item deleted its extracted text, so what read it is read again
+    // (oweExtractionRereadAfterRevive). Best effort per job ledger, like a tier move's.
+    if (written.revived) this.oweRereadsAfterRevive(item.identity, tierLedgerForWrite);
+    const { revived: _revived, ...upsert } = written;
+    return upsert;
+  }
+
+  private oweRereadsAfterRevive(identity: SourceItemIdentity, ledger: TierLedger | undefined): void {
+    const item = { provider: identity.provider, accountScope: identity.accountScope, providerItemId: identity.providerItemId };
+    let known: string[] = [];
+    try {
+      known = ledger?.knownJobLedgerPaths() ?? [];
+    } catch {
+      // The default path and the ledgers this process has open are still visited.
+    }
+    for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+      try {
+        oweExtractionRereadAfterRevive(jobsPath, item);
+      } catch {
+        // The item is back; only this ledger's re-read is lost.
+      }
+    }
   }
 
   private tombstoneWindowRemovedItems(
@@ -11865,6 +11914,7 @@ export class LocalConnectorStore {
     const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${hiddenNotIn}) AS stored_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
           AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
@@ -11882,7 +11932,7 @@ export class LocalConnectorStore {
             ${parityWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
-          WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
+          WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
         ) AS sync_runs,
         -- EXISTS rather than COUNT(DISTINCT ...) so the per-item probe stops at
         -- the first chunk row instead of walking every chunk of every item.
@@ -11898,6 +11948,7 @@ export class LocalConnectorStore {
         ) AS full_ingestion_files
     `).get(
       ...itemParams,
+      ...jsonList(tier.hidden),
       ...itemParams, JSON.stringify(keptNamesOnlyPks),
       ...itemParams,
       ...itemParams,
@@ -11908,6 +11959,7 @@ export class LocalConnectorStore {
       ...fileScopeParams,
     ) as {
       items: number;
+      stored_items: number;
       content_elsewhere_items: number;
       files: number;
       folders: number;
@@ -12014,7 +12066,7 @@ export class LocalConnectorStore {
     // insertion, so it breaks the tie by true recency.
     const last = this.db.query(
       `SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
+       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
        ORDER BY started_at DESC, rowid DESC LIMIT 1`,
     ).get() as SyncRunRow | null;
     return {
@@ -12045,6 +12097,7 @@ export class LocalConnectorStore {
             }
           : {}),
         ...(outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {}),
+        ...(counts.stored_items > counts.items ? { storedItems: counts.stored_items } : {}),
       },
       embeddingByModel: byModel.map((row) => ({
         modelId: row.model_id,

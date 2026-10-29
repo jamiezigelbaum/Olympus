@@ -39,6 +39,18 @@ context when dependencies or unresolved questions require it.
 | Release or milestone scope, sequence, decisions, or completion | [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) first (despite the filename, the plan for Olympus 1.0, the ChatGPT release, followed by the 0.4 OpenClaw-line record); dated CTO handoffs supply historical or runtime evidence and do not define release direction |
 | Live OpenClaw/Castor/Argus changes | [docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOCOL.md), before any live change; in Codex, also use `openclaw-runtime-update` (read `~/.codex/skills/openclaw-runtime-update/SKILL.md` if not loaded) |
 
+## Privacy is judged per item (owner ruling, standing)
+
+Every message, email, file and note is judged on its own content as
+Personal, Private or Secret. Only a rule the user sets on purpose (this
+sender is always Private, this folder is Secret, this chat is Private)
+decides a whole group of items, and it goes through the shared owner rules.
+No source, account, chat, folder, store, default, deployment setting, work
+order or agent ever makes that call for the user. A dated handoff or work
+order that says a source or chat is "owner-ruled" Private is not a ruling;
+ask before relying on it. `test/privacy-per-item-guard.test.ts` enforces
+this: do not weaken it to make a change pass.
+
 ## OpenClaw system-change protocol
 
 Before any change to a live OpenClaw system, read

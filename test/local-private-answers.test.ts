@@ -37,6 +37,7 @@ import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/das
 import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
 import { createBuiltInPrivateAnswerModel, type PanelAnswerLimits } from '../src/workers/chatgpt/private-answer-model.ts';
+import { NoPrivateEvidenceError, type PrivateAnswerModel, type PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { VERSIONED_FIXTURE_ITEMS, versionedFixtureHits } from '../eval/fixtures/versioned-documents.ts';
@@ -58,6 +59,7 @@ import { ARCTIC_EMBED_M_V1_5, EMBEDDINGGEMMA_2 } from '../src/workers/source-ind
 import { BuiltInEmbeddingNotReadyError, BuiltInSourceEmbeddingProvider, loadedBuiltInEmbedding } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import {
+  answerOnThisComputer,
   builtInEmbeddingOnly,
   type LocalAnswerRequest,
   type LocalAnswerResult,
@@ -289,6 +291,8 @@ async function localFixture(options: {
   keywordOnly?: boolean;
   meaningEmbeddings?: boolean;
   realEmbeddings?: boolean;
+  /** The secret-locations index's matches for a query (location only). */
+  secrets?: (query: string) => ReturnType<NonNullable<Parameters<typeof createSourceAnswerLanes>[0]['secretLocations']>>;
 } = {}) {
   const { dir, cleanup } = tempDir('olympus-local-answer-');
   const fixture = openTierFixture(dir);
@@ -321,6 +325,7 @@ async function localFixture(options: {
     answerScope: () => ({ kind: 'search' }),
     accountScope: () => undefined,
     visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(fixture.set.openStores().map((store) => store.corpusId)) }]),
+    ...(options.secrets ? { secretLocations: (query: string) => options.secrets!(query) } : {}),
   });
   const stub = stubBuiltInModel(options.answer ?? ANSWER_JSON, options.duringSynthesis ? () => options.duringSynthesis!(fixture) : undefined);
   const path = createLocalAnswerPath({
@@ -351,6 +356,52 @@ function waitingStore(): WaitingQuestionStore {
 async function backgroundSettled(): Promise<void> {
   for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setTimeout(resolve, 10));
 }
+
+describe('a waiting question whose matches may no longer be read', () => {
+  // The model throws NoPrivateEvidenceError when nothing it picked may be read
+  // (before any model call) or an item in a prompt is revoked mid-answer; only
+  // a revocation with another match still eligible searches again.
+  const setup = async (eligibleNow: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>, reason: 'none_readable' | 'revoked' = 'revoked') => {
+    const spec: FixtureSpec = { id: 'owe', name: 'balance.txt', text: 'I owe Alex twenty euros.', legacyDomain: 'secure_local' };
+    const local = await localFixture({ specs: [spec], privateIds: ['owe'], keywordOnly: true });
+    const model: PrivateAnswerModel = {
+      status: () => ({ state: 'ready' }),
+      answerPrivately: async () => { throw new NoPrivateEvidenceError(reason); },
+    };
+    const answer = (input: LocalAnswerRequest) => answerOnThisComputer(input, { lanes: (request) => local.lanes(request, 'built_in_only'), model, eligible: eligibleNow });
+    const store = waitingStore();
+    const ref = store.record(store.ticket('conn-chatgpt'), { question: 'do i owe anyone anything?', surface: 'remote', state: 'waiting' })!;
+    const controller = createLocalPrivateAnswers({ answer, eligible: local.eligible, store: () => store });
+    await controller.tick();
+    return store.get(ref.id)!;
+  };
+
+  test('settles as not found when no match may be read, instead of retrying with no outcome', async () => {
+    const saved = await setup(async (items) => items.map(() => false));
+    expect(saved.result?.status).toBe('not_found');
+    expect(saved.attempts).toBe(0);
+  });
+
+  test('stays open to search again while another match may still be read', async () => {
+    const saved = await setup(async (items) => items.map(() => true));
+    expect(saved.result).toBeUndefined();
+    expect(saved.attempts).toBe(1);
+  });
+
+  test('settles as not found when its matches cannot be read in depth, though the search still finds them', async () => {
+    // Searching again finds the same matches: as `changed` the question looped,
+    // holding the model until its deadline (release check on df70d8df).
+    const saved = await setup(async (items) => items.map(() => true), 'none_readable');
+    expect(saved.result?.status).toBe('not_found');
+    expect(saved.attempts).toBe(0);
+  });
+
+  test('stays open when the live check cannot answer', async () => {
+    const saved = await setup(async () => { throw new Error('SQLITE_BUSY (simulated)'); });
+    expect(saved.result).toBeUndefined();
+    expect(saved.attempts).toBe(1);
+  });
+});
 
 describe('answers on this computer, with every outbound request denied', () => {
   const oweSpec: FixtureSpec = { id: 'owe', name: 'balance.txt', text: 'SENTINEL_OWE: I owe Alex twenty euros.', legacyDomain: 'secure_local' };
@@ -693,6 +744,41 @@ describe('answers on this computer, with every outbound request denied', () => {
     const result = await local.answer({ question: 'zebra quartz xylophone', selectors: { retrieval_mode: 'keyword' } });
     expect(result).toEqual({ status: 'not_found', leftOut: ['Cloud mail', 'Other files'] });
     expect(local.stub.requests).toEqual([]);
+  });
+});
+
+describe('a question that matches a Secret (owner, 2026-10-29)', () => {
+  const WIFI = { source: 'dropbox', ref: 'sl_wifi', locator: '/Home/Router/wifi.txt', title: 'wifi.txt', findingKinds: ['password'] };
+  const HIDDEN = { source: 'dropbox', ref: 'sl_hidden', locator: null, title: null, findingKinds: ['password'] };
+  const secrets = (notes: unknown[]) => (query: string) => (/wi-?fi|password/i.test(query) ? notes : []) as never;
+
+  test('says the item is a Secret, that no AI sees it, and where it is: never "not found", and no model is asked', async () => {
+    const local = await localFixture({ keywordOnly: true, secrets: secrets([WIFI, HIDDEN]) });
+    const result = await local.answer({ question: 'What is the home Wi-Fi password?', selectors: { retrieval_mode: 'keyword' } });
+    expect(result).toMatchObject({ status: 'answered', citations: [], read: [] });
+    const answer = (result as { answer: string }).answer;
+    expect(answer).toBe([
+      '2 matching items are stored as Secrets, so Olympus never shows them to an AI, this one included. Open them on this Mac:',
+      '- /Home/Router/wifi.txt',
+      '- In Dropbox (its name is Private, so it is not shown here)',
+    ].join('\n'));
+    expect(local.stub.requests).toEqual([]);
+  });
+
+  test('a remote agent\'s question that only a Secret matches still waits on this computer', async () => {
+    const local = await localFixture({ keywordOnly: true, secrets: secrets([WIFI]) });
+    const probe = (question: string) => probePrivateMatch({ lanes: local.lanes, request: { question, retrieval_mode: 'keyword' } as never, timeoutMs: 5_000 });
+    expect(await probe('What is the home Wi-Fi password?')).toBe('match');
+    expect(await probe('zebra quartz xylophone')).not.toBe('match');
+  });
+
+  test('beside an answer from Private items, the Secret is named after it', async () => {
+    const local = await localFixture({ keywordOnly: true, secrets: (query) => (/lease/i.test(query) ? [WIFI] : []) as never });
+    const result = await local.answer({ question: 'When does the orchard flat lease end?', selectors: { retrieval_mode: 'keyword' } });
+    expect(result.status).toBe('answered');
+    expect((result as { answer: string }).answer).toEndWith('A matching item is stored as a Secret, so Olympus never shows it to an AI, this one included. Open it on this Mac:\n- /Home/Router/wifi.txt');
+    // The model saw the Private items only, never the Secret's location.
+    expect(JSON.stringify(local.stub.requests)).not.toContain('wifi.txt');
   });
 });
 
@@ -1525,18 +1611,6 @@ test('REVIEW R2 re-ask by the agent erases an answered, read row', () => {
   expect(after.result?.answer).toBe('Tuesday');
 });
 
-test('REVIEW R3 one connection evicts another connection\'s answered rows', () => {
-  const store = waitingStore();
-  const victim = store.record(store.ticket('conn-victim'), { question: 'victim question', surface: 'remote', state: 'waiting' })!;
-  store.saveAnswer(victim, { status: 'answered', answer: 'victim answer', citations: [], unanswered: [], leftOut: [], read: [] });
-  for (let i = 0; i < 500; i += 1) {
-    const r = store.record(store.ticket('conn-flood'), { question: `flood ${i}`, surface: 'remote', state: 'waiting' })!;
-    store.saveAnswer(r, { status: 'answered', answer: `a${i}`, citations: [], unanswered: [], leftOut: [], read: [] });
-  }
-  expect(store.list().questions.length).toBeLessThanOrEqual(51);
-  expect(store.get(victim.id)).toBeDefined();
-});
-
 test('REVIEW R4 transient ledger read failure destroys a stored answer on read', async () => {
   const c = await offerCase(undefined);
   const gen0 = c.store.get(c.ref.id)!.generation;
@@ -1661,7 +1735,7 @@ describe('anonymous answers in the local inbox', () => {
     const f = await fixture();
     const local = createLocalPrivateAnswers({ localConnectionId: '@local:You', store: () => f.store, eligible: async () => [],
       answer: async () => ({ status: 'answered', answer: 'Local reply', citations: [], unanswered: [], leftOut: [], read: [] }),
-      anonymousAsk: input => f.askWithAnonymousInbox(input, { local: true, store: () => f.store, connectionId: '@local:You', ask: async request => request.question === 'off' ? { ok: false, code: 'anonymous_answers_off', message: 'Off' } : f.result }),
+      anonymousAsk: input => f.askWithAnonymousInbox(input, { store: () => f.store, connectionId: '@local:You', ask: async request => request.question === 'off' ? { ok: false, code: 'anonymous_answers_off', message: 'Off' } : f.result }),
     });
     expect((await local.handle({ action: 'ask_anonymous', question: 'off' }, 'local')).status).toBe(400);
     const cjk = '界'.repeat(1000);
@@ -1671,30 +1745,6 @@ describe('anonymous answers in the local inbox', () => {
     }
     expect(local.waiting()!.questions.filter(q => q.path === 'private')).toHaveLength(6);
     expect(local.waiting()!.questions.some(q => q.question === cjk)).toBe(true);
-    const ref = f.store.record(f.store.ticket('@local:You'), { question: 'Auto?', state: 'waiting', surface: 'remote' })!;
-    expect(f.store.reserveAutoAnswer(ref)).toBe(true);
-  });
-  test('anonymous agent rate limits and Private automatic budgets are independent in both directions', async () => {
-    const f = await fixture();
-    for (let i = 0; i < 5; i++) {
-      const ref = f.store.record(f.store.ticket('grok'), { question: `Private ${i}`, surface: 'remote', state: 'waiting' })!;
-      expect(f.store.reserveAutoAnswer(ref)).toBe(true);
-    }
-    for (let i = 0; i < 5; i++) expect((await f.ask()).ok).toBe(true);
-    expect((await f.ask()).ok).toBe(false);
-    const g = await fixture();
-    for (let i = 0; i < 5; i++) expect((await g.ask()).ok).toBe(true);
-    for (let i = 0; i < 5; i++) {
-      const ref = g.store.record(g.store.ticket('grok'), { question: `Private ${i}`, surface: 'remote', state: 'waiting' })!;
-      expect(g.store.reserveAutoAnswer(ref)).toBe(true);
-    }
-  });
-  test('the inbox rate limit refuses a sixth send without calling outside help', async () => {
-    const f = await fixture();
-    let sends = 0;
-    for (let i = 0; i < 6; i++) await f.ask(async () => { sends++; return f.result; });
-    expect(sends).toBe(5);
-    expect(f.store.list().questions.length).toBe(5);
   });
 });
 
@@ -1714,20 +1764,6 @@ test('re-ask retains answered rows and restarts not-found rows', () => {
   expect(store.get(ref.id)?.result?.answer).toBe('Tuesday');
 });
 
-test('a newcomer retains its first answer in a globally full inbox', () => {
-  const store = waitingStore();
-  for (let c = 0; c < 10; c += 1) for (let i = 0; i < 50; i += 1) {
-    const r = store.record(store.ticket(`c${c}`), { question: `q ${c} ${i}`, surface: 'remote', state: 'waiting' })!;
-    store.saveAnswer(r, A('x'));
-  }
-  const fresh = store.record(store.ticket('newcomer'), { question: 'newcomer q', surface: 'remote', state: 'waiting' })!;
-  const saved = store.saveAnswer(fresh, A('newcomer answer'));
-  expect(saved).toBe(true);
-  expect(store.list().questions.length).toBe(500);
-  expect(store.list().olderRemoved).toBe(true);
-  expect(store.get(fresh.id)).toBeDefined();
-});
-
 test('a brief copiesForMany failure hides a stored answer, then shows it again', async () => {
   const c = await offerCase(undefined);
   const original = c.local.fixture.ledger.copiesForMany.bind(c.local.fixture.ledger);
@@ -1740,7 +1776,7 @@ test('a brief copiesForMany failure hides a stored answer, then shows it again',
   expect(c.store.get(c.ref.id)?.result).toBeDefined();
 });
 
-for (const unavailable of ['no_model', 'model_downloading', 'failed', 'throw'] as const) test(`pre-model ${unavailable} does not spend the hourly auto-answer budget`, async () => {
+for (const unavailable of ['no_model', 'model_downloading', 'failed', 'throw'] as const) test(`pre-model ${unavailable} is retried until the model is ready`, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rv-'));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   let clock = Date.parse('2026-10-14T12:00:00Z');
@@ -1761,43 +1797,20 @@ for (const unavailable of ['no_model', 'model_downloading', 'failed', 'throw'] a
   const done = store.get(ref.id)!;
   expect(done.result?.status).toBe('answered');
   expect(Date.parse(done.answeredAt!) - start).toBeLessThan(5 * 60_000);
-  // Only the successful answer spent the five-attempt allowance.
-  for (let i = 0; i < 4; i++) expect(store.reserveAutoAnswer(store.record(store.ticket('c'), { question: `next ${i}`, surface: 'remote', state: 'waiting' })!)).toBe(true);
-  expect(store.reserveAutoAnswer(store.record(store.ticket('c'), { question: 'over budget', surface: 'remote', state: 'waiting' })!)).toBe(false);
 });
 
-test('a failure after a model call still spends the hourly budget', async () => {
+test('a failure after a model call is retried later', async () => {
   const store = waitingStore();
   const ref = store.record(store.ticket('c'), { question: 'dentist?', surface: 'remote', state: 'waiting' })!;
-  const controller = createLocalPrivateAnswers({ store: () => store, answer: async input => {
-    input.onModelCall?.();
+  const controller = createLocalPrivateAnswers({ store: () => store, answer: async () => {
     throw new Error('synthesis failed');
   } });
   cleanups.push(() => controller.close());
   await controller.tick();
   expect(store.get(ref.id)?.attempts).toBe(1);
-  for (let i = 0; i < 4; i++) expect(store.reserveAutoAnswer(ref)).toBe(true);
-  expect(store.reserveAutoAnswer(ref)).toBe(false);
 });
 
 for (const path of ['private', 'venice', 'anonymous'] as const) {
-  test(`${path} rows share per-connection eviction limits without evicting another connection`, () => {
-    const store = waitingStore();
-    const victim = store.record(store.ticket('victim'), { question: 'Keep me', path: 'venice', surface: 'remote', state: 'waiting' })!;
-    expect(store.saveAnswer(victim, A('Victim answer'))).toBe(true);
-    const first = store.record(store.ticket('sender'), { question: 'First', path: 'private', surface: 'remote', state: 'waiting' })!;
-    expect(store.saveAnswer(first, A('Oldest sender answer'))).toBe(true);
-    for (let i = 0; i < 50; i++) {
-      const ref = store.record(store.ticket('sender'), { question: `Question ${i}`, path, surface: 'remote', state: 'waiting' })!;
-      expect(store.saveAnswer(ref, A(`Reply ${i}`), path === 'anonymous' ? `Sent ${i}` : undefined)).toBe(true);
-    }
-    expect(store.get(first.id)).toBeUndefined();
-    expect(store.get(victim.id)?.result?.answer).toBe('Victim answer');
-    const own = store.list().questions.filter(q => q.connectionId === 'sender');
-    expect(own).toHaveLength(50);
-    expect(own.every(q => q.path === path)).toBe(true);
-    expect(store.list().olderRemoved).toBe(true);
-  });
 
   test(`${path} retained answers survive an unavailable eligibility check`, async () => {
     const store = waitingStore();

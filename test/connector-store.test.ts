@@ -41,6 +41,7 @@ import {
   syncAndEmbedFromConnector,
   verifyConnectorStoreCorpusIntegrity,
 } from '../src/workers/connector-store/index.ts';
+import { TIER_MOVE_CONNECTOR_ID } from '../src/workers/connector-store/tier-move.ts';
 import type {
   SourceEmbeddingInput,
   SourceEmbeddingProvider,
@@ -2141,6 +2142,32 @@ describe('LocalConnectorStore sync', () => {
     insert.run('connector-sync-aaa-latest', CORPUS_ID, 'fake', startedAt);
     db.close();
     expect(store.status().lastSyncRun?.syncRunId).toBe('connector-sync-aaa-latest');
+    store.close();
+  });
+
+  test('a tier move copying an item in is not the source\'s last sync, and not a sync run', () => {
+    const dbPath = join(mkdtempSync(join(tmpdir(), 'connector-store-')), 'store.sqlite');
+    const store = newStore(dbPath);
+    const db = new Database(dbPath);
+    const insert = db.query(`
+      INSERT INTO sync_runs (sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at)
+      VALUES (?, ?, ?, 'completed', NULL, ?, ?, ?, ?)
+    `);
+    insert.run('connector-sync-source', CORPUS_ID, 'fake', 4, 4, '2026-10-29T10:44:00.000Z', '2026-10-29T10:44:02.000Z');
+    // A move writes its own run, one item, after the sync (release check 2026-10-29: the card said the last sync saw 1 item).
+    insert.run('connector-sync-move', CORPUS_ID, TIER_MOVE_CONNECTOR_ID, 1, 1, '2026-10-29T10:45:33.000Z', '2026-10-29T10:45:33.000Z');
+    db.close();
+    expect(store.status().lastSyncRun).toMatchObject({ syncRunId: 'connector-sync-source', itemsSeen: 4 });
+    expect(store.status().counts.syncRuns).toBe(1);
+    store.close();
+  });
+
+  test('a scope that reads nothing still says how many items are stored, so they can be deleted', async () => {
+    // test-omarchy 2026-10-29: a disconnected Dropbox read 0 items while 150 were stored, and Delete was never offered.
+    const store = newStore();
+    await store.syncFromConnector(createFakeConnector([[RETRO, GROCERIES]]), { fetchContent: true });
+    expect(store.status({ itemsAllowed: false, contentAllowed: false }).counts).toMatchObject({ items: 0, storedItems: 2 });
+    expect(store.status().counts.storedItems).toBeUndefined();
     store.close();
   });
 });

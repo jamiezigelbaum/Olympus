@@ -33,7 +33,7 @@ export const DASHBOARD_UPDATE_COPY = {
 
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
 export const DASHBOARD_FOLDER_NEEDS_PERMISSION = 'Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).';
-export const DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.';
+export const DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose is in Desktop, Documents, Downloads, iCloud Drive or another disk, which Olympus cannot open on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.';
 export const DASHBOARD_FOLDER_UNREADABLE = 'Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.';
 
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
@@ -2073,6 +2073,9 @@ export const DASHBOARD_HOST_GATE_COPY = {
   pasteToken: 'Paste the worker bearer token.',
   readToken: 'That is the read-only view token; use the worker bearer token from setup.',
   refused: 'That token was not accepted.',
+  /** Beside the panel when the browser kept a page the panel opened (a sign-in) from opening. */
+  openBlocked: 'Your browser did not open the page.',
+  openBlockedLink: 'Open it',
 } as const;
 
 /**
@@ -2881,6 +2884,11 @@ export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
   label: 'Set up privacy',
 } as const;
 
+/** needsYou while the privacy check waits for the owner to approve its model (approved on the computer only). */
+export const DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
+  sentence: 'Approve the model that checks what\'s private. Until you do, new items it would check wait. On your computer, run olympus tier classifier approve --why, followed by your reason',
+} as const;
+
 /**
  * The private answer panel under a ChatGPT search result
  * (src/workers/dashboard/chatgpt/private-answer.ts). `{n}`, `{percent}`,
@@ -3203,7 +3211,6 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   anonymousPending: 'Anonymous question pending',
   inboxUnavailable: 'The inbox cannot keep another answer right now. Try again later.',
   inboxBeforeSend: 'The inbox cannot keep this answer right now. Nothing was sent.',
-  anonymousRateLimit: 'Too many questions. Try again later. Nothing was sent.',
   anonymousFailed: 'Olympus could not answer this question.',
   goToModels: 'Go to Models',
   privatePath: "Local model",

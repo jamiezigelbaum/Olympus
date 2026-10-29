@@ -10,7 +10,6 @@ import {
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
 import {
-  syncAndEmbedFromConnector,
   type ConnectorStoreSyncAndEmbedSummary,
   type ConnectorStoreSyncOptions,
   type LocalConnectorStore,
@@ -170,7 +169,7 @@ export interface ReadwiseConnectorStoreSyncHandlerOptions {
    * The lane's per-tier stores (tier-set.ts), whose internal leg is `store`.
    * Absent: the single-store lane exactly as before per-item routing.
    */
-  tierSet?: TieredStoreSet;
+  tierSet: TieredStoreSet;
 }
 
 type ReadwiseLaneRun = ConnectorStoreSyncAndEmbedSummary & { tiered?: TieredLaneReceiptCounts };
@@ -201,7 +200,7 @@ export function createReadwiseConnectorStoreSyncHandler(
   });
 
   const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec('internal')?.store !== options.store) {
+  if (tierSet.legSpec('internal')?.store !== options.store) {
     throw new Error('The Readwise tier set\'s internal leg must be the lane\'s own store.');
   }
   // One traversal feeds every tier store. Existing items keep the lane's
@@ -218,15 +217,6 @@ export function createReadwiseConnectorStoreSyncHandler(
     sync: ConnectorStoreSyncOptions,
     commitCursor = true,
   ): Promise<ReadwiseLaneRun> => {
-    if (!tierSet) {
-      return syncAndEmbedFromConnector({
-        store: options.store,
-        connector,
-        embeddingProvider: options.embeddingProvider,
-        sync,
-        embed: false,
-      });
-    }
     const run = await tierSet.sync(connector, sync, { commitCursor, embed: false });
     const merged = mergedTieredLaneRun(run, 'internal');
     return {
@@ -281,7 +271,7 @@ export function createReadwiseConnectorStoreSyncHandler(
       // the last run was an uncursored reconcile (which stores no cursor).
       // The tier set's committed resume point comes first: it is written only
       // after every tier store committed.
-      const candidate = tierSet?.committedCursor(READWISE_CONNECTOR_ID)?.cursor
+      const candidate = tierSet.committedCursor(READWISE_CONNECTOR_ID)?.cursor
         ?? options.store.lastCompletedSyncRun(READWISE_CONNECTOR_ID)?.cursor
         ?? request.checkpoint?.trim()
         ?? undefined;

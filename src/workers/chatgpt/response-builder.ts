@@ -129,7 +129,10 @@ const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009fâ€‹-â€
  * may carry (enum values). Anything else falls back to checking again.
  */
 const OAUTH_SOURCES = new Set<ChatGptOAuthSource>(['gmail', 'google-drive', 'dropbox']);
-const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']);
+const FOLDER_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['google_drive.docs', 'dropbox.files', 'local.files', 'evernote.notes']);
+const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', ...FOLDER_SOURCE_IDS]);
+/** Folder sources an always-Private rule may name (privacy-profile.ts RULE_SOURCES.folder). */
+const PRIVACY_FOLDER_SOURCE_IDS = new Set<string>(['google_drive.docs', 'dropbox.files', 'evernote.notes']);
 const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'evernote.notes', 'local.files']);
 const DELETE_DATA_SOURCE_IDS = new Set<ChatGptDeleteSourceId>([...DISCONNECT_SOURCE_IDS, 'telegram.messages', 'whatsapp.personal.messages']);
 const SYNC_SOURCE_IDS = new Set<ChatGptSyncSourceId>(DISCONNECT_SOURCE_IDS);
@@ -481,7 +484,16 @@ export interface AnswerResultOptions {
   privateMatch?: PrivateMatchSummary & { jobId?: string };
   /** No source is connected yet: an empty result says so instead of counting searched sources. */
   noSourcesConnected?: boolean;
+  /**
+   * The Private check outlasted its deadline and goes on on the computer: the
+   * model says, in one line, that any Private answer will wait there.
+   */
+  privateCheckPending?: boolean;
 }
+
+/** A Private check still running when the result went out: never silent about where its answer goes. */
+export const PRIVATE_CHECK_PENDING_NOTE = 'Olympus is still checking this question against the user\'s Private items on their computer. '
+  + 'Tell the user, in one short sentence, that if any match, the answer will be waiting in Olympus on their computer.';
 
 /** An empty search on a new install, before any source is connected. */
 export const NO_SOURCES_CONNECTED_TEXT = 'No sources are connected to Olympus yet, so there is nothing to search. '
@@ -732,6 +744,7 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   // A released answer with citations is evidence the model answers from.
   const privateNote = privateMatchNote(options.privateMatch, 0, !usedPrivate && shownCitations.length > 0);
   const notes = privateNote ? [privateNote] : privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
+  if (!privateNote && options.privateCheckPending) notes.push(PRIVATE_CHECK_PENDING_NOTE);
   const textParts = [answer];
   if (shownCitations.length > 0) {
     textParts.push('', 'Sources:', ...shownCitations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
@@ -853,6 +866,7 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   const privateNote = privateMatchNote(options.privateMatch, whole(coverageRecord.content_private_items), !nothingRead);
   if (privateNote) notes.push(privateNote);
   else if (privateMatched) notes.push(DASHBOARD_CHATGPT_VOCABULARY.privateMatches);
+  if (!privateNote && options.privateCheckPending) notes.push(PRIVATE_CHECK_PENDING_NOTE);
   const structured: SearchResult = { status: evidence.length > 0 ? 'found' : 'none', evidence, coverage, notes };
   const lines: string[] = [];
   if (evidence.length === 0) {
@@ -1142,7 +1156,7 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
       if (!PRIVACY_RULE_KINDS.has(rule.kind) || !SCOPE_SOURCE_IDS.has(rule.source_id)) return [];
       if (rule.kind === 'sender') return [{ kind: 'sender', source_id: 'gmail.email', value: text(rule.value) }];
       if (rule.kind === 'label') return [{ kind: 'label', source_id: 'gmail.email', key: opaque(rule.key), value: text(rule.value) }];
-      const sourceId = rule.source_id === 'dropbox.files' ? 'dropbox.files' : rule.source_id === 'google_drive.docs' ? 'google_drive.docs' : undefined;
+      const sourceId = PRIVACY_FOLDER_SOURCE_IDS.has(rule.source_id) ? rule.source_id : undefined;
       if (!sourceId) return [];
       const display = text(rule.display);
       return [{ kind: 'folder', source_id: sourceId, key: opaque(rule.key), ...(display ? { display } : {}) }];
@@ -1215,7 +1229,7 @@ function copyScopeList(list: ScopeList): ScopeList {
   if (list.kind === 'folders') {
     const out: FolderScopeList = {
       kind: 'folders',
-      source_id: list.source_id === 'dropbox.files' || list.source_id === 'local.files' ? list.source_id : 'google_drive.docs',
+      source_id: FOLDER_SOURCE_IDS.has(list.source_id) ? list.source_id : 'google_drive.docs',
       account_generation: opaque(list.account_generation),
       scope_revision: opaque(list.scope_revision),
       status: list.status === 'approved' ? 'approved' : 'scope_pending',
@@ -1317,6 +1331,7 @@ type SurfaceOnlyErrorCode =
   | 'not_connected'
   | 'not_linked'
   | 'picker_unavailable'
+  | 'folder_needs_helper'
   | 'confirm_whole_account'
   | 'privacy_owner_only'
   | 'embedding_change_needs_approval'
@@ -1365,6 +1380,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   delete_incomplete: 'Olympus couldn\'t finish deleting this source\'s indexed data. Try again; the engine is reopening its stores.',
   delete_unavailable: 'Olympus can\'t delete this source\'s indexed data from here right now. Nothing was deleted. Try again in a moment.',
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',
+  folder_needs_helper: 'Olympus cannot open Desktop, Documents, Downloads, iCloud Drive or other disks on this Mac yet, or a folder that holds them. Your choices are still here. Choose folders outside them, or drag files onto the dashboard.',
   confirm_whole_account: 'Choosing the whole account needs the owner\'s confirmation in the Olympus panel.',
   privacy_owner_only: 'Only the owner can remove a privacy rule or change what they said is private, in the Olympus panel.',
   embedding_change_needs_approval: 'Changing the search model re-indexes every source and needs the owner\'s approval on the computer.',

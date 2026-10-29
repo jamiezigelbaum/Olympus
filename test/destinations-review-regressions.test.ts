@@ -262,7 +262,7 @@ describe('anonymous send authorization and server-owned local quotas', () => {
       expect(sent).toBe(0);
     });
   }
-  test('fresh claimed names share quotas and cannot take the owner label or bucket', async () => {
+  test('fresh claimed names cannot take the owner label or bucket', async () => {
     const store = openWaitingPrivateQuestionStore(join(tmp(), 'inbox.sqlite'));
     cleanups.push(() => store.close());
     let sent = 0;
@@ -276,7 +276,7 @@ describe('anonymous send authorization and server-owned local quotas', () => {
         return { ok: true, reply: 'r', sent: 'q', model: 'm' } as never;
       } });
     }
-    expect(sent).toBe(5);
+    expect(sent).toBe(6);
     expect(store.get(owner.id)?.question).toBe('Owner question');
     expect(anonymousInboxConnectionId({ connection_id: 'authenticated-remote', display_name: 'You' })).toBe('authenticated-remote');
     expect(localInboxLabel('@local:You')).toBe('You');

@@ -9874,6 +9874,28 @@ var init_file_scope_sources = __esm(() => {
       needConfirm: "Confirm the whole computer first."
     }
   });
+  registerBuiltIn({
+    sourceId: "evernote.notes",
+    provider: "evernote",
+    account: "provider_account",
+    credentialCapability: "evernote.notes.sync",
+    pinEnvName: "OLYMPUS_SOURCE_INDEX_EVERNOTE_CREDENTIAL_HANDLE",
+    corpusIdsToInvalidate: ["secure_local.evernote.notes", "internal.evernote.notes"],
+    filterFamily: "folder_id",
+    itemKeysExact: true,
+    normalizeKey: (key) => key.trim(),
+    rootKeys: ["/"],
+    label: "Evernote",
+    dispositionSourceId: "evernote.notes",
+    wholeScopeWords: {
+      row: "All notebooks",
+      prompt: "Olympus will read every notebook you own, including notebooks added later, except notebooks you set to Names only or Skip.",
+      confirm: "Yes, read all my notebooks",
+      summary: "Every other notebook you own: fully read, including notebooks added later.",
+      onlyFull: "All notebooks is all or nothing. Set Names only or Skip on notebooks instead.",
+      needConfirm: "Confirm all notebooks first."
+    }
+  });
 });
 
 // src/core/source-scope-approval.ts
@@ -13456,6 +13478,10 @@ function heldUntilJudged(reasons) {
 function contentDigestReason(text2) {
   return `content:sha256:${createHash9("sha256").update(text2.trim()).digest("hex")}`;
 }
+function contentNamesReason(names, parentContext) {
+  const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
+  return `content:names:${createHash9("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
+}
 function snifferContentMaterial(names, excerpt, parentContext) {
   const trimmed = names.trim();
   const context = parentContextLine(parentContext);
@@ -13512,8 +13538,9 @@ function withPublicRetired(decision) {
 }
 function classifyItemTiers(input, options = {}) {
   const decision = classifyItemTiersWithPublic(input, options);
-  if (input.text !== undefined && decision.contentTier !== "secrets")
-    decision.reasons.push(contentDigestReason(input.text));
+  if (input.text !== undefined && decision.contentTier !== "secrets") {
+    decision.reasons.push(contentDigestReason(input.text), contentNamesReason(input.signals, input.parentContext));
+  }
   return options.retirePublic ? withPublicRetired(decision) : decision;
 }
 function classifyItemTiersWithPublic(input, options) {
@@ -13610,7 +13637,8 @@ function classifyContentTier(input, options = {}) {
         `override:item:${options.override.tier}`,
         ...tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [],
         ...heldMark(holdUntilJudged, tier),
-        contentDigestReason(input.text)
+        contentDigestReason(input.text),
+        contentNamesReason(input, input.parentContext)
       ],
       contentPending: false
     };
@@ -13660,10 +13688,13 @@ function classifyContentTier(input, options = {}) {
     reasons: [
       ...content.reasons,
       ...lifted ? [PUBLIC_RETIRED_REASON] : [],
-      ...content.tier !== "secrets" ? [contentDigestReason(input.text)] : []
+      ...content.tier !== "secrets" ? [contentDigestReason(input.text), contentNamesReason(input, input.parentContext)] : []
     ],
     contentPending: content.pending || text2 === undefined
   };
+}
+function restsOnRetiredSourcePrior(reasons) {
+  return reasons.some((reason) => reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
 }
 function namesDecidedByOwner(reasons) {
   return reasons.some((reason) => reason.startsWith("metadata:owner_rule:"));
@@ -13792,11 +13823,12 @@ function contentPass(args) {
     }
   }
   const imageOrdinary = args.image === true && args.imageJudgment?.verdict === "ordinary";
-  if (args.image && args.imageJudgment?.verdict === "sensitive") {
+  const textDecides = imageOrdinary && args.imageJudgment?.textDecides === true;
+  if (args.image && (args.imageJudgment?.verdict === "sensitive" || textDecides && !imageTextReadable(text2))) {
     return {
       tier: maxTier(metadata.tier, "secure"),
       decidedBy: "default",
-      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment.category)}`, ...mark],
+      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment?.category)}`, ...mark],
       pending: false
     };
   }
@@ -13821,7 +13853,7 @@ function contentPass(args) {
       reasons: detectorReasons(detection.signals)
     });
   }
-  const recordFlags = ownRecordSignals(text2, args.matchInput);
+  const recordFlags = [...ownRecordSignals(text2, args.matchInput), ...textDecides ? ["image_document"] : []];
   const held = args.holdUntilJudged === true && metadata.ownerDecided !== true;
   let pending = false;
   const flags = [
@@ -13860,8 +13892,9 @@ function contentPass(args) {
   }
   if (reasons.length === 0)
     reasons.push("content:no_raise");
-  if (imageOrdinary)
-    reasons.unshift(IMAGE_ORDINARY_REASON);
+  if (imageOrdinary) {
+    reasons.unshift(textDecides ? `${IMAGE_TEXT_DECIDES_REASON_PREFIX}${imageCategoryCode(args.imageJudgment?.category)}` : IMAGE_ORDINARY_REASON);
+  }
   reasons.push(...mark);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
 }
@@ -13886,6 +13919,10 @@ function ownRecordSignals(text2, names) {
   if (/\b(?:test|lab|bloodwork|blood work|visit|statement|results?)\b/i.test(title) && /\b(?:\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?:\d{4}|\d{1,2}(?:,?\s+\d{4})?))\b/i.test(title))
     signals.push("dated_record");
   return signals;
+}
+function imageTextReadable(text2) {
+  const words = text2.match(/[\p{L}\p{N}][\p{L}\p{N}'’.-]*/gu) ?? [];
+  return words.length - 1 >= IMAGE_TEXT_DECIDES_MIN_WORDS;
 }
 function imageCategoryCode(category) {
   const allowed = "abcdefghijklmnopqrstuvwxyz0123456789_";
@@ -14012,8 +14049,8 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-13.p6", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
-Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
+Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
@@ -15006,7 +15043,7 @@ class TierLedger {
       SELECT i.*, CASE WHEN
           i.routed = 1 AND i.content_read = 1
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move')
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior')
           -- A held row's stamp names the exact decision it re-read, so it
           -- never outlives that decision (rejudgeKeyForHeld).
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
@@ -15032,6 +15069,9 @@ class TierLedger {
           )
           AND (
             i.state = 'pending'
+            -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
+            -- wrong under the owner ruling of 2026-10-28, so judged again now.
+            OR instr(i.reasons_json, '"metadata:prior:source_') > 0
             OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
@@ -15115,7 +15155,10 @@ class TierLedger {
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
     const rows = this.db.query(`
       SELECT * FROM tier_items
-      WHERE state = 'pending' AND routed = 1 AND content_read = 0 AND content_pending = 1 AND metadata_pending = 0
+      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')))
         AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
@@ -17370,6 +17413,168 @@ var init_tier_ledger = __esm(() => {
     secure_local: 2
   };
 });
+// src/workers/file-extraction/job-names.ts
+import { existsSync as existsSync13 } from "node:fs";
+import { Database as Database4 } from "bun:sqlite";
+function defaultFileExtractionJobsDbPath(env = process.env) {
+  return sharedDataPath("file-extraction-jobs", env);
+}
+function extractionJobsDbPaths(env = process.env) {
+  return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
+}
+function clearExtractionJobNames(dbPath, item, options = {}) {
+  if (dbPath === ":memory:" || !existsSync13(dbPath))
+    return { cleared: 0, durable: true };
+  const db = new Database4(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
+    if (!table)
+      return { cleared: 0, durable: true };
+    return db.transaction(() => {
+      if (options.proceed && !options.proceed())
+        return { cleared: 0, durable: true };
+      const claims = claimsTableExists(db);
+      const durable = redactionsTableExists(db) && (options.claimant === undefined || claims);
+      const now = new Date().toISOString();
+      if (redactionsTableExists(db)) {
+        db.query(`
+          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", now);
+      }
+      if (options.claimant !== undefined && claims) {
+        db.query(`
+          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (provider, account_scope, provider_item_id, claimant, claimed_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(item.provider, item.accountScope, item.providerItemId, options.claimant, now);
+      }
+      const artifactItems = item.localItemId !== undefined ? "provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ?" : "provider = ? AND account_scope = ? AND provider_item_id = ?";
+      const itemParams = item.localItemId !== undefined ? [item.provider, item.accountScope, item.providerItemId, item.localItemId] : [item.provider, item.accountScope, item.providerItemId];
+      if (artifactsTableExists(db)) {
+        db.query(`
+          DELETE FROM extraction_artifacts
+          WHERE (corpus_id, local_item_id) IN (SELECT corpus_id, local_item_id FROM extraction_jobs WHERE ${artifactItems})
+        `).run(...itemParams);
+      }
+      const cleared = item.localItemId !== undefined ? db.query(`
+            UPDATE extraction_jobs SET name = NULL
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
+          `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId).changes : db.query(`
+            UPDATE extraction_jobs SET name = NULL
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
+          `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      return { cleared, durable };
+    }).immediate();
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
+  if (dbPath === ":memory:" || !existsSync13(dbPath))
+    return { retired: 0, stillSecret: false };
+  const db = new Database4(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!redactionsTableExists(db))
+      return { retired: 0, stillSecret: false };
+    return db.transaction(() => {
+      if (stillSecret())
+        return { retired: 0, stillSecret: true };
+      if (claimsTableExists(db)) {
+        db.query(`
+          DELETE FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND claimant = ?
+        `).run(item.provider, item.accountScope, item.providerItemId, claimant);
+        const heldElsewhere = db.query(`
+          SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? LIMIT 1
+        `).get(item.provider, item.accountScope, item.providerItemId) !== null;
+        if (heldElsewhere)
+          return { retired: 0, stillSecret: false };
+      }
+      const retired = db.query(`
+        DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
+        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      if (retired > 0 && rereadsTableExists(db)) {
+        db.query(`
+          INSERT INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+          SELECT job_id FROM extraction_jobs
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+            AND (status IN ('indexed', 'leased')
+              OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
+          ${rereadsHaveReason(db) ? "ON CONFLICT(job_id) DO UPDATE SET reason = NULL" : "ON CONFLICT(job_id) DO NOTHING"}
+        `).run(item.provider, item.accountScope, item.providerItemId);
+      }
+      return { retired, stillSecret: false };
+    }).immediate();
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function artifactsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
+}
+function oweExtractionRereadAfterTierMove(dbPath, item) {
+  if (dbPath === ":memory:" || !existsSync13(dbPath))
+    return 0;
+  const db = new Database4(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!rereadsTableExists(db) || !rereadsHaveReason(db))
+      return 0;
+    const placement = PLACEMENT_SETTLEMENTS.map(() => "(status = ? AND last_error_kind = ?)").join(" OR ");
+    return db.query(`
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+      SELECT job_id, ? FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        AND (status = 'leased' OR ${placement})
+    `).run(REREAD_AFTER_PLACEMENT, item.provider, item.accountScope, item.providerItemId, ...PLACEMENT_SETTLEMENTS.flatMap((settlement) => [settlement.status, settlement.kind])).changes;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function oweExtractionRereadAfterRevive(dbPath, item) {
+  if (dbPath === ":memory:" || !existsSync13(dbPath))
+    return 0;
+  const db = new Database4(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!rereadsTableExists(db) || !rereadsHaveReason(db))
+      return 0;
+    return db.query(`
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+      SELECT job_id, ? FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        AND status IN ('indexed', 'leased')
+    `).run(REREAD_AFTER_REVIVE, item.provider, item.accountScope, item.providerItemId).changes;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function rereadsHaveReason(db) {
+  return db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all().some((column) => column.name === "reason");
+}
+function rereadsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
+}
+function claimsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTION_CLAIMS_TABLE) !== null;
+}
+function redactionsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
+}
+var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", REREAD_AFTER_PLACEMENT = "placement", REREAD_AFTER_REVIVE = "revived", openLedgerPaths, PLACEMENT_SETTLEMENTS;
+var init_job_names = __esm(() => {
+  init_olympus_layout();
+  openLedgerPaths = new Map;
+  PLACEMENT_SETTLEMENTS = [
+    { status: "metadata_only", kind: "store_item_metadata_only" },
+    { status: "metadata_only", kind: "store_image_content_private_only" },
+    { status: "blocked_policy", kind: "store_item_tier_move_queued" }
+  ];
+});
 
 // src/core/source-index/keyword-context.ts
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -18502,7 +18707,7 @@ var init_remote_access = __esm(() => {
 });
 
 // src/core/store-identity.ts
-import { existsSync as existsSync13, realpathSync as realpathSync3, statSync as statSync9 } from "node:fs";
+import { existsSync as existsSync14, realpathSync as realpathSync3, statSync as statSync9 } from "node:fs";
 import { basename as basename3, dirname as dirname17, isAbsolute as isAbsolute9, join as join17, relative as relative4, resolve as resolve7, sep as sep4 } from "node:path";
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
@@ -18580,7 +18785,7 @@ function storePlacementView(env = process.env) {
       return loaded = { kind: "unreadable" };
     try {
       const read = readSourceRegistry(env);
-      loaded = existsSync13(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
+      loaded = existsSync14(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
     } catch {
       loaded = { kind: "unreadable" };
     }
@@ -18732,7 +18937,7 @@ import { createHash as createHash12, randomUUID as randomUUID4 } from "node:cryp
 import {
   chmodSync as chmodSync5,
   closeSync as closeSync9,
-  existsSync as existsSync14,
+  existsSync as existsSync15,
   fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync12,
   lstatSync as lstatSync8,
@@ -18807,10 +19012,10 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
     const refs = refsDir(path);
     for (const name of markerNames(holder))
       rmSync5(join18(refs, name), { force: true });
-    const remaining = existsSync14(refs) ? readdirSync2(refs) : [];
+    const remaining = existsSync15(refs) ? readdirSync2(refs) : [];
     if (remaining.length > 0)
       return false;
-    if (existsSync14(refs))
+    if (existsSync15(refs))
       rmdirSync(refs);
     rmSync5(path, { force: true });
     return true;
@@ -18847,7 +19052,7 @@ function sweepMediaCache(dir, options = {}) {
       if (!name.endsWith(".jpg") || !isSha256(name.slice(0, -4)))
         continue;
       const refs = refsDir(path);
-      if (existsSync14(refs)) {
+      if (existsSync15(refs)) {
         for (const marker of readdirSync2(refs)) {
           const markerPath = join18(refs, marker);
           const gone = marker.startsWith("staging-") || marker.endsWith(".tmp") ? old(markerPath) : marker.startsWith(STORE_MARKER_PREFIX) ? storeHolderGone(markerPath, placement) : holderGone(markerPath, marker, placement);
@@ -18911,12 +19116,12 @@ function holderGone(marker, markerName, placement) {
   const name = readMarker(marker);
   if (!name || !isAbsolute10(name) || holderDigest(name) !== markerName)
     return false;
-  if (existsSync14(name))
+  if (existsSync15(name))
     return false;
   const verdict = placement.pathMarker(name);
   if (verdict !== "unplaced")
     return verdict === "gone";
-  return existsSync14(dirname18(name));
+  return existsSync15(dirname18(name));
 }
 function storeHolderGone(marker, placement) {
   const recorded = parseStoreMarker(readMarker(marker));
@@ -18998,7 +19203,7 @@ var init_media_cache = __esm(() => {
 });
 
 // src/workers/classification/tier-set-binding.ts
-import { existsSync as existsSync15 } from "node:fs";
+import { existsSync as existsSync16 } from "node:fs";
 import { basename as basename5, dirname as dirname19, join as join19 } from "node:path";
 function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   const candidates = [recordedLedgerPath];
@@ -19012,7 +19217,7 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
 }
 function findTierSetLedger(storeDbPath, binding) {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
-    if (candidate === ":memory:" || !existsSync15(candidate))
+    if (candidate === ":memory:" || !existsSync16(candidate))
       continue;
     if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
       return candidate;
@@ -19084,11 +19289,14 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
   const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
-  const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
+  const recorded = ledger?.getCurrent(item.identity);
+  const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
+  const signals = connector.classificationSignals(item);
   const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
+  const sniffer = fenced && recordedContentVerdictSniffer(fenced, recorded, text2, contentNamesReason(signals, parentContext));
+  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
-    signals: connector.classificationSignals(item),
+    signals,
     locators: ["locatorUri", "url", "pathDisplay"].map((key2) => item.metadata[key2]).filter((value) => typeof value === "string"),
     provider: item.identity.provider,
     ...text2 !== undefined ? { text: text2 } : {},
@@ -19103,6 +19311,21 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...override ? { override } : {},
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
+}
+function recordedContentVerdictSniffer(sniffer, recorded, text2, names) {
+  if (!recorded || !text2?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
+    return sniffer;
+  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text2)) || !recorded.reasons.includes(names))
+    return sniffer;
+  const tier = recorded.contentTier;
+  const prefix = `content:sniffer:${sniffer.id}:`;
+  const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
+  if (tier !== "private" && tier !== "secure" || !code || code === "undecided")
+    return sniffer;
+  return {
+    id: sniffer.id,
+    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
+  };
 }
 function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
   const stillAsk = () => {
@@ -19124,6 +19347,111 @@ var init_tier_placement = __esm(() => {
     public_safe: "S0",
     internal: "S3",
     secure_local: "S4"
+  };
+});
+
+// src/workers/source-index/built-in-reasoning/manifest.ts
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+function ggmlOrgAsrFile(name, bytes, sha256) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, BUILT_IN_REASONING_MODELS, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
+var init_manifest2 = __esm(() => {
+  GIB = 1024 ** 3;
+  QWEN35_2B = {
+    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+    displayName: "Qwen3.5 2B",
+    sizeClass: "small",
+    baseRepository: "Qwen/Qwen3.5-2B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-2B-GGUF",
+    revision: QWEN35_2B_REVISION,
+    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_4B = {
+    modelId: "qwen3.5-4b-q4_k_m-e87f176",
+    displayName: "Qwen3.5 4B",
+    sizeClass: "standard",
+    baseRepository: "Qwen/Qwen3.5-4B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-4B-GGUF",
+    revision: QWEN35_4B_REVISION,
+    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_9B = {
+    modelId: "qwen3.5-9b-q4_k_m-3885219",
+    displayName: "Qwen3.5 9B",
+    sizeClass: "large",
+    baseRepository: "Qwen/Qwen3.5-9B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-9B-GGUF",
+    revision: QWEN35_9B_REVISION,
+    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  BUILT_IN_REASONING_MODELS = [QWEN35_2B, QWEN35_4B, QWEN35_9B];
+  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+  LLAMA_SERVER_RUNTIME = {
+    release: LLAMA_CPP_RELEASE,
+    license: "MIT",
+    archives: [
+      {
+        platform: "darwin-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        bytes: 11827796,
+        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+        gpu: true
+      },
+      {
+        platform: "linux-x64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        bytes: 17544875,
+        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+        gpu: false
+      },
+      {
+        platform: "linux-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        bytes: 13590823,
+        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+        gpu: false
+      }
+    ]
+  };
+  QWEN3_ASR_06B = {
+    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+    displayName: "Qwen3-ASR 0.6B",
+    baseRepository: "Qwen/Qwen3-ASR-0.6B",
+    license: "Apache-2.0",
+    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+    revision: QWEN3_ASR_06B_REVISION,
+    files: [
+      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+    ],
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 4096
   };
 });
 
@@ -19180,6 +19508,18 @@ function snifferTierKey(verdict) {
   if (verdict.failSafe || verdict.tier === "private" || recordRequiresPrivate(verdict))
     return "secure";
   return verdict.confidence >= SNIFFER_PERSONAL_MIN_CONFIDENCE ? "private" : "secure";
+}
+function snifferVerdictTier(verdict, lane, flags) {
+  const tier = snifferTierKey(verdict);
+  const code = snifferReasonCode(verdict);
+  if (tier === "private" && snifferLaneIsSmall(lane) && flags.some((flag) => flag.startsWith(OWN_RECORD_FLAG_PREFIX))) {
+    return { tier: "secure", code: `${SNIFFER_RECORD_HELD_CODE_PREFIX}${code}` };
+  }
+  return { tier, code };
+}
+function snifferLaneIsSmall(lane) {
+  const id = snifferCacheModelId(lane);
+  return BUILT_IN_REASONING_MODELS.some((model) => model.sizeClass === "small" && (id === model.modelId || id.startsWith(`${model.modelId}:`)));
 }
 function recordRequiresPrivate(verdict) {
   return verdict.ownRecord === true && verdict.privateKind !== undefined && verdict.privateKind !== "none";
@@ -19384,7 +19724,7 @@ class CachedTierSniffer {
         mapRevision
       });
       if (cached2 && cachedSnifferVerdictHolds(cached2)) {
-        return { verdict: "decided", tier: snifferTierKey(cached2), code: snifferReasonCode(cached2) };
+        return { verdict: "decided", ...snifferVerdictTier(cached2, this.lane, request.flags) };
       }
       if (request.subject) {
         const queued = this.store.enqueue({
@@ -19403,9 +19743,10 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, SNIFFER_INJECTION_CATEGORY = "injection", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
+  init_manifest2();
   init_engine();
   init_delphi_scorer();
   init_sniffer_store();
@@ -19452,6 +19793,8 @@ var init_sniffer = __esm(() => {
     "because it names the owner or concerns money or identity. Read what it actually contains.",
     "privateKind is the kind of private information this item actually contains UNDER THE OWNER POLICY,",
     "or none when it is not covered or the owner says it is fine to share. Topic alone is insufficient.",
+    "An owner clause naming a kind of record covers every record of that kind, however small, routine or work-related:",
+    "such a record has that privateKind, never none.",
     "An ownRecord with a non-none privateKind is Private. Private conversations can be Private",
     "without being records. Work/reference topic never lowers an otherwise Private verdict.",
     "Use names as context, not proof of the contents. If materially uncertain, answer Private.",
@@ -19461,6 +19804,31 @@ var init_sniffer = __esm(() => {
     `{"verdicts":[{"i":1,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map((c) => `"${c}"`).join("|")},"ownRecord":true|false,"privateKind":${SNIFFER_PRIVATE_KINDS.map((c) => `"${c}"`).join("|")},"confidence":<number from 0 to 1>}]}`
   ].join(`
 `);
+  SNIFFER_RESPONSE_SCHEMA = {
+    type: "object",
+    properties: {
+      verdicts: {
+        type: "array",
+        minItems: 1,
+        maxItems: 1,
+        items: {
+          type: "object",
+          properties: {
+            i: { type: "integer", minimum: 1, maximum: 1 },
+            tier: { enum: ["personal", "private"] },
+            category: { enum: [...SNIFFER_CATEGORIES] },
+            ownRecord: { type: "boolean" },
+            privateKind: { enum: [...SNIFFER_PRIVATE_KINDS] },
+            confidence: { type: "number", minimum: 0, maximum: 1 }
+          },
+          required: ["i", "tier", "category", "ownRecord", "privateKind", "confidence"],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ["verdicts"],
+    additionalProperties: false
+  };
   SNIFFER_PROMPT_VERSION = `p-${createHash13("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
   SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash13("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
   SNIFFER_CATEGORY_SYNONYMS = {
@@ -19476,122 +19844,6 @@ var init_sniffer = __esm(() => {
     relationship: "intimate",
     relationships: "intimate"
   };
-});
-// src/workers/file-extraction/job-names.ts
-import { existsSync as existsSync16 } from "node:fs";
-import { Database as Database4 } from "bun:sqlite";
-function defaultFileExtractionJobsDbPath(env = process.env) {
-  return sharedDataPath("file-extraction-jobs", env);
-}
-function extractionJobsDbPaths(env = process.env) {
-  return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
-}
-function clearExtractionJobNames(dbPath, item, options = {}) {
-  if (dbPath === ":memory:" || !existsSync16(dbPath))
-    return { cleared: 0, durable: true };
-  const db = new Database4(dbPath, { readwrite: true, create: false });
-  try {
-    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
-    if (!table)
-      return { cleared: 0, durable: true };
-    return db.transaction(() => {
-      if (options.proceed && !options.proceed())
-        return { cleared: 0, durable: true };
-      const claims = claimsTableExists(db);
-      const durable = redactionsTableExists(db) && (options.claimant === undefined || claims);
-      const now = new Date().toISOString();
-      if (redactionsTableExists(db)) {
-        db.query(`
-          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", now);
-      }
-      if (options.claimant !== undefined && claims) {
-        db.query(`
-          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (provider, account_scope, provider_item_id, claimant, claimed_at)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(item.provider, item.accountScope, item.providerItemId, options.claimant, now);
-      }
-      const artifactItems = item.localItemId !== undefined ? "provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ?" : "provider = ? AND account_scope = ? AND provider_item_id = ?";
-      const itemParams = item.localItemId !== undefined ? [item.provider, item.accountScope, item.providerItemId, item.localItemId] : [item.provider, item.accountScope, item.providerItemId];
-      if (artifactsTableExists(db)) {
-        db.query(`
-          DELETE FROM extraction_artifacts
-          WHERE (corpus_id, local_item_id) IN (SELECT corpus_id, local_item_id FROM extraction_jobs WHERE ${artifactItems})
-        `).run(...itemParams);
-      }
-      const cleared = item.localItemId !== undefined ? db.query(`
-            UPDATE extraction_jobs SET name = NULL
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
-          `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId).changes : db.query(`
-            UPDATE extraction_jobs SET name = NULL
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
-          `).run(item.provider, item.accountScope, item.providerItemId).changes;
-      return { cleared, durable };
-    }).immediate();
-  } finally {
-    closeSqliteStore(db);
-  }
-}
-function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
-  if (dbPath === ":memory:" || !existsSync16(dbPath))
-    return { retired: 0, stillSecret: false };
-  const db = new Database4(dbPath, { readwrite: true, create: false });
-  try {
-    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    if (!redactionsTableExists(db))
-      return { retired: 0, stillSecret: false };
-    return db.transaction(() => {
-      if (stillSecret())
-        return { retired: 0, stillSecret: true };
-      if (claimsTableExists(db)) {
-        db.query(`
-          DELETE FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND claimant = ?
-        `).run(item.provider, item.accountScope, item.providerItemId, claimant);
-        const heldElsewhere = db.query(`
-          SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? LIMIT 1
-        `).get(item.provider, item.accountScope, item.providerItemId) !== null;
-        if (heldElsewhere)
-          return { retired: 0, stillSecret: false };
-      }
-      const retired = db.query(`
-        DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-      `).run(item.provider, item.accountScope, item.providerItemId).changes;
-      if (retired > 0 && rereadsTableExists(db)) {
-        db.query(`
-          INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
-          SELECT job_id FROM extraction_jobs
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-            AND (status IN ('indexed', 'leased')
-              OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
-        `).run(item.provider, item.accountScope, item.providerItemId);
-      }
-      return { retired, stillSecret: false };
-    }).immediate();
-  } finally {
-    closeSqliteStore(db);
-  }
-}
-function artifactsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
-}
-function rereadsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
-}
-function claimsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTION_CLAIMS_TABLE) !== null;
-}
-function redactionsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
-}
-var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", openLedgerPaths;
-var init_job_names = __esm(() => {
-  init_olympus_layout();
-  openLedgerPaths = new Map;
 });
 
 // src/workers/connector-store/secrets-disposition.ts
@@ -21246,6 +21498,13 @@ var init_embeddings = __esm(() => {
 });
 
 // src/workers/source-index/media-judge.ts
+function imageJudgmentSignal(judgment) {
+  return {
+    verdict: judgment.verdict,
+    ...judgment.category ? { category: judgment.category } : {},
+    ...judgment.verdict === "ordinary" && judgment.reason === MEDIA_JUDGE_TEXT_DECIDES ? { textDecides: true } : {}
+  };
+}
 function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
   return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
 }
@@ -21276,11 +21535,24 @@ function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) 
   const margin = topScore - ordinary;
   const intimateMargin = scores.intimate - ordinary;
   const kept = Object.fromEntries(Object.entries(scores).map(([key2, value]) => [key2, rounded(value)]));
-  if (margin >= thresholds.margin) {
+  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
     return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
+  }
+  let pictureTop;
+  for (const [category, score] of sensitive) {
+    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score - ordinary < thresholds.margin)
+      continue;
+    if (!pictureTop || score > scores[pictureTop])
+      pictureTop = category;
+  }
+  if (pictureTop) {
+    return { verdict: "sensitive", category: pictureTop, margin: rounded(scores[pictureTop] - ordinary), scores: kept, judgeId };
   }
   if (intimateMargin >= thresholds.intimateMargin) {
     return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
+  }
+  if (margin >= thresholds.margin) {
+    return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
   }
   return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
 }
@@ -21327,7 +21599,7 @@ async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_J
   const judgeId = mediaJudgeId(provider, thresholds);
   return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
 }
-var MEDIA_JUDGE_SENSITIVE_CATEGORIES, MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-08", MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ", MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
+var MEDIA_JUDGE_SENSITIVE_CATEGORIES, MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_TEXT_DECIDES = "text_decides", MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-29", MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ", MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
 var init_media_judge = __esm(() => {
   MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
     "id_document",
@@ -21336,6 +21608,7 @@ var init_media_judge = __esm(() => {
     "medical_document",
     "intimate"
   ];
+  MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
   MEDIA_JUDGE_PROMPTS = Object.freeze({
     id_document: "a photo of a passport, national identity card or driving licence",
     bank_card: "a photo of a credit card, debit card or bank card",
@@ -23501,7 +23774,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -23509,6 +23782,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
     AND emb.content_hash = c.embedding_input_hash
 `, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_job_names();
   init_keyword_context();
   init_keyword_languages();
   init_keyword_expansion();
@@ -23606,6 +23880,7 @@ var init_local_index = __esm(() => {
       this.name = "TierLedgerUnavailableError";
     }
   };
+  NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
   ConnectorStoreLocatorIdentityIndexNotReadyError = class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
     constructor() {
       super("Connector store locator identity index requires bounded backfill before path-only deletions can run.");
@@ -26192,7 +26467,8 @@ var init_local_index = __esm(() => {
           -- The same judgment again leaves a pending re-decision pending: only
           -- the sweep closes it (re-deciding twice is harmless).
           WHEN media_judgments.verdict = excluded.verdict
-            AND media_judgments.category IS excluded.category THEN media_judgments.tier_applied
+            AND media_judgments.category IS excluded.category
+            AND media_judgments.reason IS excluded.reason THEN media_judgments.tier_applied
           -- A changed judgment (an ordinary verdict that no longer holds, or
           -- a sensitive one a newer judge could not make) is re-decided by the
           -- sweep, whatever the writer thought, so every item's tier and its
@@ -27471,6 +27747,7 @@ var init_local_index = __esm(() => {
       return {
         itemPk,
         ftsMetadataChanged,
+        revived: existing?.tombstoned === 1,
         contentChanged: ftsMetadataChanged || existing.content_hash !== (contentHash ?? null)
       };
     }
@@ -27502,19 +27779,35 @@ var init_local_index = __esm(() => {
     }
     upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation, requiredLayer = textFromRawItem(item) === undefined ? "metadata" : "content") {
       const tierLedgerForWrite = this.visibilityLedger();
-      return this.db.transaction(() => {
+      const written = this.db.transaction(() => {
         if (!this.tierWriteAllowed(item.identity, requiredLayer, tierLedgerForWrite))
           throw new ConnectorStoreTierWriteRefusedError;
-        const upsert = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash, sourceScopeObservation);
-        this.rememberItemOwner(upsert.itemPk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), observation);
+        const upsert2 = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash, sourceScopeObservation);
+        this.rememberItemOwner(upsert2.itemPk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), observation);
         const missingScopeMetadataRow = sourceScopeObservation !== undefined && !this.db.query(`
           SELECT 1 AS present FROM connector_store_fts_rows
           WHERE item_pk = ? AND chunk_pk IS NULL LIMIT 1
-        `).get(upsert.itemPk)?.present;
-        if (upsert.ftsMetadataChanged || missingScopeMetadataRow)
-          this.refreshFtsForItem(upsert.itemPk);
-        return upsert;
+        `).get(upsert2.itemPk)?.present;
+        if (upsert2.ftsMetadataChanged || missingScopeMetadataRow)
+          this.refreshFtsForItem(upsert2.itemPk);
+        return upsert2;
       }).immediate();
+      if (written.revived)
+        this.oweRereadsAfterRevive(item.identity, tierLedgerForWrite);
+      const { revived: _revived, ...upsert } = written;
+      return upsert;
+    }
+    oweRereadsAfterRevive(identity, ledger) {
+      const item = { provider: identity.provider, accountScope: identity.accountScope, providerItemId: identity.providerItemId };
+      let known = [];
+      try {
+        known = ledger?.knownJobLedgerPaths() ?? [];
+      } catch {}
+      for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+        try {
+          oweExtractionRereadAfterRevive(jobsPath, item);
+        } catch {}
+      }
     }
     tombstoneWindowRemovedItems(connectorId, ownershipKind, syncRunId, scopes, localItemIds, snapshotObservedAt) {
       return this.db.transaction(() => {
@@ -29282,6 +29575,7 @@ var init_local_index = __esm(() => {
       const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${hiddenNotIn}) AS stored_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
           AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
@@ -29299,7 +29593,7 @@ var init_local_index = __esm(() => {
             ${parityWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
-          WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
+          WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
         ) AS sync_runs,
         -- EXISTS rather than COUNT(DISTINCT ...) so the per-item probe stops at
         -- the first chunk row instead of walking every chunk of every item.
@@ -29313,7 +29607,7 @@ var init_local_index = __esm(() => {
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${fileScopeWhere}
         ) AS full_ingestion_files
-    `).get(...itemParams, ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
+    `).get(...itemParams, ...jsonList(tier.hidden), ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
       const outsideContentWindowItems = outsideWindowSql ? this.db.query(`
           SELECT COUNT(*) AS n FROM items i
           WHERE i.tombstoned = 0
@@ -29385,7 +29679,7 @@ var init_local_index = __esm(() => {
       } : undefined;
       const settledUnreadableItems = this.settledUnreadableItems(scope).length;
       const last = this.db.query(`SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
+       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
        ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
       return {
         corpusId: this.corpusId,
@@ -29409,7 +29703,8 @@ var init_local_index = __esm(() => {
             contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems - outsideContentWindowItems),
             policyDeferredItems
           } : {},
-          ...outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {}
+          ...outsideContentWindowItems > 0 ? { outsideContentWindowItems } : {},
+          ...counts.stored_items > counts.items ? { storedItems: counts.stored_items } : {}
         },
         embeddingByModel: byModel.map((row) => ({
           modelId: row.model_id,
@@ -29839,94 +30134,6 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 
-// src/workers/connector-store/principal.ts
-function isCanonicalConnectorStoreProvider(provider) {
-  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
-}
-function isCanonicalConnectorStoreAccountScope(accountScope) {
-  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
-}
-var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
-var init_principal = __esm(() => {
-  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
-  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
-});
-
-// src/workers/connector-store/filter-capabilities.ts
-function connectorStoreFilterCapabilityRegistry(entries) {
-  const familyEntries = new Map;
-  const providerEntries = new Map;
-  for (const [scope, capabilities] of entries) {
-    const provider = "provider" in scope ? scope.provider : undefined;
-    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
-      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
-    }
-    const registry = provider === undefined ? familyEntries : providerEntries;
-    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
-    if (registry.has(key2)) {
-      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
-      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
-    }
-    registry.set(key2, Object.freeze({ ...capabilities }));
-  }
-  return Object.freeze({
-    resolve(identity) {
-      const familyCapabilities = familyEntries.get(identity.family);
-      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
-      if (!familyCapabilities)
-        return providerCapabilities;
-      if (!providerCapabilities)
-        return familyCapabilities;
-      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
-    }
-  });
-}
-function providerScopeKey(family, provider) {
-  return `${family}\x00${provider}`;
-}
-var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
-var init_filter_capabilities = __esm(() => {
-  init_principal();
-  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
-    "corpus_id",
-    "query",
-    "retrieval_mode",
-    "max_results",
-    "account",
-    "conversation_id",
-    "sender_id",
-    "sender_label",
-    "authored_after",
-    "authored_before",
-    "after",
-    "before",
-    "trust_domain",
-    "all_tiers"
-  ];
-  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
-    "approved_scope_key",
-    "chat_scope",
-    "participant_id",
-    "include_deleted",
-    "attachment_type",
-    "include_locators",
-    "chat_title",
-    "chat_title_hint",
-    "folder_id",
-    "folder_name"
-  ];
-  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
-    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
-    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
-  ]);
-});
-
-// src/workers/connector-store/index.ts
-var init_connector_store = __esm(() => {
-  init_local_index();
-  init_filter_capabilities();
-});
-
 // src/workers/connector-store/tier-set-registry.ts
 function tierSetForLedger(ledgerPath) {
   return tierSets?.get(ledgerPath);
@@ -30051,7 +30258,9 @@ function settleOne(set, record) {
   if (!store || !exported)
     return false;
   const locator = exported.columns["locator_uri"];
-  if (store.metadataOnlyRuleForLocator(typeof locator === "string" ? locator : undefined) === undefined)
+  const mimeType = exported.columns["mime_type"];
+  const container = typeof mimeType === "string" && CONTAINER_MIME_TYPES.includes(mimeType.trim().toLowerCase());
+  if (!container && store.metadataOnlyRuleForLocator(typeof locator === "string" ? locator : undefined) === undefined)
     return false;
   const decision = {
     metadataTier: record.metadataTier,
@@ -30068,7 +30277,10 @@ function settleOne(set, record) {
     mapRevision: record.mapRevision,
     snifferId: "undecided"
   };
-  const recorded = set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { stagedLandingAllowed: true });
+  const recorded = set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    stagedLandingAllowed: true,
+    guard: { generation: record.generation, override: set.ledger.getOverride(identity) }
+  });
   return recorded.outcome === "updated" || recorded.outcome === "unchanged";
 }
 function parseIdentity(raw) {
@@ -30099,6 +30311,7 @@ function identityOf2(record) {
 var DEFAULT_NAMES_ONLY_SETTLE_ROWS = 500, SETTLE_META_KEY = "names_only_settle_after";
 var init_tier_names_only_settle = __esm(() => {
   init_tier_ledger();
+  init_local_index();
 });
 
 // src/workers/embedding-ledger.ts
@@ -30668,6 +30881,23 @@ function copyFingerprint(copy, layers) {
   })).digest("hex");
 }
 function finishVerifiedMove(options, receipt) {
+  const result = flipVerifiedMove(options, receipt);
+  oweExtractionRereads(options.set.ledger, options.identity);
+  return result;
+}
+function oweExtractionRereads(ledger, identity) {
+  let known = [];
+  try {
+    known = ledger.knownJobLedgerPaths();
+  } catch {}
+  const item = { provider: identity.provider, accountScope: identity.accountScope, providerItemId: identity.providerItemId };
+  for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+    try {
+      oweExtractionRereadAfterTierMove(jobsPath, item);
+    } catch {}
+  }
+}
+function flipVerifiedMove(options, receipt) {
   const { set, identity } = options;
   const ledger = set.ledger;
   const contentDestination = copyServingLayer(receipt.placement, "content");
@@ -30815,13 +31045,15 @@ function fullIdentity(identity) {
     ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
   };
 }
-var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError, MOVE_NOTE_PREFIX = "tier-move-note:";
+var ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError, MOVE_NOTE_PREFIX = "tier-move-note:";
 var init_tier_move = __esm(() => {
   init_engine();
   init_tier_classifier();
   init_tier_ledger();
   init_embedding_ledger();
+  init_local_index();
   init_secrets_disposition();
+  init_job_names();
   init_tier_placement();
   TierMoveRefusedError = class TierMoveRefusedError extends Error {
     constructor(message2) {
@@ -31912,7 +32144,7 @@ function rejudgeStoredContent(set, record, options) {
     ...sender ? { sender } : {},
     ...mimeType ? { mimeType } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
-    ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
+    ...imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {},
     ...parentContext ? { parentContext } : {},
     subject: identity
   }, {
@@ -31983,7 +32215,8 @@ function rejudgeStoredContent(set, record, options) {
 }
 function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false, parentContext) {
   const previous = { ...record, reasons: record.reasons.filter((reason) => !reason.startsWith("content:")) };
-  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !record.reasons.some((reason) => reason.startsWith("metadata:sniffer:") && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`)))
+  const retiredPrior = restsOnRetiredSourcePrior(record.reasons);
+  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !retiredPrior && !record.reasons.some((reason) => reason.startsWith("metadata:sniffer:") && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`)))
     return previous;
   const signals = {
     ...names.title ? { title: names.title } : {},
@@ -31992,8 +32225,8 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
     folderKeys: names.folderKeys
   };
   const fresh = classifyItemTiers({ signals, namesOnly: true });
-  const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason));
-  const baseline = maxTier(fresh.metadataTier, record.metadataTier);
+  const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
+  const baseline = retiredPrior ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === "secrets")
     return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
@@ -32097,6 +32330,7 @@ function storedFolderKeys(value) {
 }
 var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge";
 var init_tier_rejudge = __esm(() => {
+  init_media_judge();
   init_parent_context();
   init_tier_classifier();
   init_tier_ledger();
@@ -32610,7 +32844,6 @@ var init_tiered_store_set = __esm(() => {
 
 // src/workers/readwise/live-sync.ts
 var init_live_sync = __esm(() => {
-  init_connector_store();
   init_tiered_store_set();
   init_api();
   init_connector();
@@ -32624,6 +32857,94 @@ var init_readwise = __esm(() => {
   init_connector();
   init_live_control();
   init_live_sync();
+});
+
+// src/workers/connector-store/principal.ts
+function isCanonicalConnectorStoreProvider(provider) {
+  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
+}
+function isCanonicalConnectorStoreAccountScope(accountScope) {
+  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
+}
+var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
+var init_principal = __esm(() => {
+  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
+  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
+});
+
+// src/workers/connector-store/filter-capabilities.ts
+function connectorStoreFilterCapabilityRegistry(entries) {
+  const familyEntries = new Map;
+  const providerEntries = new Map;
+  for (const [scope, capabilities] of entries) {
+    const provider = "provider" in scope ? scope.provider : undefined;
+    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
+      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
+    }
+    const registry = provider === undefined ? familyEntries : providerEntries;
+    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
+    if (registry.has(key2)) {
+      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
+      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
+    }
+    registry.set(key2, Object.freeze({ ...capabilities }));
+  }
+  return Object.freeze({
+    resolve(identity) {
+      const familyCapabilities = familyEntries.get(identity.family);
+      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
+      if (!familyCapabilities)
+        return providerCapabilities;
+      if (!providerCapabilities)
+        return familyCapabilities;
+      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
+    }
+  });
+}
+function providerScopeKey(family, provider) {
+  return `${family}\x00${provider}`;
+}
+var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
+var init_filter_capabilities = __esm(() => {
+  init_principal();
+  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
+    "corpus_id",
+    "query",
+    "retrieval_mode",
+    "max_results",
+    "account",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "authored_after",
+    "authored_before",
+    "after",
+    "before",
+    "trust_domain",
+    "all_tiers"
+  ];
+  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
+    "approved_scope_key",
+    "chat_scope",
+    "participant_id",
+    "include_deleted",
+    "attachment_type",
+    "include_locators",
+    "chat_title",
+    "chat_title_hint",
+    "folder_id",
+    "folder_name"
+  ];
+  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
+    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
+    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
+  ]);
+});
+
+// src/workers/connector-store/index.ts
+var init_connector_store = __esm(() => {
+  init_local_index();
+  init_filter_capabilities();
 });
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS;
@@ -33251,7 +33572,6 @@ var init_window_diagnostic = __esm(() => {
 
 // src/workers/x-bookmarks/live-sync.ts
 var init_live_sync2 = __esm(() => {
-  init_connector_store();
   init_tiered_store_set();
   init_api_connector();
   init_live_control2();
@@ -36001,110 +36321,6 @@ var init_remote_vlm = __esm(() => {
   ].join(" ");
 });
 
-// src/workers/source-index/built-in-reasoning/manifest.ts
-function unslothQwen(size, revision, bytes, sha256) {
-  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
-  return {
-    name,
-    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
-    bytes,
-    sha256
-  };
-}
-function ggmlOrgAsrFile(name, bytes, sha256) {
-  return {
-    name,
-    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
-    bytes,
-    sha256
-  };
-}
-var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
-var init_manifest2 = __esm(() => {
-  GIB = 1024 ** 3;
-  QWEN35_2B = {
-    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
-    displayName: "Qwen3.5 2B",
-    sizeClass: "small",
-    baseRepository: "Qwen/Qwen3.5-2B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-2B-GGUF",
-    revision: QWEN35_2B_REVISION,
-    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_4B = {
-    modelId: "qwen3.5-4b-q4_k_m-e87f176",
-    displayName: "Qwen3.5 4B",
-    sizeClass: "standard",
-    baseRepository: "Qwen/Qwen3.5-4B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-4B-GGUF",
-    revision: QWEN35_4B_REVISION,
-    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_9B = {
-    modelId: "qwen3.5-9b-q4_k_m-3885219",
-    displayName: "Qwen3.5 9B",
-    sizeClass: "large",
-    baseRepository: "Qwen/Qwen3.5-9B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-9B-GGUF",
-    revision: QWEN35_9B_REVISION,
-    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-  LLAMA_SERVER_RUNTIME = {
-    release: LLAMA_CPP_RELEASE,
-    license: "MIT",
-    archives: [
-      {
-        platform: "darwin-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        bytes: 11827796,
-        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
-        gpu: true
-      },
-      {
-        platform: "linux-x64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        bytes: 17544875,
-        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
-        gpu: false
-      },
-      {
-        platform: "linux-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        bytes: 13590823,
-        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
-        gpu: false
-      }
-    ]
-  };
-  QWEN3_ASR_06B = {
-    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
-    displayName: "Qwen3-ASR 0.6B",
-    baseRepository: "Qwen/Qwen3-ASR-0.6B",
-    license: "Apache-2.0",
-    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
-    revision: QWEN3_ASR_06B_REVISION,
-    files: [
-      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
-      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
-    ],
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 4096
-  };
-});
-
 // src/workers/source-index/built-in-reasoning/install.ts
 var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
 var init_install = __esm(() => {
@@ -36268,6 +36484,7 @@ var init_tiered_store_sink = __esm(() => {
   init_tier_ledger();
   init_parent_context();
   init_tier_placement();
+  init_media_judge();
   init_secrets_disposition();
   init_tiered_store_set();
   init_store_sink();
@@ -36499,7 +36716,11 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "evernote.notes",
       label: "Evernote",
       authentication: { type: "oauth2", ownership: "sign-in with Evernote on this computer (read permission only)" },
-      contextual_scopes: ["notebooks the person owns", "notes shared with the person are counted, not imported"],
+      contextual_scopes: [
+        "the notebooks the person chooses after signing in (nothing is read before the choice): each read, names only, or Skip",
+        "a Skip notebook's notes are never read",
+        "notebooks the person does not own and notes shared with the person are counted, not imported"
+      ],
       dependencies: [{ id: "evernote_mcp", label: "Evernote's own MCP server", required_for: "listing notes and reading notes and attachments" }],
       provider_ceiling: "An hourly full pass, paced at about one call a second; a large first import finishes over several passes.",
       supported_formats: ["note text", "title", "notebook", "tags", "created and updated times", "attachments read on their own"],
@@ -36759,7 +36980,7 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "A folder you chose is in Desktop, Documents, Downloads, iCloud Drive or another disk, which Olympus cannot open on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -37725,17 +37946,9 @@ var init_waiting_private_questions = __esm(() => {
     questionBytes: 2048,
     localQuestionBytes: 8 * 1024,
     selectorBytes: 4096,
-    perConnection: 20,
-    total: 50,
-    totalBytes: 256 * 1024,
-    answeredPerConnection: 50,
-    answeredBytesPerConnection: 1024 * 1024,
-    autoAnswersPerWindow: 5,
-    autoAnswerWindowMs: 60 * 60000,
-    answeredTotal: 500,
-    answeredBytes: 16 * 1024 * 1024,
     answerBytes: 128 * 1024,
-    ttlMs: 7 * 24 * 60 * 60000
+    ttlMs: 7 * 24 * 60 * 60000,
+    reanswerAfterMs: 10 * 60000
   });
 });
 
@@ -37921,10 +38134,343 @@ var init_private_answer_model = __esm(() => {
   init_private_answer_contract();
 });
 
+// src/core/remote-result.ts
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, REMOTE_PENDING_MESSAGE, REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA;
+var init_remote_result = __esm(() => {
+  init_operation_error();
+  init_opsec();
+  init_parent_label();
+  init_release_manifest();
+  init_secret_location_note();
+  MAX_ANSWER = 64 * 1024;
+  MAX_SENT = 16 * 1024;
+  JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
+  PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+  CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
+  MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+  REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
+  PROVIDER_LABELS = {
+    gmail: "Gmail",
+    google_drive: "Google Drive",
+    "google-drive": "Google Drive",
+    google_calendar: "Google Calendar",
+    dropbox: "Dropbox",
+    x: "X bookmarks",
+    readwise: "Readwise",
+    telegram: "Telegram",
+    whatsapp: "WhatsApp",
+    whatsapp_personal: "WhatsApp",
+    whatsapp_business: "WhatsApp",
+    apple_messages: "Apple Messages",
+    signal: "Signal",
+    reflect: "Reflect",
+    roam: "Roam",
+    evernote: "Evernote",
+    local_files: "Files on this computer"
+  };
+  FAMILY_LABELS = {
+    email: "Mail",
+    file: "Files",
+    chat: "Messages",
+    note: "Notes",
+    x: "X bookmarks",
+    readwise: "Readwise"
+  };
+  REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
+    ...Object.values(PROVIDER_LABELS),
+    ...Object.values(FAMILY_LABELS),
+    OTHER_SOURCE_LABEL
+  ])].sort());
+  REMOTE_REFUSAL_CODES = Object.freeze([
+    "refused",
+    "anonymous_answers_off",
+    "cancelled",
+    "gate_refused",
+    "internal_error",
+    "invalid_params",
+    "model_same_provider",
+    "question_empty",
+    "question_too_long",
+    "route_not_configured",
+    "secret_detected",
+    "settings_invalid",
+    "settings_stale",
+    "writer_declined",
+    "writer_failed",
+    "invalid_question",
+    "busy",
+    "acknowledgements_incomplete",
+    "funding_date_missing",
+    "funding_date_invalid",
+    "note_expired",
+    "daemon_api_key_missing",
+    "daemon_not_found",
+    "tor_not_found",
+    "unresolved_session",
+    "unresolved_session_other_wallet",
+    "no_unresolved_session",
+    "stranded_processes",
+    "daemon_already_running",
+    "tor_port_busy",
+    "tor_bootstrap_failed",
+    "daemon_start_failed",
+    "daemon_version_unsupported",
+    "daemon_supervisor_unsupported",
+    "relay_mismatch",
+    "key_reuse_on",
+    "key_reuse_unverified",
+    "daemon_keyless",
+    "daemon_identity_failed",
+    "daemon_api_key_rejected",
+    "session_process_exited",
+    "confinement_self_test_failed",
+    "confinement_unavailable",
+    "policy_unavailable",
+    "model_unavailable",
+    "daily_cap_reached",
+    "spend_cap_reached",
+    "state_unavailable",
+    "timeout",
+    "aborted",
+    "redirect_refused",
+    "response_too_large",
+    "invalid_response",
+    "daemon_error",
+    "transport_failed",
+    "teardown_incomplete",
+    "authorization_refused",
+    "session_spent"
+  ].filter((code, index, all) => all.indexOf(code) === index));
+  REMOTE_DAEMON_CODES = Object.freeze([
+    "busy",
+    "request_cancelled",
+    "funding_required",
+    "model_budget_unavailable",
+    "model_policy_unavailable",
+    "invalid_model",
+    "anonymous_access_failed",
+    "upstream_error",
+    "invalid_upstream_response",
+    "withdrawal_pending",
+    "wallet_conflict",
+    "invalid_request_error",
+    "invalid_body",
+    "testnet_password_required",
+    "invalid_api_key",
+    "local_connection_required",
+    "browser_origin_denied",
+    "unrecognized"
+  ]);
+  REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
+  TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
+  RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
+  RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+  NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
+  CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
+  OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
+  REMOTE_DESCRIPTIONS = {
+    source_index_status: [
+      "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
+      "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
+      "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
+    ].join(" ")
+  };
+  REMOTE_ERROR_TEXT = {
+    invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
+    invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
+    unsupported_filter: "That filter is not supported here.",
+    config_error: "Olympus on the computer needs setup before it can answer.",
+    argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
+    argus_error: "Olympus's private analyst could not answer. Try again later.",
+    email_not_configured: "Olympus on the computer needs setup before it can answer.",
+    email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+    email_error: "Olympus could not complete this request.",
+    email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+    source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
+    source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+    source_index_error: "Olympus could not complete this request.",
+    source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
+    source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
+    source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
+    source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
+    internal_error: "Olympus could not complete this request.",
+    unknown_operation: "Olympus has no operation with that name here.",
+    operation_unavailable: "That operation is not enabled on this Olympus install.",
+    unauthorized: "A connection token is required.",
+    invalid_token: "The connection token is not valid or has been revoked.",
+    remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
+    not_found: "There is nothing at this path.",
+    method_not_allowed: "That HTTP method is not allowed here.",
+    unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
+    payload_too_large: "The request body is too large.",
+    olympus_offline: "Olympus is off; try again later."
+  };
+  REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
+  REFERENCED_ERROR_CODES = new Set([
+    "internal_error",
+    "email_error",
+    "source_index_error",
+    "argus_error",
+    "config_error"
+  ]);
+  PENDING_SCHEMA = {
+    type: "object",
+    description: "Still working: call source_answer_result with job_id, again while it says working.",
+    additionalProperties: false,
+    required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
+    properties: {
+      status: { const: "working" },
+      job_id: { type: "string", pattern: JOB_ID.source },
+      elapsed_ms: { type: "integer", minimum: 0 },
+      next_tool: { const: "source_answer_result" },
+      message: { type: "string" }
+    }
+  };
+  CITATION_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["label"],
+    properties: {
+      label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+      title: { type: "string", maxLength: MAX_TITLE },
+      date: { type: "string", format: "date" }
+    }
+  };
+  ANONYMOUS_ANSWERED_SCHEMA = {
+    type: "object",
+    description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
+    additionalProperties: false,
+    required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "answered" },
+      reply: { type: "string", maxLength: MAX_ANSWER },
+      level: { enum: ["strict", "standard"] },
+      rewritten: { type: "boolean" },
+      remembered: { type: "boolean" },
+      network_identity: { enum: [...NETWORK_IDENTITIES] },
+      cleanup: { enum: [...CLEANUPS] },
+      model: { type: "string", pattern: MODEL_ID.source },
+      route: { type: "string", maxLength: MAX_ROUTE },
+      sent: { type: "string", maxLength: MAX_SENT },
+      note: { type: "string", maxLength: MAX_MESSAGE },
+      provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
+    }
+  };
+  ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
+    type: "object",
+    description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
+    additionalProperties: false,
+    required: ["kind", "status", "message", "options"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "needs_choice" },
+      message: { type: "string" },
+      options: {
+        type: "object",
+        additionalProperties: false,
+        required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
+        properties: {
+          suggested_level: { enum: ["strict", "standard"] },
+          suggested_cleanup: { enum: [...CLEANUPS] },
+          custom_instruction: { type: "boolean" }
+        }
+      }
+    }
+  };
+  ANONYMOUS_REFUSED_SCHEMA = {
+    type: "object",
+    description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
+    additionalProperties: false,
+    required: ["kind", "status", "code", "message"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "refused" },
+      code: { enum: [...REMOTE_REFUSAL_CODES] },
+      message: { type: "string", maxLength: MAX_MESSAGE },
+      outcome: { enum: [...OUTCOMES] },
+      daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
+      sent: { type: "string", maxLength: MAX_SENT }
+    }
+  };
+  SOURCE_INDEX_STATUS_SCHEMA = {
+    type: "object",
+    description: "Per-corpus status and counts.",
+    additionalProperties: false,
+    required: ["kind", "corpora"],
+    properties: {
+      kind: { const: "source_index_status" },
+      generated_at: { type: "string", format: "date-time" },
+      corpora: {
+        type: "array",
+        maxItems: MAX_CORPORA,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["corpus_id", "label", "configured"],
+          properties: {
+            corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
+            label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+            trust_domain: { enum: [...TRUST_DOMAINS] },
+            configured: { type: "boolean" },
+            retrieval: {
+              type: "object",
+              additionalProperties: false,
+              required: ["mode", "state"],
+              properties: {
+                mode: { enum: [...RETRIEVAL_MODES] },
+                state: { enum: [...RETRIEVAL_STATES] }
+              }
+            },
+            last_refresh: {
+              type: "object",
+              additionalProperties: false,
+              required: ["status"],
+              properties: {
+                status: { enum: [...REFRESH_STATUSES] },
+                completed_at: { type: "string", format: "date-time" }
+              }
+            },
+            counts: {
+              type: "object",
+              additionalProperties: false,
+              required: ["indexed_items", "chunks", "embedded_chunks"],
+              properties: {
+                indexed_items: { type: "integer", minimum: 0 },
+                chunks: { type: "integer", minimum: 0 },
+                embedded_chunks: { type: "integer", minimum: 0 }
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  REMOTE_ERROR_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["error", "message"],
+    properties: {
+      error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
+      message: { type: "string", description: "A fixed sentence for this code." },
+      ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
+      param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
+      retry_after_seconds: {
+        type: "integer",
+        minimum: 1,
+        maximum: 86400,
+        description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
+      }
+    }
+  };
+});
+
 // src/workers/source-index/local-answer.ts
 var IN_SCOPE_SKIPS;
 var init_local_answer = __esm(() => {
   init_evidence_pack();
+  init_remote_result();
+  init_secret_location_note();
   init_source_model_policy();
   init_private_answer_contract();
   init_analyst_answer();
@@ -39016,6 +39562,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     archiveConfirm: {},
     unreadablePages: {},
     landing: "",
+    landingImport: false,
     landed: null,
     lastFailure: null
   };
@@ -39123,6 +39670,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const landing = value.landing;
     if (value.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
       state.landing = landing.sourceId;
+      state.landingImport = landing.import === true;
     }
   }
   function onComputer() {
@@ -39888,7 +40436,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(controls, fixControl(fix, "primary:" + id, "plain", true, context2));
     if (checking)
       add(controls, checkingControl("primary:" + id));
-    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry, id)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    const deleted = state.deleting[id] !== undefined;
+    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry, id)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)) && !(deleted && entry && entry.tool === config.deleteDataTool));
     if (other) {
       const importing = (entry) => !!entry && (entry.archiveImport === true || entry.label === H.copy.archives.importAction);
       const shown2 = menu.filter(importing)[0];
@@ -40511,6 +41060,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!id || !state.data || state.relayDown || editorOpen() || compact())
       return;
     state.landing = "";
+    if (state.landingImport) {
+      state.landingImport = false;
+      if (!picker || !onComputer())
+        return;
+      if (id === config.archivesSourceId)
+        startArchivePick("", "");
+      else if (archiveSourceMeta(id))
+        startArchivePick("", id);
+      return;
+    }
     const sources = Array.isArray(state.data.sources) ? state.data.sources : [];
     if (!sources.some((source) => source && source.id === id))
       return;
@@ -41236,6 +41795,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return !!data2.models && !!data2.models.embedding && installLines(data2.models).some((entry) => entry.state !== "failed");
   }
   function deletePending() {
+    for (const id of Object.keys(state.deleting))
+      if (Date.now() >= (state.deleting[id] ?? 0))
+        delete state.deleting[id];
     return Object.keys(state.deleting).length > 0;
   }
   function settleDeleting(data2) {
@@ -41248,7 +41810,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
   }
   function refreshDelay() {
-    const base = deletePending() ? R.settleMs : moving() ? R.activeMs : R.idleMs;
+    if (deletePending())
+      return R.settleMs;
+    const base = moving() ? R.activeMs : R.idleMs;
     return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
   }
   function scheduleRefresh() {
@@ -42848,7 +43412,8 @@ function chatgptPickerProgram(kit) {
         leave(fill2(Q.saved, { source: p.label }), true);
         return;
       }
-      p.saveError = Q.saveFailed;
+      const refusal2 = result && result.isError && result.structuredContent && result.structuredContent.error === "folder_needs_helper" ? String(result.content && result.content[0] && result.content[0].text || "") : "";
+      p.saveError = refusal2 || Q.saveFailed;
       kit.render(focus);
     }, () => {
       if (mine !== session || !p)
@@ -42939,12 +43504,15 @@ function chatgptPickerProgram(kit) {
     const now = effective(key2);
     const selectable = !node || node.selectable !== false;
     const capped = !own3 && p.own.size >= MAX_RULES;
+    const unreadable = node && node.access && node.access.state === "needs_helper" ? String(node.access.message || Q.cannotChoose) : "";
     return segControl(name, "picker:seg:" + key2 + ":", {
       pressed: own3,
       inherited: own3 ? now !== own3 ? now : "" : from.state,
       blocked: (state) => {
         if (!selectable)
           return Q.cannotChoose;
+        if (unreadable && state !== "exclude")
+          return unreadable;
         if (!allowed(key2, state))
           return fill2(Q.notPossible, { parent: sourceName(from.from), state: Q.statesLower[from.state] });
         if (capped)
@@ -43057,6 +43625,10 @@ function chatgptPickerProgram(kit) {
     label.title = node.name;
     nameParts(label, node.name, key2, node);
     add(li, label, folderControl(key2, node.name, node));
+    if (node.access && node.access.state === "needs_helper" && node.access.message) {
+      li.className += " has-note";
+      add(li, el("p", "muted frow-note", String(node.access.message)));
+    }
     return li;
   }
   function loadMore(parentKey2) {
@@ -44309,7 +44881,8 @@ var init_privacy = __esm(() => {
   CHATGPT_PRIVACY_META_KEY = PRIVACY_META_KEY;
   CHATGPT_PRIVACY_FOLDER_SOURCES = {
     "dropbox.files": "Dropbox",
-    "google_drive.docs": "Google Drive"
+    "google_drive.docs": "Google Drive",
+    "evernote.notes": "Evernote"
   };
 });
 
@@ -44660,6 +45233,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .seg-row>.fname>.fopen{font-size:1.375rem;color:var(--muted)}
 .seg-row>button.fname:hover:not(:disabled)>.fopen{color:var(--text)}
 .seg-row>.seg{margin-left:auto}
+.frow.seg-row.has-note{flex-wrap:wrap}
+.frow-note{flex:1 0 100%;margin:0 0 0.5rem 1.4375rem;font-size:0.8125rem;line-height:1.25rem}
 .seg{flex:none;display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;background:var(--bg)}
 .seg-opt{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:2.75rem;height:2rem;margin:0;padding:0 0.75rem;font:inherit;font-size:0.8125rem;font-weight:500;color:var(--text);background:none;border:0;border-radius:999px;cursor:pointer;white-space:nowrap}
 .seg-opt::before{content:"";position:absolute;inset:-0.4375rem 0}
@@ -45748,10 +46323,10 @@ var init_mac_permissions = __esm(() => {
   MAC_ACCESS_COPY = {
     needsPermission: "Your Mac will ask before Olympus opens this folder.",
     waiting: "Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.",
-    needsHelper: 'To open this folder, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then choose Try again.',
-    needsHelperWholeComputer: 'To read the whole computer, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then open this list again.',
-    needsHelperManagedWorker: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. To use it, run Olympus Engine instead ("olympus engine install", then "olympus engine install-helper"), or choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks.',
-    needsHelperManagedWorkerWholeComputer: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. To use it, run Olympus Engine instead ("olympus engine install", then "olympus engine install-helper"), or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.',
+    needsHelper: "Olympus cannot open this folder on this Mac yet. Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.",
+    needsHelperWholeComputer: "Olympus cannot read the whole computer on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.",
+    needsHelperManagedWorker: "Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. Choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.",
+    needsHelperManagedWorkerWholeComputer: "Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.",
     denied: (kind, app = ENGINE_APP) => `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under ${app}. Then choose Try again.`,
     fullDiskAccess: (app = ENGINE_APP) => app === ENGINE_APP ? "To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save." : `To search your whole computer, ${app} needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch it on. If it is not in the list, add it with the plus button.`,
     unreadable: "Your user account is not allowed to open this folder. In Finder, choose Get Info on it and check who may open it under Sharing & Permissions, then choose Try again.",
@@ -45881,7 +46456,7 @@ var init_connector5 = __esm(() => {
 
 // node_modules/pkce-challenge/dist/index.node.js
 async function getRandomValues(size) {
-  return (await crypto).getRandomValues(new Uint8Array(size));
+  return (await crypto2).getRandomValues(new Uint8Array(size));
 }
 async function random(size) {
   const mask = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
@@ -45901,7 +46476,7 @@ async function generateVerifier(length) {
   return await random(length);
 }
 async function generateChallenge(code_verifier) {
-  const buffer = await (await crypto).subtle.digest("SHA-256", new TextEncoder().encode(code_verifier));
+  const buffer = await (await crypto2).subtle.digest("SHA-256", new TextEncoder().encode(code_verifier));
   return btoa(String.fromCharCode(...new Uint8Array(buffer))).replace(/\//g, "_").replace(/\+/g, "-").replace(/=/g, "");
 }
 async function pkceChallenge(length) {
@@ -45917,9 +46492,9 @@ async function pkceChallenge(length) {
     code_challenge: challenge
   };
 }
-var crypto;
+var crypto2;
 var init_index_node = __esm(() => {
-  crypto = globalThis.crypto?.webcrypto ?? globalThis.crypto ?? import("node:crypto").then((m) => m.webcrypto);
+  crypto2 = globalThis.crypto?.webcrypto ?? globalThis.crypto ?? import("node:crypto").then((m) => m.webcrypto);
 });
 
 // node_modules/zod/v4/core/core.js
@@ -62032,9 +62607,11 @@ var init_live_sync3 = __esm(() => {
   init_session();
   init_source_placement();
   init_source_storage();
+  init_source_ingestion_exclusions();
   init_tiered_store_set();
   init_connected_handles();
   init_connector5();
+  init_listing();
   EVERNOTE_TIER_CORPUS_IDS = Object.freeze({
     secure_local: EVERNOTE_SECURE_CORPUS_ID,
     internal: EVERNOTE_INTERNAL_CORPUS_ID
@@ -62263,6 +62840,7 @@ var init_credential_degradation = __esm(() => {
 var TIER_MIGRATION_REPLAN_STOP_REASONS;
 var init_tier_migration = __esm(() => {
   init_tier_migration_reports();
+  init_media_judge();
   init_embedding_cost_estimates();
   init_operation_error();
   init_tier_move();
@@ -62314,6 +62892,12 @@ var PROOF_HEADER = "X-Olympus-Owner-Proof";
 var FORM_PROOF = "_olympus_owner_proof";
 var STORAGE = "olympus-desktop-owner-v1";
 var TICKET_MS = 60000;
+var CLAIM_HEADER = "X-Olympus-Owner-Claim";
+var CODE_HEADER = "X-Olympus-Owner-Code";
+var APPROVAL_HEADER = "X-Olympus-Owner-Approval";
+var DECLINED_HEADER = "X-Olympus-Owner-Declined";
+var WAIT_STORAGE = "olympus-desktop-owner-wait-v1";
+var CLAIM_MS = 3 * 60000;
 var SESSION_MS = 12 * 60 * 60 * 1000;
 var DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open";
 var DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.";
@@ -62335,6 +62919,11 @@ function randomOwnerHostname() {
   return `${text3}.localhost`;
 }
 var secret = () => randomBytes3(32).toString("base64url");
+function matchCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const [a, b, c, d, e, f] = [...randomBytes3(6)].map((byte) => alphabet[byte & 31]);
+  return `${a}${b}${c}-${d}${e}${f}`;
+}
 function equal(a, b) {
   return typeof a === "string" && /^[A-Za-z0-9_-]+$/.test(a) && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
@@ -62437,11 +63026,11 @@ class OwnerOpenLimited extends Error {
   }
 }
 function confirmation() {
-  return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
+  return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><p id="code" hidden></p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
 (async function(){
- const message=document.getElementById('message'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
- let resuming=false, opening=false, waiting=false, poll, timeout;
- const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;confirm.disabled=opening;};
+ const message=document.getElementById('message'), code=document.getElementById('code'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
+ let resuming=false, opening=false, waiting=false, claim='', claiming=false, poll, timeout;
+ const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;claim='';code.hidden=true;confirm.disabled=opening;};
  async function resume(){
   if(resuming||!localStorage.getItem(key))return;
   resuming=true;
@@ -62450,6 +63039,18 @@ function confirmation() {
   }catch{resuming=false;}
  }
  function onStorage(event){if(event.key===key)void resume();}
+ // An Olympus window in another browser cannot share this page's storage: once
+ // the owner approves there (codes matching), the engine hands this claim its own proof.
+ async function collect(){
+  if(!claim||claiming||resuming)return;
+  claiming=true;
+  try{const r=await fetch('/owner-claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({claim})});
+   if(r.status===202||r.status===503)return;
+   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);await resume();return;}
+   const declined=r.headers.has(${JSON.stringify(DECLINED_HEADER)});stopWaiting();
+   message.textContent=declined?"The Olympus window said this wasn't you. Press Confirm it's you to try again.":"This confirmation expired or was replaced. Press Confirm it's you to try again.";
+  }catch{}finally{claiming=false;}
+ }
  confirm.onclick=async function(){
   if(opening||waiting)return;
   opening=true;confirm.disabled=true;
@@ -62457,12 +63058,14 @@ function confirmation() {
    if(!r.ok){message.textContent=r.status!==429?${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)}:r.headers.get(${JSON.stringify(OWNER_LIMIT_HEADER)})==='hourly'?${JSON.stringify(BROWSER_OPEN_LIMIT_MESSAGE)}:${JSON.stringify(BROWSER_OPEN_RECENT_MESSAGE)};return;}
    // A refused replacement must leave the current wait intact. Only a
    // successful open replaces its ticket and starts a fresh 60-second wait.
-   stopWaiting();waiting=true;confirm.disabled=true;
+   stopWaiting();waiting=true;confirm.disabled=true;claim=r.headers.get(${JSON.stringify(CLAIM_HEADER)})||'';
+   const approval=r.headers.get(${JSON.stringify(APPROVAL_HEADER)});if(approval)try{localStorage.setItem(${JSON.stringify(WAIT_STORAGE)},approval);}catch{}
+   const shown=r.headers.get(${JSON.stringify(CODE_HEADER)});if(shown){code.textContent='If the Olympus window asks, it shows this code: '+shown;code.hidden=false;}
    message.textContent='Approve in the Olympus window that just opened. This page continues by itself.';
    // Check storage after subscribing too: the opener may already have proved.
    addEventListener('storage',onStorage);
-   poll=setInterval(resume,1000);
-   timeout=setTimeout(()=>{stopWaiting();message.textContent='Open this page again from the Olympus window.';},${TICKET_MS});
+   poll=setInterval(()=>{void resume();void collect();},1000);
+   timeout=setTimeout(()=>{stopWaiting();message.textContent="This confirmation timed out. Press Confirm it's you to try again.";},${CLAIM_MS});
    await resume();
   }catch{message.textContent=${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)};}
   finally{opening=false;confirm.disabled=waiting;}
@@ -62477,11 +63080,31 @@ html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px -apple-s
 }
 function proofPage() {
   const response = page(`${openingView()}<script>
+// A page in another browser asked for this window. Its own browser keeps the
+// approval id, so a page in this browser continues by itself with no question.
+function approve(request,proof){return new Promise(function(done){
+ const wait=${JSON.stringify(WAIT_STORAGE)}, same=()=>{try{return localStorage.getItem(wait)===request.id;}catch{return false;}};
+ if(same()){done();return;}
+ const panel=document.createElement('div'), text=document.createElement('p'), code=document.createElement('p'), yes=document.createElement('button'), no=document.createElement('button');
+ text.textContent="A page in another browser is waiting for you to confirm it's you. Approve only if that page shows this code:";
+ code.id='approval-code';code.style.cssText='font-size:1.5rem;font-weight:600;letter-spacing:.1em';code.textContent=request.code;
+ yes.id='approve';yes.textContent='Approve';no.id='decline';no.textContent='Not me';no.style.marginLeft='.5rem';
+ panel.append(text,code,yes,no);document.querySelector('main').append(panel);
+ const message=document.getElementById('message'), opening=message.textContent;message.textContent='Olympus';message.hidden=true;
+ const finish=()=>{removeEventListener('storage',onStorage);panel.remove();message.textContent=opening;message.hidden=false;done();};
+ function onStorage(event){if(event.key===wait&&same())finish();}
+ addEventListener('storage',onStorage);
+ const answer=async approved=>{yes.disabled=no.disabled=true;
+  try{await fetch('/owner-approve',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json',${JSON.stringify(PROOF_HEADER)}:proof},body:JSON.stringify({id:request.id,approve:approved})});}catch{}
+  finish();};
+ yes.onclick=()=>answer(true);no.onclick=()=>answer(false);
+});}
 (async function(){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
  try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ if(result.approval)await approve(result.approval,result.proof);
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
  // header-only worker CSP directives cannot be carried through document.write.
@@ -62508,6 +63131,7 @@ class LinuxOwnerBridge {
   entryOrigin;
   tickets = new Map;
   sessions = [];
+  claim;
   lastOpen = { control: -Infinity, browser: -Infinity };
   browserOpens = [];
   closed = false;
@@ -62525,6 +63149,7 @@ class LinuxOwnerBridge {
   close() {
     this.closed = true;
     this.sessions = [];
+    this.claim = undefined;
     this.clearTicket();
   }
   clearTicket(ticket) {
@@ -62594,14 +63219,44 @@ class LinuxOwnerBridge {
     this.tickets.set(lane, ticket);
     ticket.timer = setTimeout(() => this.clearTicket(ticket), TICKET_MS);
     ticket.timer.unref();
+    if (lane === "browser") {
+      const claimSecret = secret();
+      this.claim = { secret: claimSecret, record: { hash: hashSecret(claimSecret), code: matchCode(), approvalId: secret(), ticket, expires: this.now() + CLAIM_MS, state: "waiting" } };
+    }
     try {
       await (this.options.openFile ?? openLinuxOwnerTicketFile)(path);
       if (!this.live())
         throw new Error("Graphical session ended.");
     } catch (error) {
+      if (this.claim?.record.ticket === ticket)
+        this.claim = undefined;
       this.clearTicket(ticket);
       throw error;
     }
+  }
+  cookieSession(request) {
+    const cookie = request.headers.get("cookie")?.split(";").map((v) => v.trim()).find((v) => v.startsWith(COOKIE + "="))?.slice(COOKIE.length + 1);
+    if (this.sessions.some((s) => s.expires <= this.now()))
+      this.sessions = this.sessions.filter((s) => s.expires > this.now()).slice(-15);
+    return this.sessions.find((s) => equalHash(cookie, s.cookieHash));
+  }
+  provenSession(request) {
+    const session = this.cookieSession(request);
+    return !!session && equalHash(request.headers.get(PROOF_HEADER), session.proofHash);
+  }
+  grantSession(dashboardCookies, extra) {
+    const cookie = secret(), proof = secret();
+    const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
+    this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-14), session];
+    const response = Response.json({ proof, ...extra }, { headers: {
+      "Set-Cookie": `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
+      "Cache-Control": "no-store",
+      "Clear-Site-Data": '"cache"',
+      "Content-Security-Policy": CSP
+    } });
+    for (const cookie2 of dashboardCookies)
+      response.headers.append("Set-Cookie", cookie2);
+    return response;
   }
   async handle(request, ownerRequestAdmitted) {
     if (!this.live())
@@ -62679,23 +63334,79 @@ class LinuxOwnerBridge {
         return refusal(503);
       }
       this.clearTicket(ticket);
-      const cookie2 = secret(), proof2 = secret();
-      const session2 = { cookieHash: hashSecret(cookie2), proofHash: hashSecret(proof2), expires: this.now() + SESSION_MS };
-      this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-14), session2];
-      const response2 = Response.json({ proof: proof2, target: ticket.target }, { headers: {
-        "Set-Cookie": `${COOKIE}=${cookie2}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
-        "Cache-Control": "no-store",
-        "Clear-Site-Data": '"cache"',
-        "Content-Security-Policy": CSP
-      } });
-      for (const cookie3 of dashboardCookies)
-        response2.headers.append("Set-Cookie", cookie3);
-      return response2;
+      const claim = this.claim?.record;
+      const asking = claim?.ticket === ticket && claim.state === "waiting" && claim.expires > this.now();
+      if (asking)
+        claim.state = "asked";
+      return this.grantSession(dashboardCookies, { target: ticket.target, ...asking ? { approval: { id: claim.approvalId, code: claim.code } } : {} });
+    }
+    if (url.pathname === "/owner-claim" && request.method === "POST") {
+      let body2;
+      try {
+        body2 = JSON.parse(await boundedBody(request, 1024));
+      } catch {
+        return refusal();
+      }
+      const claim = this.claim?.record;
+      if (!claim || claim.expires <= this.now() || !equalHash(body2.claim, claim.hash))
+        return refusal();
+      if (claim.state === "declined") {
+        this.claim = undefined;
+        const declined = refusal();
+        declined.headers.set(DECLINED_HEADER, "1");
+        return declined;
+      }
+      if (claim.state !== "approved")
+        return new Response(null, { status: 202, headers: { "Cache-Control": "no-store" } });
+      if (claim.collecting)
+        return restarting();
+      claim.collecting = true;
+      const current2 = () => this.claim?.record === claim && claim.expires > this.now();
+      let dashboardCookies;
+      try {
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (result === null) {
+          if (current2())
+            this.claim = undefined;
+          return refusal();
+        }
+        dashboardCookies = result;
+      } catch {
+        if (this.live() && current2()) {
+          claim.collecting = false;
+          return restarting();
+        }
+        return refusal(503);
+      }
+      if (!this.live() || !current2())
+        return refusal(503);
+      this.claim = undefined;
+      return this.grantSession(dashboardCookies, {});
+    }
+    if (url.pathname === "/owner-approve" && request.method === "POST") {
+      let body2;
+      try {
+        body2 = JSON.parse(await boundedBody(request, 1024));
+      } catch {
+        return refusal();
+      }
+      const claim = this.claim?.record;
+      if (!this.provenSession(request) || !claim || claim.state !== "asked" || claim.expires <= this.now() || !equal(body2.id, claim.approvalId))
+        return refusal();
+      claim.state = body2.approve === true ? "approved" : "declined";
+      return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
     }
     if (url.pathname === "/owner-open" && request.method === "POST") {
       try {
         await this.openTicket("/dashboard", "browser");
-        return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
+        const claim = this.claim;
+        const headers2 = new Headers({ "Cache-Control": "no-store" });
+        if (claim) {
+          headers2.set(CLAIM_HEADER, claim.secret);
+          headers2.set(CODE_HEADER, claim.record.code);
+          headers2.set(APPROVAL_HEADER, claim.record.approvalId);
+        }
+        return new Response(null, { status: 204, headers: headers2 });
       } catch (error) {
         if (!(error instanceof OwnerOpenLimited)) {
           const failed = page(`<p>${BROWSER_OPEN_FAILED_MESSAGE}</p>`, 503);
@@ -62712,10 +63423,7 @@ class LinuxOwnerBridge {
     }
     if (url.pathname === DESKTOP_OWNER_OPEN_PATH || url.pathname.startsWith("/owner-"))
       return refusal();
-    const cookie = request.headers.get("cookie")?.split(";").map((v) => v.trim()).find((v) => v.startsWith(COOKIE + "="))?.slice(COOKIE.length + 1);
-    if (this.sessions.some((s) => s.expires <= this.now()))
-      this.sessions = this.sessions.filter((s) => s.expires > this.now()).slice(-15);
-    const session = this.sessions.find((s) => equalHash(cookie, s.cookieHash));
+    const session = this.cookieSession(request);
     let proof = request.headers.get(PROOF_HEADER);
     let body;
     const binary = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() === "application/octet-stream";
@@ -62828,14 +63536,19 @@ init_package_root();
 import { existsSync as existsSync20 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { join as join28 } from "node:path";
+function telegramPythonVenvDir(options = {}) {
+  const env = options.env ?? process.env;
+  const home = options.homeDir ?? env.HOME ?? homedir12();
+  return join28(env.XDG_CACHE_HOME ?? join28(home, ".cache"), "olympus", "telegram-python");
+}
 function telegramPythonExecutable(options = {}) {
   if (options.pythonExecutable)
     return options.pythonExecutable;
-  const env = options.env ?? process.env;
-  const home = options.homeDir ?? env.HOME ?? homedir12();
-  const isolated = join28(env.XDG_CACHE_HOME ?? join28(home, ".cache"), "olympus", "telegram-python", "bin", "python");
+  const isolated = join28(telegramPythonVenvDir(options), "bin", "python");
   return existsSync20(isolated) ? isolated : Bun.which("python3") ?? undefined;
 }
+var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0";
+var TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
 
 // src/core/messaging-capture.ts
 init_atomic_file();
@@ -62852,7 +63565,6 @@ import { existsSync as existsSync21, mkdirSync as mkdirSync14, rmSync as rmSync6
 import { homedir as homedir13 } from "node:os";
 import { dirname as dirname27, join as join29 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-var GRANT_RETIRED_ENV = ["OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES", "OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES"];
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return captureGrantPathBeside(source, registryPath);
 }
@@ -62922,8 +63634,6 @@ class MessagingCaptureSupervisor {
       return { source: grant.source, state: "blocked", reason: "session_missing" };
     }
     const childEnv = definedEnv({ ...layoutEnv, ...grant.producer.env });
-    for (const name of GRANT_RETIRED_ENV)
-      delete childEnv[name];
     if (account.layout === "folder") {
       for (const name of folderCaptureEnvRemoved(account))
         delete childEnv[name];
@@ -63083,6 +63793,10 @@ init_olympus_layout();
 init_source_placement();
 init_source_registry();
 init_source_storage();
+
+// src/core/whatsapp-bridge-name.ts
+if (false)
+  ;
 
 // src/core/messaging-pairing.ts
 init_provider_account_history();
@@ -63586,6 +64300,7 @@ init_corpora();
 init_zkapi_consult_settings();
 
 // src/workers/dashboard/components.ts
+init_open_targets();
 init_source_dashboard();
 
 // src/workers/dashboard/theme.ts
@@ -64033,6 +64748,7 @@ var COMPUTER_HOST_PAGE_CSP = [
 
 // src/workers/dashboard/pages/local.ts
 init_source_dashboard();
+init_open_targets();
 
 // src/workers/agent-connections.ts
 init_operation_caller();
@@ -64649,9 +65365,6 @@ init_store();
 init_scope();
 init_store();
 
-// src/workers/local-files/scheduler-source.ts
-init_embeddings();
-
 // src/workers/source-scheduler.ts
 init_config();
 init_operation_error();
@@ -64662,7 +65375,6 @@ init_drive_extraction_source();
 init_connector_store();
 init_google_connectors();
 init_readwise();
-init_embeddings();
 init_x_bookmarks();
 init_live_control2();
 import { createHash as createHash24 } from "node:crypto";
@@ -65400,14 +66112,6 @@ ${request.taskId}`);
 }
 var EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
 var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-var CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP = true;
-var WHOLE_STORE_EMBEDDING_SWEEP_BY_SOURCE = {
-  [SCHEDULER_SOURCE_IDS.readwise]: true,
-  [SCHEDULER_SOURCE_IDS.gmail]: ["internal.email"],
-  [SCHEDULER_SOURCE_IDS.xBookmarks]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-  [SCHEDULER_SOURCE_IDS.whatsapp]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP,
-  [SCHEDULER_SOURCE_IDS.telegram]: CHAT_LANE_WHOLE_STORE_EMBEDDING_SWEEP
-};
 function normalizeTaskResult(result) {
   return {
     status: result.status,
@@ -66842,9 +67546,6 @@ var ARCHIVE_EXTRACTION_SCOPE_KEY = `${ARCHIVE_IMPORTS_SOURCE_ID2}:extraction`;
 // src/workers/archive-import/extraction-runtime.ts
 init_lane();
 
-// src/workers/archive-import/scheduler-source.ts
-init_embeddings();
-
 // src/workers/archive-import/sync.ts
 init_archive_formats();
 init_archive_formats();
@@ -67694,6 +68395,7 @@ init_tier_ledger();
 init_child_visibility();
 
 // src/workers/connector-store/tier-visibility.ts
+init_tier_classifier();
 init_tier_ledger();
 init_child_visibility();
 
@@ -67811,6 +68513,9 @@ var GMAIL_IMPORT_MIN_DAILY_BUDGET = Math.ceil((GMAIL_IMPORT_LABELS_COST + GMAIL_
 
 // src/workers/google-connectors/gmail-header-match.ts
 init_request_budget();
+
+// src/workers/connector-store/embedding-plan.ts
+init_embeddings();
 
 // src/workers/email-source/server.ts
 init_source_registry();
@@ -68037,11 +68742,11 @@ async function runSnifferPass(options) {
   const apply = (item, verdict) => {
     if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false) && !screenQuestion(item.target, item.question))
       return;
-    const tier = snifferTierKey(verdict);
+    const { tier, code } = snifferVerdictTier(verdict, options.lane, item.question.flags);
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
       tier,
-      reason: `${item.question.pass}:sniffer:${id}:${snifferReasonCode(verdict)}`,
+      reason: `${item.question.pass}:sniffer:${id}:${code}`,
       modelId: snifferCacheModelId(options.lane),
       mapRevision: item.question.mapRevision
     }, {
@@ -68224,6 +68929,7 @@ async function runSnifferPass(options) {
         system: SNIFFER_SYSTEM_PROMPT,
         prompt,
         localOnly: true,
+        responseSchema: SNIFFER_RESPONSE_SCHEMA,
         maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
         ...options.signal ? { signal: options.signal } : {}
       });
@@ -68447,7 +69153,13 @@ class TierSnifferService {
     };
   }
   get hasPriority() {
-    return this.running || this.continuation !== undefined;
+    if (!this.running && this.continuation === undefined)
+      return false;
+    try {
+      return this.options.shouldYield?.() !== true;
+    } catch {
+      return true;
+    }
   }
   status() {
     return {
@@ -69302,6 +70014,12 @@ function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
     ...env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH } : {}
   });
 }
+var SCOPE_APPROVED_SOURCE_IDS = new Set([
+  SCHEDULER_SOURCE_IDS.gmail,
+  SCHEDULER_SOURCE_IDS.googleDrive,
+  SCHEDULER_SOURCE_IDS.dropbox,
+  SCHEDULER_SOURCE_IDS.localFiles
+]);
 function parseOptionalTimeoutSeconds(value, name) {
   if (value === undefined || value.trim().length === 0)
     return;

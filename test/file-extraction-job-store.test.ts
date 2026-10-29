@@ -117,7 +117,7 @@ function isoSecondsFromNow(seconds: number): string {
 describe('extraction job store: module identity', () => {
   test('store id, schema version and default path follow the side-DB precedent', () => {
     expect(FILE_EXTRACTION_JOBS_STORE_ID).toBe('file-extraction-jobs');
-    expect(FILE_EXTRACTION_JOBS_SCHEMA_VERSION).toBe(6);
+    expect(FILE_EXTRACTION_JOBS_SCHEMA_VERSION).toBe(7);
     expect(defaultFileExtractionJobsDbPath({ XDG_DATA_HOME: '/data' }))
       .toBe('/data/openclaw/olympus/file-extraction-jobs.sqlite');
     // No env variable relocates the ledger alone (source storage step 6).

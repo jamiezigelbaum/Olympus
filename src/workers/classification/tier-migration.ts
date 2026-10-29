@@ -35,12 +35,12 @@ import { TIER_MIGRATION_DIR_ENV, tierMigrationReportDir, tierMigrationStatePath 
 // caller. Source-neutral: a lane is data (a tiered store set plus a source id
 // string); nothing branches on which source an item came from.
 
+import { imageJudgmentSignal } from '../source-index/media-judge.ts';
 import { DEFAULT_EMBEDDING_MODEL_ESTIMATES, embeddingModelEstimate } from '../../core/embedding-cost-estimates.ts';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { SourceClassificationSignals } from '../../core/contracts.ts';
-import { trustDomainPrior } from '../../core/classification-signals.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import type { SourceItemIdentity, SourceTrustDomain } from '../../core/source-index/types.ts';
 import type {
@@ -104,13 +104,6 @@ function domainTier(domain: SourceTrustDomain): Exclude<TierKey, 'secrets'> {
 export interface TierMigrationLane {
   sourceId: string;
   set: TieredStoreSet;
-  /**
-   * The lane's stored placement is a configured chat-level rule (a prior its
-   * items rest at and are never lowered below by automatic signals). The
-   * connector publishes it as a prior at sync time; a stored row cannot, so
-   * the lane declares it here.
-   */
-  storedPlacementIsPrior?: boolean;
 }
 
 /** The owner's classification inputs. `revision` covers everything but per-item overrides (read from the ledgers). */
@@ -379,8 +372,6 @@ function pathOf(item: Pick<ConnectorStoreMigrationItem, 'locatorUri'>): string |
  */
 function signalsFromStoredItem(
   item: ConnectorStoreMigrationItem,
-  storeDomain: SourceTrustDomain,
-  storedPlacementIsPrior: boolean,
 ): SourceClassificationSignals {
   const folderKeys = [
     ...item.folderKeys,
@@ -389,7 +380,6 @@ function signalsFromStoredItem(
   const path = pathOf(item);
   const sender = item.senderLabel ?? item.senderId;
   return {
-    ...(storedPlacementIsPrior ? { prior: trustDomainPrior(storeDomain) } : {}),
     ...(item.title ? { title: item.title } : {}),
     ...(path ? { path } : {}),
     ...(folderKeys.length > 0 ? { folderKeys } : {}),
@@ -723,14 +713,14 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
             || heldUntilJudged(ledger.getCurrent(item.identity)?.reasons);
           const decision = classifyItemTiers(
             {
-              signals: signalsFromStoredItem(item, store.trustDomain, lane.storedPlacementIsPrior === true),
+              signals: signalsFromStoredItem(item),
               // A link locator is screened for credentials as at ingestion.
               ...(item.locatorUri ? { locators: [item.locatorUri] } : {}),
               provider: item.identity.provider,
               text: item.chunks.map((chunk) => chunk.text).join(''),
               ...(item.mimeType ? { mimeType: item.mimeType } : {}),
               ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
-              ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
+              ...(imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {}),
               subject: item.identity,
             },
             {

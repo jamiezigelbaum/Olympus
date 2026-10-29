@@ -38,6 +38,7 @@ import {
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT,
 } from './vocabulary.ts';
 import {
+  DASHBOARD_IMPORT_LANDING_PREFIX,
   DASHBOARD_OPEN_FRAGMENT_KEY,
   OPEN_PAGE_BASE_URL,
   allOpenTargets,
@@ -214,6 +215,8 @@ function hostProgram(input: {
   openFragment: string;
   /** The panel targets' tokens and the source each lands on (core/open-targets.ts). */
   landings: Record<string, string>;
+  /** `import.`: a Keys link's landing on one card's Import an archive; the panel checks the card. */
+  importLanding: string;
   hasReadToken: boolean;
   toolsCallPath: string;
   /** Where one file of an archive upload goes, and the local tool whose unlock opens the session it needs. */
@@ -377,7 +380,7 @@ function hostProgram(input: {
   }
   // An open link's place in the panel (See why on one source): read against
   // the closed list, then cleared, so a reload does not land again.
-  let landing: { sourceId: string } | undefined;
+  let landing: { sourceId: string; import?: true } | undefined;
   if (window.location.hash.indexOf(input.openFragment) === 0) {
     const wanted = window.location.hash.slice(input.openFragment.length);
     try {
@@ -386,6 +389,8 @@ function hostProgram(input: {
       // An unchangeable history keeps the fragment; it is only a place to look.
     }
     if (Object.prototype.hasOwnProperty.call(input.landings, wanted)) landing = { sourceId: input.landings[wanted]! };
+    const card = wanted.indexOf(input.importLanding) === 0 ? wanted.slice(input.importLanding.length) : '';
+    if (/^[a-z0-9_.]{1,64}$/.test(card)) landing = { sourceId: card, import: true };
   }
   handle = bridge(landing ? { ...input.bridge, landing } : input.bridge, {
     frame,
@@ -411,8 +416,30 @@ function hostProgram(input: {
         window.location.assign(parsed.pathname + parsed.search + parsed.hash);
         return;
       }
-      window.open(url, '_blank', 'noopener');
+      // No 'noopener' feature: with it window.open answers null even when the tab opened, so a blocked open
+      // (Safari blocks one that comes after the connect call, not inside the click) could not be told apart.
+      let tab: Window | null = null;
+      try {
+        tab = window.open(url, '_blank');
+      } catch {
+        tab = null;
+      }
+      if (tab) {
+        tab.opener = null;
+        return;
+      }
+      // Blocked: the link goes beside the panel, where pressing it is the person's own click, which no browser blocks.
+      const offer = document.querySelector<HTMLElement>('[data-open-offer]');
+      const link = document.querySelector<HTMLAnchorElement>('[data-open-offer-link]');
+      if (!offer || !link) return;
+      link.href = url;
+      offer.hidden = false;
     },
+  });
+  const offerLink = document.querySelector<HTMLAnchorElement>('[data-open-offer-link]');
+  offerLink?.addEventListener('click', () => {
+    const offer = document.querySelector<HTMLElement>('[data-open-offer]');
+    if (offer) offer.hidden = true;
   });
 
   const toggle = document.querySelector<HTMLButtonElement>('[data-gate-toggle]');
@@ -533,6 +560,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     lockedUrl: dashboardHomeHref(token),
     openFragment: `#${DASHBOARD_OPEN_FRAGMENT_KEY}=`,
     landings: panelOpenTargetSources(),
+    importLanding: DASHBOARD_IMPORT_LANDING_PREFIX,
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     uploadPath: DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH,
@@ -562,6 +590,8 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
       + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`,
     ] : []),
     lockedGate(!locked),
+    `<section class="gate" data-open-offer role="alert" hidden><p>${text(DASHBOARD_HOST_GATE_COPY.openBlocked)} `
+    + `<a class="btn" data-open-offer-link target="_blank" rel="noopener noreferrer">${text(DASHBOARD_HOST_GATE_COPY.openBlockedLink)}</a></p></section>`,
     ...(input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map(model => `<p><strong>${text(model.name)} — ${text(model.state)}</strong>: ${text(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p>`).join('')}</details>`] : []),
     // allow-scripts only: an opaque origin, so the panel can reach nothing of
     // this page's (cookies, storage, DOM) and talks only through postMessage.

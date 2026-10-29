@@ -902,7 +902,7 @@ export class TierLedger {
       SELECT i.*, CASE WHEN
           i.routed = 1 AND i.content_read = 1
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move')
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior')
           -- A held row's stamp names the exact decision it re-read, so it
           -- never outlives that decision (rejudgeKeyForHeld).
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
@@ -928,6 +928,9 @@ export class TierLedger {
           )
           AND (
             i.state = 'pending'
+            -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
+            -- wrong under the owner ruling of 2026-10-28, so judged again now.
+            OR instr(i.reasons_json, '"metadata:prior:source_') > 0
             OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
@@ -1069,9 +1072,11 @@ export class TierLedger {
   }
 
   /**
-   * Routed items held pending ONLY because their text has not been read (no
-   * open names question, content unread), in key order after `after`: the
-   * rows a names-only settle pass checks (tier-names-only-settle.ts).
+   * Routed items held ONLY because their text has not been read (no open
+   * names question, content unread): pending on it, or settled fail-safe
+   * Private for the content question it could not have yet. In key order
+   * after `after`: the rows a names-only settle pass checks
+   * (tier-names-only-settle.ts).
    */
   listAwaitingText(options: { limit?: number; after?: TierLedgerIdentity } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
@@ -1080,7 +1085,10 @@ export class TierLedger {
       : null;
     const rows = this.db.query(`
       SELECT * FROM tier_items
-      WHERE state = 'pending' AND routed = 1 AND content_read = 0 AND content_pending = 1 AND metadata_pending = 0
+      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')))
         AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?

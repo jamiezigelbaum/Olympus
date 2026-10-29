@@ -254,6 +254,25 @@ describe('ModelSetupService local checks', () => {
     expect((await wrong.checkLocalModels()).cards[0]?.state).toBe('needs_attention');
   });
 
+  test('an unreachable server passes only where the built-in model answers for that profile (#591)', async () => {
+    const refused = asFetch(async () => { throw new TypeError('fetch failed: ECONNREFUSED'); });
+    const timedOut = asFetch(async () => {
+      const error = new Error('Request exceeded its 5000ms deadline.');
+      error.name = 'AbortError';
+      throw error;
+    });
+    const wrongModel = asFetch(async () => json({ data: [{ id: 'different-model' }] }));
+    const check = (fetch: typeof globalThis.fetch, backed: boolean) => new ModelSetupService({
+      config: localConfig(localChat), credentialState: () => 'ready', fetch, autoCheck: false,
+      builtInAnswers: (id) => backed && id === 'local',
+    }).checkLocalModels().then((view) => view.cards[0]?.state);
+
+    expect(await check(refused, true)).toBe('ready');
+    expect(await check(refused, false)).toBe('needs_attention');
+    expect(await check(timedOut, true)).toBe('needs_attention');
+    expect(await check(wrongModel, true)).toBe('needs_attention');
+  });
+
   test('requires a nonempty chat completion', async () => {
     const service = new ModelSetupService({
       config: localConfig(localChat), credentialState: () => 'ready',

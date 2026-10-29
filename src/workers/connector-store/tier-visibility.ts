@@ -23,6 +23,7 @@
 
 import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
+import { contentHeldForJudgment } from '../classification/tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { hiddenChildKeys, itemVerdicts, type ChildVisibilityStore } from './child-visibility.ts';
 
@@ -99,7 +100,8 @@ export function createTierVisibilityGate(scopes: () => readonly TierVisibilitySc
  * Each input is read by its exact identity, account included, from the ledger
  * that governs its corpus: one batched read per ledger, so every input is
  * judged against one snapshot. A row at Secrets (or moving there) is
- * `secret`; at Private (or moving there) `private`; anything else classified
+ * `secret`; at Private (or moving there), or held Private while its model
+ * question waits (`contentHeldForJudgment`), `private`; anything else classified
  * is `public_or_personal`; a routed item with no current copy left is also
  * `gone`. An item
  * no ledger governs, or one its ledger never classified (ledger rows are never
@@ -148,8 +150,12 @@ export function createReleaseTierCheck(
           const tiers = namesOnly
             ? [record.metadataTier, record.targetMetadataTier]
             : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+          // What waits for its model question is held Private, as placement
+          // holds it, though its recorded tier is the Personal default: an
+          // answer read from it is Private until the model says otherwise.
+          const held = record.metadataPending || (!namesOnly && contentHeldForJudgment(record));
           verdicts[index] = {
-            tier: tiers.includes('secrets') ? 'secret' : tiers.includes('secure') ? 'private' : 'public_or_personal',
+            tier: tiers.includes('secrets') ? 'secret' : held || tiers.includes('secure') ? 'private' : 'public_or_personal',
             gone: record.routed && !copies.some((copy) => copy.state === 'current'
               && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata')),
           };

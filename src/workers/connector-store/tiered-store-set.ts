@@ -63,7 +63,7 @@ import type { SecretLocationsIndex } from '../classification/secret-locations.ts
 import {
   maxTier,
   hasCredentialUrl,
-  PERSONAL_FIRST_REASON,
+  contentHeldForJudgment,
   type TierDecidedBy,
   type TierDecision,
   type TierKey,
@@ -86,6 +86,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
+  CONTAINER_MIME_TYPES,
   TierLedgerUnavailableError,
   connectorStoreItemText,
   syncAndEmbedFromConnector,
@@ -634,7 +635,7 @@ export class TieredStoreSet {
         stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) },
       };
     }
-    const contentHeld = decision.contentPending && !decision.reasons?.includes(PERSONAL_FIRST_REASON);
+    const contentHeld = contentHeldForJudgment(decision);
     const contentDomain = contentHeld
       ? this.domainAtLeast('secure_local')
       : this.domainAtLeast(
@@ -1804,16 +1805,20 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }
 
     // A lane whose text arrives later reads none at listing; an owner
-    // metadata-only disposition means none ever arrives.
+    // metadata-only disposition means none ever arrives, and neither does a
+    // container's (a folder has no text of its own), so no extraction will
+    // ever answer a question about it.
     const deferred = this.set.readsContentLater(item);
-    const text = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
+    const namesOnly = deferred
+      && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? ''));
+    const text = namesOnly ? undefined : connectorStoreItemText(item);
     // The owner's installed inputs (map, rules file, sniffer) merged with the
     // set's own (TieredStoreSet.classification()), resolved once per run.
     const classification = this.classification;
     // Names-only by the owner's choice: the text never arrives, so the names
     // are the whole decision and the item never waits on it.
     let decision = decideItemTiers(connector, item, text, classification, ledger, {
-      namesOnly: deferred && input.metadataOnly,
+      namesOnly,
       ...(input.contentFetchFailed ? { contentFetchFailed: true } : {}),
     });
     // With the owner's rules file or map unusable, the decision (made with
@@ -1871,8 +1876,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         return { kind: 'hold', reason: 'content_unread' };
       }
       // Re-listed without text in a lane whose text arrives later: the names
-      // are judged afresh, the content half stays what its text decided.
-      decision = withRecordedContent(decision, ledger.getCurrent(identity));
+      // are judged afresh, the content half stays what its text decided. Not
+      // for an item back after a deletion: that removed its copies and its
+      // text, so its text is read and judged again like a new item's.
+      if (ledger.copies(identity).length > 0) decision = withRecordedContent(decision, ledger.getCurrent(identity));
     }
 
     let placement = this.set.placementFor(decision, { contentArrivesLater: deferred });

@@ -184,7 +184,8 @@ describe('streaming, with no size limit', () => {
     const receiving = f.uploads.receive(uploadId, 'big.bin', live.body);
     const target = join(f.root, uploadId, 'files', 'big.bin');
     live.send('0123456789');
-    await until(() => existsSync(target) && statSync(target).size === 10);
+    // The write lands on disk a moment before the receive counts it: wait for both.
+    await until(() => existsSync(target) && statSync(target).size === 10 && f.uploads.status(uploadId).bytes === 10);
     // The sender has not finished, and ten bytes are already on disk and counted.
     expect(statSync(target).size).toBe(10);
     expect(f.uploads.status(uploadId)).toEqual({ state: 'receiving', files: 0, bytes: 10 });

@@ -21,6 +21,7 @@ import {
   type XBookmarksLiveSyncResult,
 } from '../src/workers/x-bookmarks/index.ts';
 import { createXBookmarksSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 describe('X bookmarks live server integration', () => {
   test('constructs the connector-store runtime only behind all three gates', () => {
@@ -28,25 +29,25 @@ describe('X bookmarks live server integration', () => {
     const handle = xHandle();
     const embeddingProvider = fakeEmbeddingProvider();
 
-    expect(createXBookmarksConnectorStoreRuntime({
+    expect(createXBookmarksConnectorStoreRuntime({ tierSetFor: (store) => xBookmarksTestTierSet(store),
       enabled: false,
       handle,
       embeddingProvider,
       dbPath: join(root, 'disabled.sqlite'),
     })).toBeUndefined();
-    expect(createXBookmarksConnectorStoreRuntime({
+    expect(createXBookmarksConnectorStoreRuntime({ tierSetFor: (store) => xBookmarksTestTierSet(store),
       enabled: true,
       embeddingProvider,
       dbPath: join(root, 'missing-handle.sqlite'),
     })).toBeUndefined();
-    expect(createXBookmarksConnectorStoreRuntime({
+    expect(createXBookmarksConnectorStoreRuntime({ tierSetFor: (store) => xBookmarksTestTierSet(store),
       enabled: true,
       handle,
       dbPath: join(root, 'missing-embedding.sqlite'),
     })).toBeUndefined();
 
     const usageStore = new LocalXBookmarksApiUsageStore(':memory:');
-    const runtime = createXBookmarksConnectorStoreRuntime({
+    const runtime = createXBookmarksConnectorStoreRuntime({ tierSetFor: (store) => xBookmarksTestTierSet(store),
       enabled: true,
       handle,
       embeddingProvider,
@@ -64,7 +65,7 @@ describe('X bookmarks live server integration', () => {
   test('activates the canonical store task after reauth without reviving it after disconnect', () => {
     const usageStore = new LocalXBookmarksApiUsageStore(':memory:');
     const reconcileStateStore = new LocalXBookmarksReconcileStateStore(':memory:');
-    const lane = createRefreshableXBookmarksConnectorStoreRuntime({
+    const lane = createRefreshableXBookmarksConnectorStoreRuntime({ tierSetFor: (store) => xBookmarksTestTierSet(store),
       enabled: true,
       embeddingProvider: fakeEmbeddingProvider(),
       dbPath: ':memory:',

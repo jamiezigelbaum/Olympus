@@ -42,6 +42,7 @@ import {
   type XBookmarksLiveSyncConfig,
   type XBookmarksLiveSyncResult,
 } from '../src/workers/x-bookmarks/index.ts';
+import { xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'personal';
 const NOON = new Date('2026-08-19T12:00:00.000Z');
@@ -251,6 +252,7 @@ describe('X usage guard invocation provenance', () => {
       exhaustSpendBudget(usage, config);
       const handler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         embeddingProvider: fakeEmbeddingProvider(),
         account: ACCOUNT,
@@ -314,6 +316,7 @@ describe('X usage guard invocation provenance', () => {
       const post = bookmark('op-reconcile-1', 'operator reconcile marker');
       const handler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         embeddingProvider: fakeEmbeddingProvider(),
         account: ACCOUNT,
@@ -360,6 +363,7 @@ describe('X usage guard invocation provenance', () => {
     exhaustSpendBudget(usage, config);
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       account: ACCOUNT,

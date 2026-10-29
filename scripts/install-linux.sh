@@ -17,6 +17,12 @@ BUN_BYTES=@BUN_BYTES@
 BUN_SHA256=@BUN_SHA256@
 BUN_EXE_SHA256=@BUN_EXE_SHA256@
 BUN_GLIBC_MIN=@BUN_GLIBC_MIN@
+# The release's prebuilt Linux x64 WhatsApp bridge, served beside the tarball as
+# $WHATSAPP_BRIDGE_NAME-linux-x64 and placed in the per-user bridge cache pairing
+# reads, so pairing WhatsApp needs no Go or C compiler. none: pairing builds it.
+WHATSAPP_BRIDGE_NAME=@WHATSAPP_BRIDGE_NAME@
+WHATSAPP_BRIDGE_SHA256=@WHATSAPP_BRIDGE_SHA256@
+WHATSAPP_BRIDGE_BYTES=@WHATSAPP_BRIDGE_BYTES@
 
 say() { printf '%s\n' "$*"; }
 die() { printf '%s\n' "Olympus was not installed or upgraded: $*" >&2; exit 1; }
@@ -27,22 +33,24 @@ check_digest() {
 fetch() { curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "$2" "$1"; }
 
 usage() {
-  say 'Usage: install-linux.sh [--tarball PATH] [--bun-archive PATH]'
-  say 'Both local archives are checked against the release pins before extraction or execution.'
+  say 'Usage: install-linux.sh [--tarball PATH] [--bun-archive PATH] [--whatsapp-bridge PATH]'
+  say 'Every local file is checked against the release pins before extraction or execution.'
 }
 
 parse_args() {
   LOCAL_TARBALL=''
   LOCAL_BUN_ARCHIVE=''
+  LOCAL_BRIDGE=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --tarball|--bun-archive)
+      --tarball|--bun-archive|--whatsapp-bridge)
         [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a path."
-        case "$1" in --tarball) LOCAL_TARBALL=$2 ;; *) LOCAL_BUN_ARCHIVE=$2 ;; esac
+        case "$1" in --tarball) LOCAL_TARBALL=$2 ;; --bun-archive) LOCAL_BUN_ARCHIVE=$2 ;; *) LOCAL_BRIDGE=$2 ;; esac
         shift 2
         ;;
       --tarball=*) LOCAL_TARBALL=${1#--tarball=} ; shift ;;
       --bun-archive=*) LOCAL_BUN_ARCHIVE=${1#--bun-archive=} ; shift ;;
+      --whatsapp-bridge=*) LOCAL_BRIDGE=${1#--whatsapp-bridge=} ; shift ;;
       --help|-h) usage; exit 0 ;;
       *) die "Unknown option: $1" ;;
     esac
@@ -54,7 +62,7 @@ check_tools() {
   for tool in sha256sum tar unzip stat getconf mktemp mkdir chmod rm wc tr id uname df cp mv cat dirname sed head find awk grep diff cmp ps flock loginctl systemctl systemd-analyze python3; do
     command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
   done
-  if { [ -z "$LOCAL_TARBALL" ] || [ -z "$LOCAL_BUN_ARCHIVE" ]; } && ! command -v curl >/dev/null 2>&1; then
+  if { [ -z "$LOCAL_TARBALL" ] || [ -z "$LOCAL_BUN_ARCHIVE" ] || { [ "$WHATSAPP_BRIDGE_NAME" != none ] && [ -z "$LOCAL_BRIDGE" ]; }; } && ! command -v curl >/dev/null 2>&1; then
     missing="$missing curl"
   fi
   if [ -n "$missing" ]; then
@@ -148,7 +156,7 @@ unpack_package() {
 
 main() {
   parse_args "$@"
-  case "$OLYMPUS_VERSION$OLYMPUS_SHA256$OLYMPUS_BYTES$BUN_VERSION$BUN_URL$BUN_ENTRY$BUN_BYTES$BUN_SHA256$BUN_EXE_SHA256$BUN_GLIBC_MIN" in
+  case "$OLYMPUS_VERSION$OLYMPUS_SHA256$OLYMPUS_BYTES$BUN_VERSION$BUN_URL$BUN_ENTRY$BUN_BYTES$BUN_SHA256$BUN_EXE_SHA256$BUN_GLIBC_MIN$WHATSAPP_BRIDGE_NAME$WHATSAPP_BRIDGE_SHA256$WHATSAPP_BRIDGE_BYTES" in
     *@*) die 'Unfilled installer template; use a published Linux release.' ;;
   esac
   check_tools
@@ -163,6 +171,11 @@ main() {
     && [ "$BUN_ENTRY" = bun-linux-x64-baseline/bun ] && [ "$BUN_GLIBC_MIN" = 2.17 ] \
     || die 'Missing or unsupported Linux runtime pin.'
   printf '%s\n' "$BUN_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die 'Missing or malformed Bun version.'
+  if [ "$WHATSAPP_BRIDGE_NAME" != none ]; then
+    printf '%s\n' "$WHATSAPP_BRIDGE_NAME" | grep -Eq '^olympus-whatsapp-bridge-[0-9a-f]{16}$' || die 'Malformed WhatsApp bridge name.'
+    printf '%s\n' "$WHATSAPP_BRIDGE_SHA256" | grep -Eq '^[0-9a-f]{64}$' || die 'Malformed WhatsApp bridge checksum.'
+    case "$WHATSAPP_BRIDGE_BYTES" in ''|*[!0-9]*|0) die 'Malformed WhatsApp bridge size.' ;; esac
+  fi
   check_session
   umask 077
   mkdir -p "$XDG_RUNTIME_DIR/olympus"
@@ -175,7 +188,7 @@ main() {
   trap 'rm -rf "$WORK"' EXIT
   # Allow room for the runtime, compressed package and extraction before downloading.
   available=$(df -Pk "$WORK" | awk 'END {print $4}')
-  [ "$available" -ge "$(( (BUN_BYTES * 4 + OLYMPUS_BYTES * 6) / 1024 + 65536 ))" ] || die 'Not enough bootstrap disk space.'
+  [ "$available" -ge "$(( (BUN_BYTES * 4 + OLYMPUS_BYTES * 6 + WHATSAPP_BRIDGE_BYTES * 2) / 1024 + 65536 ))" ] || die 'Not enough bootstrap disk space.'
   if [ -n "$LOCAL_BUN_ARCHIVE" ]; then
     copy_local_archive "$LOCAL_BUN_ARCHIVE" "$WORK/bun.zip" 'Local Bun archive'
   else
@@ -192,6 +205,14 @@ main() {
     fetch "$RELEASE_BASE/$OLYMPUS_VERSION/olympus-$OLYMPUS_VERSION.tgz" "$WORK/release.tgz" || die 'Release download failed.'
   fi
   check_digest "$WORK/release.tgz" "$OLYMPUS_BYTES" "$OLYMPUS_SHA256" || die 'Release checksum/size mismatch; nothing was executed.'
+  if [ "$WHATSAPP_BRIDGE_NAME" != none ]; then
+    if [ -n "$LOCAL_BRIDGE" ]; then
+      copy_local_archive "$LOCAL_BRIDGE" "$WORK/whatsapp-bridge" 'Local WhatsApp bridge'
+    else
+      fetch "$RELEASE_BASE/$OLYMPUS_VERSION/$WHATSAPP_BRIDGE_NAME-linux-x64" "$WORK/whatsapp-bridge" || die 'WhatsApp bridge download failed.'
+    fi
+    check_digest "$WORK/whatsapp-bridge" "$WHATSAPP_BRIDGE_BYTES" "$WHATSAPP_BRIDGE_SHA256" || die 'WhatsApp bridge checksum/size mismatch; nothing was executed.'
+  fi
   unpack_package
   [ "$("$WORK/bun" --no-env-file --version)" = "$BUN_VERSION" ] || die 'The verified Bun cannot run on this CPU/glibc, or returned the wrong version.'
   "$WORK/bun" --no-env-file -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(p.name!=="olympus" || p.version!==process.argv[2]) process.exit(1)' "$WORK/unpacked/package/package.json" "$OLYMPUS_VERSION" \
@@ -235,6 +256,18 @@ ACTIVATE
   flock --nonblock "$LOCK" /bin/sh "$WORK/activate.sh" "$WORK" || result=$?
   trap - HUP INT TERM
   [ "$result" = 0 ] || die "Lifecycle supervisor failed (status $result); see the recovery report above."
+  # The verified bridge goes where pairing and capture look for this source's build
+  # (core/messaging-pairing.ts whatsappBridgeCachePath): owner-only, never in the
+  # read-only version tree. Replaced atomically, so a running capture keeps its file.
+  if [ "$WHATSAPP_BRIDGE_NAME" != none ]; then
+    bridge_dir="$XDG_CACHE_HOME/olympus/bin"
+    check_path "$bridge_dir"
+    mkdir -p "$bridge_dir" && chmod 700 "$XDG_CACHE_HOME/olympus" "$bridge_dir" \
+      && cp "$WORK/whatsapp-bridge" "$bridge_dir/$WHATSAPP_BRIDGE_NAME.next" \
+      && chmod 700 "$bridge_dir/$WHATSAPP_BRIDGE_NAME.next" \
+      && mv -f "$bridge_dir/$WHATSAPP_BRIDGE_NAME.next" "$bridge_dir/$WHATSAPP_BRIDGE_NAME" \
+      || say 'Olympus is installed, but its WhatsApp bridge could not be placed; WhatsApp pairing will build it instead.'
+  fi
 
 }
 

@@ -64,12 +64,14 @@ function renderForTest(input: {
   bunExe: string;
   sha256?: string;
   bunExeSha256?: string;
+  /** A prebuilt WhatsApp bridge served beside the tarball. */
+  bridge?: { name: string; path: string; sha256?: string };
 }): string {
   return renderInstallScript(readFileSync(TEMPLATE, 'utf8'), {
     version: input.version,
     sha256: input.sha256 ?? sha256(input.tarball),
     bytes: sizeOf(input.tarball),
-  })
+  }, input.bridge ? { name: input.bridge.name, sha256: input.bridge.sha256 ?? sha256(input.bridge.path), bytes: sizeOf(input.bridge.path) } : undefined)
     .replace(/^RELEASE_BASE=.*$/m, `RELEASE_BASE=${input.releaseBase}`)
     .replace(/^BUN_BASE=.*$/m, `BUN_BASE=${input.bunBase}`)
     .replace(/^BUN_SHA256_DARWIN_AARCH64=.*$/m, `BUN_SHA256_DARWIN_AARCH64=${sha256(input.bunZip)}`)
@@ -107,7 +109,9 @@ interface Harness {
   app: string;
   runtimeBun: string;
   uid: number;
-  run(version: string, env?: Record<string, string>, options?: { sha256?: string; bunExeSha256?: string }): RunResult;
+  run(version: string, env?: Record<string, string>, options?: { sha256?: string; bunExeSha256?: string; bridge?: { sha256?: string } }): RunResult;
+  /** The prebuilt bridge the installer downloads with `bridge`, and its name. */
+  bridgeName: string;
   /** The same, in the background: its process id and its result. */
   start(version: string, env?: Record<string, string>): { pid: number; done: Promise<RunResult> };
   uninstall(env?: Record<string, string>): RunResult;
@@ -247,7 +251,10 @@ exec /bin/mv "$@"
   });
   const support = join(home, 'Library', 'Application Support', 'Olympus');
   const app = join(support, 'app');
-  const writeScript = (version: string, options: { sha256?: string; bunExeSha256?: string } = {}): string => {
+  const bridgeName = 'olympus-whatsapp-bridge-0123456789abcdef';
+  const bridgePath = join(tarballs, `${bridgeName}-darwin-arm64`);
+  writeFileSync(bridgePath, 'prebuilt bridge\n');
+  const writeScript = (version: string, options: { sha256?: string; bunExeSha256?: string; bridge?: { sha256?: string } } = {}): string => {
     const tarball = makeTarball(version);
     const script = join(root, `install-${version}.sh`);
     writeFileSync(script, renderForTest({
@@ -259,6 +266,7 @@ exec /bin/mv "$@"
       bunExe: fakeBun,
       ...(options.sha256 ? { sha256: options.sha256 } : {}),
       ...(options.bunExeSha256 ? { bunExeSha256: options.bunExeSha256 } : {}),
+      ...(options.bridge ? { bridge: { name: bridgeName, path: bridgePath, ...(options.bridge.sha256 ? { sha256: options.bridge.sha256 } : {}) } } : {}),
     }));
     return script;
   };
@@ -269,6 +277,7 @@ exec /bin/mv "$@"
     app,
     runtimeBun: join(support, 'runtime', 'bun'),
     uid: UID,
+    bridgeName,
     tarball: makeTarball,
     run(version, extra = {}, options = {}) {
       const script = writeScript(version, options);
@@ -325,6 +334,25 @@ const leftovers = (support: string): string[] =>
   existsSync(support) ? readdirSync(support).filter((name) => !['app', 'app.previous', 'runtime', '.install-lock'].includes(name)) : [];
 
 describe.each(SHELLS)('install.sh under %s', (shell) => {
+  shellTest('puts the release\'s verified WhatsApp bridge in the app, owner-only writable, and refuses a corrupt one', () => {
+    const h = harness(shell);
+    const result = h.run(V1, {}, { bridge: {} });
+    expectSucceeded(result);
+    const installed = join(h.app, 'tools', 'whatsapp-bridge', 'bin', h.bridgeName);
+    expect(readFileSync(installed, 'utf8')).toBe('prebuilt bridge\n');
+    expect(statSync(installed).mode & 0o777).toBe(0o755);
+    expect(h.curlCalls()).toContain(`https://releases.test/${V1}/${h.bridgeName}-darwin-arm64`);
+    // The same release again, its bridge gone: put back without a reinstall.
+    rmSync(installed);
+    expectSucceeded(h.run(V1, {}, { bridge: {} }));
+    expect(readFileSync(installed, 'utf8')).toBe('prebuilt bridge\n');
+    // A bridge that does not match its pins stops the install before anything changes.
+    const corrupt = h.run(V2, {}, { bridge: { sha256: 'c'.repeat(64) } });
+    expect(corrupt.status).toBe(1);
+    expect(corrupt.stderr).toContain('the WhatsApp bridge download did not match its checksum');
+    expect(appVersion(h.app)).toBe(V1);
+   }, 60_000);
+
   shellTest('installs Bun and Olympus, starts the engine, and tells the user the next step in ChatGPT', () => {
     const h = harness(shell);
     const result = h.run(V1);

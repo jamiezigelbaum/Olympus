@@ -32,6 +32,7 @@ export const CHATGPT_PRIVACY_META_KEY = PRIVACY_META_KEY;
 export const CHATGPT_PRIVACY_FOLDER_SOURCES = {
   'dropbox.files': 'Dropbox',
   'google_drive.docs': 'Google Drive',
+  'evernote.notes': 'Evernote',
 } as const;
 
 export type ChatGptPrivacyRuleKind = 'folder' | 'label' | 'sender';

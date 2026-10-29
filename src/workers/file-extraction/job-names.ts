@@ -58,6 +58,12 @@ export interface ExtractionJobItemKey {
 export const SECRET_ITEM_REDACTIONS_TABLE = 'secret_item_redactions';
 export const SECRET_ITEM_REDACTION_CLAIMS_TABLE = 'secret_item_redaction_claims';
 export const SECRET_RESTORED_REREADS_TABLE = 'secret_restored_rereads';
+/** A re-read owed for a placement, not for leaving Secrets: it reopens only a
+ * job its store refused for placement, never one that judged its text Secret. */
+export const REREAD_AFTER_PLACEMENT = 'placement';
+/** A re-read owed because a retired item came back: its text went with the
+ * retirement, so a job that read it is read again. */
+export const REREAD_AFTER_REVIVE = 'revived';
 
 const openLedgerPaths = new Map<string, number>();
 
@@ -225,13 +231,16 @@ export function retireExtractionJobRedaction(
       // including workers still settling the refusal. Other policy blocks
       // stay settled. Wait for the next enqueue, once the restored store copy
       // exists, so the worker has a copy to land in.
+      // A placement debt already owed to one of these jobs is widened to a
+      // restoration debt, or taking it would drop the Secrets reread.
       if (retired > 0 && rereadsTableExists(db)) {
         db.query(`
-          INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+          INSERT INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
           SELECT job_id FROM extraction_jobs
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
             AND (status IN ('indexed', 'leased')
               OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
+          ${rereadsHaveReason(db) ? 'ON CONFLICT(job_id) DO UPDATE SET reason = NULL' : 'ON CONFLICT(job_id) DO NOTHING'}
         `).run(item.provider, item.accountScope, item.providerItemId);
       }
       return { retired, stillSecret: false };
@@ -347,9 +356,97 @@ function artifactsTableExists(db: Database): boolean {
 }
 
 /**
+ * Settlements decided by WHERE the item sat when its text arrived, not by the
+ * text or the file: the store it was bound for kept only names, a picture had
+ * no Private store to land in, or its names had to move first. Each is
+ * correct for that placement and wrong after a tier move changes it, so a
+ * completed move owes these jobs a re-read (`oweExtractionRereadAfterTierMove`).
+ * The tokens are the sink's skip reasons (store-sink.ts), spelled out here
+ * because this module is imported by the store side and must not import the
+ * sink.
+ */
+const PLACEMENT_SETTLEMENTS = [
+  { status: 'metadata_only', kind: 'store_item_metadata_only' },
+  { status: 'metadata_only', kind: 'store_image_content_private_only' },
+  { status: 'blocked_policy', kind: 'store_item_tier_move_queued' },
+] as const;
+
+function settledByPlacement(job: { status: string; last_error_kind: string | null }): boolean {
+  return PLACEMENT_SETTLEMENTS.some((settlement) =>
+    settlement.status === job.status && settlement.kind === job.last_error_kind);
+}
+
+/**
+ * A tier move of one item has completed (connector-store/tier-move.ts): its
+ * jobs that settled on the old placement are read again at their next
+ * enqueue, which comes because the moved item, still without text, is listed
+ * as a candidate again. Without this the settled job's identity (lane corpus,
+ * item, revision, extractor) never changes, enqueue keeps it settled, and the
+ * moved item stays names-only for good. A leased job is owed too: it may be
+ * settling against the old placement right now. Uses the same re-read table
+ * as a Secrets restoration; the debt is consumed by `takeRestoredReread`.
+ */
+export function oweExtractionRereadAfterTierMove(
+  dbPath: string,
+  item: Omit<ExtractionJobItemKey, 'localItemId'>,
+): number {
+  if (dbPath === ':memory:' || !existsSync(dbPath)) return 0;
+  const db = new Database(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!rereadsTableExists(db) || !rereadsHaveReason(db)) return 0;
+    const placement = PLACEMENT_SETTLEMENTS.map(() => '(status = ? AND last_error_kind = ?)').join(' OR ');
+    return db.query(`
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+      SELECT job_id, ? FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        AND (status = 'leased' OR ${placement})
+    `).run(
+      REREAD_AFTER_PLACEMENT,
+      item.provider,
+      item.accountScope,
+      item.providerItemId,
+      ...PLACEMENT_SETTLEMENTS.flatMap((settlement) => [settlement.status, settlement.kind]),
+    ).changes;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
+ * A stored item came back after it was retired (a notebook or folder chosen
+ * again, a file restored): retiring deleted its extracted text, so its jobs
+ * that read it are read again at their next enqueue. The item, back without
+ * text, is listed as a candidate again; without this its job's identity
+ * (corpus, item, version, extractor) is unchanged and it stays settled with
+ * nothing behind it. Same re-read table as a Secrets restoration.
+ */
+export function oweExtractionRereadAfterRevive(
+  dbPath: string,
+  item: Omit<ExtractionJobItemKey, 'localItemId'>,
+): number {
+  if (dbPath === ':memory:' || !existsSync(dbPath)) return 0;
+  const db = new Database(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!rereadsTableExists(db) || !rereadsHaveReason(db)) return 0;
+    return db.query(`
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+      SELECT job_id, ? FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        AND status IN ('indexed', 'leased')
+    `).run(REREAD_AFTER_REVIVE, item.provider, item.accountScope, item.providerItemId).changes;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
  * Whether an existing job is owed a re-read because its item left Secrets
- * (see `retireExtractionJobRedaction`), read and consumed on the caller's
- * own connection inside its enqueue transaction.
+ * (see `retireExtractionJobRedaction`), completed a tier move (see
+ * `oweExtractionRereadAfterTierMove`) or came back after it was retired (see
+ * `oweExtractionRereadAfterRevive`), read and consumed on the caller's own
+ * connection inside its enqueue transaction.
  */
 export function takeRestoredReread(db: Database, jobId: string): boolean {
   if (!rereadsTableExists(db)) return false;
@@ -358,9 +455,19 @@ export function takeRestoredReread(db: Database, jobId: string): boolean {
   // A listing can overlap the old worker's settlement. Keep its debt and
   // lease intact until the outcome tells us whether a reread is needed.
   if (job?.status === 'leased') return false;
-  const owed = db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId).changes > 0;
-  return owed && (job?.status === 'indexed'
-    || (job?.status === 'blocked_policy' && job.last_error_kind === 'store_item_secrets'));
+  const debt = db.query(`SELECT ${rereadsHaveReason(db) ? 'reason' : 'NULL AS reason'} FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`)
+    .get(jobId) as { reason: string | null } | null;
+  if (!debt || !job) return false;
+  db.query(`DELETE FROM ${SECRET_RESTORED_REREADS_TABLE} WHERE job_id = ?`).run(jobId);
+  // A restoration debt covers a placement settlement too; a placement debt
+  // never reopens a Secrets verdict.
+  return settledByPlacement(job) || (debt.reason !== REREAD_AFTER_PLACEMENT && (job.status === 'indexed'
+    || (job.status === 'blocked_policy' && job.last_error_kind === 'store_item_secrets')));
+}
+
+function rereadsHaveReason(db: Database): boolean {
+  return (db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all() as { name: string }[])
+    .some((column) => column.name === 'reason');
 }
 
 function rereadsTableExists(db: Database): boolean {

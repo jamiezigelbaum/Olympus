@@ -355,6 +355,79 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-29 (no version change): **an owner clause naming a kind of
+  record covers every record of that kind.** The built-in model judged 5 of
+  24 Private inbox records Personal with `privateKind` "none", every one a
+  small invoice or receipt the owner profile calls Private ("Invoices, bills
+  and receipts"), stable over repeated runs. Two generic lines in
+  `SNIFFER_SYSTEM_PROMPT` say such a clause covers every record of the kind,
+  however small, routine or work-related. No per-source or per-question
+  logic. Classification inbox eval with qwen3.5-4b: dev 22/24 → 24/24,
+  held-out 21/24 → 23/24 (inbox-32 still missed), Personal and Secrets
+  recall 1.0; `eval:classification` passes. The prompt version changes, so
+  on the built-in model the new prompt is approved by default and stored
+  items are re-judged automatically, with no owner step.
+- 2026-10-29 (no contract type version change; tier classifier
+  `2026-10-29.p8`): **on the small built-in model, a record stays Private**.
+  On the Linux release check the 8 GB-class model (Qwen3.5 2B) judged the
+  cardiology fixture ("resting heart rate 52 bpm", a prescription) "work
+  0.95" Personal, five of five on the real model, whenever its names carried
+  no label saying private; the 4B judged it Private. A Personal answer from
+  a small built-in model now holds an item Private when the content pass
+  found a populated record in its own text (the existing `content:own_record:`
+  signals: values with units, reference ranges, a named holder, a filled
+  form, a records folder, a dated record title), recorded as
+  `content:sniffer:<id>:record_held:<code>`. Topic words still never hold or
+  raise, and every other model's answer stands. Items decided under p7 are
+  judged again; cached answers settle them without a model call.
+- 2026-10-29 (no contract type version change; tier classifier
+  `2026-10-29.p7`, photo judge `photo-judge-2026-10-29`): **a picture of a
+  document is decided by its text** (owner direction 2026-10-29: fix privacy
+  misjudgments generally, not one at a time). The 2026-10-08 photo judge
+  compared a picture with one description of an ordinary photo, so any
+  picture of writing (the demo kit's whiteboard, slides, screenshots, notes)
+  could land nearest the medical document description and rest Private on
+  the picture alone, whatever it said (calibration with the real model,
+  `eval/photo-judge/`: both whiteboards; rewording the ordinary description
+  cleared all 17 writing pictures but missed 6 to 7 of 22 sensitive
+  specimens, so the descriptions are unchanged). A medical document is named
+  by what it says, so a picture nearest it is now `ordinary` with the reason
+  `text_decides`, and the classifier decides
+  it by the text read off it: held Private (an own-record hold, never
+  `content:personal_first`) until the privacy-safe model reads that text,
+  Private at once on a structured identifier, and Private on the picture
+  (`content:image_sensitive:<category>`) when fewer than eight words were
+  read. With no model the hold never lifts. Identity documents, bank cards,
+  intimate pictures and, for now, financial documents stay `sensitive` on the
+  picture alone: the built-in model still judges some small invoices and
+  receipts Personal against the owner's words (classification inbox eval,
+  5 of 24 Private records), so financial text cannot yet decide. Stored data:
+  the new judge id makes every stored judgment stale, so each picture is
+  judged again and a changed verdict re-decides its items through the
+  existing judgment sweep; the classifier version re-judges routed items
+  through the existing re-judge pass. Both run automatically, with no owner
+  step. No schema change: the verdict set is unchanged and the reason column
+  already exists; a re-written judgment with a changed reason is re-applied.
+  SourceConnector, EvidencePack and Analyst shapes and the canonical
+  fingerprint are unchanged. Evidence: `test/photo-privacy-judge.test.ts`
+  (a whiteboard and a lab result judged nearest a medical document through
+  the tier set: the whiteboard reaches Personal with its picture after the
+  model reads it, the lab result stays Private); the calibration kit
+  `eval/photo-judge/` (pictures of everyday writing and synthetic records,
+  scored by the real model). Critical-review gate: a critical classification
+  change; it needs fresh independent review of its head before merge.
+- 2026-10-28 (no version change): **only the user's own rule decides a
+  group of items** (owner ruling). The Telegram helper no longer reads a
+  deployment's protected-chat or chat-classification settings and captures
+  every approved chat alike; the repo's Saved Messages policy file is
+  deleted. The tier migration no longer reads a Telegram store's placement
+  as a prior (`storedPlacementIsPrior` is deleted), so messages already
+  stored Private are re-judged by their content like any other. Capture
+  records written before this change keep their recorded trust domain as a
+  prior on replay; nothing new is written that way. `test/privacy-per-item-guard.test.ts` keeps these paths dead and
+  holds every published floor to a per-item fact. The `prior` field stays
+  optional, so none of this is reachable from the three contract types and
+  the fingerprint is unchanged.
 - 2026-10-28 (no version change): **no source is Private wholesale** (owner
   ruling, repeated: privacy is decided per item by its content, in every
   source). WhatsApp and Apple Messages no longer publish a `source_default`

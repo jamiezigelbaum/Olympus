@@ -1160,7 +1160,7 @@ describe('photo content rests Private by default', () => {
   test('an image\'s content is Private whatever text was read off it; its names keep their tier', () => {
     const decision = classifyContentTier({ ...base, text: 'Photo\nOPEN HOUSE SUNDAY', mimeType: 'image/jpeg' });
     expect(decision.contentTier).toBe('secure');
-    expect(decision.reasons).toEqual([IMAGE_PRIVATE_DEFAULT_REASON, `content:sha256:${createHash('sha256').update('Photo\nOPEN HOUSE SUNDAY').digest('hex')}`]);
+    expect(decision.reasons).toEqual([IMAGE_PRIVATE_DEFAULT_REASON, `content:sha256:${createHash('sha256').update('Photo\nOPEN HOUSE SUNDAY').digest('hex')}`, expect.stringMatching(/^content:names:[a-f0-9]{16}$/)]);
     expect(decision.contentPending).toBe(false);
     // Even when an owner rule forced the names Public.
     expect(classifyContentTier({ ...base, metadataTier: 'public', metadataForced: true, text: 'Photo', mimeType: 'image/png' }).contentTier).toBe('secure');

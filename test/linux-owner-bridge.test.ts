@@ -661,3 +661,63 @@ test('a worker session refusal permanently spends the claim instead of retrying 
   expect(response.headers.has('Set-Cookie')).toBe(false);
   expect((await bridge.handle(request())).status).toBe(403); expect(calls).toBe(1);
 });
+
+test('a waiting page in another browser continues only after an Olympus window approves its code, once', async () => {
+  const f = fixture();
+  const owner = await prove(f);
+  const opened = await f.bridge.handle(f.post('/owner-open', {}));
+  expect(opened.status).toBe(204);
+  const claim = opened.headers.get('X-Olympus-Owner-Claim')!, code = opened.headers.get('X-Olympus-Owner-Code')!, id = opened.headers.get('X-Olympus-Owner-Approval')!;
+  expect(code).toMatch(/^[A-Z2-9]{3}-[A-Z2-9]{3}$/);
+  // Until the Olympus window redeems its ticket and the owner approves there, the claim only waits.
+  expect((await f.bridge.handle(f.post('/owner-claim', { claim }))).status).toBe(202);
+  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  const redeemed = await f.bridge.handle(f.post('/owner-proof', { ticket }));
+  const window = await redeemed.json() as { proof: string; approval: { id: string; code: string } };
+  expect(window.approval).toEqual({ id, code });
+  const windowCookie = redeemed.headers.get('set-cookie')!.split(';')[0]!;
+  const approve = (headers: Record<string, string>, body: object) => f.bridge.handle(f.request('/owner-approve', { method: 'POST',
+    headers: { Origin: f.bridge.origin, 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin', ...headers }, body: JSON.stringify(body) }));
+  // The approval id alone, or a proof without its cookie, approves nothing.
+  expect((await approve({}, { id, approve: true })).status).toBe(403);
+  expect((await approve({ 'X-Olympus-Owner-Proof': window.proof }, { id, approve: true })).status).toBe(403);
+  expect((await approve({ Cookie: windowCookie, 'X-Olympus-Owner-Proof': window.proof }, { id: 'x'.repeat(43), approve: true })).status).toBe(403);
+  expect((await f.bridge.handle(f.post('/owner-claim', { claim }))).status).toBe(202);
+  expect((await approve({ Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof }, { id, approve: true })).status).toBe(204);
+  const collected = await f.bridge.handle(f.post('/owner-claim', { claim }));
+  expect(collected.status).toBe(200);
+  const page = await collected.json() as { proof: string };
+  const pageCookie = collected.headers.get('set-cookie')!.split(';')[0]!;
+  expect((await f.bridge.handle(f.request('/dashboard.json', { headers: { Cookie: pageCookie, 'X-Olympus-Owner-Proof': page.proof } }))).status).toBe(200);
+  // Collected once; a guessed claim never collects.
+  expect((await f.bridge.handle(f.post('/owner-claim', { claim }))).status).toBe(403);
+  expect((await f.bridge.handle(f.post('/owner-claim', { claim: 'y'.repeat(43) }))).status).toBe(403);
+});
+
+test('a declined, replaced or expired waiting page gets no access', async () => {
+  const f = fixture();
+  const open = async () => {
+    const r = await f.bridge.handle(f.post('/owner-open', {}));
+    const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+    return { claim: r.headers.get('X-Olympus-Owner-Claim')!, id: r.headers.get('X-Olympus-Owner-Approval')!, ticket };
+  };
+  const answer = async (ticket: string, id: string, approve: boolean) => {
+    const redeemed = await f.bridge.handle(f.post('/owner-proof', { ticket }));
+    const { proof } = await redeemed.json() as { proof: string };
+    const cookie = redeemed.headers.get('set-cookie')!.split(';')[0]!;
+    return f.bridge.handle(f.request('/owner-approve', { method: 'POST', headers: { Origin: f.bridge.origin, 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin', Cookie: cookie, 'X-Olympus-Owner-Proof': proof }, body: JSON.stringify({ id, approve }) }));
+  };
+  const declined = await open();
+  expect((await answer(declined.ticket, declined.id, false)).status).toBe(204);
+  const refused = await f.bridge.handle(f.post('/owner-claim', { claim: declined.claim }));
+  expect(refused.status).toBe(403); expect(refused.headers.get('X-Olympus-Owner-Declined')).toBe('1');
+  f.advance(10_000);
+  const replaced = await open();
+  f.advance(10_000);
+  const current = await open();
+  expect((await f.bridge.handle(f.post('/owner-claim', { claim: replaced.claim }))).status).toBe(403);
+  // The replaced window's ticket is gone; the current one is asked about.
+  expect((await f.bridge.handle(f.post('/owner-proof', { ticket: replaced.ticket }))).status).toBe(403);
+  f.advance(3 * 60_000);
+  expect((await f.bridge.handle(f.post('/owner-claim', { claim: current.claim }))).status).toBe(403);
+});

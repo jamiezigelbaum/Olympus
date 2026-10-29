@@ -333,7 +333,7 @@ describe('each cause gets its own action', () => {
     const failure = await failureOf(() => source.tasks.find((task) => task.kind === 'sync')!.run());
     expect(failure.errorKind).toBe('scope_root_helper_needed');
     expect(failure.reason).toBe('scope_root_helper_needed');
-    expect(failure.message).toContain('olympus engine install-helper');
+    expect(failure.message).toContain('helper app');
   });
 
   test('the Mac\'s privacy refusal keeps the Files & Folders reason; an ordinary refusal is its own reason', async () => {

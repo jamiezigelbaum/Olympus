@@ -45,7 +45,7 @@ import {
   type LlamaServerHandle,
   type LlamaServerLaunch,
 } from '../src/workers/source-index/built-in-reasoning/server.ts';
-import { applyBuiltInPrivateAnalyst } from '../src/workers/email-source/server.ts';
+import { applyBuiltInPrivateAnalyst, builtInBacksPrivateAnalyst } from '../src/workers/email-source/server.ts';
 
 const GIB = 1024 ** 3;
 const temporaryDirectories: string[] = [];
@@ -468,6 +468,18 @@ describe('Private lane fallback', () => {
     await expect(withVenice.get('local-source-answer')!.analyst.analyze(pack, { localOnly: true })).rejects.toThrow('unreachable');
 
     expect(applyBuiltInPrivateAnalyst(localOnly, new Set(['local-source-answer']), undefined)).toBe(false);
+  });
+
+  test('the readiness gate counts the built-in model while boot re-verifies it, the same members as the wiring (#591)', () => {
+    const local = { id: 'local-source-answer', profile: { provider: 'local-openai-compatible' as const, trust: 'local' as const, model: 'delphi/source-answer', baseUrl: 'http://127.0.0.1:28090/v1' } };
+    const venice = { id: 'venice-private', profile: { provider: 'venice' as const, trust: 'encrypted_cloud' as const, model: 'm' } };
+    for (const state of ['not_started', 'downloading', 'verifying', 'loading', 'ready'] as const) {
+      expect(builtInBacksPrivateAnalyst(local.id, state, [local])).toBe(true);
+    }
+    expect(builtInBacksPrivateAnalyst(local.id, 'failed', [local])).toBe(false);
+    expect(builtInBacksPrivateAnalyst(local.id, undefined, [local])).toBe(false);
+    expect(builtInBacksPrivateAnalyst(local.id, 'ready', [local, venice])).toBe(false);
+    expect(builtInBacksPrivateAnalyst('other', 'ready', [local])).toBe(false);
   });
 });
 

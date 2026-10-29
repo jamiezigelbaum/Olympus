@@ -14,19 +14,48 @@ import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { defaultSovereigntyConfigPath } from '../src/core/sovereignty.ts';
 import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { gmailHoldsImportedHistory, gmailImportedHistoryEmbeddingTargets, gmailLaneEmbeddingTargets } from '../src/workers/google-connectors/gmail-archive-target.ts';
+import { gmailHoldsImportedHistory } from '../src/workers/google-connectors/gmail-archive-target.ts';
+import { gmailCursorConnectorId } from '../src/workers/google-connectors/index.ts';
+import { planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
+import type { FileSourceScopeAuthority, SourceScopePolicyRef } from '../src/workers/source-scope-runtime.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { gmailPrivateStoreStatusScope } from '../src/workers/email-source/gmail-status-scope.ts';
 import {
   createSourceIndexEmbeddingProviderFromSovereignty,
   loadSourceWorkerSovereignty,
-  localPrivateEmbeddingTargets,
+  storeEmbeddingScope,
 } from '../src/workers/email-source/server.ts';
 import {
   createGmailImportedHistorySchedulerSource,
   withEmbeddingSweep,
-  withLocalPrivateEmbeddingBackfill,
 } from '../src/workers/source-scheduler.ts';
+
+/** Gmail's stores as the worker plans them: one rule per store, under the mail approval (or none). */
+function gmailTargets(input: {
+  stores: LocalConnectorStore[];
+  provider: SourceEmbeddingProvider;
+  ref?: SourceScopePolicyRef;
+  importAccountScope?: string;
+}) {
+  const authority = { assertCurrentMail() {}, assertRefCurrent() {} } as unknown as FileSourceScopeAuthority;
+  return () => input.stores.flatMap((store) => {
+    const target = planStoreEmbedding({
+      store,
+      provider: input.provider,
+      servedByMeaning: true,
+      scope: storeEmbeddingScope({
+        store,
+        sourceId: 'gmail.email',
+        scopeRef: input.ref,
+        authority: input.ref ? authority : undefined,
+        readScope: () => ({ allowed: true, contentAllowed: true }),
+        gmailAccountScope: 'personal',
+        ...(input.importAccountScope ? { gmailImportAccountScope: input.importAccountScope } : {}),
+      }),
+    });
+    return target ? [target] : [];
+  });
+}
 
 const homes: string[] = [];
 const stores: LocalConnectorStore[] = [];
@@ -99,18 +128,12 @@ describe('imported Gmail history with no live connection', () => {
       config: { worker: { scheduler: { syncIntervalSeconds: 60, freshnessThresholdHours: 24 } } } as never,
     });
     expect(source).toMatchObject({ sourceId: 'gmail.email', tasks: [] });
-    const targets = (gmailImportAccountScope?: string) => () => localPrivateEmbeddingTargets({
-      source, sovereigntyEngine: engine, secureLocalPolicyEmbeddingProvider: provider,
-      sourceCorpusRegistry: registry, connectorStores: [store], fullCorpusDefinitions: [definition],
-      scopeRefs: new Map(), readScope: () => ({ allowed: true, contentAllowed: true }),
-      connectorStoreAccountScopes: new Map(),
-      ...(gmailImportAccountScope ? { gmailImportAccountScope } : {}),
+    const targets = (gmailImportAccountScope?: string) => gmailTargets({
+      stores: [store], provider, ...(gmailImportAccountScope ? { importAccountScope: gmailImportAccountScope } : {}),
     });
-    // Without the import scope (the old behaviour), nothing would ever embed Gmail's Private store here.
-    expect(targets()()).toEqual([]);
-    const swept = withEmbeddingSweep([source], () => undefined);
-    const backfilled = withLocalPrivateEmbeddingBackfill(swept, targets('personal'));
-    const task = backfilled[0]!.tasks.find((entry) => entry.id === 'gmail.email_private_meaning')!;
+    // Without the import scope, only a queue would drain, and nothing queued Gmail's Private store here.
+    expect(targets()()).toEqual([{ store, provider }]);
+    const task = withEmbeddingSweep([source], () => targets('personal'))[0]!.tasks.find((entry) => entry.id === 'gmail.email_embeddings')!;
     expect(await task.run()).toMatchObject({ counts: { chunks_embedded: 1 } });
     expect(inputs.join('\n')).toContain('imported lease renewal');
     expect(inputs.join('\n')).not.toContain('approval that no longer stands');
@@ -119,14 +142,16 @@ describe('imported Gmail history with no live connection', () => {
 });
 
 describe('imported mail is recovered beside a connected live lane', () => {
-  test('Venice policy, provider down, restart, then live connected: the imports\' backlog embeds, live rows are not embedded twice', async () => {
+  test('Venice policy, provider down, restart, then live connected: the imports and the current approval\'s mail embed once; an old approval\'s mail does not', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gmail-live-recovery-'));
     homes.push(dir);
     const path = join(dir, 'secure.sqlite');
-    // 1. Imported mail live Gmail does not hold, and a live row, written while the embedder was down: no vectors.
+    const ref = { sourceId: 'gmail.email', accountGeneration: 'generation-now', revision: 'revision-now' } as const;
+    // 1. Imported mail, a row under the current approval and one under an old one, written while the embedder was down: no vectors.
     const first = new LocalConnectorStore({ dbPath: path, corpusId: CORPUS, family: 'email', trustDomain: 'secure_local', tierLedger: null });
     await first.syncFromConnector(connector('archive.6f9c2a10-0000-4000-8000-000000000003', mailItem('imported-only', 'The imported insurance policy renewal')), { fetchContent: true });
-    await first.syncFromConnector(connector('gmail.scope.0123456789abcdef01234567', mailItem('live-one', 'A live message under the current approval')), { fetchContent: true });
+    await first.syncFromConnector(connector(gmailCursorConnectorId('personal', { generation: ref.accountGeneration, revision: ref.revision }), mailItem('live-one', 'A live message under the current approval')), { fetchContent: true });
+    await first.syncFromConnector(connector('gmail.scope.0123456789abcdef01234567', mailItem('live-old', 'A live message under an approval that was replaced')), { fetchContent: true });
     first.close();
     // 2. A restart: the in-memory queue is gone.
     const store = new LocalConnectorStore({ dbPath: path, corpusId: CORPUS, family: 'email', trustDomain: 'secure_local', tierLedger: null });
@@ -139,20 +164,16 @@ describe('imported mail is recovered beside a connected live lane', () => {
         return inputs.map(() => [1, 0, 0, 0]);
       },
     } as SourceEmbeddingProvider;
-    // 3. Live Gmail connected and approved: its Private store is queue-only (never store-wide).
-    const live = [{ store, provider: venice, wholeStore: false }];
+    // 3. Live Gmail connected and approved: the store catches up on what the approval and the imports hold.
     const source = createGmailImportedHistorySchedulerSource({
       config: { worker: { scheduler: { syncIntervalSeconds: 60, freshnessThresholdHours: 24 } } } as never,
     });
-    const liveOnly = withEmbeddingSweep([source], () => () => live)[0]!.tasks[0]!;
-    expect(await liveOnly.run()).toMatchObject({ counts: { chunks_embedded: 0 } });
-    const lane = withEmbeddingSweep([source], () => () => gmailLaneEmbeddingTargets({
-      live, stores: [store], providerFor: () => venice, accountScope: 'personal',
-    }))[0]!.tasks[0]!;
-    expect(await lane.run()).toMatchObject({ counts: { chunks_embedded: 1 } });
+    const lane = withEmbeddingSweep([source], () => gmailTargets({ stores: [store], provider: venice, ref, importAccountScope: 'personal' }))[0]!.tasks[0]!;
+    expect(await lane.run()).toMatchObject({ counts: { chunks_embedded: 2 } });
     expect(calls.join('\n')).toContain('insurance policy renewal');
-    expect(calls.join('\n')).not.toContain('current approval');
-    // Nothing is embedded twice: a second pass finds nothing missing among the imports.
+    expect(calls.join('\n')).toContain('current approval');
+    expect(calls.join('\n')).not.toContain('was replaced');
+    // Nothing is embedded twice: a second pass finds nothing missing.
     calls.length = 0;
     expect(await lane.run()).toMatchObject({ counts: { chunks_embedded: 0 } });
     expect(calls).toEqual([]);
@@ -188,8 +209,7 @@ describe('kept live mail with no approval is left alone', () => {
     const source = createGmailImportedHistorySchedulerSource({
       config: { worker: { scheduler: { syncIntervalSeconds: 60, freshnessThresholdHours: 24 } } } as never,
     });
-    const targets = () => gmailImportedHistoryEmbeddingTargets({ stores: [store], providerFor: () => provider, accountScope: 'personal' });
-    const sweep = withEmbeddingSweep([source], () => targets)[0]!.tasks[0]!;
+    const sweep = withEmbeddingSweep([source], () => gmailTargets({ stores: [store], provider, importAccountScope: 'personal' }))[0]!.tasks[0]!;
     expect(await sweep.run()).toMatchObject({ counts: { chunks_embedded: 0 } });
     expect(calls).toEqual([]);
     // An import brings one message: it, and only it, is embedded.

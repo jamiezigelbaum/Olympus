@@ -78,6 +78,13 @@ OLYMPUS_VERSION=@OLYMPUS_VERSION@
 OLYMPUS_SHA256=@OLYMPUS_SHA256@
 OLYMPUS_BYTES=@OLYMPUS_BYTES@
 RELEASE_BASE=https://olympusplugin.ai/releases
+# The release's prebuilt WhatsApp bridge for Apple silicon, served beside the
+# tarball as $WHATSAPP_BRIDGE_NAME-darwin-arm64 and placed in the package's
+# tools/whatsapp-bridge/bin/, so pairing WhatsApp needs no Go or C compiler.
+# `none` when the release has none (pairing then builds it from source).
+WHATSAPP_BRIDGE_NAME=@WHATSAPP_BRIDGE_NAME@
+WHATSAPP_BRIDGE_SHA256=@WHATSAPP_BRIDGE_SHA256@
+WHATSAPP_BRIDGE_BYTES=@WHATSAPP_BRIDGE_BYTES@
 
 # Bun, pinned by version and by the SHA-256 and size of its Apple-silicon
 # release archive (from Bun's published SHASUMS256.txt and GitHub's asset
@@ -340,6 +347,15 @@ download_bun() {
 }
 
 # same_package <a> <b>: the same package.json and the same dist/, byte for byte.
+# place_bridge <package dir>: the verified bridge into the package, owner-only
+# writable and executable, as pairing requires of it.
+place_bridge() {
+  mkdir -p "$1/tools/whatsapp-bridge/bin"
+  cp "$WORK/whatsapp-bridge" "$1/tools/whatsapp-bridge/bin/$WHATSAPP_BRIDGE_NAME.next"
+  chmod 755 "$1/tools/whatsapp-bridge/bin/$WHATSAPP_BRIDGE_NAME.next"
+  mv "$1/tools/whatsapp-bridge/bin/$WHATSAPP_BRIDGE_NAME.next" "$1/tools/whatsapp-bridge/bin/$WHATSAPP_BRIDGE_NAME"
+}
+
 same_package() {
   [ -f "$1/package.json" ] && [ -f "$2/package.json" ] && [ -f "$2/dist/cli.js" ] \
     && cmp -s "$1/package.json" "$2/package.json" \
@@ -364,6 +380,11 @@ main() {
   esac
   printf '%s' "$OLYMPUS_SHA256" | grep -Eq '^[0-9a-f]{64}$' || die "the installer's release checksum is malformed."
   case "$OLYMPUS_BYTES" in ''|*[!0-9]*) die "the installer's release size is malformed." ;; esac
+  if [ "$WHATSAPP_BRIDGE_NAME" != none ]; then
+    printf '%s' "$WHATSAPP_BRIDGE_NAME" | grep -Eq '^olympus-whatsapp-bridge-[0-9a-f]{16}$' || die "the installer's WhatsApp bridge name is malformed."
+    printf '%s' "$WHATSAPP_BRIDGE_SHA256" | grep -Eq '^[0-9a-f]{64}$' || die "the installer's WhatsApp bridge checksum is malformed."
+    case "$WHATSAPP_BRIDGE_BYTES" in ''|*[!0-9]*) die "the installer's WhatsApp bridge size is malformed." ;; esac
+  fi
 
   say "Installing Olympus $OLYMPUS_VERSION for $(id -un 2>/dev/null || echo you) on this Mac."
   say "It needs no administrator password and changes nothing outside your home folder."
@@ -415,6 +436,15 @@ main() {
   [ -f "$WORK/unpacked/package/dist/cli.js" ] || die "the Olympus download has no dist/cli.js."
   printf '%s\n' "$OLYMPUS_SHA256" > "$WORK/unpacked/package/$RECEIPT_NAME"
   RELEASE="$WORK/unpacked/package"
+  if [ "$WHATSAPP_BRIDGE_NAME" != none ]; then
+    step "Downloading the WhatsApp bridge ($(megabytes "$WHATSAPP_BRIDGE_BYTES"))..."
+    fetch "$RELEASE_BASE/$OLYMPUS_VERSION/$WHATSAPP_BRIDGE_NAME-darwin-arm64" "$WORK/whatsapp-bridge" \
+      || die "the WhatsApp bridge could not be downloaded." "Check the internet connection and run this again. Nothing was changed on this Mac."
+    if [ "$(sha256_of "$WORK/whatsapp-bridge")" != "$WHATSAPP_BRIDGE_SHA256" ] || [ "$(bytes_of "$WORK/whatsapp-bridge")" != "$WHATSAPP_BRIDGE_BYTES" ]; then
+      die "the WhatsApp bridge download did not match its checksum, so it was not used." "Nothing was changed on this Mac. Run this again; if it happens again, email $SUPPORT_EMAIL."
+    fi
+    place_bridge "$RELEASE"
+  fi
   step "The downloads match their published checksums."
 
   # 2. One installer at a time; finish what an interrupted one left.
@@ -448,6 +478,10 @@ main() {
   if [ -f "$APP/$RECEIPT_NAME" ] && [ "$(cat "$APP/$RECEIPT_NAME")" = "$OLYMPUS_SHA256" ]; then
     if same_package "$RELEASE" "$APP"; then
       step "Olympus $OLYMPUS_VERSION is already installed. Checking that it is running..."
+      # A copy installed before its bridge was published gets it now.
+      if [ "$WHATSAPP_BRIDGE_NAME" != none ] && ! cmp -s "$WORK/whatsapp-bridge" "$APP/tools/whatsapp-bridge/bin/$WHATSAPP_BRIDGE_NAME"; then
+        place_bridge "$APP"
+      fi
       # Proof against the build of the verified download, not whatever the
       # installed agent names: an upgrade cut short leaves the old one there.
       if ! cli "$APP" engine verify --expect-package "$RELEASE"; then

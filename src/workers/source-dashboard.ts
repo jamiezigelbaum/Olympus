@@ -38,6 +38,7 @@ import {
   answerReadyEligibleItems,
   answerReadyPercent,
   corpusAnswerReadyEligibleItems,
+  corpusOwnIndexedItems,
   notReadByPolicyFromCounts,
 } from './dashboard/answer-ready-coverage.ts';
 // Words only. vocabulary.ts imports nothing from this module at runtime — its
@@ -957,6 +958,12 @@ export interface DashboardSourceCard {
      * subtraction remains the answer.
      */
     answer_ready_eligible_items?: number;
+    /**
+     * Items still stored when the read scope hides them (a disconnected source
+     * reads nothing, so `indexed_items` is 0). Delete indexed data is offered
+     * on it. Absent when every stored item is in scope.
+     */
+    stored_items?: number;
     /**
      * In-scope items extraction gave up on for good — a damaged file, or a
      * format nothing reads — with nothing left to retry. Owner ruling,
@@ -3635,6 +3642,8 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     ...(cards.some(card => card.coverage.settled_unreadable_items !== undefined)
       ? { settled_unreadable_items: cards.reduce((sum, card) => sum + (card.coverage.settled_unreadable_items ?? 0), 0) } : {}),
     ...(unreadable !== undefined ? { unreadable_items: unreadable } : {}),
+    ...(cards.some((card) => card.coverage.stored_items !== undefined)
+      ? { stored_items: cards.reduce((sum, card) => sum + (card.coverage.stored_items ?? card.coverage.indexed_items), 0) } : {}),
   });
 }
 
@@ -4942,7 +4951,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
   const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   return {
-    indexed_items: indexedItems,
+    indexed_items: corpusOwnIndexedItems(counts, indexedItems),
     content_ready_items: contentReadyItems,
     embedded_items: embeddedItems,
     ...(embeddedFiles !== undefined ? { embedded_files: embeddedFiles } : {}),
@@ -4951,6 +4960,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
     ...(eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {}),
     ...(counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items }),
     ...(unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {}),
+    ...(counts.stored_items === undefined ? {} : { stored_items: counts.stored_items }),
   };
 }
 

@@ -26,6 +26,12 @@ import {
   IMAGE_ORDINARY_REASON,
   IMAGE_PRIVATE_DEFAULT_REASON,
   IMAGE_SENSITIVE_REASON_PREFIX,
+  IMAGE_TEXT_DECIDES_MIN_WORDS,
+  IMAGE_TEXT_DECIDES_REASON_PREFIX,
+  HELD_RECORD_PRIORITY,
+  PERSONAL_FIRST_REASON,
+  type TierSniffer,
+  type TierSnifferRequest,
 } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import type { AnalystModel } from '../src/core/analyst.ts';
@@ -58,7 +64,9 @@ import {
 import {
   MEDIA_JUDGE_PROMPT_PREFIX,
   MEDIA_JUDGE_PROMPTS,
+  MEDIA_JUDGE_TEXT_DECIDES,
   MEDIA_JUDGE_THRESHOLDS,
+  imageJudgmentSignal,
   judgeImageVector,
   judgeMediaImages,
   judgeMediaScores,
@@ -194,13 +202,29 @@ describe('the judge: thresholds and categories', () => {
   test('the closest sensitive description must beat the ordinary one by the margin', () => {
     const passport = judgeMediaScores(PASSPORT, 'j');
     expect(passport).toMatchObject({ verdict: 'sensitive', category: 'id_document', margin: 0.1 });
-    for (const category of ['bank_card', 'financial_document', 'medical_document'] as const) {
+    for (const category of ['bank_card', 'financial_document'] as const) {
       expect(judgeMediaScores(scores(0.6, { [category]: 0.6 + MEDIA_JUDGE_THRESHOLDS.margin }), 'j')).toMatchObject({ verdict: 'sensitive', category });
     }
     // Just under the margin, with intimate far below: ordinary.
     const close = judgeMediaScores(scores(0.6, { medical_document: 0.639, intimate: 0.5 }), 'j');
     expect(close).toMatchObject({ verdict: 'ordinary', category: 'medical_document', margin: 0.039 });
+    expect(close.reason).toBeUndefined();
     expect(judgeMediaScores(ORDINARY, 'j').verdict).toBe('ordinary');
+  });
+
+  test('a picture nearest a medical document is left to its text, unless it is also near intimate', () => {
+    for (const category of ['medical_document'] as const) {
+      const judged = judgeMediaScores(scores(0.6, { [category]: 0.6 + MEDIA_JUDGE_THRESHOLDS.margin, intimate: 0.5 }), 'j');
+      expect(judged).toMatchObject({ verdict: 'ordinary', category, reason: MEDIA_JUDGE_TEXT_DECIDES });
+      expect(imageJudgmentSignal(judged)).toEqual({ verdict: 'ordinary', category, textDecides: true });
+    }
+    // A financial document that passes on its own is not hidden by a slightly closer medical one.
+    expect(judgeMediaScores(scores(0.6, { medical_document: 0.7, financial_document: 0.69 }), 'j'))
+      .toMatchObject({ verdict: 'sensitive', category: 'financial_document', margin: 0.09 });
+    const nearIntimate = judgeMediaScores(scores(0.6, { medical_document: 0.7, intimate: 0.6 + MEDIA_JUDGE_THRESHOLDS.intimateMargin }), 'j');
+    expect(nearIntimate).toMatchObject({ verdict: 'sensitive', category: 'intimate' });
+    // An unjudged picture's reason never reads as text deciding.
+    expect(imageJudgmentSignal({ verdict: 'unjudged', reason: MEDIA_JUDGE_TEXT_DECIDES })).toEqual({ verdict: 'unjudged' });
   });
 
   test('intimate is judged more cautiously: half the margin is enough', () => {
@@ -235,10 +259,10 @@ describe('the tier a judged photo gets', () => {
 
   test('unjudged stays Private; sensitive is Private with its category; ordinary is Personal', () => {
     const unjudged = classifyContentTier({ ...base, text: 'Photo' });
-    expect(unjudged).toMatchObject({ contentTier: 'secure', reasons: [IMAGE_PRIVATE_DEFAULT_REASON, `content:sha256:${createHash('sha256').update('Photo').digest('hex')}`] });
+    expect(unjudged).toMatchObject({ contentTier: 'secure', reasons: [IMAGE_PRIVATE_DEFAULT_REASON, `content:sha256:${createHash('sha256').update('Photo').digest('hex')}`, expect.stringMatching(/^content:names:[a-f0-9]{16}$/)] });
     expect(classifyContentTier({ ...base, text: 'Photo', imageJudgment: { verdict: 'unjudged' } }).contentTier).toBe('secure');
     const sensitive = classifyContentTier({ ...base, text: 'Photo', imageJudgment: { verdict: 'sensitive', category: 'id_document' } });
-    expect(sensitive).toMatchObject({ contentTier: 'secure', reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}id_document`, `content:sha256:${createHash('sha256').update('Photo').digest('hex')}`] });
+    expect(sensitive).toMatchObject({ contentTier: 'secure', reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}id_document`, `content:sha256:${createHash('sha256').update('Photo').digest('hex')}`, expect.stringMatching(/^content:names:[a-f0-9]{16}$/)] });
     const ordinary = classifyContentTier({ ...base, text: 'Photo', imageJudgment: { verdict: 'ordinary' } });
     expect(ordinary.contentTier).toBe('private');
     expect(ordinary.reasons).toContain(IMAGE_ORDINARY_REASON);
@@ -260,6 +284,68 @@ describe('the tier a judged photo gets', () => {
       { ...base, text: 'Photo', imageJudgment: { verdict: 'ordinary' } },
       { override: { kind: 'tier', tier: 'secure' } },
     ).contentTier).toBe('secure');
+  });
+});
+
+describe('a picture of a document is decided by the text read off it', () => {
+  // The demo kit's whiteboard (eval/photo-judge/fixtures/demo-kit-whiteboard.jpg), as OCR reads it.
+  const WHITEBOARD = 'Photo\nNorthwind Labs kickoff\n1. Ingest: Gmail + Dropbox\n2. Agent answers with sources\n3. Pilot: 3 analysts, 4 weeks\nNext: demo on 13 Nov\nInvoice 2026-014 sent';
+  const LAB = 'Photo\nPatient: Morgan Example\nDiagnosis: appendicitis, laparoscopic appendectomy\nFollow-up: surgical clinic in ten days';
+  const base = { metadataTier: 'private' as const, metadataForced: false, metadataFlagged: false, mimeType: 'image/jpeg' };
+  function model(tier?: 'private' | 'secure') {
+    const requests: TierSnifferRequest[] = [];
+    const sniffer: TierSniffer = {
+      id: 'fixture',
+      judge(request) {
+        requests.push(request);
+        return tier ? { verdict: 'decided', tier, code: tier === 'secure' ? 'private' : 'personal' } : { verdict: 'undecided', queued: true };
+      },
+    };
+    return { sniffer, requests };
+  }
+  const documentPicture = (category: string) => ({ verdict: 'ordinary' as const, category, textDecides: true as const });
+
+  for (const category of ['medical_document', 'financial_document']) {
+    test(`a whiteboard judged nearest ${category} is held Private until the model reads it, never Personal first`, () => {
+      const waiting = model();
+      const held = classifyContentTier({ ...base, text: WHITEBOARD, imageJudgment: documentPicture(category) }, { sniffer: waiting.sniffer });
+      expect(held.contentPending).toBe(true);
+      expect(held.reasons).toContain(`${IMAGE_TEXT_DECIDES_REASON_PREFIX}${category}`);
+      expect(held.reasons).not.toContain(PERSONAL_FIRST_REASON);
+      expect(waiting.requests).toEqual([expect.objectContaining({ pass: 'content', priority: HELD_RECORD_PRIORITY })]);
+    });
+
+    test(`once the model reads the whiteboard's text (${category}), it is Personal`, () => {
+      const answered = model('private');
+      const decision = classifyContentTier({ ...base, text: WHITEBOARD, imageJudgment: documentPicture(category) }, { sniffer: answered.sniffer });
+      expect(decision).toMatchObject({ contentTier: 'private', contentPending: false });
+    });
+  }
+
+  test('a real record read off a picture stays Private on the model\'s verdict, and an account number at once', () => {
+    expect(classifyContentTier({ ...base, text: LAB, imageJudgment: documentPicture('medical_document') }, { sniffer: model('secure').sniffer }).contentTier).toBe('secure');
+    const statement = classifyContentTier(
+      { ...base, text: `${WHITEBOARD}\nIBAN GB82 WEST 1234 5698 7654 32`, imageJudgment: documentPicture('financial_document') },
+      { sniffer: model('private').sniffer },
+    );
+    expect(statement.contentTier).toBe('secure');
+  });
+
+  test('with too little text to read, the picture rests Private; with no model, it waits Private', () => {
+    const short = classifyContentTier({ ...base, text: `Photo\n${'word '.repeat(IMAGE_TEXT_DECIDES_MIN_WORDS - 1)}`, imageJudgment: documentPicture('medical_document') }, { sniffer: model('private').sniffer });
+    expect(short).toMatchObject({ contentTier: 'secure', reasons: expect.arrayContaining([`${IMAGE_SENSITIVE_REASON_PREFIX}medical_document`]) });
+    const noModel = classifyContentTier({ ...base, text: WHITEBOARD, imageJudgment: documentPicture('medical_document') });
+    expect(noModel.contentPending).toBe(true);
+    expect(noModel.reasons).not.toContain(PERSONAL_FIRST_REASON);
+  });
+
+  test('identity documents, bank cards and intimate pictures keep the picture\'s verdict whatever their text', () => {
+    for (const category of ['id_document', 'bank_card', 'intimate']) {
+      const asked = model('private');
+      const decision = classifyContentTier({ ...base, text: WHITEBOARD, imageJudgment: { verdict: 'sensitive', category } }, { sniffer: asked.sniffer });
+      expect(decision.contentTier).toBe('secure');
+      expect(asked.requests).toEqual([]);
+    }
   });
 });
 
@@ -563,7 +649,7 @@ interface Lane {
 }
 
 /** A lane whose text arrives after listing, over per-tier stores (as the Dropbox files lane runs). */
-function openLane(dir: string): Lane {
+function openLane(dir: string, options: { sniffer?: TierSniffer } = {}): Lane {
   const paths: Record<SourceTrustDomain, string> = {
     public_safe: join(dir, 'public.sqlite'),
     internal: join(dir, 'internal.sqlite'),
@@ -588,6 +674,7 @@ function openLane(dir: string): Lane {
     ledger,
     secretLocations: secrets,
     contentArrivesLater: true,
+    ...(options.sniffer ? { tierClassification: { sniffer: options.sniffer } } : {}),
     legs: {
       public_safe: { onDemand: onDemand('public_safe') },
       internal: { onDemand: onDemand('internal') },
@@ -709,6 +796,56 @@ describe('the judge decides a photo\'s tier through the tier set', () => {
       releaseMediaCacheFile(third.path, third.sha256, third.stagingHolder);
       expect(rejudged.accepted).toBe(false);
       expect(lane.ledger.getCurrent(identity('kitchen'))).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
+    } finally {
+      lane.close();
+    }
+  });
+});
+
+describe('a picture of writing judged nearest a document reaches Personal through its text', () => {
+  test('the whiteboard is held Private, its text is read, and it moves to Personal with its picture; a lab result stays', async () => {
+    // The privacy-safe model's answers, by the text it is shown.
+    const sniffer: TierSniffer = {
+      id: 'fixture-model',
+      judge(request) {
+        return /Patient:/.test(request.material ?? '') ? { verdict: 'decided', tier: 'secure', code: 'private' } : { verdict: 'decided', tier: 'private', code: 'personal' };
+      },
+    };
+    const lane = openLane(temporaryDir(), { sniffer });
+    try {
+      const ids = ['whiteboard', 'lab'];
+      await lane.set.sync(connectorFor(ids), { fetchContent: false, placement: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }) });
+      const media = Object.fromEntries(ids.map((id) => [id, picture()]));
+      const text = {
+        whiteboard: `${IMAGE_MEDIA_DESCRIPTOR}\nNorthwind Labs kickoff\nIngest: Gmail + Dropbox\nAgent answers with sources\nPilot: 3 analysts, 4 weeks\nNext: demo on 13 Nov`,
+        lab: `${IMAGE_MEDIA_DESCRIPTOR}\nPatient: Morgan Example\nDiagnosis: appendicitis, laparoscopic appendectomy\nFollow-up in ten days`,
+      };
+      for (const id of ids) expect((await lane.sink.accept(request(id, media[id]!, text[id as keyof typeof text]))).accepted).toBe(true);
+      for (const entry of Object.values(media)) releaseMediaCacheFile(entry.path, entry.sha256, entry.stagingHolder);
+
+      // Both pictures read nearest a medical document: the 2026-10-08 judge called both sensitive.
+      const medical = scores(0.6, { medical_document: 0.7 });
+      const provider = new JudgingProvider(new Map(ids.map((id) => [media[id]!.sha256, medical])));
+      await lane.stores.secure_local!.embedChunks({ provider });
+      expect(judgmentRows(lane.paths.secure_local).map((row) => row.verdict)).toEqual(['ordinary', 'ordinary']);
+      expect(applyMediaJudgments({ set: lane.set })).toMatchObject({ applied: 2, movesQueued: 1 });
+
+      const lab = lane.ledger.getCurrent(identity('lab'))!;
+      expect(lab).toMatchObject({ contentTier: 'secure', state: 'current' });
+      expect(lab.reasons).toContain(`${IMAGE_TEXT_DECIDES_REASON_PREFIX}medical_document`);
+
+      const whiteboard = lane.ledger.getCurrent(identity('whiteboard'))!;
+      expect(whiteboard).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+      await moveTieredItem({
+        set: lane.set,
+        identity: { ...identity('whiteboard'), family: 'file', localItemId: 'personal:whiteboard' },
+        target: { metadataTier: whiteboard.targetMetadataTier!, contentTier: whiteboard.targetContentTier! },
+        vectorIdentities: { internal: provider },
+        replaceOwnSupersededCopy: true,
+      });
+      expect(lane.ledger.getCurrent(identity('whiteboard'))).toMatchObject({ contentTier: 'private', state: 'current' });
+      expect(lane.stores.internal!.searchItems('Northwind', 5).map((row) => row.sourceItem.providerItemId)).toEqual(['whiteboard']);
+      expect(chunkMedia(lane.paths.internal).map((row) => row.media_sha256)).toEqual([media.whiteboard!.sha256]);
     } finally {
       lane.close();
     }

@@ -29,7 +29,8 @@ import {
   type SourceSchedulerTask,
 } from '../source-scheduler.ts';
 import { resolvedStorePath } from '../../core/source-placement.ts';
-import { EVERNOTE_PROVIDER, EVERNOTE_SOURCE_ID } from './connector.ts';
+import { EVERNOTE_PROVIDER, EVERNOTE_SOURCE_ID, type EvernoteNotebookGate } from './connector.ts';
+import type { EvernoteNotebook } from './listing.ts';
 import {
   EVERNOTE_SECURE_CORPUS_ID,
   createEvernoteLiveSync,
@@ -70,8 +71,21 @@ export interface EvernoteRuntime {
   existingLane(): EvernoteTierLane | undefined;
   /** The live pass for this handle (the same one while the handle is). */
   liveSync(handle: ConnectedCredentialHandle): EvernoteLiveSync;
-  /** The scheduler source for a connected handle: one pass task and the attachment reads. */
-  schedulerSource(input: { config: OlympusConfig; handle: ConnectedCredentialHandle }): SourceSchedulerSource;
+  /**
+   * The scheduler source for a connected handle: one pass task and the attachment reads. Each pass
+   * asks `notebookGate` which notebooks the person approved (it throws when that approval changed).
+   */
+  schedulerSource(input: {
+    config: OlympusConfig;
+    handle: ConnectedCredentialHandle;
+    notebookGate: () => EvernoteNotebookGate;
+    /** Throws once that approval is no longer the saved one: a running pass stops before its next read or write. */
+    assertNotebookChoiceCurrent: () => void;
+    /** That approval, recorded on every item a pass stores so reads can be held to it. */
+    scope: { accountGeneration: string; scopeRevision: string };
+  }): SourceSchedulerSource;
+  /** The account's notebooks for the picker (no note is read). */
+  notebooks(handle: ConnectedCredentialHandle): Promise<EvernoteNotebook[]>;
   /** The dashboard card's facts about the passes; undefined before the first. */
   dashboardPass(): DashboardLivePass | undefined;
 }
@@ -120,22 +134,26 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
     return live.sync;
   };
 
-  // The attachment reader over whichever stores are open, rebuilt when that changes.
-  let extraction: { key: string; runtime: FileExtractionRuntime | undefined } | undefined;
+  // The attachment reader over whichever stores are open, rebuilt when that changes. It serves the
+  // Private store's corpus only: as the lane's one legacy store it lists the routed Personal store too
+  // (tieredExtractionView `home`), so an attachment is read once wherever its note rests.
+  // Also rebuilt for a new sync (a reconnect): the attachment connector carries that sync's bound choice.
+  let extraction: { key: string; sync: EvernoteLiveSync; runtime: FileExtractionRuntime | undefined } | undefined;
   const extractionRuntime = (sync: EvernoteLiveSync, accountScope: string): FileExtractionRuntime | undefined => {
     const opened = openLane();
     const stores = [opened.secure.current(), opened.internal.current()].filter((store): store is LocalConnectorStore => store !== undefined);
     const key = `${accountScope}|${stores.map((store) => store.corpusId).join(',')}`;
-    if (extraction?.key === key) return extraction.runtime;
+    if (extraction?.key === key && extraction.sync === sync) return extraction.runtime;
     extraction?.runtime?.close();
     const connector = sync.attachmentConnector();
     extraction = {
       key,
+      sync,
       runtime: stores.length === 0 ? undefined : createChildExtractionRuntime({
         provider: EVERNOTE_ATTACHMENT_EXTRACTION_PROVIDER,
         scopeKey: EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY,
-        corpusIds: stores.map((store) => store.corpusId),
-        stores,
+        corpusIds: [opened.secure.corpusId],
+        stores: [opened.secure.open(), ...stores.filter((store) => store.corpusId !== opened.secure.corpusId)],
         set: opened.set,
         accountScope: () => accountScope,
         connector: (scope) => (scope === accountScope ? connector : undefined),
@@ -149,8 +167,11 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
   return {
     existingLane,
     liveSync,
-    schedulerSource({ config, handle }) {
+    notebooks: (handle) => liveSync(handle).notebooks(),
+    schedulerSource({ config, handle, notebookGate, assertNotebookChoiceCurrent, scope }) {
       const sync = liveSync(handle);
+      // Attachment reads are held to the same choice as the pass.
+      sync.bindNotebookChoice({ gate: notebookGate, assertCurrent: assertNotebookChoiceCurrent });
       const accountScope = handle.accountRole ?? 'personal';
       const opened = openLane();
       const intervalMs = config.worker.scheduler.syncIntervalSeconds * 1_000;
@@ -163,7 +184,7 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
         freshnessThresholdMs,
         run: async () => {
           try {
-            const receipt = await sync.pass();
+            const receipt = await sync.pass({ notebookGate: notebookGate(), assertNotebookChoiceCurrent, scope });
             const stopped = sync.status()?.last_error;
             return {
               status: receipt.status,
@@ -178,7 +199,7 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
           }
         },
       };
-      // One extraction task per store; a store the pass has not opened yet has nothing to read.
+      // One extraction task for the lane (see extractionRuntime); before the pass opens a store there is nothing to read.
       const attachmentTask = (corpusId: string, leg: () => LocalConnectorStore | undefined): SourceSchedulerTask => {
         const laneKey = { corpusId, provider: EVERNOTE_PROVIDER, accountScope, approvedScopeKey: EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY };
         const id = `evernote.attachments.${corpusId}`;
@@ -207,8 +228,7 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
         freshnessThresholdHours: config.worker.scheduler.freshnessThresholdHours,
         tasks: [
           pass,
-          attachmentTask(opened.secure.corpusId, () => opened.secure.current()),
-          attachmentTask(opened.internal.corpusId, () => opened.internal.current()),
+          attachmentTask(opened.secure.corpusId, () => opened.secure.current() ?? opened.internal.current()),
         ],
         lastSyncCompletedAt: () => sync.lastStoreRunCompletedAt(),
       };

@@ -922,7 +922,7 @@ describe('Privacy saves through the panel tools', () => {
 // ---- a session that expires while the page is open ---------------------------
 
 describe('the host page when its session expires', () => {
-  function hostPage(readToken?: string, pageOrigin = ORIGIN) {
+  function hostPage(readToken?: string, pageOrigin = ORIGIN, tab: { opener: unknown } | null = null) {
     const html = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN, csrfToken: 'csrf-123', ...(readToken ? { readToken } : {}) });
     const start = html.indexOf('<script>') + '<script>'.length;
     const script = html.slice(start, html.indexOf('</script>', start));
@@ -946,7 +946,7 @@ describe('the host page when its session expires', () => {
       setInterval: win.setInterval.bind(win),
       location: { hash: '', pathname: '/dashboard', search: '', href: `${pageOrigin}/dashboard`, origin: pageOrigin, assign: (url: string) => assigned.push(url), reload: () => assigned.push('reload') },
       history: { replaceState: () => undefined },
-      open: (url: string) => { opened.push(url); return null; },
+      open: (url: string) => { opened.push(url); return tab; },
     };
     new Function('window', 'document', 'fetch', 'navigator', script)(fakeWindow, win.document, fakeFetch, win.navigator);
     const send = (message: Record<string, unknown>) => win.dispatchEvent(new win.MessageEvent('message', { data: { jsonrpc: '2.0', ...message }, source: child as any }));
@@ -963,6 +963,29 @@ describe('the host page when its session expires', () => {
       expect(page.assigned).toEqual(['/dashboard?private-answers', '/dashboard?private-answers']);
       expect(page.opened).toEqual(['https://console.example.test/keys']);
     }
+  });
+
+  test('a page the browser keeps from opening (Safari, an open after the connect call) is offered as a link to press', async () => {
+    const page = hostPage();
+    const offer = page.win.document.querySelector('[data-open-offer]') as unknown as HTMLElement;
+    const link = page.win.document.querySelector('[data-open-offer-link]') as unknown as HTMLAnchorElement;
+    expect(offer.hidden).toBe(true);
+    page.send({ id: 1, method: 'ui/open-link', params: { url: 'https://www.dropbox.com/oauth2/authorize?state=x' } });
+    await settle();
+    expect(page.opened).toEqual(['https://www.dropbox.com/oauth2/authorize?state=x']);
+    expect(offer.hidden).toBe(false);
+    expect([link.getAttribute('href'), link.getAttribute('target'), link.getAttribute('rel')]).toEqual(['https://www.dropbox.com/oauth2/authorize?state=x', '_blank', 'noopener noreferrer']);
+    link.dispatchEvent(new page.win.Event('click') as never);
+    expect(offer.hidden).toBe(true);
+  });
+
+  test('a page that opens says nothing more, and the opened tab cannot reach back to the dashboard', async () => {
+    const tab = { opener: 'the dashboard' as unknown };
+    const page = hostPage(undefined, ORIGIN, tab);
+    page.send({ id: 1, method: 'ui/open-link', params: { url: 'https://www.dropbox.com/oauth2/authorize?state=x' } });
+    await settle();
+    expect(tab.opener).toBeNull();
+    expect((page.win.document.querySelector('[data-open-offer]') as unknown as HTMLElement).hidden).toBe(true);
   });
 
   test('without a reader\'s token it locks in place: the banner shows, the panel is told, reads keep the last answer, never a raw 401', async () => {

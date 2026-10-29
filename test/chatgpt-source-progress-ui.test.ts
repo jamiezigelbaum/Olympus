@@ -372,7 +372,7 @@ describe('a chosen folder the computer will not open: the action fits the cause'
     const privacy = link('scope_root_permission_needed');
     expect(privacy.link?.textContent).toBe(Q.openPrivacySettings);
     expect(row(privacy.host, 'Files on this computer').querySelector('.stall-line')!.textContent).toContain('Files & Folders');
-    for (const [reason, words] of [['scope_root_helper_needed', 'olympus engine install-helper'], ['scope_root_unreadable', 'user account']] as const) {
+    for (const [reason, words] of [['scope_root_helper_needed', 'helper app'], ['scope_root_unreadable', 'user account']] as const) {
       const other = link(reason);
       expect(other.link).toBeNull();
       expect(row(other.host, 'Files on this computer').querySelector('.stall-line')!.textContent).toContain(words);

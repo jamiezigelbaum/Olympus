@@ -115,7 +115,8 @@ was reacted to.
 For a packaged Olympus install, use `olympus connect whatsapp --pair`. Its
 private terminal shows only the current QR and replaces it when WhatsApp
 refreshes the handshake. Expired codes are removed from view. Authentication
-and persisted-device proof must succeed before Olympus asks for capture scope.
+and persisted-device proof must succeed before Olympus starts capture for the
+whole linked account.
 The bridge pins an upstream revision containing the September 2026 companion
 registration refresh support. Passkey-required linking is reported explicitly;
 this terminal flow does not implement browser passkey verification. Fixed,
