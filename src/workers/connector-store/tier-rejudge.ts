@@ -40,6 +40,7 @@
 
 import { imageJudgmentSignal } from '../source-index/media-judge.ts';
 import { parentNamesContext } from './parent-context.ts';
+import { storedSignals } from './stored-names.ts';
 import {
   classifyContentTier,
   classifyItemTiers,
@@ -193,7 +194,8 @@ export function rejudgeStoredContent(
   const path = columnString(exported.columns['locator_uri']);
   const sender = columnString(exported.columns['sender_label']);
   const mimeType = columnString(exported.columns['mime_type']);
-  const folderKeys = storedFolderKeys(exported.columns['source_scope_folder_keys_json']);
+  // The same folder keys the owner-rule sweep reads: a message's chat is one of them.
+  const folderKeys = [...(storedSignals(exported).folderKeys ?? [])];
   // A failed cache/queue operation is not an open question. Leave all retry
   // stamps and receipts untouched until every needed question is persisted.
   let questionNotQueued = false;

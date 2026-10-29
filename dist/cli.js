@@ -27155,6 +27155,7 @@ var init_sniffer = __esm(() => {
     "because it names the owner or concerns money or identity. Read what it actually contains.",
     "privateKind is the kind of private information this item actually contains UNDER THE OWNER POLICY,",
     "or none when it is not covered or the owner says it is fine to share. Topic alone is insufficient.",
+    "With an owner description, privateKind is only ever a kind that description calls private; any other kind, even health or family, is none, whoever the item is about.",
     "An owner clause naming a kind of record covers every record of that kind, however small, routine or work-related:",
     "such a record has that privateKind, never none.",
     "An ownRecord with a non-none privateKind is Private. Private conversations can be Private",
@@ -60272,7 +60273,7 @@ function rejudgeStoredContent(set, record, options) {
   const path = columnString(exported.columns["locator_uri"]);
   const sender = columnString(exported.columns["sender_label"]);
   const mimeType = columnString(exported.columns["mime_type"]);
-  const folderKeys = storedFolderKeys(exported.columns["source_scope_folder_keys_json"]);
+  const folderKeys = [...storedSignals(exported).folderKeys ?? []];
   let questionNotQueued = false;
   const counting = options.sniffer && {
     id: options.sniffer.id,
@@ -60486,6 +60487,7 @@ var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_ti
 var init_tier_rejudge = __esm(() => {
   init_media_judge();
   init_parent_context();
+  init_stored_names();
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
