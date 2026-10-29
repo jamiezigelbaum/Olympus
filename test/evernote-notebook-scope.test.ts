@@ -9,6 +9,7 @@ import { ownerRuleMatches } from '../src/workers/classification/tier-classifier.
 import { EVERNOTE_PROVIDER, EVERNOTE_SOURCE_ID, type EvernoteNotebookGate } from '../src/workers/evernote/connector.ts';
 import { evernoteNotebookGate } from '../src/workers/evernote/live-sync.ts';
 import { createEvernoteNotebookScopeBrowser } from '../src/workers/source-scope-browser.ts';
+import { fileSourceScopeContentFilters, fileSourceScopeMetadataFilters } from '../src/workers/source-scope-runtime.ts';
 
 const NOTEBOOKS = [
   { id: 'nb-work', label: 'Work', owned: true },
@@ -87,5 +88,29 @@ describe('an always-Private notebook', () => {
     // The connector publishes a note's notebook name and id as its folder keys (evernote-connector.test.ts).
     expect(ownerRuleMatches(rule, { folderKeys: ['Clients', 'nb-clients'] }, EVERNOTE_PROVIDER)).toBe(true);
     expect(ownerRuleMatches(rule, { folderKeys: ['Work', 'nb-work'] }, EVERNOTE_PROVIDER)).toBe(false);
+  });
+});
+
+describe('reads of stored notes under a saved choice', () => {
+  const approval = (sourceId: 'evernote.notes' | 'google_drive.docs') => ({
+    sourceId,
+    status: 'approved' as const,
+    accountGeneration: 'a'.repeat(64),
+    revision: '00000000-0000-4000-8000-000000000001',
+    selections: [{ key: 'nb-clients', state: 'exclude' as const, ancestorKeys: [] }],
+    wholeAccount: true,
+  });
+
+  test('Evernote notes are held to this account and their own notebook, not to the revision of the latest save', () => {
+    for (const scope of [fileSourceScopeMetadataFilters(approval('evernote.notes')), fileSourceScopeContentFilters(approval('evernote.notes'))]) {
+      expect(scope).toMatchObject({ allowed: true, filters: { sourceScopeGeneration: 'a'.repeat(64), sourceScopeFolderNoneKeys: ['nb-clients'] } });
+      expect(scope.allowed && scope.filters?.sourceScopeRevision).toBeFalsy();
+    }
+  });
+
+  test('a source whose folders can move above an item still needs the current save\'s stamp', () => {
+    expect(fileSourceScopeMetadataFilters(approval('google_drive.docs'))).toMatchObject({
+      allowed: true, filters: { sourceScopeRevision: '00000000-0000-4000-8000-000000000001' },
+    });
   });
 });

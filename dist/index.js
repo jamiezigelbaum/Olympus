@@ -15401,6 +15401,7 @@ var init_file_scope_sources = __esm(() => {
     pinEnvName: "OLYMPUS_SOURCE_INDEX_EVERNOTE_CREDENTIAL_HANDLE",
     corpusIdsToInvalidate: ["secure_local.evernote.notes", "internal.evernote.notes"],
     filterFamily: "folder_id",
+    itemKeysExact: true,
     normalizeKey: (key) => key.trim(),
     rootKeys: ["/"],
     label: "Evernote",
@@ -17598,6 +17599,13 @@ var init_tier_ledger = __esm(() => {
   init_tier_classifier();
 });
 
+// src/workers/file-extraction/job-names.ts
+var openLedgerPaths;
+var init_job_names = __esm(() => {
+  init_olympus_layout();
+  openLedgerPaths = new Map;
+});
+
 // src/core/source-index/keyword-languages.ts
 var profiles;
 var init_keyword_languages = __esm(() => {
@@ -17951,13 +17959,6 @@ var init_sniffer = __esm(() => {
   SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 });
 
-// src/workers/file-extraction/job-names.ts
-var openLedgerPaths;
-var init_job_names = __esm(() => {
-  init_olympus_layout();
-  openLedgerPaths = new Map;
-});
-
 // src/workers/connector-store/secrets-disposition.ts
 var init_secrets_disposition = __esm(() => {
   init_sniffer();
@@ -18133,6 +18134,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 }
 var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
+  init_job_names();
   init_keyword_context();
   init_keyword_languages();
   init_keyword_expansion();

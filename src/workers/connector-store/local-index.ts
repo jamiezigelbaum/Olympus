@@ -1,4 +1,5 @@
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
+import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
@@ -8550,7 +8551,7 @@ export class LocalConnectorStore {
     preserveStoredSearchTextOwnedFacets = false,
     preserveStoredContentHash = false,
     sourceScopeObservation?: { accountGeneration: string; scopeRevision: string; folderKeys: readonly string[] },
-  ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean } {
+  ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean; revived: boolean } {
     // The structural half of "exclusion beats inclusion". Every write into
     // this store reaches this line, and there is no option, scope, or
     // allowlist consulted after it that can put an excluded item back. A
@@ -8714,6 +8715,7 @@ export class LocalConnectorStore {
     return {
       itemPk,
       ftsMetadataChanged,
+      revived: existing?.tombstoned === 1,
       // Did this upsert change anything, or did it rewrite the row it already
       // had? Every health signal the store publishes counts writes, so a lane
       // re-indexing byte-identical rows forever reads as healthy progress —
@@ -8767,7 +8769,7 @@ export class LocalConnectorStore {
     requiredLayer: TierSearchLayer = textFromRawItem(item) === undefined ? 'metadata' : 'content',
   ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean } {
     const tierLedgerForWrite = this.visibilityLedger();
-    return this.db.transaction(() => {
+    const written = this.db.transaction(() => {
       if (!this.tierWriteAllowed(item.identity, requiredLayer, tierLedgerForWrite)) throw new ConnectorStoreTierWriteRefusedError();
       const upsert = this.upsertItem(
         item,
@@ -8804,6 +8806,28 @@ export class LocalConnectorStore {
       if (upsert.ftsMetadataChanged || missingScopeMetadataRow) this.refreshFtsForItem(upsert.itemPk);
       return upsert;
     }).immediate();
+    // Retiring the item deleted its extracted text, so what read it is read again
+    // (oweExtractionRereadAfterRevive). Best effort per job ledger, like a tier move's.
+    if (written.revived) this.oweRereadsAfterRevive(item.identity, tierLedgerForWrite);
+    const { revived: _revived, ...upsert } = written;
+    return upsert;
+  }
+
+  private oweRereadsAfterRevive(identity: SourceItemIdentity, ledger: TierLedger | undefined): void {
+    const item = { provider: identity.provider, accountScope: identity.accountScope, providerItemId: identity.providerItemId };
+    let known: string[] = [];
+    try {
+      known = ledger?.knownJobLedgerPaths() ?? [];
+    } catch {
+      // The default path and the ledgers this process has open are still visited.
+    }
+    for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+      try {
+        oweExtractionRereadAfterRevive(jobsPath, item);
+      } catch {
+        // The item is back; only this ledger's re-read is lost.
+      }
+    }
   }
 
   private tombstoneWindowRemovedItems(

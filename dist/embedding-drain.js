@@ -9882,6 +9882,7 @@ var init_file_scope_sources = __esm(() => {
     pinEnvName: "OLYMPUS_SOURCE_INDEX_EVERNOTE_CREDENTIAL_HANDLE",
     corpusIdsToInvalidate: ["secure_local.evernote.notes", "internal.evernote.notes"],
     filterFamily: "folder_id",
+    itemKeysExact: true,
     normalizeKey: (key) => key.trim(),
     rootKeys: ["/"],
     label: "Evernote",
@@ -17394,6 +17395,168 @@ var init_tier_ledger = __esm(() => {
     secure_local: 2
   };
 });
+// src/workers/file-extraction/job-names.ts
+import { existsSync as existsSync13 } from "node:fs";
+import { Database as Database4 } from "bun:sqlite";
+function defaultFileExtractionJobsDbPath(env = process.env) {
+  return sharedDataPath("file-extraction-jobs", env);
+}
+function extractionJobsDbPaths(env = process.env) {
+  return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
+}
+function clearExtractionJobNames(dbPath, item, options = {}) {
+  if (dbPath === ":memory:" || !existsSync13(dbPath))
+    return { cleared: 0, durable: true };
+  const db = new Database4(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
+    if (!table)
+      return { cleared: 0, durable: true };
+    return db.transaction(() => {
+      if (options.proceed && !options.proceed())
+        return { cleared: 0, durable: true };
+      const claims = claimsTableExists(db);
+      const durable = redactionsTableExists(db) && (options.claimant === undefined || claims);
+      const now = new Date().toISOString();
+      if (redactionsTableExists(db)) {
+        db.query(`
+          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", now);
+      }
+      if (options.claimant !== undefined && claims) {
+        db.query(`
+          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (provider, account_scope, provider_item_id, claimant, claimed_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(item.provider, item.accountScope, item.providerItemId, options.claimant, now);
+      }
+      const artifactItems = item.localItemId !== undefined ? "provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ?" : "provider = ? AND account_scope = ? AND provider_item_id = ?";
+      const itemParams = item.localItemId !== undefined ? [item.provider, item.accountScope, item.providerItemId, item.localItemId] : [item.provider, item.accountScope, item.providerItemId];
+      if (artifactsTableExists(db)) {
+        db.query(`
+          DELETE FROM extraction_artifacts
+          WHERE (corpus_id, local_item_id) IN (SELECT corpus_id, local_item_id FROM extraction_jobs WHERE ${artifactItems})
+        `).run(...itemParams);
+      }
+      const cleared = item.localItemId !== undefined ? db.query(`
+            UPDATE extraction_jobs SET name = NULL
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
+          `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId).changes : db.query(`
+            UPDATE extraction_jobs SET name = NULL
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
+          `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      return { cleared, durable };
+    }).immediate();
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
+  if (dbPath === ":memory:" || !existsSync13(dbPath))
+    return { retired: 0, stillSecret: false };
+  const db = new Database4(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!redactionsTableExists(db))
+      return { retired: 0, stillSecret: false };
+    return db.transaction(() => {
+      if (stillSecret())
+        return { retired: 0, stillSecret: true };
+      if (claimsTableExists(db)) {
+        db.query(`
+          DELETE FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND claimant = ?
+        `).run(item.provider, item.accountScope, item.providerItemId, claimant);
+        const heldElsewhere = db.query(`
+          SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? LIMIT 1
+        `).get(item.provider, item.accountScope, item.providerItemId) !== null;
+        if (heldElsewhere)
+          return { retired: 0, stillSecret: false };
+      }
+      const retired = db.query(`
+        DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
+        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      if (retired > 0 && rereadsTableExists(db)) {
+        db.query(`
+          INSERT INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+          SELECT job_id FROM extraction_jobs
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+            AND (status IN ('indexed', 'leased')
+              OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
+          ${rereadsHaveReason(db) ? "ON CONFLICT(job_id) DO UPDATE SET reason = NULL" : "ON CONFLICT(job_id) DO NOTHING"}
+        `).run(item.provider, item.accountScope, item.providerItemId);
+      }
+      return { retired, stillSecret: false };
+    }).immediate();
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function artifactsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
+}
+function oweExtractionRereadAfterTierMove(dbPath, item) {
+  if (dbPath === ":memory:" || !existsSync13(dbPath))
+    return 0;
+  const db = new Database4(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!rereadsTableExists(db) || !rereadsHaveReason(db))
+      return 0;
+    const placement = PLACEMENT_SETTLEMENTS.map(() => "(status = ? AND last_error_kind = ?)").join(" OR ");
+    return db.query(`
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+      SELECT job_id, ? FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        AND (status = 'leased' OR ${placement})
+    `).run(REREAD_AFTER_PLACEMENT, item.provider, item.accountScope, item.providerItemId, ...PLACEMENT_SETTLEMENTS.flatMap((settlement) => [settlement.status, settlement.kind])).changes;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function oweExtractionRereadAfterRevive(dbPath, item) {
+  if (dbPath === ":memory:" || !existsSync13(dbPath))
+    return 0;
+  const db = new Database4(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!rereadsTableExists(db) || !rereadsHaveReason(db))
+      return 0;
+    return db.query(`
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+      SELECT job_id, ? FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        AND status IN ('indexed', 'leased')
+    `).run(REREAD_AFTER_REVIVE, item.provider, item.accountScope, item.providerItemId).changes;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function rereadsHaveReason(db) {
+  return db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all().some((column) => column.name === "reason");
+}
+function rereadsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
+}
+function claimsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTION_CLAIMS_TABLE) !== null;
+}
+function redactionsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
+}
+var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", REREAD_AFTER_PLACEMENT = "placement", REREAD_AFTER_REVIVE = "revived", openLedgerPaths, PLACEMENT_SETTLEMENTS;
+var init_job_names = __esm(() => {
+  init_olympus_layout();
+  openLedgerPaths = new Map;
+  PLACEMENT_SETTLEMENTS = [
+    { status: "metadata_only", kind: "store_item_metadata_only" },
+    { status: "metadata_only", kind: "store_image_content_private_only" },
+    { status: "blocked_policy", kind: "store_item_tier_move_queued" }
+  ];
+});
 
 // src/core/source-index/keyword-context.ts
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -18526,7 +18689,7 @@ var init_remote_access = __esm(() => {
 });
 
 // src/core/store-identity.ts
-import { existsSync as existsSync13, realpathSync as realpathSync3, statSync as statSync9 } from "node:fs";
+import { existsSync as existsSync14, realpathSync as realpathSync3, statSync as statSync9 } from "node:fs";
 import { basename as basename3, dirname as dirname17, isAbsolute as isAbsolute9, join as join17, relative as relative4, resolve as resolve7, sep as sep4 } from "node:path";
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
@@ -18604,7 +18767,7 @@ function storePlacementView(env = process.env) {
       return loaded = { kind: "unreadable" };
     try {
       const read = readSourceRegistry(env);
-      loaded = existsSync13(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
+      loaded = existsSync14(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
     } catch {
       loaded = { kind: "unreadable" };
     }
@@ -18756,7 +18919,7 @@ import { createHash as createHash12, randomUUID as randomUUID4 } from "node:cryp
 import {
   chmodSync as chmodSync5,
   closeSync as closeSync9,
-  existsSync as existsSync14,
+  existsSync as existsSync15,
   fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync12,
   lstatSync as lstatSync8,
@@ -18831,10 +18994,10 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
     const refs = refsDir(path);
     for (const name of markerNames(holder))
       rmSync5(join18(refs, name), { force: true });
-    const remaining = existsSync14(refs) ? readdirSync2(refs) : [];
+    const remaining = existsSync15(refs) ? readdirSync2(refs) : [];
     if (remaining.length > 0)
       return false;
-    if (existsSync14(refs))
+    if (existsSync15(refs))
       rmdirSync(refs);
     rmSync5(path, { force: true });
     return true;
@@ -18871,7 +19034,7 @@ function sweepMediaCache(dir, options = {}) {
       if (!name.endsWith(".jpg") || !isSha256(name.slice(0, -4)))
         continue;
       const refs = refsDir(path);
-      if (existsSync14(refs)) {
+      if (existsSync15(refs)) {
         for (const marker of readdirSync2(refs)) {
           const markerPath = join18(refs, marker);
           const gone = marker.startsWith("staging-") || marker.endsWith(".tmp") ? old(markerPath) : marker.startsWith(STORE_MARKER_PREFIX) ? storeHolderGone(markerPath, placement) : holderGone(markerPath, marker, placement);
@@ -18935,12 +19098,12 @@ function holderGone(marker, markerName, placement) {
   const name = readMarker(marker);
   if (!name || !isAbsolute10(name) || holderDigest(name) !== markerName)
     return false;
-  if (existsSync14(name))
+  if (existsSync15(name))
     return false;
   const verdict = placement.pathMarker(name);
   if (verdict !== "unplaced")
     return verdict === "gone";
-  return existsSync14(dirname18(name));
+  return existsSync15(dirname18(name));
 }
 function storeHolderGone(marker, placement) {
   const recorded = parseStoreMarker(readMarker(marker));
@@ -19022,7 +19185,7 @@ var init_media_cache = __esm(() => {
 });
 
 // src/workers/classification/tier-set-binding.ts
-import { existsSync as existsSync15 } from "node:fs";
+import { existsSync as existsSync16 } from "node:fs";
 import { basename as basename5, dirname as dirname19, join as join19 } from "node:path";
 function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   const candidates = [recordedLedgerPath];
@@ -19036,7 +19199,7 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
 }
 function findTierSetLedger(storeDbPath, binding) {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
-    if (candidate === ":memory:" || !existsSync15(candidate))
+    if (candidate === ":memory:" || !existsSync16(candidate))
       continue;
     if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
       return candidate;
@@ -19500,150 +19663,6 @@ var init_sniffer = __esm(() => {
     relationship: "intimate",
     relationships: "intimate"
   };
-});
-// src/workers/file-extraction/job-names.ts
-import { existsSync as existsSync16 } from "node:fs";
-import { Database as Database4 } from "bun:sqlite";
-function defaultFileExtractionJobsDbPath(env = process.env) {
-  return sharedDataPath("file-extraction-jobs", env);
-}
-function extractionJobsDbPaths(env = process.env) {
-  return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
-}
-function clearExtractionJobNames(dbPath, item, options = {}) {
-  if (dbPath === ":memory:" || !existsSync16(dbPath))
-    return { cleared: 0, durable: true };
-  const db = new Database4(dbPath, { readwrite: true, create: false });
-  try {
-    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
-    if (!table)
-      return { cleared: 0, durable: true };
-    return db.transaction(() => {
-      if (options.proceed && !options.proceed())
-        return { cleared: 0, durable: true };
-      const claims = claimsTableExists(db);
-      const durable = redactionsTableExists(db) && (options.claimant === undefined || claims);
-      const now = new Date().toISOString();
-      if (redactionsTableExists(db)) {
-        db.query(`
-          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", now);
-      }
-      if (options.claimant !== undefined && claims) {
-        db.query(`
-          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (provider, account_scope, provider_item_id, claimant, claimed_at)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(item.provider, item.accountScope, item.providerItemId, options.claimant, now);
-      }
-      const artifactItems = item.localItemId !== undefined ? "provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ?" : "provider = ? AND account_scope = ? AND provider_item_id = ?";
-      const itemParams = item.localItemId !== undefined ? [item.provider, item.accountScope, item.providerItemId, item.localItemId] : [item.provider, item.accountScope, item.providerItemId];
-      if (artifactsTableExists(db)) {
-        db.query(`
-          DELETE FROM extraction_artifacts
-          WHERE (corpus_id, local_item_id) IN (SELECT corpus_id, local_item_id FROM extraction_jobs WHERE ${artifactItems})
-        `).run(...itemParams);
-      }
-      const cleared = item.localItemId !== undefined ? db.query(`
-            UPDATE extraction_jobs SET name = NULL
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
-          `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId).changes : db.query(`
-            UPDATE extraction_jobs SET name = NULL
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
-          `).run(item.provider, item.accountScope, item.providerItemId).changes;
-      return { cleared, durable };
-    }).immediate();
-  } finally {
-    closeSqliteStore(db);
-  }
-}
-function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
-  if (dbPath === ":memory:" || !existsSync16(dbPath))
-    return { retired: 0, stillSecret: false };
-  const db = new Database4(dbPath, { readwrite: true, create: false });
-  try {
-    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    if (!redactionsTableExists(db))
-      return { retired: 0, stillSecret: false };
-    return db.transaction(() => {
-      if (stillSecret())
-        return { retired: 0, stillSecret: true };
-      if (claimsTableExists(db)) {
-        db.query(`
-          DELETE FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND claimant = ?
-        `).run(item.provider, item.accountScope, item.providerItemId, claimant);
-        const heldElsewhere = db.query(`
-          SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? LIMIT 1
-        `).get(item.provider, item.accountScope, item.providerItemId) !== null;
-        if (heldElsewhere)
-          return { retired: 0, stillSecret: false };
-      }
-      const retired = db.query(`
-        DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-      `).run(item.provider, item.accountScope, item.providerItemId).changes;
-      if (retired > 0 && rereadsTableExists(db)) {
-        db.query(`
-          INSERT INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
-          SELECT job_id FROM extraction_jobs
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-            AND (status IN ('indexed', 'leased')
-              OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
-          ${rereadsHaveReason(db) ? "ON CONFLICT(job_id) DO UPDATE SET reason = NULL" : "ON CONFLICT(job_id) DO NOTHING"}
-        `).run(item.provider, item.accountScope, item.providerItemId);
-      }
-      return { retired, stillSecret: false };
-    }).immediate();
-  } finally {
-    closeSqliteStore(db);
-  }
-}
-function artifactsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
-}
-function oweExtractionRereadAfterTierMove(dbPath, item) {
-  if (dbPath === ":memory:" || !existsSync16(dbPath))
-    return 0;
-  const db = new Database4(dbPath, { readwrite: true, create: false });
-  try {
-    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    if (!rereadsTableExists(db) || !rereadsHaveReason(db))
-      return 0;
-    const placement = PLACEMENT_SETTLEMENTS.map(() => "(status = ? AND last_error_kind = ?)").join(" OR ");
-    return db.query(`
-      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
-      SELECT job_id, ? FROM extraction_jobs
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-        AND (status = 'leased' OR ${placement})
-    `).run(REREAD_AFTER_PLACEMENT, item.provider, item.accountScope, item.providerItemId, ...PLACEMENT_SETTLEMENTS.flatMap((settlement) => [settlement.status, settlement.kind])).changes;
-  } finally {
-    closeSqliteStore(db);
-  }
-}
-function rereadsHaveReason(db) {
-  return db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all().some((column) => column.name === "reason");
-}
-function rereadsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
-}
-function claimsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTION_CLAIMS_TABLE) !== null;
-}
-function redactionsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
-}
-var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4, SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions", SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims", SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads", REREAD_AFTER_PLACEMENT = "placement", openLedgerPaths, PLACEMENT_SETTLEMENTS;
-var init_job_names = __esm(() => {
-  init_olympus_layout();
-  openLedgerPaths = new Map;
-  PLACEMENT_SETTLEMENTS = [
-    { status: "metadata_only", kind: "store_item_metadata_only" },
-    { status: "metadata_only", kind: "store_image_content_private_only" },
-    { status: "blocked_policy", kind: "store_item_tier_move_queued" }
-  ];
 });
 
 // src/workers/connector-store/secrets-disposition.ts
@@ -23561,6 +23580,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
     AND emb.content_hash = c.embedding_input_hash
 `, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_job_names();
   init_keyword_context();
   init_keyword_languages();
   init_keyword_expansion();
@@ -27523,6 +27543,7 @@ var init_local_index = __esm(() => {
       return {
         itemPk,
         ftsMetadataChanged,
+        revived: existing?.tombstoned === 1,
         contentChanged: ftsMetadataChanged || existing.content_hash !== (contentHash ?? null)
       };
     }
@@ -27554,19 +27575,35 @@ var init_local_index = __esm(() => {
     }
     upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation, requiredLayer = textFromRawItem(item) === undefined ? "metadata" : "content") {
       const tierLedgerForWrite = this.visibilityLedger();
-      return this.db.transaction(() => {
+      const written = this.db.transaction(() => {
         if (!this.tierWriteAllowed(item.identity, requiredLayer, tierLedgerForWrite))
           throw new ConnectorStoreTierWriteRefusedError;
-        const upsert = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash, sourceScopeObservation);
-        this.rememberItemOwner(upsert.itemPk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), observation);
+        const upsert2 = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash, sourceScopeObservation);
+        this.rememberItemOwner(upsert2.itemPk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), observation);
         const missingScopeMetadataRow = sourceScopeObservation !== undefined && !this.db.query(`
           SELECT 1 AS present FROM connector_store_fts_rows
           WHERE item_pk = ? AND chunk_pk IS NULL LIMIT 1
-        `).get(upsert.itemPk)?.present;
-        if (upsert.ftsMetadataChanged || missingScopeMetadataRow)
-          this.refreshFtsForItem(upsert.itemPk);
-        return upsert;
+        `).get(upsert2.itemPk)?.present;
+        if (upsert2.ftsMetadataChanged || missingScopeMetadataRow)
+          this.refreshFtsForItem(upsert2.itemPk);
+        return upsert2;
       }).immediate();
+      if (written.revived)
+        this.oweRereadsAfterRevive(item.identity, tierLedgerForWrite);
+      const { revived: _revived, ...upsert } = written;
+      return upsert;
+    }
+    oweRereadsAfterRevive(identity, ledger) {
+      const item = { provider: identity.provider, accountScope: identity.accountScope, providerItemId: identity.providerItemId };
+      let known = [];
+      try {
+        known = ledger?.knownJobLedgerPaths() ?? [];
+      } catch {}
+      for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+        try {
+          oweExtractionRereadAfterRevive(jobsPath, item);
+        } catch {}
+      }
     }
     tombstoneWindowRemovedItems(connectorId, ownershipKind, syncRunId, scopes, localItemIds, snapshotObservedAt) {
       return this.db.transaction(() => {
