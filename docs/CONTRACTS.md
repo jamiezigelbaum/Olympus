@@ -355,6 +355,36 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-29 (no contract type version change; tier classifier
+  `2026-10-29.p7`, photo judge `photo-judge-2026-10-29`): **a picture of a
+  document is decided by its text** (owner direction 2026-10-29: fix privacy
+  misjudgments generally, not one at a time). The 2026-10-08 photo judge
+  compared a picture with one description of an ordinary photo, so any
+  picture of writing (the demo kit's whiteboard, slides, screenshots, notes)
+  could land nearest the financial or medical document description and rest
+  Private on the picture alone, whatever it said. Financial and medical
+  documents are named by what they say, so a picture nearest one of them is
+  now `ordinary` with the reason `text_decides`, and the classifier decides
+  it by the text read off it: held Private (an own-record hold, never
+  `content:personal_first`) until the privacy-safe model reads that text,
+  Private at once on a structured identifier, and Private on the picture
+  (`content:image_sensitive:<category>`) when fewer than eight words were
+  read. With no model the hold never lifts. Identity documents, bank cards
+  and intimate pictures stay `sensitive` on the picture alone. Stored data:
+  the new judge id makes every stored judgment stale, so each picture is
+  judged again and a changed verdict re-decides its items through the
+  existing judgment sweep; the classifier version re-judges routed items
+  through the existing re-judge pass. Both run automatically, with no owner
+  step. No schema change: the verdict set is unchanged and the reason column
+  already exists; a re-written judgment with a changed reason is re-applied.
+  SourceConnector, EvidencePack and Analyst shapes and the canonical
+  fingerprint are unchanged. Evidence: `test/photo-privacy-judge.test.ts`
+  (a whiteboard and a lab result judged nearest a medical document through
+  the tier set: the whiteboard reaches Personal with its picture after the
+  model reads it, the lab result stays Private); the calibration kit
+  `eval/photo-judge/` (pictures of everyday writing and synthetic records,
+  scored by the real model). Critical-review gate: a critical classification
+  change; it needs fresh independent review of its head before merge.
 - 2026-10-28 (no version change): **no source is Private wholesale** (owner
   ruling, repeated: privacy is decided per item by its content, in every
   source). WhatsApp and Apple Messages no longer publish a `source_default`

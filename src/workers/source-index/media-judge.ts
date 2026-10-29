@@ -12,7 +12,18 @@
 // cannot be judged (no image encoder, no model that reads pictures, a picture
 // the encoder fails on) is `unjudged`, and an unjudged picture stays Private.
 // A missed sensitive photo is worse than a wrongly Private one.
+//
+// Financial and medical documents are named by what they SAY, which a picture
+// alone cannot tell: any page of writing (a whiteboard, a slide, notes) can
+// land nearest one of those descriptions (2026-10-29: the demo kit's
+// whiteboard was judged a medical document). A picture whose closest
+// description is one of them is therefore `ordinary` with the reason
+// MEDIA_JUDGE_TEXT_DECIDES: the text read off it decides, as for any document,
+// and it is held Private until that text is judged (tier-classifier.ts). Only
+// identity documents, bank cards and intimate pictures, which the picture
+// itself shows, are `sensitive` on the picture alone.
 
+import type { ImageJudgmentSignal } from '../classification/tier-classifier.ts';
 import type { SourceEmbeddingImageInput, SourceEmbeddingProvider } from './embeddings.ts';
 
 export type MediaJudgmentVerdict = 'sensitive' | 'ordinary' | 'unjudged';
@@ -26,13 +37,19 @@ export const MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
 ] as const;
 export type MediaJudgeSensitiveCategory = (typeof MEDIA_JUDGE_SENSITIVE_CATEGORIES)[number];
 export type MediaJudgeCategory = MediaJudgeSensitiveCategory | 'ordinary';
+/** The sensitive categories named by what a document says: the picture's text decides them. */
+export const MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES: ReadonlySet<MediaJudgeSensitiveCategory> = new Set(['financial_document', 'medical_document']);
+/** The reason an ordinary verdict carries when its picture's text decides (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES). */
+export const MEDIA_JUDGE_TEXT_DECIDES = 'text_decides';
 
 /**
  * One description per category, embedded as a classification query. The
- * version names this exact prompt set: a judgment records it, and a changed
- * prompt set is a new judge.
+ * version names this exact prompt set and the rules that read it: a judgment
+ * records it, and a change to either is a new judge, so every picture is
+ * judged again. 2026-10-29: financial and medical documents are decided by
+ * their text (MEDIA_JUDGE_TEXT_DECIDES).
  */
-export const MEDIA_JUDGE_PROMPT_SET = 'photo-judge-2026-10-08';
+export const MEDIA_JUDGE_PROMPT_SET = 'photo-judge-2026-10-29';
 export const MEDIA_JUDGE_PROMPTS: Readonly<Record<MediaJudgeCategory, string>> = Object.freeze({
   id_document: 'a photo of a passport, national identity card or driving licence',
   bank_card: 'a photo of a credit card, debit card or bank card',
@@ -87,8 +104,20 @@ export interface MediaJudgment {
   scores?: Partial<Record<MediaJudgeCategory, number>>;
   /** Which judge decided: the prompt set, the thresholds and the model that read the picture. */
   judgeId: string;
-  /** Why a picture is unjudged (it could not be read). */
+  /**
+   * Why a picture is unjudged (it could not be read), or, on an ordinary
+   * verdict, MEDIA_JUDGE_TEXT_DECIDES: its text decides.
+   */
   reason?: string;
+}
+
+/** The signal the tier classifier reads from a judgment. */
+export function imageJudgmentSignal(judgment: Pick<MediaJudgment, 'verdict' | 'category' | 'reason'>): ImageJudgmentSignal {
+  return {
+    verdict: judgment.verdict,
+    ...(judgment.category ? { category: judgment.category } : {}),
+    ...(judgment.verdict === 'ordinary' && judgment.reason === MEDIA_JUDGE_TEXT_DECIDES ? { textDecides: true as const } : {}),
+  };
 }
 
 // A stored judgment made under any other id is stale: the picture is judged
@@ -137,11 +166,14 @@ export function judgeMediaScores(
   const margin = topScore - ordinary;
   const intimateMargin = scores.intimate! - ordinary;
   const kept = Object.fromEntries(Object.entries(scores).map(([key, value]) => [key, rounded(value!)])) as Partial<Record<MediaJudgeCategory, number>>;
-  if (margin >= thresholds.margin) {
+  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
     return { verdict: 'sensitive', category: top, margin: rounded(margin), scores: kept, judgeId };
   }
   if (intimateMargin >= thresholds.intimateMargin) {
     return { verdict: 'sensitive', category: 'intimate', margin: rounded(margin), scores: kept, judgeId };
+  }
+  if (margin >= thresholds.margin) {
+    return { verdict: 'ordinary', category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
   }
   return { verdict: 'ordinary', category: top, margin: rounded(margin), scores: kept, judgeId };
 }
