@@ -98,7 +98,7 @@ print(json.dumps([norm(Msg(1, forward=Forward(from_name="Hidden Name"), text="a"
 from pathlib import Path
 spool = Path(${JSON.stringify(spoolDir)})
 reader.write_capture_heartbeat(spool)
-config = reader.GatewayConfig(account="telegram.personal", approved_scopes=(), classifications={}, state_dir=spool, spool_dir=spool,
+config = reader.GatewayConfig(account="telegram.personal", approved_scopes=(), state_dir=spool, spool_dir=spool,
     state_path=spool / "state.json", report_path=spool / "report.json", backfill_path=spool / "b.jsonl", max_messages=10,
     interval_seconds=60, stale_threshold_seconds=3600)
 report = reader.gateway_report(config, reader.read_gateway_state(spool / "state.json"), 0)

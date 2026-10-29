@@ -144,7 +144,7 @@ export const OLYMPUS_SOURCE_FAMILY_POSTURES: SourceFamilyPosture[] = [
     credentialHandles: ['telegram.personal'],
     castorEvidenceForms: ['bounded_answer', 'safe_provenance', 'approved_context'],
     writePosture: 'read_only',
-    notes: 'First live messaging source with green read/search proof. Approved ordinary chats default internal; protected chats route to secure_local. Send/control authority is separate and not active.',
+    notes: 'First live messaging source with green read/search proof. Each message is judged by its own content; no chat is Private as a whole unless the user sets a rule for it. Send/control authority is separate and not active.',
   }),
   defineSourceFamilyPosture({
     sourceId: 'whatsapp.business.messages',

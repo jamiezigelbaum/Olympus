@@ -542,7 +542,9 @@ starts Personal and is raised to Private or Secrets by the detectors, the
 sniffer, a provider fact about that item (a Telegram Secret Chat message) or
 an owner rule the owner chose (an always-Private sender, label, folder or
 chat). Pairing or connecting a source never marks it, or any of its chats,
-Private. Personal Telegram messages live in `internal.telegram.messages`;
+Private, and no default, deployment setting, connector or store does either:
+only the user's own rule decides a group of items (owner ruling,
+2026-10-28; `test/privacy-per-item-guard.test.ts` keeps it so). Personal Telegram messages live in `internal.telegram.messages`;
 Private ones in `secure_local.telegram.protected.messages`.
 
 ## macOS zkAPI route confinement

@@ -31,7 +31,6 @@ MAX_MESSAGES_DEFAULT = 500
 MAX_MESSAGES_HARD_CAP = 5000
 TELEGRAM_GATEWAY_ENDPOINT_ID = "telegram_local_telethon_reader"
 INTERNAL_TELEGRAM_CORPUS_ID = "internal.telegram.messages"
-PROTECTED_TELEGRAM_CORPUS_ID = "secure_local.telegram.protected.messages"
 EVENT_SENDER_CACHE_MAX = 1024
 EVENT_LANE_COUNTER_KEYS = (
     "events_seen",
@@ -229,7 +228,6 @@ async def read_messages_with_client(
 class GatewayConfig:
     account: str
     approved_scopes: tuple[str, ...]
-    classifications: dict[str, dict[str, str]]
     state_dir: Path
     spool_dir: Path
     state_path: Path
@@ -731,29 +729,9 @@ def gateway_config() -> GatewayConfig:
         "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES",
     )
     approved_scopes = exact_chat_scopes(approved_raw, account, "approved_chat_scopes_required")
-    protected_raw = first_env(
-        "OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES",
-        "OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES",
-    )
-    protected_scopes = exact_chat_scopes(protected_raw, account, None)
-    classification_raw = first_env(
-        "OLYMPUS_SOURCE_INDEX_TELEGRAM_CHAT_CLASSIFICATIONS_JSON",
-        "OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON",
-    )
-    classifications = parse_gateway_classifications(classification_raw, account)
-    for scope in protected_scopes:
-        existing = classifications.get(scope)
-        if existing and existing["trust_domain"] != "secure_local":
-            raise SafeConfigError("conflicting_chat_classification")
-        classifications.setdefault(scope, {
-            "trust_domain": "secure_local",
-            "reason": "legacy_protected_scope",
-            "source": "legacy_protected_chat_scopes",
-        })
-    for scope in classifications:
-        if scope not in approved_scopes:
-            raise SafeConfigError("classification_scope_not_approved")
-
+    # Every approved chat is captured alike: each message is judged by its own
+    # content downstream. No chat is routed Private as a whole (a user's own
+    # rule for a chat is an owner rule, applied where every source's are).
     # Match the worker consumer and data-lifecycle custody paths, including
     # relocated XDG installations and the legacy drain spool override.
     home = Path(os.environ.get("HOME", "").strip() or str(Path.home()))
@@ -770,7 +748,6 @@ def gateway_config() -> GatewayConfig:
     return GatewayConfig(
         account=account,
         approved_scopes=tuple(approved_scopes),
-        classifications=classifications,
         state_dir=state_dir,
         spool_dir=spool_dir,
         state_path=state_dir / "state.json",
@@ -785,37 +762,6 @@ def gateway_config() -> GatewayConfig:
     )
 
 
-def parse_gateway_classifications(value: str | None, account: str) -> dict[str, dict[str, str]]:
-    if not value:
-        return {}
-    try:
-        entries = json.loads(value)
-    except json.JSONDecodeError as error:
-        raise SafeConfigError("invalid_chat_classifications") from error
-    if not isinstance(entries, list):
-        raise SafeConfigError("invalid_chat_classifications")
-    result: dict[str, dict[str, str]] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            raise SafeConfigError("invalid_chat_classifications")
-        scope = entry.get("chatScope", entry.get("chat_scope"))
-        trust = entry.get("trustDomain", entry.get("trust_domain"))
-        reason = entry.get("reason")
-        if not isinstance(scope, str) or scope not in exact_chat_scopes(scope, account, "invalid_chat_scope"):
-            raise SafeConfigError("invalid_chat_classifications")
-        if trust not in ("internal", "secure_local") or not isinstance(reason, str) or not reason.strip():
-            raise SafeConfigError("invalid_chat_classifications")
-        normalized = {"trust_domain": trust, "reason": reason.strip()}
-        for source_key, target_key in (("owner", "owner"), ("reviewedAt", "reviewed_at"), ("reviewed_at", "reviewed_at"), ("source", "source")):
-            field = entry.get(source_key)
-            if isinstance(field, str) and field.strip():
-                normalized[target_key] = field.strip()
-        if scope in result and result[scope] != normalized:
-            raise SafeConfigError("conflicting_chat_classification")
-        result[scope] = normalized
-    return result
-
-
 def append_gateway_page(
     config: GatewayConfig,
     chat_scope: str,
@@ -824,12 +770,12 @@ def append_gateway_page(
     request_id: str | None = None,
 ) -> int:
     captured_at = gateway_now_iso()
-    classification = config.classifications.get(chat_scope, {
+    classification = {
         "trust_domain": "internal",
         "reason": "approved_ordinary_chat",
         "source": "approved_chat_scopes",
-    })
-    corpus_id = PROTECTED_TELEGRAM_CORPUS_ID if classification["trust_domain"] == "secure_local" else INTERNAL_TELEGRAM_CORPUS_ID
+    }
+    corpus_id = INTERNAL_TELEGRAM_CORPUS_ID
     records = []
     for message in page.get("messages", []):
         if not isinstance(message, dict):
@@ -1066,7 +1012,6 @@ def gateway_report(config: GatewayConfig, state: dict[str, Any], captured: int) 
         "status": "attention" if freshness_status in ("stale", "unavailable") else "ok",
         "credential_endpoint_id": TELEGRAM_GATEWAY_ENDPOINT_ID,
         "approved_chats": len(config.approved_scopes),
-        "protected_chats": sum(1 for value in config.classifications.values() if value["trust_domain"] == "secure_local"),
         "records_captured": captured,
         "spool_records": spool_records,
         **({"spool_newest_age_seconds": age} if age is not None else {}),

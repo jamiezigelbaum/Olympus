@@ -355,6 +355,18 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-28 (no version change): **only the user's own rule decides a
+  group of items** (owner ruling). The Telegram helper no longer reads a
+  deployment's protected-chat or chat-classification settings and captures
+  every approved chat alike; the repo's Saved Messages policy file is
+  deleted. The tier migration no longer reads a Telegram store's placement
+  as a prior (`storedPlacementIsPrior` is deleted), so messages already
+  stored Private are re-judged by their content like any other. Capture
+  records written before this change keep their recorded trust domain as a
+  prior on replay; nothing new is written that way. `test/privacy-per-item-guard.test.ts` keeps these paths dead and
+  holds every published floor to a per-item fact. The `prior` field stays
+  optional, so none of this is reachable from the three contract types and
+  the fingerprint is unchanged.
 - 2026-10-28 (no version change): **no source is Private wholesale** (owner
   ruling, repeated: privacy is decided per item by its content, in every
   source). WhatsApp and Apple Messages no longer publish a `source_default`
