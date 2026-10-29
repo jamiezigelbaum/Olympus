@@ -9,6 +9,7 @@
 - **An archive import reads everything it can,** including Telegram account details and service messages, and the dashboard tells what could not be read apart from how it was read.
 - **Live Telegram and WhatsApp capture is sturdier.** Any size of backlog is read, a lost position is recovered, dropped messages are counted, and the dashboard tells a quiet account from one that stopped.
 - **Each source keeps its data in its own folder.** Existing accounts move into their folders when Olympus starts after the update. Delete, Export and uninstall work from the same record of what each account owns.
+- **Every store indexes for meaning the same way,** whatever source filled it, and catches up on items still missing vectors (#600).
 - Answers: a question with no matching evidence says so instead of failing, and a Private file matched only by its name, or a file Olympus never read, no longer withholds the whole answer.
 - The privacy check no longer counts files still waiting to be read as missing a question.
 - An Inbox delete that removed nothing says so and keeps the answer.
