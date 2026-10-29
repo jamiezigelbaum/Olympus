@@ -32,7 +32,7 @@ describe('release-check suite rules', () => {
   });
 
   test('an answer without the expected citation fails the cited check', () => {
-    const checks = evaluateObservation(observation('file-fact', { answerText: '1,284.50 EUR due 15 November 2026', evidenceTitles: ['Something else'] }), markers);
+    const checks = evaluateObservation(observation('file-fact', { answerText: 'Every 18 months; 1.3 bar when cold', evidenceTitles: ['Something else'] }), markers);
     expect(status(checks, 'file-fact.facts')).toBe('pass');
     expect(status(checks, 'file-fact.cited')).toBe('fail');
   });
