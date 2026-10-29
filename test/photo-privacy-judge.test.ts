@@ -218,6 +218,9 @@ describe('the judge: thresholds and categories', () => {
       expect(judged).toMatchObject({ verdict: 'ordinary', category, reason: MEDIA_JUDGE_TEXT_DECIDES });
       expect(imageJudgmentSignal(judged)).toEqual({ verdict: 'ordinary', category, textDecides: true });
     }
+    // A financial document that passes on its own is not hidden by a slightly closer medical one.
+    expect(judgeMediaScores(scores(0.6, { medical_document: 0.7, financial_document: 0.69 }), 'j'))
+      .toMatchObject({ verdict: 'sensitive', category: 'financial_document', margin: 0.09 });
     const nearIntimate = judgeMediaScores(scores(0.6, { medical_document: 0.7, intimate: 0.6 + MEDIA_JUDGE_THRESHOLDS.intimateMargin }), 'j');
     expect(nearIntimate).toMatchObject({ verdict: 'sensitive', category: 'intimate' });
     // An unjudged picture's reason never reads as text deciding.

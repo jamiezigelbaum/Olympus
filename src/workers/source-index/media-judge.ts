@@ -171,6 +171,16 @@ export function judgeMediaScores(
   if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
     return { verdict: 'sensitive', category: top, margin: rounded(margin), scores: kept, judgeId };
   }
+  // A text-decided category that wins never hides another sensitive one that
+  // passes on its own: the picture's verdict stands for that one.
+  let pictureTop: MediaJudgeSensitiveCategory | undefined;
+  for (const [category, score] of sensitive) {
+    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score! - ordinary < thresholds.margin) continue;
+    if (!pictureTop || score! > scores[pictureTop]!) pictureTop = category;
+  }
+  if (pictureTop) {
+    return { verdict: 'sensitive', category: pictureTop, margin: rounded(scores[pictureTop]! - ordinary), scores: kept, judgeId };
+  }
   if (intimateMargin >= thresholds.intimateMargin) {
     return { verdict: 'sensitive', category: 'intimate', margin: rounded(margin), scores: kept, judgeId };
   }
