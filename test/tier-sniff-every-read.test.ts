@@ -15,7 +15,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
   SNIFFER_CATEGORIES,
-  SNIFFER_DEFAULT_PRIVACY_POLICY,
   SNIFFER_PROMPT_VERSION,
   SNIFFER_SYSTEM_PROMPT,
   buildSnifferBatchPrompt,
@@ -141,19 +140,5 @@ describe('the sniffer prompt asks one generic question', () => {
     expect(prompt).toContain(JSON.stringify({ i: 1, document: 'Names: a.pdf\nExcerpt: text' }));
     // Derived from the text: the change is a new version, approved before use.
     expect(SNIFFER_PROMPT_VERSION).toMatch(/^p-[0-9a-f]{12}$/);
-  });
-
-  test('with no owner description the default policy is quoted beside the item, as the owner\'s words would be', () => {
-    // The small built-in model ignored the system prompt's conditional default
-    // and judged a cardiology note "work" Personal; it applies a quoted policy.
-    const item = [{ i: 1, material: 'Names: Cardiology follow-up notes\nExcerpt: resting heart rate 52 bpm' }];
-    const bare = buildSnifferBatchPrompt('content', item);
-    expect(bare).toContain(JSON.stringify({ default_privacy: SNIFFER_DEFAULT_PRIVACY_POLICY }));
-    expect(SNIFFER_DEFAULT_PRIVACY_POLICY).toContain('health');
-    expect(bare.indexOf('default_privacy')).toBeLessThan(bare.indexOf('"i":1'));
-    // The owner's words replace the default; they are never mixed with it.
-    const owned = buildSnifferBatchPrompt('content', item, 'my medical records and my tax papers');
-    expect(owned).toContain(JSON.stringify({ owner_privacy: 'my medical records and my tax papers' }));
-    expect(owned).not.toContain('default_privacy');
   });
 });

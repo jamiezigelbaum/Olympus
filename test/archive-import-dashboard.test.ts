@@ -1027,7 +1027,7 @@ function judgingModel(): AnalystModel & { calls: number } {
     calls: 0,
     async complete(request: { prompt: string }) {
       model.calls += 1;
-      const items = request.prompt.split('\n').filter((line) => line.startsWith('{"i":')).map((line) => JSON.parse(line) as { i: number });
+      const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as { i: number });
       const verdicts = items.map((item) => ({ i: item.i, tier: 'private', category: 'none', confidence: 0.9, ownRecord: false, privateKind: 'none' }));
       return { text: JSON.stringify({ verdicts }), modelId: SNIFFER_LANE.modelId };
     },

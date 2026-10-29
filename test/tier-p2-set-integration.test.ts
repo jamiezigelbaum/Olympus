@@ -43,7 +43,7 @@ function model(answer: (material: string) => { tier: string; category: string; c
     requests,
     async complete(request) {
       requests.push(request);
-      const items = request.prompt.split('\n').filter((line) => line.startsWith('{"i":')).map((line) => JSON.parse(line) as { i: number; names?: string; document?: string });
+      const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as { i: number; names?: string; document?: string });
       return {
         text: JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, ownRecord: false, privateKind: 'none', ...answer(item.names ?? item.document ?? '') })) }),
         modelId: LANE.modelId,
