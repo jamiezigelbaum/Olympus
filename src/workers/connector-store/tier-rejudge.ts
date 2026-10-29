@@ -38,6 +38,7 @@
 // - Runs only with a sniffer configured (the sniffer service calls it): with
 //   no private lane, recorded decisions stand exactly as before.
 
+import { imageJudgmentSignal } from '../source-index/media-judge.ts';
 import { parentNamesContext } from './parent-context.ts';
 import {
   classifyContentTier,
@@ -223,7 +224,7 @@ export function rejudgeStoredContent(
       ...(sender ? { sender } : {}),
       ...(mimeType ? { mimeType } : {}),
       ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
-      ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
+      ...(imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {}),
       ...(parentContext ? { parentContext } : {}),
       subject: identity,
     },

@@ -18890,11 +18890,12 @@ function contentPass(args) {
     }
   }
   const imageOrdinary = args.image === true && args.imageJudgment?.verdict === "ordinary";
-  if (args.image && args.imageJudgment?.verdict === "sensitive") {
+  const textDecides = imageOrdinary && args.imageJudgment?.textDecides === true;
+  if (args.image && (args.imageJudgment?.verdict === "sensitive" || textDecides && !imageTextReadable(text2))) {
     return {
       tier: maxTier(metadata.tier, "secure"),
       decidedBy: "default",
-      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment.category)}`, ...mark],
+      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment?.category)}`, ...mark],
       pending: false
     };
   }
@@ -18919,7 +18920,7 @@ function contentPass(args) {
       reasons: detectorReasons(detection.signals)
     });
   }
-  const recordFlags = ownRecordSignals(text2, args.matchInput);
+  const recordFlags = [...ownRecordSignals(text2, args.matchInput), ...textDecides ? ["image_document"] : []];
   const held = args.holdUntilJudged === true && metadata.ownerDecided !== true;
   let pending = false;
   const flags = [
@@ -18958,8 +18959,9 @@ function contentPass(args) {
   }
   if (reasons.length === 0)
     reasons.push("content:no_raise");
-  if (imageOrdinary)
-    reasons.unshift(IMAGE_ORDINARY_REASON);
+  if (imageOrdinary) {
+    reasons.unshift(textDecides ? `${IMAGE_TEXT_DECIDES_REASON_PREFIX}${imageCategoryCode(args.imageJudgment?.category)}` : IMAGE_ORDINARY_REASON);
+  }
   reasons.push(...mark);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
 }
@@ -18984,6 +18986,10 @@ function ownRecordSignals(text2, names) {
   if (/\b(?:test|lab|bloodwork|blood work|visit|statement|results?)\b/i.test(title) && /\b(?:\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?:\d{4}|\d{1,2}(?:,?\s+\d{4})?))\b/i.test(title))
     signals.push("dated_record");
   return signals;
+}
+function imageTextReadable(text2) {
+  const words = text2.match(/[\p{L}\p{N}][\p{L}\p{N}'’.-]*/gu) ?? [];
+  return words.length - 1 >= IMAGE_TEXT_DECIDES_MIN_WORDS;
 }
 function imageCategoryCode(category) {
   const allowed = "abcdefghijklmnopqrstuvwxyz0123456789_";
@@ -19110,8 +19116,8 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-13.p6", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
-Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-29.p7", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
+Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
@@ -28784,6 +28790,13 @@ var init_embeddings = __esm(() => {
 });
 
 // src/workers/source-index/media-judge.ts
+function imageJudgmentSignal(judgment) {
+  return {
+    verdict: judgment.verdict,
+    ...judgment.category ? { category: judgment.category } : {},
+    ...judgment.verdict === "ordinary" && judgment.reason === MEDIA_JUDGE_TEXT_DECIDES ? { textDecides: true } : {}
+  };
+}
 function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
   return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
 }
@@ -28814,11 +28827,24 @@ function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) 
   const margin = topScore - ordinary;
   const intimateMargin = scores.intimate - ordinary;
   const kept = Object.fromEntries(Object.entries(scores).map(([key2, value]) => [key2, rounded(value)]));
-  if (margin >= thresholds.margin) {
+  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
     return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
+  }
+  let pictureTop;
+  for (const [category, score] of sensitive) {
+    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score - ordinary < thresholds.margin)
+      continue;
+    if (!pictureTop || score > scores[pictureTop])
+      pictureTop = category;
+  }
+  if (pictureTop) {
+    return { verdict: "sensitive", category: pictureTop, margin: rounded(scores[pictureTop] - ordinary), scores: kept, judgeId };
   }
   if (intimateMargin >= thresholds.intimateMargin) {
     return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
+  }
+  if (margin >= thresholds.margin) {
+    return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
   }
   return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
 }
@@ -28865,7 +28891,7 @@ async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_J
   const judgeId = mediaJudgeId(provider, thresholds);
   return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
 }
-var MEDIA_JUDGE_SENSITIVE_CATEGORIES, MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-08", MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ", MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
+var MEDIA_JUDGE_SENSITIVE_CATEGORIES, MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_TEXT_DECIDES = "text_decides", MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-29", MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ", MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
 var init_media_judge = __esm(() => {
   MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
     "id_document",
@@ -28874,6 +28900,7 @@ var init_media_judge = __esm(() => {
     "medical_document",
     "intimate"
   ];
+  MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
   MEDIA_JUDGE_PROMPTS = Object.freeze({
     id_document: "a photo of a passport, national identity card or driving licence",
     bank_card: "a photo of a credit card, debit card or bank card",
@@ -34518,7 +34545,8 @@ var init_local_index = __esm(() => {
           -- The same judgment again leaves a pending re-decision pending: only
           -- the sweep closes it (re-deciding twice is harmless).
           WHEN media_judgments.verdict = excluded.verdict
-            AND media_judgments.category IS excluded.category THEN media_judgments.tier_applied
+            AND media_judgments.category IS excluded.category
+            AND media_judgments.reason IS excluded.reason THEN media_judgments.tier_applied
           -- A changed judgment (an ordinary verdict that no longer holds, or
           -- a sensitive one a newer judge could not make) is re-decided by the
           -- sweep, whatever the writer thought, so every item's tier and its
@@ -59930,7 +59958,7 @@ function rejudgeStoredContent(set, record, options) {
     ...sender ? { sender } : {},
     ...mimeType ? { mimeType } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
-    ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
+    ...imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {},
     ...parentContext ? { parentContext } : {},
     subject: identity2
   }, {
@@ -60115,6 +60143,7 @@ function storedFolderKeys(value) {
 }
 var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge";
 var init_tier_rejudge = __esm(() => {
+  init_media_judge();
   init_parent_context();
   init_tier_classifier();
   init_tier_ledger();
@@ -89764,7 +89793,7 @@ function createTieredStoreExtractionSink(options) {
         ...itemTitle2 ? { title: itemTitle2 } : {},
         ...itemPath ? { path: itemPath } : {},
         mimeType: plan.item.mimeType,
-        ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
+        ...imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {},
         ...holdUntilJudged ? { holdUntilJudged: true } : {},
         ...parentContext ? { parentContext } : {},
         subject: identity2
@@ -89982,6 +90011,7 @@ var init_tiered_store_sink = __esm(() => {
   init_tier_ledger();
   init_parent_context();
   init_tier_placement();
+  init_media_judge();
   init_secrets_disposition();
   init_tiered_store_set();
   init_store_sink();
@@ -115034,7 +115064,7 @@ async function planTierMigration(options) {
             text: item.chunks.map((chunk) => chunk.text).join(""),
             ...item.mimeType ? { mimeType: item.mimeType } : {},
             ...holdUntilJudged ? { holdUntilJudged: true } : {},
-            ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
+            ...imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {},
             subject: item.identity
           }, {
             ...options.inputs.rules ? { rules: options.inputs.rules } : {},
@@ -116128,6 +116158,7 @@ function tierMigrationStatusSummary(statePath) {
 var TIER_MIGRATION_STATE_SCHEMA_VERSION = 1, TIER_DISPLAY, SELECTOR_KINDS, TIER_MIGRATION_REPLAN_STOP_REASONS;
 var init_tier_migration = __esm(() => {
   init_tier_migration_reports();
+  init_media_judge();
   init_embedding_cost_estimates();
   init_operation_error();
   init_tier_move();

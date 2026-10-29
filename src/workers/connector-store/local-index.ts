@@ -6621,7 +6621,8 @@ export class LocalConnectorStore {
           -- The same judgment again leaves a pending re-decision pending: only
           -- the sweep closes it (re-deciding twice is harmless).
           WHEN media_judgments.verdict = excluded.verdict
-            AND media_judgments.category IS excluded.category THEN media_judgments.tier_applied
+            AND media_judgments.category IS excluded.category
+            AND media_judgments.reason IS excluded.reason THEN media_judgments.tier_applied
           -- A changed judgment (an ordinary verdict that no longer holds, or
           -- a sensitive one a newer judge could not make) is re-decided by the
           -- sweep, whatever the writer thought, so every item's tier and its

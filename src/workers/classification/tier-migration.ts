@@ -35,6 +35,7 @@ import { TIER_MIGRATION_DIR_ENV, tierMigrationReportDir, tierMigrationStatePath 
 // caller. Source-neutral: a lane is data (a tiered store set plus a source id
 // string); nothing branches on which source an item came from.
 
+import { imageJudgmentSignal } from '../source-index/media-judge.ts';
 import { DEFAULT_EMBEDDING_MODEL_ESTIMATES, embeddingModelEstimate } from '../../core/embedding-cost-estimates.ts';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -719,7 +720,7 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
               text: item.chunks.map((chunk) => chunk.text).join(''),
               ...(item.mimeType ? { mimeType: item.mimeType } : {}),
               ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
-              ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
+              ...(imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {}),
               subject: item.identity,
             },
             {

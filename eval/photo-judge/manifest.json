@@ -1,0 +1,117 @@
+[
+ {
+  "file": "fixtures/demo-kit-whiteboard.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/whiteboard-standup.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/whiteboard-architecture.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/handwritten-todo.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/meeting-notes.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/slide-roadmap.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/slide-agenda.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/chat-screenshot.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/web-screenshot.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/code-screenshot.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/restaurant-menu.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/event-poster.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/recipe-card.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/school-calendar.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/book-page.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/flight-board.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/sign-street.jpg",
+  "label": "ordinary",
+  "group": "writing"
+ },
+ {
+  "file": "fixtures/lab-results.jpg",
+  "label": "sensitive",
+  "group": "medical"
+ },
+ {
+  "file": "fixtures/prescription.jpg",
+  "label": "sensitive",
+  "group": "medical"
+ },
+ {
+  "file": "fixtures/discharge-summary.jpg",
+  "label": "sensitive",
+  "group": "medical"
+ },
+ {
+  "file": "fixtures/bank-statement.jpg",
+  "label": "sensitive",
+  "group": "financial"
+ },
+ {
+  "file": "fixtures/payslip.jpg",
+  "label": "sensitive",
+  "group": "financial"
+ },
+ {
+  "file": "fixtures/tax-form.jpg",
+  "label": "sensitive",
+  "group": "financial"
+ }
+]
