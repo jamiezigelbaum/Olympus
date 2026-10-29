@@ -20,6 +20,7 @@
 - Delete indexed data no longer stops the Gmail source when it runs before the source has started.
 - Open on this computer works for files whose path has spaces or other special characters.
 - **Telegram pairing installs what it needs.** The first `olympus connect telegram --pair` sets up Telethon in Olympus's own Python environment; nothing has to be installed by hand.
+- **Pairing Telegram or WhatsApp reads every chat** with no chat question to answer. Each message is still judged Personal, Private or Secret by what it says. Telegram reads your most recent chats, up to 200; a chat started later is read after you pair again.
 - A disconnected source keeps offering Delete indexed data while its items are still stored.
 - Asking the same Private question again later gets a fresh answer instead of the earlier one.
 - Index status names Files on this computer.

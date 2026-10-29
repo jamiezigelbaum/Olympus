@@ -213560,7 +213560,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
   }
   const tell = (text6) => writeSync9(terminal, text6);
   try {
-    tell(`Pairing ${source} privately on this machine. Each message is judged Personal, Private or Secret by what it says. No messages are captured until you approve the scope.
+    tell(`Pairing ${source} privately on this machine. Each message is judged Personal, Private or Secret by what it says.
 `);
     if (source === "whatsapp")
       tell(`${WHATSAPP_UNOFFICIAL_CLIENT_NOTICE}
@@ -213574,25 +213574,17 @@ async function runMessagingPairing(source, secretStore, registryPath) {
       requestCaptureScope: async ({ chats }) => {
         if (source === "telegram") {
           if (chats.length === 0) {
-            tell(`No chats were available to select. Nothing will be captured.
+            tell(`No chats were available to read. Nothing will be captured.
 `);
             return;
           }
-          chats.forEach((chat, index) => tell(`${index + 1}. ${chat.title.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "")}
-`));
-          const answer2 = await readSecretFromTerminal("Choose chat numbers separated by commas, or type CANCEL (input hidden): ");
-          if (answer2.trim().toUpperCase() === "CANCEL")
-            return;
-          const indices = answer2.split(",").map((value2) => Number(value2.trim()) - 1);
-          if (indices.some((index) => !Number.isInteger(index) || index < 0 || index >= chats.length)) {
-            throw new OperationError("invalid_params", "Chat selection was invalid; no capture scope was approved. Run pairing again to choose chats.");
-          }
-          return { source: "telegram", explicitApproval: true, chatScopes: [...new Set(indices.map((index) => chats[index].chatScope))] };
+          tell(`Olympus reads all ${chats.length} of your most recent Telegram chats. Each message is still judged Personal, Private or Secret by what it says. A chat you start after pairing is read once you pair again.
+`);
+          return { source: "telegram", explicitApproval: true, chatScopes: [...new Set(chats.map((chat) => chat.chatScope))] };
         }
-        tell(`WhatsApp captures new messages delivered for the linked account while its bridge runs; this does not import the full historical archive.
+        tell(`Olympus reads every WhatsApp chat on this account, from new messages delivered while its bridge runs; this does not import the full historical archive. Each message is still judged Personal, Private or Secret by what it says.
 `);
-        const answer = await readSecretFromTerminal("Type ALL to approve this account, or CANCEL to leave capture off (input hidden): ");
-        return answer.trim() === "ALL" ? { source: "whatsapp", explicitApproval: true, wholeAccount: true } : undefined;
+        return { source: "whatsapp", explicitApproval: true, wholeAccount: true };
       }
     });
     if (!paired.registered)
