@@ -59,7 +59,7 @@ import { redactDeep, redactMarkers, type LeakMarker } from './leak.ts';
 import { CommandDriver, type Machine } from './machine.ts';
 import {
   buildReport, renderHtml, scanReport,
-  type AgentReport, type AgentUsage, type CheckResult, type MachineReport, type PhaseReport, type ReleaseReport, type ReportFile,
+  type AgentReport, type AgentUsage, type CheckResult, type MachineReport, type PhaseReport, type ReleaseReport, type ReleaseReportInput, type ReportFile,
 } from './report.ts';
 import {
   describeDifferences, evaluateCounts, evaluateUpgrade, versionFromTarballName,
@@ -76,6 +76,8 @@ import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
 import { JOURNEYS } from './journeys.ts';
+import { carryInto, copyCarriedFiles, LEG_SKIPPED, loadCarryBase } from './carry.ts';
+import { harnessReach, planImpact, readChangedFiles, type ImpactPlan } from './impact.ts';
 import { layoutChecks, layoutFindings, layoutQualificationCheck, scoreLayoutRules } from './layout-rules.ts';
 import type { PlantedPicture } from './reviewer-plants.ts';
 import { buildInventory } from './explore-inventory.ts';
@@ -154,6 +156,8 @@ export interface RunOptions {
   /** Run only these configured agents (by id); omitted runs every enabled one. */
   onlyAgents?: string[];
   budgetMs?: number;
+  /** An incremental run (impact.ts): the tested report, its path, and the plan for the change since its commit. The plan's skips are set. */
+  carry?: { base: ReleaseReport; path: string; plan: ImpactPlan };
 }
 
 const ENGINE_PORT = 8010;
@@ -953,7 +957,7 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   // A journey whose setup comes from a leg this run skipped is skipped too, and says so: its failure would be the run's, not the product's.
   const skippedLegs = new Set([...(options.skipSuite ? ['suite'] : []), ...(options.skipInbox ? ['inbox'] : [])]);
   const unmet = JOURNEYS.filter((journey) => (!options.onlyJourneys?.length || options.onlyJourneys.includes(journey.id)) && journey.needs?.some((leg) => skippedLegs.has(leg)));
-  for (const journey of unmet) run.add({ id: `journey.${journey.id}`, title: journey.title, status: 'skip', detail: `needs the ${journey.needs!.filter((leg) => skippedLegs.has(leg)).join(' and ')} leg, which this run skipped` });
+  for (const journey of unmet) run.add({ id: `journey.${journey.id}`, title: journey.title, status: 'skip', detail: `needs the ${journey.needs!.filter((leg) => skippedLegs.has(leg)).join(' and ')} leg, ${LEG_SKIPPED}` });
   const skip = unmet.length ? ` --skip ${sh(unmet.map((journey) => journey.id).join(','))}` : '';
   const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}${skip}${plants}`, 2_400_000));
   const result = done.result;
@@ -1381,6 +1385,18 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       : options.inboxSelftest
         ? `a fault was deliberately made in the Inbox leg (${options.inboxSelftest}); this run is expected to FAIL on ${run.inboxSelftestFailsOn && options.inboxSelftest === 'wrong-link-id' ? run.inboxSelftestFailsOn : INBOX_SELFTEST_FAILS[options.inboxSelftest]}`
         : undefined;
+  let carry: ReleaseReportInput['carry'];
+  if (options.carry) {
+    const { base, path, plan } = options.carry;
+    const from = { runId: base.runId, sha: base.candidate.sha! };
+    try {
+      const parts = carryInto(machine, base.machines[0]!, from);
+      copyCarriedFiles(path, options.outDir);
+      carry = { fromRunId: from.runId, fromSha: from.sha, ran: plan.run, carried: plan.carry, files: plan.files, parts };
+    } catch (error) {
+      run.errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
   let report = buildReport({
     runId: options.runId,
     candidate: { label: options.candidateLabel, ...(options.candidateSha ? { sha: options.candidateSha } : {}) },
@@ -1390,6 +1406,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     errors: run.errors,
     ...(options.harnessCommit ? { harnessCommit: options.harnessCommit } : {}),
     ...(selfTest ? { selfTest } : {}),
+    ...(carry ? { carry } : {}),
   });
   // The report must itself be clean; a hit fails the run without copying the marker.
   const reportLeaks = scanReport(report, run.markers);
@@ -1424,7 +1441,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -1457,6 +1474,21 @@ export function parseCli(argv: readonly string[]): RunOptions {
   if (has('--reviewer-plants') && has('--skip-journeys')) throw new Error('--reviewer-plants takes its pictures with the screens; drop --skip-journeys');
   if (has('--reviewer-plants') && has('--update-baselines')) throw new Error('--reviewer-plants is a qualification run; it never writes baselines');
   const onlyJourneys = get('--only-journeys');
+  // An incremental run: the plan decides which legs run, so nothing else may change what runs or what the screens show.
+  const carryFrom = get('--carry-from');
+  const changedFiles = get('--changed-files');
+  let carry: RunOptions['carry'];
+  if ((carryFrom === undefined) !== (changedFiles === undefined)) throw new Error('--carry-from and --changed-files go together');
+  if (carryFrom !== undefined && changedFiles !== undefined) {
+    const conflicts = ['--skip-relay', '--skip-screenshots', '--skip-inbox', '--skip-journeys', '--skip-explore', '--skip-suite', '--skip-archive', '--only-journeys', '--agents',
+      '--mistier', '--upgrade-from', '--inbox-selftest', '--update-baselines', '--reviewer-plants', '--fail-after-provision', '--keep-machine'].filter(has);
+    if (conflicts.length > 0) throw new Error(`--carry-from lets the change decide what runs; drop ${conflicts.join(', ')}`);
+    if (!existsSync(resolve(changedFiles))) throw new Error(`--changed-files ${changedFiles} does not exist`);
+    const path = resolve(carryFrom);
+    carry = { base: loadCarryBase(path, get('--sha')), path, plan: planImpact(readChangedFiles(resolve(changedFiles)), harnessReach(join(import.meta.dir, '..', '..'))) };
+  }
+  const skips = new Set(carry?.plan.skipFlags ?? []);
+  const skip = (flag: string): boolean => has(flag) || skips.has(flag);
   const runId = get('--run-id') ?? newRunId();
   const harnessCommit = get('--harness-commit');
   if (harnessCommit !== undefined) {
@@ -1476,11 +1508,11 @@ export function parseCli(argv: readonly string[]): RunOptions {
     ...(upgradeFrom !== undefined ? { upgradeFromDir: resolve(upgradeFrom) } : {}),
     ...(upgradeSelftest ? { upgradeSelftest: upgradeSelftest as UpgradeSelftest } : {}),
     ...(inboxSelftest ? { inboxSelftest: inboxSelftest as InboxSelftest } : {}),
-    skipInbox: has('--skip-inbox'),
-    skipJourneys: has('--skip-journeys'),
-    skipExplore: has('--skip-explore'),
-    skipArchive: has('--skip-archive'),
-    skipSuite: has('--skip-suite'),
+    skipInbox: skip('--skip-inbox'),
+    skipJourneys: skip('--skip-journeys'),
+    skipExplore: skip('--skip-explore'),
+    skipArchive: skip('--skip-archive'),
+    skipSuite: skip('--skip-suite'),
     ...(onlyJourneys ? { onlyJourneys: onlyJourneys.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     ...(baselines !== undefined ? { baselinesDir: resolve(baselines) } : {}),
     updateBaselines: has('--update-baselines'),
@@ -1488,8 +1520,9 @@ export function parseCli(argv: readonly string[]): RunOptions {
     ...(only ? { onlyAgents: only.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     failAfterProvision: has('--fail-after-provision'),
     keepMachine: has('--keep-machine'),
-    skipRelay: has('--skip-relay'),
-    skipScreenshots: has('--skip-screenshots'),
+    skipRelay: skip('--skip-relay'),
+    skipScreenshots: skip('--skip-screenshots'),
+    ...(carry ? { carry } : {}),
   };
 }
 

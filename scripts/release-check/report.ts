@@ -20,7 +20,12 @@ export interface CheckResult {
   status: CheckStatus;
   detail?: string;
   ms?: number;
+  /** Set on a result kept from an earlier run of a commit this candidate's change cannot reach (impact.ts, `--carry-from`). */
+  carried?: CarriedFrom;
 }
+
+/** The tested run a result was kept from. */
+export interface CarriedFrom { runId: string; sha: string }
 
 /** What an agent's run cost in calls, so shared subscription limits and per-call bills stay visible. */
 export interface AgentUsage {
@@ -50,6 +55,7 @@ export interface AgentReport {
   ran: boolean;
   skipReason?: string;
   checks: CheckResult[];
+  carried?: CarriedFrom;
 }
 
 export interface ReportFile {
@@ -126,6 +132,21 @@ export interface ReleaseReportInput {
   selfTest?: string;
   /** The commit this harness and the installer bundle were exported from. Absent for an unpinned development run. */
   harnessCommit?: string;
+  /**
+   * An incremental run: the legs the change between `fromSha` and this candidate can reach ran again, and the rest kept the
+   * tested run's results. `files` is the proof: every changed file with the legs it reaches (impact.ts).
+   */
+  carry?: CarryRecord;
+}
+
+export interface CarryRecord {
+  fromRunId: string;
+  fromSha: string;
+  ran: string[];
+  carried: string[];
+  files: Array<{ file: string; legs: string[] | 'all'; why: string }>;
+  /** What else came from the tested run: the step traces, the screen comparisons, the control exploration. */
+  parts: string[];
 }
 
 /** How the commit of the harness relates to the commit of the candidate that was tested. */
@@ -229,9 +250,19 @@ function seconds(ms: number | undefined): string {
   return ms === undefined ? '' : `${(ms / 1000).toFixed(1)} s`;
 }
 
+const carriedNote = (carried: CarriedFrom | undefined): string => (carried ? ` <span class="muted">(kept from ${escapeHtml(carried.sha.slice(0, 8))})</span>` : '');
+
 function checkRow(check: CheckResult): string {
   return `<tr class="${check.status}"><td><span class="badge ${check.status}">${STATUS_LABEL[check.status]}</span></td>`
-    + `<td>${escapeHtml(check.title)}</td><td>${escapeHtml(check.detail ?? '')}</td><td class="num">${seconds(check.ms)}</td></tr>`;
+    + `<td>${escapeHtml(check.title)}${carriedNote(check.carried)}</td><td>${escapeHtml(check.detail ?? '')}</td><td class="num">${seconds(check.ms)}</td></tr>`;
+}
+
+function carrySection(carry: CarryRecord | undefined): string {
+  if (!carry) return '';
+  const files = carry.files.map((f) => `<li><code>${escapeHtml(f.file)}</code>: ${escapeHtml(f.legs === 'all' ? 'every leg' : f.legs.length === 0 ? 'no leg' : f.legs.join(', '))} (${escapeHtml(f.why)})</li>`).join('');
+  return `<section><h2>Incremental run</h2><p>Ran again: ${escapeHtml(carry.ran.join(', ') || 'only the install and setup checks')}. `
+    + `Kept from run ${escapeHtml(carry.fromRunId)} of ${escapeHtml(carry.fromSha)}: ${escapeHtml([...carry.carried, ...carry.parts].join(', ') || 'nothing')}.</p>`
+    + `<details><summary>${carry.files.length} changed file(s) since the tested commit, and the legs each can reach</summary><ul>${files}</ul></details></section>`;
 }
 
 function checkTable(checks: readonly CheckResult[]): string {
@@ -259,7 +290,7 @@ function screenshotGrid(files: readonly ReportFile[]): string {
 
 function agentSection(agent: AgentReport): string {
   const status = !agent.ran ? 'skip' : agent.checks.some((c) => c.status === 'fail') ? 'fail' : 'pass';
-  const header = `<h4>${escapeHtml(agent.label)} <span class="badge ${status}">${agent.ran ? STATUS_LABEL[status] : 'SKIPPED'}</span></h4>`;
+  const header = `<h4>${escapeHtml(agent.label)} <span class="badge ${status}">${agent.ran ? STATUS_LABEL[status] : 'SKIPPED'}</span>${carriedNote(agent.carried)}</h4>`;
   if (!agent.ran) return `<section class="agent">${header}<p class="muted">${escapeHtml(agent.skipReason ?? 'Did not run.')}</p></section>`;
   const usage = agent.usage
     ? `<p class="muted">${agent.usage.invocations} invocation(s), ${agent.usage.modelCalls} model call(s), ${agent.usage.toolCalls} tool call(s), `
@@ -473,6 +504,7 @@ export function renderHtml(report: ReleaseReport): string {
     + `<p class="muted">${harnessLine(report.harness)}</p>`
     + (report.selfTest ? `<p class="muted">Self-test: ${escapeHtml(report.selfTest)}</p>` : '')
     + errors
+    + carrySection(report.carry)
     + report.machines.map(machineSection).join('')
     + `</main></body></html>`;
 }
