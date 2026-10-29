@@ -7,9 +7,6 @@ import { cpSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AgentReport, CarriedFrom, CheckResult, MachineReport, ReleaseReport } from './report.ts';
 
-/** Ends the detail of a journey left out because its setup leg was skipped (run.ts), which a kept result then replaces. */
-export const LEG_SKIPPED = 'which this run skipped';
-
 /** The tested report, refused unless it can stand as evidence for the legs it lends: one plain run, pinned to its own commit. */
 export function loadCarryBase(path: string, candidateSha: string | undefined): ReleaseReport {
   if (!existsSync(path)) throw new Error(`--carry-from ${path} does not exist`);
@@ -20,32 +17,36 @@ export function loadCarryBase(path: string, candidateSha: string | undefined): R
   if (base.candidate.sha === candidateSha) throw new Error('--carry-from names a run of this same commit; run it again in full instead');
   if (base.selfTest) throw new Error('--carry-from names a self-test, whose results are planted failures');
   if (base.machines.length !== 1 || base.machines[0]!.upgrade) throw new Error('--carry-from needs a plain run on one machine (not an upgrade run)');
+  const machine = base.machines[0]!;
+  if (![...machine.checks, ...machine.agents].some((item) => item.leg)) throw new Error('--carry-from names a report that does not say which leg made each result; run in full once');
   return base;
 }
 
 const mark = (check: CheckResult, from: CarriedFrom): CheckResult => ({ ...check, carried: check.carried ?? from });
 const markAgent = (agent: AgentReport, from: CarriedFrom): AgentReport => ({ ...agent, carried: agent.carried ?? from, checks: agent.checks.map((check) => mark(check, from)) });
 
-/** Adds what the new run left out to `machine`, in place. Returns the parts (besides checks and agents) that were kept. */
-export function carryInto(machine: MachineReport, base: MachineReport, from: CarriedFrom): string[] {
+/**
+ * Adds the tested run's results for the legs this run skipped (`carried`) to `machine`, in place, by the leg that
+ * made each one: a check the rerun leg no longer emits (a failure-only check it now passes) is not kept. Returns
+ * the parts (besides checks and agents) that were kept.
+ */
+export function carryInto(machine: MachineReport, base: MachineReport, from: CarriedFrom, carried: readonly string[]): string[] {
   if (machine.os !== base.os) throw new Error(`--carry-from is a ${base.os} run; this run is on ${machine.os}`);
-  const ran = new Map(machine.checks.map((check, at) => [check.id, at]));
-  for (const check of base.checks) {
-    if (check.id === 'scan.report') continue;
-    const at = ran.get(check.id);
-    if (at === undefined) machine.checks.push(mark(check, from));
-    else if (machine.checks[at]!.status === 'skip' && machine.checks[at]!.detail?.endsWith(LEG_SKIPPED) && check.status !== 'skip') machine.checks[at] = mark(check, from);
-  }
+  const skipped = (leg: string | undefined): boolean => leg !== undefined && carried.includes(leg);
+  const ran = new Set(machine.checks.map((check) => check.id));
+  for (const check of base.checks) if (skipped(check.leg) && !ran.has(check.id)) machine.checks.push(mark(check, from));
   for (const agent of base.agents) {
+    if (!skipped(agent.leg)) continue;
     const at = machine.agents.findIndex((a) => a.id === agent.id);
     if (at === -1) machine.agents.push(markAgent(agent, from));
     else if (!machine.agents[at]!.ran && machine.agents[at]!.skipReason === 'skipped by option') machine.agents[at] = markAgent(agent, from);
   }
   const parts: string[] = [];
-  if (!machine.traces && base.traces) { machine.traces = base.traces; parts.push('step traces'); }
-  if (!machine.visual && base.visual) { machine.visual = base.visual; parts.push('screen comparisons'); }
-  if (!machine.explore && base.explore) { machine.explore = base.explore; parts.push('control exploration'); }
-  if (machine.screenshots.length === 0 && base.screenshots.length > 0) { machine.screenshots = base.screenshots; parts.push('dashboard screenshots'); }
+  const traces = (base.traces ?? []).filter((trace) => skipped(trace.leg));
+  if (traces.length > 0) { machine.traces = [...(machine.traces ?? []), ...traces]; parts.push('step traces'); }
+  if (carried.includes('journeys') && !machine.visual && base.visual) { machine.visual = base.visual; parts.push('screen comparisons'); }
+  if (carried.includes('explore') && !machine.explore && base.explore) { machine.explore = base.explore; parts.push('control exploration'); }
+  if (carried.includes('screenshots') && machine.screenshots.length === 0 && base.screenshots.length > 0) { machine.screenshots = base.screenshots; parts.push('dashboard screenshots'); }
   return parts;
 }
 

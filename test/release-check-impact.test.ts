@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { harnessReach, planImpact } from '../scripts/release-check/impact.ts';
-import { carryInto, copyCarriedFiles, LEG_SKIPPED, loadCarryBase } from '../scripts/release-check/carry.ts';
+import { carryInto, copyCarriedFiles, loadCarryBase } from '../scripts/release-check/carry.ts';
 import { buildReport, renderHtml, type MachineReport, type ReleaseReport } from '../scripts/release-check/report.ts';
 import { parseCli } from '../scripts/release-check/run.ts';
 
@@ -23,13 +23,18 @@ function tested(over: Partial<MachineReport> = {}): ReleaseReport {
     machines: [machine({
       checks: [
         { id: 'install', title: 'installed', status: 'pass' },
-        { id: 'archive.import', title: 'archive imported', status: 'pass' },
-        { id: 'journey.inbox-delete-one', title: 'delete one', status: 'fail', detail: 'broke' },
+        { id: 'archive.import', title: 'archive imported', status: 'pass', leg: 'archive' },
+        { id: 'archive.remove.ran', title: 'removal ran', status: 'fail', leg: 'archive' },
+        { id: 'journey.inbox-delete-one', title: 'delete one', status: 'fail', detail: 'broke', leg: 'journeys' },
         { id: 'scan.report', title: 'scan', status: 'pass' },
       ],
       agents: [
-        { id: 'claude', label: 'Claude', kind: 'model', ran: true, checks: [{ id: 'q1', title: 'q1', status: 'pass' }] },
-        { id: 'chatgpt-protocol', label: 'protocol', kind: 'protocol', ran: true, checks: [{ id: 'p1', title: 'p1', status: 'pass' }] },
+        { id: 'claude', label: 'Claude', kind: 'model', ran: true, leg: 'suite', checks: [{ id: 'q1', title: 'q1', status: 'pass', leg: 'suite' }] },
+        { id: 'chatgpt-protocol', label: 'protocol', kind: 'protocol', ran: true, leg: 'relay', checks: [{ id: 'p1', title: 'p1', status: 'pass', leg: 'relay' }] },
+      ],
+      traces: [
+        { id: 'inbox-check', title: 'Inbox', source: 'the Inbox leg', ok: true, steps: [], ms: 1, leg: 'inbox' },
+        { id: 'archive-import', title: 'Archive', source: 'the archive leg', ok: true, steps: [], ms: 1, leg: 'archive' },
       ],
       visual: [],
       ...over,
@@ -79,18 +84,24 @@ describe('which legs a change reaches', () => {
 });
 
 describe('keeping the tested run\'s results', () => {
-  test('what the new run left out is kept and marked; what it ran is its own; the report link files come along', () => {
+  test('only the skipped legs\' results are kept and marked; a rerun leg\'s old failure-only check is not', () => {
     const base = tested();
+    // The archive leg ran again and passed: it no longer emits its failure-only removal check.
     const now = machine({
-      checks: [{ id: 'install', title: 'installed', status: 'pass', detail: 'new' }, { id: 'journey.agent-never-expired', title: 'x', status: 'skip', detail: `needs the suite leg, ${LEG_SKIPPED}` }],
+      checks: [{ id: 'install', title: 'installed', status: 'pass', detail: 'new' }, { id: 'archive.import', title: 'archive imported', status: 'pass', leg: 'archive' }],
       agents: [{ id: 'chatgpt-protocol', label: 'protocol', kind: 'protocol', ran: false, skipReason: 'skipped by option', checks: [] }],
+      traces: [{ id: 'archive-import', title: 'Archive', source: 'the archive leg', ok: true, steps: [], ms: 2, leg: 'archive' }],
     });
-    const parts = carryInto(now, base.machines[0]!, { runId: 'run-base', sha: A });
+    const parts = carryInto(now, base.machines[0]!, { runId: 'run-base', sha: A }, ['suite', 'relay', 'inbox', 'screenshots', 'journeys', 'explore']);
     expect(now.checks.find((c) => c.id === 'install')).toEqual({ id: 'install', title: 'installed', status: 'pass', detail: 'new' });
-    expect(now.checks.find((c) => c.id === 'archive.import')!.carried).toEqual({ runId: 'run-base', sha: A });
+    expect(now.checks.find((c) => c.id === 'archive.import')!.carried).toBeUndefined();
+    expect(now.checks.some((c) => c.id === 'archive.remove.ran')).toBe(false);
+    expect(now.checks.find((c) => c.id === 'journey.inbox-delete-one')!.carried).toEqual({ runId: 'run-base', sha: A });
     expect(now.checks.some((c) => c.id === 'scan.report')).toBe(false);
     expect(now.agents.map((a) => [a.id, a.ran, a.carried?.sha])).toEqual([['chatgpt-protocol', true, A], ['claude', true, A]]);
-    expect(parts).toEqual(['screen comparisons']);
+    // The new run's own archive trace stays, and the skipped Inbox leg's trace is added beside it.
+    expect(now.traces!.map((t) => [t.id, t.ms])).toEqual([['archive-import', 2], ['inbox-check', 1]]);
+    expect(parts).toEqual(['step traces', 'screen comparisons']);
     // A kept failure still fails the run.
     const report = buildReport({ runId: 'run-new', candidate: { label: 'c', sha: B }, startedAt: 't0', finishedAt: 't1', errors: [], harnessCommit: B, machines: [now] });
     expect(report.verdict).toBe('fail');
@@ -98,7 +109,7 @@ describe('keeping the tested run\'s results', () => {
   });
 
   test('a run on another platform cannot lend its results', () => {
-    expect(() => carryInto(machine({ os: 'macos' }), tested().machines[0]!, { runId: 'r', sha: A })).toThrow('linux run');
+    expect(() => carryInto(machine({ os: 'macos' }), tested().machines[0]!, { runId: 'r', sha: A }, ['suite'])).toThrow('linux run');
   });
 
   test('only a plain run pinned to its own commit, of another commit, can be a base', () => {
@@ -110,6 +121,7 @@ describe('keeping the tested run\'s results', () => {
       expect(() => loadCarryBase(write(tested()), undefined)).toThrow('--sha');
       expect(() => loadCarryBase(write({ ...tested(), selfTest: 'x' }), B)).toThrow('self-test');
       expect(() => loadCarryBase(write({ ...tested(), harness: { relation: 'unpinned' } }), B)).toThrow('own commit');
+      expect(() => loadCarryBase(write(tested({ checks: [{ id: 'x', title: 'x', status: 'pass' }], agents: [] })), B)).toThrow('which leg');
       // The tested run's pictures are copied beside the new report without replacing the new run's own.
       const baseDir = join(dir, 'base');
       mkdirSync(join(baseDir, 'visual'), { recursive: true });

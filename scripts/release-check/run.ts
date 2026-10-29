@@ -76,8 +76,8 @@ import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
 import { JOURNEYS } from './journeys.ts';
-import { carryInto, copyCarriedFiles, LEG_SKIPPED, loadCarryBase } from './carry.ts';
-import { harnessReach, planImpact, readChangedFiles, type ImpactPlan } from './impact.ts';
+import { carryInto, copyCarriedFiles, loadCarryBase } from './carry.ts';
+import { harnessReach, planImpact, readChangedFiles, type ImpactPlan, type Leg } from './impact.ts';
 import { layoutChecks, layoutFindings, layoutQualificationCheck, scoreLayoutRules } from './layout-rules.ts';
 import type { PlantedPicture } from './reviewer-plants.ts';
 import { buildInventory } from './explore-inventory.ts';
@@ -261,6 +261,25 @@ class Run {
     } finally {
       this.timings[name] = (this.timings[name] ?? 0) + (Date.now() - started);
       this.log(`phase ${name}: ${((Date.now() - started) / 1000).toFixed(1)} s`);
+    }
+  }
+
+  /**
+   * Runs one leg and names it on every check, agent and trace the leg added that no inner leg named. An
+   * incremental run keeps a tested run's results by these names (carry.ts), never by a check being absent.
+   */
+  async inLeg<T>(leg: Leg, work: () => Promise<T>): Promise<T> {
+    const stage = this.stage;
+    const before = { checks: stage.checks.length, agents: stage.agents.length, traces: stage.traces?.length ?? 0 };
+    try {
+      return await work();
+    } finally {
+      for (const check of stage.checks.slice(before.checks)) check.leg ??= leg;
+      for (const agent of stage.agents.slice(before.agents)) {
+        agent.leg ??= leg;
+        for (const check of agent.checks) check.leg ??= agent.leg;
+      }
+      for (const trace of stage.traces?.slice(before.traces) ?? []) trace.leg ??= leg;
     }
   }
 
@@ -957,7 +976,7 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   // A journey whose setup comes from a leg this run skipped is skipped too, and says so: its failure would be the run's, not the product's.
   const skippedLegs = new Set([...(options.skipSuite ? ['suite'] : []), ...(options.skipInbox ? ['inbox'] : [])]);
   const unmet = JOURNEYS.filter((journey) => (!options.onlyJourneys?.length || options.onlyJourneys.includes(journey.id)) && journey.needs?.some((leg) => skippedLegs.has(leg)));
-  for (const journey of unmet) run.add({ id: `journey.${journey.id}`, title: journey.title, status: 'skip', detail: `needs the ${journey.needs!.filter((leg) => skippedLegs.has(leg)).join(' and ')} leg, ${LEG_SKIPPED}` });
+  for (const journey of unmet) run.add({ id: `journey.${journey.id}`, title: journey.title, status: 'skip', detail: `needs the ${journey.needs!.filter((leg) => skippedLegs.has(leg)).join(' and ')} leg, which this run skipped` });
   const skip = unmet.length ? ` --skip ${sh(unmet.map((journey) => journey.id).join(','))}` : '';
   const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}${skip}${plants}`, 2_400_000));
   const result = done.result;
@@ -1188,7 +1207,7 @@ async function runSuite(run: Run, workDir: string, judge: Judge | undefined, { m
     if (!ok) return;
   }
   await runModelAgents(run, bridge, judge);
-  await runProtocolAgent(run, workDir);
+  await run.inLeg('relay', () => runProtocolAgent(run, workDir));
 }
 
 const tarballVersion = (dir: string): string | undefined => {
@@ -1310,16 +1329,16 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     } else {
       const ready = await setupMachine(run, workDir, bundlePath);
       if (ready && !options.skipSuite && Date.now() < deadline) {
-        await runSuite(run, workDir, judge, { mintToken: true });
+        await run.inLeg('suite', () => runSuite(run, workDir, judge, { mintToken: true }));
       } else if (ready && !options.skipSuite) {
         run.errors.push('the run exceeded its time budget before the agent suite');
       }
       if (ready) {
-        await captureScreenshots(run, options.outDir);
-        if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
-        if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
-        if (Date.now() < deadline) await runArchiveLeg(run, options.outDir, deadline); else run.errors.push('the run exceeded its time budget before the archive-import leg');
-        if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
+        await run.inLeg('screenshots', () => captureScreenshots(run, options.outDir));
+        if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
+        if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
+        if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
+        if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
       }
       await collectEvidence(run, options.outDir);
     }
@@ -1390,7 +1409,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     const { base, path, plan } = options.carry;
     const from = { runId: base.runId, sha: base.candidate.sha! };
     try {
-      const parts = carryInto(machine, base.machines[0]!, from);
+      const parts = carryInto(machine, base.machines[0]!, from, plan.carry);
       copyCarriedFiles(path, options.outDir);
       carry = { fromRunId: from.runId, fromSha: from.sha, ran: plan.run, carried: plan.carry, files: plan.files, parts };
     } catch (error) {

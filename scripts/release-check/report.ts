@@ -22,6 +22,8 @@ export interface CheckResult {
   ms?: number;
   /** Set on a result kept from an earlier run of a commit this candidate's change cannot reach (impact.ts, `--carry-from`). */
   carried?: CarriedFrom;
+  /** The leg that produced it (run.ts inLeg); absent for the install and setup checks every run makes. */
+  leg?: string;
 }
 
 /** The tested run a result was kept from. */
@@ -56,6 +58,7 @@ export interface AgentReport {
   skipReason?: string;
   checks: CheckResult[];
   carried?: CarriedFrom;
+  leg?: string;
 }
 
 export interface ReportFile {
