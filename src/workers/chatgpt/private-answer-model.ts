@@ -350,7 +350,7 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
             const ok = await checkPrivateEvidence(options.eligible, prompted);
             if (!ok.every(Boolean)) {
               revoked = true;
-              throw new NoPrivateEvidenceError();
+              throw new NoPrivateEvidenceError('revoked');
             }
           };
           return runWithLocalInferenceGuard(guard, async () => {
@@ -372,10 +372,10 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           ...(signal ? { signal } : {}),
         });
       } catch (error) {
-        if (revoked) throw new NoPrivateEvidenceError();
+        if (revoked) throw new NoPrivateEvidenceError('revoked');
         throw error;
       }
-      if (revoked) throw new NoPrivateEvidenceError();
+      if (revoked) throw new NoPrivateEvidenceError('revoked');
       const byId = new Map(items.map((item, position) => [item.id, { item, hit: hitOf(picked[position]!) }]));
       const citations: PrivateAnswerSourceCitation[] = [];
       const seen = new Set<string>();

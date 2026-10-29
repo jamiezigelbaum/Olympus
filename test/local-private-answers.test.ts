@@ -355,14 +355,15 @@ async function backgroundSettled(): Promise<void> {
 }
 
 describe('a waiting question whose matches may no longer be read', () => {
-  // The model throws NoPrivateEvidenceError when an item it read is revoked;
-  // the live check then decides: none eligible settles, some eligible searches again.
-  const setup = async (eligibleNow: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>) => {
+  // The model throws NoPrivateEvidenceError when nothing it picked may be read
+  // (before any model call) or an item in a prompt is revoked mid-answer; only
+  // a revocation with another match still eligible searches again.
+  const setup = async (eligibleNow: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>, reason: 'none_readable' | 'revoked' = 'revoked') => {
     const spec: FixtureSpec = { id: 'owe', name: 'balance.txt', text: 'I owe Alex twenty euros.', legacyDomain: 'secure_local' };
     const local = await localFixture({ specs: [spec], privateIds: ['owe'], keywordOnly: true });
     const model: PrivateAnswerModel = {
       status: () => ({ state: 'ready' }),
-      answerPrivately: async () => { throw new NoPrivateEvidenceError(); },
+      answerPrivately: async () => { throw new NoPrivateEvidenceError(reason); },
     };
     const answer = (input: LocalAnswerRequest) => answerOnThisComputer(input, { lanes: (request) => local.lanes(request, 'built_in_only'), model, eligible: eligibleNow });
     const store = waitingStore();
@@ -382,6 +383,14 @@ describe('a waiting question whose matches may no longer be read', () => {
     const saved = await setup(async (items) => items.map(() => true));
     expect(saved.result).toBeUndefined();
     expect(saved.attempts).toBe(1);
+  });
+
+  test('settles as not found when its matches cannot be read in depth, though the search still finds them', async () => {
+    // Searching again finds the same matches: as `changed` the question looped,
+    // holding the model until its deadline (release check on df70d8df).
+    const saved = await setup(async (items) => items.map(() => true), 'none_readable');
+    expect(saved.result?.status).toBe('not_found');
+    expect(saved.attempts).toBe(0);
   });
 
   test('stays open when the live check cannot answer', async () => {

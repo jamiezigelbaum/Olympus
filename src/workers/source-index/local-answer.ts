@@ -198,13 +198,15 @@ export async function answerOnThisComputer(
     }, { detail: input.detail === 'full' ? 'full' : 'summary' });
   } catch (error) {
     if (!(error instanceof NoPrivateEvidenceError)) return { status: 'failed' };
-    // A match the answer read is no longer eligible (one revoked mid-answer
-    // is enough). Settled as not found only when the live check says none
-    // is; `changed` searches again; a check that throws stays `failed`.
-    // As `failed` throughout, the waiting question retried forever.
+    // Nothing picked may be read. Before any model call (`none_readable`) a
+    // fresh search finds the same items, so that settles as not found; an
+    // item revoked mid-answer is `changed` while any match is still eligible,
+    // and searches again. A live check that throws stays `failed`. As
+    // `changed` throughout, a question whose matches cannot be read in depth
+    // searched and answered again until its deadline, holding the model.
     try {
       const ok = await options.eligible(candidates);
-      return ok.some((value) => value === true) ? { status: 'changed' } : { status: 'not_found', leftOut };
+      return error.reason === 'revoked' && ok.some((value) => value === true) ? { status: 'changed' } : { status: 'not_found', leftOut };
     } catch {
       return { status: 'failed' };
     }
