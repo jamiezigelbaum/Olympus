@@ -60,7 +60,7 @@ const OTHER_LOCAL: FileScopeSourceDefinition = {
 
 describe('file-scope registry', () => {
   test('Dropbox and Drive are registered with their historical values', () => {
-    expect(listFileScopeSources().map((definition) => definition.sourceId)).toEqual(['google_drive.docs', 'dropbox.files', 'local.files']);
+    expect(listFileScopeSources().map((definition) => definition.sourceId)).toEqual(['google_drive.docs', 'dropbox.files', 'local.files', 'evernote.notes']);
     const drive = getFileScopeSource('google_drive.docs')!;
     const dropbox = getFileScopeSource('dropbox.files')!;
     expect(drive).toMatchObject({

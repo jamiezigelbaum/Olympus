@@ -44,6 +44,8 @@ export interface FakeNote {
 export interface FakeNotebook {
   id: string;
   label: string;
+  /** Evernote's `primaryAccess`; OWNED unless the test says otherwise. */
+  primaryAccess?: string;
 }
 
 export interface FakeEvernoteOptions {
@@ -66,6 +68,8 @@ export class FakeEvernoteServer {
   cap: number;
   readOnlyHint: Record<string, boolean>;
   readonly calls: Record<string, number> = {};
+  /** Every note id `get_note` was asked for, in order. */
+  readonly notesRead: string[] = [];
   /** The next N tool calls answer "rate limited" as a tool error. */
   rateLimitNext = 0;
   /** The next N HTTP requests to /mcp answer 429. */
@@ -117,8 +121,8 @@ export class FakeEvernoteServer {
     return Object.values(this.calls).reduce((sum, count) => sum + count, 0);
   }
 
-  addNotebook(label: string): FakeNotebook {
-    const notebook = { id: randomUUID(), label };
+  addNotebook(label: string, primaryAccess?: string): FakeNotebook {
+    const notebook = { id: randomUUID(), label, ...(primaryAccess ? { primaryAccess } : {}) };
     this.notebooks.push(notebook);
     return notebook;
   }
@@ -211,6 +215,7 @@ export class FakeEvernoteServer {
       const name = request.params.name;
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;
       this.calls[name] = (this.calls[name] ?? 0) + 1;
+      if (name === 'get_note') this.notesRead.push(String(args.noteId ?? ''));
       if (this.rateLimitNext > 0) {
         this.rateLimitNext -= 1;
         return { isError: true, content: [{ type: 'text', text: 'Rate limit exceeded. Try again later.' }] };
@@ -232,7 +237,7 @@ export class FakeEvernoteServer {
       const query = String(args.query ?? '').toLowerCase();
       const all = this.notebooks.filter((book) => book.label.toLowerCase().includes(query));
       const max = Math.min(Number(args.maxResults ?? 10), 100);
-      const hits = all.slice(0, max).map((book) => ({ notebookId: book.id, label: book.label, searchFilter: `nbGuid:"${book.id}"`, score: null, stack: null, primaryAccess: 'OWNED', workspaceId: null, workspaceName: null }));
+      const hits = all.slice(0, max).map((book) => ({ notebookId: book.id, label: book.label, searchFilter: `nbGuid:"${book.id}"`, score: null, stack: null, primaryAccess: book.primaryAccess ?? 'OWNED', workspaceId: null, workspaceName: null }));
       return this.json({ hits, totalResultCount: all.length, startIndex: 0, isLastPage: true });
     }
     if (name === 'search_notes') {
