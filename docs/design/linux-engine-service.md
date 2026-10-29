@@ -612,9 +612,25 @@ The original tab watches this origin's storage event and polls once a second
 for proof, then fetches its own unchanged path/query and replaces the document.
 The Confirm button stays disabled while opening and waiting; repeat clicks
 leave the pending wait intact. Only a successful replacement open restarts the
-60-second wait; a 429 preserves the current wait. Waiting is bounded by the
-ticket's 60-second lifetime. A different browser
-profile cannot resume it; timeout says “Open this page again from the Olympus window.”
+60-second wait; a 429 preserves the current wait.
+
+A page in a different browser or profile cannot read the Olympus window's
+storage (#631). Each browser open therefore also makes one claim for its
+waiting page, before the window launches: a claim secret the page keeps in
+memory, a six-character code (`ABC-DEF`) the page shows, and an approval id
+the page writes to its own browser's storage. When the window redeems its
+ticket and finds that id in its storage, the page is in the same browser and
+continues by itself, with no question. Otherwise the window asks “A page in
+another browser is waiting for you to confirm it's you. Approve only if that
+page shows this code:” with Approve and Not me. Only a proven owner window
+(cookie plus storage proof) can answer, and only for the claim its own ticket
+was asked about. The page polls `POST /owner-claim` once a second: 202 while
+unanswered, a fresh owner session (cookie plus proof, as a ticket redemption
+gives) exactly once after approval, and a refusal when declined, replaced by a
+newer open, or expired. Approval never comes from the requesting page itself,
+so another account that loads the page and presses Confirm gets nothing unless
+the owner approves a code they cannot match. The wait lasts three minutes;
+timeout says “This confirmation timed out. Press Confirm it's you to try again.”
 At most sixteen 12-hour owner sessions are held.
 
 An HttpOnly, SameSite=Lax, host-only cookie is bound to this bridge instance.
