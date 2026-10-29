@@ -593,6 +593,37 @@ describe('bounds and the owner-approval gate', () => {
       release?.();
       service.stop();
       hanging.stop();
+
+      // A pass in flight gives up its priority over Inbox answers the moment
+      // the caller asks it to yield, not only once it reaches a question.
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 3, 'medical letter');
+      let overdue = false;
+      let enter: () => void = () => {};
+      const entered = new Promise<void>((resolve) => { enter = resolve; });
+      let finish: () => void = () => {};
+      const blocked = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: {
+          async complete() {
+            enter();
+            await new Promise<void>((resolve) => { finish = resolve; });
+            throw new Error('released');
+          },
+        },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        shouldYield: () => overdue,
+        now: () => new Date(clock),
+      });
+      const running = blocked.runOnce();
+      await entered;
+      expect(blocked.hasPriority).toBe(true);
+      overdue = true;
+      expect(blocked.hasPriority).toBe(false);
+      finish();
+      await running;
+      blocked.stop();
     } finally {
       installed.close();
       ledger.close();

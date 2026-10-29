@@ -183861,7 +183861,13 @@ class TierSnifferService {
     };
   }
   get hasPriority() {
-    return this.running || this.continuation !== undefined;
+    if (!this.running && this.continuation === undefined)
+      return false;
+    try {
+      return this.options.shouldYield?.() !== true;
+    } catch {
+      return true;
+    }
   }
   status() {
     return {

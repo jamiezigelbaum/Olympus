@@ -380,8 +380,22 @@ export class TierSnifferService {
     };
   }
 
-  /** A running or continuing classification pass outranks automatic inbox work. */
-  get hasPriority(): boolean { return this.running || this.continuation !== undefined; }
+  /**
+   * A running or continuing classification pass outranks automatic inbox work,
+   * unless the caller asks it to yield (an Inbox answer overdue or running).
+   * The pass is marked running from its first step (approval, recovery,
+   * re-judge, moves), long before it reaches a question where it can yield; on
+   * a 1 s tick that kept an overdue answer from ever starting (release check
+   * 2026-10-29: queued 601 s after #620).
+   */
+  get hasPriority(): boolean {
+    if (!this.running && this.continuation === undefined) return false;
+    try {
+      return this.options.shouldYield?.() !== true;
+    } catch {
+      return true;
+    }
+  }
 
   status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting } {
     return {
