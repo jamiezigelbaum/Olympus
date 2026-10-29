@@ -1876,8 +1876,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         return { kind: 'hold', reason: 'content_unread' };
       }
       // Re-listed without text in a lane whose text arrives later: the names
-      // are judged afresh, the content half stays what its text decided.
-      decision = withRecordedContent(decision, ledger.getCurrent(identity));
+      // are judged afresh, the content half stays what its text decided. Not
+      // for an item back after a deletion: that removed its copies and its
+      // text, so its text is read and judged again like a new item's.
+      if (ledger.copies(identity).length > 0) decision = withRecordedContent(decision, ledger.getCurrent(identity));
     }
 
     let placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
