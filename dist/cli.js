@@ -19133,7 +19133,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-29.p7", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
+var TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
 Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
@@ -26565,6 +26565,133 @@ var init_tier_placement = __esm(() => {
   };
 });
 
+// src/workers/source-index/built-in-reasoning/manifest.ts
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+function ggmlOrgAsrFile(name, bytes, sha256) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256
+  };
+}
+function pickBuiltInReasoningModel(totalMemoryBytes, choice = "auto", models = BUILT_IN_REASONING_MODELS) {
+  const wanted = choice.trim().toLowerCase() || "auto";
+  const exact = models.find((model) => model.modelId === wanted);
+  if (exact)
+    return totalMemoryBytes >= exact.minimumMemoryBytes ? exact : undefined;
+  if (wanted === "small" || wanted === "standard" || wanted === "large") {
+    const sized = models.find((model) => model.sizeClass === wanted);
+    return sized && totalMemoryBytes >= sized.minimumMemoryBytes ? sized : undefined;
+  }
+  if (wanted !== "auto")
+    return;
+  const standard = models.find((model) => model.sizeClass === "standard");
+  if (standard && totalMemoryBytes >= standard.minimumMemoryBytes)
+    return standard;
+  const small = models.find((model) => model.sizeClass === "small");
+  if (small && totalMemoryBytes >= small.minimumMemoryBytes)
+    return small;
+  return;
+}
+function runtimeArchiveFor(platform2, runtime = LLAMA_SERVER_RUNTIME) {
+  return runtime.archives.find((archive) => archive.platform === platform2);
+}
+var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, BUILT_IN_REASONING_MODELS, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
+var init_manifest2 = __esm(() => {
+  GIB = 1024 ** 3;
+  QWEN35_2B = {
+    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+    displayName: "Qwen3.5 2B",
+    sizeClass: "small",
+    baseRepository: "Qwen/Qwen3.5-2B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-2B-GGUF",
+    revision: QWEN35_2B_REVISION,
+    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_4B = {
+    modelId: "qwen3.5-4b-q4_k_m-e87f176",
+    displayName: "Qwen3.5 4B",
+    sizeClass: "standard",
+    baseRepository: "Qwen/Qwen3.5-4B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-4B-GGUF",
+    revision: QWEN35_4B_REVISION,
+    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_9B = {
+    modelId: "qwen3.5-9b-q4_k_m-3885219",
+    displayName: "Qwen3.5 9B",
+    sizeClass: "large",
+    baseRepository: "Qwen/Qwen3.5-9B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-9B-GGUF",
+    revision: QWEN35_9B_REVISION,
+    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  BUILT_IN_REASONING_MODELS = [QWEN35_2B, QWEN35_4B, QWEN35_9B];
+  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+  LLAMA_SERVER_RUNTIME = {
+    release: LLAMA_CPP_RELEASE,
+    license: "MIT",
+    archives: [
+      {
+        platform: "darwin-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        bytes: 11827796,
+        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+        gpu: true
+      },
+      {
+        platform: "linux-x64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        bytes: 17544875,
+        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+        gpu: false
+      },
+      {
+        platform: "linux-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        bytes: 13590823,
+        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+        gpu: false
+      }
+    ]
+  };
+  QWEN3_ASR_06B = {
+    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+    displayName: "Qwen3-ASR 0.6B",
+    baseRepository: "Qwen/Qwen3-ASR-0.6B",
+    license: "Apache-2.0",
+    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+    revision: QWEN3_ASR_06B_REVISION,
+    files: [
+      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+    ],
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 4096
+  };
+});
+
 // src/workers/classification/delphi-scorer.ts
 function parseStrictJsonObject(text2) {
   let parsed;
@@ -26618,6 +26745,18 @@ function snifferTierKey(verdict) {
   if (verdict.failSafe || verdict.tier === "private" || recordRequiresPrivate(verdict))
     return "secure";
   return verdict.confidence >= SNIFFER_PERSONAL_MIN_CONFIDENCE ? "private" : "secure";
+}
+function snifferVerdictTier(verdict, lane, flags) {
+  const tier = snifferTierKey(verdict);
+  const code = snifferReasonCode(verdict);
+  if (tier === "private" && snifferLaneIsSmall(lane) && flags.some((flag) => flag.startsWith(OWN_RECORD_FLAG_PREFIX))) {
+    return { tier: "secure", code: `${SNIFFER_RECORD_HELD_CODE_PREFIX}${code}` };
+  }
+  return { tier, code };
+}
+function snifferLaneIsSmall(lane) {
+  const id = snifferCacheModelId(lane);
+  return BUILT_IN_REASONING_MODELS.some((model) => model.sizeClass === "small" && (id === model.modelId || id.startsWith(`${model.modelId}:`)));
 }
 function recordRequiresPrivate(verdict) {
   return verdict.ownRecord === true && verdict.privateKind !== undefined && verdict.privateKind !== "none";
@@ -26822,7 +26961,7 @@ class CachedTierSniffer {
         mapRevision
       });
       if (cached2 && cachedSnifferVerdictHolds(cached2)) {
-        return { verdict: "decided", tier: snifferTierKey(cached2), code: snifferReasonCode(cached2) };
+        return { verdict: "decided", ...snifferVerdictTier(cached2, this.lane, request.flags) };
       }
       if (request.subject) {
         const queued = this.store.enqueue({
@@ -26841,9 +26980,10 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, SNIFFER_INJECTION_CATEGORY = "injection", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
+  init_manifest2();
   init_engine();
   init_delphi_scorer();
   init_sniffer_store();
@@ -47439,7 +47579,7 @@ function isCopyOf(record, digests) {
   return record.files.length === digests.length && record.files.every((file, index) => file.sha256 === digests[index]);
 }
 var ARCHIVE_FINGERPRINT_BYTES, PROBE_MAX_FILE_HEADS = 32, PROBE_MAX_ZIPS = 4, PROBE_MAX_MEMBER_HEADS = 32, ARCHIVE_DIGEST_RANGE_BYTES;
-var init_manifest2 = __esm(() => {
+var init_manifest3 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
   init_byte_source();
@@ -47645,7 +47785,7 @@ var init_requests = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_source_storage();
-  init_manifest2();
+  init_manifest3();
   init_state();
   init_olympus_layout();
   STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
@@ -86103,133 +86243,6 @@ var init_remote_vlm = __esm(() => {
   ].join(" ");
 });
 
-// src/workers/source-index/built-in-reasoning/manifest.ts
-function unslothQwen(size, revision, bytes, sha2566) {
-  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
-  return {
-    name,
-    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
-    bytes,
-    sha256: sha2566
-  };
-}
-function ggmlOrgAsrFile(name, bytes, sha2566) {
-  return {
-    name,
-    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
-    bytes,
-    sha256: sha2566
-  };
-}
-function pickBuiltInReasoningModel(totalMemoryBytes, choice = "auto", models = BUILT_IN_REASONING_MODELS) {
-  const wanted = choice.trim().toLowerCase() || "auto";
-  const exact = models.find((model) => model.modelId === wanted);
-  if (exact)
-    return totalMemoryBytes >= exact.minimumMemoryBytes ? exact : undefined;
-  if (wanted === "small" || wanted === "standard" || wanted === "large") {
-    const sized = models.find((model) => model.sizeClass === wanted);
-    return sized && totalMemoryBytes >= sized.minimumMemoryBytes ? sized : undefined;
-  }
-  if (wanted !== "auto")
-    return;
-  const standard = models.find((model) => model.sizeClass === "standard");
-  if (standard && totalMemoryBytes >= standard.minimumMemoryBytes)
-    return standard;
-  const small = models.find((model) => model.sizeClass === "small");
-  if (small && totalMemoryBytes >= small.minimumMemoryBytes)
-    return small;
-  return;
-}
-function runtimeArchiveFor(platform2, runtime = LLAMA_SERVER_RUNTIME) {
-  return runtime.archives.find((archive) => archive.platform === platform2);
-}
-var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, BUILT_IN_REASONING_MODELS, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
-var init_manifest3 = __esm(() => {
-  GIB = 1024 ** 3;
-  QWEN35_2B = {
-    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
-    displayName: "Qwen3.5 2B",
-    sizeClass: "small",
-    baseRepository: "Qwen/Qwen3.5-2B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-2B-GGUF",
-    revision: QWEN35_2B_REVISION,
-    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_4B = {
-    modelId: "qwen3.5-4b-q4_k_m-e87f176",
-    displayName: "Qwen3.5 4B",
-    sizeClass: "standard",
-    baseRepository: "Qwen/Qwen3.5-4B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-4B-GGUF",
-    revision: QWEN35_4B_REVISION,
-    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_9B = {
-    modelId: "qwen3.5-9b-q4_k_m-3885219",
-    displayName: "Qwen3.5 9B",
-    sizeClass: "large",
-    baseRepository: "Qwen/Qwen3.5-9B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-9B-GGUF",
-    revision: QWEN35_9B_REVISION,
-    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  BUILT_IN_REASONING_MODELS = [QWEN35_2B, QWEN35_4B, QWEN35_9B];
-  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-  LLAMA_SERVER_RUNTIME = {
-    release: LLAMA_CPP_RELEASE,
-    license: "MIT",
-    archives: [
-      {
-        platform: "darwin-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        bytes: 11827796,
-        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
-        gpu: true
-      },
-      {
-        platform: "linux-x64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        bytes: 17544875,
-        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
-        gpu: false
-      },
-      {
-        platform: "linux-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        bytes: 13590823,
-        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
-        gpu: false
-      }
-    ]
-  };
-  QWEN3_ASR_06B = {
-    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
-    displayName: "Qwen3-ASR 0.6B",
-    baseRepository: "Qwen/Qwen3-ASR-0.6B",
-    license: "Apache-2.0",
-    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
-    revision: QWEN3_ASR_06B_REVISION,
-    files: [
-      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
-      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
-    ],
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 4096
-  };
-});
-
 // src/workers/source-index/built-in-reasoning/install.ts
 import { spawnSync as spawnSync10 } from "node:child_process";
 import { createHash as createHash61, randomUUID as randomUUID19 } from "node:crypto";
@@ -86772,7 +86785,7 @@ var BUILT_IN_REASONING_DIR_ENV = "OLYMPUS_BUILT_IN_REASONING_DIR", REASONING_NOU
 var init_install = __esm(() => {
   init_pinned_download();
   init_olympus_layout();
-  init_manifest3();
+  init_manifest2();
   STALE_LOCK_MS2 = 60 * 60000;
   BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
   SPACE_BACKOFF_MS = 15 * 60000;
@@ -87386,7 +87399,7 @@ var BUILT_IN_TRANSCRIPTION_DIR_ENV = "OLYMPUS_BUILT_IN_TRANSCRIPTION_DIR", BUILT
 var init_transcription_model = __esm(() => {
   init_olympus_layout();
   init_install();
-  init_manifest3();
+  init_manifest2();
 });
 
 // src/workers/file-extraction/extractors/audio-wav.ts
@@ -87811,7 +87824,7 @@ var TRANSCRIPT_TIME_BUDGET_WARNING = "transcript_time_budget_reached", DEFAULT_I
 var init_built_in_transcriber = __esm(() => {
   init_model_transport();
   init_install();
-  init_manifest3();
+  init_manifest2();
   init_server();
   init_transcription_model();
   init_audio_wav();
@@ -137725,7 +137738,7 @@ var init_analyst_built_in = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_install();
-  init_manifest3();
+  init_manifest2();
   init_server();
   GAP_GENERIC_WORDS = new Set([
     "the",
@@ -139464,7 +139477,7 @@ var init_linux_model_readiness = __esm(() => {
   init_manifest();
   init_assets();
   init_transcription_model();
-  init_manifest3();
+  init_manifest2();
 });
 
 // src/core/model-setup.ts
@@ -176358,7 +176371,7 @@ var init_start = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
   init_source_storage();
-  init_manifest2();
+  init_manifest3();
 });
 
 // src/workers/archive-import/runtime.ts
@@ -177735,7 +177748,7 @@ var init_dashboard2 = __esm(() => {
   init_vocabulary();
   init_agent();
   init_source_scheduler();
-  init_manifest2();
+  init_manifest3();
   init_removal();
   init_olympus_layout();
   init_staging();
@@ -177905,7 +177918,7 @@ var init_extraction_source3 = __esm(() => {
   init_scope_safe_fs();
   init_connector_source();
   init_spool();
-  init_manifest2();
+  init_manifest3();
   init_media_bindings();
   init_state();
   ARCHIVE_EXTRACTION_PROVIDER = ARCHIVE_IMPORTS_SOURCE_ID2;
@@ -178426,7 +178439,7 @@ var init_sync = __esm(() => {
   init_source_input();
   init_source_targets();
   init_media_bindings();
-  init_manifest2();
+  init_manifest3();
   init_state();
   init_store();
 });
@@ -180279,7 +180292,7 @@ var GMAIL_ARCHIVE_SOURCE_ID = "gmail.email", GMAIL_ARCHIVE_LABEL = "Gmail", GMAI
 var init_gmail_archive_target = __esm(() => {
   init_provider_account_identity();
   init_source_inputs();
-  init_manifest2();
+  init_manifest3();
   init_gmail_account();
   init_gmail_input();
   init_gmail_mail_record();
@@ -182968,7 +182981,7 @@ async function readMboxPart(input) {
 var init_part_reader = __esm(() => {
   init_file_extraction_source();
   init_scope_safe_fs();
-  init_manifest2();
+  init_manifest3();
   init_gmail_mail_record();
   init_gmail_input();
   init_parse4();
@@ -183485,11 +183498,11 @@ async function runSnifferPass(options) {
   const apply = (item, verdict) => {
     if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false) && !screenQuestion(item.target, item.question))
       return;
-    const tier = snifferTierKey(verdict);
+    const { tier, code } = snifferVerdictTier(verdict, options.lane, item.question.flags);
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
       tier,
-      reason: `${item.question.pass}:sniffer:${id}:${snifferReasonCode(verdict)}`,
+      reason: `${item.question.pass}:sniffer:${id}:${code}`,
       modelId: snifferCacheModelId(options.lane),
       mapRevision: item.question.mapRevision
     }, {
