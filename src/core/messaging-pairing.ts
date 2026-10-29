@@ -541,7 +541,7 @@ async function buildWhatsAppBridge(input: { go: string; sourceDir: string; outpu
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const result = await Promise.race([
     child.exited,
-    new Promise<'timeout'>((resolve) => { timeout = setTimeout(() => resolve('timeout'), 2 * 60 * 1000); }),
+    new Promise<'timeout'>((resolve) => { timeout = setTimeout(() => resolve('timeout'), 10 * 60 * 1000); }),
   ]);
   if (timeout) clearTimeout(timeout);
   if (result === 'timeout') {

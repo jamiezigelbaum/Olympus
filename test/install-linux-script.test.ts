@@ -2,7 +2,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { uninstallEngine } from '../src/core/engine-service.ts';
@@ -39,7 +39,9 @@ function treeSha(root: string): string {
   return hash.digest('hex');
 }
 
-function fixture(shell = '/bin/sh', archiveKind = 'normal') {
+const BRIDGE_NAME = 'olympus-whatsapp-bridge-0123456789abcdef';
+
+function fixture(shell = '/bin/sh', archiveKind = 'normal', bridge?: string) {
   const root = mkdtempSync(join(tmpdir(), 'olympus-linux-shell-'));
   roots.push(root);
   const home = join(root, 'home');
@@ -122,10 +124,13 @@ case "$1" in
  *) exit 2 ;;
 esac
 `);
+  const bridgeFile = join(root, 'whatsapp-bridge');
+  if (bridge !== undefined) writeFileSync(bridgeFile, bridge);
   executable(join(bin, 'curl'), `#!/bin/sh
 while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; --proto|--retry) shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac; done
 case "$url" in
  *bun-linux-x64-baseline.zip) [ -z "$FAKE_ARCHIVE_CORRUPT" ] || { echo corrupt > "$out"; exit 0; }; cp '${zip}' "$out" ;;
+ *-linux-x64) cp '${bridgeFile}' "$out" ;;
  *) cp '${tar}' "$out" ;;
 esac
 `);
@@ -135,6 +140,9 @@ esac
     BUN_VERSION: '1.3.14', BUN_URL: 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-baseline.zip',
     BUN_ENTRY: 'bun-linux-x64-baseline/bun', BUN_BYTES: String(readFileSync(zip).length), BUN_SHA256: sha(readFileSync(zip)),
     BUN_EXE_SHA256: sha(bunProgram), BUN_GLIBC_MIN: '2.17',
+    ...(bridge === undefined
+      ? { WHATSAPP_BRIDGE_NAME: 'none', WHATSAPP_BRIDGE_SHA256: 'none', WHATSAPP_BRIDGE_BYTES: '0' }
+      : { WHATSAPP_BRIDGE_NAME: BRIDGE_NAME, WHATSAPP_BRIDGE_SHA256: sha(Buffer.from(bridge)), WHATSAPP_BRIDGE_BYTES: String(Buffer.byteLength(bridge)) }),
   };
   const script = join(root, 'install.sh');
   writeFileSync(script, template.replace(/@([A-Z0-9_]+)@/g, (all, key) => pins[key] ?? all));
@@ -181,7 +189,7 @@ esac
     writeFileSync(receiptPath, `${JSON.stringify(data)}\n`, { mode: 0o600 });
     return { path: receiptPath, bun, cli: installedCli, engine, generation, markerPath, unitPath, launcherPath, configDir, dataDir, stateDir, cacheDir };
   };
-  return { root, home, runtime, bin, script, run, calls, uninstall, receipt, env, shell, tar, zip };
+  return { root, home, runtime, bin, script, run, calls, uninstall, receipt, env, shell, tar, zip, bridgeFile };
 }
 
 for (const changed of ['launcher', 'open handler', 'generation'] as const) {
@@ -262,6 +270,30 @@ test('local pinned tarball and Bun archive install without curl', () => {
   expect({ status: r.status, err: r.stderr }).toEqual({ status: 0, err: '' });
   expect(h.calls()).toContain('engine status');
 }, 30_000);
+
+test('a pinned WhatsApp bridge is verified and placed owner-only in the bridge cache pairing reads', () => {
+  const h = fixture('/bin/sh', 'normal', 'prebuilt linux bridge\n');
+  const r = h.run();
+  expect({ status: r.status, err: r.stderr }).toEqual({ status: 0, err: '' });
+  const placed = join(h.home, '.cache', 'olympus', 'bin', BRIDGE_NAME);
+  expect(text(placed)).toBe('prebuilt linux bridge\n');
+  expect(statSync(placed).mode & 0o777).toBe(0o700);
+  expect(statSync(dirname(placed)).mode & 0o777).toBe(0o700);
+  // A local bridge works without curl; a tampered one refuses before anything runs.
+  rmSync(placed);
+  rmSync(join(h.bin, 'curl'));
+  const local = h.run({}, ['--tarball', h.tar, '--bun-archive', h.zip, '--whatsapp-bridge', h.bridgeFile]);
+  expect({ status: local.status, err: local.stderr }).toEqual({ status: 0, err: '' });
+  expect(text(placed)).toBe('prebuilt linux bridge\n');
+  const tampered = join(h.root, 'tampered-bridge');
+  writeFileSync(tampered, 'wrong');
+  const before = h.calls();
+  const refused = h.run({}, ['--tarball', h.tar, '--bun-archive', h.zip, '--whatsapp-bridge', tampered]);
+  expect(refused.stderr).toContain('WhatsApp bridge checksum/size mismatch; nothing was executed.');
+  expect(h.calls()).toBe(before);
+  // Without curl a pinned bridge must come from a local file.
+  expect(h.run({}, ['--tarball', h.tar, '--bun-archive', h.zip]).stderr).toContain('curl');
+}, 60_000);
 
 test('local archive options still enforce pins and reject unsafe paths', () => {
   const h = fixture();

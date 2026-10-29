@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import {
   bunExecutableDigest,
   checkLinuxSiteRelease,
@@ -189,6 +189,65 @@ describe('the prebuilt WhatsApp bridge', () => {
     writeFileSync(bridge, '#!/bin/sh\n');
     expect(() => publishToSite({ root, artifact, bridge })).toThrow('not an Apple-silicon');
     expect(existsSync(join(root, 'site', 'install.sh'))).toBe(false);
+  }, 30_000);
+});
+
+describe('the prebuilt Linux WhatsApp bridge', () => {
+  /** A Linux release whose tarball carries bridge source, and an x86-64 ELF stand-in named for that source. */
+  function linuxBridgeFixture() {
+    const result = linuxFixture();
+    const source = join(result.root, 'build', 'package', 'tools', 'whatsapp-bridge');
+    mkdirSync(source, { recursive: true });
+    for (const name of ['main.go', 'go.mod', 'go.sum']) writeFileSync(join(source, name), `${name} fixture`);
+    expect(spawnSync('tar', ['-czf', result.artifact, '-C', join(result.root, 'build'), 'package']).status).toBe(0);
+    const elf = Buffer.alloc(64);
+    elf.writeUInt32BE(0x7f454c46, 0);
+    elf[4] = 2;
+    elf[5] = 1;
+    elf.writeUInt16LE(2, 16);
+    elf.writeUInt16LE(0x3e, 18);
+    const bridge = join(result.root, `${whatsappBridgeFileName(source)}-linux-x64`);
+    writeFileSync(bridge, elf);
+    return { ...result, bridge, elf };
+  }
+
+  test('is served beside the tarball, pinned in install-linux.sh, and checked before deploy', () => {
+    const { root, artifact, bridge } = linuxBridgeFixture();
+    const result = publishLinuxToSite({ root, artifact, bridge });
+    expect(result.bridge?.name).toMatch(/^olympus-whatsapp-bridge-[0-9a-f]{16}$/);
+    const served = join(root, releaseBridgePath('1.0.0-rc.1', result.bridge!.name, 'linux-x64'));
+    expect(readFileSync(served)).toEqual(readFileSync(bridge));
+    expect(readInstallScriptBridgePins(readFileSync(join(root, 'site', 'install-linux.sh'), 'utf8'))).toEqual(result.bridge);
+    expect(checkLinuxSiteRelease(root)).toEqual([]);
+    writeFileSync(served, 'changed');
+    expect(checkLinuxSiteRelease(root).join('\n')).toContain('does not match the Linux installer\'s WhatsApp bridge pins');
+    rmSync(served);
+    expect(checkLinuxSiteRelease(root).join('\n')).toContain('-linux-x64 is missing');
+  }, 30_000);
+
+  test('is refused when it is a Mac build or built from other source', () => {
+    const { root, artifact, bridge, elf } = linuxBridgeFixture();
+    const misnamed = join(root, 'olympus-whatsapp-bridge-0000000000000000-linux-x64');
+    writeFileSync(misnamed, elf);
+    expect(() => publishLinuxToSite({ root, artifact, bridge: misnamed })).toThrow('was not built from this release');
+    const machO = Buffer.alloc(64);
+    machO.writeUInt32LE(0xfeedfacf, 0);
+    machO.writeUInt32LE(0x0100000c, 4);
+    writeFileSync(bridge, machO);
+    expect(() => publishLinuxToSite({ root, artifact, bridge })).toThrow('not a Linux x64');
+    expect(existsSync(join(root, 'site', 'install-linux.sh'))).toBe(false);
+  }, 30_000);
+
+  test('goes into the local Linux bundle with its checksum and the install command that uses it', () => {
+    const { root, artifact, bridge } = linuxBridgeFixture();
+    const output = join(root, 'acceptance');
+    const pins = prepareLinuxLocalBundle({ root, artifact, output, bridge });
+    const name = basename(bridge);
+    expect(readFileSync(join(output, name))).toEqual(readFileSync(bridge));
+    expect(readInstallScriptBridgePins(readFileSync(join(output, 'install-linux.sh'), 'utf8'))?.sha256).toBe(fileDigest(bridge).sha256);
+    expect(readFileSync(join(output, 'SHA256SUMS'), 'utf8')).toContain(`${fileDigest(bridge).sha256}  ${name}`);
+    expect(readFileSync(join(output, 'README.txt'), 'utf8')).toContain(`--whatsapp-bridge "$(pwd)/${name}"`);
+    expect(pins.version).toBe('1.0.0-rc.1');
   }, 30_000);
 });
 

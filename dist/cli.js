@@ -38957,7 +38957,7 @@ async function buildWhatsAppBridge(input) {
   const result = await Promise.race([
     child.exited,
     new Promise((resolve14) => {
-      timeout = setTimeout(() => resolve14("timeout"), 2 * 60 * 1000);
+      timeout = setTimeout(() => resolve14("timeout"), 10 * 60 * 1000);
     })
   ]);
   if (timeout)
