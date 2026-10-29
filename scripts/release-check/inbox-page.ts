@@ -60,26 +60,62 @@ export const PAGE_UNLOCKED = String.raw`(() => !!document.querySelector('[data-p
 /** The Unlock form is offered (a launch session reads nothing until the owner unlocks). */
 export const PAGE_UNLOCK_OFFERED = String.raw`(() => !!document.querySelector('[data-private-answers] form[data-pa-unlock] button'))()`;
 
-/**
- * A call to the page's route, as the page's own script makes it. Returns JSON { status, body }. The CSRF token is the one the page
- * itself holds in its script; nothing else authorizes the call.
- */
-export function pageApi(body: unknown): string {
-  return String.raw`(async () => {
+/** The page's route called as the page's own script calls it: a function expression, `(body) => Promise<{ status, body }>`. */
+const PAGE_CALL = String.raw`(async (body) => {
     const source = Array.from(document.scripts).map((script) => script.textContent || '').join('\n');
     const csrf = (/"csrfToken":"([^"]+)"/.exec(source) || [])[1];
-    if (!csrf) return JSON.stringify({ status: 0, body: null });
+    if (!csrf) return { status: 0, body: null };
     let response;
     try {
       response = await fetch(${JSON.stringify(PRIVATE_ANSWERS_POST_PATH)}, {
         method: 'POST', credentials: 'same-origin', cache: 'no-store',
         headers: { 'X-Olympus-CSRF': csrf, 'Content-Type': 'application/json' },
-        body: ${JSON.stringify(JSON.stringify(body))},
+        body: JSON.stringify(body),
       });
-    } catch (error) { return JSON.stringify({ status: 0, body: null }); }
+    } catch (error) { return { status: 0, body: null }; }
     let parsed = null;
     try { parsed = await response.json(); } catch (error) { parsed = null; }
-    return JSON.stringify({ status: response.status, body: parsed });
+    return { status: response.status, body: parsed };
+  })`;
+
+/**
+ * A call to the page's route, as the page's own script makes it. Returns JSON { status, body }. The CSRF token is the one the page
+ * itself holds in its script; nothing else authorizes the call.
+ */
+export function pageApi(body: unknown): string {
+  return `(async () => JSON.stringify(await ${PAGE_CALL}(${JSON.stringify(body)})))()`;
+}
+
+/** The ids of the Inbox's rows as JSON { status, ids }: ids only, no question leaves the page. ids is null when it could not be listed. */
+export const INBOX_IDS = String.raw`(async () => {
+    const listed = await ${PAGE_CALL}({ action: 'list' });
+    const rows = listed.status === 200 && listed.body && Array.isArray(listed.body.questions) ? listed.body.questions : null;
+    return JSON.stringify({ status: listed.status, ids: rows ? rows.map((row) => String(row && row.id)) : null });
+  })()`;
+
+/**
+ * Reads every Inbox row that is not in `known` (the rows a remote question left) and whether one of their answers contains
+ * `sentence`, as JSON { status, fresh, states, found }. The answers are compared in the page: only their states and the boolean
+ * leave it. fresh is null when the Inbox could not be listed.
+ */
+export function freshAnswerSays(known: readonly string[], sentence: RegExp): string {
+  return String.raw`(async () => {
+    const call = ${PAGE_CALL};
+    const known = new Set(${JSON.stringify(known)});
+    const sentence = new RegExp(${JSON.stringify(sentence.source)}, ${JSON.stringify(sentence.flags)});
+    const listed = await call({ action: 'list' });
+    const rows = listed.status === 200 && listed.body && Array.isArray(listed.body.questions) ? listed.body.questions : null;
+    if (!rows) return JSON.stringify({ status: listed.status, fresh: null, states: [], found: false });
+    const fresh = rows.map((row) => String(row && row.id)).filter((id) => !known.has(id));
+    const states = [];
+    let found = false;
+    for (const id of fresh) {
+      const read = await call({ action: 'read', id });
+      const ok = read.status === 200 && read.body && read.body.ok === true;
+      states.push(ok ? String(read.body.status) : 'http ' + read.status);
+      if (ok && read.body.status === 'answered' && sentence.test(String(read.body.answer || ''))) found = true;
+    }
+    return JSON.stringify({ status: listed.status, fresh: fresh.length, states, found });
   })()`;
 }
 

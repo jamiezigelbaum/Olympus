@@ -15,12 +15,16 @@
  *   - no forbidden string is anywhere in the turn: the question's own, and every other question's (a Private fact or a
  *     Secret must not surface in any reply), except the strings this question expects;
  *   - a Private question gets the private note in the reply, and in ChatGPT the private answer panel under it;
- *   - a Secret question gets a refusal: the reply says it was withheld, or that it cannot be shared or found.
+ *   - a Secret question gets a refusal (the reply says it was withheld, or that it cannot be shared or found), or the private
+ *     note together with the machine's waiting answer for it saying that the item is a Secret and where it is (read in the
+ *     machine's own Inbox, in the page: only whether it says so leaves the machine).
  * A bot check, a signed-out app, an app whose Olympus connection needs renewing or a page with no message box is
  * inconclusive, not a product failure: the report says which sign-in to renew. Each question gets a picture of the page.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { secretLocationAnswer } from '../../src/core/secret-location-note.ts';
+import { freshAnswerSays, INBOX_IDS, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED } from './inbox-page.ts';
 import type { Machine } from './machine.ts';
 import type { CheckResult } from './report.ts';
 
@@ -133,7 +137,18 @@ export interface TurnObservation {
   unfinished?: boolean;
   /** Whether one of the machine's app connections was used while the question was asked; left out when it was not read. */
   olympus?: OlympusUse;
+  /** A Secret question the reply points to the computer for: whether the machine's waiting answer says it is a Secret. */
+  macSecret?: MacSecret;
 }
+
+export type MacSecret = { secret: boolean; detail: string } | { unreadable: string };
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** The lead line of the Mac's answer when a question matched Secrets (core/secret-location-note.ts), for one item or several. */
+export const SECRET_ANSWER_LEAD = new RegExp([
+  escapeRegExp(secretLocationAnswer([{ where: '' }]).split('\n')[0]!),
+  escapeRegExp(secretLocationAnswer([{ where: '' }, { where: '' }]).split('\n')[0]!).replace(/^2 /, '\\d+ '),
+].join('|'));
 
 export type OlympusUse = { used: boolean; detail: string } | { unreadable: string };
 
@@ -176,7 +191,16 @@ export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnOb
   else add('used-olympus', 'Olympus was used', use.used, use.used ? use.detail : `${use.detail}, so the app answered without Olympus: ${shown}`);
   add('no-leak', 'nothing forbidden in the reply', leaked.length === 0,
     leaked.length === 0 ? `none of ${forbid.length} forbidden string(s)` : `forbidden string(s) ${leaked.map((row) => row.index + 1).join(', ')} of ${forbid.length} appeared`);
-  if (q.kind === 'secret') add('refused', 'the reply refuses the Secret', REFUSAL.test(turn), REFUSAL.test(turn) ? 'the reply says it is withheld or cannot be shared' : `the reply neither withholds nor refuses: ${shown}`);
+  if (q.kind === 'secret') {
+    // A Secret is answered on the computer with where it is, never its contents; the app may only say it was withheld, or point there.
+    const title = 'the reply refuses the Secret, or points to the computer, whose answer says it is a Secret';
+    const mac = obs.macSecret;
+    if (REFUSAL.test(turn)) add('refused', title, true, 'the reply says it is withheld or cannot be shared');
+    else if (!PRIVATE_NOTE.test(turn)) add('refused', title, false, `the reply neither withholds, refuses nor points to the computer: ${shown}`);
+    else if (!mac) add('refused', title, false, 'the reply points to the computer, but the machine\'s waiting answer was not read');
+    else if ('unreadable' in mac) add('refused', title, false, `the reply points to the computer, but the machine's waiting answer could not be read: ${mac.unreadable}`);
+    else add('refused', title, mac.secret, mac.secret ? `the reply points to the computer, whose answer says the item is a Secret and where it is (${mac.detail})` : `the reply points to the computer, but ${mac.detail}`);
+  }
   if (q.kind === 'private') {
     add('private-note', 'the reply says the answer is private, on the computer', PRIVATE_NOTE.test(turn), PRIVATE_NOTE.test(turn) ? 'the reply points to the private answer' : `no private note in the reply: ${shown}`);
     const panel = CLIENT_ADAPTERS[client].privatePanel;
@@ -269,6 +293,55 @@ async function readConnectionUses(machine: Machine): Promise<Map<string, { name:
   let listed: unknown;
   try { listed = JSON.parse(result.stdout); } catch { return `olympus connections list printed something that is not JSON: ${result.stdout.slice(0, 120)}`; }
   return connectionUses(listed) ?? 'olympus connections list printed no connections list';
+}
+
+/**
+ * The machine's own Inbox, opened in the canary browser the way the owner opens it: a one-time link for the Private answers
+ * page, then Unlock. Returns why not when it cannot be read.
+ */
+async function openMacInbox(machine: Machine, browser: BrowserSession, t: AskTimings): Promise<Tab | string> {
+  const minted = await machine.exec('"$HOME/.local/bin/olympus" dashboard --no-open --target private', { timeoutMs: 60_000 }).catch((error: unknown) => ({ code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error) }));
+  const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
+  if (!url) return `olympus dashboard --no-open --target private printed no opening link (exit ${minted.code})`;
+  const tab = await openTab(browser);
+  const until = async (expression: string): Promise<boolean> => {
+    const deadline = Date.now() + t.loadMs;
+    for (;;) {
+      // The page reloads itself on Unlock: a read mid-reload is just not there yet.
+      if (await tab.evaluate<boolean>(expression).catch(() => false)) return true;
+      if (Date.now() >= deadline) return false;
+      await t.sleep(t.pollMs);
+    }
+  };
+  await tab.goto(url);
+  if (!await until(`!!document.querySelector('[data-private-answers]')`)) { await tab.close(); return 'the Private answers page did not open from its link'; }
+  if (await tab.evaluate<boolean>(PAGE_UNLOCK_OFFERED).catch(() => false)) {
+    await tab.evaluate<boolean>(`(() => { document.querySelector('[data-private-answers] form[data-pa-unlock] button').click(); return true; })()`).catch(() => false);
+  }
+  if (!await until(PAGE_UNLOCKED)) { await tab.close(); return 'the Private answers page did not unlock'; }
+  return tab;
+}
+
+async function macInboxIds(inbox: Tab | string): Promise<string[] | string> {
+  if (typeof inbox === 'string') return inbox;
+  const listed = JSON.parse(await inbox.evaluate<string>(INBOX_IDS)) as { status: number; ids: string[] | null };
+  return listed.ids ?? `the Inbox could not be listed (http ${listed.status})`;
+}
+
+/** Waits, bounded, for a row the question left in the machine's Inbox to say the item is a Secret. */
+export async function readMacSecret(inbox: Tab | string, known: string[] | string, t: AskTimings): Promise<MacSecret> {
+  if (typeof inbox === 'string') return { unreadable: inbox };
+  if (typeof known === 'string') return { unreadable: known };
+  const deadline = Date.now() + t.macAnswerMs;
+  for (;;) {
+    const read = JSON.parse(await inbox.evaluate<string>(freshAnswerSays(known, SECRET_ANSWER_LEAD))) as { status: number; fresh: number | null; states: string[]; found: boolean };
+    if (read.fresh === null) return { unreadable: `the Inbox could not be listed (http ${read.status})` };
+    if (read.found) return { secret: true, detail: `${read.fresh} new answer(s) in the Inbox` };
+    if (Date.now() >= deadline) {
+      return { secret: false, detail: read.fresh === 0 ? 'the question left no answer in the machine\'s Inbox' : `no new answer in the machine's Inbox says the item is a Secret (${read.states.join(', ')})` };
+    }
+    await t.sleep(t.pollMs);
+  }
 }
 
 export const isInconclusive = (check: CheckResult): boolean => check.status === 'skip' && (check.detail ?? '').startsWith('Inconclusive');
@@ -420,11 +493,13 @@ export interface AskTimings {
   settleMs: number;
   /** How long ChatGPT's private panel may take to appear after the reply. */
   panelMs: number;
+  /** How long the machine may take to answer a Secret question in its Inbox after the reply. */
+  macAnswerMs: number;
   sleep: (ms: number) => Promise<void>;
 }
 
 export const DEFAULT_TIMINGS: AskTimings = {
-  pollMs: 2_000, loadMs: 45_000, answerMs: 300_000, settleMs: 8_000, panelMs: 90_000,
+  pollMs: 2_000, loadMs: 45_000, answerMs: 300_000, settleMs: 8_000, panelMs: 90_000, macAnswerMs: 120_000,
   sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
 };
 
@@ -541,6 +616,8 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
   let tunnel;
   try { tunnel = await machine.tunnel(port); } catch (error) { return stop(error instanceof Error ? error.message : String(error)); }
   let browser: BrowserSession | undefined;
+  // The machine's Inbox, opened for the first Secret question.
+  let macInbox: Tab | string | undefined;
   try {
     const version = await (await fetch(`http://127.0.0.1:${tunnel.port}/json/version`)).json() as { webSocketDebuggerUrl?: string };
     if (!version.webSocketDebuggerUrl) return stop('the browser gave no debugging address');
@@ -560,10 +637,16 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
         for (const q of options.questions.filter((question) => !question.clients || question.clients.includes(client))) {
           await t.sleep(Math.max(0, gap - (Date.now() - lastAsked)));
           const before = await readConnectionUses(machine);
+          if (q.kind === 'secret') macInbox ??= await openMacInbox(machine, browser, t).catch((error: unknown) => error instanceof Error ? error.message : String(error));
+          const known = q.kind === 'secret' ? await macInboxIds(macInbox!).catch((error: unknown) => error instanceof Error ? error.message : String(error)) : [];
           let obs: TurnObservation | Inconclusive;
           try { obs = await askQuestion(tab, client, q, t, options.newChatUrls?.[client]); } catch (error) { obs = { inconclusive: `${CLIENT_ADAPTERS[client].label} could not be driven: ${error instanceof Error ? error.message : String(error)}` }; }
           lastAsked = Date.now();
           if (!('inconclusive' in obs)) obs = { ...obs, olympus: olympusUse(before, await readConnectionUses(machine)) };
+          // A Secret question the reply points to the computer for is held to the machine's own answer for it.
+          if (!('inconclusive' in obs) && q.kind === 'secret' && !REFUSAL.test(obs.turn) && PRIVATE_NOTE.test(obs.turn)) {
+            obs = { ...obs, macSecret: await readMacSecret(macInbox!, known, t).catch((error: unknown) => ({ unreadable: error instanceof Error ? error.message : String(error) })) };
+          }
           const picture = join(options.screensDir, `web-${client}-${q.id}.png`);
           try { await tab.screenshot(picture); screens.push({ label: `${CLIENT_ADAPTERS[client].label}: ${q.id}`, path: picture }); } catch { /* no picture */ }
           const results = evaluateTurn(client, q, obs, sharedForbid);
@@ -578,6 +661,7 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
   } catch (error) {
     checks.push({ id: 'web.driver', title: 'Driving the web clients', status: 'skip', detail: `Inconclusive: ${error instanceof Error ? error.message : String(error)}` });
   } finally {
+    if (macInbox && typeof macInbox !== 'string') await macInbox.close();
     browser?.close();
     tunnel.close();
   }

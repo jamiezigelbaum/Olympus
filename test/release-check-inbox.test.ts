@@ -13,7 +13,7 @@ import {
   evaluateInbox, judgeNote, noteChecks, privateLinkIdsIn, privateNoteIn, type CardView, type EntryView, type InboxObservation,
 } from '../scripts/release-check/inbox.ts';
 import {
-  anchorPresent, ASK_VIEW, centerOf, factsIn, FOCUS_QUESTION, PAGE_STATE, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED, pageApi, PRIVATE_ANSWERS_POST_PATH, rowView, sourceNames,
+  anchorPresent, ASK_VIEW, centerOf, factsIn, FOCUS_QUESTION, freshAnswerSays, INBOX_IDS, PAGE_STATE, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED, pageApi, PRIVATE_ANSWERS_POST_PATH, rowView, sourceNames,
 } from '../scripts/release-check/inbox-page.ts';
 import {
   freshEgress, isBrowserProcess, normalizeIp, outboundFromLsof, outboundFromProcNet, procAddress, requestsOutsideMachine,
@@ -547,6 +547,21 @@ describe('the page scripts read the product\'s own page', () => {
     expect(Object.keys(page.posts.at(-1)!.headers).map((name) => name.toLowerCase())).not.toContain('authorization');
     const refused = JSON.parse(String(await page.run(pageApi({ action: 'ask_venice', question: 'q' })))) as { status: number };
     expect(refused.status).toBe(403);
+  });
+
+  test('the rows a remote question left are read in the page, and only whether one says the sentence leaves it', async () => {
+    const answers: Record<string, string> = { [ID]: 'Old answer: Garage stored as a Secret.', fresh1: 'A matching item is stored as a Secret. Open it on this Mac:\n- Notes: Garage' };
+    const page = mountPage(localOptions(), (body) => (body.action === 'list'
+      ? { status: 200, body: { ok: true, questions: [{ id: ID }, { id: 'fresh1' }] } }
+      : { status: 200, body: { ok: true, status: 'answered', answer: answers[String(body.id)], citations: [] } }));
+    page.document.body.appendChild(Object.assign(page.document.createElement('script'), { textContent: document_scripts(page.html) }));
+    expect(JSON.parse(String(await page.run(INBOX_IDS)))).toEqual({ status: 200, ids: [ID, 'fresh1'] });
+    const said = JSON.parse(String(await page.run(freshAnswerSays([ID], /stored as a Secret\. Open it/))));
+    expect(said).toEqual({ status: 200, fresh: 1, states: ['answered'], found: true });
+    expect(JSON.stringify(said)).not.toContain('Garage');
+    // Only rows not known before count: the old row's answer is never read.
+    expect(page.posts.filter((post) => post.body.action === 'read').map((post) => post.body.id)).toEqual(['fresh1']);
+    expect(JSON.parse(String(await page.run(freshAnswerSays([ID, 'fresh1'], /Secret/))))).toEqual({ status: 200, fresh: 0, states: [], found: false });
   });
 
   test('an opened Inbox row, and an answer on the Ask form, are read as the page renders them', async () => {
