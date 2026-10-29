@@ -57,7 +57,10 @@ export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // document (a medical one) is decided by the text read off it, held Private until
 // the privacy-safe model has read that text; with too little text it stays
 // Private on the picture. Pictures decided under p6 are judged again.
-export const TIER_CLASSIFIER_VERSION = '2026-10-29.p7';
+// p8 (2026-10-29): on the small built-in model a Personal answer holds an item
+// whose text shows a populated record Private (sniffer.ts, snifferVerdictTier).
+// Items decided under p7 are judged again; cached answers settle them at once.
+export const TIER_CLASSIFIER_VERSION = '2026-10-29.p8';
 
 /**
  * The `mapRevision` every decision records. The legacy sensitivity map was

@@ -41,8 +41,7 @@ import {
   snifferMaterialForModel,
   snifferOwnMaterial,
   cachedSnifferVerdictHolds,
-  snifferReasonCode,
-  snifferTierKey,
+  snifferVerdictTier,
 } from './sniffer.ts';
 import { assertSnifferProfileAllowed, type SnifferLane } from './sniffer-lane.ts';
 import type {
@@ -248,11 +247,11 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     // without rekeying the dispatched revision. The ledger rejects stale answers.
     if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false)
       && !screenQuestion(item.target, item.question)) return;
-    const tier = snifferTierKey(verdict);
+    const { tier, code } = snifferVerdictTier(verdict, options.lane, item.question.flags);
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
       tier,
-      reason: `${item.question.pass}:sniffer:${id}:${snifferReasonCode(verdict)}`,
+      reason: `${item.question.pass}:sniffer:${id}:${code}`,
       modelId: snifferCacheModelId(options.lane),
       mapRevision: item.question.mapRevision,
     }, {

@@ -368,6 +368,19 @@ section consolidates and supersedes all other policy wording.
   on the built-in model the new prompt is approved by default and stored
   items are re-judged automatically, with no owner step.
 - 2026-10-29 (no contract type version change; tier classifier
+  `2026-10-29.p8`): **on the small built-in model, a record stays Private**.
+  On the Linux release check the 8 GB-class model (Qwen3.5 2B) judged the
+  cardiology fixture ("resting heart rate 52 bpm", a prescription) "work
+  0.95" Personal, five of five on the real model, whenever its names carried
+  no label saying private; the 4B judged it Private. A Personal answer from
+  a small built-in model now holds an item Private when the content pass
+  found a populated record in its own text (the existing `content:own_record:`
+  signals: values with units, reference ranges, a named holder, a filled
+  form, a records folder, a dated record title), recorded as
+  `content:sniffer:<id>:record_held:<code>`. Topic words still never hold or
+  raise, and every other model's answer stands. Items decided under p7 are
+  judged again; cached answers settle them without a model call.
+- 2026-10-29 (no contract type version change; tier classifier
   `2026-10-29.p7`, photo judge `photo-judge-2026-10-29`): **a picture of a
   document is decided by its text** (owner direction 2026-10-29: fix privacy
   misjudgments generally, not one at a time). The 2026-10-08 photo judge

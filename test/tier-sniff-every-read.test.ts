@@ -17,6 +17,7 @@ import {
   SNIFFER_CATEGORIES,
   SNIFFER_PRIVATE_KINDS,
   SNIFFER_RESPONSE_SCHEMA,
+  snifferVerdictTier,
   parseSnifferBatchResponse,
   SNIFFER_PROMPT_VERSION,
   SNIFFER_SYSTEM_PROMPT,
@@ -62,7 +63,7 @@ describe('every read item is judged; only own-record signals hold content', () =
       { signals: LAB_NAMES, provider: 'fixture', text: LAB_REPORT },
       { sniffer: answering({ verdict: 'undecided' }, asked) },
     );
-    expect(TIER_CLASSIFIER_VERSION).toBe('2026-10-29.p7');
+    expect(TIER_CLASSIFIER_VERSION).toBe('2026-10-29.p8');
     expect(decision).toMatchObject({ contentRead: true, contentPending: true, state: 'pending', engineVersion: TIER_CLASSIFIER_VERSION });
     expect(decision.reasons).not.toContain('content:no_raise');
     expect(asked).toHaveLength(1);
@@ -143,6 +144,18 @@ describe('the sniffer prompt asks one generic question', () => {
     expect(prompt).toContain(JSON.stringify({ i: 1, document: 'Names: a.pdf\nExcerpt: text' }));
     // Derived from the text: the change is a new version, approved before use.
     expect(SNIFFER_PROMPT_VERSION).toMatch(/^p-[0-9a-f]{12}$/);
+  });
+
+  test('the small built-in model cannot lower an item whose text shows a record; other models\' answers stand', () => {
+    // Qwen3.5 2B judged a cardiology note with a heart rate and a prescription "work 0.95" Personal (release check 2026-10-29).
+    const personal = { tier: 'personal' as const, category: 'work' as const, confidence: 0.95, ownRecord: false, privateKind: 'none' as const, failSafe: false };
+    const small = { kind: 'local' as const, modelId: 'built_in', cacheModelId: 'qwen3.5-2b-q4_k_m-f6d5376:f6d5376be1edb4d416d56da11e5397a961aca8ae:aaf4' };
+    const standard = { kind: 'local' as const, modelId: 'built_in', cacheModelId: 'qwen3.5-4b-q4_k_m-e87f176:e87f176479d0855a907a41277aca2f8ee7a09523:00fe' };
+    const record = ['content:own_record:measurement', 'content:borderline:health'];
+    expect(snifferVerdictTier(personal, small, record)).toEqual({ tier: 'secure', code: 'record_held:work:0.95' });
+    expect(snifferVerdictTier(personal, small, ['content:borderline:health'])).toEqual({ tier: 'private', code: 'work:0.95' });
+    expect(snifferVerdictTier(personal, standard, record)).toEqual({ tier: 'private', code: 'work:0.95' });
+    expect(snifferVerdictTier(personal, { kind: 'venice' as const, modelId: 'venice-model' }, record)).toEqual({ tier: 'private', code: 'work:0.95' });
   });
 
   test('the reply schema allows exactly what the parser accepts, so a grammar-bound model cannot answer out of range', () => {
