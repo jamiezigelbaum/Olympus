@@ -5,11 +5,20 @@ import { buildSnifferBatchPrompt, parseSnifferBatchResponse, SNIFFER_SYSTEM_PROM
   snifferMaterialCarriesSecret, snifferMaterialLooksLikeInjection, snifferPromptVersions, snifferTierKey,
 } from '../../src/workers/classification/sniffer.ts';
 import fixture from './fixtures/inbox-onboarding.json';
+import ownerExemptions from './fixtures/owner-exemptions.json';
 
 export const inboxFixture = fixture;
+/** Items judged under a short owner description whose fine-to-share clauses name default-sensitive kinds. */
+export const ownerExemptionsFixture = ownerExemptions;
 export type InboxSplit = 'dev' | 'held-out' | 'all';
-export function inboxMaterial(item: typeof fixture.items[number]): string {
-  const e = item.email;
+export type InboxSet = 'inbox' | 'owner-exemptions';
+type EvalItem = { id: string; split: string; label: string; email?: (typeof fixture.items)[number]['email']; material?: string };
+type EvalFixture = { privacyProfile: { description: string }; items: readonly EvalItem[] };
+const FIXTURES: Record<InboxSet, EvalFixture> = { inbox: fixture, 'owner-exemptions': ownerExemptions };
+
+export function inboxMaterial(item: EvalItem): string {
+  if (item.material !== undefined) return item.material;
+  const e = item.email!;
   // Inert, impossible-to-use synthetic credential; never stored in the fixture as a credential literal.
   const credential = ['pass', 'word', ' = ', 'inert-eval-only-credential'].join('');
   return `From: ${e.from_}\nTo: ${e.to}\nDate: ${e.date}\nSubject: ${e.subject}\n\n${e.body}`.replaceAll('{{CREDENTIAL}}', credential);
@@ -28,7 +37,8 @@ export function createInboxReplayModel(): AnalystModel {
   } };
 }
 
-export async function runInboxEval(options: { model: AnalystModel; modelId: string; split?: InboxSplit }) {
+export async function runInboxEval(options: { model: AnalystModel; modelId: string; split?: InboxSplit; set?: InboxSet }) {
+  const fixture = FIXTURES[options.set ?? 'inbox'];
   const items = fixture.items.filter(item => !options.split || options.split === 'all' || item.split === options.split);
   const results: Array<{ id: string; split: string; expected: string; actual: string; milliseconds: number; dispatches: number }> = [];
   let secretDispatches = 0;
