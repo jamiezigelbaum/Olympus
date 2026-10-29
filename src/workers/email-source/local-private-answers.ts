@@ -495,7 +495,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
  * Anonymous questions have no retrieval context, source identities or citations. */
 export async function askWithAnonymousInbox(
   input: import('../../core/consult-ask.ts').ConsultAskInput,
-  options: { deliveredToPanel?: boolean; local?: boolean; isActive?: (id: string) => boolean; store: () => WaitingQuestionStore | undefined; connectionId: string; ask: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult> },
+  options: { deliveredToPanel?: boolean; isActive?: (id: string) => boolean; store: () => WaitingQuestionStore | undefined; connectionId: string; ask: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult> },
 ): Promise<import('../../core/consult-ask.ts').ConsultAskResult> {
   if (options.deliveredToPanel) return options.ask(input);
   if (typeof input.question !== 'string' || !input.question.trim()) return { ok: false, code: 'transport_unavailable', message: 'Type a question first.' };
@@ -503,10 +503,6 @@ export async function askWithAnonymousInbox(
   const ref = store?.record(store.ticket(options.connectionId), { question: W.anonymousPending, surface: 'remote', state: 'waiting', path: 'anonymous' });
   if (!store || !ref) return { ok: false, code: 'transport_unavailable', message: W.inboxBeforeSend };
   const acknowledge = () => { try { store.acknowledge(ref); } catch { /* Closed/deleted store: never restore the row. */ } };
-  if (!options.local && !store.reserveAutoAnswer(ref, 'anonymous')) {
-    acknowledge();
-    return { ok: false, code: 'transport_unavailable', message: W.anonymousRateLimit };
-  }
   try {
     const result = await options.ask({ ...input, stillAuthorized: () => {
       try {

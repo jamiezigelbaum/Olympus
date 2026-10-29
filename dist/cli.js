@@ -48593,29 +48593,6 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
   const expire = (at) => {
     db.query("DELETE FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ?").run(at - WAITING_QUESTION_LIMITS.ttlMs);
   };
-  const markOlderRemoved = (at) => {
-    db.query("INSERT INTO waiting_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(OLDER_REMOVED_KEY, String(at));
-  };
-  const enforceBounds = (connectionId, at) => {
-    let removed = 0;
-    const perConnection = db.query("SELECT id FROM waiting_questions WHERE connection_id = ? AND answered_at IS NULL ORDER BY asked_at DESC, rowid DESC").all(connectionId);
-    for (const row of perConnection.slice(WAITING_QUESTION_LIMITS.perConnection)) {
-      removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
-    }
-    const all = db.query(`
-      SELECT id, LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes
-      FROM waiting_questions WHERE answered_at IS NULL ORDER BY asked_at DESC, rowid DESC
-    `).all();
-    let total = 0;
-    all.forEach((row, index) => {
-      total += row.bytes + RECORD_OVERHEAD_BYTES;
-      if (index >= WAITING_QUESTION_LIMITS.total || total > WAITING_QUESTION_LIMITS.totalBytes) {
-        removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
-      }
-    });
-    if (removed > 0)
-      markOlderRemoved(at);
-  };
   const revokeInTransaction = (connectionId) => {
     const removed = db.query("DELETE FROM waiting_questions WHERE connection_id = ?").run(connectionId).changes;
     db.query(`
@@ -48682,9 +48659,8 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
           `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === "anonymous" ? "anonymous" : "private", input.path === "venice" ? "venice" : null);
           ref = { id, generation: 1, connectionId: ticket.connectionId };
         }
-        enforceBounds(ticket.connectionId, at);
         notify();
-        return db.query("SELECT 1 FROM waiting_questions WHERE id = ?").get(ref.id) ? ref : undefined;
+        return ref;
       }).immediate();
     },
     list(options2) {
@@ -48756,22 +48732,6 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
     markRead(ref) {
       return db.query("UPDATE waiting_questions SET seen = 1 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NOT NULL").run(ref.id, ref.generation, ref.connectionId).changes > 0;
     },
-    reserveAutoAnswer(ref, lane) {
-      const budgetKey = lane === "anonymous" ? JSON.stringify(["anonymous", ref.connectionId]) : ref.connectionId;
-      return db.transaction(() => {
-        if (!db.query("SELECT 1 FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").get(ref.id, ref.generation, ref.connectionId))
-          return false;
-        const at = now();
-        const budget = db.query("SELECT started_at, attempts FROM auto_answer_budgets WHERE connection_id = ?").get(budgetKey);
-        if (budget && at < budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs && budget.attempts >= WAITING_QUESTION_LIMITS.autoAnswersPerWindow) {
-          db.query("UPDATE waiting_questions SET next_attempt_at = ? WHERE id = ? AND generation = ? AND connection_id = ?").run(budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs, ref.id, ref.generation, ref.connectionId);
-          return false;
-        }
-        const fresh = !budget || at >= budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs;
-        db.query("INSERT INTO auto_answer_budgets (connection_id, started_at, attempts) VALUES (?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET started_at = excluded.started_at, attempts = excluded.attempts").run(budgetKey, fresh ? at : budget.started_at, fresh ? 1 : budget.attempts + 1);
-        return true;
-      }).immediate();
-    },
     saveAnswer(ref, result, sent) {
       const serialized = JSON.stringify(result);
       if (utf8Length(serialized) + utf8Length(sent ?? "") > WAITING_QUESTION_LIMITS.answerBytes)
@@ -48786,36 +48746,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       }
       return db.transaction(() => {
         const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), sent ?? null, ref.id, ref.generation, ref.connectionId).changes > 0;
-        if (!changed)
-          return false;
-        const rows = db.query("SELECT id, connection_id, COALESCE(LENGTH(CAST(result AS BLOB)), 0) + LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes FROM waiting_questions WHERE answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC").all();
-        let ownBytes = 0;
-        let ownCount = 0;
-        const removed = new Set;
-        const remove = (id) => {
-          db.query("DELETE FROM waiting_questions WHERE id = ?").run(id);
-          removed.add(id);
-        };
-        for (const row of rows.filter((row2) => row2.connection_id === ref.connectionId)) {
-          ownBytes += row.bytes + RECORD_OVERHEAD_BYTES;
-          if (++ownCount > WAITING_QUESTION_LIMITS.answeredPerConnection || ownBytes > WAITING_QUESTION_LIMITS.answeredBytesPerConnection)
-            remove(row.id);
-        }
-        let count = rows.length - removed.size;
-        let bytes = rows.filter((row) => !removed.has(row.id)).reduce((sum, row) => sum + row.bytes + RECORD_OVERHEAD_BYTES, 0);
-        const newcomer = !rows.some((row) => row.connection_id === ref.connectionId && row.id !== ref.id);
-        for (const row of [...rows].reverse()) {
-          if (count <= WAITING_QUESTION_LIMITS.answeredTotal && bytes <= WAITING_QUESTION_LIMITS.answeredBytes)
-            break;
-          if (!newcomer && row.connection_id !== ref.connectionId || removed.has(row.id))
-            continue;
-          remove(row.id);
-          count--;
-          bytes -= row.bytes + RECORD_OVERHEAD_BYTES;
-        }
-        if (removed.size)
-          markOlderRemoved(now());
-        return !removed.has(ref.id);
+        return changed;
       }).immediate();
     },
     retry(ref) {
@@ -49020,7 +48951,7 @@ function hardenPrivatePath(dbPath) {
     }
   }
 }
-var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 5, WAITING_QUESTION_LIMITS, RECORD_OVERHEAD_BYTES = 160, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, CHATGPT_INBOX_GRACE_MS = 30000;
+var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 5, WAITING_QUESTION_LIMITS, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, CHATGPT_INBOX_GRACE_MS = 30000;
 var init_waiting_private_questions = __esm(() => {
   init_sqlite_migrations();
   init_olympus_layout();
@@ -49028,15 +48959,6 @@ var init_waiting_private_questions = __esm(() => {
     questionBytes: 2048,
     localQuestionBytes: 8 * 1024,
     selectorBytes: 4096,
-    perConnection: 20,
-    total: 50,
-    totalBytes: 256 * 1024,
-    answeredPerConnection: 50,
-    answeredBytesPerConnection: 1024 * 1024,
-    autoAnswersPerWindow: 5,
-    autoAnswerWindowMs: 60 * 60000,
-    answeredTotal: 500,
-    answeredBytes: 16 * 1024 * 1024,
     answerBytes: 128 * 1024,
     ttlMs: 7 * 24 * 60 * 60000,
     reanswerAfterMs: 10 * 60000
@@ -53811,7 +53733,6 @@ var init_vocabulary = __esm(() => {
     anonymousPending: "Anonymous question pending",
     inboxUnavailable: "The inbox cannot keep another answer right now. Try again later.",
     inboxBeforeSend: "The inbox cannot keep this answer right now. Nothing was sent.",
-    anonymousRateLimit: "Too many questions. Try again later. Nothing was sent.",
     anonymousFailed: "Olympus could not answer this question.",
     goToModels: "Go to Models",
     privatePath: "Local model",
@@ -139292,10 +139213,6 @@ async function askWithAnonymousInbox(input, options) {
       store.acknowledge(ref);
     } catch {}
   };
-  if (!options.local && !store.reserveAutoAnswer(ref, "anonymous")) {
-    acknowledge();
-    return { ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousRateLimit };
-  }
   try {
     const result = await options.ask({ ...input, stillAuthorized: () => {
       try {
@@ -207480,7 +207397,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     return askWithAnonymousInbox({ ...input, level: consultAskLevelOrSaved2(input.level, readConsultSettings2()) }, {
       store: waitingQuestionStore,
       connectionId: "@local:You",
-      local: true,
       isActive: connectionActive,
       ask: (request) => askAnonymouslyNow ? askAnonymouslyNow(request) : Promise.resolve({ ok: false, code: "transport_unavailable", message: DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp })
     });

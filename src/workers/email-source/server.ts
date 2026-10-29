@@ -5992,7 +5992,7 @@ export async function main(): Promise<void> {
   let askAnonymouslyNow: ((input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>) | undefined;
   const localAnonymousAsk = (input: import('../../core/consult-ask.ts').ConsultAskInput) => {
     return askWithAnonymousInbox({ ...input, level: consultAskLevelOrSaved(input.level, readConsultSettings()) }, {
-      store: waitingQuestionStore, connectionId: '@local:You', local: true, isActive: connectionActive,
+      store: waitingQuestionStore, connectionId: '@local:You', isActive: connectionActive,
       ask: request => askAnonymouslyNow ? askAnonymouslyNow(request) : Promise.resolve({ ok: false, code: 'transport_unavailable', message: PRIVATE_ANSWERS_COPY.anonymousNotSetUp }),
     });
   };

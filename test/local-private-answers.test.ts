@@ -1611,18 +1611,6 @@ test('REVIEW R2 re-ask by the agent erases an answered, read row', () => {
   expect(after.result?.answer).toBe('Tuesday');
 });
 
-test('REVIEW R3 one connection evicts another connection\'s answered rows', () => {
-  const store = waitingStore();
-  const victim = store.record(store.ticket('conn-victim'), { question: 'victim question', surface: 'remote', state: 'waiting' })!;
-  store.saveAnswer(victim, { status: 'answered', answer: 'victim answer', citations: [], unanswered: [], leftOut: [], read: [] });
-  for (let i = 0; i < 500; i += 1) {
-    const r = store.record(store.ticket('conn-flood'), { question: `flood ${i}`, surface: 'remote', state: 'waiting' })!;
-    store.saveAnswer(r, { status: 'answered', answer: `a${i}`, citations: [], unanswered: [], leftOut: [], read: [] });
-  }
-  expect(store.list().questions.length).toBeLessThanOrEqual(51);
-  expect(store.get(victim.id)).toBeDefined();
-});
-
 test('REVIEW R4 transient ledger read failure destroys a stored answer on read', async () => {
   const c = await offerCase(undefined);
   const gen0 = c.store.get(c.ref.id)!.generation;
@@ -1747,7 +1735,7 @@ describe('anonymous answers in the local inbox', () => {
     const f = await fixture();
     const local = createLocalPrivateAnswers({ localConnectionId: '@local:You', store: () => f.store, eligible: async () => [],
       answer: async () => ({ status: 'answered', answer: 'Local reply', citations: [], unanswered: [], leftOut: [], read: [] }),
-      anonymousAsk: input => f.askWithAnonymousInbox(input, { local: true, store: () => f.store, connectionId: '@local:You', ask: async request => request.question === 'off' ? { ok: false, code: 'anonymous_answers_off', message: 'Off' } : f.result }),
+      anonymousAsk: input => f.askWithAnonymousInbox(input, { store: () => f.store, connectionId: '@local:You', ask: async request => request.question === 'off' ? { ok: false, code: 'anonymous_answers_off', message: 'Off' } : f.result }),
     });
     expect((await local.handle({ action: 'ask_anonymous', question: 'off' }, 'local')).status).toBe(400);
     const cjk = '界'.repeat(1000);
@@ -1757,13 +1745,6 @@ describe('anonymous answers in the local inbox', () => {
     }
     expect(local.waiting()!.questions.filter(q => q.path === 'private')).toHaveLength(6);
     expect(local.waiting()!.questions.some(q => q.question === cjk)).toBe(true);
-  });
-  test('the inbox rate limit refuses a sixth send without calling outside help', async () => {
-    const f = await fixture();
-    let sends = 0;
-    for (let i = 0; i < 6; i++) await f.ask(async () => { sends++; return f.result; });
-    expect(sends).toBe(5);
-    expect(f.store.list().questions.length).toBe(5);
   });
 });
 
@@ -1781,20 +1762,6 @@ test('re-ask retains answered rows and restarts not-found rows', () => {
   expect(nf2.generation).toBe(nf.generation + 1);
   expect(store.get(nf.id)?.result).toBeUndefined();
   expect(store.get(ref.id)?.result?.answer).toBe('Tuesday');
-});
-
-test('a newcomer retains its first answer in a globally full inbox', () => {
-  const store = waitingStore();
-  for (let c = 0; c < 10; c += 1) for (let i = 0; i < 50; i += 1) {
-    const r = store.record(store.ticket(`c${c}`), { question: `q ${c} ${i}`, surface: 'remote', state: 'waiting' })!;
-    store.saveAnswer(r, A('x'));
-  }
-  const fresh = store.record(store.ticket('newcomer'), { question: 'newcomer q', surface: 'remote', state: 'waiting' })!;
-  const saved = store.saveAnswer(fresh, A('newcomer answer'));
-  expect(saved).toBe(true);
-  expect(store.list().questions.length).toBe(500);
-  expect(store.list().olderRemoved).toBe(true);
-  expect(store.get(fresh.id)).toBeDefined();
 });
 
 test('a brief copiesForMany failure hides a stored answer, then shows it again', async () => {
@@ -1844,23 +1811,6 @@ test('a failure after a model call is retried later', async () => {
 });
 
 for (const path of ['private', 'venice', 'anonymous'] as const) {
-  test(`${path} rows share per-connection eviction limits without evicting another connection`, () => {
-    const store = waitingStore();
-    const victim = store.record(store.ticket('victim'), { question: 'Keep me', path: 'venice', surface: 'remote', state: 'waiting' })!;
-    expect(store.saveAnswer(victim, A('Victim answer'))).toBe(true);
-    const first = store.record(store.ticket('sender'), { question: 'First', path: 'private', surface: 'remote', state: 'waiting' })!;
-    expect(store.saveAnswer(first, A('Oldest sender answer'))).toBe(true);
-    for (let i = 0; i < 50; i++) {
-      const ref = store.record(store.ticket('sender'), { question: `Question ${i}`, path, surface: 'remote', state: 'waiting' })!;
-      expect(store.saveAnswer(ref, A(`Reply ${i}`), path === 'anonymous' ? `Sent ${i}` : undefined)).toBe(true);
-    }
-    expect(store.get(first.id)).toBeUndefined();
-    expect(store.get(victim.id)?.result?.answer).toBe('Victim answer');
-    const own = store.list().questions.filter(q => q.connectionId === 'sender');
-    expect(own).toHaveLength(50);
-    expect(own.every(q => q.path === path)).toBe(true);
-    expect(store.list().olderRemoved).toBe(true);
-  });
 
   test(`${path} retained answers survive an unavailable eligibility check`, async () => {
     const store = waitingStore();

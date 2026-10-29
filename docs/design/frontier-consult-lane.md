@@ -42,10 +42,9 @@ return through their existing result/source_answer_result path.
 Anonymous asks retrieve no source items and attach no source citations; the
 existing writer, secret gate, Strict privacy gate and final transport
 authorization remain unchanged. Retained replies use the private inbox store,
-its row/byte limits and deletion generation fences. Anonymous agent calls have
-a five-attempts-per-hour bound per connection, because each send spends the
-owner's deposit; human asks do not use it. Automatic Private answers have no
-such bound (owner ruling, 2026-10-29): every question an agent asks is answered. Reservations contain only a fixed placeholder, never the original
+and its deletion generation fences. Anonymous agent calls, like automatic
+Private answers, have no hourly bound (owner ruling, 2026-10-29: Olympus sets
+no limit on how it is used; an owner who wants one sets it). Reservations contain only a fixed placeholder, never the original
 anonymous question. Replies have local-control-only
 serving, export exclusion and data delete --all cleanup. Delete during a call or
 connection revocation prevents its late reply from restoring the row.

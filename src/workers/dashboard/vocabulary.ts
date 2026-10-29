@@ -3211,7 +3211,6 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   anonymousPending: 'Anonymous question pending',
   inboxUnavailable: 'The inbox cannot keep another answer right now. Try again later.',
   inboxBeforeSend: 'The inbox cannot keep this answer right now. Nothing was sent.',
-  anonymousRateLimit: 'Too many questions. Try again later. Nothing was sent.',
   anonymousFailed: 'Olympus could not answer this question.',
   goToModels: 'Go to Models',
   privatePath: "Local model",

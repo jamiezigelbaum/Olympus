@@ -161,12 +161,13 @@ Rows say Answering…, Trying again…, or Could not check yet.
 **Storage.** Migration v2 of the question store retains answer text, citation
 labels/locators (no source content copies), an allowlist of corpus/tier/source
 item identities for eligibility, answered-at and read/unread. Questions keep
-2 KB/4 KB selector bounds, deduplication, 20 per connection, 50 total, 256 KB
-and seven-day bounds until answered. Answered rows have no time expiry,
-including when invalidated and being re-answered. The storage safety cap is
-500 retained answered rows/16 MiB (including invalidated rows and their
-questions/selectors) and 128 KiB per answer; oldest beyond the cap are
-removed with the visible older answers were removed line. Re-asking a
+2 KB/4 KB selector bounds, deduplication and a seven-day bound until answered.
+Answered rows have no time expiry, including when invalidated and being
+re-answered. Each answer is at most 128 KiB. There is no count or byte limit
+on how many questions are asked or kept, per connection or in all (owner
+ruling, 2026-10-29): the inbox holds them all, and the page adapts to their
+number. Stores from before the ruling may still show the older answers were
+removed line once. Re-asking a
 question refreshes its generation and queues a new answer. Reading marks
 read, never deletes. Delete removes one; Delete all has one confirmation.
 
@@ -186,7 +187,7 @@ read scope are refused. Revoking a connection deletes all of its rows and
 bumps its recording ticket generation, exactly as before. data delete --all
 removes answers and sidecars. --source deletes answers depending on that
 source's corpora, unmapped dependencies, and all pending questions, whose dependencies are not known;
-this also fences a pending answer completing after deletion. Questions typed into Ask privately also stay in this inbox after the local eligibility check. ChatGPT panel answers are not copied into it. Anonymous dashboard asks and agent tool asks are retained with the exact question sent after the writer, labeled Anonymous and who asked; sealed ChatGPT anonymous panel answers are never duplicated. They share the inbox storage quotas, local control boundary, delete-all and export exclusions. Anonymous agent attempts have a five-per-hour budget per connection, because each send spends the owner's deposit; human asks do not consume it. Automatic Private answers have no hourly allowance (owner ruling, 2026-10-29): every question an agent asks is answered, and the inbox's storage limits are the only bound. Anonymous reservations keep a fixed placeholder instead of the original wording. The local private box retains multibyte questions within its existing 2,000-character limit. Anonymous asks have no source retrieval or attached source citations; they use the existing writer and outbound gate.
+this also fences a pending answer completing after deletion. Questions typed into Ask privately also stay in this inbox after the local eligibility check. ChatGPT panel answers are not copied into it. Anonymous dashboard asks and agent tool asks are retained with the exact question sent after the writer, labeled Anonymous and who asked; sealed ChatGPT anonymous panel answers are never duplicated. They share the inbox store, local control boundary, delete-all and export exclusions. Neither anonymous agent attempts nor automatic Private answers have any hourly allowance (owner ruling, 2026-10-29: Olympus sets no limit on how it is used; an owner who wants one sets it): every question an agent asks is answered or sent. Anonymous reservations keep a fixed placeholder instead of the original wording. The local private box retains multibyte questions within its existing 2,000-character limit. Anonymous asks have no source retrieval or attached source citations; they use the existing writer and outbound gate.
 
 **The model's note**, host-neutral: “Your answer is in Olympus on your
 computer.” Followed by **Open answer**, using the existing open-on-computer

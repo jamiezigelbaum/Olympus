@@ -144,58 +144,6 @@ describe('waiting private questions: dedupe', () => {
 });
 
 describe('waiting private questions: bounds, expiry and dismiss', () => {
-  test('20 per connection: the oldest is dropped and the marker persists', () => {
-    const { store, clock, path } = open();
-    for (let index = 0; index < 21; index += 1) {
-      clock.now += 1_000;
-      store.record(store.ticket(CONN_A), { question: `question ${index}`, surface: 'chatgpt', state: 'waiting' });
-    }
-    const listed = store.list();
-    expect(listed.questions).toHaveLength(20);
-    expect(listed.questions.map((q) => q.question)).not.toContain('question 0');
-    expect(listed.olderRemoved).toBe(true);
-    store.close();
-    // Persisted: a reopen (a restart) still shows the line.
-    const reopened = openWaitingPrivateQuestionStore(path, { now: () => clock.now });
-    stores.push(reopened);
-    expect(reopened.list().olderRemoved).toBe(true);
-    // Dismiss all clears it.
-    expect(reopened.dismissAll()).toBe(20);
-    expect(reopened.list()).toEqual({ questions: [], olderRemoved: false });
-  });
-
-  test('50 in all across connections, oldest first', () => {
-    const { store, clock } = open();
-    for (let index = 0; index < 55; index += 1) {
-      clock.now += 1_000;
-      const connection = (index % 5).toString(16).repeat(18);
-      store.record(store.ticket(connection), { question: `question ${index}`, surface: 'remote', state: 'waiting' });
-    }
-    const listed = store.list();
-    expect(listed.questions).toHaveLength(50);
-    expect(listed.questions.map((q) => q.question)).not.toContain('question 4');
-    expect(listed.questions.map((q) => q.question)).toContain('question 5');
-    expect(listed.olderRemoved).toBe(true);
-  });
-
-  test('256 KB in all: large records push the oldest out', () => {
-    const { store, clock } = open();
-    let bytes = 0;
-    for (let index = 0; index < 50; index += 1) {
-      clock.now += 1_000;
-      const connection = (index % 5).toString(16).repeat(18);
-      const question = `${index} ${'q'.repeat(2_000)}`;
-      store.record(store.ticket(connection), { question, surface: 'remote', state: 'waiting', selectors: { query: 's'.repeat(3_900) } });
-      bytes += question.length + 3_900;
-    }
-    expect(bytes).toBeGreaterThan(WAITING_QUESTION_LIMITS.totalBytes);
-    const listed = store.list();
-    expect(listed.questions.length).toBeLessThan(50);
-    const total = listed.questions.reduce((sum, q) => sum + q.question.length + JSON.stringify(q.selectors).length + 160, 0);
-    expect(total).toBeLessThanOrEqual(WAITING_QUESTION_LIMITS.totalBytes);
-    expect(listed.questions[0]!.question.startsWith('49 ')).toBe(true);
-    expect(listed.olderRemoved).toBe(true);
-  });
 
   test('7 days: an expired question is gone, silently', () => {
     const { store, clock } = open();

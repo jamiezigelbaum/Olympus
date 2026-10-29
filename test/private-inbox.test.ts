@@ -212,20 +212,21 @@ describe('private inbox automatic answering', () => {
 });
 
 describe('private inbox persistence and fencing', () => {
-  test('answered rows survive seven days, remain owner-only and respect the per-connection cap', () => {
+  test('answered rows survive seven days, remain owner-only, and are all kept however many there are', () => {
     const f = fixture();
     const oldest = record(f.store, { question: 'Answered oldest' });
     expect(f.store.saveAnswer(oldest, stored())).toBe(true);
     record(f.store, { question: 'Unanswered oldest' });
     f.advance(8 * 24 * 60 * 60_000);
     expect(f.store.list().questions.map(q => q.id)).toEqual([oldest.id]);
-    for (let i = 0; i < WAITING_QUESTION_LIMITS.answeredPerConnection; i++) {
+    for (let i = 0; i < 120; i++) {
       f.advance(1);
       expect(f.store.saveAnswer(record(f.store, { question: `Answered ${i}` }), stored())).toBe(true);
     }
-    expect(f.store.list().questions).toHaveLength(WAITING_QUESTION_LIMITS.answeredPerConnection);
-    expect(f.store.get(oldest.id)).toBeUndefined();
-    expect(f.store.list().olderRemoved).toBe(true);
+    // No count or byte limit drops anything (owner ruling, 2026-10-29).
+    expect(f.store.list().questions).toHaveLength(121);
+    expect(f.store.get(oldest.id)).toBeDefined();
+    expect(f.store.list().olderRemoved).toBe(false);
     expect(statSync(f.dbPath).mode & 0o777).toBe(0o600);
     expect(statSync(join(f.dir, 'data')).mode & 0o777).toBe(0o700);
   });
@@ -479,20 +480,6 @@ test('metadata listing succeeds under a writer lock and never parses answer bodi
     expect(listed.questions[0]).toMatchObject({ id: ref.id, hasResult: true });
     expect(listed.questions[0]!.result).toBeUndefined();
   } finally { lock.exec('ROLLBACK'); lock.close(); }
-});
-
-test('byte quota evicts only the saving connection even below the row quota', () => {
-  const f = fixture();
-  const victim = record(f.store, { question: 'Another connection answer' }, 'other');
-  f.store.saveAnswer(victim, stored());
-  for (let i = 0; i < 15; i++) {
-    f.advance(1);
-    f.store.saveAnswer(record(f.store, { question: `Large ${i}` }), { ...stored(), answer: 'x'.repeat(100 * 1024) });
-  }
-  expect(f.store.get(victim.id)?.result?.answer).toBe(ANSWER);
-  const own = f.store.list().questions.filter(q => q.connectionId === 'synthetic-agent');
-  expect(own.length).toBeLessThan(15);
-  expect(own.length).toBeGreaterThan(0);
 });
 
 test('an unavailable open check hides the source but preserves answer, generation and token for retry', async () => {

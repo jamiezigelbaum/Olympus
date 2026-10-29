@@ -41,24 +41,13 @@ export const WAITING_QUESTION_LIMITS = Object.freeze({
   localQuestionBytes: 8 * 1024,
   /** UTF-8 bytes of the serialized retrieval selectors (selected items can be long). */
   selectorBytes: 4_096,
-  perConnection: 20,
-  total: 50,
-  /** Every record's question and selectors together, plus a fixed allowance per record. */
-  totalBytes: 256 * 1024,
-  answeredPerConnection: 50,
-  answeredBytesPerConnection: 1024 * 1024,
-  /** Anonymous outside help only: each send spends the owner's zkAPI deposit. Private answers have no allowance. */
-  autoAnswersPerWindow: 5,
-  autoAnswerWindowMs: 60 * 60_000,
-  answeredTotal: 500,
-  answeredBytes: 16 * 1024 * 1024,
+  // No count, byte or rate limit on how many questions are asked or kept (owner ruling, 2026-10-29):
+  // the inbox holds them all. Only each item's own size is bounded.
   answerBytes: 128 * 1024,
   ttlMs: 7 * 24 * 60 * 60_000,
   /** A re-ask within this of the answer is the same ask (an app retrying); after it, the question is answered afresh. */
   reanswerAfterMs: 10 * 60_000,
 });
-/** The fixed per-record allowance in the byte total (ids, times, enums). */
-const RECORD_OVERHEAD_BYTES = 160;
 const STORE_BUSY_TIMEOUT_MS = 5_000;
 /** The revoking process's cleanup waits at most this long for the lock; the worker retries it. */
 const REVOKE_BUSY_TIMEOUT_MS = 1_000;
@@ -196,7 +185,6 @@ export interface WaitingQuestionStore {
   /** Generation fences every completion, retry and invalidation against delete/revoke/re-ask. */
   subscribe(listener: () => void): () => void;
   markRead(ref: WaitingQuestionRef): boolean;
-  reserveAutoAnswer(ref: WaitingQuestionRef, lane: 'anonymous'): boolean;
   saveAnswer(ref: WaitingQuestionRef, result: StoredPrivateAnswer, sent?: string): boolean;
   retry(ref: WaitingQuestionRef): boolean;
   invalidate(ref: WaitingQuestionRef): boolean;
@@ -364,32 +352,6 @@ export function openWaitingPrivateQuestionStore(
 
   };
 
-  const markOlderRemoved = (at: number): void => {
-    db.query('INSERT INTO waiting_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-      .run(OLDER_REMOVED_KEY, String(at));
-  };
-
-  /** Drops the oldest records beyond the per-connection, total and byte bounds. */
-  const enforceBounds = (connectionId: string, at: number): void => {
-    let removed = 0;
-    const perConnection = db.query('SELECT id FROM waiting_questions WHERE connection_id = ? AND answered_at IS NULL ORDER BY asked_at DESC, rowid DESC').all(connectionId) as Array<{ id: string }>;
-    for (const row of perConnection.slice(WAITING_QUESTION_LIMITS.perConnection)) {
-      removed += db.query('DELETE FROM waiting_questions WHERE id = ?').run(row.id).changes;
-    }
-    const all = db.query(`
-      SELECT id, LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes
-      FROM waiting_questions WHERE answered_at IS NULL ORDER BY asked_at DESC, rowid DESC
-    `).all() as Array<{ id: string; bytes: number }>;
-    let total = 0;
-    all.forEach((row, index) => {
-      total += row.bytes + RECORD_OVERHEAD_BYTES;
-      if (index >= WAITING_QUESTION_LIMITS.total || total > WAITING_QUESTION_LIMITS.totalBytes) {
-        removed += db.query('DELETE FROM waiting_questions WHERE id = ?').run(row.id).changes;
-      }
-    });
-    if (removed > 0) markOlderRemoved(at);
-  };
-
   const revokeInTransaction = (connectionId: string): number => {
     const removed = db.query('DELETE FROM waiting_questions WHERE connection_id = ?').run(connectionId).changes;
     db.query(`
@@ -471,10 +433,8 @@ export function openWaitingPrivateQuestionStore(
           `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === 'anonymous' ? 'anonymous' : 'private', input.path === 'venice' ? 'venice' : null);
           ref = { id, generation: 1, connectionId: ticket.connectionId };
         }
-        enforceBounds(ticket.connectionId, at);
         notify();
-        // The bounds may have dropped this very record (a single oversized total cannot, but stay exact).
-        return db.query('SELECT 1 FROM waiting_questions WHERE id = ?').get(ref.id) ? ref : undefined;
+        return ref;
       }).immediate();
     },
 
@@ -565,28 +525,6 @@ export function openWaitingPrivateQuestionStore(
         .run(ref.id, ref.generation, ref.connectionId).changes > 0;
     },
 
-    reserveAutoAnswer(ref, lane) {
-      // Anonymous agent calls have the same bound without consuming Private
-      // background synthesis slots. Connection ids cannot use this JSON prefix.
-      const budgetKey = lane === 'anonymous' ? JSON.stringify(['anonymous', ref.connectionId]) : ref.connectionId;
-      return db.transaction(() => {
-        if (!db.query('SELECT 1 FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL')
-          .get(ref.id, ref.generation, ref.connectionId)) return false;
-        const at = now();
-        const budget = db.query('SELECT started_at, attempts FROM auto_answer_budgets WHERE connection_id = ?')
-          .get(budgetKey) as { started_at: number; attempts: number } | null;
-        if (budget && at < budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs && budget.attempts >= WAITING_QUESTION_LIMITS.autoAnswersPerWindow) {
-          db.query('UPDATE waiting_questions SET next_attempt_at = ? WHERE id = ? AND generation = ? AND connection_id = ?')
-            .run(budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs, ref.id, ref.generation, ref.connectionId);
-          return false;
-        }
-        const fresh = !budget || at >= budget.started_at + WAITING_QUESTION_LIMITS.autoAnswerWindowMs;
-        db.query('INSERT INTO auto_answer_budgets (connection_id, started_at, attempts) VALUES (?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET started_at = excluded.started_at, attempts = excluded.attempts')
-          .run(budgetKey, fresh ? at : budget.started_at, fresh ? 1 : budget.attempts + 1);
-        return true;
-      }).immediate();
-    },
-
     saveAnswer(ref, result, sent) {
       const serialized = JSON.stringify(result);
       if (utf8Length(serialized) + utf8Length(sent ?? '') > WAITING_QUESTION_LIMITS.answerBytes) return false;
@@ -596,28 +534,7 @@ export function openWaitingPrivateQuestionStore(
       return db.transaction(() => {
         const changed = db.query('UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
           .run(serialized, now(), sent ?? null, ref.id, ref.generation, ref.connectionId).changes > 0;
-        if (!changed) return false;
-        const rows = db.query('SELECT id, connection_id, COALESCE(LENGTH(CAST(result AS BLOB)), 0) + LENGTH(CAST(question AS BLOB)) + LENGTH(CAST(selectors AS BLOB)) AS bytes FROM waiting_questions WHERE answered_at IS NOT NULL ORDER BY answered_at DESC, rowid DESC').all() as Array<{ id: string; connection_id: string; bytes: number }>;
-        let ownBytes = 0;
-        let ownCount = 0;
-        const removed = new Set<string>();
-        const remove = (id: string) => { db.query('DELETE FROM waiting_questions WHERE id = ?').run(id); removed.add(id); };
-        for (const row of rows.filter(row => row.connection_id === ref.connectionId)) {
-          ownBytes += row.bytes + RECORD_OVERHEAD_BYTES;
-          if (++ownCount > WAITING_QUESTION_LIMITS.answeredPerConnection || ownBytes > WAITING_QUESTION_LIMITS.answeredBytesPerConnection) remove(row.id);
-        }
-        let count = rows.length - removed.size;
-        let bytes = rows.filter(row => !removed.has(row.id)).reduce((sum, row) => sum + row.bytes + RECORD_OVERHEAD_BYTES, 0);
-        // Existing connections pay with their own older answers; a newcomer's
-        // first answer may replace the oldest global row.
-        const newcomer = !rows.some(row => row.connection_id === ref.connectionId && row.id !== ref.id);
-        for (const row of [...rows].reverse()) {
-          if (count <= WAITING_QUESTION_LIMITS.answeredTotal && bytes <= WAITING_QUESTION_LIMITS.answeredBytes) break;
-          if ((!newcomer && row.connection_id !== ref.connectionId) || removed.has(row.id)) continue;
-          remove(row.id); count--; bytes -= row.bytes + RECORD_OVERHEAD_BYTES;
-        }
-        if (removed.size) markOlderRemoved(now());
-        return !removed.has(ref.id);
+        return changed;
       }).immediate();
     },
 
