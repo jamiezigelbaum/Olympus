@@ -93433,6 +93433,8 @@ function providerFromCorpusId(corpusId) {
       return "gmail";
     if (parts[1] === "drive")
       return "google_drive";
+    if (parts[1] === "local" && parts[2] === "files")
+      return "local_files";
     return parts[1] ?? "unknown";
   }
   return parts[0] || "unknown";

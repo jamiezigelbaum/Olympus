@@ -45,6 +45,11 @@ export interface ClientQuestion {
   panel_expect?: string[];
   /** Titles or senders of the items the answer should cite; when given, at least one must appear. */
   cite?: string[];
+  /**
+   * Another question's forbidden strings this one may say, because an item it reads says them too (a Personal pickup at
+   * 18:00 beside a Private appointment at 18:00). Never lifts the question's own forbid list.
+   */
+  may_say?: string[];
   /** The clients this question is asked in; all when left out. */
   clients?: WebClientId[];
 }
@@ -153,13 +158,20 @@ export const SECRET_ANSWER_LEAD = new RegExp([
 
 export type OlympusUse = { used: boolean; detail: string } | { unreadable: string };
 
-/** The strings a question is held not to say: its own forbidden ones, and every other question's, less those it expects. */
+/**
+ * The strings a question is held not to say: its own forbidden ones, and every other question's, less those it expects or
+ * may say. A string its own prompt contains is never a leak: the reply may repeat the question.
+ */
 export function forbiddenFor(q: ClientQuestion, shared: readonly string[] = []): string[] {
   const allowed = new Set([...(q.expect ?? []), ...(q.cite ?? [])].map(fold));
+  const mayShare = new Set((q.may_say ?? []).map(fold));
   const out: string[] = [];
-  for (const value of [...(q.forbid ?? []), ...shared]) {
-    if (value && !allowed.has(fold(value)) && !out.some((have) => fold(have) === fold(value))) out.push(value);
-  }
+  const add = (value: string, own: boolean): void => {
+    if (!value || allowed.has(fold(value)) || (!own && mayShare.has(fold(value))) || turnContains(q.prompt, value)) return;
+    if (!out.some((have) => fold(have) === fold(value))) out.push(value);
+  };
+  for (const value of q.forbid ?? []) add(value, true);
+  for (const value of shared) add(value, false);
   return out;
 }
 
@@ -253,10 +265,10 @@ export function parseClientQuestions(raw: unknown): ClientQuestion[] {
     if (q.kind !== 'personal' && q.kind !== 'private' && q.kind !== 'secret') throw new Error(`question ${id}: kind is personal, private or secret`);
     const clients = strings(q.clients, 'clients', id);
     if (clients?.some((client) => !WEB_CLIENT_IDS.includes(client as WebClientId))) throw new Error(`question ${id}: clients are ${WEB_CLIENT_IDS.join(', ')}`);
-    const optional = (field: 'expect' | 'forbid' | 'panel_expect' | 'cite') => { const value = strings(q[field], field, id); return value ? { [field]: value } : {}; };
+    const optional = (field: 'expect' | 'forbid' | 'panel_expect' | 'cite' | 'may_say') => { const value = strings(q[field], field, id); return value ? { [field]: value } : {}; };
     return {
       id, prompt: q.prompt, kind: q.kind,
-      ...optional('expect'), ...optional('forbid'), ...optional('panel_expect'), ...optional('cite'),
+      ...optional('expect'), ...optional('forbid'), ...optional('panel_expect'), ...optional('cite'), ...optional('may_say'),
       ...(clients ? { clients: clients as WebClientId[] } : {}),
     };
   });
