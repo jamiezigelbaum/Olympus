@@ -48344,7 +48344,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         expire(at);
         const existing = db.query("SELECT * FROM waiting_questions WHERE dedupe_key = ?").get(dedupeKey);
         let ref;
-        if (existing?.result && JSON.parse(existing.result).status === "answered") {
+        if (existing?.result && JSON.parse(existing.result).status === "answered" && at - (existing.answered_at ?? at) < WAITING_QUESTION_LIMITS.reanswerAfterMs) {
           db.query("UPDATE waiting_questions SET asked_at = ? WHERE id = ?").run(at, existing.id);
           return { id: existing.id, generation: existing.generation, connectionId: ticket.connectionId };
         }
@@ -48724,7 +48724,8 @@ var init_waiting_private_questions = __esm(() => {
     answeredTotal: 500,
     answeredBytes: 16 * 1024 * 1024,
     answerBytes: 128 * 1024,
-    ttlMs: 7 * 24 * 60 * 60000
+    ttlMs: 7 * 24 * 60 * 60000,
+    reanswerAfterMs: 10 * 60000
   });
   SELECTOR_TEXT_FIELDS = [
     "query",

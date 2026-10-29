@@ -53,6 +53,8 @@ export const WAITING_QUESTION_LIMITS = Object.freeze({
   answeredBytes: 16 * 1024 * 1024,
   answerBytes: 128 * 1024,
   ttlMs: 7 * 24 * 60 * 60_000,
+  /** A re-ask within this of the answer is the same ask (an app retrying); after it, the question is answered afresh. */
+  reanswerAfterMs: 10 * 60_000,
 });
 /** The fixed per-record allowance in the byte total (ids, times, enums). */
 const RECORD_OVERHEAD_BYTES = 160;
@@ -436,9 +438,12 @@ export function openWaitingPrivateQuestionStore(
         expire(at);
         const existing = db.query('SELECT * FROM waiting_questions WHERE dedupe_key = ?').get(dedupeKey) as QuestionRow | null;
         let ref: WaitingQuestionRef;
-        if (existing?.result && JSON.parse(existing.result).status === 'answered') {
-          // Eligibility is checked at every read/open. Re-asking cannot erase
-          // a retained answer or restart its generation; only withdrawal can.
+        if (existing?.result && JSON.parse(existing.result).status === 'answered'
+          && at - (existing.answered_at ?? at) < WAITING_QUESTION_LIMITS.reanswerAfterMs) {
+          // Eligibility is checked at every read/open. An app retrying the
+          // same ask keeps its answer. A later re-ask is answered afresh: a
+          // retained answer from before a new build, new mail or a policy
+          // change was handed back as current (live canary, 2026-10-29).
           db.query('UPDATE waiting_questions SET asked_at = ? WHERE id = ?').run(at, existing.id);
           return { id: existing.id, generation: existing.generation, connectionId: ticket.connectionId };
         }

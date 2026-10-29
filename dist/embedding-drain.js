@@ -37893,7 +37893,8 @@ var init_waiting_private_questions = __esm(() => {
     answeredTotal: 500,
     answeredBytes: 16 * 1024 * 1024,
     answerBytes: 128 * 1024,
-    ttlMs: 7 * 24 * 60 * 60000
+    ttlMs: 7 * 24 * 60 * 60000,
+    reanswerAfterMs: 10 * 60000
   });
 });
 

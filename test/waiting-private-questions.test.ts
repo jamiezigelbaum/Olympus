@@ -218,6 +218,21 @@ describe('waiting private questions: bounds, expiry and dismiss', () => {
     expect(store.list().questions).toHaveLength(1);
   });
 
+  test('an app retrying keeps the answer; a re-ask later is answered afresh', () => {
+    // Live canary 2026-10-29: re-asks were handed yesterday's answers, made before the Secret fix.
+    const { store, clock } = open();
+    const ask = () => store.record(store.ticket(CONN_A), { question: 'Where is the Wi-Fi password?', surface: 'remote', state: 'waiting' })!;
+    const first = ask();
+    expect(store.saveAnswer(first, { status: 'answered', answer: 'Old reply', citations: [], read: [], leftOut: [], unanswered: [] })).toBe(true);
+    clock.now += WAITING_QUESTION_LIMITS.reanswerAfterMs - 1;
+    expect(ask()).toEqual(first);
+    expect(store.list().questions[0]).toMatchObject({ generation: 1, answeredAt: expect.any(String) });
+    clock.now += 1;
+    const again = ask();
+    expect(again).toEqual({ ...first, generation: 2 });
+    expect(store.list().questions[0]).not.toHaveProperty('answeredAt');
+  });
+
   test('mark seen', () => {
     const { store } = open();
     const ref = store.record(store.ticket(CONN_A), { question: 'q', surface: 'chatgpt', state: 'waiting' })!;
