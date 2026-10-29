@@ -18352,53 +18352,6 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
-
-// src/workers/connector-store/principal.ts
-var init_principal = () => {};
-
-// src/workers/connector-store/filter-capabilities.ts
-var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
-var init_filter_capabilities = __esm(() => {
-  init_principal();
-  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
-    "corpus_id",
-    "query",
-    "retrieval_mode",
-    "max_results",
-    "account",
-    "conversation_id",
-    "sender_id",
-    "sender_label",
-    "authored_after",
-    "authored_before",
-    "after",
-    "before",
-    "trust_domain",
-    "all_tiers"
-  ];
-  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
-    "approved_scope_key",
-    "chat_scope",
-    "participant_id",
-    "include_deleted",
-    "attachment_type",
-    "include_locators",
-    "chat_title",
-    "chat_title_hint",
-    "folder_id",
-    "folder_name"
-  ];
-  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
-    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
-    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
-  ]);
-});
-
-// src/workers/connector-store/index.ts
-var init_connector_store = __esm(() => {
-  init_local_index();
-  init_filter_capabilities();
-});
 // src/workers/connector-store/stored-names.ts
 var init_stored_names = __esm(() => {
   init_tier_ledger();
@@ -18874,7 +18827,6 @@ var init_tiered_store_set = __esm(() => {
 
 // src/workers/readwise/live-sync.ts
 var init_live_sync = __esm(() => {
-  init_connector_store();
   init_tiered_store_set();
   init_api();
   init_connector();
@@ -18888,6 +18840,53 @@ var init_readwise = __esm(() => {
   init_connector();
   init_live_control();
   init_live_sync();
+});
+
+// src/workers/connector-store/principal.ts
+var init_principal = () => {};
+
+// src/workers/connector-store/filter-capabilities.ts
+var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
+var init_filter_capabilities = __esm(() => {
+  init_principal();
+  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
+    "corpus_id",
+    "query",
+    "retrieval_mode",
+    "max_results",
+    "account",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "authored_after",
+    "authored_before",
+    "after",
+    "before",
+    "trust_domain",
+    "all_tiers"
+  ];
+  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
+    "approved_scope_key",
+    "chat_scope",
+    "participant_id",
+    "include_deleted",
+    "attachment_type",
+    "include_locators",
+    "chat_title",
+    "chat_title_hint",
+    "folder_id",
+    "folder_name"
+  ];
+  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
+    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
+    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
+  ]);
+});
+
+// src/workers/connector-store/index.ts
+var init_connector_store = __esm(() => {
+  init_local_index();
+  init_filter_capabilities();
 });
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS;
@@ -19438,7 +19437,6 @@ var init_window_diagnostic = __esm(() => {
 
 // src/workers/x-bookmarks/live-sync.ts
 var init_live_sync2 = __esm(() => {
-  init_connector_store();
   init_tiered_store_set();
   init_api_connector();
   init_live_control2();

@@ -17,6 +17,7 @@ import {
   type XBookmarkPost,
   type XBookmarksLiveSyncConfig,
 } from '../src/workers/x-bookmarks/index.ts';
+import { xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'personal';
 const NOW = new Date('2026-08-17T15:00:00.000Z');
@@ -102,6 +103,7 @@ function stuckProvider(pageSizes: number[], overlapId?: string) {
 function handlerFor(store: LocalConnectorStore, usage: LocalXBookmarksApiUsageStore, client: ReturnType<typeof stuckProvider>) {
   return createXBookmarksConnectorStoreSyncHandler({
     store,
+    tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
     usageStore: usage,
     embeddingProvider: fakeEmbeddingProvider(),
     account: ACCOUNT,

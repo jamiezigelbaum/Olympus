@@ -12,6 +12,7 @@ import {
   type XBookmarkPost,
   type XBookmarksLiveSyncConfig,
 } from '../src/workers/x-bookmarks/index.ts';
+import { xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'personal';
 const ATTEMPTED_AT = new Date('2026-08-18T10:00:00.000Z');
@@ -25,6 +26,7 @@ describe('X reconciliation truncation-ladder exhaustion', () => {
     try {
       const handler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         embeddingProvider: fakeEmbeddingProvider(),
         sourceClient: {

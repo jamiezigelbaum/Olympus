@@ -21,6 +21,7 @@ import {
   type ReadwiseFetch,
 } from '../src/workers/readwise/index.ts';
 import { DeterministicSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { readwiseTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'personal';
 const NOW = new Date('2026-08-01T00:00:00.000Z');
@@ -70,6 +71,7 @@ function harness() {
   const calls: string[] = [];
   const handler = createReadwiseConnectorStoreSyncHandler({
     store,
+    tierSet: readwiseTestTierSet(store),
     embeddingProvider: new DeterministicSourceEmbeddingProvider({
       modelId: 'readwise-traversal-test',
       epochId: 'cloud:test:readwise-traversal-test:v1',

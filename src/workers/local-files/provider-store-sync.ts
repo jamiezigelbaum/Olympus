@@ -93,7 +93,7 @@ export interface LocalFilesProviderStoreSyncHandlerOptions {
   hub?: WatchHub;
   snapshotDir: string;
   ignore?: readonly string[];
-  tierSet?: TieredStoreSet;
+  tierSet: TieredStoreSet;
   embeddingProvider?: SourceEmbeddingProvider;
   /**
    * Asked before each pass. The worker's clean-up of what an earlier version
@@ -131,44 +131,37 @@ export function localFilesConnectorIdForScope(
  * for. A deleted path names a file or a whole folder whose items may sit in any
  * tier store, one item possibly in several (a names copy and a content copy).
  */
-export function localFilesStoreView(store: LocalConnectorStore, tierSet?: TieredStoreSet): LocalFilesStoreView {
-  return tierSet
-    ? {
-        activeIdentityForLocatorIfIndexed(input) {
-          for (const domain of TIER_DOMAIN_ORDER) {
-            const identity = tierSet.store(domain)?.activeIdentityForLocatorIfIndexed(input);
-            if (identity) return identity;
-          }
-          return undefined;
-        },
-        activeItemsUnderLocatorIfIndexed(input) {
-          const union = new Map<string, { identity: import('../../core/source-index/types.ts').SourceItemIdentity; locatorUri: string }>();
-          for (const domain of TIER_DOMAIN_ORDER) {
-            for (const descendant of tierSet.store(domain)?.activeItemsUnderLocatorIfIndexed(input) ?? []) {
-              if (!union.has(descendant.identity.providerItemId)) union.set(descendant.identity.providerItemId, descendant);
-            }
-          }
-          return [...union.values()];
-        },
-        activeItemsDirectlyUnderRootIfIndexed(input) {
-          const union = new Map<string, { identity: import('../../core/source-index/types.ts').SourceItemIdentity; locatorUri: string }>();
-          for (const domain of TIER_DOMAIN_ORDER) {
-            for (const child of tierSet.store(domain)?.activeItemsDirectlyUnderRootIfIndexed(input) ?? []) {
-              if (!union.has(child.identity.providerItemId)) union.set(child.identity.providerItemId, child);
-            }
-          }
-          return [...union.values()];
-        },
-        lookupsReady() {
-          return TIER_DOMAIN_ORDER.every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
-        },
+export function localFilesStoreView(tierSet: TieredStoreSet): LocalFilesStoreView {
+  return {
+    activeIdentityForLocatorIfIndexed(input) {
+      for (const domain of TIER_DOMAIN_ORDER) {
+        const identity = tierSet.store(domain)?.activeIdentityForLocatorIfIndexed(input);
+        if (identity) return identity;
       }
-    : {
-        activeIdentityForLocatorIfIndexed: (input) => store.activeIdentityForLocatorIfIndexed(input),
-        activeItemsUnderLocatorIfIndexed: (input) => store.activeItemsUnderLocatorIfIndexed(input),
-        activeItemsDirectlyUnderRootIfIndexed: (input) => store.activeItemsDirectlyUnderRootIfIndexed(input),
-        lookupsReady: () => store.locatorIdentityIndexReady(),
-      };
+      return undefined;
+    },
+    activeItemsUnderLocatorIfIndexed(input) {
+      const union = new Map<string, { identity: import('../../core/source-index/types.ts').SourceItemIdentity; locatorUri: string }>();
+      for (const domain of TIER_DOMAIN_ORDER) {
+        for (const descendant of tierSet.store(domain)?.activeItemsUnderLocatorIfIndexed(input) ?? []) {
+          if (!union.has(descendant.identity.providerItemId)) union.set(descendant.identity.providerItemId, descendant);
+        }
+      }
+      return [...union.values()];
+    },
+    activeItemsDirectlyUnderRootIfIndexed(input) {
+      const union = new Map<string, { identity: import('../../core/source-index/types.ts').SourceItemIdentity; locatorUri: string }>();
+      for (const domain of TIER_DOMAIN_ORDER) {
+        for (const child of tierSet.store(domain)?.activeItemsDirectlyUnderRootIfIndexed(input) ?? []) {
+          if (!union.has(child.identity.providerItemId)) union.set(child.identity.providerItemId, child);
+        }
+      }
+      return [...union.values()];
+    },
+    lookupsReady() {
+      return TIER_DOMAIN_ORDER.every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
+    },
+  };
 }
 
 export function createLocalFilesProviderStoreSyncHandler(
@@ -178,12 +171,12 @@ export function createLocalFilesProviderStoreSyncHandler(
     throw new Error('Local files secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
   const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec('secure_local')?.store !== options.store) {
+  if (tierSet.legSpec('secure_local')?.store !== options.store) {
     throw new Error('The local files tier set\'s secure leg must be the lane\'s own store.');
   }
   const connectorIdFor = (approvedScopeKey: string): string => localFilesConnectorIdForScope(approvedScopeKey, options.scope);
 
-  const storeView = localFilesStoreView(options.store, tierSet);
+  const storeView = localFilesStoreView(tierSet);
 
   return {
     connectorIdForScope: connectorIdFor,
@@ -195,7 +188,7 @@ export function createLocalFilesProviderStoreSyncHandler(
       const approvedScopeKey = request.approved_scope_key.trim();
       const root = localFilesRootOfApprovedScopeKey(approvedScopeKey);
       const connectorId = connectorIdFor(approvedScopeKey);
-      const priorCursor = tierSet?.committedCursor(connectorId)?.cursor
+      const priorCursor = tierSet.committedCursor(connectorId)?.cursor
         ?? options.store.lastCompletedSyncRun(connectorId)?.cursor
         ?? checkpointCursor(request.checkpoint, connectorId)
         ?? undefined;
@@ -228,10 +221,6 @@ export function createLocalFilesProviderStoreSyncHandler(
           }),
           ...(cursor ? { cursor } : {}),
         };
-        if (!tierSet) {
-          const sync = await options.store.syncFromConnector(observed.connector, syncOptions);
-          return { sync, legs: [sync], completed: observed.completed(), walk, full };
-        }
         const run = await tierSet.sync(observed.connector, syncOptions);
         const secure = run.byDomain.secure_local;
         if (!secure) throw new Error('The local files secure store did not run.');

@@ -3137,9 +3137,9 @@ export async function main(): Promise<void> {
   const dropboxScopeRef = dropboxHandle && fileSourceScopeAuthority
     ? fileSourceScopeAuthority.policyRef('dropbox.files')
     : undefined;
-  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority
+  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxTierLane && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority
     ? createDropboxProviderStoreSyncHandler({
-        ...(dropboxTierLane ? { tierSet: dropboxTierLane.set } : {}),
+        tierSet: dropboxTierLane.set,
         store: dropboxConnectorStore,
         account: dropboxProviderAccount,
         credentialHandle: dropboxHandle.handle,
@@ -3217,24 +3217,23 @@ export async function main(): Promise<void> {
   // Olympus's own folders are never indexed, and what an earlier version indexed
   // inside one (a folder the person had chosen by name) is removed here: before
   // the worker answers anything, and again with each pass until none is left.
-  const localFilesOwnRootsCleanup = localFilesConnectorStore
+  const localFilesOwnRootsCleanup = localFilesConnectorStore && localFilesTierLane
     ? createLocalFilesOwnRootsCleanup({
-        store: localFilesConnectorStore,
-        ...(localFilesTierLane ? { tierSet: localFilesTierLane.set } : {}),
+        tierSet: localFilesTierLane.set,
         context: localFilesExclusionContext,
         log: (message) => console.warn(`[local-files] ${message}`),
       })
     : undefined;
   let localFilesSyncCache: { key: string; handler: ReturnType<typeof createLocalFilesProviderStoreSyncHandler> } | undefined;
   const localFilesSyncFor = (ref: SourceScopePolicyRef) => {
-    if (!localFilesConnectorStore || !fileSourceScopeAuthority) return undefined;
+    if (!localFilesConnectorStore || !localFilesTierLane || !fileSourceScopeAuthority) return undefined;
     const key = `${ref.accountGeneration}:${ref.revision}`;
     if (localFilesSyncCache?.key === key) return localFilesSyncCache.handler;
     // The watch folder is the account's raw state, written only from here on. The store is open
     // (the guard above), so the account is already placed; this keeps that true by construction.
     recordAccountPlacement({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesWatchDir(process.env));
     const handler = createLocalFilesProviderStoreSyncHandler({
-      ...(localFilesTierLane ? { tierSet: localFilesTierLane.set } : {}),
+      tierSet: localFilesTierLane.set,
       store: localFilesConnectorStore,
       scope: createScopeBoundLocalFilesContentScope({ authority: fileSourceScopeAuthority, ref, context: localFilesExclusionContext }),
       volumes: localFilesVolumes,
@@ -3343,9 +3342,9 @@ export async function main(): Promise<void> {
     },
     readChild: whatsappReadChild,
   }));
-  const whatsappConnectorStoreSync: WhatsAppConnectorStoreSyncHandler | undefined = whatsappConnectorStore
+  const whatsappConnectorStoreSync: WhatsAppConnectorStoreSyncHandler | undefined = whatsappConnectorStore && whatsappTierSet
     ? createWhatsAppConnectorStoreSyncHandler({
-        ...(whatsappTierSet ? { tierSet: whatsappTierSet } : {}),
+        tierSet: whatsappTierSet,
         store: whatsappConnectorStore,
         account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
         env: process.env,
@@ -4832,7 +4831,7 @@ export async function main(): Promise<void> {
       ? fileSourceScopeAuthority.policyRef('dropbox.files')
       : undefined;
     const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef
-      && fileSourceScopeAuthority && dropboxConnectorStore
+      && fileSourceScopeAuthority && dropboxConnectorStore && dropboxTierLane
       ? currentDropboxHandle.handle === dropboxHandle?.handle
         && currentDropboxScopeRef.sourceId === dropboxScopeRef?.sourceId
         && currentDropboxScopeRef.accountGeneration === dropboxScopeRef?.accountGeneration
@@ -4840,7 +4839,7 @@ export async function main(): Promise<void> {
         && dropboxProviderStoreSync
         ? dropboxProviderStoreSync
         : createDropboxProviderStoreSyncHandler({
-            ...(dropboxTierLane ? { tierSet: dropboxTierLane.set } : {}),
+            tierSet: dropboxTierLane.set,
             store: dropboxConnectorStore,
             account: currentDropboxHandle.accountRole?.trim() || dropboxFilesAccount || 'personal',
             credentialHandle: currentDropboxHandle.handle,
@@ -7156,6 +7155,8 @@ export function createReadwiseConnectorStoreRuntime(options: {
   requestBudget?: ReadwiseDailyRequestBudget;
   requestBudgetStatePath?: string;
   env?: Record<string, string | undefined>;
+  /** The lane's per-tier stores over its store: every item is judged on its own. */
+  tierSetFor: (store: LocalConnectorStore) => TieredStoreSet;
 }): ReadwiseConnectorStoreRuntime | undefined {
   if (!options.enabled || !options.embeddingProvider) return undefined;
   const handle = options.handle;
@@ -7186,7 +7187,7 @@ export function createRefreshableReadwiseConnectorStoreRuntime(options: {
   requestBudgetStatePath?: string;
   env?: Record<string, string | undefined>;
   /** The lane's per-tier stores over its store, built once (P1c). */
-  tierSetFor?: (store: LocalConnectorStore) => TieredStoreSet | undefined;
+  tierSetFor: (store: LocalConnectorStore) => TieredStoreSet;
 }): RefreshableReadwiseConnectorStoreRuntime | undefined {
   const embeddingProvider = options.embeddingProvider;
   if (!options.enabled || !embeddingProvider) return undefined;
@@ -7203,12 +7204,12 @@ export function createRefreshableReadwiseConnectorStoreRuntime(options: {
     options.dbPath ?? resolvedStorePath(READWISE_SOURCE_ID, 'internal', env),
     env,
   );
-  const tierSet = options.tierSetFor?.(store);
+  const tierSet = options.tierSetFor(store);
   const buildSync = (handle: ConnectedCredentialHandle | undefined): ReadwiseConnectorStoreSyncHandler =>
     createReadwiseConnectorStoreSyncHandler({
       store,
       embeddingProvider,
-      ...(tierSet ? { tierSet } : {}),
+      tierSet,
       account: options.account?.trim() || handle?.accountRole?.trim() || 'personal',
       requestBudget,
       ...(env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE?.trim()
@@ -7258,6 +7259,8 @@ export function createXBookmarksConnectorStoreRuntime(options: {
   dbPath?: string;
   usageStore?: LocalXBookmarksApiUsageStore;
   env?: Record<string, string | undefined>;
+  /** The lane's per-tier stores over its store: every item is judged on its own. */
+  tierSetFor: (store: LocalConnectorStore) => TieredStoreSet;
 }): XBookmarksConnectorStoreRuntime | undefined {
   if (!xBookmarksRuntimeBinding(options)) return undefined;
   return createRefreshableXBookmarksConnectorStoreRuntime(options)?.runtimeForHandle(options.handle);
@@ -7280,7 +7283,7 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
   reconcileStateStore?: LocalXBookmarksReconcileStateStore;
   env?: Record<string, string | undefined>;
   /** The lane's per-tier stores over its store, built once (P1c). */
-  tierSetFor?: (store: LocalConnectorStore) => TieredStoreSet | undefined;
+  tierSetFor: (store: LocalConnectorStore) => TieredStoreSet;
 }): RefreshableXBookmarksConnectorStoreRuntime | undefined {
   const embeddingProvider = options.embeddingProvider;
   if (!options.enabled || !embeddingProvider) return undefined;
@@ -7289,7 +7292,7 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
     options.dbPath ?? resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'internal', env),
     env,
   );
-  const tierSet = options.tierSetFor?.(store);
+  const tierSet = options.tierSetFor(store);
   let usageStore = options.usageStore;
   let reconcileStateStore = options.reconcileStateStore;
   let cachedKey: string | undefined;
@@ -7322,7 +7325,7 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
         usageStore,
         reconcileStateStore,
         env,
-        ...(tierSet ? { tierSet } : {}),
+        tierSet,
       });
       cachedKey = key;
       return cachedRuntime;
@@ -7372,7 +7375,7 @@ function bindXBookmarksConnectorStoreRuntime(options: {
   usageStore: LocalXBookmarksApiUsageStore;
   reconcileStateStore: LocalXBookmarksReconcileStateStore;
   env: Record<string, string | undefined>;
-  tierSet?: TieredStoreSet;
+  tierSet: TieredStoreSet;
 }): XBookmarksConnectorStoreRuntime {
   const env = options.env;
   // One broker instance owns both scheduled acquisition and operator recovery.
@@ -7383,7 +7386,7 @@ function bindXBookmarksConnectorStoreRuntime(options: {
   const sync = createXBookmarksConnectorStoreSyncHandler({
     store: options.store,
     embeddingProvider: options.embeddingProvider,
-    ...(options.tierSet ? { tierSet: options.tierSet } : {}),
+    tierSet: options.tierSet,
     credentialHandle: options.handle.handle,
     account: options.principalAccount,
     userId: options.providerUserId,
@@ -7397,7 +7400,7 @@ function bindXBookmarksConnectorStoreRuntime(options: {
   });
   const contentRecovery = createXBookmarksContentRecoveryHandler({
     store: options.store,
-    ...(options.tierSet ? { tierLedger: options.tierSet.ledger } : {}),
+    tierLedger: options.tierSet.ledger,
     usageStore: options.usageStore,
     reconcileStateStore: options.reconcileStateStore,
     embeddingProvider: options.embeddingProvider,

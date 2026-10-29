@@ -27,6 +27,7 @@ import {
   type XBookmarksLiveSyncConfig,
 } from '../src/workers/x-bookmarks/index.ts';
 import { seedCanonicalXBookmarksSnapshot } from './helpers/x-bookmarks-reconcile.ts';
+import { xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const ACCOUNT = 'personal';
 
@@ -372,6 +373,7 @@ describe('X bookmarks thin connector', () => {
     usage.recordHeadCheckpoint(ACCOUNT, 'stored', originalCheckpointAt);
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       account: ACCOUNT,
@@ -425,6 +427,7 @@ describe('X bookmarks thin connector', () => {
     const headStarted = new Promise<void>((resolve) => { headRequested = resolve; });
     const head = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       reconcileStateStore: state,
       embeddingProvider: fakeEmbeddingProvider(),
@@ -448,6 +451,7 @@ describe('X bookmarks thin connector', () => {
     });
     const reconcile = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       reconcileStateStore: state,
       embeddingProvider: fakeEmbeddingProvider(),
@@ -500,6 +504,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     };
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: embedding }),
       usageStore: usage,
       embeddingProvider: embedding,
       sourceClient: client,
@@ -575,6 +580,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     };
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: embedding }),
       usageStore: usage,
       embeddingProvider: embedding,
       sourceClient: client,
@@ -635,6 +641,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
       const client = paginatedCurrentPostsClient(() => currentPosts);
       const handler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         reconcileStateStore: reconcileState,
         embeddingProvider: fakeEmbeddingProvider(),
@@ -688,6 +695,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     const client = paginatedCurrentPostsClient(() => currentPosts);
     const handlerOptions = {
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       reconcileStateStore: reconcileState,
       embeddingProvider: fakeEmbeddingProvider(),
@@ -754,6 +762,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     };
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       sourceClient: client,
@@ -798,6 +807,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     ));
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       sourceClient: {
@@ -846,7 +856,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
       },
     };
     const handler = createXBookmarksConnectorStoreSyncHandler({
-      store, usageStore: usage, embeddingProvider: embedding,
+      store, tierSet: xBookmarksTestTierSet(store, { embeddingProvider: embedding }), usageStore: usage, embeddingProvider: embedding,
       sourceClient: client, account: ACCOUNT, userId: 'provider-user-1', config: testConfig(),
       now: () => new Date('2026-07-18T15:00:00.000Z'),
     });
@@ -890,6 +900,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     const post = bookmark('stable-post', 'stable daily content marker');
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: embedding }),
       usageStore: usage,
       embeddingProvider: embedding,
       sourceClient: {
@@ -934,6 +945,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     };
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: embedding }),
       usageStore: usage,
       reconcileStateStore: state,
       embeddingProvider: embedding,
@@ -1020,6 +1032,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
       let membershipCalls = 0;
       const handler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         reconcileStateStore: state,
         embeddingProvider: fakeEmbeddingProvider(),
@@ -1268,6 +1281,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     let fullGlobal = false;
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       reconcileStateStore: state,
       embeddingProvider: fakeEmbeddingProvider(),
@@ -1340,6 +1354,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     }));
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       reconcileStateStore: state,
       embeddingProvider: fakeEmbeddingProvider(),
@@ -1407,6 +1422,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
       }), { fetchContent: true });
       const handler = createXBookmarksConnectorStoreSyncHandler({
         store,
+        tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
         usageStore: usage,
         embeddingProvider: fakeEmbeddingProvider(),
         sourceClient: {
@@ -1468,6 +1484,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     };
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       sourceClient: client,
@@ -1782,6 +1799,7 @@ describe('X bookmarks API usage and response controls', () => {
     });
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       sourceClient: client,
@@ -1835,6 +1853,7 @@ describe('X bookmarks API usage and response controls', () => {
     const at = (iso: string) => new Date(iso);
     const midnightHandler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       sourceClient: client,
@@ -1853,6 +1872,7 @@ describe('X bookmarks API usage and response controls', () => {
 
     const eveningHandler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       sourceClient: client,
@@ -2020,6 +2040,7 @@ describe('X bookmarks API usage and response controls', () => {
     const usage = new LocalXBookmarksApiUsageStore(':memory:');
     const handler = createXBookmarksConnectorStoreSyncHandler({
       store,
+      tierSet: xBookmarksTestTierSet(store, { embeddingProvider: fakeEmbeddingProvider() }),
       usageStore: usage,
       embeddingProvider: fakeEmbeddingProvider(),
       sourceClient: client,

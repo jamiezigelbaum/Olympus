@@ -20,7 +20,9 @@ import { rehomeChatLaneOverrides } from '../src/workers/connector-store/tiered-s
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import {
   createDropboxProviderStoreSyncHandler,
+  createDropboxSourceConnector,
   createDropboxTierLane,
+  dropboxConnectorIdForScope,
   type DropboxMetadataClient,
   type DropboxMetadataPage,
 } from '../src/workers/dropbox-files/index.ts';
@@ -43,6 +45,7 @@ import {
 import { X_BOOKMARKS_STORE_PLACEMENT } from '../src/workers/x-bookmarks/connector.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { DROPBOX_STORE_PLACEMENT } from '../src/workers/dropbox-files/connector-store.ts';
 
 /** The owner's privacy profile: an always-Private Dropbox folder. */
 function ownerRules() {
@@ -164,9 +167,13 @@ describe('P1c Dropbox lane', () => {
     const securePath = join(root, 'dropbox-secure.sqlite');
     // Before per-item routing: the lane's one secure store.
     {
+      // Written as that version wrote it: the connector straight into the store.
       const store = new LocalConnectorStore({ dbPath: securePath, corpusId: 'secure_local.dropbox.files', family: 'file', trustDomain: 'secure_local' });
-      await createDropboxProviderStoreSyncHandler({ store, account: 'personal', broker, metadataClient })
-        .pull({ approved_scope_key: 'dropbox.personal:/' });
+      const connectorId = dropboxConnectorIdForScope('personal', 'dropbox.personal:/', undefined);
+      await store.syncFromConnector(
+        createDropboxSourceConnector({ account: 'personal', approvedScopeKey: 'dropbox.personal:/', connectorId, broker, metadataClient }),
+        { placement: DROPBOX_STORE_PLACEMENT, fetchContent: false },
+      );
       store.close();
     }
     const before = snapshotStore(securePath);

@@ -29,6 +29,7 @@ import {
 import { createLocalFilesConnectorStore, localFilesWatchDir } from '../src/workers/local-files/store.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { WatchHub } from '../src/workers/local-files/watch-hub.ts';
+import { localFilesTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
@@ -82,6 +83,7 @@ test('after the move, changes made while Olympus was stopped are found from the 
   });
   const handler = (store: LocalConnectorStore, hub: WatchHub) => createLocalFilesProviderStoreSyncHandler({
     store,
+    tierSet: localFilesTestTierSet(store),
     scope,
     volumes: new VolumeResolver(),
     snapshotDir: localFilesWatchDir(env),

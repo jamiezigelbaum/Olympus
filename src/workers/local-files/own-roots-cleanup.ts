@@ -45,9 +45,8 @@ const DEFAULT_PAGE = 1_000;
 const DEFAULT_MAX_SCANNED = 1_000_000;
 
 export interface LocalFilesOwnRootsCleanupOptions {
-  store: LocalConnectorStore;
-  /** The lane's tier stores, when it has them: the items may sit in any of them. */
-  tierSet?: TieredStoreSet;
+  /** The lane's tier stores: the items may sit in any of them. */
+  tierSet: TieredStoreSet;
   /** The own folders, and how each volume treats case. */
   context: Pick<DefaultExclusionContext, 'ownRoots' | 'platform' | 'volumeIgnoresCase'>;
   /** At most this many items are removed by one run. */
@@ -85,17 +84,16 @@ export interface LocalFilesOwnRootsCleanup {
 }
 
 export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsCleanupOptions): LocalFilesOwnRootsCleanup {
-  const { store, tierSet, context } = options;
+  const { tierSet, context } = options;
   const maxItems = Math.max(1, options.maxItems ?? DEFAULT_MAX_ITEMS);
   const maxMs = Math.max(0, options.maxMs ?? DEFAULT_MAX_MS);
   const batchSize = Math.max(1, options.batchSize ?? DEFAULT_BATCH);
   const pageSize = Math.max(1, options.pageSize ?? DEFAULT_PAGE);
   const maxScanned = Math.max(1, options.maxScanned ?? DEFAULT_MAX_SCANNED);
-  const view = localFilesStoreView(store, tierSet);
+  const view = localFilesStoreView(tierSet);
   // Every store the items may sit in, each walked under every own folder.
-  const stores: LocalConnectorStore[] = tierSet
-    ? TIER_DOMAIN_ORDER.flatMap((domain) => { const leg = tierSet.store(domain); return leg ? [leg] : []; })
-    : [store];
+  const stores: LocalConnectorStore[] = TIER_DOMAIN_ORDER
+    .flatMap((domain) => { const leg = tierSet.store(domain); return leg ? [leg] : []; });
   interface Walk { store: LocalConnectorStore; root: string; after?: string; done: boolean }
   const walks: Walk[] = stores.flatMap((leg) => (context.ownRoots ?? []).map((root): Walk => ({ store: leg, root, done: false })));
   let finished = walks.length === 0;
@@ -121,8 +119,7 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
     const connector = deletionsConnector(batch.map((item) => localFilesDeletedItem(item.identity, item.locatorUri, at)));
     const sync = { placement: LOCAL_FILES_STORE_PLACEMENT, fetchContent: false };
     // Not a resume point of any folder's pass, and nothing else settled first: the deletion is all it does.
-    if (tierSet) await tierSet.sync(connector, sync, { commitCursor: false, settle: false });
-    else await store.syncFromConnector(connector, sync);
+    await tierSet.sync(connector, sync, { commitCursor: false, settle: false });
   };
 
   const once = async (): Promise<LocalFilesOwnRootsCleanupResult> => {

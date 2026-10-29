@@ -15,6 +15,7 @@ import {
   type DropboxMetadataPage,
 } from '../src/workers/dropbox-files/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { dropboxTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const APPROVED_SCOPE = 'dropbox.personal:/Olympus Approved/JOB_SECRET_PATH';
 const RAW_FOLDER_PATH = '/Olympus Approved/JOB_SECRET_PATH';
@@ -25,6 +26,7 @@ describe('Dropbox canonical provider-to-store pull', () => {
     await withStore(async (store) => {
       const handler = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: dropboxBroker(),
         metadataClient: singlePageClient([
@@ -87,6 +89,7 @@ describe('Dropbox canonical provider-to-store pull', () => {
       };
       const handler = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: dropboxBroker(),
         metadataClient: client,
@@ -127,6 +130,7 @@ describe('Dropbox canonical provider-to-store pull', () => {
       };
       const handler = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: dropboxBroker(),
         metadataClient: client,
@@ -150,12 +154,14 @@ describe('Dropbox canonical provider-to-store pull', () => {
     await withStore(async (store) => {
       expect(() => createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         embeddingProvider: remoteEmbeddingProvider(),
       })).toThrow('approved Venice embedding provider');
 
       const handler = createDropboxProviderStoreSyncHandler({
         store,
+        tierSet: dropboxTestTierSet(store),
         account: 'personal',
         broker: dropboxBroker(),
         metadataClient: {
