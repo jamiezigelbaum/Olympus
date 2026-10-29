@@ -406,6 +406,18 @@ describe('remote output allowlists, per operation and result family', () => {
     expectSchemaValid('source_index_status', output);
   });
 
+  test('a corpus is named as the dashboard and search results name it (test-mac, 2026-10-29)', () => {
+    const labels = (remoteOperationOutput('source_index_status', {
+      kind: 'source_index_status',
+      generated_at: '2026-10-29T10:00:00.000Z',
+      corpora: [
+        { corpus_id: 'secure_local.evernote.notes', provider: 'evernote', family: 'note', configured: true },
+        { corpus_id: 'secure_local.local.files', provider: 'local_files', family: 'file', configured: true },
+      ],
+    }) as { corpora: Array<{ label: string }> }).corpora.map((corpus) => corpus.label);
+    expect(labels).toEqual(['Evernote', 'Files on this computer']);
+  });
+
   test('an unknown shape is an error, never a pass-through', () => {
     expect(() => remoteOperationOutput('source_answer', { surprise: true })).toThrow(OperationError);
     expect(() => remoteOperationOutput('source_index_status', { corpora: [] })).toThrow(OperationError);

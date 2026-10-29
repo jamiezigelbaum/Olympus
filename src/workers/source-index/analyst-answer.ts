@@ -2909,7 +2909,12 @@ export async function searchPrivateEvidence(input: {
       .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
       .filter((candidate) => candidate.trustDomain === 'secure_local' && candidate.corpusId !== '');
   };
-  const matches = await build(lanes.adapters);
+  // As probePrivateMatch does, no search waits on the local model's keyword translation (keyword-expansion.ts:
+  // up to 20 s on a busy or CPU-only computer, past the ChatGPT probe's deadline, so its panel never showed)
+  // unless nothing matched and the translation could still find something.
+  const translation: CachedKeywordExpansion = { missing: false };
+  let matches = await withCachedKeywordExpansion(translation, () => build(lanes.adapters));
+  if (matches.length === 0 && translation.missing) matches = await build(lanes.adapters);
   // Only a question that matched gets neighbours: the count (what leaves this
   // computer) and whether there is a panel at all stay the matches' alone.
   if (matches.length === 0) return { matched: 0, candidates: [] };

@@ -108,6 +108,9 @@ const PROVIDER_LABELS: Readonly<Record<string, string>> = {
   signal: 'Signal',
   reflect: 'Reflect',
   roam: 'Roam',
+  // The names the dashboard and search results use (source-dashboard.ts), not the family's.
+  evernote: 'Evernote',
+  local_files: 'Files on this computer',
 };
 
 const FAMILY_LABELS: Readonly<Record<string, string>> = {

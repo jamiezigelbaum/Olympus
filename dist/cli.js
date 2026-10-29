@@ -67337,7 +67337,10 @@ async function searchPrivateEvidence(input) {
     assertEvidencePackModelEligible(detail.pack);
     return detail.pack.candidates.map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? "" })).filter((candidate) => candidate.trustDomain === "secure_local" && candidate.corpusId !== "");
   };
-  const matches = await build(lanes.adapters);
+  const translation = { missing: false };
+  let matches = await withCachedKeywordExpansion(translation, () => build(lanes.adapters));
+  if (matches.length === 0 && translation.missing)
+    matches = await build(lanes.adapters);
   if (matches.length === 0)
     return { matched: 0, candidates: [] };
   return { matched: matches.length, candidates: [...matches, ...await privateNeighbours(lanes.adapters, build, matches)] };
@@ -135074,7 +135077,9 @@ var init_remote_result = __esm(() => {
     apple_messages: "Apple Messages",
     signal: "Signal",
     reflect: "Reflect",
-    roam: "Roam"
+    roam: "Roam",
+    evernote: "Evernote",
+    local_files: "Files on this computer"
   };
   FAMILY_LABELS = {
     email: "Mail",
