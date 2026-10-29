@@ -15,6 +15,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
   SNIFFER_CATEGORIES,
+  SNIFFER_PRIVATE_KINDS,
+  SNIFFER_RESPONSE_SCHEMA,
+  parseSnifferBatchResponse,
   SNIFFER_PROMPT_VERSION,
   SNIFFER_SYSTEM_PROMPT,
   buildSnifferBatchPrompt,
@@ -140,5 +143,16 @@ describe('the sniffer prompt asks one generic question', () => {
     expect(prompt).toContain(JSON.stringify({ i: 1, document: 'Names: a.pdf\nExcerpt: text' }));
     // Derived from the text: the change is a new version, approved before use.
     expect(SNIFFER_PROMPT_VERSION).toMatch(/^p-[0-9a-f]{12}$/);
+  });
+
+  test('the reply schema allows exactly what the parser accepts, so a grammar-bound model cannot answer out of range', () => {
+    // Qwen3.5 2B answered privateKind "work" without one (release check 2026-10-29), and the verdict was dropped.
+    const item = (SNIFFER_RESPONSE_SCHEMA as any).properties.verdicts.items;
+    expect(item.properties.tier.enum).toEqual(['personal', 'private']);
+    expect(item.properties.category.enum).toEqual([...SNIFFER_CATEGORIES]);
+    expect(item.properties.privateKind.enum).toEqual([...SNIFFER_PRIVATE_KINDS]);
+    expect(item.required).toEqual(['i', 'tier', 'category', 'ownRecord', 'privateKind', 'confidence']);
+    const reply = { verdicts: [{ i: 1, tier: 'private', category: 'health', ownRecord: true, privateKind: 'health', confidence: 0.9 }] };
+    expect(parseSnifferBatchResponse(JSON.stringify(reply), new Set([1])).get(1)).toMatchObject({ tier: 'private', privateKind: 'health' });
   });
 });

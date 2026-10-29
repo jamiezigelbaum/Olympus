@@ -30,6 +30,7 @@ import {
   SNIFFER_INJECTION_CATEGORY,
   SNIFFER_MAX_ATTEMPTS,
   SNIFFER_PROMPT_VERSION,
+  SNIFFER_RESPONSE_SCHEMA,
   SNIFFER_SYSTEM_PROMPT,
   buildSnifferBatchPrompt,
   parseSnifferBatchResponse,
@@ -454,6 +455,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         system: SNIFFER_SYSTEM_PROMPT,
         prompt,
         localOnly: true,
+        responseSchema: SNIFFER_RESPONSE_SCHEMA,
         maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
         ...(options.signal ? { signal: options.signal } : {}),
       });

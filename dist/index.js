@@ -17905,7 +17905,7 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, INSTRUCTION_VERBS, OBJECT_GLUE, SNIFFER_SYSTEM_PROMPT, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
+var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, INSTRUCTION_VERBS, OBJECT_GLUE, SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_engine();
@@ -17957,6 +17957,31 @@ var init_sniffer = __esm(() => {
     `{"verdicts":[{"i":1,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map((c) => `"${c}"`).join("|")},"ownRecord":true|false,"privateKind":${SNIFFER_PRIVATE_KINDS.map((c) => `"${c}"`).join("|")},"confidence":<number from 0 to 1>}]}`
   ].join(`
 `);
+  SNIFFER_RESPONSE_SCHEMA = {
+    type: "object",
+    properties: {
+      verdicts: {
+        type: "array",
+        minItems: 1,
+        maxItems: 1,
+        items: {
+          type: "object",
+          properties: {
+            i: { type: "integer", minimum: 1, maximum: 1 },
+            tier: { enum: ["personal", "private"] },
+            category: { enum: [...SNIFFER_CATEGORIES] },
+            ownRecord: { type: "boolean" },
+            privateKind: { enum: [...SNIFFER_PRIVATE_KINDS] },
+            confidence: { type: "number", minimum: 0, maximum: 1 }
+          },
+          required: ["i", "tier", "category", "ownRecord", "privateKind", "confidence"],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ["verdicts"],
+    additionalProperties: false
+  };
   SNIFFER_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
   SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 });

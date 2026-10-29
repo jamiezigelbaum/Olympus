@@ -254,6 +254,39 @@ export const SNIFFER_SYSTEM_PROMPT = [
   `{"verdicts":[{"i":1,"tier":"personal"|"private","category":${SNIFFER_CATEGORIES.map(c => `"${c}"`).join('|')},"ownRecord":true|false,"privateKind":${SNIFFER_PRIVATE_KINDS.map(c => `"${c}"`).join('|')},"confidence":<number from 0 to 1>}]}`,
 ].join('\n');
 
+/**
+ * The reply shape as a JSON Schema, for a model that decodes under a grammar
+ * (the built-in llama-server): every field is bounded to its allowed values,
+ * so a small model cannot answer a privateKind of "work" or leave a field out
+ * (2026-10-29, Qwen3.5 2B on the release check). Not part of the prompt, so the
+ * prompt version and the verdict cache are unchanged; other models ignore it.
+ */
+export const SNIFFER_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    verdicts: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 1,
+      items: {
+        type: 'object',
+        properties: {
+          i: { type: 'integer', minimum: 1, maximum: 1 },
+          tier: { enum: ['personal', 'private'] },
+          category: { enum: [...SNIFFER_CATEGORIES] },
+          ownRecord: { type: 'boolean' },
+          privateKind: { enum: [...SNIFFER_PRIVATE_KINDS] },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
+        },
+        required: ['i', 'tier', 'category', 'ownRecord', 'privateKind', 'confidence'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['verdicts'],
+  additionalProperties: false,
+};
+
 export interface SnifferBatchItem {
   /** 1-based position in the batch. */
   i: number;

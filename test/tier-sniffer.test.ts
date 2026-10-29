@@ -22,6 +22,7 @@ import { InstalledTierClassification } from '../src/workers/classification/insta
 import {
   CachedTierSniffer,
   SNIFFER_PROMPT_VERSION,
+  SNIFFER_RESPONSE_SCHEMA,
   parseSnifferBatchResponse,
   snifferId,
   snifferTierKey,
@@ -195,6 +196,7 @@ describe('batching, cache and threshold', () => {
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: VENICE_LANE, model, maxCallsPerPass: 100 });
       expect(model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{')).length)).toEqual(Array(25).fill(1));
       expect(model.requests.every((request) => request.localOnly === true)).toBe(true);
+      expect(model.requests.every((request) => request.responseSchema === SNIFFER_RESPONSE_SCHEMA)).toBe(true);
       expect(report).toMatchObject({ calls: 25, verdictsApplied: 25, resolvedPrivate: 25 });
       expect(ledger.counts().byState.pending).toBe(25); // content still unread: that is not a sniffer question
       const record = ledger.getCurrent(subject(7))!;
