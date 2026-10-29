@@ -521,6 +521,32 @@ describe('Evernote notebook choices', () => {
     expect(run.outcome().counts).toMatchObject({ shared_not_imported: 1, notes_read: 0 });
   });
 
+  test('a choice saved while a pass runs stops it before its next read or write', async () => {
+    fake = new FakeEvernoteServer().start();
+    const book = fake.addNotebook('Clients');
+    const first = fake.addNote({ title: 'One', notebookId: book.id, created: day(2023) });
+    fake.addNote({ title: 'Two', notebookId: book.id, created: day(2023, 2) });
+    // The person replaces the choice once the first note has been read.
+    const connector = createEvernoteSourceConnector({
+      accountScope: 'personal',
+      session: () => new McpSourceSession({
+        serverUrl: fake!.url, clientName: 'olympus-test', clientVersion: '1.0.0', readTools: EVERNOTE_READ_TOOLS,
+        callBudget: 5_000, pacer: new McpCallPacer({ minIntervalMs: 0 }), rateLimitBackoffMs: 1,
+      }),
+      notebookGate: () => () => 'ingest',
+      assertNotebookChoiceCurrent: () => {
+        if (fake!.notesRead.length > 0) throw new Error('The saved scope changed.');
+      },
+    });
+    const emitted: RawItem[] = [];
+    await expect((async () => {
+      for await (const page of connector.listItems() as AsyncIterable<SourceConnectorListPage>) emitted.push(...page.items);
+    })()).rejects.toThrow('The saved scope changed.');
+    expect(fake.notesRead).toEqual([first.id]);
+    expect(emitted).toEqual([]);
+    expect(connector.lastOutcome()).toBeUndefined();
+  });
+
   test('a listing that drops many notes retires at most the cap per pass; the rest wait', async () => {
     fake = new FakeEvernoteServer().start();
     const book = fake.addNotebook('Archive');

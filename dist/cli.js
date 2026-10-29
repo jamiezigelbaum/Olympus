@@ -158079,6 +158079,7 @@ function createEvernoteSourceConnector(options) {
           counts.notes_not_read += 1;
           continue;
         }
+        options.assertNotebookChoiceCurrent?.();
         let out;
         try {
           out = await session.callTool("get_note", { noteId });
@@ -158131,6 +158132,7 @@ function createEvernoteSourceConnector(options) {
         counts.notes_read += 1;
         counts.attachments_listed += built.childKeys.length;
         while (pending.length >= PAGE_ITEMS) {
+          options.assertNotebookChoiceCurrent?.();
           options.readSoFar?.(readNotes);
           const items = pending.splice(0, PAGE_ITEMS);
           for (const item of items)
@@ -158145,6 +158147,7 @@ function createEvernoteSourceConnector(options) {
         counts,
         ...stoppedBy ? { stoppedBy } : {}
       };
+      options.assertNotebookChoiceCurrent?.();
       options.readSoFar?.(readNotes);
       for (const item of pending)
         listed.set(item.identity.localItemId, item);
@@ -158429,6 +158432,9 @@ function createEvernoteLiveSync(options) {
   const accountScope = options.handle.accountRole ?? EVERNOTE_ACCOUNT_ROLE;
   let shouldContinue = () => true;
   let notebookChoice = () => "ingest";
+  let notebookChoiceCurrent = () => {
+    return;
+  };
   const session = (purpose) => new McpSourceSession({
     serverUrl,
     clientName: "Olympus",
@@ -158443,6 +158449,7 @@ function createEvernoteLiveSync(options) {
     accountScope,
     session,
     notebookGate: () => evernoteNotebookGate(notebookChoice, evernoteExclusionMatcher(env)),
+    assertNotebookChoiceCurrent: () => notebookChoiceCurrent(),
     ...previous ? { previous } : {},
     ...readSoFar ? { readSoFar } : {},
     ...options.downloadHosts ? { downloadHosts: options.downloadHosts } : {},
@@ -158520,12 +158527,18 @@ function createEvernoteLiveSync(options) {
       running ??= (async () => {
         shouldContinue = request.shouldContinue ?? (() => true);
         notebookChoice = request.notebookGate ?? (() => "ingest");
+        notebookChoiceCurrent = request.assertNotebookChoiceCurrent ?? (() => {
+          return;
+        });
         try {
           return await runPass();
         } finally {
           running = undefined;
           shouldContinue = () => true;
           notebookChoice = () => "ingest";
+          notebookChoiceCurrent = () => {
+            return;
+          };
         }
       })();
       return running;
@@ -180101,7 +180114,7 @@ function createEvernoteRuntime(options) {
     existingLane,
     liveSync,
     notebooks: (handle) => liveSync(handle).notebooks(),
-    schedulerSource({ config: config2, handle, notebookGate }) {
+    schedulerSource({ config: config2, handle, notebookGate, assertNotebookChoiceCurrent }) {
       const sync = liveSync(handle);
       const accountScope = handle.accountRole ?? "personal";
       const opened = openLane();
@@ -180115,7 +180128,7 @@ function createEvernoteRuntime(options) {
         freshnessThresholdMs,
         run: async () => {
           try {
-            const receipt = await sync.pass({ notebookGate: notebookGate() });
+            const receipt = await sync.pass({ notebookGate: notebookGate(), assertNotebookChoiceCurrent });
             const stopped = sync.status()?.last_error;
             return {
               status: receipt.status,
@@ -206292,6 +206305,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             notebookGate: () => {
               const approval = authority.assertCurrent(scopeRef);
               return (notebook) => fileSourceScopeAllowsContent(approval, [notebook.id]) ? "ingest" : fileSourceScopeAllowsMetadata(approval, [notebook.id]) ? "metadata_only" : "exclude";
+            },
+            assertNotebookChoiceCurrent: () => {
+              authority.assertCurrent(scopeRef);
             }
           });
           return scopeBoundSchedulerSource({ source, authority, ref: scopeRef });

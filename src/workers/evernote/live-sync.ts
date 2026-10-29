@@ -303,7 +303,12 @@ export interface EvernoteLiveSync {
    * exclusion rules applied on top. Throws when it changed nothing (a listing that could not finish,
    * a sign-in to renew).
    */
-  pass(request?: { shouldContinue?: () => boolean; notebookGate?: EvernoteNotebookGate }): Promise<EvernotePassReceipt>;
+  pass(request?: {
+    shouldContinue?: () => boolean;
+    notebookGate?: EvernoteNotebookGate;
+    /** Throws once the notebook choice changed; the pass then stops before its next read or write. */
+    assertNotebookChoiceCurrent?: () => void;
+  }): Promise<EvernotePassReceipt>;
   /** The account's notebooks, for the picker: ids, names and ownership, nothing from a note. */
   notebooks(): Promise<EvernoteNotebook[]>;
   /** The connector the extraction factory reads attachments with. */
@@ -330,6 +335,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
   const accountScope = options.handle.accountRole ?? EVERNOTE_ACCOUNT_ROLE;
   let shouldContinue: () => boolean = () => true;
   let notebookChoice: EvernoteNotebookGate = () => 'ingest';
+  let notebookChoiceCurrent: () => void = () => undefined;
   const session = (purpose: 'pass' | 'attachment' | 'notebooks'): McpSourceSession => new McpSourceSession({
     serverUrl,
     clientName: 'Olympus',
@@ -349,6 +355,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
     session,
     // The rules file is read at each pass, so a rule saved since applies to the next one.
     notebookGate: () => evernoteNotebookGate(notebookChoice, evernoteExclusionMatcher(env)),
+    assertNotebookChoiceCurrent: () => notebookChoiceCurrent(),
     ...(previous ? { previous } : {}),
     ...(readSoFar ? { readSoFar } : {}),
     ...(options.downloadHosts ? { downloadHosts: options.downloadHosts } : {}),
@@ -437,12 +444,14 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
       running ??= (async () => {
         shouldContinue = request.shouldContinue ?? (() => true);
         notebookChoice = request.notebookGate ?? (() => 'ingest');
+        notebookChoiceCurrent = request.assertNotebookChoiceCurrent ?? (() => undefined);
         try {
           return await runPass();
         } finally {
           running = undefined;
           shouldContinue = () => true;
           notebookChoice = () => 'ingest';
+          notebookChoiceCurrent = () => undefined;
         }
       })();
       return running;

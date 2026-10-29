@@ -162,6 +162,11 @@ export interface EvernoteConnectorOptions {
   previous?: () => EvernotePassRecord | undefined;
   /** Which notebooks may be read, asked once at the start of each pass. Absent: every notebook. */
   notebookGate?: () => EvernoteNotebookGate;
+  /**
+   * Throws once the choice the gate came from is no longer the saved one. Asked before each note is
+   * read and each page goes out, so a pass never reads or stores under a choice the person replaced.
+   */
+  assertNotebookChoiceCurrent?: () => void;
   /** Before each page goes out: every note this pass has read so far, kept until the pass is committed. */
   readSoFar?: (notes: EvernotePassRecord['notes']) => void;
   downloadHosts?: readonly string[];
@@ -435,6 +440,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
           counts.notes_not_read += 1;
           continue;
         }
+        options.assertNotebookChoiceCurrent?.();
         let out;
         try {
           out = await session.callTool('get_note', { noteId });
@@ -487,6 +493,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         counts.attachments_listed += built.childKeys.length;
         // Pages go out as they fill, so a long first pass stores as it reads.
         while (pending.length >= PAGE_ITEMS) {
+          options.assertNotebookChoiceCurrent?.();
           options.readSoFar?.(readNotes);
           const items = pending.splice(0, PAGE_ITEMS);
           for (const item of items) listed.set(item.identity.localItemId, item);
@@ -501,6 +508,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         counts,
         ...(stoppedBy ? { stoppedBy } : {}),
       };
+      options.assertNotebookChoiceCurrent?.();
       options.readSoFar?.(readNotes);
       for (const item of pending) listed.set(item.identity.localItemId, item);
       yield { items: pending, done: true };

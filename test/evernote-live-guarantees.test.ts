@@ -291,6 +291,7 @@ describe('the live Evernote source', () => {
         config: { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never,
         handle,
         notebookGate: () => () => 'ingest',
+      assertNotebookChoiceCurrent: () => undefined,
       });
       for (const task of source.tasks.slice(1)) await task.run({} as never).catch(() => undefined);
     });

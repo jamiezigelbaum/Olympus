@@ -5076,6 +5076,7 @@ export async function main(): Promise<void> {
                   ? 'ingest'
                   : fileSourceScopeAllowsMetadata(approval, [notebook.id]) ? 'metadata_only' : 'exclude';
               },
+              assertNotebookChoiceCurrent: () => { authority.assertCurrent(scopeRef); },
             });
             return scopeBoundSchedulerSource({ source, authority, ref: scopeRef });
           },

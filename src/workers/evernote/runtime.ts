@@ -79,6 +79,8 @@ export interface EvernoteRuntime {
     config: OlympusConfig;
     handle: ConnectedCredentialHandle;
     notebookGate: () => EvernoteNotebookGate;
+    /** Throws once that approval is no longer the saved one: a running pass stops before its next read or write. */
+    assertNotebookChoiceCurrent: () => void;
   }): SourceSchedulerSource;
   /** The account's notebooks for the picker (no note is read). */
   notebooks(handle: ConnectedCredentialHandle): Promise<EvernoteNotebook[]>;
@@ -162,7 +164,7 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
     existingLane,
     liveSync,
     notebooks: (handle) => liveSync(handle).notebooks(),
-    schedulerSource({ config, handle, notebookGate }) {
+    schedulerSource({ config, handle, notebookGate, assertNotebookChoiceCurrent }) {
       const sync = liveSync(handle);
       const accountScope = handle.accountRole ?? 'personal';
       const opened = openLane();
@@ -176,7 +178,7 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
         freshnessThresholdMs,
         run: async () => {
           try {
-            const receipt = await sync.pass({ notebookGate: notebookGate() });
+            const receipt = await sync.pass({ notebookGate: notebookGate(), assertNotebookChoiceCurrent });
             const stopped = sync.status()?.last_error;
             return {
               status: receipt.status,
