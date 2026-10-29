@@ -369,6 +369,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
     // The rules file is read at each pass, so a rule saved since applies to the next one.
     notebookGate: () => evernoteNotebookGate(notebookChoice, evernoteExclusionMatcher(env)),
     assertNotebookChoiceCurrent: () => notebookChoiceCurrent(),
+    scopeStamp: () => passScope,
     ...(previous ? { previous } : {}),
     ...(readSoFar ? { readSoFar } : {}),
     ...(options.downloadHosts ? { downloadHosts: options.downloadHosts } : {}),

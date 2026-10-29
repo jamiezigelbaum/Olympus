@@ -137,16 +137,18 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
   // The attachment reader over whichever stores are open, rebuilt when that changes. It serves the
   // Private store's corpus only: as the lane's one legacy store it lists the routed Personal store too
   // (tieredExtractionView `home`), so an attachment is read once wherever its note rests.
-  let extraction: { key: string; runtime: FileExtractionRuntime | undefined } | undefined;
+  // Also rebuilt for a new sync (a reconnect): the attachment connector carries that sync's bound choice.
+  let extraction: { key: string; sync: EvernoteLiveSync; runtime: FileExtractionRuntime | undefined } | undefined;
   const extractionRuntime = (sync: EvernoteLiveSync, accountScope: string): FileExtractionRuntime | undefined => {
     const opened = openLane();
     const stores = [opened.secure.current(), opened.internal.current()].filter((store): store is LocalConnectorStore => store !== undefined);
     const key = `${accountScope}|${stores.map((store) => store.corpusId).join(',')}`;
-    if (extraction?.key === key) return extraction.runtime;
+    if (extraction?.key === key && extraction.sync === sync) return extraction.runtime;
     extraction?.runtime?.close();
     const connector = sync.attachmentConnector();
     extraction = {
       key,
+      sync,
       runtime: stores.length === 0 ? undefined : createChildExtractionRuntime({
         provider: EVERNOTE_ATTACHMENT_EXTRACTION_PROVIDER,
         scopeKey: EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY,

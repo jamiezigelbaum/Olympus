@@ -180,6 +180,11 @@ export interface EvernoteConnectorOptions {
    * before its bytes are handed on. Absent: every attachment.
    */
   attachmentAllowed?: (noteId: string) => boolean;
+  /**
+   * The approval this pass stores under (account generation and scope revision), part of every
+   * note's version: a new approval re-stamps each note once, as a fresh traversal does elsewhere.
+   */
+  scopeStamp?: () => { accountGeneration: string; scopeRevision: string } | undefined;
   /** Before each page goes out: every note this pass has read so far, kept until the pass is committed. */
   readSoFar?: (notes: EvernotePassRecord['notes']) => void;
   downloadHosts?: readonly string[];
@@ -198,16 +203,19 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 
 /**
- * A note's version: its `updated`, its notebook (id and name) and whether it was read or only
- * named, so a move, a rename or a changed notebook choice re-reads it.
+ * A note's version: its `updated`, its notebook (id and name), whether it was read or only named,
+ * and the approval it was stored under, so a move, a rename, a changed notebook choice or a new
+ * approval re-reads it.
  */
 export function evernoteNoteVersion(
   updatedAt: string,
   notebookId: string,
   notebookLabel: string,
   disposition: 'ingest' | 'metadata_only' = 'ingest',
+  scope?: { accountGeneration: string; scopeRevision: string },
 ): string {
-  return `${updatedAt}|${notebookId}|${digest(notebookLabel)}|${disposition === 'ingest' ? 'f' : 'n'}`;
+  const base = `${updatedAt}|${notebookId}|${digest(notebookLabel)}|${disposition === 'ingest' ? 'f' : 'n'}`;
+  return scope ? `${base}|${digest(`${scope.accountGeneration}\u0000${scope.scopeRevision}`)}` : base;
 }
 
 /** The keys of a note's attachments, in its order: `<md5>`, then `<md5>.<n>` for the n-th equal one. */
@@ -342,6 +350,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
     listed.clear();
     // Asked before any call: a choice that cannot be read stops the pass before Evernote is asked anything.
     const gate = options.notebookGate?.() ?? ((): EvernoteNotebookDisposition => 'ingest');
+    const stamp = options.scopeStamp?.();
     const previous = options.previous?.();
     const session = options.session('pass');
     await session.open();
@@ -424,7 +433,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
           withhold(noteId, before, book.owned);
           continue;
         }
-        const version = book ? evernoteNoteVersion(hit.updatedAt, book.id, book.label, book.disposition) : undefined;
+        const version = book ? evernoteNoteVersion(hit.updatedAt, book.id, book.label, book.disposition, stamp) : undefined;
         if (version) {
           const stored = listOptions.storedItem?.({ provider: EVERNOTE_PROVIDER, accountScope: account, providerItemId: noteId }, (a, b) => a.localeCompare(b));
           // Skipped only when the last committed pass recorded this version: a note stored by a pass
@@ -492,7 +501,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
           counts.notes_excluded += 1;
           continue;
         }
-        const noteVersion = evernoteNoteVersion(hit.updatedAt, notebookId, actual.label);
+        const noteVersion = evernoteNoteVersion(hit.updatedAt, notebookId, actual.label, 'ingest', stamp);
         const built = noteItems(note, noteVersion, actual);
         if (before && !before.v.startsWith('shared|') && before.v.split('|')[0] === hit.updatedAt) counts.notes_moved += 1;
         // An attachment the note no longer carries.

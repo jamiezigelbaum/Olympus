@@ -157867,8 +157867,9 @@ function evernoteUnfinishedWith(unfinished, notes) {
   }
   return next;
 }
-function evernoteNoteVersion(updatedAt, notebookId, notebookLabel, disposition = "ingest") {
-  return `${updatedAt}|${notebookId}|${digest4(notebookLabel)}|${disposition === "ingest" ? "f" : "n"}`;
+function evernoteNoteVersion(updatedAt, notebookId, notebookLabel, disposition = "ingest", scope) {
+  const base = `${updatedAt}|${notebookId}|${digest4(notebookLabel)}|${disposition === "ingest" ? "f" : "n"}`;
+  return scope ? `${base}|${digest4(`${scope.accountGeneration}\x00${scope.scopeRevision}`)}` : base;
 }
 function evernoteAttachmentKeys(hashes) {
   const seen = new Map;
@@ -157977,6 +157978,7 @@ function createEvernoteSourceConnector(options) {
     outcome = undefined;
     listed.clear();
     const gate = options.notebookGate?.() ?? (() => "ingest");
+    const stamp = options.scopeStamp?.();
     const previous = options.previous?.();
     const session = options.session("pass");
     await session.open();
@@ -158058,7 +158060,7 @@ function createEvernoteSourceConnector(options) {
           withhold(noteId, before, book.owned);
           continue;
         }
-        const version2 = book ? evernoteNoteVersion(hit.updatedAt, book.id, book.label, book.disposition) : undefined;
+        const version2 = book ? evernoteNoteVersion(hit.updatedAt, book.id, book.label, book.disposition, stamp) : undefined;
         if (version2) {
           const stored = listOptions.storedItem?.({ provider: EVERNOTE_PROVIDER, accountScope: account, providerItemId: noteId }, (a, b) => a.localeCompare(b));
           const current2 = before?.v === version2 && (!stored || stored.version === version2 && stored.tombstoned !== true && stored.incomplete !== true);
@@ -158123,7 +158125,7 @@ function createEvernoteSourceConnector(options) {
           counts.notes_excluded += 1;
           continue;
         }
-        const noteVersion = evernoteNoteVersion(hit.updatedAt, notebookId, actual.label);
+        const noteVersion = evernoteNoteVersion(hit.updatedAt, notebookId, actual.label, "ingest", stamp);
         const built = noteItems(note, noteVersion, actual);
         if (before && !before.v.startsWith("shared|") && before.v.split("|")[0] === hit.updatedAt)
           counts.notes_moved += 1;
@@ -158468,6 +158470,7 @@ function createEvernoteLiveSync(options) {
     session,
     notebookGate: () => evernoteNotebookGate(notebookChoice, evernoteExclusionMatcher(env)),
     assertNotebookChoiceCurrent: () => notebookChoiceCurrent(),
+    scopeStamp: () => passScope,
     ...previous ? { previous } : {},
     ...readSoFar ? { readSoFar } : {},
     ...options.downloadHosts ? { downloadHosts: options.downloadHosts } : {},
@@ -180135,12 +180138,13 @@ function createEvernoteRuntime(options) {
     const opened = openLane();
     const stores = [opened.secure.current(), opened.internal.current()].filter((store) => store !== undefined);
     const key2 = `${accountScope}|${stores.map((store) => store.corpusId).join(",")}`;
-    if (extraction?.key === key2)
+    if (extraction?.key === key2 && extraction.sync === sync)
       return extraction.runtime;
     extraction?.runtime?.close();
     const connector = sync.attachmentConnector();
     extraction = {
       key: key2,
+      sync,
       runtime: stores.length === 0 ? undefined : createChildExtractionRuntime({
         provider: EVERNOTE_ATTACHMENT_EXTRACTION_PROVIDER,
         scopeKey: EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY,
@@ -205508,20 +205512,12 @@ ${key2}`;
     const scopeAccount = fileScopeAccount(sourceId);
     if (!scopeAccount)
       return { allowed: false };
-    const scoped = (filters2) => {
-      if (!filters2 || sourceId !== EVERNOTE_SOURCE_ID)
-        return filters2;
-      const { sourceScopeGeneration: _generation, sourceScopeRevision: _revision, ...byNotebook } = filters2;
-      return byNotebook;
-    };
-    const contentFilters = contentScope.allowed ? scoped(contentScope.filters) : undefined;
-    const filters = scoped(metadataScope.filters);
     return {
       allowed: true,
       accountScope: scopeAccount.accountScope,
-      ...filters ? { filters } : {},
+      filters: metadataScope.filters,
       contentAllowed: contentScope.allowed,
-      ...contentFilters ? { contentFilters } : {}
+      ...contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}
     };
   };
   const connectorStoreStatusScope = (store) => {

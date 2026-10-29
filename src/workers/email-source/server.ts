@@ -3770,22 +3770,12 @@ export async function main(): Promise<void> {
     const contentScope = fileSourceScopeContentFilters(approval);
     const scopeAccount = fileScopeAccount(sourceId);
     if (!scopeAccount) return { allowed: false };
-    // Evernote rewrites only the notes that changed, so a note keeps the approval it was stored
-    // under: its notebook id decides, not the stamp's revision (a re-approval would hide every
-    // unchanged note). Another account behind the sign-in stops the pass before it stores anything.
-    const scoped = (filters: import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined) => {
-      if (!filters || sourceId !== EVERNOTE_SOURCE_ID) return filters;
-      const { sourceScopeGeneration: _generation, sourceScopeRevision: _revision, ...byNotebook } = filters;
-      return byNotebook;
-    };
-    const contentFilters = contentScope.allowed ? scoped(contentScope.filters) : undefined;
-    const filters = scoped(metadataScope.filters);
     return {
       allowed: true,
       accountScope: scopeAccount.accountScope,
-      ...(filters ? { filters } : {}),
+      filters: metadataScope.filters,
       contentAllowed: contentScope.allowed,
-      ...(contentFilters ? { contentFilters } : {}),
+      ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
     };
   };
   const connectorStoreStatusScope = (store: LocalConnectorStore):
