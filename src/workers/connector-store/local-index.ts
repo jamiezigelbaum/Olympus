@@ -914,6 +914,15 @@ export class TierLedgerUnavailableError extends Error {
 
 export const TIER_SET_BINDING_RUN_ID = 'tiered-store-set-binding';
 export const TIER_SET_BINDING_CONNECTOR_ID = 'tiered_store_set_binding';
+/** The writer a tier move copies an item into its new tier's store under (tier-move.ts). */
+export const TIER_MOVE_CONNECTOR_ID = 'olympus_tier_move';
+/**
+ * Writers that record a `sync_runs` row but are not a sync of the source: the
+ * embedding write authority, the set binding and a tier move. A store's
+ * status counts and its last run leave them out, so a source card never says
+ * its last sync saw the one item a tier move copied.
+ */
+const NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}')`;
 
 export class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
   constructor() {
@@ -11916,7 +11925,7 @@ export class LocalConnectorStore {
             ${parityWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
-          WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
+          WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
         ) AS sync_runs,
         -- EXISTS rather than COUNT(DISTINCT ...) so the per-item probe stops at
         -- the first chunk row instead of walking every chunk of every item.
@@ -12048,7 +12057,7 @@ export class LocalConnectorStore {
     // insertion, so it breaks the tie by true recency.
     const last = this.db.query(
       `SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
+       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
        ORDER BY started_at DESC, rowid DESC LIMIT 1`,
     ).get() as SyncRunRow | null;
     return {
