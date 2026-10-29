@@ -53,7 +53,11 @@ export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // The archive hold (`holdUntilJudged`, 2026-10-23) keeps p6: it changes only
 // decisions in a lane that sets it, and no such lane existed before it, so no
 // recorded decision differs under it (docs/CONTRACTS.md change log).
-export const TIER_CLASSIFIER_VERSION = '2026-10-13.p6';
+// p7 (2026-10-29): a picture the photo judge placed nearest a text-decided
+// document (a medical one) is decided by the text read off it, held Private until
+// the privacy-safe model has read that text; with too little text it stays
+// Private on the picture. Pictures decided under p6 are judged again.
+export const TIER_CLASSIFIER_VERSION = '2026-10-29.p7';
 
 /**
  * The `mapRevision` every decision records. The legacy sensitivity map was
@@ -360,7 +364,10 @@ export interface TierClassificationInput {
 export interface ImageJudgmentSignal {
   verdict: 'sensitive' | 'ordinary' | 'unjudged';
   category?: string;
+  /** An ordinary verdict on a picture of a text-decided document (a medical one): its text decides (media-judge.ts). */
+  textDecides?: true;
 }
+
 
 /**
  * An UNJUDGED photo's content is Private, whatever text was read off it
@@ -379,6 +386,15 @@ export const IMAGE_SENSITIVE_REASON_PREFIX = 'content:image_sensitive:';
  * the picture was judged.
  */
 export const IMAGE_ORDINARY_REASON = 'content:image_ordinary';
+/**
+ * A picture the judge placed nearest a text-decided (medical) document whose
+ * read text decides: `content:image_text_decides:<category>`. Its content is
+ * held Private (`content:own_record:image_document`) until the privacy-safe
+ * model has read the text, never Personal first.
+ */
+export const IMAGE_TEXT_DECIDES_REASON_PREFIX = 'content:image_text_decides:';
+/** Words read off a picture (beside the media descriptor) before its text, not the picture, decides it. */
+export const IMAGE_TEXT_DECIDES_MIN_WORDS = 8;
 
 /** Whether a media type is a still image, whose content rests Private unless its picture is judged ordinary. */
 export function isImageMediaType(mimeType: string | undefined): boolean {
@@ -708,6 +724,19 @@ interface PassResult {
  * the sniffer only because its text was read: the owner already said where
  * it belongs.
  */
+/**
+ * A resting tier a connector or deployment once published for a whole source
+ * or chat (a `source_*` prior basis). Retired 2026-10-28:
+ * only the user's own rules judge a group of items, so a stored decision that
+ * rests on one is wrong and is re-judged on its own content automatically
+ * (tier-rejudge.ts), with nobody's approval.
+ */
+export const RETIRED_SOURCE_PRIOR_REASON = 'metadata:prior:source_';
+
+export function restsOnRetiredSourcePrior(reasons: readonly string[]): boolean {
+  return reasons.some((reason) => reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
+}
+
 export function namesDecidedByOwner(reasons: readonly string[]): boolean {
   return reasons.some((reason) => reason.startsWith('metadata:owner_rule:'));
 }
@@ -923,12 +952,17 @@ function contentPass(args: {
   // above, and the per-item override, before either pass, decide otherwise).
   // An ordinary picture's text goes through the usual rules below, so an
   // account or card number read off it still makes it Private.
+  //
+  // A picture of a text-decided (medical) document is decided by its text,
+  // like any document, but held Private until the model has read it. With
+  // too little text to judge, the picture's own verdict stands.
   const imageOrdinary = args.image === true && args.imageJudgment?.verdict === 'ordinary';
-  if (args.image && args.imageJudgment?.verdict === 'sensitive') {
+  const textDecides = imageOrdinary && args.imageJudgment?.textDecides === true;
+  if (args.image && (args.imageJudgment?.verdict === 'sensitive' || (textDecides && !imageTextReadable(text)))) {
     return {
       tier: maxTier(metadata.tier, 'secure'),
       decidedBy: 'default',
-      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment.category)}`, ...mark],
+      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment?.category)}`, ...mark],
       pending: false,
     };
   }
@@ -967,7 +1001,7 @@ function contentPass(args: {
   // and, in a lane that holds content until judged, every read item does
   // (asked even with no model, so it stays pending until one answers),
   // unless an owner rule settled its names: the owner said where it belongs.
-  const recordFlags = ownRecordSignals(text, args.matchInput);
+  const recordFlags = [...ownRecordSignals(text, args.matchInput), ...(textDecides ? ['image_document'] : [])];
   const held = args.holdUntilJudged === true && metadata.ownerDecided !== true;
   let pending = false;
   const flags = [
@@ -1005,7 +1039,9 @@ function contentPass(args: {
     }
   }
   if (reasons.length === 0) reasons.push('content:no_raise');
-  if (imageOrdinary) reasons.unshift(IMAGE_ORDINARY_REASON);
+  if (imageOrdinary) {
+    reasons.unshift(textDecides ? `${IMAGE_TEXT_DECIDES_REASON_PREFIX}${imageCategoryCode(args.imageJudgment?.category)}` : IMAGE_ORDINARY_REASON);
+  }
   reasons.push(...mark);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
 }
@@ -1035,6 +1071,13 @@ function ownRecordSignals(text: string, names: NamesMatchInput): string[] {
   if (/\b(?:test|lab|bloodwork|blood work|visit|statement|results?)\b/i.test(title)
     && /\b(?:\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?:\d{4}|\d{1,2}(?:,?\s+\d{4})?))\b/i.test(title)) signals.push('dated_record');
   return signals;
+}
+
+/** Whether enough text was read off a picture for that text to decide it. */
+function imageTextReadable(text: string): boolean {
+  const words = text.match(/[\p{L}\p{N}][\p{L}\p{N}'’.-]*/gu) ?? [];
+  // The extractor's one-word media descriptor leads every picture's text.
+  return words.length - 1 >= IMAGE_TEXT_DECIDES_MIN_WORDS;
 }
 
 /** A category code safe in a reason string (the judge's own codes pass unchanged). */

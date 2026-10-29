@@ -268,7 +268,16 @@ Shared and source-neutral (`src/workers/source-index/media-judge.ts`,
   financial_document, medical_document, intimate, and ordinary. The margin is
   the best sensitive score minus the ordinary score. Sensitive when the margin
   is at least 0.04, or when the intimate score alone beats ordinary by at
-  least 0.025; otherwise ordinary. Missing or non-finite scores: unjudged. The
+  least 0.025; otherwise ordinary. Since 2026-10-29 (`photo-judge-2026-10-29`)
+  a picture whose closest description is the medical document one is
+  `ordinary` with the reason `text_decides` instead of sensitive (unless the
+  intimate rule holds): a medical document is named by what it says, and any
+  picture of writing (a whiteboard, a slide, notes) can land nearest it.
+  Financial documents stay sensitive until the text judge reliably applies
+  the owner's words to small invoices and receipts. The tier classifier then decides it by the text read off it, held
+  Private until the privacy-safe model has read that text, and Private on
+  the picture when fewer than eight words were read (classifier
+  `2026-10-29.p7`). Missing or non-finite scores: unjudged. The
   description vectors are made once per model and process; the prompt set is
   versioned (`photo-judge-2026-10-08`) and each judgment records it with the
   model.
