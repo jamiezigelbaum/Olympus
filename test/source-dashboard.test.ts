@@ -91,6 +91,25 @@ describe('multi-source source dashboard', () => {
     expect(source.unreadable?.reasons).toEqual([{ code: 'privacy_check_missing', count: 2 }]);
   });
 
+  test('an item whose text moved to the Private store counts once: there, not also where its names stay', () => {
+    // Release check 2026-10-29: three items, two moved to Private, read as five.
+    const status = fixtureStatus();
+    const internal = status.corpora[0]!;
+    if (!internal.configured) throw new Error('fixture');
+    internal.counts = { indexed_items: 3, items_with_text: 1, content_elsewhere_items: 2, items_embedded: 1, chunks: 1, embedded_chunks: 1, sync_runs: 1, tombstoned_items: 0 };
+    status.corpora = [internal, { ...internal, corpus_id: 'secure_local.email.private', trust_domain: 'secure_local',
+      activation_mode: 'lexical_only', embedding_policy: 'disabled',
+      counts: { indexed_items: 2, items_with_text: 2, chunks: 2, embedded_chunks: 0, sync_runs: 1, tombstoned_items: 0 } }];
+    const view = buildSourceDashboardViewModel({ sourceIndexStatus: status, sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: { version: 1, handles: [gmailHandle('gmail.personal')] }, now: new Date('2026-07-02T12:00:00.000Z') });
+    const gmail = view.sources.find(source => source.source_id === 'gmail.email')!;
+    expect(gmail.coverage).toMatchObject({ indexed_items: 3, content_ready_items: 3 });
+    expect(gmail.tier_composition).toEqual(expect.arrayContaining([
+      expect.objectContaining({ trust_domain: 'internal', indexed_items: 1 }),
+      expect.objectContaining({ trust_domain: 'secure_local', indexed_items: 2 }),
+    ]));
+  });
+
   test('mixed embedded and policy-held Gmail corpora finish without an embedding backlog', () => {
     const status = fixtureStatus();
     const internal = status.corpora[0]!;
