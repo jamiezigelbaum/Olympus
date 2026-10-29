@@ -22,8 +22,8 @@ describe('pilot installation entry points', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const download = install.slice(install.indexOf('### Pilot download'), install.indexOf('Success looks like'))
       .replace(/\s+/g, ' ');
-    expect(download).toContain('https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.1.0');
-    expect(download).toContain('https://github.com/jamiezigelbaum/Olympus/releases/download/v1.1.0/olympus-1.1.0.tgz');
+    expect(download).toContain('https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.2.0');
+    expect(download).toContain('https://github.com/jamiezigelbaum/Olympus/releases/download/v1.2.0/olympus-1.2.0.tgz');
     expect(download).toContain('without authentication');
     expect(download).toContain('Select exactly one uploaded asset');
     const selectedAsset = /Select exactly one uploaded asset named `([^`]+)`/.exec(install)?.[1];
@@ -31,8 +31,8 @@ describe('pilot installation entry points', () => {
     const manualAsset = /choose `([^`]+)` under Assets/.exec(readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8'))?.[1];
     expect(manualAsset).toBe(selectedAsset);
     expect(download).toContain('Do not use `/releases/latest`');
-    expect(download).toContain('b9ea7f219886dfd74a30bdbfadbc6a1c876795836a600325cf77ec80b9ac8372');
-    expect(download).toContain('Byte count: `16134010`');
+    expect(download).toContain('5de3d2f0d1bc6e33836dcb41d28eb57ff9b64550d91261aaaba861f1a0bddd41');
+    expect(download).toContain('Byte count: `16627786`');
     expect(download).toContain("metadata's digest and size to match the pinned values");
     expect(download).toContain('Do not extract, execute, or install an archive unless both match');
     expect(download).toContain('missing digest, ambiguous asset, or checksum/size mismatch stops installation');
