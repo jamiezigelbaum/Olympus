@@ -32,7 +32,7 @@ Personal and `secure` means Private; never substitute one for the other.
 | User asks to rank, count, or analyze the top posters/senders in an indexed chat | `skills/ask-sources/SKILL.md` |
 | User asks for unified source search or source-index search | `skills/ask-sources/SKILL.md` |
 | The calling assistant needs evidence from approved internal or public-safe corpora | `skills/ask-sources/SKILL.md` |
-| The calling assistant needs private/personal source evidence across email, Dropbox, or protected Telegram | `skills/ask-sources/SKILL.md` |
+| The calling assistant needs private/personal source evidence across email, Dropbox or Telegram | `skills/ask-sources/SKILL.md` |
 
 Source answers may report automatic local self-heal status when incomplete
 Dropbox text is being re-ingested; follow `skills/ask-sources/SKILL.md`.

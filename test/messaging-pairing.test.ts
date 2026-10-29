@@ -155,6 +155,7 @@ describe('packaged messaging pairing', () => {
     // No chat is protected wholesale: each message is tiered by its content.
     expect(result.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES).toBeUndefined();
     expect(result.producer.env.OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES).toBeUndefined();
+    expect(result.producer.env.OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON).toBeUndefined();
     expect(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES)
       .toBe('telegram.personal:chat:101');
     expect(result.producer.secretEnvironment).toEqual([
