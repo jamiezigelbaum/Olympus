@@ -185,7 +185,7 @@ export interface DoctorResult {
 }
 
 const ARGUS_LANE_HINT = 'Check the configured local model service and rerun olympus doctor.';
-const EMAIL_WORKER_HINT = 'Run olympus worker status, then olympus worker start or olympus worker install.';
+const EMAIL_WORKER_HINT = 'Run olympus engine status and olympus engine logs, then olympus engine restart. On a host without the engine, run olympus worker status, then olympus worker start.';
 const SOURCE_INDEX_HINT = 'Run olympus source index status, then use Sync now in the dashboard or check the worker logs.';
 const SCHEDULER_HINT = 'Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.';
 const CREDENTIAL_HINT = 'Run the matching olympus connect command again for each handle that needs reauthorization.';
@@ -532,6 +532,8 @@ async function ocrReadingCheck(deps: DoctorDeps): Promise<DoctorCheck> {
  */
 async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const facts = await deps.hostProbe!();
+  // Checked first: a competing worker unit is a common reason the engine's own worker is not ready.
+  if (facts.engine.installed && facts.legacyWorkerUnit) return { name: 'host', ok: false, detail: 'A worker service from olympus worker install is installed beside the engine and competes with it for the same data and port.', hint: 'Run olympus worker uninstall. The engine keeps running and owns the worker.' };
   if (facts.engine.installed && (facts.engine.healthy === false || facts.engine.linger === false)) return { name: 'host', ok: false, detail: facts.engine.detail || 'The Linux engine has not proved healthy and persistent.', hint: 'Run olympus engine status and olympus engine logs. Repair configuration, then run systemctl --user reset-failed olympus-engine.service followed by olympus engine start.' };
   const hosts: string[] = [];
   if (facts.engine.installed) hosts.push(`standalone engine (${facts.engine.state})`);

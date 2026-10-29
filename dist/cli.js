@@ -111823,6 +111823,8 @@ async function ocrReadingCheck(deps) {
 }
 async function hostCheck(deps) {
   const facts = await deps.hostProbe();
+  if (facts.engine.installed && facts.legacyWorkerUnit)
+    return { name: "host", ok: false, detail: "A worker service from olympus worker install is installed beside the engine and competes with it for the same data and port.", hint: "Run olympus worker uninstall. The engine keeps running and owns the worker." };
   if (facts.engine.installed && (facts.engine.healthy === false || facts.engine.linger === false))
     return { name: "host", ok: false, detail: facts.engine.detail || "The Linux engine has not proved healthy and persistent.", hint: "Run olympus engine status and olympus engine logs. Repair configuration, then run systemctl --user reset-failed olympus-engine.service followed by olympus engine start." };
   const hosts = [];
@@ -112983,7 +112985,7 @@ function asCount2(value2) {
 function errorDetail2(error) {
   return error instanceof Error && error.message ? error.message : String(error);
 }
-var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.", EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.", SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.", SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.", CREDENTIAL_HINT2 = "Run the matching olympus connect command again for each handle that needs reauthorization.", STALE_RUNNING_SYNC_MS, EMBEDDING_LAG_RATIO = 0.1, DROPBOX_FILES_CORPUS_ID2 = "secure_local.dropbox.files", ARGUS_GENERATION_PROBE_TIMEOUT_MS = 15000, INGESTION_STUCK_WARNING_HOURS = 24, INGESTION_STUCK_ERROR_HOURS = 72, INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10, CONNECTED_SOURCE_LANES, ON_DEMAND_TIER_CORPORA, ON_DEMAND_TIER_CORPUS_IDS, TIER_MIGRATION_STOPPED_GRACE_DAYS_ENV = "OLYMPUS_TIER_MIGRATION_STOPPED_GRACE_DAYS", DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS = 7, DAY_MS2;
+var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.", EMAIL_WORKER_HINT = "Run olympus engine status and olympus engine logs, then olympus engine restart. On a host without the engine, run olympus worker status, then olympus worker start.", SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.", SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.", CREDENTIAL_HINT2 = "Run the matching olympus connect command again for each handle that needs reauthorization.", STALE_RUNNING_SYNC_MS, EMBEDDING_LAG_RATIO = 0.1, DROPBOX_FILES_CORPUS_ID2 = "secure_local.dropbox.files", ARGUS_GENERATION_PROBE_TIMEOUT_MS = 15000, INGESTION_STUCK_WARNING_HOURS = 24, INGESTION_STUCK_ERROR_HOURS = 72, INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10, CONNECTED_SOURCE_LANES, ON_DEMAND_TIER_CORPORA, ON_DEMAND_TIER_CORPUS_IDS, TIER_MIGRATION_STOPPED_GRACE_DAYS_ENV = "OLYMPUS_TIER_MIGRATION_STOPPED_GRACE_DAYS", DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS = 7, DAY_MS2;
 var init_doctor = __esm(() => {
   init_linux_engine_service();
   init_engine_service();
@@ -212997,6 +212999,8 @@ async function runWorkerCommand(args) {
   }
   if (command === "install" || command === "upgrade") {
     const parsed = parseWorkerInstallArgs(command, args.slice(1));
+    if (!parsed.dryRun)
+      refuseWorkerServiceBesideEngine(parsed);
     const options = command === "install" ? withWorkerInstallAuth(parsed) : parsed;
     const result = runWorkerLifecycle(command, options);
     const handler = command === "install" && !options.dryRun ? linuxDesktopOpenHandler("install", options) : undefined;
@@ -213005,6 +213009,8 @@ async function runWorkerCommand(args) {
   }
   if (["status", "start", "stop", "restart", "uninstall"].includes(command)) {
     const actionOptions = parseWorkerActionArgs(args.slice(1));
+    if (command === "start" || command === "restart")
+      refuseWorkerServiceBesideEngine(actionOptions);
     const workerHttp = command === "status" ? await readWorkerHttpState() : undefined;
     const result = runWorkerLifecycle(command, {
       ...actionOptions,
@@ -213022,6 +213028,15 @@ async function runWorkerCommand(args) {
     return;
   }
   throw new OperationError("invalid_params", `Unknown worker command: ${command}`);
+}
+function refuseWorkerServiceBesideEngine(options) {
+  const platform2 = options.platform ?? process.platform;
+  if (platform2 !== "darwin" && platform2 !== "linux")
+    return;
+  const env = options.homeDir ? { HOME: options.homeDir } : process.env;
+  if (!existsSync98(engineServicePaths({ env, platform: platform2 }).plistPath))
+    return;
+  throw new OperationError("config_error", "The Olympus engine already runs the worker on this computer; a separate worker service would compete with it for the same data and port. Use olympus engine status, olympus engine logs or olympus engine restart instead. To remove a worker service installed earlier, run olympus worker uninstall.");
 }
 function linuxDesktopOpenHandler(action, options) {
   if ((options.platform ?? process.platform) !== "linux")

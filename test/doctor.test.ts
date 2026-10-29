@@ -217,6 +217,15 @@ describe('runDoctor', () => {
     }
   });
 
+  test('a worker unit from olympus worker install beside the engine fails host with its removal step', async () => {
+    const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(), platform: 'linux',
+      hostProbe: () => ({ engine: { installed: true, state: 'running', healthy: false, detail: 'Olympus worker failed to become ready.', linger: true }, legacyWorkerUnit: true }) }));
+    const host = checkByName(result.checks, 'host');
+    expect(host.ok).toBe(false);
+    expect(host.detail).toContain('competes with it');
+    expect(host.hint).toContain('olympus worker uninstall');
+  });
+
   test('Linux standalone host copy does not claim no private model runs; Mac wording is unchanged', async () => {
     for (const platform of ['linux', 'darwin'] as const) {
       const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(), platform,

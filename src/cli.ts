@@ -137,7 +137,7 @@ import {
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import { readThisComputerHandles } from './core/this-computer.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
-import { engineDataCustody, inspectEngine, restartEngine } from './core/engine-service.ts';
+import { engineDataCustody, engineServicePaths, inspectEngine, restartEngine } from './core/engine-service.ts';
 import {
   reachableLoopbackWorkerOrigin,
   readRemoteAccessStatus,
@@ -1822,6 +1822,7 @@ async function runWorkerCommand(args: string[]): Promise<void> {
   }
   if (command === 'install' || command === 'upgrade') {
     const parsed = parseWorkerInstallArgs(command, args.slice(1));
+    if (!parsed.dryRun) refuseWorkerServiceBesideEngine(parsed);
     const options = command === 'install' ? withWorkerInstallAuth(parsed) : parsed;
     const result = runWorkerLifecycle(command, options);
     const handler = command === 'install' && !options.dryRun ? linuxDesktopOpenHandler('install', options) : undefined;
@@ -1830,6 +1831,7 @@ async function runWorkerCommand(args: string[]): Promise<void> {
   }
   if (['status', 'start', 'stop', 'restart', 'uninstall'].includes(command)) {
     const actionOptions = parseWorkerActionArgs(args.slice(1));
+    if (command === 'start' || command === 'restart') refuseWorkerServiceBesideEngine(actionOptions);
     const workerHttp = command === 'status' ? await readWorkerHttpState() : undefined;
     const result = runWorkerLifecycle(
       command as Extract<WorkerLifecycleAction, 'status' | 'start' | 'stop' | 'restart' | 'uninstall'>,
@@ -1850,6 +1852,24 @@ async function runWorkerCommand(args: string[]): Promise<void> {
     return;
   }
   throw new OperationError('invalid_params', `Unknown worker command: ${command}`);
+}
+
+/**
+ * Where `olympus engine install` runs the worker, a second worker service
+ * competes with it for the same data and port: it exits in a loop and the
+ * engine's worker cannot become ready. Stop, status and uninstall stay open so
+ * one installed earlier can still be removed.
+ */
+function refuseWorkerServiceBesideEngine(options: { platform?: WorkerServicePlatform; homeDir?: string }): void {
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'darwin' && platform !== 'linux') return;
+  // An explicit --home names the whole layout, as the worker lifecycle reads it; no ambient XDG selectors.
+  const env = options.homeDir ? { HOME: options.homeDir } : process.env;
+  if (!existsSync(engineServicePaths({ env, platform }).plistPath)) return;
+  throw new OperationError(
+    'config_error',
+    'The Olympus engine already runs the worker on this computer; a separate worker service would compete with it for the same data and port. Use olympus engine status, olympus engine logs or olympus engine restart instead. To remove a worker service installed earlier, run olympus worker uninstall.',
+  );
 }
 
 /**

@@ -667,6 +667,26 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('worker install and start refuse where the engine already runs the worker; uninstall stays open', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-worker-beside-engine-'));
+    const home = join(dir, 'home');
+    try {
+      mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });
+      writeFileSync(join(home, 'Library', 'LaunchAgents', 'ai.olympusplugin.engine.plist'), '<plist/>');
+      for (const args of [['install'], ['start'], ['restart']]) {
+        const result = await runBinExit(['worker', ...args, '--platform', 'darwin', '--home', home]);
+        expect(result.code).not.toBe(0);
+        expect(result.stderr).toContain('The Olympus engine already runs the worker on this computer');
+        expect(result.stderr).toContain('olympus worker uninstall');
+      }
+      expect(existsSync(join(home, 'Library', 'LaunchAgents', 'com.openclaw.olympus.worker.plist'))).toBe(false);
+      // A dry run only previews, so it still answers.
+      expect((await runBinExit(['worker', 'install', '--dry-run', '--platform', 'darwin', '--home', home])).code).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('worker install generates a token before activating the service', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-worker-install-test-'));
     const binDir = join(dir, 'bin');

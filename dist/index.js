@@ -31655,7 +31655,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   };
 }
 var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.";
-var EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.";
+var EMAIL_WORKER_HINT = "Run olympus engine status and olympus engine logs, then olympus engine restart. On a host without the engine, run olympus worker status, then olympus worker start.";
 var SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.";
 var SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.";
 var CREDENTIAL_HINT2 = "Run the matching olympus connect command again for each handle that needs reauthorization.";
@@ -31873,6 +31873,8 @@ async function ocrReadingCheck(deps) {
 }
 async function hostCheck(deps) {
   const facts = await deps.hostProbe();
+  if (facts.engine.installed && facts.legacyWorkerUnit)
+    return { name: "host", ok: false, detail: "A worker service from olympus worker install is installed beside the engine and competes with it for the same data and port.", hint: "Run olympus worker uninstall. The engine keeps running and owns the worker." };
   if (facts.engine.installed && (facts.engine.healthy === false || facts.engine.linger === false))
     return { name: "host", ok: false, detail: facts.engine.detail || "The Linux engine has not proved healthy and persistent.", hint: "Run olympus engine status and olympus engine logs. Repair configuration, then run systemctl --user reset-failed olympus-engine.service followed by olympus engine start." };
   const hosts = [];
