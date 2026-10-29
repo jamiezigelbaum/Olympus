@@ -355,6 +355,18 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-29 (no version change): **an owner clause naming a kind of
+  record covers every record of that kind.** The built-in model judged 5 of
+  24 Private inbox records Personal with `privateKind` "none", every one a
+  small invoice or receipt the owner profile calls Private ("Invoices, bills
+  and receipts"), stable over repeated runs. Two generic lines in
+  `SNIFFER_SYSTEM_PROMPT` say such a clause covers every record of the kind,
+  however small, routine or work-related. No per-source or per-question
+  logic. Classification inbox eval with qwen3.5-4b: dev 22/24 → 24/24,
+  held-out 21/24 → 23/24 (inbox-32 still missed), Personal and Secrets
+  recall 1.0; `eval:classification` passes. The prompt version changes, so
+  on the built-in model the new prompt is approved by default and stored
+  items are re-judged automatically, with no owner step.
 - 2026-10-29 (no contract type version change; tier classifier
   `2026-10-29.p7`, photo judge `photo-judge-2026-10-29`): **a picture of a
   document is decided by its text** (owner direction 2026-10-29: fix privacy
