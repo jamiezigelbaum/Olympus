@@ -18773,6 +18773,7 @@ var init_tier_row_rehome = __esm(() => {
 var init_tier_rejudge = __esm(() => {
   init_media_judge();
   init_parent_context();
+  init_stored_names();
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
