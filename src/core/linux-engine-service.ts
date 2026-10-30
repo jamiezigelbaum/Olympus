@@ -91,13 +91,15 @@ export function rotateEngineLog(path: string, maxBytes = 10 * 1024 * 1024, retai
   copyFileSync(path,`${path}.1`,constants.COPYFILE_EXCL); ftruncateSync(fd,0);
  } finally { closeSync(fd); }
 }
-/** Includes descendants via cgroup.events; a missing group is empty, denied inspection is unknown. */
+/** Includes descendants via cgroup.events; a missing group requires a visible v2 user hierarchy. */
 export function systemdCgroupEmpty(group: string, root = '/sys/fs/cgroup'): boolean | undefined {
  if (!group.startsWith('/user.slice/') || group.split('/').includes('..')) return undefined;
  try { return /^populated 0$/m.test(readFileSync(join(root,group,'cgroup.events'),'utf8')); }
  catch(e) {
   if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return undefined;
-  try { readFileSync(join(root,'cgroup.controllers')); } catch { return undefined; }
+  const uid = process.getuid?.();
+  if (uid === undefined || !group.startsWith(`/user.slice/user-${uid}.slice/user@${uid}.service/`)) return undefined;
+  try { readFileSync(join(root,'cgroup.controllers')); statSync(dirname(join(root,group))); } catch { return undefined; }
   try { statSync(join(root,group)); return undefined; }
   catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? true : undefined; }
  }

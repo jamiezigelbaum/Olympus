@@ -84,13 +84,18 @@ test('Linux lifecycle re-enables boot start on restart, and stop removes custody
  expect(uninstallEngine(options).removed_plist).toBe(true);
  expect(()=>readFileSync(l.unitPath)).toThrow(); expect(readFileSync(l.receiptPath,'utf8')).toContain('olympus.engine.install.v1');
 });
-test('missing cgroup is release proof only on a verified v2 hierarchy',()=>{
+test('missing cgroup requires a visible user-manager hierarchy and parent',()=>{
  const l=layout(); const root=join(l.home,'cgroup'); mkdirSync(root);
- expect(systemdCgroupEmpty('/user.slice/engine',root)).toBeUndefined();
+ const group=`/user.slice/user-${process.getuid!()}.slice/user@${process.getuid!()}.service/app.slice/engine.service`;
+ expect(systemdCgroupEmpty(group,root)).toBeUndefined();
  writeFileSync(join(root,'cgroup.controllers'),'cpu');
- expect(systemdCgroupEmpty('/user.slice/engine',root)).toBe(true);
- mkdirSync(join(root,'user.slice/engine'),{recursive:true});
- expect(systemdCgroupEmpty('/user.slice/engine',root)).toBeUndefined();
+ expect(systemdCgroupEmpty(group,root)).toBeUndefined();
+ mkdirSync(dirname(join(root,group)),{recursive:true});
+ expect(systemdCgroupEmpty(group,root)).toBe(true);
+ mkdirSync(join(root,group));
+ expect(systemdCgroupEmpty(group,root)).toBeUndefined();
+ writeFileSync(join(root,group,'cgroup.events'),'populated 1\n'); expect(systemdCgroupEmpty(group,root)).toBe(false);
+ writeFileSync(join(root,group,'cgroup.events'),'populated 0\n'); expect(systemdCgroupEmpty(group,root)).toBe(true);
 });
 test('restart checks a cgroup that appears between inspection and stop',()=>{
  const {options,exec}=installed(); let shows=0;
