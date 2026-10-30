@@ -279,8 +279,8 @@ Olympus answers it on your computer; the agent is told only that the answer is
 in Olympus on your computer, with a link (`olympus://open/private/` and a
 random identifier) that opens it there. The answer waits in the dashboard's
 [Inbox](https://olympusplugin.ai/open/private/) (under **On this computer**),
-which Olympus gives no AI app a way to read, until you delete it or the Inbox
-removes the oldest answers when full, and **Needs you** counts the
+which Olympus gives no AI app a way to read, until you delete it, and
+**Needs you** counts the
 answers you have not read. More: [Connect other
 agents](#connect-other-agents).
 
