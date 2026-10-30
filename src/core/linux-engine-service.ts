@@ -92,10 +92,15 @@ export function rotateEngineLog(path: string, maxBytes = 10 * 1024 * 1024, retai
  } finally { closeSync(fd); }
 }
 /** Includes descendants via cgroup.events; a missing group is empty, denied inspection is unknown. */
-export function systemdCgroupEmpty(group: string): boolean | undefined {
+export function systemdCgroupEmpty(group: string, root = '/sys/fs/cgroup'): boolean | undefined {
  if (!group.startsWith('/user.slice/') || group.split('/').includes('..')) return undefined;
- try { return /^populated 0$/m.test(readFileSync(join('/sys/fs/cgroup',group,'cgroup.events'),'utf8')); }
- catch(e) { return (e as NodeJS.ErrnoException).code === 'ENOENT' ? true : undefined; }
+ try { return /^populated 0$/m.test(readFileSync(join(root,group,'cgroup.events'),'utf8')); }
+ catch(e) {
+  if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return undefined;
+  try { readFileSync(join(root,'cgroup.controllers')); } catch { return undefined; }
+  try { statSync(join(root,group)); return undefined; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? true : undefined; }
+ }
 }
 /** Wait briefly for systemd and the kernel to finish removing a stopped cgroup. */
 function waitForEmptyCgroup(group: string, options: EngineServiceOptions): boolean {
@@ -107,6 +112,10 @@ function waitForEmptyCgroup(group: string, options: EngineServiceOptions): boole
   if (empty === undefined || waited >= 2000) return false;
   sleep(100);
  }
+}
+function releasedCgroups(before: SystemdEngineFacts, after: SystemdEngineFacts, options: EngineServiceOptions): boolean {
+ return [...new Set([before.control_group, after.control_group].filter((group): group is string => !!group))]
+  .every(group => waitForEmptyCgroup(group, options));
 }
 export function systemdPidInCgroup(pid: number, group: string): boolean {
  try { return readFileSync(`/proc/${pid}/cgroup`,'utf8').split('\n').some(line => line === `0::${group}`); } catch { return false; }
@@ -848,7 +857,7 @@ function processTable(options: EngineServiceOptions & { reap?: EngineChildReapDe
 function removeReleasedWorkerSocket(layout: LinuxEngineLayout, before: SystemdEngineFacts, after: SystemdEngineFacts, options: EngineServiceOptions & { reap?: EngineChildReapDeps }): void {
  assertKnown(after);
  if (after.active) throw new Error('Engine process custody is still active; the worker socket was retained.');
- if (before.control_group && !waitForEmptyCgroup(before.control_group, options)) throw new Error('Engine cgroup custody is not empty or unknown; the worker socket was retained.');
+ if (!releasedCgroups(before, after, options)) throw new Error('Engine cgroup custody is not empty or unknown; the worker socket was retained.');
  const childrenPath = engineServicePaths({ ...options, platform: 'linux' }).childrenPath;
  const recorded = readEngineChildren(childrenPath);
  const table = processTable(options);
@@ -1062,7 +1071,7 @@ export function stopLinuxEngine(options: EngineServiceOptions & { reap?: EngineC
   const before=inspectSystemdEngine(l,exec); assertKnown(before); if(before.active && !before.control_group)throw new Error('Engine cgroup custody is unknown; stop refused.'); waitForQuietEngine(options);
   systemdMust(exec,['disable','--now',SYSTEMD_ENGINE_UNIT]);
   const after=inspectSystemdEngine(l,exec); assertKnown(after);
-  if(after.active || after.enabled!==false || (before.control_group && !waitForEmptyCgroup(before.control_group, options))) throw new Error('Engine cgroup custody is not empty or enablement is unknown. Files and recovery evidence were retained.');
+  if(after.active || after.enabled!==false || (!releasedCgroups(before, after, options))) throw new Error('Engine cgroup custody is not empty or enablement is unknown. Files and recovery evidence were retained.');
   const childrenPath=engineServicePaths({...options,platform:'linux'}).childrenPath;
   const recorded=readEngineChildren(childrenPath);
   const reaped=reapRecordedEngineChildren(childrenPath, options.reap);
