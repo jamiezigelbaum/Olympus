@@ -6,7 +6,7 @@
 
 **Your machine, your memory. Keep your private things private.**
 
-*A private second brain on your own computer, for ChatGPT, Claude, Grok and any AI app that speaks MCP. On a Mac, and on [Omarchy](https://omarchy.org) Linux. Free and open source.*
+*A private second brain on your own computer, for ChatGPT, Claude, Grok and any AI app that speaks MCP. On a Mac, and on [Omarchy](https://omarchy.org) and Ubuntu 24.04 LTS Linux. Free and open source.*
 
 [![version](https://img.shields.io/badge/version-1.2.1-534AB7)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-0F6E56)](LICENSE)
@@ -80,7 +80,7 @@ mailbox.
 ## Get started
 
 You need a Mac with Apple silicon (M1 or later) on macOS 13 Ventura or later,
-or an x86_64 computer running [Omarchy](https://omarchy.org). Intel Macs,
+or an x86_64 computer running [Omarchy](https://omarchy.org) or Ubuntu 24.04 LTS. Intel Macs,
 other Linux distributions and ARM Linux are not supported yet. You do not need
 OpenClaw, Tailscale, an API key or a new account.
 
@@ -98,11 +98,18 @@ sudo pacman -S --needed tesseract tesseract-data-eng poppler libvips libheif ffm
 curl -fsSL https://olympusplugin.ai/install-linux.sh | sh
 ```
 
-Either installs Olympus for your user only (the installer itself needs no
-administrator password; on Omarchy, the `pacman` line above does),
+On Ubuntu 24.04 LTS, install the prerequisites and run the Linux installer:
+
+```bash
+sudo apt install curl ca-certificates tar unzip coreutils findutils gawk grep diffutils procps util-linux systemd python3 tesseract-ocr tesseract-ocr-eng poppler-utils libvips-tools libheif1 ffmpeg
+curl -fsSL https://olympusplugin.ai/install-linux.sh | sh
+```
+
+Each installer installs Olympus for your user only (the installer itself needs no
+administrator password; the package installation lines above do),
 checks every download against a pinned SHA-256 before using it, keeps Olympus
 running in the background (a LaunchAgent on a Mac, a systemd user service on
-Omarchy), adds the `olympus` command, and waits until the engine proves it is
+Linux), adds the `olympus` command, and waits until the engine proves it is
 running. On Omarchy it also adds **Olympus** to the app launcher. Then Olympus
 downloads its built-in models once. Running it again updates or repairs the
 install; a failed update puts the previous version back. Details, folders and
@@ -306,13 +313,13 @@ yourself away. Both are off until you turn them on.
   [Inbox](https://olympusplugin.ai/open/private/); each question as sent, and
   its reply, stay in the Inbox on your computer until you delete them or the
   Inbox removes the oldest when full.
-  Anonymous answers work on a Mac and on Omarchy (x64, Linux 6.7 or newer),
+  Anonymous answers work on a Mac and on Omarchy and Ubuntu 24.04 LTS (x64),
   once Olympus's network isolation checks pass.
 
 ## Uninstall
 
 On a Mac, run `curl -fsSL https://olympusplugin.ai/uninstall.sh | sh`; on
-Omarchy, `curl -fsSL https://olympusplugin.ai/uninstall-linux.sh | sh`. Both
+Linux, `curl -fsSL https://olympusplugin.ai/uninstall-linux.sh | sh`. Both
 stop Olympus and remove the app, the runtime and the `olympus` command, and
 keep your settings and data. To delete those too, first run
 `olympus engine stop` and `olympus data delete --all`. To only stop Olympus

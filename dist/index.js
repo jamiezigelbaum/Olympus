@@ -9362,7 +9362,7 @@ function linuxConfinementRemedy(code, sysctls, launcher) {
     return "Needs Linux 6.7 or newer with Landlock enabled.";
   if (["namespace_unavailable", "loopback_unavailable"].includes(code)) {
     if (sysctls["/proc/sys/kernel/apparmor_restrict_unprivileged_userns"]?.trim() === "1")
-      return `One step needs an administrator. Ubuntu blocks the isolated network space used for private answers. These commands allow only an administrator-owned copy of the helper. This guidance has not been qualified on Ubuntu; answers remain unavailable until the checks pass.
+      return `One step needs an administrator. Ubuntu blocks the isolated network space used for private answers. These commands allow only an administrator-owned copy of the helper. Answers remain unavailable until the checks pass.
 
 sudo install -D -m 0755 -o root -g root ${shellQuote(launcher)} /usr/local/libexec/olympus/zkapi-confine
 sudo tee /etc/apparmor.d/olympus-zkapi-confine >/dev/null <<'EOF'
