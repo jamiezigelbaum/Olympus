@@ -5,7 +5,7 @@ import { closeSync, copyFileSync, lstatSync, readlinkSync, symlinkSync, mkdirSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { resolveLinuxEngineLayout } from '../src/core/linux-engine-layout.ts';
-import { inspectSystemdEngine, linuxEngineCustody, linuxMachineArtifactDigest, recoverInterruptedLinuxEngineInstall, renderEngineSystemdUnit, ensureEngineLinger, rotateEngineLog, preflightSystemdEngine, settleLinuxEngineInstall, withLinuxEngineLifecycleLock } from '../src/core/linux-engine-service.ts';
+import { inspectSystemdEngine, systemdCgroupEmpty, linuxEngineCustody, linuxMachineArtifactDigest, recoverInterruptedLinuxEngineInstall, renderEngineSystemdUnit, ensureEngineLinger, rotateEngineLog, preflightSystemdEngine, settleLinuxEngineInstall, withLinuxEngineLifecycleLock } from '../src/core/linux-engine-service.ts';
 import type { EngineExec } from '../src/core/engine-service.ts';
 const roots: string[] = [];
 function layout() { const home = mkdtempSync(join(tmpdir(), 'svc-systemd-')); roots.push(home); const run = join(home, 'run'); mkdirSync(run, { mode: 0o700 }); return resolveLinuxEngineLayout({ HOME: home, XDG_RUNTIME_DIR: run }); }
@@ -83,6 +83,48 @@ test('Linux lifecycle re-enables boot start on restart, and stop removes custody
  stopEngine(options); calls.length=0; startEngine(options); expect(calls).toContainEqual(['systemctl','--user','enable',l.unitPath]);
  expect(uninstallEngine(options).removed_plist).toBe(true);
  expect(()=>readFileSync(l.unitPath)).toThrow(); expect(readFileSync(l.receiptPath,'utf8')).toContain('olympus.engine.install.v1');
+});
+test('missing cgroup requires a visible user-manager hierarchy and parent',()=>{
+ const l=layout(); const root=join(l.home,'cgroup'); mkdirSync(root);
+ const group=`/user.slice/user-${process.getuid!()}.slice/user@${process.getuid!()}.service/app.slice/engine.service`;
+ expect(systemdCgroupEmpty(group,root)).toBeUndefined();
+ writeFileSync(join(root,'cgroup.controllers'),'cpu');
+ expect(systemdCgroupEmpty(group,root)).toBeUndefined();
+ mkdirSync(dirname(join(root,group)),{recursive:true});
+ expect(systemdCgroupEmpty(group,root)).toBe(true);
+ mkdirSync(join(root,group));
+ expect(systemdCgroupEmpty(group,root)).toBeUndefined();
+ writeFileSync(join(root,group,'cgroup.events'),'populated 1\n'); expect(systemdCgroupEmpty(group,root)).toBe(false);
+ writeFileSync(join(root,group,'cgroup.events'),'populated 0\n'); expect(systemdCgroupEmpty(group,root)).toBe(true);
+});
+test('restart checks a cgroup that appears between inspection and stop',()=>{
+ const {options,exec}=installed(); let shows=0;
+ const raceExec:EngineExec=(cmd,args)=>{const result=exec(cmd,args); if(args.includes('show') && ++shows===1) return {...result,stdout:result.stdout.replace('ControlGroup=/user.slice/engine','ControlGroup=')}; return result;};
+ expect(()=>restartEngine({...options,exec:raceExec,cgroupEmpty:()=>false,sleepMs:()=>{}})).toThrow('custody');
+});
+test('restart waits for asynchronous cgroup teardown but refuses a persistent process',()=>{
+ const {l,options}=installed(); const group=join(l.home,'fake-cgroup'); mkdirSync(group);
+ writeFileSync(join(group,'cgroup.events'),'populated 1\n'); writeFileSync(join(group,'cgroup.procs'),'');
+ let polls=0;
+ const cgroupEmpty=()=>/^populated 0$/m.test(readFileSync(join(group,'cgroup.events'),'utf8'));
+ const sleepMs=()=>{ if(++polls===3) writeFileSync(join(group,'cgroup.events'),'populated 0\n'); };
+ expect(restartEngine({...options,cgroupEmpty,sleepMs})).toMatchObject({ok:true});
+ expect(polls).toBe(3);
+ writeFileSync(join(group,'cgroup.events'),'populated 1\n'); writeFileSync(join(group,'cgroup.procs'),'1234\n');
+ polls=0;
+ expect(()=>restartEngine({...options,cgroupEmpty,sleepMs:()=>{polls++;}})).toThrow('custody');
+ expect(polls).toBe(20);
+});
+test('stop and inactive custody wait for release, and unknown inspection fails closed',()=>{
+ const {l,options}=installed(); let reads=0, sleeps=0;
+ expect(stopEngine({...options,cgroupEmpty:()=>++reads>3,sleepMs:()=>{sleeps++;}})).toMatchObject({ok:true});
+ expect(sleeps).toBe(3);
+ const facts=inspectSystemdEngine(l,options.exec); reads=0; sleeps=0;
+ expect(linuxEngineCustody(l,facts,{...options,cgroupEmpty:()=>++reads>2,sleepMs:()=>{sleeps++;}})).toBe('none');
+ expect(sleeps).toBe(2);
+ reads=0; sleeps=0;
+ expect(linuxEngineCustody(l,facts,{...options,cgroupEmpty:()=>++reads===1?false:undefined,sleepMs:()=>{sleeps++;}})).toBe('unknown');
+ expect(sleeps).toBe(1);
 });
 test('unknown cgroup/listener custody retains unit and receipt; enabled/unknown managers block data deletion',()=>{
  const {l,options}=installed();
