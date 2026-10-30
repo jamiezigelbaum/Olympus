@@ -515,7 +515,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       }
     }
     const lastKinds = new Set(seed.last ?? []);
-    const orderKey = (entry: { path: string[]; parentKind?: ControlKind }): number => (entry.parentKind && lastKinds.has(entry.parentKind) && /:yes$/.test(entry.path[entry.path.length - 1]!) ? 1 : 0);
+    // A confirmation can remove the control needed to replay its Cancel path.
+    const orderKey = (entry: { path: string[] }): number => (/:yes$/.test(entry.path[entry.path.length - 1]!) ? 1 : 0);
 
     let presses = 0;
     let dirty = false;
