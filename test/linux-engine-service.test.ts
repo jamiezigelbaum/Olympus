@@ -84,6 +84,19 @@ test('Linux lifecycle re-enables boot start on restart, and stop removes custody
  expect(uninstallEngine(options).removed_plist).toBe(true);
  expect(()=>readFileSync(l.unitPath)).toThrow(); expect(readFileSync(l.receiptPath,'utf8')).toContain('olympus.engine.install.v1');
 });
+test('restart waits for asynchronous cgroup teardown but refuses a persistent process',()=>{
+ const {l,options}=installed(); const group=join(l.home,'fake-cgroup'); mkdirSync(group);
+ writeFileSync(join(group,'cgroup.events'),'populated 1\n'); writeFileSync(join(group,'cgroup.procs'),'');
+ let polls=0;
+ const cgroupEmpty=()=>/^populated 0$/m.test(readFileSync(join(group,'cgroup.events'),'utf8'));
+ const sleepMs=()=>{ if(++polls===3) writeFileSync(join(group,'cgroup.events'),'populated 0\n'); };
+ expect(restartEngine({...options,cgroupEmpty,sleepMs})).toMatchObject({ok:true});
+ expect(polls).toBe(3);
+ writeFileSync(join(group,'cgroup.events'),'populated 1\n'); writeFileSync(join(group,'cgroup.procs'),'1234\n');
+ polls=0;
+ expect(()=>restartEngine({...options,cgroupEmpty,sleepMs:()=>{polls++;}})).toThrow('custody');
+ expect(polls).toBeGreaterThan(0); expect(polls).toBeLessThanOrEqual(100);
+});
 test('unknown cgroup/listener custody retains unit and receipt; enabled/unknown managers block data deletion',()=>{
  const {l,options}=installed();
  expect(()=>stopEngine({...options,cgroupEmpty:()=>undefined})).toThrow('custody');
