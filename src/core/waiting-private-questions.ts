@@ -3,10 +3,9 @@
  * Questions retain their exact bounded selectors; v4 also retains anonymous
  * replies with the exact sent text and an explicit path. A v2 migration adds local
  * answer text, citation locators, content-free source identities, answered-at
- * and read/unread. Unanswered rows keep the original 20/connection, 50 total,
- * 256 KB and seven-day bounds. Answered rows stay until deletion, including
- * while re-answering after eligibility changes, subject to 50 rows / 1 MiB per
- * connection and 500 rows / 16 MiB global storage safety limits; each answer is at most 128 KiB.
+ * and read/unread. Unanswered rows expire after seven days. Answered rows stay
+ * until deletion, including while re-answering after eligibility changes; there
+ * is no count or byte cap (owner ruling 2026-10-29), and each answer is at most 128 KiB.
  *
  * Every completion/retry/invalidation compares id, generation and connection.
  * Revocation deletes that connection's rows and bumps its recording ticket;

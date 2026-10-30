@@ -192,7 +192,9 @@ Olympus sorts every item, one by one, into one of three tiers:
 Olympus decides on your computer. Once its built-in private model is ready, it
 checks every item it reads before treating it as Personal. Labels are
 automatic and can be wrong. In the dashboard,
-**Privacy** asks *"What's private for you?"*: answer in your own words. You
+**Privacy** asks *"What's private for you?"*: answer in your own words. Once
+you do, only the kinds of things you call private are Private: health or
+family matters you leave out, or say are fine to share, can reach ChatGPT. You
 can also mark folders, Gmail labels or senders as always Private.
 
 ### 5. Ask
@@ -277,8 +279,8 @@ Olympus answers it on your computer; the agent is told only that the answer is
 in Olympus on your computer, with a link (`olympus://open/private/` and a
 random identifier) that opens it there. The answer waits in the dashboard's
 [Inbox](https://olympusplugin.ai/open/private/) (under **On this computer**),
-which Olympus gives no AI app a way to read, until you delete it or the Inbox
-removes the oldest answers when full, and **Needs you** counts the
+which Olympus gives no AI app a way to read, until you delete it, and
+**Needs you** counts the
 answers you have not read. More: [Connect other
 agents](#connect-other-agents).
 
