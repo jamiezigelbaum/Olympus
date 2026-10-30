@@ -1,5 +1,5 @@
 /* olympusplugin.ai home: the long launch film laid out down the page. Each .stage frames one of the film's own
-   scenes (/film/scene.html, 1920x1080), scaled to fit and cropped to the paper and its shadow; home.js plays each
+   scenes (/film/scene.html, 1920x1080), zoomed to fit and cropped to the paper and its shadow; home.js plays each
    once when it reaches the middle of the screen. The stages have no desk of their own: the paper lies on this page. */
 
 /* The heavens: full-bleed banner; the first page rises over its foot. */
@@ -13,7 +13,7 @@
 .scene { width: 100%; max-width: calc(var(--sheet-max) * 1540 / 1420); margin: 0 auto; }
 .stage { position: relative; aspect-ratio: 1540 / 1080; overflow: hidden; }
 .stage iframe { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; border: 0; background: transparent;
-  transform-origin: 0 0; transform: scale(var(--k, 0.5)) translateX(-190px); pointer-events: none; }
+  pointer-events: none; }
 @media (max-width: 599px) { .scene { width: calc(100% + 2 * var(--gutter)); margin-inline: calc(var(--gutter) * -1); } }
 #intro { margin-top: clamp(-150px, -9vw, -40px); position: relative; }
 
