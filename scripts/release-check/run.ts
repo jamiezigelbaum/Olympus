@@ -84,6 +84,7 @@ import { exploreChecks, type ExploreResult } from './explore.ts';
 import { SCREENS, compareScreens, currentApprovalDigest, visualChecks, type VisualResult } from './visual.ts';
 import { SCREEN_THEMES, SCREEN_WIDTHS, screenName } from './visual-capture.ts';
 import { BESIDE_LIVE_FORMATS, EXTRA_FORMATS, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
+import { checkZkapiConfinement } from './zkapi-confinement.ts';
 import {
   ARCHIVE_BOUNDS, BULK_SIZES, besideLiveChecks, changedChecks, drainBoundS, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, seedLiveChecks,
   type BesideLiveObservation, type ChangedObservation, type ImportObservation, type ModelObservation, type RemoveObservation, type SeedLiveObservation,
@@ -1272,7 +1273,14 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
   if (Date.now() < deadline) await runArchiveLeg(run, options.outDir, deadline); else run.errors.push('the run exceeded its time budget before the archive-import leg');
   if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
+  if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
   await collectEvidence(run, options.outDir);
+}
+
+// Last, because installing the anonymous-answer tools and, on Ubuntu, the administrator's AppArmor profile changes what
+// the Models and Ask pages show; every check and screen before it sees the install as a user first has it.
+async function runConfinementCheck(run: Run): Promise<void> {
+  run.add(await run.phase('zkapi-confinement', () => checkZkapiConfinement(run.machine!)));
 }
 
 export async function runReleaseCheck(options: RunOptions): Promise<ReleaseReport> {
@@ -1316,6 +1324,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
         if (Date.now() < deadline) await runArchiveLeg(run, options.outDir, deadline); else run.errors.push('the run exceeded its time budget before the archive-import leg');
         if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
+        if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
       }
       await collectEvidence(run, options.outDir);
     }

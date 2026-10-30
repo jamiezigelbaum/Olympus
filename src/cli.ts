@@ -17,6 +17,12 @@ import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
 import { mintDashboardOpeningUrl, olympusCommandHint as olympusCommandHintFor, workerRootBaseUrl, type DashboardFetch } from './core/dashboard-opening.ts';
 
+export async function printConfinementStatus(confinement: Pick<import('./core/consult-transport-zkapi.ts').ZkapiConfinement, 'check' | 'limit'>): Promise<boolean> {
+  const result = confinement.check ? await confinement.check() : { ok: false, line: `confinement on this platform: ${confinement.limit}` };
+  console.log(result.line);
+  return result.ok;
+}
+
 /** How the CLI names itself in hints: plain `olympus` on PATH, else this install's own bin/olympus. */
 export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
   return olympusCommandHintFor({ ...input, pluginBin: input.pluginBin ?? resolve(olympusPackageRoot(), 'bin', 'olympus') });
@@ -301,6 +307,14 @@ async function main(): Promise<void> {
 
   if (args[0] === 'worker') {
     await runWorkerCommand(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'zkapi' && args[1] === 'check-confinement') {
+    if (args.length !== 2) throw new OperationError('invalid_params', 'olympus zkapi check-confinement takes no options.');
+    const { defaultZkapiConfinement } = await import('./core/consult-transport-zkapi.ts');
+    const confinement = defaultZkapiConfinement();
+    if (!await printConfinementStatus(confinement)) process.exitCode = 1;
     return;
   }
 
@@ -1355,6 +1369,7 @@ function printHelp(): void {
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
   for (const usage of Object.values(TIER_CLI_USAGE)) console.log(`  ${usage}`);
   console.log('  olympus zkapi install-tools');
+  console.log('  olympus zkapi check-confinement');
   console.log(`  ${ZKAPI_TEST_WRITER_USAGE}`);
   console.log('  olympus serve');
   console.log('  olympus --tools-json');
@@ -1404,6 +1419,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
   ...TIER_CLI_USAGE,
   'zkapi install-tools': 'olympus zkapi install-tools',
+  'zkapi check-confinement': 'olympus zkapi check-confinement',
   'zkapi test-writer': ZKAPI_TEST_WRITER_USAGE,
   serve: 'olympus serve',
 };
@@ -1501,6 +1517,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
   zkapi: [
     'Usage: olympus zkapi <command>',
     'Commands:',
+    '  olympus zkapi check-confinement   Check anonymous-answer network confinement',
     '  olympus zkapi install-tools   Install the pinned, verified Tor and zkapi-clientd builds for anonymous answers',
     '  olympus zkapi test-writer     Test your own local model as the anonymous-answer writer on invented cases (sends nothing to zkAPI)',
   ],
