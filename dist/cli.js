@@ -2813,6 +2813,7 @@ var init_public_surface = __esm(() => {
     "argus list",
     "argus complete",
     "zkapi install-tools",
+    "zkapi check-confinement",
     "zkapi test-writer",
     "serve"
   ];
@@ -211682,6 +211683,11 @@ function expectNoArgs(command, args) {
 // src/cli.ts
 init_engine_service();
 init_remote_access();
+async function printConfinementStatus(confinement) {
+  const result = confinement.check ? await confinement.check() : { ok: false, line: `confinement on this platform: ${confinement.limit}` };
+  console.log(result.line);
+  return result.ok;
+}
 function olympusCommandHint2(input2 = {}) {
   return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve27(olympusPackageRoot(), "bin", "olympus") });
 }
@@ -211827,6 +211833,15 @@ Run: ${ocr.repairHint}`);
   }
   if (args[0] === "worker") {
     await runWorkerCommand(args.slice(1));
+    return;
+  }
+  if (args[0] === "zkapi" && args[1] === "check-confinement") {
+    if (args.length !== 2)
+      throw new OperationError("invalid_params", "olympus zkapi check-confinement takes no options.");
+    const { defaultZkapiConfinement: defaultZkapiConfinement2 } = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
+    const confinement = defaultZkapiConfinement2();
+    if (!await printConfinementStatus(confinement))
+      process.exitCode = 1;
     return;
   }
   if (args[0] === "zkapi" && args[1] === "install-tools") {
@@ -212726,6 +212741,7 @@ function printHelp() {
   for (const usage of Object.values(TIER_CLI_USAGE))
     console.log(`  ${usage}`);
   console.log("  olympus zkapi install-tools");
+  console.log("  olympus zkapi check-confinement");
   console.log(`  ${ZKAPI_TEST_WRITER_USAGE}`);
   console.log("  olympus serve");
   console.log("  olympus --tools-json");
@@ -212774,6 +212790,7 @@ var PUBLIC_LEAF_USAGE = {
   "data delete": "olympus data delete --all|--source <id> [--dry-run]",
   ...TIER_CLI_USAGE,
   "zkapi install-tools": "olympus zkapi install-tools",
+  "zkapi check-confinement": "olympus zkapi check-confinement",
   "zkapi test-writer": ZKAPI_TEST_WRITER_USAGE,
   serve: "olympus serve"
 };
@@ -212868,6 +212885,7 @@ var COMMAND_GROUP_HELP = {
   zkapi: [
     "Usage: olympus zkapi <command>",
     "Commands:",
+    "  olympus zkapi check-confinement   Check anonymous-answer network confinement",
     "  olympus zkapi install-tools   Install the pinned, verified Tor and zkapi-clientd builds for anonymous answers",
     "  olympus zkapi test-writer     Test your own local model as the anonymous-answer writer on invented cases (sends nothing to zkAPI)"
   ],
@@ -214355,6 +214373,7 @@ export {
   runConnectionsCommand,
   restartCaptureWorker,
   resolveCliOperation,
+  printConfinementStatus,
   parseXReconcileRecoveryArgs,
   parseXContentRecoveryArgs,
   parseTerminalContentRequalifyArgs,
