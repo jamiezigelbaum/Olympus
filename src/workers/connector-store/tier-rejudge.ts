@@ -67,7 +67,7 @@ import {
   type TierOwnerOverrideGuard,
 } from '../classification/tier-ledger.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import type { TierLedger } from '../classification/tier-ledger.ts';
+import { STORED_NAMES_ASKED_REASON, STORED_NAMES_REASON, type TierLedger } from '../classification/tier-ledger.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
@@ -309,9 +309,6 @@ export function rejudgeStoredContent(
   else report.updated += 1;
 }
 
-/** Marks a names verdict a re-judge made from the stored names alone. */
-const STORED_NAMES_REASON = 'metadata:names_from_store';
-
 /** Only a model's obsolete names verdict may be replaced here. Owner rules,
  * overrides and provider floors retain their authority. The old placement
  * stays in force while these new names and content questions are answered. */
@@ -363,8 +360,9 @@ function rejudgeMetadata(
       ...providerReasons,
       `metadata:sniffer:${sniffer.id}:${pending ? 'undecided' : verdict.code}`,
       // Mark only a raise this stored-names verdict made. A tier held at the
-      // inherited floor must stay unmarked, or the next re-judge drops it.
-      ...(metadataTier !== baseline ? [STORED_NAMES_REASON] : []),
+      // inherited floor must stay unmarked, or the next re-judge drops it. A
+      // queued question is marked when its answer comes in (tier-ledger.ts).
+      ...(pending ? [STORED_NAMES_ASKED_REASON] : metadataTier !== baseline ? [STORED_NAMES_REASON] : []),
     ],
   };
 }

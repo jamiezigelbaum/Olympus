@@ -18912,6 +18912,7 @@ var init_tier_rejudge = __esm(() => {
   init_stored_names();
   init_tier_classifier();
   init_tier_ledger();
+  init_tier_ledger();
   init_secrets_disposition();
   init_tier_placement();
 });

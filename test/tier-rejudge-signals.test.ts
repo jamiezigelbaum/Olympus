@@ -179,6 +179,35 @@ test('names a re-judge held Private from the stored names can be lowered by a la
   expect(f.stores.internal!.localContent(localId('record'))?.chunks.join('')).toBe(text);
 });
 
+test('a raise from a queued stored-names question is marked when its answer comes in, so a later re-judge can lower it', async () => {
+  const f = await storedPrivate('private');
+  const placementFor = f.set.placementFor.bind(f.set);
+  const queued = { id: 'prompt-a', judge: (request: TierSnifferRequest) => request.pass === 'metadata'
+    ? { verdict: 'undecided' as const, queued: true as const }
+    : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary' } };
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: queued });
+  f.ledger.applySnifferVerdict(identity, { pass: 'metadata', tier: 'secure', reason: 'metadata:sniffer:prompt-a:identity', modelId: 'fixture' }, { placementFor });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'secure' });
+  await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  const raised = f.ledger.getCurrent(identity)!;
+  expect(raised.reasons).toContain('metadata:names_from_store');
+  expect(raised.reasons).not.toContain('metadata:names_from_store:asked');
+  rejudgeStoredContent(f.set, raised, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging('prompt-b', 'private') });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'private' });
+});
+
+test('a queued stored-names question answered at its floor leaves no mark', async () => {
+  const f = await storedPrivate();
+  const queued = { id: 'prompt-a', judge: (request: TierSnifferRequest) => request.pass === 'metadata'
+    ? { verdict: 'undecided' as const, queued: true as const }
+    : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary' } };
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: queued });
+  f.ledger.applySnifferVerdict(identity, { pass: 'metadata', tier: 'private', reason: 'metadata:sniffer:prompt-a:ordinary', modelId: 'fixture' }, { placementFor: f.set.placementFor.bind(f.set) });
+  const settled = f.ledger.getCurrent(identity)!;
+  expect(settled).toMatchObject({ state: 'current', metadataTier: 'secure' });
+  expect(settled.reasons.filter((reason) => reason.startsWith('metadata:names_from_store'))).toEqual([]);
+});
+
 for (const locator of [
   'ftp://reader:synthetic-password@example.test/report',
   'ftp://example.test/report?access_token=synthetic-url-credential',

@@ -14822,7 +14822,7 @@ class TierLedger {
           contentTier,
           decidedBy: contentTier !== existing.contentTier ? "sniffer" : existing.decidedBy,
           reasons: [
-            ...metadataReasons.filter((reason) => !isOpenSnifferReason(reason, "metadata")),
+            ...settleStoredNamesMark(metadataReasons.filter((reason) => !isOpenSnifferReason(reason, "metadata")), existing.metadataTier, metadataTier),
             verdict.reason,
             ...settlesContent ? contentReasons.filter((reason) => !isOpenSnifferReason(reason, "content")) : contentReasons
           ],
@@ -14882,13 +14882,14 @@ class TierLedger {
     const metadataTier = verdict.pass === "metadata" ? maxTier(base.metadataTier, verdict.tier) : base.metadataTier;
     const contentTier = maxTier(base.contentTier, verdict.tier);
     const metadataPending = verdict.pass === "metadata" ? false : base.metadataPending;
+    const kept = base.reasons.filter((reason) => !isOpenSnifferReason(reason, verdict.pass) && !(metadataTier === "secure" && isOpenSnifferReason(reason, "content")));
     const contentPending = verdict.pass === "content" || metadataTier === "secure" ? false : base.contentPending;
     const decision = {
       ...base,
       metadataTier,
       contentTier,
       decidedBy: "sniffer",
-      reasons: [...base.reasons.filter((reason) => !isOpenSnifferReason(reason, verdict.pass) && !(metadataTier === "secure" && isOpenSnifferReason(reason, "content"))), verdict.reason],
+      reasons: [...verdict.pass === "metadata" ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept, verdict.reason],
       metadataPending,
       contentPending,
       state: metadataPending || contentPending ? "pending" : "current"
@@ -16951,6 +16952,12 @@ function settleStaleEmbedHolds(db, now) {
       )
   `).run(now).changes;
 }
+function settleStoredNamesMark(reasons, askedTier, answeredTier) {
+  if (!reasons.includes(STORED_NAMES_ASKED_REASON))
+    return [...reasons];
+  const rest = reasons.filter((reason) => reason !== STORED_NAMES_ASKED_REASON);
+  return answeredTier !== askedTier ? [...rest, STORED_NAMES_REASON] : rest;
+}
 function isOpenSnifferReason(reason, pass) {
   if (pass === "metadata") {
     return reason.startsWith("metadata:possibly_private:") || reason.startsWith("metadata:sniffer:") && reason.endsWith(":undecided");
@@ -17381,7 +17388,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 10, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 10, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -32255,7 +32262,7 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
       ...fresh.reasons.filter((reason) => reason.startsWith("metadata:") && !reason.startsWith("metadata:sniffer:") && !reason.startsWith("metadata:possibly_private:")),
       ...providerReasons,
       `metadata:sniffer:${sniffer.id}:${pending ? "undecided" : verdict.code}`,
-      ...metadataTier !== baseline ? [STORED_NAMES_REASON] : []
+      ...pending ? [STORED_NAMES_ASKED_REASON] : metadataTier !== baseline ? [STORED_NAMES_REASON] : []
     ]
   };
 }
@@ -32335,12 +32342,13 @@ function storedFolderKeys(value) {
     return [];
   }
 }
-var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge", STORED_NAMES_REASON = "metadata:names_from_store";
+var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge";
 var init_tier_rejudge = __esm(() => {
   init_media_judge();
   init_parent_context();
   init_stored_names();
   init_tier_classifier();
+  init_tier_ledger();
   init_tier_ledger();
   init_secrets_disposition();
   init_tier_placement();
