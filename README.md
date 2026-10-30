@@ -192,7 +192,9 @@ Olympus sorts every item, one by one, into one of three tiers:
 Olympus decides on your computer. Once its built-in private model is ready, it
 checks every item it reads before treating it as Personal. Labels are
 automatic and can be wrong. In the dashboard,
-**Privacy** asks *"What's private for you?"*: answer in your own words. You
+**Privacy** asks *"What's private for you?"*: answer in your own words. Once
+you do, only the kinds of things you call private are Private: health or
+family matters you leave out, or say are fine to share, can reach ChatGPT. You
 can also mark folders, Gmail labels or senders as always Private.
 
 ### 5. Ask
