@@ -1,3 +1,4 @@
+import { checkZkapiConfinement } from './zkapi-confinement.ts';
 /**
  * Olympus release check: one candidate build, one throwaway machine per
  * platform, the same synthetic test life, the same agent question suite, one
@@ -1259,6 +1260,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   run.differences = describeDifferences(before, after);
 
   run.use('after');
+  run.add(await run.phase('zkapi-confinement', () => checkZkapiConfinement(machine)));
   if (after.version) run.stage.version = after.version;
   if (after.build) run.build = after.build;
   // No sync here: the update must not need the data brought in again.
@@ -1305,6 +1307,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       await runUpgradeLeg(run, workDir, bundlePath, judge, deadline, versions);
     } else {
       const ready = await setupMachine(run, workDir, bundlePath);
+      if (ready) run.add(await run.phase('zkapi-confinement', () => checkZkapiConfinement(run.machine!)));
       if (ready && !options.skipSuite && Date.now() < deadline) {
         await runSuite(run, workDir, judge, { mintToken: true });
       } else if (ready && !options.skipSuite) {
