@@ -1,0 +1,635 @@
+{
+  "schemaVersion": 1,
+  "description": "The demo kit's WhatsApp (Sofia) and Telegram (Tiago Ferreira) chat messages, judged under the owner description saved on test-mac, each with its names, bare, and as the names pass a re-judge asks. From the 1.2.1 canary (2026-10-30): after the #625 re-judge, Telegram's Duque and €18 messages stopped answering normally. Every item is labelled Personal ('private' tier key), as the demo expects; the chat ids are placeholders shaped like production keys.",
+  "privacyProfile": {
+    "schemaVersion": 1,
+    "description": "Money and legal stuff are private, including anything from my lawyer or accountant. Plans with Leo, including his appointments, and plans with friends and my AI projects are fine to share.\nAbout money: private — Bank, card, brokerage and crypto statements, Tax and payroll papers, Invoices, bills and receipts, Loans and proof of funds; fine to share — Articles and guides about money, Crypto project whitepapers and research, Prices and quotes I am researching."
+  },
+  "items": [
+    {
+      "id": "tg-01",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Tiago Ferreira\nExcerpt: You're on at demo night on the 13th, right? What are you showing?"
+    },
+    {
+      "id": "tg-01-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "You're on at demo night on the 13th, right? What are you showing?"
+    },
+    {
+      "id": "tg-01-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-02",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Jamie Z\nExcerpt: Yes! Olympus, the private search thing. My slot is 7:40"
+    },
+    {
+      "id": "tg-02-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Yes! Olympus, the private search thing. My slot is 7:40"
+    },
+    {
+      "id": "tg-02-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-03",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Tiago Ferreira\nExcerpt: Nice. I'm doing the intros, send me two lines about you"
+    },
+    {
+      "id": "tg-03-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Nice. I'm doing the intros, send me two lines about you"
+    },
+    {
+      "id": "tg-03-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-04",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Jamie Z\nExcerpt: Will do"
+    },
+    {
+      "id": "tg-04-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Will do"
+    },
+    {
+      "id": "tg-04-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-05",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Tiago Ferreira\nExcerpt: Drinks after at Duque? I'll book a table for 6 at 9"
+    },
+    {
+      "id": "tg-05-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Drinks after at Duque? I'll book a table for 6 at 9"
+    },
+    {
+      "id": "tg-05-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-06",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Jamie Z\nExcerpt: Yes, but I'll have Leo, so I'll come once he's dropped off"
+    },
+    {
+      "id": "tg-06-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Yes, but I'll have Leo, so I'll come once he's dropped off"
+    },
+    {
+      "id": "tg-06-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-07",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Tiago Ferreira\nExcerpt: No problem. And bring an HDMI adapter, the projector there is ancient"
+    },
+    {
+      "id": "tg-07-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "No problem. And bring an HDMI adapter, the projector there is ancient"
+    },
+    {
+      "id": "tg-07-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-08",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Jamie Z\nExcerpt: Noted 👍"
+    },
+    {
+      "id": "tg-08-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Noted 👍"
+    },
+    {
+      "id": "tg-08-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-09",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Tiago Ferreira\nExcerpt: We're taking the kids to Jardim da Estrela on Saturday at 12. Bring Leo?"
+    },
+    {
+      "id": "tg-09-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "We're taking the kids to Jardim da Estrela on Saturday at 12. Bring Leo?"
+    },
+    {
+      "id": "tg-09-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-10",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Jamie Z\nExcerpt: Yes! Right after his check-up"
+    },
+    {
+      "id": "tg-10-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Yes! Right after his check-up"
+    },
+    {
+      "id": "tg-10-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-11",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "A small debt between friends. The demo's owe-tiago question expects a normal answer; under 'money … private' this is the judgment call to watch.",
+      "material": "Names: Tiago Ferreira | Tiago Ferreira\nExcerpt: Also you owe me €18 for the pastéis last week 😄"
+    },
+    {
+      "id": "tg-11-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "A small debt between friends. The demo's owe-tiago question expects a normal answer; under 'money … private' this is the judgment call to watch.",
+      "material": "Also you owe me €18 for the pastéis last week 😄"
+    },
+    {
+      "id": "tg-11-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "pass": "metadata"
+    },
+    {
+      "id": "tg-12",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Tiago Ferreira | Jamie Z\nExcerpt: Sending now"
+    },
+    {
+      "id": "tg-12-bare",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Sending now"
+    },
+    {
+      "id": "tg-12-names",
+      "templateFamily": "tg-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-01",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Sofia\nExcerpt: Hi! My Porto trip is confirmed. Can you take Leo from Friday the 7th instead of Saturday?"
+    },
+    {
+      "id": "wa-01-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Hi! My Porto trip is confirmed. Can you take Leo from Friday the 7th instead of Saturday?"
+    },
+    {
+      "id": "wa-01-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-02",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Jamie\nExcerpt: Sure, I'll get him from school"
+    },
+    {
+      "id": "wa-02-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Sure, I'll get him from school"
+    },
+    {
+      "id": "wa-02-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-03",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Sofia\nExcerpt: School closes at 1 that day, teacher training"
+    },
+    {
+      "id": "wa-03-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "School closes at 1 that day, teacher training"
+    },
+    {
+      "id": "wa-03-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-04",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Jamie\nExcerpt: Got it, 1pm at the gate"
+    },
+    {
+      "id": "wa-04-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Got it, 1pm at the gate"
+    },
+    {
+      "id": "wa-04-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-05",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Sofia\nExcerpt: His check-up is Saturday at 10:30 with Dr. Alves. Can you take him? The vaccine booklet is in his blue backpack"
+    },
+    {
+      "id": "wa-05-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "His check-up is Saturday at 10:30 with Dr. Alves. Can you take him? The vaccine booklet is in his blue backpack"
+    },
+    {
+      "id": "wa-05-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-06",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Jamie\nExcerpt: Yes, I'll take him"
+    },
+    {
+      "id": "wa-06-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Yes, I'll take him"
+    },
+    {
+      "id": "wa-06-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-07",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Sofia\nExcerpt: Did Ana send the new parenting plan? I haven't seen it"
+    },
+    {
+      "id": "wa-07-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Did Ana send the new parenting plan? I haven't seen it"
+    },
+    {
+      "id": "wa-07-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-08",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Jamie\nExcerpt: She emailed it, I saved a copy in Dropbox under Family/Legal"
+    },
+    {
+      "id": "wa-08-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "She emailed it, I saved a copy in Dropbox under Family/Legal"
+    },
+    {
+      "id": "wa-08-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-09",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Sofia\nExcerpt: Thanks. I'll pick him up from you Sunday at 6"
+    },
+    {
+      "id": "wa-09-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Thanks. I'll pick him up from you Sunday at 6"
+    },
+    {
+      "id": "wa-09-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-10",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Jamie\nExcerpt: Perfect"
+    },
+    {
+      "id": "wa-10-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Perfect"
+    },
+    {
+      "id": "wa-10-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-11",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Sofia\nExcerpt: Also, could you have him Thursday the 13th in the evening? I have a late meeting"
+    },
+    {
+      "id": "wa-11-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Also, could you have him Thursday the 13th in the evening? I have a late meeting"
+    },
+    {
+      "id": "wa-11-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-12",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Jamie\nExcerpt: That's my demo night 😬 He can come, it's at 7"
+    },
+    {
+      "id": "wa-12-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "That's my demo night 😬 He can come, it's at 7"
+    },
+    {
+      "id": "wa-12-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
+      "pass": "metadata"
+    },
+    {
+      "id": "wa-13",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Names: Sofia | Sofia\nExcerpt: Ha, he'll love it. Pack his headphones, it gets loud"
+    },
+    {
+      "id": "wa-13-bare",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Demo-kit chat message; the demo expects every chat message to be answerable normally (plans with Leo and friends are fine to share).",
+      "material": "Ha, he'll love it. Pack his headphones, it gets loud"
+    },
+    {
+      "id": "wa-13-names",
+      "templateFamily": "wa-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
+      "pass": "metadata"
+    }
+  ]
+}
