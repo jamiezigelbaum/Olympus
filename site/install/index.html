@@ -30,7 +30,7 @@
       <p class="lede">Two steps. Install Olympus on your computer, then connect the AI you use. Your files stay on your computer; your AI asks Olympus.</p>
 
       <h2 id="install"><span class="step" aria-hidden="true">1</span>Install Olympus on your computer</h2>
-      <p>Olympus runs on a Mac with Apple silicon, or on Linux with Omarchy. No administrator password, and no account to create.</p>
+      <p>Olympus runs on a Mac with Apple silicon, or on x86_64 Linux with Omarchy or Ubuntu 24.04 LTS. No account to create.</p>
       <p>By installing Olympus you agree to its <a href="/terms/">Terms</a> and acknowledge its <a href="/privacy/">Privacy Policy</a>. Olympus is provided as is, without warranty. Keep your own backups.</p>
 
       <h3 id="mac">On a Mac</h3>
@@ -42,14 +42,20 @@
 
       <h3 id="linux">On Omarchy</h3>
       <ul>
-        <li><a href="https://omarchy.org">Omarchy</a> (Arch Linux) on an x86_64 computer. Omarchy already has everything else Olympus needs (a processor with SSE4.2, glibc 2.17 or later, systemd, and curl, tar and unzip). Other Linux distributions and ARM computers are not supported yet.</li>
+        <li><a href="https://omarchy.org">Omarchy</a> (Arch Linux) on an x86_64 computer. Omarchy already has everything else Olympus needs (a processor with SSE4.2, glibc 2.17 or later, systemd, and curl, tar and unzip).</li>
       </ul>
       <p>First install the tools Olympus uses to read scans, photos and voice notes:</p>
       <pre><code>sudo pacman -S --needed tesseract tesseract-data-eng poppler libvips libheif ffmpeg</code></pre>
       <p>Then, in a terminal:</p>
       <pre><code>curl -fsSL https://olympusplugin.ai/install-linux.sh | sh</code></pre>
 
-      <p>It takes a minute or two. When it says <strong>Olympus is installed and running</strong> (on Omarchy, <strong>Installed for your user without an administrator password</strong>), connect your AI. On Omarchy it also adds <strong>Olympus</strong> to your app launcher (Super+Space), which opens the dashboard. Running the same line again later updates Olympus, or repairs it if it stopped. You can read the installer before you run it: <a href="/install.sh">Mac</a>, <a href="/install-linux.sh">Omarchy</a>.</p>
+      <h3 id="ubuntu">On Ubuntu 24.04 LTS</h3>
+      <p>On an x86_64 computer, install the prerequisites, then run the installer:</p>
+      <pre><code>sudo apt install curl ca-certificates tar unzip coreutils findutils gawk grep diffutils procps util-linux systemd python3 tesseract-ocr tesseract-ocr-eng poppler-utils libvips-tools libheif1 ffmpeg
+curl -fsSL https://olympusplugin.ai/install-linux.sh | sh</code></pre>
+      <p>Other Linux distributions and ARM computers are not supported yet. Anonymous answers on Ubuntu need an administrator step; Olympus prints it when you run <code>olympus zkapi check-confinement</code>. Answers remain unavailable until the checks pass.</p>
+
+      <p>It takes a minute or two. When it says <strong>Olympus is installed and running</strong> (on Linux, <strong>Installed for your user without an administrator password</strong>), connect your AI. On Omarchy it also adds <strong>Olympus</strong> to your app launcher (Super+Space), which opens the dashboard. Running the same line again later updates Olympus, or repairs it if it stopped. You can read the installer before you run it: <a href="/install.sh">Mac</a>, <a href="/install-linux.sh">Linux</a>.</p>
       <div class="note">
         <p><strong>On a server, or already using OpenClaw?</strong> Olympus runs there as an OpenClaw plugin. <a href="/install/openclaw/">Install with OpenClaw</a>.</p>
       </div>
@@ -75,7 +81,7 @@
       <ul>
         <li>Installs Olympus for your user only. It changes nothing outside your home folder.</li>
         <li>Downloads Olympus over a secure connection, with the runtime it needs, and checks each download against a published checksum before using it. If one does not match, it stops and changes nothing.</li>
-        <li>Starts Olympus in the background, so it keeps running, and checks that it really started. On a Mac that is a per-user login item (a LaunchAgent). On Omarchy it is a systemd user service that keeps running after you log out; if your system needs an administrator to allow that, the installer stops before changing anything and prints the one command to run (<code>sudo loginctl enable-linger</code> and your user name).</li>
+        <li>Starts Olympus in the background, so it keeps running, and checks that it really started. On a Mac that is a per-user login item (a LaunchAgent). On Linux it is a systemd user service that keeps running after you log out; if your system needs an administrator to allow that, the installer stops before changing anything and prints the one command to run (<code>sudo loginctl enable-linger</code> and your user name).</li>
         <li>Adds the <code>olympus</code> command, and on a Mac a line to your shell profile so Terminal finds it. On Omarchy it also adds Olympus to the app launcher.</li>
         <li>If an update does not start, puts the previous version back.</li>
       </ul>
@@ -110,7 +116,7 @@
           </tbody>
         </table>
       </div>
-      <h3>On Omarchy</h3>
+      <h3>On Linux</h3>
       <div class="table-scroll">
         <table>
           <thead>
@@ -129,9 +135,9 @@
       <h2 id="uninstall">Uninstall</h2>
       <p>On a Mac, in Terminal:</p>
       <pre><code>curl -fsSL https://olympusplugin.ai/uninstall.sh | sh</code></pre>
-      <p>On Omarchy:</p>
+      <p>On Linux:</p>
       <pre><code>curl -fsSL https://olympusplugin.ai/uninstall-linux.sh | sh</code></pre>
-      <p>On a Mac, this stops Olympus, removes its login item, and deletes the app, the runtime, the <code>olympus</code> command and the line the installer added to your shell profile. On Omarchy, it stops Olympus and removes its service, the app and the <code>olympus</code> command. Both keep your data and settings, and list where they are. To only stop Olympus and remove its login item, keeping the app, run <code>olympus engine uninstall</code> instead.</p>
+      <p>On a Mac, this stops Olympus, removes its login item, and deletes the app, the runtime, the <code>olympus</code> command and the line the installer added to your shell profile. On Linux, it stops Olympus and removes its service, the app and the <code>olympus</code> command. Both keep your data and settings, and list where they are. To only stop Olympus and remove its login item, keeping the app, run <code>olympus engine uninstall</code> instead.</p>
       <p>To delete your data too, do this <strong>before</strong> uninstalling. It cannot be undone:</p>
       <pre><code>olympus engine stop
 olympus data delete --all</code></pre>

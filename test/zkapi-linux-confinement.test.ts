@@ -68,6 +68,7 @@ describe('4.7 check and remedies', () => {
   });
   test('admin guidance prints root-owned copy and profile, never a sysctl disable', () => {
     const text=linuxConfinementRemedy('namespace_unavailable',{'/proc/sys/kernel/apparmor_restrict_unprivileged_userns':'1'},'/managed/bin/zkapi-confine');
+    expect(text).toContain('Answers remain unavailable until the checks pass.'); expect(text).not.toContain('not been qualified');
     expect(text).toContain('sudo install'); expect(text).toContain('-o root'); expect(text).toContain('sudo apparmor_parser'); expect(text).not.toContain('userns=0');
   });
   test('Linux x64 selects confinement only when the pinned launcher check passes', async () => {

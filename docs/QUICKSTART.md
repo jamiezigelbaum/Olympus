@@ -5,7 +5,7 @@ cited answer.
 
 This is the OpenClaw path. **Using ChatGPT, Claude or Grok?** Follow
 [Get started](../README.md#get-started) instead: it needs only a Mac or an
-Omarchy computer, with no OpenClaw and no API keys.
+Omarchy or Ubuntu 24.04 LTS x86_64 computer, with no OpenClaw and no API keys.
 
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
