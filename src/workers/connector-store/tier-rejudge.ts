@@ -48,6 +48,7 @@ import {
   HELD_UNTIL_JUDGED_PRIORITY,
   heldUntilJudged,
   SNIFFER_NAMES_MAX_CHARS,
+  snifferFolderKeyNames,
   tierSnifferInputHash,
   maxTier,
   hasCredentialUrl,
@@ -339,7 +340,7 @@ function rejudgeMetadata(
   const providerReasons = previous.reasons.filter(reason => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
   const baseline = retiredPrior ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
-  const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
+  const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({ pass: 'metadata', material: namesWithParentContext(material, parentContext), flags: ['names:rejudge'], subject,
     materialHash: tierSnifferInputHash('metadata', signals, undefined, parentContext),
     mapRevision: fresh.mapRevision, priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY });

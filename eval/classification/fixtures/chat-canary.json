@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "description": "The demo kit's WhatsApp (Sofia) and Telegram (Tiago Ferreira) chat messages, judged under the owner description saved on test-mac, each with its names, bare, and as the names pass a re-judge asks. From the 1.2.1 canary (2026-10-30): after the #625 re-judge, Telegram's Duque and €18 messages stopped answering normally. Every item is labelled Personal ('private' tier key), as the demo expects; the chat ids are placeholders shaped like production keys.",
+  "description": "The demo kit's WhatsApp (Sofia) and Telegram (Tiago Ferreira) chat messages, judged under the owner description saved on test-mac, each with its names, bare, and as the names pass a re-judge asks. From the 1.2.1 canary (2026-10-30): after the #625 re-judge, Telegram's Duque and €18 messages stopped answering normally. Every item is labelled Personal ('private' tier key), as the demo expects; the chat ids are placeholders shaped like production keys. Telegram's numeric peer id is not in its names (snifferFolderKeyNames); before that fix the names pass held every Tiago message Private.",
   "privacyProfile": {
     "schemaVersion": 1,
     "description": "Money and legal stuff are private, including anything from my lawyer or accountant. Plans with Leo, including his appointments, and plans with friends and my AI projects are fine to share.\nAbout money: private — Bank, card, brokerage and crypto statements, Tax and payroll papers, Invoices, bills and receipts, Loans and proof of funds; fine to share — Articles and guides about money, Crypto project whitepapers and research, Prices and quotes I am researching."
@@ -27,8 +27,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Tiago Ferreira",
       "pass": "metadata"
     },
     {
@@ -52,8 +52,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Jamie Z",
       "pass": "metadata"
     },
     {
@@ -77,8 +77,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Tiago Ferreira",
       "pass": "metadata"
     },
     {
@@ -102,8 +102,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Jamie Z",
       "pass": "metadata"
     },
     {
@@ -127,8 +127,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Tiago Ferreira",
       "pass": "metadata"
     },
     {
@@ -152,8 +152,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Jamie Z",
       "pass": "metadata"
     },
     {
@@ -177,8 +177,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Tiago Ferreira",
       "pass": "metadata"
     },
     {
@@ -202,8 +202,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Jamie Z",
       "pass": "metadata"
     },
     {
@@ -227,8 +227,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Tiago Ferreira",
       "pass": "metadata"
     },
     {
@@ -252,8 +252,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Jamie Z",
       "pass": "metadata"
     },
     {
@@ -277,8 +277,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Tiago Ferreira",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Tiago Ferreira",
       "pass": "metadata"
     },
     {
@@ -302,8 +302,8 @@
       "templateFamily": "tg-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
-      "material": "Tiago Ferreira | 8122045531 | Jamie Z",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
+      "material": "Tiago Ferreira | Jamie Z",
       "pass": "metadata"
     },
     {
@@ -327,7 +327,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
       "pass": "metadata"
     },
@@ -352,7 +352,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
       "pass": "metadata"
     },
@@ -377,7 +377,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
       "pass": "metadata"
     },
@@ -402,7 +402,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
       "pass": "metadata"
     },
@@ -427,7 +427,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
       "pass": "metadata"
     },
@@ -452,7 +452,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
       "pass": "metadata"
     },
@@ -477,7 +477,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
       "pass": "metadata"
     },
@@ -502,7 +502,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
       "pass": "metadata"
     },
@@ -527,7 +527,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
       "pass": "metadata"
     },
@@ -552,7 +552,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
       "pass": "metadata"
     },
@@ -577,7 +577,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
       "pass": "metadata"
     },
@@ -602,7 +602,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Jamie",
       "pass": "metadata"
     },
@@ -627,7 +627,7 @@
       "templateFamily": "wa-chat",
       "split": "dev",
       "label": "private",
-      "rationale": "The names pass the re-judge asks, now with the chat's key (#625 side fix).",
+      "rationale": "The names pass a re-judge asks, as the sniffer reads it: a chat key with no letters (Telegram's peer id) is left out (snifferFolderKeyNames).",
       "material": "Sofia | 351912793515@s.whatsapp.net | Sofia",
       "pass": "metadata"
     }

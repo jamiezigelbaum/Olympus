@@ -331,8 +331,10 @@ export interface SnifferBatchItem {
 }
 
 export function buildSnifferBatchPrompt(pass: SnifferPass, items: readonly SnifferBatchItem[], ownerContext?: string): string {
+  // "its" (2026-10-30) versions the prompt: names a pass read with a chat's numeric
+  // id beside them (snifferFolderKeyNames) are asked again without it.
   const intro = pass === 'metadata'
-    ? 'Each item below is the NAMES of one file, message or note: title, folder path, labels and sender.'
+    ? 'Each item below is the NAMES of one file, message or note: its title, folder path, labels and sender.'
     : 'Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.';
   // One JSON object per line: the material is a JSON string, so nothing inside
   // it can close the item or start a new one.

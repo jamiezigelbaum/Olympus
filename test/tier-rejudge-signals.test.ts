@@ -114,6 +114,29 @@ test('rejudging a message asks about its names with its chat, as the owner-rule 
   expect(question.materialHash).toBe(tierSnifferInputHash('metadata', storedSignals(f.stores.secure_local!.exportItemCopy(chatIdentity)!)));
 });
 
+test('a chat key with no letters is left out of the names the sniffer reads, but still keys the question', async () => {
+  // 1.2.1 canary: next to "Tiago Ferreira", Telegram's numeric peer id read as his identity and held his messages Private.
+  const tmp = tempDir();
+  const f = openTierFixture(tmp.dir, { embed: false });
+  cleanup.push(() => { f.close(); tmp.cleanup(); });
+  const chatIdentity = identityOf('message', '8122045531');
+  await f.set.sync(fixtureConnector(() => [{ id: 'message', name: 'Tiago Ferreira', text, conversation: '8122045531' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  await moveTieredItem({ set: f.set, identity: chatIdentity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  const decision = { ...classifyItemTiers({ signals: { title: 'Tiago Ferreira' }, text }),
+    metadataTier: 'secure' as const, contentTier: 'secure' as const,
+    reasons: ['metadata:sniffer:old-prompt:private', 'content:no_raise'],
+  };
+  f.ledger.recordRoutedPlacement(chatIdentity, decision, f.set.placementFor(decision));
+  const requests: TierSnifferRequest[] = [];
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(chatIdentity)!, { autoMoves: true, report: emptyTierRejudgeReport(),
+    sniffer: { id: 'new-prompt', judge(request) { requests.push(request); return { verdict: 'decided', tier: 'private', code: 'ordinary' }; } },
+  });
+  const question = requests.find(request => request.pass === 'metadata')!;
+  expect(question.material).toContain('Tiago Ferreira');
+  expect(question.material).not.toContain('8122045531');
+  expect(question.materialHash).toBe(tierSnifferInputHash('metadata', storedSignals(f.stores.secure_local!.exportItemCopy(chatIdentity)!)));
+});
+
 test('a Personal answer cannot lower an old names verdict when labels were not stored; a relist can reassess it', async () => {
   const f = await storedPrivate();
   rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(),

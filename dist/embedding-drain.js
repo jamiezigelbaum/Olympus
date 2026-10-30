@@ -13994,11 +13994,14 @@ function namesMatchInput(signals) {
     ...path ? { path } : {}
   };
 }
+function snifferFolderKeyNames(keys) {
+  return (keys ?? []).filter((key) => /\p{L}/u.test(key));
+}
 function snifferNames(signals) {
   const joined = [
     signals.title,
     signals.path,
-    ...signals.folderKeys ?? [],
+    ...snifferFolderKeyNames(signals.folderKeys),
     ...signals.labels ?? [],
     signals.sender
   ].filter((part) => typeof part === "string" && part.trim().length > 0).map((part) => part.trim()).join(" | ");
@@ -19597,7 +19600,7 @@ function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
   return `${lane.kind}:${promptVersion}.m${model}`;
 }
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
-  const intro = pass === "metadata" ? "Each item below is the NAMES of one file, message or note: title, folder path, labels and sender." : "Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.";
+  const intro = pass === "metadata" ? "Each item below is the NAMES of one file, message or note: its title, folder path, labels and sender." : "Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.";
   const lines = items.map((item) => JSON.stringify(pass === "metadata" ? { i: item.i, names: item.material } : { i: item.i, document: item.material }));
   const context2 = boundedOwnerContext(ownerContext);
   const owner = context2 ? [
@@ -32230,7 +32233,7 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
   const baseline = retiredPrior ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === "secrets")
     return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
-  const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
+  const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({
     pass: "metadata",
     material: namesWithParentContext(material, parentContext),

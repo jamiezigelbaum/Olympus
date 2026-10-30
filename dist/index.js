@@ -17994,7 +17994,7 @@ var init_delphi_scorer = __esm(() => {
 // src/workers/classification/sniffer.ts
 import { createHash as createHash12 } from "node:crypto";
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
-  const intro = pass === "metadata" ? "Each item below is the NAMES of one file, message or note: title, folder path, labels and sender." : "Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.";
+  const intro = pass === "metadata" ? "Each item below is the NAMES of one file, message or note: its title, folder path, labels and sender." : "Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.";
   const lines = items.map((item) => JSON.stringify(pass === "metadata" ? { i: item.i, names: item.material } : { i: item.i, document: item.material }));
   const context2 = boundedOwnerContext(ownerContext);
   const owner = context2 ? [
