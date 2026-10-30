@@ -2,7 +2,7 @@
 
 ## 1.2.2 - 2026-10-30
 
-- Olympus supports Ubuntu 24.04 LTS on x86_64. After an engine restart, the network isolation check now waits for the previous service to finish stopping, so anonymous answers can become available again (#642).
+- Olympus supports Ubuntu 24.04 LTS on x86_64. On Ubuntu, restarting or stopping Olympus could be refused because it checked too early that the previous engine had stopped. It now waits for systemd to finish (#642).
 - Run `olympus zkapi check-confinement` to check whether anonymous answers are ready and see any steps needed (#639).
 
 ## 1.2.1 - 2026-10-29
