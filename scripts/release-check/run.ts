@@ -206,6 +206,20 @@ interface Stage {
 
 const newStage = (id: string, label: string): Stage => ({ id, label, timings: {}, checks: [], agents: [], screenshots: [], logs: [] });
 
+/** A leg an option left out or cut down: it lends no results, since the tested run never made them all (Codex on #635). */
+function legPartial(leg: Leg, options: RunOptions): boolean {
+  const partial: Record<Leg, boolean | undefined> = {
+    suite: options.skipSuite || (options.onlyAgents?.length ?? 0) > 0,
+    relay: options.skipRelay,
+    inbox: options.skipInbox,
+    screenshots: options.skipScreenshots,
+    journeys: options.skipJourneys || (options.onlyJourneys?.length ?? 0) > 0,
+    explore: options.skipExplore,
+    archive: options.skipArchive,
+  };
+  return partial[leg] === true;
+}
+
 class Run {
   readonly markers: LeakMarker[] = forbiddenMarkers();
   readonly logLines: string[] = [];
@@ -221,6 +235,8 @@ class Run {
   inboxSelftestFailsOn?: string;
   stage: Stage;
   machine?: Machine;
+  /** The legs that ran in full: an incremental run may borrow only these from this report (carry.ts). */
+  readonly legsRan: Leg[] = [];
 
   constructor(readonly options: RunOptions, readonly driver: CommandDriver) {
     this.stage = this.addStage('install', 'Olympus installed fresh');
@@ -272,7 +288,9 @@ class Run {
     const stage = this.stage;
     const before = { checks: stage.checks.length, agents: stage.agents.length, traces: stage.traces?.length ?? 0 };
     try {
-      return await work();
+      const result = await work();
+      if (!legPartial(leg, this.options) && !(leg === 'relay' && !stage.agents.slice(before.agents).some((agent) => agent.ran))) this.legsRan.push(leg);
+      return result;
     } finally {
       for (const check of stage.checks.slice(before.checks)) check.leg ??= leg;
       for (const agent of stage.agents.slice(before.agents)) {
@@ -1383,6 +1401,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     agents: last.agents,
     screenshots: last.screenshots,
     logs: last.logs,
+    legs: [...run.legsRan],
     ...(last.traces ? { traces: last.traces } : {}),
     ...(last.visual ? { visual: last.visual } : {}),
     ...(last.explore ? { explore: last.explore } : {}),

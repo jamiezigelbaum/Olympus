@@ -112,6 +112,8 @@ export interface MachineReport {
   agents: AgentReport[];
   screenshots: ReportFile[];
   logs: ReportFile[];
+  /** The legs that ran in full (no option left them out or cut them down); a kept leg counts once its tested run had it. */
+  legs?: string[];
   /** Step-by-step traces of the browser-driven parts (journeys and the Inbox leg), with a picture after each step. */
   traces?: JourneyTrace[];
   /** The screens compared with the approved pictures. */

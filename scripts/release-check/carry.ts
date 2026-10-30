@@ -35,6 +35,12 @@ const markAgent = (agent: AgentReport, from: CarriedFrom): AgentReport => ({ ...
  */
 export function carryInto(machine: MachineReport, base: MachineReport, from: CarriedFrom, carried: readonly string[]): string[] {
   if (machine.os !== base.os) throw new Error(`--carry-from is a ${base.os} run; this run is on ${machine.os}`);
+  // A leg the tested run left out or cut down (--skip-archive, --only-agents) has no errors and no results, so
+  // borrowing it would pass with nothing checked (Codex on #635).
+  if (!base.legs) throw new Error('--carry-from names a report that does not say which legs ran in full; run in full once');
+  const missing = carried.filter((leg) => !base.legs!.includes(leg));
+  if (missing.length > 0) throw new Error(`--carry-from did not run ${missing.join(', ')} in full, so there is nothing to keep; run ${missing.length === 1 ? 'it' : 'them'} instead`);
+  machine.legs = [...new Set([...(machine.legs ?? []), ...carried])];
   const skipped = (leg: string | undefined): boolean => leg !== undefined && carried.includes(leg);
   const ran = new Set(machine.checks.map((check) => check.id));
   for (const check of base.checks) if (skipped(check.leg) && !ran.has(check.id)) machine.checks.push(mark(check, from));

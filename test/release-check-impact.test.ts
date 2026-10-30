@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { harnessReach, planImpact } from '../scripts/release-check/impact.ts';
+import { LEGS, harnessReach, planImpact } from '../scripts/release-check/impact.ts';
 import { carryInto, copyCarriedFiles, loadCarryBase } from '../scripts/release-check/carry.ts';
 import { buildReport, renderHtml, type MachineReport, type ReleaseReport } from '../scripts/release-check/report.ts';
 import { parseCli } from '../scripts/release-check/run.ts';
@@ -21,6 +21,7 @@ function tested(over: Partial<MachineReport> = {}): ReleaseReport {
   return buildReport({
     runId: 'run-base', candidate: { label: 'c', sha: A }, startedAt: 't0', finishedAt: 't1', errors: [], harnessCommit: A,
     machines: [machine({
+      legs: [...LEGS],
       checks: [
         { id: 'install', title: 'installed', status: 'pass' },
         { id: 'archive.import', title: 'archive imported', status: 'pass', leg: 'archive' },
@@ -115,6 +116,16 @@ describe('keeping the tested run\'s results', () => {
     const parts = carryInto(now, base.machines[0]!, { runId: 'run-base', sha: A }, ['screenshots', 'journeys', 'explore', 'archive']);
     expect(now.screenshots.map((s) => s.path)).toEqual(['screenshots/inbox.png', 'screenshots/home.png']);
     expect(parts).toContain('dashboard screenshots');
+  });
+
+  test('a leg the tested run left out or cut down cannot be kept, though it left no errors', () => {
+    const skippedArchive = tested({ legs: LEGS.filter((leg) => leg !== 'archive') }).machines[0]!;
+    expect(() => carryInto(machine(), skippedArchive, { runId: 'r', sha: A }, ['archive', 'explore'])).toThrow('did not run archive in full');
+    const { legs: _unrecorded, ...older } = tested().machines[0]!;
+    expect(() => carryInto(machine(), older, { runId: 'r', sha: A }, ['suite'])).toThrow('which legs ran');
+    const now = machine({ legs: ['suite'] });
+    carryInto(now, skippedArchive, { runId: 'r', sha: A }, ['explore']);
+    expect(now.legs).toEqual(['suite', 'explore']);
   });
 
   test('a run on another platform cannot lend its results', () => {
