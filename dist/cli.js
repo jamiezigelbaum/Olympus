@@ -5753,19 +5753,22 @@ function telegramPythonExecutable(options = {}) {
   return existsSync5(isolated) ? isolated : Bun.which("python3") ?? undefined;
 }
 async function readyTelegramPython(options = {}) {
-  const python = telegramPythonExecutable(options);
-  if (!python)
-    throw new Error(`Python 3 is required for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
+  if (options.pythonExecutable)
+    return options.pythonExecutable;
   const venvDir = telegramPythonVenvDir(options);
   const isolated = join12(venvDir, "bin", "python");
-  if (options.pythonExecutable || python === isolated)
-    return python;
-  if (await (options.pythonHasTelethon ?? pythonImportsTelethon)(python))
-    return python;
+  const hasTelethon = options.pythonHasTelethon ?? pythonImportsTelethon;
+  if (!installing.has(venvDir) && existsSync5(isolated) && await hasTelethon(isolated))
+    return isolated;
+  const system = Bun.which("python3") ?? undefined;
+  if (!installing.has(venvDir) && system && await hasTelethon(system))
+    return system;
   let install = installing.get(venvDir);
   if (!install) {
+    if (!system)
+      throw new Error(`Python 3 is required for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
     options.onInstall?.(venvDir);
-    install = (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: python, venvDir }).finally(() => installing.delete(venvDir));
+    install = (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: system, venvDir }).finally(() => installing.delete(venvDir));
     installing.set(venvDir, install);
   }
   if (!await install || !existsSync5(isolated))

@@ -63541,29 +63541,26 @@ function telegramPythonVenvDir(options = {}) {
   const home = options.homeDir ?? env.HOME ?? homedir12();
   return join28(env.XDG_CACHE_HOME ?? join28(home, ".cache"), "olympus", "telegram-python");
 }
-function telegramPythonExecutable(options = {}) {
-  if (options.pythonExecutable)
-    return options.pythonExecutable;
-  const isolated = join28(telegramPythonVenvDir(options), "bin", "python");
-  return existsSync20(isolated) ? isolated : Bun.which("python3") ?? undefined;
-}
 var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0";
 var TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
 var installing = new Map;
 async function readyTelegramPython(options = {}) {
-  const python = telegramPythonExecutable(options);
-  if (!python)
-    throw new Error(`Python 3 is required for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
+  if (options.pythonExecutable)
+    return options.pythonExecutable;
   const venvDir = telegramPythonVenvDir(options);
   const isolated = join28(venvDir, "bin", "python");
-  if (options.pythonExecutable || python === isolated)
-    return python;
-  if (await (options.pythonHasTelethon ?? pythonImportsTelethon)(python))
-    return python;
+  const hasTelethon = options.pythonHasTelethon ?? pythonImportsTelethon;
+  if (!installing.has(venvDir) && existsSync20(isolated) && await hasTelethon(isolated))
+    return isolated;
+  const system = Bun.which("python3") ?? undefined;
+  if (!installing.has(venvDir) && system && await hasTelethon(system))
+    return system;
   let install = installing.get(venvDir);
   if (!install) {
+    if (!system)
+      throw new Error(`Python 3 is required for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
     options.onInstall?.(venvDir);
-    install = (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: python, venvDir }).finally(() => installing.delete(venvDir));
+    install = (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: system, venvDir }).finally(() => installing.delete(venvDir));
     installing.set(venvDir, install);
   }
   if (!await install || !existsSync20(isolated))
