@@ -352,8 +352,9 @@ function rejudgeMetadata(
     materialHash: tierSnifferInputHash('metadata', signals, undefined, parentContext),
     mapRevision: fresh.mapRevision, priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY });
   const pending = verdict.verdict === 'undecided';
+  const metadataTier = pending ? baseline : maxTier(baseline, verdict.tier);
   return {
-    metadataTier: pending ? baseline : maxTier(baseline, verdict.tier),
+    metadataTier,
     metadataForced: false,
     metadataFlagged: pending || fresh.metadataFlagged,
     metadataPending: pending,
@@ -361,7 +362,9 @@ function rejudgeMetadata(
       ...fresh.reasons.filter(reason => reason.startsWith('metadata:') && !reason.startsWith('metadata:sniffer:') && !reason.startsWith('metadata:possibly_private:')),
       ...providerReasons,
       `metadata:sniffer:${sniffer.id}:${pending ? 'undecided' : verdict.code}`,
-      STORED_NAMES_REASON,
+      // Mark only a raise this stored-names verdict made. A tier held at the
+      // inherited floor must stay unmarked, or the next re-judge drops it.
+      ...(metadataTier !== baseline ? [STORED_NAMES_REASON] : []),
     ],
   };
 }

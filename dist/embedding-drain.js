@@ -32245,8 +32245,9 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
     priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY
   });
   const pending = verdict.verdict === "undecided";
+  const metadataTier = pending ? baseline : maxTier(baseline, verdict.tier);
   return {
-    metadataTier: pending ? baseline : maxTier(baseline, verdict.tier),
+    metadataTier,
     metadataForced: false,
     metadataFlagged: pending || fresh.metadataFlagged,
     metadataPending: pending,
@@ -32254,7 +32255,7 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
       ...fresh.reasons.filter((reason) => reason.startsWith("metadata:") && !reason.startsWith("metadata:sniffer:") && !reason.startsWith("metadata:possibly_private:")),
       ...providerReasons,
       `metadata:sniffer:${sniffer.id}:${pending ? "undecided" : verdict.code}`,
-      STORED_NAMES_REASON
+      ...metadataTier !== baseline ? [STORED_NAMES_REASON] : []
     ]
   };
 }

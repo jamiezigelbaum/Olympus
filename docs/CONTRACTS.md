@@ -370,8 +370,10 @@ section consolidates and supersedes all other policy wording.
   judged Private under the 1.2.0 prompt and 6 under the 1.2.1 prompt.
   A re-judge keeps the higher of the old and new names verdicts, because the
   store does not keep labels, so a raise it made by mistake could never be
-  undone. A names verdict a re-judge makes from the stored names now carries
+  undone. A raise a re-judge makes from the stored names now carries
   `metadata:names_from_store`, and a later re-judge may lower such a verdict.
+  A tier held at the old verdict carries no mark, so a floor that rested on
+  labels the store lacks still needs a relist to come down.
 - 2026-10-29 (no version change): **under an owner description, only a
   kind the owner calls private can be private.** On test-mac the owner's
   description says Leo's appointments are fine to share and names only money

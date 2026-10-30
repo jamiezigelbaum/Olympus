@@ -63,15 +63,15 @@ for (const [pass, otherState, otherLayers] of [
   } finally { service.stop(); installed.close(); }
 });
 
-async function storedPrivate() {
+async function storedPrivate(tier: 'private' | 'secure' = 'secure') {
   const tmp = tempDir();
   const f = openTierFixture(tmp.dir, { embed: false });
   cleanup.push(() => { f.close(); tmp.cleanup(); });
   await f.set.sync(fixtureConnector(() => [{ id: 'record', name: 'Notes', text }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-  await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  if (tier === 'secure') await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
   const decision = { ...classifyItemTiers({ signals: { title: 'Notes' }, text }),
-    metadataTier: 'secure' as const, contentTier: 'secure' as const,
-    reasons: ['metadata:sniffer:old-prompt:private', 'content:no_raise'],
+    metadataTier: tier, contentTier: tier,
+    reasons: [`metadata:sniffer:old-prompt:${tier === 'secure' ? 'private' : 'ordinary'}`, 'content:no_raise'],
   };
   f.ledger.recordRoutedPlacement(identity, decision, f.set.placementFor(decision));
   return f;
@@ -149,14 +149,27 @@ test('a Personal answer cannot lower an old names verdict when labels were not s
   expect(f.stores.internal!.localContent(localId('record'))?.chunks.join('')).toBe(text);
 });
 
+const judging = (id: string, tier: 'private' | 'secure') => ({ id, judge: (request: TierSnifferRequest) =>
+  request.pass === 'metadata' ? { verdict: 'decided' as const, tier, code: tier === 'secure' ? 'identity' : 'ordinary' }
+    : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary' } });
+
+test('names held Private by labels the store lacks stay Private across repeated Personal re-judges', async () => {
+  const f = await storedPrivate();
+  for (const prompt of ['prompt-a', 'prompt-b']) {
+    rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging(prompt, 'private') });
+    expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+    expect(f.ledger.getCurrent(identity)!.reasons).not.toContain('metadata:names_from_store');
+  }
+  expect(f.stores.internal!.localContent(localId('record'))).toBeUndefined();
+});
+
 test('names a re-judge held Private from the stored names can be lowered by a later re-judge', async () => {
   // 1.2.1 canary: a re-judge held Tiago's messages Private on a chat id it should not have read; the
   // fixed prompt answered Personal, but the old maximum kept them Private for good.
-  const f = await storedPrivate();
-  const judging = (id: string, tier: 'private' | 'secure') => ({ id, judge: (request: TierSnifferRequest) =>
-    request.pass === 'metadata' ? { verdict: 'decided' as const, tier, code: tier === 'secure' ? 'identity' : 'ordinary' }
-      : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary' } });
+  const f = await storedPrivate('private');
   rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging('prompt-a', 'secure') });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'secure' });
+  await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
   expect(f.ledger.getCurrent(identity)).toMatchObject({ metadataTier: 'secure' });
   expect(f.ledger.getCurrent(identity)!.reasons).toContain('metadata:names_from_store');
   rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging('prompt-b', 'private') });
