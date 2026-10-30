@@ -11,18 +11,18 @@
  *   - Codex signs in with the ChatGPT login already on the machine that runs
  *     the suite (`auth.json` in the Codex home). That file is copied into the
  *     scratch home for the run; if Codex refreshed the tokens during the run,
- *     the refreshed file is written back only when the original is still the
- *     file that was copied, because a refresh can retire the old refresh token.
+ *     a kernel lock serializes the copy, run and write-back because a refresh
+ *     can retire the old refresh token. Other login users must coordinate separately.
  *     A host without a ChatGPT login needs a one-time `codex login` there.
  *
  * Both are billed to a subscription, so the suite keeps its question list
  * short and every run reports how many calls each agent made.
  */
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AGENT_INSTRUCTIONS } from './agents.ts';
 
 export interface CliUsage {
@@ -49,7 +49,7 @@ function runProcess(command: string, args: readonly string[], options: { env: Re
     let timedOut = false;
     // stdin is closed, not inherited: both CLIs wait on it when it is open.
     const child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, options.timeoutMs);
+    const timer = options.timeoutMs > 0 ? setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, options.timeoutMs) : undefined;
     child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8'); });
     child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
     child.on('error', (error) => { clearTimeout(timer); resolve({ code: 127, stdout, stderr: `${stderr}${error.message}`, timedOut }); });
@@ -200,10 +200,6 @@ export function parseCodexEvents(stdout: string): CliRun {
   };
 }
 
-function sha(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
-}
-
 export async function runCodex(options: { question: string; mcpUrl: string; model?: string; timeoutMs?: number }): Promise<CliRun> {
   const realAuth = join(codexHomePath(), 'auth.json');
   const scratch = mkdtempSync(join(tmpdir(), 'release-check-codex-'));
@@ -214,26 +210,15 @@ export async function runCodex(options: { question: string; mcpUrl: string; mode
     for (const dir of [home, codexHome, work]) mkdirSync(dir, { recursive: true });
     writeFileSync(join(codexHome, 'config.toml'), codexConfigToml(options.mcpUrl), { mode: 0o600 });
     const scopedAuth = join(codexHome, 'auth.json');
-    copyFileSync(realAuth, scopedAuth);
-    chmodSync(scopedAuth, 0o600);
-    const copiedDigest = sha(scopedAuth);
     const args = [
       'exec', '--skip-git-repo-check', '--ephemeral', '--json', '-C', work,
       ...(options.model ? ['-m', options.model] : []),
       `${options.question}\n\n${AGENT_INSTRUCTIONS}`,
     ];
     const env = { ...baseEnv(home), CODEX_HOME: codexHome };
-    const out = await runProcess('codex', args, { env, cwd: work, timeoutMs: options.timeoutMs ?? 240_000 });
-    // A refresh can retire the old refresh token, so a refreshed login is handed back, never lost.
-    try {
-      if (sha(scopedAuth) !== copiedDigest && existsSync(realAuth) && sha(realAuth) === copiedDigest) {
-        const staged = `${realAuth}.release-check-${process.pid}`;
-        copyFileSync(scopedAuth, staged);
-        chmodSync(staged, 0o600);
-        renameSync(staged, realAuth);
-      }
-    } catch { /* leave the real login as it was */ }
-    if (out.timedOut) return { finalText: '', usage: { invocations: 1, modelCalls: 0, inputTokens: 0, outputTokens: 0 }, toolCalls: 0, error: 'Codex timed out' };
+    const helper = fileURLToPath(new URL('./codex-locked.py', import.meta.url));
+    const out = await runProcess('python3', [helper, realAuth, scopedAuth, String((options.timeoutMs ?? 240_000) / 1000), 'codex', ...args], { env, cwd: work, timeoutMs: 0 });
+    if (out.code === 124) return { finalText: '', usage: { invocations: 1, modelCalls: 0, inputTokens: 0, outputTokens: 0 }, toolCalls: 0, error: 'Codex timed out' };
     const run = parseCodexEvents(out.stdout);
     if (out.code !== 0 && !run.error) run.error = `Codex exited ${out.code}`;
     return run;

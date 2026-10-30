@@ -1,11 +1,12 @@
 // OLYMPUS_TEST_LANE: deploy
 // The subscription command-line agents: how their output becomes calls and tokens, and what they are given.
 
+import { spawn } from 'node:child_process';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { codexConfigToml, codexLoginAvailable, looksLikeClaudeSetupToken, parseClaudeResult, parseCodexEvents } from '../scripts/release-check/cli-agents.ts';
+import { codexConfigToml, codexLoginAvailable, looksLikeClaudeSetupToken, parseClaudeResult, parseCodexEvents, runCodex } from '../scripts/release-check/cli-agents.ts';
 
 const scratch: string[] = [];
 afterEach(() => { for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -78,4 +79,44 @@ describe('Codex', () => {
     writeFileSync(join(home, 'auth.json'), '{broken');
     expect(codexLoginAvailable(home)).toBe(false);
   });
+  test('serializes concurrent refreshes and recovers an abandoned lock file', async () => {
+    const root = tempDir();
+    const home = join(root, 'codex-home');
+    const bin = join(root, 'bin');
+    mkdirSync(home); mkdirSync(bin);
+    writeFileSync(join(home, 'auth.json'), '0');
+    // Kill a real lock holder, leaving its file behind for the next call.
+    const holder = spawn('python3', ['-c', 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); print("ready",flush=True); time.sleep(30)', join(home, '.release-check-codex.lock')]);
+    await new Promise<void>((resolve, reject) => { holder.stdout.once('data', () => resolve()); holder.once('error', reject); });
+    holder.kill('SIGKILL');
+    await new Promise<void>((resolve) => holder.once('close', () => resolve()));
+    const fake = join(bin, 'codex');
+    writeFileSync(fake, `#!/usr/bin/env python3
+import os, time
+p = os.path.join(os.environ['CODEX_HOME'], 'auth.json')
+with open(p) as f: n = int(f.read())
+time.sleep(0.15)
+with open(p, 'w') as f: f.write(str(n + 1))
+print('{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}')
+`);
+    chmodSync(fake, 0o755);
+    const oldHome = process.env.CODEX_HOME;
+    const oldPath = process.env.PATH;
+    process.env.CODEX_HOME = home;
+    process.env.PATH = `${bin}:${oldPath}`;
+    try {
+      const options = { question: 'test', mcpUrl: 'http://localhost', timeoutMs: 5000 };
+      const runs = await Promise.all([runCodex(options), runCodex(options)]);
+      expect(runs.map(run => run.error)).toEqual([undefined, undefined]);
+      expect(readFileSync(join(home, 'auth.json'), 'utf8')).toBe('2');
+      const single = await runCodex(options);
+      expect(single.error).toBeUndefined();
+      expect(single.usage.inputTokens).toBe(1);
+      expect(readFileSync(join(home, 'auth.json'), 'utf8')).toBe('3');
+    } finally {
+      if (oldHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldHome;
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+    }
+  });
+
 });
