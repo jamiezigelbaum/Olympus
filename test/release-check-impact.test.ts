@@ -7,7 +7,7 @@ import { describe, expect, test } from 'bun:test';
 import { LEGS, harnessReach, planImpact } from '../scripts/release-check/impact.ts';
 import { carryInto, copyCarriedFiles, loadCarryBase } from '../scripts/release-check/carry.ts';
 import { buildReport, renderHtml, type MachineReport, type ReleaseReport } from '../scripts/release-check/report.ts';
-import { parseCli } from '../scripts/release-check/run.ts';
+import { legPartial, parseCli, type RunOptions } from '../scripts/release-check/run.ts';
 
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -126,6 +126,15 @@ describe('keeping the tested run\'s results', () => {
     const now = machine({ legs: ['suite'] });
     carryInto(now, skippedArchive, { runId: 'r', sha: A }, ['explore']);
     expect(now.legs).toEqual(['suite', 'explore']);
+  });
+
+  test('a leg counts as whole only when no option left out it or the legs its journeys need', () => {
+    const options = (over: Partial<RunOptions>): RunOptions => over as RunOptions;
+    expect(legPartial('journeys', options({}))).toBe(false);
+    expect(legPartial('journeys', options({ skipInbox: true }))).toBe(true);
+    expect(legPartial('journeys', options({ onlyJourneys: ['inbox-delete-one'] }))).toBe(true);
+    expect(legPartial('suite', options({ onlyAgents: ['claude'] }))).toBe(true);
+    expect(legPartial('archive', options({ skipInbox: true }))).toBe(false);
   });
 
   test('a run on another platform cannot lend its results', () => {

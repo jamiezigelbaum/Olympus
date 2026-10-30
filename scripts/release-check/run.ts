@@ -207,17 +207,18 @@ interface Stage {
 const newStage = (id: string, label: string): Stage => ({ id, label, timings: {}, checks: [], agents: [], screenshots: [], logs: [] });
 
 /** A leg an option left out or cut down: it lends no results, since the tested run never made them all (Codex on #635). */
-function legPartial(leg: Leg, options: RunOptions): boolean {
-  const partial: Record<Leg, boolean | undefined> = {
-    suite: options.skipSuite || (options.onlyAgents?.length ?? 0) > 0,
-    relay: options.skipRelay,
-    inbox: options.skipInbox,
-    screenshots: options.skipScreenshots,
-    journeys: options.skipJourneys || (options.onlyJourneys?.length ?? 0) > 0,
-    explore: options.skipExplore,
-    archive: options.skipArchive,
-  };
-  return partial[leg] === true;
+export function legPartial(leg: Leg, options: RunOptions): boolean {
+  switch (leg) {
+    case 'suite': return options.skipSuite === true || (options.onlyAgents?.length ?? 0) > 0;
+    case 'relay': return options.skipRelay === true;
+    case 'inbox': return options.skipInbox === true;
+    case 'screenshots': return options.skipScreenshots === true;
+    // A journey whose setup leg was left out is skipped too (runJourneyLeg), so the leg is not whole.
+    case 'journeys': return options.skipJourneys === true || (options.onlyJourneys?.length ?? 0) > 0
+      || JOURNEYS.some((journey) => journey.needs?.some((need) => legPartial(need, options)));
+    case 'explore': return options.skipExplore === true;
+    case 'archive': return options.skipArchive === true;
+  }
 }
 
 class Run {
