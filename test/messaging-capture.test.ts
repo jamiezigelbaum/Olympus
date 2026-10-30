@@ -135,6 +135,77 @@ describe('messaging capture supervisor', () => {
     expect(killed).toBe(true);
   });
 
+  test('a Telegram whose private Python is gone gets it installed again, and one that cannot be never starts', async () => {
+    // test-omarchy 2026-10-29: with the environment removed, capture started a Python without Telethon that exited at once.
+    const root = mkdtempSync(join(tmpdir(), 'olympus-messaging-capture-python-'));
+    const registryPath = join(root, 'handles.json');
+    const grantPath = join(root, 'messaging-capture.json');
+    const sessionPath = join(root, 'telegram.personal');
+    writeFileSync(`${sessionPath}.session`, 'fixture');
+    writeRegistry(registryPath, true);
+    saveMessagingCaptureGrant({ path: grantPath, pairing: telegramPairing(sessionPath) });
+    const venvDir = join(root, 'xdg', 'olympus', 'telegram-python');
+    let installs = 0;
+    let installWorks = false;
+    const spawned: string[] = [];
+    const supervisor = new MessagingCaptureSupervisor({
+      source: 'telegram', registryPath, grantPath, packageRoot: '/fixture',
+      baseEnv: { XDG_CACHE_HOME: join(root, 'xdg') },
+      secretStore: secretStore({ [TELEGRAM_API_ID_SECRET_KEY]: '12345', [TELEGRAM_API_HASH_SECRET_KEY]: 'fixture' }),
+      pythonHasTelethon: async () => false,
+      provisionTelegramPython: async (input) => {
+        installs += 1;
+        expect(input.venvDir).toBe(venvDir);
+        if (!installWorks) return false;
+        mkdirSync(join(input.venvDir, 'bin'), { recursive: true });
+        writeFileSync(join(input.venvDir, 'bin', 'python'), '');
+        return true;
+      },
+      spawn: (input) => { spawned.push(input.executable); return { exited: new Promise<number>(() => {}), kill: () => {} }; },
+    });
+    await expect(supervisor.reconcile()).rejects.toThrow(/could not install Telethon/);
+    expect(spawned).toEqual([]);
+    installWorks = true;
+    expect(await supervisor.reconcile()).toEqual({ source: 'telegram', state: 'running' });
+    expect(spawned).toEqual([join(venvDir, 'bin', 'python')]);
+    expect(installs).toBe(2);
+  });
+
+  test('a stop while Telegram\'s Python is being installed keeps that reconcile from starting a helper', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-messaging-capture-stop-'));
+    const registryPath = join(root, 'handles.json');
+    const grantPath = join(root, 'messaging-capture.json');
+    const sessionPath = join(root, 'telegram.personal');
+    writeFileSync(`${sessionPath}.session`, 'fixture');
+    writeRegistry(registryPath, true);
+    saveMessagingCaptureGrant({ path: grantPath, pairing: telegramPairing(sessionPath) });
+    let finishInstall!: () => void;
+    let installStarted!: () => void;
+    const started = new Promise<void>((resolve) => { installStarted = resolve; });
+    let spawned = false;
+    const supervisor = new MessagingCaptureSupervisor({
+      source: 'telegram', registryPath, grantPath, packageRoot: '/fixture',
+      baseEnv: { XDG_CACHE_HOME: join(root, 'xdg') },
+      secretStore: secretStore({ [TELEGRAM_API_ID_SECRET_KEY]: '12345', [TELEGRAM_API_HASH_SECRET_KEY]: 'fixture' }),
+      pythonHasTelethon: async () => false,
+      provisionTelegramPython: (input) => new Promise<boolean>((resolve) => {
+        installStarted();
+        finishInstall = () => {
+          mkdirSync(join(input.venvDir, 'bin'), { recursive: true });
+          writeFileSync(join(input.venvDir, 'bin', 'python'), '');
+          resolve(true);
+        };
+      }),
+      spawn: () => { spawned = true; return { exited: new Promise<number>(() => {}), kill: () => {} }; },
+    });
+    const reconciling = supervisor.reconcile();
+    await started;
+    await supervisor.stop();
+    finishInstall();
+    expect((await reconciling).state).toBe('stopped');
+    expect(spawned).toBe(false);
+  });
+
   test('does not start when a required secret is absent', async () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-messaging-capture-'));
     const registryPath = join(root, 'handles.json');
@@ -492,7 +563,7 @@ describe('a capture helper that cannot be started is reported, not hidden by the
     const warnings: string[] = [];
     const captures = {
       telegram: stubSupervisor(async () => {
-        if (telegramThrows) throw new Error('Python 3 is required to start Telegram capture.');
+        if (telegramThrows) throw new Error('Python 3 is required for Telegram.');
         return { source: 'telegram' as const, state: 'running' as const };
       }),
       whatsapp: stubSupervisor(async () => ({ source: 'whatsapp' as const, state: 'running' as const })),

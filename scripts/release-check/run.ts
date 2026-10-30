@@ -59,7 +59,7 @@ import { redactDeep, redactMarkers, type LeakMarker } from './leak.ts';
 import { CommandDriver, type Machine } from './machine.ts';
 import {
   buildReport, renderHtml, scanReport,
-  type AgentReport, type AgentUsage, type CheckResult, type MachineReport, type PhaseReport, type ReleaseReport, type ReportFile,
+  type AgentReport, type AgentUsage, type CheckResult, type MachineReport, type PhaseReport, type ReleaseReport, type ReleaseReportInput, type ReportFile,
 } from './report.ts';
 import {
   describeDifferences, evaluateCounts, evaluateUpgrade, versionFromTarballName,
@@ -76,6 +76,8 @@ import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
 import { JOURNEYS } from './journeys.ts';
+import { carryInto, copyCarriedFiles, loadCarryBase } from './carry.ts';
+import { harnessReach, planImpact, readChangedFiles, type ImpactPlan, type Leg } from './impact.ts';
 import { layoutChecks, layoutFindings, layoutQualificationCheck, scoreLayoutRules } from './layout-rules.ts';
 import type { PlantedPicture } from './reviewer-plants.ts';
 import { buildInventory } from './explore-inventory.ts';
@@ -155,6 +157,8 @@ export interface RunOptions {
   /** Run only these configured agents (by id); omitted runs every enabled one. */
   onlyAgents?: string[];
   budgetMs?: number;
+  /** An incremental run (impact.ts): the tested report, its path, and the plan for the change since its commit. The plan's skips are set. */
+  carry?: { base: ReleaseReport; path: string; plan: ImpactPlan };
 }
 
 const ENGINE_PORT = 8010;
@@ -203,6 +207,21 @@ interface Stage {
 
 const newStage = (id: string, label: string): Stage => ({ id, label, timings: {}, checks: [], agents: [], screenshots: [], logs: [] });
 
+/** A leg an option left out or cut down: it lends no results, since the tested run never made them all (Codex on #635). */
+export function legPartial(leg: Leg, options: RunOptions): boolean {
+  switch (leg) {
+    case 'suite': return options.skipSuite === true || (options.onlyAgents?.length ?? 0) > 0;
+    case 'relay': return options.skipRelay === true;
+    case 'inbox': return options.skipInbox === true;
+    case 'screenshots': return options.skipScreenshots === true;
+    // A journey whose setup leg was left out is skipped too (runJourneyLeg), so the leg is not whole.
+    case 'journeys': return options.skipJourneys === true || (options.onlyJourneys?.length ?? 0) > 0
+      || JOURNEYS.some((journey) => journey.needs?.some((need) => legPartial(need, options)));
+    case 'explore': return options.skipExplore === true;
+    case 'archive': return options.skipArchive === true;
+  }
+}
+
 class Run {
   readonly markers: LeakMarker[] = forbiddenMarkers();
   readonly logLines: string[] = [];
@@ -218,6 +237,8 @@ class Run {
   inboxSelftestFailsOn?: string;
   stage: Stage;
   machine?: Machine;
+  /** The legs that ran in full: an incremental run may borrow only these from this report (carry.ts). */
+  readonly legsRan: Leg[] = [];
 
   constructor(readonly options: RunOptions, readonly driver: CommandDriver) {
     this.stage = this.addStage('install', 'Olympus installed fresh');
@@ -258,6 +279,27 @@ class Run {
     } finally {
       this.timings[name] = (this.timings[name] ?? 0) + (Date.now() - started);
       this.log(`phase ${name}: ${((Date.now() - started) / 1000).toFixed(1)} s`);
+    }
+  }
+
+  /**
+   * Runs one leg and names it on every check, agent and trace the leg added that no inner leg named. An
+   * incremental run keeps a tested run's results by these names (carry.ts), never by a check being absent.
+   */
+  async inLeg<T>(leg: Leg, work: () => Promise<T>): Promise<T> {
+    const stage = this.stage;
+    const before = { checks: stage.checks.length, agents: stage.agents.length, traces: stage.traces?.length ?? 0 };
+    try {
+      const result = await work();
+      if (!legPartial(leg, this.options) && !(leg === 'relay' && !stage.agents.slice(before.agents).some((agent) => agent.ran))) this.legsRan.push(leg);
+      return result;
+    } finally {
+      for (const check of stage.checks.slice(before.checks)) check.leg ??= leg;
+      for (const agent of stage.agents.slice(before.agents)) {
+        agent.leg ??= leg;
+        for (const check of agent.checks) check.leg ??= agent.leg;
+      }
+      for (const trace of stage.traces?.slice(before.traces) ?? []) trace.leg ??= leg;
     }
   }
 
@@ -1185,7 +1227,7 @@ async function runSuite(run: Run, workDir: string, judge: Judge | undefined, { m
     if (!ok) return;
   }
   await runModelAgents(run, bridge, judge);
-  await runProtocolAgent(run, workDir);
+  await run.inLeg('relay', () => runProtocolAgent(run, workDir));
 }
 
 const tarballVersion = (dir: string): string | undefined => {
@@ -1314,16 +1356,16 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     } else {
       const ready = await setupMachine(run, workDir, bundlePath);
       if (ready && !options.skipSuite && Date.now() < deadline) {
-        await runSuite(run, workDir, judge, { mintToken: true });
+        await run.inLeg('suite', () => runSuite(run, workDir, judge, { mintToken: true }));
       } else if (ready && !options.skipSuite) {
         run.errors.push('the run exceeded its time budget before the agent suite');
       }
       if (ready) {
-        await captureScreenshots(run, options.outDir);
-        if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
-        if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
-        if (Date.now() < deadline) await runArchiveLeg(run, options.outDir, deadline); else run.errors.push('the run exceeded its time budget before the archive-import leg');
-        if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
+        await run.inLeg('screenshots', () => captureScreenshots(run, options.outDir));
+        if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
+        if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
+        if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
+        if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
         if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
       }
       await collectEvidence(run, options.outDir);
@@ -1369,6 +1411,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     agents: last.agents,
     screenshots: last.screenshots,
     logs: last.logs,
+    legs: [...run.legsRan],
     ...(last.traces ? { traces: last.traces } : {}),
     ...(last.visual ? { visual: last.visual } : {}),
     ...(last.explore ? { explore: last.explore } : {}),
@@ -1390,6 +1433,18 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       : options.inboxSelftest
         ? `a fault was deliberately made in the Inbox leg (${options.inboxSelftest}); this run is expected to FAIL on ${run.inboxSelftestFailsOn && options.inboxSelftest === 'wrong-link-id' ? run.inboxSelftestFailsOn : INBOX_SELFTEST_FAILS[options.inboxSelftest]}`
         : undefined;
+  let carry: ReleaseReportInput['carry'];
+  if (options.carry) {
+    const { base, path, plan } = options.carry;
+    const from = { runId: base.runId, sha: base.candidate.sha! };
+    try {
+      const parts = carryInto(machine, base.machines[0]!, from, plan.carry);
+      copyCarriedFiles(path, options.outDir);
+      carry = { fromRunId: from.runId, fromSha: from.sha, ran: plan.run, carried: plan.carry, files: plan.files, parts };
+    } catch (error) {
+      run.errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
   let report = buildReport({
     runId: options.runId,
     candidate: { label: options.candidateLabel, ...(options.candidateSha ? { sha: options.candidateSha } : {}) },
@@ -1399,6 +1454,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     errors: run.errors,
     ...(options.harnessCommit ? { harnessCommit: options.harnessCommit } : {}),
     ...(selfTest ? { selfTest } : {}),
+    ...(carry ? { carry } : {}),
   });
   // The report must itself be clean; a hit fails the run without copying the marker.
   const reportLeaks = scanReport(report, run.markers);
@@ -1433,7 +1489,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -1466,6 +1522,21 @@ export function parseCli(argv: readonly string[]): RunOptions {
   if (has('--reviewer-plants') && has('--skip-journeys')) throw new Error('--reviewer-plants takes its pictures with the screens; drop --skip-journeys');
   if (has('--reviewer-plants') && has('--update-baselines')) throw new Error('--reviewer-plants is a qualification run; it never writes baselines');
   const onlyJourneys = get('--only-journeys');
+  // An incremental run: the plan decides which legs run, so nothing else may change what runs or what the screens show.
+  const carryFrom = get('--carry-from');
+  const changedFiles = get('--changed-files');
+  let carry: RunOptions['carry'];
+  if ((carryFrom === undefined) !== (changedFiles === undefined)) throw new Error('--carry-from and --changed-files go together');
+  if (carryFrom !== undefined && changedFiles !== undefined) {
+    const conflicts = ['--skip-relay', '--skip-screenshots', '--skip-inbox', '--skip-journeys', '--skip-explore', '--skip-suite', '--skip-archive', '--only-journeys', '--agents',
+      '--mistier', '--upgrade-from', '--inbox-selftest', '--update-baselines', '--reviewer-plants', '--fail-after-provision', '--keep-machine'].filter(has);
+    if (conflicts.length > 0) throw new Error(`--carry-from lets the change decide what runs; drop ${conflicts.join(', ')}`);
+    if (!existsSync(resolve(changedFiles))) throw new Error(`--changed-files ${changedFiles} does not exist`);
+    const path = resolve(carryFrom);
+    carry = { base: loadCarryBase(path, get('--sha')), path, plan: planImpact(readChangedFiles(resolve(changedFiles)), harnessReach(join(import.meta.dir, '..', '..'))) };
+  }
+  const skips = new Set(carry?.plan.skipFlags ?? []);
+  const skip = (flag: string): boolean => has(flag) || skips.has(flag);
   const runId = get('--run-id') ?? newRunId();
   const harnessCommit = get('--harness-commit');
   if (harnessCommit !== undefined) {
@@ -1485,11 +1556,11 @@ export function parseCli(argv: readonly string[]): RunOptions {
     ...(upgradeFrom !== undefined ? { upgradeFromDir: resolve(upgradeFrom) } : {}),
     ...(upgradeSelftest ? { upgradeSelftest: upgradeSelftest as UpgradeSelftest } : {}),
     ...(inboxSelftest ? { inboxSelftest: inboxSelftest as InboxSelftest } : {}),
-    skipInbox: has('--skip-inbox'),
-    skipJourneys: has('--skip-journeys'),
-    skipExplore: has('--skip-explore'),
-    skipArchive: has('--skip-archive'),
-    skipSuite: has('--skip-suite'),
+    skipInbox: skip('--skip-inbox'),
+    skipJourneys: skip('--skip-journeys'),
+    skipExplore: skip('--skip-explore'),
+    skipArchive: skip('--skip-archive'),
+    skipSuite: skip('--skip-suite'),
     ...(onlyJourneys ? { onlyJourneys: onlyJourneys.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     ...(baselines !== undefined ? { baselinesDir: resolve(baselines) } : {}),
     updateBaselines: has('--update-baselines'),
@@ -1497,8 +1568,9 @@ export function parseCli(argv: readonly string[]): RunOptions {
     ...(only ? { onlyAgents: only.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     failAfterProvision: has('--fail-after-provision'),
     keepMachine: has('--keep-machine'),
-    skipRelay: has('--skip-relay'),
-    skipScreenshots: has('--skip-screenshots'),
+    skipRelay: skip('--skip-relay'),
+    skipScreenshots: skip('--skip-screenshots'),
+    ...(carry ? { carry } : {}),
   };
 }
 

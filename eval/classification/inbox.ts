@@ -6,15 +6,17 @@ import { buildSnifferBatchPrompt, parseSnifferBatchResponse, SNIFFER_SYSTEM_PROM
 } from '../../src/workers/classification/sniffer.ts';
 import fixture from './fixtures/inbox-onboarding.json';
 import ownerExemptions from './fixtures/owner-exemptions.json';
+import chatCanary from './fixtures/chat-canary.json';
 
 export const inboxFixture = fixture;
 /** Items judged under a short owner description whose fine-to-share clauses name default-sensitive kinds. */
 export const ownerExemptionsFixture = ownerExemptions;
 export type InboxSplit = 'dev' | 'held-out' | 'all';
-export type InboxSet = 'inbox' | 'owner-exemptions';
-type EvalItem = { id: string; split: string; label: string; email?: (typeof fixture.items)[number]['email']; material?: string };
+export type InboxSet = 'inbox' | 'owner-exemptions' | 'chat-canary';
+// `pass` is the sniffer pass the item is judged in: content (the default) or metadata (names only).
+type EvalItem = { id: string; split: string; label: string; email?: (typeof fixture.items)[number]['email']; material?: string; pass?: string };
 type EvalFixture = { privacyProfile: { description: string }; items: readonly EvalItem[] };
-const FIXTURES: Record<InboxSet, EvalFixture> = { inbox: fixture, 'owner-exemptions': ownerExemptions };
+const FIXTURES: Record<InboxSet, EvalFixture> = { inbox: fixture, 'owner-exemptions': ownerExemptions, 'chat-canary': chatCanary };
 
 export function inboxMaterial(item: EvalItem): string {
   if (item.material !== undefined) return item.material;
@@ -53,7 +55,7 @@ export async function runInboxEval(options: { model: AnalystModel; modelId: stri
       dispatches++;
       if (item.label === 'secrets') secretDispatches++;
       const response = await options.model.complete({ system: SNIFFER_SYSTEM_PROMPT,
-        prompt: buildSnifferBatchPrompt('content', [{ i: 1, material }], fixture.privacyProfile.description), localOnly: true });
+        prompt: buildSnifferBatchPrompt(item.pass === 'metadata' ? 'metadata' : 'content', [{ i: 1, material }], fixture.privacyProfile.description), localOnly: true });
       const verdict = parseSnifferBatchResponse(response.text, new Set([1])).get(1);
       actual = verdict ? snifferTierKey(verdict) : 'unresolved';
     }

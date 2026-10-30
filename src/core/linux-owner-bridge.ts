@@ -277,7 +277,7 @@ export class LinuxOwnerBridge {
   private tickets = new Map<'control' | 'browser', Ticket>();
   private sessions: Session[] = [];
   private claim: { secret: string; record: Claim } | undefined;
-  private lastOpen = { control: -Infinity, browser: -Infinity };
+  private lastBrowserOpen = -Infinity;
   private browserOpens: number[] = [];
   private closed = false;
   private readonly now: () => number;
@@ -301,24 +301,24 @@ export class LinuxOwnerBridge {
   }
   async openTicket(target: string, lane: 'control' | 'browser' = 'control'): Promise<void> {
     if (!safeTarget(target) || !this.live()) throw new Error('Desktop owner confirmation is unavailable.');
-    const openedAt = this.now(), previousOpen = this.lastOpen[lane];
+    // The owner's own opens (the launcher, an olympus:// link, olympus dashboard) come over the owner socket and are never
+    // refused: a link pressed just after the launcher used to do nothing at all. A newer ticket replaces the pending one.
+    if (lane === 'control') return this.launchTicket(target, lane);
+    // The unauthenticated Confirm button is bounded, so another account cannot flood the owner's screen with windows.
     // The hourly cap is checked first: when both limits apply, it decides the real wait.
-    if (lane === 'browser') {
-      this.browserOpens = this.browserOpens.filter(time => time > openedAt - 60 * 60 * 1000);
-      if (this.browserOpens.length >= 6) throw new OwnerOpenLimited('Wait before opening another owner ticket.', true);
-    }
-    if (openedAt - this.lastOpen[lane] < 10_000) throw new OwnerOpenLimited('Wait ten seconds before opening another owner ticket.', false);
-    if (lane === 'browser') this.browserOpens.push(openedAt);
-    this.lastOpen[lane] = openedAt;
+    const openedAt = this.now(), previousOpen = this.lastBrowserOpen;
+    this.browserOpens = this.browserOpens.filter(time => time > openedAt - 60 * 60 * 1000);
+    if (this.browserOpens.length >= 6) throw new OwnerOpenLimited('Wait before opening another owner ticket.', true);
+    if (openedAt - this.lastBrowserOpen < 10_000) throw new OwnerOpenLimited('Wait ten seconds before opening another owner ticket.', false);
+    this.browserOpens.push(openedAt);
+    this.lastBrowserOpen = openedAt;
     try {
       await this.launchTicket(target, lane);
     } catch (error) {
       // No window opened, so the attempt counts toward neither limiter.
-      if (this.lastOpen[lane] === openedAt) this.lastOpen[lane] = previousOpen;
-      if (lane === 'browser') {
-        const index = this.browserOpens.lastIndexOf(openedAt);
-        if (index >= 0) this.browserOpens.splice(index, 1);
-      }
+      if (this.lastBrowserOpen === openedAt) this.lastBrowserOpen = previousOpen;
+      const index = this.browserOpens.lastIndexOf(openedAt);
+      if (index >= 0) this.browserOpens.splice(index, 1);
       throw error;
     }
   }
@@ -491,7 +491,7 @@ export class LinuxOwnerBridge {
         const response = page(`<p>${error.hourly ? BROWSER_OPEN_LIMIT_MESSAGE : BROWSER_OPEN_RECENT_MESSAGE}</p>`, 429);
         response.headers.set('X-Olympus-Owner-Refused', '1');
         response.headers.set(OWNER_LIMIT_HEADER, error.hourly ? 'hourly' : 'recent');
-        const retryAt = Math.max(this.lastOpen.browser + 10_000,
+        const retryAt = Math.max(this.lastBrowserOpen + 10_000,
           this.browserOpens.length >= 6 ? this.browserOpens[0]! + 60 * 60 * 1000 : 0);
         response.headers.set('Retry-After', String(Math.max(1, Math.ceil((retryAt - this.now()) / 1000))));
         return response;

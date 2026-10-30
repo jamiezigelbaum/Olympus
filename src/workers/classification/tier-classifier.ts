@@ -1257,12 +1257,23 @@ function namesMatchInput(signals: SourceClassificationSignals): NamesMatchInput 
   };
 }
 
+/**
+ * Folder keys the sniffer may read as names. A key with no letters (a Telegram
+ * chat's peer id, a phone-number chat key) is an identifier, not a name: next
+ * to a person's name the model read it as their identity and held ordinary chat
+ * messages Private (1.2.1 canary, 2026-10-30). Rule matching and the input hash
+ * still use every key.
+ */
+export function snifferFolderKeyNames(keys: readonly string[] | undefined): string[] {
+  return (keys ?? []).filter((key) => /\p{L}/u.test(key));
+}
+
 /** The names the sniffer may read (pass 1, and with the excerpt in pass 2), bounded. The sender is metadata too. */
 function snifferNames(signals: SourceClassificationSignals): string {
   const joined = [
     signals.title,
     signals.path,
-    ...(signals.folderKeys ?? []),
+    ...snifferFolderKeyNames(signals.folderKeys),
     ...(signals.labels ?? []),
     signals.sender,
   ].filter((part): part is string => typeof part === 'string' && part.trim().length > 0)

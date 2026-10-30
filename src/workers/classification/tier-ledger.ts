@@ -525,7 +525,7 @@ export class TierLedger {
           contentTier,
           decidedBy: contentTier !== existing.contentTier ? 'sniffer' : existing.decidedBy,
           reasons: [
-            ...metadataReasons.filter((reason) => !isOpenSnifferReason(reason, 'metadata')),
+            ...settleStoredNamesMark(metadataReasons.filter((reason) => !isOpenSnifferReason(reason, 'metadata')), existing.metadataTier, metadataTier),
             verdict.reason,
             ...(settlesContent ? contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content')) : contentReasons),
           ],
@@ -597,14 +597,15 @@ export class TierLedger {
     const metadataTier = verdict.pass === 'metadata' ? maxTier(base.metadataTier, verdict.tier) : base.metadataTier;
     const contentTier = maxTier(base.contentTier, verdict.tier);
     const metadataPending = verdict.pass === 'metadata' ? false : base.metadataPending;
+    const kept = base.reasons.filter(reason => !isOpenSnifferReason(reason, verdict.pass)
+      && !(metadataTier === 'secure' && isOpenSnifferReason(reason, 'content')));
     const contentPending = verdict.pass === 'content' || metadataTier === 'secure' ? false : base.contentPending;
     const decision: TierDecision = {
       ...base,
       metadataTier,
       contentTier,
       decidedBy: 'sniffer',
-      reasons: [...base.reasons.filter(reason => !isOpenSnifferReason(reason, verdict.pass)
-        && !(metadataTier === 'secure' && isOpenSnifferReason(reason, 'content'))), verdict.reason],
+      reasons: [...(verdict.pass === 'metadata' ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept), verdict.reason],
       metadataPending,
       contentPending,
       state: metadataPending || contentPending ? 'pending' : 'current',
@@ -3880,6 +3881,18 @@ function settleStaleEmbedHolds(db: Database, now: string): number {
 }
 
 /** The reasons that say a question is still open: the flags, the borderline families and `sniffer:<id>:undecided`. */
+/** Names a re-judge judged from the stored names alone and raised: a later re-judge may lower them (tier-rejudge.ts). */
+export const STORED_NAMES_REASON = 'metadata:names_from_store';
+/** The same question still open: its answer is marked only if it raises the names it was asked about. */
+export const STORED_NAMES_ASKED_REASON = 'metadata:names_from_store:asked';
+
+/** Settles an open stored-names question's mark once its answer is in (Codex on #635: queued answers lost it). */
+function settleStoredNamesMark(reasons: readonly string[], askedTier: TierKey, answeredTier: TierKey): string[] {
+  if (!reasons.includes(STORED_NAMES_ASKED_REASON)) return [...reasons];
+  const rest = reasons.filter((reason) => reason !== STORED_NAMES_ASKED_REASON);
+  return answeredTier !== askedTier ? [...rest, STORED_NAMES_REASON] : rest;
+}
+
 function isOpenSnifferReason(reason: string, pass: 'metadata' | 'content'): boolean {
   if (pass === 'metadata') {
     return reason.startsWith('metadata:possibly_private:')

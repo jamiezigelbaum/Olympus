@@ -140,7 +140,8 @@ export interface JourneyTrace {
   steps: StepTrace[];
   ms: number;
   /** The journey could not run at all (the browser, the opening link). */
-  error?: string;
+  error?: string;  /** The release-check leg that walked it (run.ts inLeg). */
+  leg?: string;
 }
 
 // ---------------------------------------------------------------------------

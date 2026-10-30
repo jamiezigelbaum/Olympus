@@ -1,7 +1,16 @@
 # Changelog
 
+## 1.2.1 - 2026-10-29
+
+- On Linux, an Olympus link opened right after another Olympus window now opens. Before, a second open within ten seconds was refused, so the link did nothing until it was clicked again.
+- When you describe what is private to you, only the kinds you name are Private. A message about a child's check-up stays Personal if you said appointments are fine to share (#625).
+- Telegram keeps syncing when its private Python environment is removed, for example by clearing the cache: Olympus installs it again on its own. If it cannot, the dashboard says Telegram capture could not start, instead of Telegram going quiet.
+
 ## 1.2.0 - 2026-10-28
 
+- **Confirm it's you works from any browser.** The confirmation window shows a code, and you approve when it matches (#631).
+- Olympus sets no limit of its own on how much you use it: no caps on questions or on Inbox answers.
+- On the small built-in model, text that reads like your own records stays Private.
 - **Import your archives.** Each source's card has Import an archive, with a picker for that source's own exports. Drop an export or a whole folder onto the dashboard and Olympus imports a copy of it; your original is never touched. Exports from anywhere else go under Other archives.
 - **One history per account.** A Gmail Takeout export joins your Gmail source, a Telegram Desktop export joins your live Telegram, and a WhatsApp chat export joins the WhatsApp history it overlaps. What both bring is stored once.
 - **Reflect, Roam and Evernote** are sources of their own. Evernote exports come with their attachments.

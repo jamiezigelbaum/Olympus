@@ -64,8 +64,8 @@ test('ticket is 0600, single use, expiring, bounded and never returned publicly'
   expect(owner.response.headers.get('set-cookie')).toContain('HttpOnly; SameSite=Lax');
   expect(owner.response.headers.get('set-cookie')).not.toMatch(/Domain=/i);
   expect((await f.bridge.handle(f.post('/owner-proof', { ticket: owner.ticket }))).status).toBe(403);
-  await expect(f.bridge.openTicket('/dashboard')).rejects.toThrow('ten seconds');
-  f.advance(10_001); await f.bridge.openTicket('/dashboard');
+  // The owner's own opens are never refused, even straight after another (an olympus:// link right after the launcher).
+  await f.bridge.openTicket('/dashboard');
   expect(statSync(f.opened()).mode & 0o777).toBe(0o600); expect(statSync(join(f.root, 'olympus')).mode & 0o777).toBe(0o700);
   const file = readFileSync(f.opened(), 'utf8'); expect(file).toContain('cannot reach the private *.localhost');
   const value = file.match(/owner-proof#([A-Za-z0-9_-]{43})/)![1];
@@ -720,4 +720,16 @@ test('a declined, replaced or expired waiting page gets no access', async () => 
   expect((await f.bridge.handle(f.post('/owner-proof', { ticket: replaced.ticket }))).status).toBe(403);
   f.advance(3 * 60_000);
   expect((await f.bridge.handle(f.post('/owner-claim', { claim: current.claim }))).status).toBe(403);
+});
+
+test('an owner open right after another opens a window, and the newer ticket replaces the pending one', async () => {
+  const f = fixture();
+  await f.bridge.openTicket('/dashboard');
+  const first = f.opened();
+  await f.bridge.openTicket('/dashboard');
+  const second = f.opened();
+  expect(second).not.toBe(first);
+  expect(existsSync(first)).toBe(false);
+  const ticket = readFileSync(second, 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  expect((await f.bridge.handle(f.post('/owner-proof', { ticket }))).status).toBe(200);
 });

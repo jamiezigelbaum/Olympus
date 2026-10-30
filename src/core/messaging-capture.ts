@@ -1,4 +1,4 @@
-import { telegramPythonExecutable } from './messaging-runtime.ts';
+import { readyTelegramPython, type TelegramPythonSeams } from './messaging-runtime.ts';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -250,7 +250,7 @@ export class MessagingCaptureSupervisor {
     whatsappBridgePath?: string;
     stopTimeoutMs?: number;
     now?: () => number;
-  }) {}
+  } & TelegramPythonSeams) {}
 
   /** Whether the helper is alive right now, for the dashboard: a cached reconcile result can be ten seconds old. */
   liveness(): MessagingCaptureLiveness {
@@ -332,10 +332,12 @@ export class MessagingCaptureSupervisor {
     if (generation !== this.generation) return { source: grant.source, state: 'stopped', reason: 'grant_missing' };
     const nextFingerprint = JSON.stringify(grant);
     if (this.child && this.fingerprint === nextFingerprint) return { source: grant.source, state: 'running' };
+    // Resolved before the generation check below: making Telegram's Python ready can take minutes, and a stop
+    // (Unpair, shutdown) during it must keep this reconcile from starting a helper on the grant it read.
+    const launch = await resolveCurrentLaunch(this.options, grant.source, layoutEnv);
     await this.stop();
     if (generation !== this.generation - 1) return { source: grant.source, state: 'stopped', reason: 'grant_missing' };
     const spawn = this.options.spawn ?? spawnCapture;
-    const launch = resolveCurrentLaunch(this.options, grant.source);
     // A WhatsApp bridge holds its session's lock for its whole life: taken here and handed to it as
     // an inherited descriptor. Another bridge on the session (one left running) keeps this one from starting.
     const lock = grant.source === 'whatsapp' ? tryHoldFileFlock(join(whatsappStateDirOf(grant, account, layoutEnv), WHATSAPP_BRIDGE_LOCK_NAME)) : undefined;
@@ -393,17 +395,24 @@ async function observeChildExit(child: CaptureChild, timeoutMs: number): Promise
 
 const readGrant = readCaptureGrantFile;
 
-function resolveCurrentLaunch(
+async function resolveCurrentLaunch(
   options: {
     packageRoot?: string;
     pythonExecutable?: string;
     whatsappBridgePath?: string;
-  },
+  } & TelegramPythonSeams,
   source: MessagingPairingSource,
-): { executable: string; args: string[] } {
+  env: Record<string, string>,
+): Promise<{ executable: string; args: string[] }> {
   if (source === 'telegram') {
-    const executable = telegramPythonExecutable({ ...(options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {}) });
-    if (!executable) throw new Error('Python 3 is required to start Telegram capture.');
+    // Made ready the way pairing makes it: a missing private environment is installed, and one that cannot be
+    // throws, which the worker reports as a capture that could not start. A Python without Telethon never runs.
+    const executable = await readyTelegramPython({
+      env,
+      ...(options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {}),
+      ...(options.pythonHasTelethon ? { pythonHasTelethon: options.pythonHasTelethon } : {}),
+      ...(options.provisionTelegramPython ? { provisionTelegramPython: options.provisionTelegramPython } : {}),
+    });
     const packageRoot = options.packageRoot ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     return { executable, args: [join(packageRoot, 'scripts', 'telegram-telethon-reader.py'), '--gateway'] };
   }

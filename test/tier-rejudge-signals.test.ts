@@ -63,15 +63,15 @@ for (const [pass, otherState, otherLayers] of [
   } finally { service.stop(); installed.close(); }
 });
 
-async function storedPrivate() {
+async function storedPrivate(tier: 'private' | 'secure' = 'secure') {
   const tmp = tempDir();
   const f = openTierFixture(tmp.dir, { embed: false });
   cleanup.push(() => { f.close(); tmp.cleanup(); });
   await f.set.sync(fixtureConnector(() => [{ id: 'record', name: 'Notes', text }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-  await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  if (tier === 'secure') await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
   const decision = { ...classifyItemTiers({ signals: { title: 'Notes' }, text }),
-    metadataTier: 'secure' as const, contentTier: 'secure' as const,
-    reasons: ['metadata:sniffer:old-prompt:private', 'content:no_raise'],
+    metadataTier: tier, contentTier: tier,
+    reasons: [`metadata:sniffer:old-prompt:${tier === 'secure' ? 'private' : 'ordinary'}`, 'content:no_raise'],
   };
   f.ledger.recordRoutedPlacement(identity, decision, f.set.placementFor(decision));
   return f;
@@ -114,6 +114,29 @@ test('rejudging a message asks about its names with its chat, as the owner-rule 
   expect(question.materialHash).toBe(tierSnifferInputHash('metadata', storedSignals(f.stores.secure_local!.exportItemCopy(chatIdentity)!)));
 });
 
+test('a chat key with no letters is left out of the names the sniffer reads, but still keys the question', async () => {
+  // 1.2.1 canary: next to "Tiago Ferreira", Telegram's numeric peer id read as his identity and held his messages Private.
+  const tmp = tempDir();
+  const f = openTierFixture(tmp.dir, { embed: false });
+  cleanup.push(() => { f.close(); tmp.cleanup(); });
+  const chatIdentity = identityOf('message', '8122045531');
+  await f.set.sync(fixtureConnector(() => [{ id: 'message', name: 'Tiago Ferreira', text, conversation: '8122045531' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  await moveTieredItem({ set: f.set, identity: chatIdentity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  const decision = { ...classifyItemTiers({ signals: { title: 'Tiago Ferreira' }, text }),
+    metadataTier: 'secure' as const, contentTier: 'secure' as const,
+    reasons: ['metadata:sniffer:old-prompt:private', 'content:no_raise'],
+  };
+  f.ledger.recordRoutedPlacement(chatIdentity, decision, f.set.placementFor(decision));
+  const requests: TierSnifferRequest[] = [];
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(chatIdentity)!, { autoMoves: true, report: emptyTierRejudgeReport(),
+    sniffer: { id: 'new-prompt', judge(request) { requests.push(request); return { verdict: 'decided', tier: 'private', code: 'ordinary' }; } },
+  });
+  const question = requests.find(request => request.pass === 'metadata')!;
+  expect(question.material).toContain('Tiago Ferreira');
+  expect(question.material).not.toContain('8122045531');
+  expect(question.materialHash).toBe(tierSnifferInputHash('metadata', storedSignals(f.stores.secure_local!.exportItemCopy(chatIdentity)!)));
+});
+
 test('a Personal answer cannot lower an old names verdict when labels were not stored; a relist can reassess it', async () => {
   const f = await storedPrivate();
   rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(),
@@ -124,6 +147,65 @@ test('a Personal answer cannot lower an old names verdict when labels were not s
   await f.set.sync(fixtureConnector(() => [{ id: 'record', name: 'Notes', text, version: 'v2' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
   await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'private', contentTier: 'private' } });
   expect(f.stores.internal!.localContent(localId('record'))?.chunks.join('')).toBe(text);
+});
+
+const judging = (id: string, tier: 'private' | 'secure') => ({ id, judge: (request: TierSnifferRequest) =>
+  request.pass === 'metadata' ? { verdict: 'decided' as const, tier, code: tier === 'secure' ? 'identity' : 'ordinary' }
+    : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary' } });
+
+test('names held Private by labels the store lacks stay Private across repeated Personal re-judges', async () => {
+  const f = await storedPrivate();
+  for (const prompt of ['prompt-a', 'prompt-b']) {
+    rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging(prompt, 'private') });
+    expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+    expect(f.ledger.getCurrent(identity)!.reasons).not.toContain('metadata:names_from_store');
+  }
+  expect(f.stores.internal!.localContent(localId('record'))).toBeUndefined();
+});
+
+test('names a re-judge held Private from the stored names can be lowered by a later re-judge', async () => {
+  // 1.2.1 canary: a re-judge held Tiago's messages Private on a chat id it should not have read; the
+  // fixed prompt answered Personal, but the old maximum kept them Private for good.
+  const f = await storedPrivate('private');
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging('prompt-a', 'secure') });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'secure' });
+  await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ metadataTier: 'secure' });
+  expect(f.ledger.getCurrent(identity)!.reasons).toContain('metadata:names_from_store');
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging('prompt-b', 'private') });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'private', targetContentTier: 'private' });
+  await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'private', contentTier: 'private' } });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ metadataTier: 'private', contentTier: 'private' });
+  expect(f.stores.internal!.localContent(localId('record'))?.chunks.join('')).toBe(text);
+});
+
+test('a raise from a queued stored-names question is marked when its answer comes in, so a later re-judge can lower it', async () => {
+  const f = await storedPrivate('private');
+  const placementFor = f.set.placementFor.bind(f.set);
+  const queued = { id: 'prompt-a', judge: (request: TierSnifferRequest) => request.pass === 'metadata'
+    ? { verdict: 'undecided' as const, queued: true as const }
+    : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary' } };
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: queued });
+  f.ledger.applySnifferVerdict(identity, { pass: 'metadata', tier: 'secure', reason: 'metadata:sniffer:prompt-a:identity', modelId: 'fixture' }, { placementFor });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'secure' });
+  await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  const raised = f.ledger.getCurrent(identity)!;
+  expect(raised.reasons).toContain('metadata:names_from_store');
+  expect(raised.reasons).not.toContain('metadata:names_from_store:asked');
+  rejudgeStoredContent(f.set, raised, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging('prompt-b', 'private') });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'private' });
+});
+
+test('a queued stored-names question answered at its floor leaves no mark', async () => {
+  const f = await storedPrivate();
+  const queued = { id: 'prompt-a', judge: (request: TierSnifferRequest) => request.pass === 'metadata'
+    ? { verdict: 'undecided' as const, queued: true as const }
+    : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary' } };
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: queued });
+  f.ledger.applySnifferVerdict(identity, { pass: 'metadata', tier: 'private', reason: 'metadata:sniffer:prompt-a:ordinary', modelId: 'fixture' }, { placementFor: f.set.placementFor.bind(f.set) });
+  const settled = f.ledger.getCurrent(identity)!;
+  expect(settled).toMatchObject({ state: 'current', metadataTier: 'secure' });
+  expect(settled.reasons.filter((reason) => reason.startsWith('metadata:names_from_store'))).toEqual([]);
 });
 
 for (const locator of [

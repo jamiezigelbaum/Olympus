@@ -48,6 +48,7 @@ import {
   HELD_UNTIL_JUDGED_PRIORITY,
   heldUntilJudged,
   SNIFFER_NAMES_MAX_CHARS,
+  snifferFolderKeyNames,
   tierSnifferInputHash,
   maxTier,
   hasCredentialUrl,
@@ -66,7 +67,7 @@ import {
   type TierOwnerOverrideGuard,
 } from '../classification/tier-ledger.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import type { TierLedger } from '../classification/tier-ledger.ts';
+import { STORED_NAMES_ASKED_REASON, STORED_NAMES_REASON, type TierLedger } from '../classification/tier-ledger.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
@@ -337,15 +338,20 @@ function rejudgeMetadata(
   // Re-judging may raise it, but only a connector relist with complete signals
   // can lower the names and therefore their content floor.
   const providerReasons = previous.reasons.filter(reason => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
-  const baseline = retiredPrior ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  // A verdict an earlier re-judge made from these same stored names lacked
+  // nothing this one has, so a better prompt may lower it (1.2.1 canary: names
+  // a re-judge held Private by mistake otherwise stayed Private for good).
+  const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
+  const baseline = retiredPrior || fromStoredNames ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
-  const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
+  const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({ pass: 'metadata', material: namesWithParentContext(material, parentContext), flags: ['names:rejudge'], subject,
     materialHash: tierSnifferInputHash('metadata', signals, undefined, parentContext),
     mapRevision: fresh.mapRevision, priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY });
   const pending = verdict.verdict === 'undecided';
+  const metadataTier = pending ? baseline : maxTier(baseline, verdict.tier);
   return {
-    metadataTier: pending ? baseline : maxTier(baseline, verdict.tier),
+    metadataTier,
     metadataForced: false,
     metadataFlagged: pending || fresh.metadataFlagged,
     metadataPending: pending,
@@ -353,6 +359,10 @@ function rejudgeMetadata(
       ...fresh.reasons.filter(reason => reason.startsWith('metadata:') && !reason.startsWith('metadata:sniffer:') && !reason.startsWith('metadata:possibly_private:')),
       ...providerReasons,
       `metadata:sniffer:${sniffer.id}:${pending ? 'undecided' : verdict.code}`,
+      // Mark only a raise this stored-names verdict made. A tier held at the
+      // inherited floor must stay unmarked, or the next re-judge drops it. A
+      // queued question is marked when its answer comes in (tier-ledger.ts).
+      ...(pending ? [STORED_NAMES_ASKED_REASON] : metadataTier !== baseline ? [STORED_NAMES_REASON] : []),
     ],
   };
 }

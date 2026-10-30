@@ -32,7 +32,7 @@ async function main(): Promise<void> {
     const split = (process.argv.find(arg => arg.startsWith('--split='))?.split('=')[1] ?? 'all') as InboxSplit;
     if (!['all', 'dev', 'held-out'].includes(split)) throw new Error('Invalid split');
     const set = (process.argv.find(arg => arg.startsWith('--set='))?.split('=')[1] ?? 'inbox') as InboxSet;
-    if (!['inbox', 'owner-exemptions'].includes(set)) throw new Error('Invalid set');
+    if (!['inbox', 'owner-exemptions', 'chat-canary'].includes(set)) throw new Error('Invalid set');
     // Only the inbox set carries frozen replay responses; the others measure a real model.
     if (set !== 'inbox' && !real) throw new Error(`--set=${set} measures a real model: add --real --built-in.`);
     if (real && process.argv.includes('--built-in')) {
