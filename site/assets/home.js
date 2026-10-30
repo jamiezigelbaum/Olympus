@@ -1,5 +1,5 @@
 // olympusplugin.ai home: the long launch film, scene by scene down the page. Each .stage holds one of the film's own
-// scenes (/film/scene.html) in a frame, scaled to fit. A scene plays once, at the film's own timing, when its middle
+// scenes (/film/scene.html) in a frame, zoomed to fit. A scene plays once, at the film's own timing, when its middle
 // reaches the middle of the screen (Jamie, 2026-10-12: earlier felt too soon). With reduced motion, or ?still for
 // screenshots, every scene shows its last frame instead.
 (function () {
@@ -7,42 +7,35 @@
   var motion = document.documentElement.classList.contains("motion");
   var scenes = Array.prototype.slice.call(document.querySelectorAll("[data-scene]"));
 
-  // Frame each scene a little before it comes on screen, and take its frame down again once it is well past. Eleven
-  // 1920x1080 film documents at once were more than a phone's browser would hold: scrolling down fast made it drop the
-  // page and reload it at the top (Jamie, 2026-10-30). A scene that played and was taken down comes back as its last
-  // frame; one still loading when it reaches the middle starts the moment it is ready (see tick).
-  var frames = new Map();  // scene -> its frame, while it has one
-  var done = new Set();    // scenes that played and were taken down
-  function mount(scene) {
+  // Frame each scene, all at once: a scene still loading when it reaches the middle would start late.
+  var frames = new Map();
+  scenes.forEach(function (scene) {
     var stage = scene.querySelector(".stage");
-    if (!stage || frames.has(scene)) return;
+    if (!stage) return;
     var f = document.createElement("iframe");
     f.title = "";
     f.tabIndex = -1;
     f.setAttribute("aria-hidden", "true");
     f.setAttribute("scrolling", "no");
-    f.src = "/film/scene.html?v=1.0.0&s=" + encodeURIComponent(stage.getAttribute("data-film-scene")) +
-      (motion && !done.has(scene) ? "" : "&still");
+    f.src = "/film/scene.html?v=1.0.1&s=" + encodeURIComponent(stage.getAttribute("data-film-scene")) + (motion ? "" : "&still");
     stage.appendChild(f);
     frames.set(scene, f);
-    fit();
-    if (state.has(scene) && !running) { running = true; last = 0; retries = 0; requestAnimationFrame(tick); }
-  }
-  function unmount(scene) {
-    var f = frames.get(scene);
-    if (!f) return;
-    drawn.forEach(function (d, C) { if (d.frame === f) { d.remove(); drawn.delete(C); } });
-    f.remove();
-    frames.delete(scene);
-    var st = state.get(scene);
-    if (st && st.played) done.add(scene);
-    state.delete(scene);
-  }
+  });
 
-  // The frame is 1920 wide, cropped to 1540 (see home.css): scale it to the stage's width.
+  // The frame is 1920 wide, cropped to 1540 (see home.css): size it to the stage's width, and zoom the scene inside it
+  // to match (film/scene.html zooms itself on load from its frame's width). Shrinking a full 1920x1080 frame with a
+  // transform made phones paint and blur the whole film size for every card: animations stuttered, and a fast scroll
+  // ran the browser out of memory, so it reloaded the page at the top (Jamie, 2026-10-30).
   function fit() {
-    frames.forEach(function (f) { f.style.setProperty("--k", f.parentNode.clientWidth / 1540); });
+    frames.forEach(function (f) {
+      var k = f.parentNode.clientWidth / 1540;
+      f.style.width = 1920 * k + "px";
+      f.style.height = 1080 * k + "px";
+      f.style.left = -190 * k + "px";
+      try { f.contentDocument.documentElement.style.zoom = k; } catch (e) { /* not loaded yet: it zooms itself */ }
+    });
   }
+  fit();
   if ("ResizeObserver" in window) new ResizeObserver(fit).observe(document.querySelector(".reel"));
   else window.addEventListener("resize", fit);
 
@@ -67,9 +60,7 @@
     last = now;
     var busy = false, loading = false;
     state.forEach(function (st, scene) {
-      var f = frames.get(scene);
-      if (!f) return;        // not framed yet: mount() starts the clock again once it is
-      var sc = f.contentWindow && f.contentWindow.olympusScene;
+      var sc = frames.get(scene).contentWindow && frames.get(scene).contentWindow.olympusScene;
       if (!sc) { loading = true; return; }
       if (sc.enter && st.arrived && st.e < ENTER) {
         st.e = Math.min(st.e + dt, ENTER);
@@ -83,7 +74,7 @@
         sc.tl.seek(st.t, false);
       }
       if (st.t < target || (sc.enter && st.arrived && st.e < ENTER)) busy = true;
-      cursors(f);
+      cursors(frames.get(scene));
     });
     if (busy) requestAnimationFrame(tick);
     else {
@@ -116,7 +107,6 @@
         }
         d = document.createElement("div");
         d.innerHTML = C.el.innerHTML;
-        d.frame = f;
         layer.appendChild(d);
         drawn.set(C, d);
         C.el.style.visibility = "hidden";
@@ -124,7 +114,9 @@
       var op = +g.getProperty(C.el, "opacity");
       if (op < 0.01) { d.style.opacity = "0"; return; }
       var tip = C.el.getBoundingClientRect(), fr = f.getBoundingClientRect();
-      var px = fr.left + tip.left * k, py = fr.top + tip.top * k;
+      // the scene is zoomed: some browsers measure inside it in the page's pixels, some in the film's
+      var z = k * 1920 / w.document.documentElement.getBoundingClientRect().width;
+      var px = fr.left + tip.left * z, py = fr.top + tip.top * z;
       var x = +g.getProperty(C.el, "x"), y = +g.getProperty(C.el, "y"), m = 360 * k;
       // inside a leg: how far along it is (per axis, so each keeps its own ease), stretched to the window's edge
       var now = w.olympusScene.tl.time();
@@ -149,23 +141,13 @@
     });
   }
 
-  if ("IntersectionObserver" in window) {
-    var near = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) { if (e.isIntersecting) mount(e.target); });
-    }, { rootMargin: "50% 0px" });
-    var far = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) { if (!e.isIntersecting) unmount(e.target); });
-    }, { rootMargin: "100% 0px" });
-    scenes.forEach(function (scene) { near.observe(scene); far.observe(scene); });
-  } else scenes.forEach(mount);
-
   if (motion) {
     // Arrive: the stage's top has come a little way into the screen. Play: the stage's middle (tall stages count only
     // their first 70% of a screen) is just past the middle of the screen, or the whole stage is on screen and close
     // to it (a reader who stops with the card in full view shouldn't have to nudge it the last few lines). The first
     // scene does both on load; a scene already scrolled past does both at once; at the very bottom every scene in
     // view does both.
-    var pending = scenes.filter(function (s) { return s.querySelector(".stage"); });
+    var pending = scenes.filter(function (s) { return frames.has(s); });
     var ticking = false;
     var check = function () {
       ticking = false;
