@@ -29561,13 +29561,43 @@ function readEngineLinger(exec = linuxEngineExec, uid = process.getuid()) {
   const r = exec("loginctl", ["show-user", String(uid), "--property=Linger", "--value"]);
   return r.status === 0 && ["yes", "no"].includes(r.stdout.trim()) ? r.stdout.trim() === "yes" : undefined;
 }
-function systemdCgroupEmpty(group) {
+function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
   if (!group.startsWith("/user.slice/") || group.split("/").includes(".."))
     return;
   try {
-    return /^populated 0$/m.test(readFileSync26(join32("/sys/fs/cgroup", group, "cgroup.events"), "utf8"));
+    return /^populated 0$/m.test(readFileSync26(join32(root, group, "cgroup.events"), "utf8"));
   } catch (e) {
-    return e.code === "ENOENT" ? true : undefined;
+    if (e.code !== "ENOENT")
+      return;
+    const uid = process.getuid?.();
+    if (uid === undefined || !group.startsWith(`/user.slice/user-${uid}.slice/user@${uid}.service/`))
+      return;
+    try {
+      readFileSync26(join32(root, "cgroup.controllers"));
+      statSync16(dirname23(join32(root, group)));
+    } catch {
+      return;
+    }
+    try {
+      statSync16(join32(root, group));
+      return;
+    } catch (error) {
+      return error.code === "ENOENT" ? true : undefined;
+    }
+  }
+}
+function waitForEmptyCgroup(group, options) {
+  const inspect = options.cgroupEmpty ?? systemdCgroupEmpty;
+  const sleep3 = options.sleepMs ?? ((ms) => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  });
+  for (let waited = 0;; waited += 100) {
+    const empty = inspect(group);
+    if (empty === true)
+      return true;
+    if (empty === undefined || waited >= 2000)
+      return false;
+    sleep3(100);
   }
 }
 function systemdPidInCgroup(pid, group) {
@@ -29600,7 +29630,7 @@ function linuxEngineCustody(l, facts, options = {}) {
     return "loaded";
   if (facts.state === "unknown" || facts.enabled === null)
     return "unknown";
-  if (facts.control_group && (options.cgroupEmpty ?? systemdCgroupEmpty)(facts.control_group) !== true)
+  if (facts.control_group && !waitForEmptyCgroup(facts.control_group, options))
     return "unknown";
   const childrenPath = join32(l.dataDir, "engine/children.json");
   const record2 = readEngineChildren(childrenPath);
