@@ -60397,7 +60397,8 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
   };
   const fresh = classifyItemTiers({ signals, namesOnly: true });
   const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
-  const baseline = retiredPrior ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
+  const baseline = retiredPrior || fromStoredNames ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === "secrets")
     return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
@@ -60419,7 +60420,8 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
     reasons: [
       ...fresh.reasons.filter((reason) => reason.startsWith("metadata:") && !reason.startsWith("metadata:sniffer:") && !reason.startsWith("metadata:possibly_private:")),
       ...providerReasons,
-      `metadata:sniffer:${sniffer.id}:${pending ? "undecided" : verdict.code}`
+      `metadata:sniffer:${sniffer.id}:${pending ? "undecided" : verdict.code}`,
+      STORED_NAMES_REASON
     ]
   };
 }
@@ -60499,7 +60501,7 @@ function storedFolderKeys(value) {
     return [];
   }
 }
-var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge";
+var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge", STORED_NAMES_REASON = "metadata:names_from_store";
 var init_tier_rejudge = __esm(() => {
   init_media_judge();
   init_parent_context();

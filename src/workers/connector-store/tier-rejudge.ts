@@ -309,6 +309,9 @@ export function rejudgeStoredContent(
   else report.updated += 1;
 }
 
+/** Marks a names verdict a re-judge made from the stored names alone. */
+const STORED_NAMES_REASON = 'metadata:names_from_store';
+
 /** Only a model's obsolete names verdict may be replaced here. Owner rules,
  * overrides and provider floors retain their authority. The old placement
  * stays in force while these new names and content questions are answered. */
@@ -338,7 +341,11 @@ function rejudgeMetadata(
   // Re-judging may raise it, but only a connector relist with complete signals
   // can lower the names and therefore their content floor.
   const providerReasons = previous.reasons.filter(reason => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
-  const baseline = retiredPrior ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  // A verdict an earlier re-judge made from these same stored names lacked
+  // nothing this one has, so a better prompt may lower it (1.2.1 canary: names
+  // a re-judge held Private by mistake otherwise stayed Private for good).
+  const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
+  const baseline = retiredPrior || fromStoredNames ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({ pass: 'metadata', material: namesWithParentContext(material, parentContext), flags: ['names:rejudge'], subject,
@@ -354,6 +361,7 @@ function rejudgeMetadata(
       ...fresh.reasons.filter(reason => reason.startsWith('metadata:') && !reason.startsWith('metadata:sniffer:') && !reason.startsWith('metadata:possibly_private:')),
       ...providerReasons,
       `metadata:sniffer:${sniffer.id}:${pending ? 'undecided' : verdict.code}`,
+      STORED_NAMES_REASON,
     ],
   };
 }

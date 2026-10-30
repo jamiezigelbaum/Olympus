@@ -149,6 +149,23 @@ test('a Personal answer cannot lower an old names verdict when labels were not s
   expect(f.stores.internal!.localContent(localId('record'))?.chunks.join('')).toBe(text);
 });
 
+test('names a re-judge held Private from the stored names can be lowered by a later re-judge', async () => {
+  // 1.2.1 canary: a re-judge held Tiago's messages Private on a chat id it should not have read; the
+  // fixed prompt answered Personal, but the old maximum kept them Private for good.
+  const f = await storedPrivate();
+  const judging = (id: string, tier: 'private' | 'secure') => ({ id, judge: (request: TierSnifferRequest) =>
+    request.pass === 'metadata' ? { verdict: 'decided' as const, tier, code: tier === 'secure' ? 'identity' : 'ordinary' }
+      : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary' } });
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging('prompt-a', 'secure') });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ metadataTier: 'secure' });
+  expect(f.ledger.getCurrent(identity)!.reasons).toContain('metadata:names_from_store');
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging('prompt-b', 'private') });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'private', targetContentTier: 'private' });
+  await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'private', contentTier: 'private' } });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ metadataTier: 'private', contentTier: 'private' });
+  expect(f.stores.internal!.localContent(localId('record'))?.chunks.join('')).toBe(text);
+});
+
 for (const locator of [
   'ftp://reader:synthetic-password@example.test/report',
   'ftp://example.test/report?access_token=synthetic-url-credential',
