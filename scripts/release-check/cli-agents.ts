@@ -21,7 +21,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AGENT_INSTRUCTIONS } from './agents.ts';
 
@@ -201,7 +201,8 @@ export function parseCodexEvents(stdout: string): CliRun {
 }
 
 export async function runCodex(options: { question: string; mcpUrl: string; model?: string; timeoutMs?: number }): Promise<CliRun> {
-  const realAuth = join(codexHomePath(), 'auth.json');
+  // Absolute: the lock helper runs in the scratch work directory, where a relative CODEX_HOME would miss the login.
+  const realAuth = resolve(codexHomePath(), 'auth.json');
   const scratch = mkdtempSync(join(tmpdir(), 'release-check-codex-'));
   try {
     const home = join(scratch, 'home');

@@ -117,6 +117,6 @@ print('{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}')
       if (oldHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldHome;
       if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
     }
-  });
+  }, 30_000);
 
 });
