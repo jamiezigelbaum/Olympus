@@ -49,7 +49,12 @@ export function carryInto(machine: MachineReport, base: MachineReport, from: Car
   if (traces.length > 0) { machine.traces = [...(machine.traces ?? []), ...traces]; parts.push('step traces'); }
   if (carried.includes('journeys') && !machine.visual && base.visual) { machine.visual = base.visual; parts.push('screen comparisons'); }
   if (carried.includes('explore') && !machine.explore && base.explore) { machine.explore = base.explore; parts.push('control exploration'); }
-  if (carried.includes('screenshots') && machine.screenshots.length === 0 && base.screenshots.length > 0) { machine.screenshots = base.screenshots; parts.push('dashboard screenshots'); }
+  // The Inbox leg adds its own pictures to the same list, so the tested run's are merged in by path (Codex on #635).
+  if (carried.includes('screenshots')) {
+    const have = new Set(machine.screenshots.map((shot) => shot.path));
+    const kept = base.screenshots.filter((shot) => !have.has(shot.path));
+    if (kept.length > 0) { machine.screenshots = [...machine.screenshots, ...kept]; parts.push('dashboard screenshots'); }
+  }
   return parts;
 }
 

@@ -108,6 +108,15 @@ describe('keeping the tested run\'s results', () => {
     expect(renderHtml(report)).toContain('kept from aaaaaaaa');
   });
 
+  test('the tested run\'s dashboard pictures are kept beside the rerun Inbox leg\'s own', () => {
+    const shot = (path: string) => ({ label: path, path, width: 1280, theme: 'light' as const });
+    const base = tested({ screenshots: [shot('screenshots/home.png'), shot('screenshots/inbox.png')] });
+    const now = machine({ screenshots: [shot('screenshots/inbox.png')] });
+    const parts = carryInto(now, base.machines[0]!, { runId: 'run-base', sha: A }, ['screenshots', 'journeys', 'explore', 'archive']);
+    expect(now.screenshots.map((s) => s.path)).toEqual(['screenshots/inbox.png', 'screenshots/home.png']);
+    expect(parts).toContain('dashboard screenshots');
+  });
+
   test('a run on another platform cannot lend its results', () => {
     expect(() => carryInto(machine({ os: 'macos' }), tested().machines[0]!, { runId: 'r', sha: A }, ['suite'])).toThrow('linux run');
   });
