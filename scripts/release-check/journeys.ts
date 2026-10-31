@@ -36,6 +36,10 @@ const DESCRIPTION_EDIT: Target = { css: 'button[data-key="privacy:description:ed
 const OPEN_DESCRIPTION = { name: 'Open the description box', do: { click: DESCRIPTION_EDIT, frame: 'panel' as const }, expect: [{ present: DESCRIPTION, frame: 'panel' as const }] };
 // The sender field's label also holds its error once one shows.
 const SENDER: Target = { role: 'textbox', name: PRIVACY.senderLabel, contains: true };
+// 1.3 adds a rule on a three-step sheet: Add a rule, pick what kind, then the details.
+const ADD_RULE = { name: 'Press Add a rule', do: { click: { role: 'button', name: PRIVACY.addRule }, frame: 'panel' as const }, expect: [{ text: PRIVACY.kindPrompt, frame: 'panel' as const }, { present: { role: 'button', name: PRIVACY.addSender }, frame: 'panel' as const }] };
+const PICK_SENDER = { name: 'Choose Add a sender', do: { click: { role: 'button', name: PRIVACY.addSender }, frame: 'panel' as const }, expect: [{ present: { role: 'button', name: PRIVACY.next }, frame: 'panel' as const }] };
+const SENDER_NEXT = { name: 'Press Next to the sender', do: { click: { role: 'button', name: PRIVACY.next }, frame: 'panel' as const }, expect: [{ text: PRIVACY.senderIntro, frame: 'panel' as const }, { present: SENDER, frame: 'panel' as const }] };
 const MODELS_LINE: Target = { role: 'button', name: new RegExp(`^${PANEL.models}\\s+—`) };
 // What the open section says; a closed section's content counts as hidden here (the probe's rule), whatever the page's text holds.
 const SEARCH_LINE: Target = { text: new RegExp(`^${PANEL.modelSearch}: \\S`) };
@@ -329,7 +333,7 @@ export const JOURNEYS: readonly Journey[] = [
   },
   {
     id: 'privacy-cancel-asks',
-    title: 'Leaving the privacy settings with unsaved changes asks first, and Discard changes keeps nothing',
+    title: 'Leaving the privacy settings with unsaved changes asks first, Discard changes keeps nothing, and Cancel puts the description back',
     source: 'owner test plan: what is private; the release check had never pressed Cancel there',
     steps: [
       { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
@@ -341,8 +345,8 @@ export const JOURNEYS: readonly Journey[] = [
         expect: [{ value: DESCRIPTION, equals: DISCARDED_NOTE, frame: 'panel' }],
       },
       {
-        name: 'Press Cancel',
-        do: { click: { role: 'button', name: PRIVACY.cancel }, frame: 'panel' },
+        name: 'Press Back with the description unsaved',
+        do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' },
         expect: [
           { text: PRIVACY.discardPrompt, frame: 'panel' },
           { present: { role: 'button', name: PRIVACY.discard }, frame: 'panel' },
@@ -354,7 +358,7 @@ export const JOURNEYS: readonly Journey[] = [
         do: { click: { role: 'button', name: PRIVACY.keep }, frame: 'panel' },
         expect: [{ noText: PRIVACY.discardPrompt, frame: 'panel' }, { value: DESCRIPTION, equals: DISCARDED_NOTE, frame: 'panel' }],
       },
-      { name: 'Press Cancel again', do: { click: { role: 'button', name: PRIVACY.cancel }, frame: 'panel' }, expect: [{ text: PRIVACY.discardPrompt, frame: 'panel' }] },
+      { name: 'Press Back again', do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' }, expect: [{ text: PRIVACY.discardPrompt, frame: 'panel' }] },
       {
         name: 'Press Discard changes',
         do: { click: { role: 'button', name: PRIVACY.discard }, frame: 'panel' },
@@ -365,59 +369,70 @@ export const JOURNEYS: readonly Journey[] = [
         do: { click: OPEN_PRIVACY, frame: 'panel' },
         expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }, { noText: DISCARDED_NOTE, frame: 'panel' }],
       },
+      OPEN_DESCRIPTION,
+      { name: 'Type the description again', do: { type: { into: DESCRIPTION, text: DISCARDED_NOTE }, frame: 'panel' }, expect: [{ value: DESCRIPTION, equals: DISCARDED_NOTE, frame: 'panel' }] },
+      {
+        name: 'Press Cancel',
+        do: { click: { role: 'button', name: PRIVACY.cancel }, frame: 'panel' },
+        // Cancel is the owner saying "put it back": the box closes on the saved description, with nothing to ask about.
+        expect: [{ absent: DESCRIPTION, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }, { noText: DISCARDED_NOTE, frame: 'panel' }, { noText: PRIVACY.discardPrompt, frame: 'panel' }],
+      },
       {
         name: 'Press Back with nothing changed',
         do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' },
-        // Nothing was edited this time, so there is nothing to ask about.
+        // Nothing is unsaved now, so there is nothing to ask about.
         expect: [{ text: PANEL.sources, frame: 'panel' }, { noText: PRIVACY.discardPrompt, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
       },
     ],
   },
   {
     id: 'privacy-add-sender',
-    title: 'Add a sender refuses what is not an address, adds one that is, and Discard changes drops it',
+    title: 'Add a rule for a sender refuses what is not an address, takes one that is, and backing out of the review keeps nothing',
     source: 'owner test plan: what is private; the release check had never added a sender',
     steps: [
       { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
       // The title shows while the settings still load; the description box only once they have.
       { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }] },
-      {
-        name: 'Press Add a sender',
-        do: { click: { role: 'button', name: PRIVACY.addSender }, frame: 'panel' },
-        expect: [{ text: PRIVACY.senderIntro, frame: 'panel' }, { present: SENDER, frame: 'panel' }, { present: { role: 'button', name: PRIVACY.senderAdd }, frame: 'panel' }],
-      },
+      ADD_RULE,
+      PICK_SENDER,
+      SENDER_NEXT,
       { name: 'Type something that is not an address', do: { type: { into: SENDER, text: 'not an address' }, frame: 'panel' }, expect: [{ value: SENDER, equals: 'not an address', frame: 'panel' }] },
       {
-        name: 'Press Add',
-        do: { click: { role: 'button', name: PRIVACY.senderAdd }, frame: 'panel' },
+        name: 'Press Next with it',
+        do: { click: { role: 'button', name: PRIVACY.next }, frame: 'panel' },
         expect: [{ text: PRIVACY.senderInvalid, frame: 'panel' }, { present: SENDER, frame: 'panel' }],
       },
+      { name: 'Press Back to the kinds', do: { click: { role: 'button', name: PRIVACY.sheetBack }, frame: 'panel' }, expect: [{ text: PRIVACY.kindPrompt, frame: 'panel' }, { absent: SENDER, frame: 'panel' }] },
       {
         name: 'Press Back to privacy',
-        do: { click: { role: 'button', name: PRIVACY.backToPrivacy }, frame: 'panel' },
+        do: { click: { role: 'button', name: PRIVACY.sheetBack }, frame: 'panel' },
         expect: [{ present: DESCRIPTION_EDIT, frame: 'panel' }, { absent: SENDER, frame: 'panel' }, { noText: 'not an address', frame: 'panel' }],
       },
+      { ...ADD_RULE, name: 'Press Add a rule again' },
+      PICK_SENDER,
       {
-        name: 'Press Add a sender again',
-        do: { click: { role: 'button', name: PRIVACY.addSender }, frame: 'panel' },
+        ...SENDER_NEXT,
         // A fresh start: the refused value and its error are gone.
         expect: [{ value: SENDER, equals: '', frame: 'panel' }, { noText: PRIVACY.senderInvalid, frame: 'panel' }],
       },
       { name: 'Type an address', do: { type: { into: SENDER, text: DISCARDED_SENDER }, frame: 'panel' }, expect: [{ value: SENDER, equals: DISCARDED_SENDER, frame: 'panel' }] },
       {
-        name: 'Press Add with the address',
-        do: { click: { role: 'button', name: PRIVACY.senderAdd }, frame: 'panel' },
-        expect: [{ absent: SENDER, frame: 'panel' }, { text: DISCARDED_SENDER, frame: 'panel' }, { present: { role: 'button', name: PRIVACY.save }, frame: 'panel' }],
+        name: 'Press Next with the address',
+        do: { click: { role: 'button', name: PRIVACY.next }, frame: 'panel' },
+        expect: [{ text: PRIVACY.confirmRule, frame: 'panel' }, { text: DISCARDED_SENDER, frame: 'panel' }, { present: { role: 'button', name: PRIVACY.makePrivate }, frame: 'panel' }],
+      },
+      // Make private would save the rule at once; backing out of the review must keep nothing.
+      { name: 'Press Back from the review', do: { click: { role: 'button', name: PRIVACY.sheetBack }, frame: 'panel' }, expect: [{ value: SENDER, equals: DISCARDED_SENDER, frame: 'panel' }] },
+      { name: 'Press Back to the kinds again', do: { click: { role: 'button', name: PRIVACY.sheetBack }, frame: 'panel' }, expect: [{ text: PRIVACY.kindPrompt, frame: 'panel' }] },
+      {
+        name: 'Press Back to privacy again',
+        do: { click: { role: 'button', name: PRIVACY.sheetBack }, frame: 'panel' },
+        expect: [{ present: DESCRIPTION_EDIT, frame: 'panel' }, { noText: DISCARDED_SENDER, frame: 'panel' }],
       },
       {
-        name: 'Press Back with the sender unsaved',
+        name: 'Leave the privacy settings',
         do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' },
-        expect: [{ text: PRIVACY.discardPrompt, frame: 'panel' }, { present: { role: 'button', name: PRIVACY.discard }, frame: 'panel' }],
-      },
-      {
-        name: 'Press Discard changes',
-        do: { click: { role: 'button', name: PRIVACY.discard }, frame: 'panel' },
-        expect: [{ text: PANEL.sources, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
+        expect: [{ text: PANEL.sources, frame: 'panel' }, { noText: PRIVACY.discardPrompt, frame: 'panel' }],
       },
       {
         name: 'Open the privacy settings again',
@@ -425,7 +440,7 @@ export const JOURNEYS: readonly Journey[] = [
         // Loaded first, so the saved senders are on the page when their absence is read.
         expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }, { noText: DISCARDED_SENDER, frame: 'panel' }],
       },
-      { name: 'Leave the privacy settings', do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
+      { name: 'Leave the privacy settings again', do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
     ],
   },
   {
