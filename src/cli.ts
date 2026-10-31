@@ -362,7 +362,7 @@ async function main(): Promise<void> {
       if (result !== undefined) console.log(brief ? JSON.stringify(result) : JSON.stringify(result, null, 2));
       // Linux automation treats every unhealthy/unknown result as nonzero;
       // retain the historical Mac exit contract for non-verifying commands.
-      const healthExit = process.platform === 'linux' || ['install', 'verify', 'rollback'].includes(args[1] ?? '');
+      const healthExit = process.platform === 'linux' || ['install', 'install-helper', 'verify', 'rollback'].includes(args[1] ?? '');
       if (healthExit && result && typeof result === 'object' && (result as { ok?: unknown }).ok === false) process.exitCode = 1;
     } catch (error) {
       if (error instanceof OperationError) {
