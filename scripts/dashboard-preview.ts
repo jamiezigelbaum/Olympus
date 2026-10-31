@@ -20,6 +20,7 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?state=secret-notice  ChatGPT private panel and remote verdict
 //   /dashboard?keys | ?agents | ?private-answers | ?connector
 //                the computer's own pages, as the worker renders them.
+//   &sheet=dropbox|venice&step=1..5 opens a setup fixture without starting OAuth.
 //   &waiting=0..9  how many private inbox questions appear (default 3; remembered):
 //                the Private answers list and the panel's Needs you line.
 //   &agents=off|not-connected|relay-unavailable|awaiting-terms|worker-env
@@ -269,7 +270,7 @@ const engine = createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({
  */
 function connectPreview(
   provider: 'google' | 'dropbox' | 'x',
-  options: { refused?: boolean; loopback?: boolean; publisher?: boolean } = {},
+  options: { refused?: boolean; connecting?: boolean; loopback?: boolean; publisher?: boolean } = {},
 ) {
   const source = provider === 'google' ? 'gmail' : provider;
   return buildSourceDashboardViewModel({
@@ -293,13 +294,13 @@ function connectPreview(
     // publisher's Dropbox app key (and later Google web client id) ship.
     ...(options.publisher ? { publisherOAuthSources: ['gmail', 'google-drive', 'dropbox'] as const } : {}),
     oauthRedirectBaseUrl: options.loopback ? 'http://127.0.0.1:8010' : PREVIEW_REDIRECT_BASE_URL,
-    ...(options.refused
+    ...(options.refused || options.connecting
       ? {
         pendingConnects: [{
           source: source as 'gmail' | 'dropbox' | 'x',
           started_at: at(300),
           expires_at: new Date(NOW.getTime() + 5 * 60_000).toISOString(),
-          error: { code: 'redirect_uri_mismatch', at: at(280) },
+          ...(options.refused ? { error: { code: 'redirect_uri_mismatch', at: at(280) } } : {}),
         }],
       }
       : {}),
@@ -511,6 +512,8 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
   if (state === 'dropbox-update') return dropboxPreview('update');
   if (state === 'connect-google') return connectPreview('google');
   if (state === 'connect-google-loopback') return connectPreview('google', { loopback: true });
+  if (state === 'connect-venice') return buildDashboardPreviewView('models');
+  if (state === 'connect-dropbox-connecting') return connectPreview('dropbox', { connecting: true });
   if (state === 'connect-dropbox') return connectPreview('dropbox');
   if (state === 'connect-x') return connectPreview('x');
   if (state === 'connect-dropbox-refused') return connectPreview('dropbox', { refused: true });
@@ -1688,7 +1691,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'privacy-add-kind', 'privacy-add-pick', 'privacy-add-confirm', 'privacy-details', 'privacy-add-folder', 'privacy-add-label',
   'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
-  'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
+  'connect-venice', 'connect-dropbox-connecting', 'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
   'local-files-off', 'local-files-connected', 'local-files-indexing', 'local-files-reading', 'local-files-needs-permission',
   'local-files-finding', 'local-files-finding-page', 'local-files-sync-checking', 'local-files-sync-checked',
   'local-files-picker', 'local-files-picker-waiting', 'local-files-picker-denied', 'local-files-picker-helper',
@@ -1845,6 +1848,13 @@ function pickerAutoScript(spec: string): string {
 }
 
 /** The dashboard tool's result for a preview state, with the computer's Index faster state (and waiting questions, unlocked). */
+export function setupPreviewScript(name: string | null, step: string | null): string {
+  if (name !== 'dropbox' && name !== 'venice') return '';
+  const index = Math.max(0, Math.min(name === 'dropbox' ? 4 : 2, Number(step ?? 1) - 1 || 0));
+  const selector = name === 'dropbox' ? '#connect-dropbox-files' : '[data-setup-steps]:has([name="source"][value="venice"])';
+  return `<script>window.addEventListener('DOMContentLoaded',function(){var sheet=document.querySelector(${JSON.stringify(selector)});if(!sheet)return;sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');var steps=sheet.matches('[data-setup-steps]')?sheet:sheet.querySelector('[data-setup-steps]');if(steps){var details=steps.closest('details');if(details)details.open=true;for(var i=0;i<${index};i++){steps.querySelector('[data-setup-next]').click();}}sheet.scrollIntoView({block:'center'});});</script>`;
+}
+
 export function previewDashboardToolResult(state: string, indexFasterOn: boolean, waitingPrivateQuestions = 0) {
   if (state === 'delete-data' && previewDataDeleted) state = 'delete-data-done';
   const result = dashboardToolResult(buildChatGptDashboardViewModel(view(state), { now: NOW, ...buildDashboardPreviewOptions(state) }));
@@ -2113,7 +2123,7 @@ if (import.meta.main) {
           outsideHelp: previewOutsideHelp(url.searchParams.get('anonymous') === 'on'),
           privateAnswers: { available: true, destinations: { computer: 'ready', venice: url.searchParams.get('venice') === 'ready' ? 'ready' : url.searchParams.get('venice') === 'unset' ? 'not_set_up' : 'not_allowed' }, ...(unlocked ? { waiting: previewWaitingQuestions(waitingCount, pageState) } : {}) },
         },
-      }), undefined, url.searchParams.get('theme')), cookies);
+      }) + setupPreviewScript(url.searchParams.get('sheet'), url.searchParams.get('step')), undefined, url.searchParams.get('theme')), cookies);
     }
     const named = url.pathname.replace(/^\//, '');
     if ((DASHBOARD_PREVIEW_STATES as readonly string[]).includes(named)) {
