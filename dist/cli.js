@@ -53649,6 +53649,8 @@ var init_vocabulary = __esm(() => {
     },
     rowNoCount: "Uses your description and always-private rules.",
     edit: "Edit",
+    descriptionEmpty: "You haven't said what's private yet.",
+    descriptionStart: "Describe what's private",
     editLabel: "Edit what's private",
     dashboardPending: {
       one: "{n} item waiting to be checked",
@@ -151211,7 +151213,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     const asked = L.questions(s.description);
     if (!asked.length)
       return null;
-    const section = add(el("section", "fsection questions"), el("h2", "", Q.title));
+    const section = add(el("section", "fsection questions"), el("h2", "", Q.title), el("p", "reason", Q.intro));
     for (const topic of asked) {
       const heading = el("h3", "qtitle", topic.question);
       heading.id = "privacy-q-" + topic.id;
@@ -151280,13 +151282,17 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       return;
     }
     const description = add(el("section", "fsection privacy-description"), el("h2", "", W.descriptionLabel));
-    const summary = el("p", "privacy-summary", s.description || W.descriptionPlaceholder);
+    const summary = el("p", "privacy-summary", s.description);
     summary.setAttribute("data-key", "privacy:summary");
-    if (!s.editingDescription) {
-      add(description, summary, kit.button(W.edit, "privacy:description:edit", s.saving ? null : () => {
-        s.editingDescription = true;
-        kit.render("privacy:description");
-      }, "plain"));
+    const openEditor = s.saving ? null : () => {
+      s.editingDescription = true;
+      kit.render("privacy:description");
+    };
+    if (!s.editingDescription && s.description) {
+      add(description, summary, kit.button(W.edit, "privacy:description:edit", openEditor, "plain"));
+    } else if (!s.editingDescription) {
+      summary.textContent = W.descriptionEmpty;
+      add(description, summary, el("p", "muted privacy-example", W.descriptionPlaceholder), kit.button(W.descriptionStart, "privacy:description:edit", openEditor, "main"));
     } else {
       const field = el("label", "field");
       const area = el("textarea", "text");
@@ -151319,7 +151325,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     if (questions)
       add(page2, questions);
     const details = disclosure();
-    add(details, el("p", "reason", W.judgingDetails), el("p", "reason", W.questions.intro));
+    add(details, el("p", "reason", W.judgingDetails));
     const rules = add(el("section", "fsection"), el("h2", "", W.rulesTitle));
     if (s.rules.length) {
       const listNode = el("ul", "rule-chips");

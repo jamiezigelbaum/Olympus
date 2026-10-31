@@ -247,8 +247,11 @@ describe('privacy main-view essentials', () => {
   });
   test('empty state opens the same inline editor; Cancel restores words without saving', async () => {
     const { host, saves } = await openPrivacy();
-    expect(host.text()).toContain(W.descriptionPlaceholder);
-    host.button('Edit').click();
+    // Empty reads as empty: a plain line, the example greyed, and one main button; never the example as saved text.
+    expect(host.doc.querySelector('[data-key="privacy:summary"]')!.textContent).toBe(W.descriptionEmpty);
+    expect(host.doc.querySelector('.privacy-example.muted')!.textContent).toBe(W.descriptionPlaceholder);
+    expect(host.doc.querySelector('button[data-key="privacy:description:edit"]')!.textContent).toBe(W.descriptionStart);
+    host.button(W.descriptionStart).click();
     const area = host.doc.querySelector('textarea')!;
     expect(area.closest('details')).toBeNull();
     expect(area.placeholder).toBe(W.descriptionPlaceholder);
@@ -259,14 +262,14 @@ describe('privacy main-view essentials', () => {
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button(W.cancel).click();
     expect(host.doc.querySelector('textarea')).toBeNull();
-    expect(host.text()).toContain(W.descriptionPlaceholder);
+    expect(host.text()).toContain(W.descriptionEmpty);
     expect(host.text()).toContain(W.title);
     expect(saves).toHaveLength(0);
   });
 });
 
 function editDescription(host: Host): HTMLTextAreaElement {
-  if (!host.doc.querySelector('textarea')) host.button(W.edit).click();
+  if (!host.doc.querySelector('textarea')) (host.doc.querySelector('button[data-key="privacy:description:edit"]') as unknown as HTMLButtonElement).click();
   return host.doc.querySelector('textarea') as HTMLTextAreaElement;
 }
 
@@ -968,7 +971,9 @@ describe('follow-up questions', () => {
     const { host } = await openPrivacy({ description: OWNER });
     const section = host.doc.querySelector('section.questions')!;
     expect(section.querySelector('h2')!.textContent).toBe(Q.title);
-    expect(host.doc.querySelector('details')!.textContent).toContain(Q.intro);
+    // The explanation sits with the questions on the main view, as on main, not in Details.
+    expect(section.textContent).toContain(Q.intro);
+    expect(host.doc.querySelector('details')!.textContent).not.toContain(Q.intro);
     expect(section.querySelector('h3')!.textContent).toBe(Q.topics.family.question);
     const rows = Array.from(section.querySelectorAll('[role="radiogroup"]'));
     // Each pair is named by its question and its choice.

@@ -15221,6 +15221,8 @@ var init_vocabulary = __esm(() => {
     },
     rowNoCount: "Uses your description and always-private rules.",
     edit: "Edit",
+    descriptionEmpty: "You haven't said what's private yet.",
+    descriptionStart: "Describe what's private",
     editLabel: "Edit what's private",
     dashboardPending: {
       one: "{n} item waiting to be checked",

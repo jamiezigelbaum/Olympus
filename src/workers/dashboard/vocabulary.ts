@@ -2881,6 +2881,9 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   },
   rowNoCount: 'Uses your description and always-private rules.',
   edit: 'Edit',
+  /** The description while nothing is written yet, with its button. */
+  descriptionEmpty: 'You haven\'t said what\'s private yet.',
+  descriptionStart: 'Describe what\'s private',
   editLabel: 'Edit what\'s private',
   dashboardPending: {
     one: '{n} item waiting to be checked',
