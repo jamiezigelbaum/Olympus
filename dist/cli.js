@@ -53855,6 +53855,7 @@ var init_vocabulary = __esm(() => {
     deleteAll: "Delete all",
     deleteAllConfirm: "Delete every question and answer in your private inbox?",
     deleted: "That answer was deleted",
+    secretLinkUnavailable: "This link has expired or is unavailable. Choose your question in Inbox.",
     deleteNotFound: "Olympus could not find this answer, so nothing was deleted. Reload to see your inbox as it is now.",
     deleteUnavailable: "Private answers cannot be changed right now, so nothing was deleted. Try again in a moment.",
     nothingDeleted: "Nothing was deleted. Reload to see your inbox as it is now.",
@@ -139131,13 +139132,14 @@ function createLocalAnswerPath(options) {
   return {
     eligible,
     secretSources: (input, locations) => {
-      const current2 = lanes(localAnswerRequest(input.question, input.selectors));
+      const request = localAnswerRequest(input.question, input.selectors);
+      const current2 = lanes(request);
       if (current2.checkSecretLocations?.(locations) !== true)
         return [];
-      const matches2 = current2.secretLocations?.(input.question, current2.registry.list().map((c) => c.corpusId)) ?? [];
-      return matches2.filter((location) => locations.some((saved) => saved.source === location.source && saved.ref === location.ref)).map((location) => {
+      const matches2 = current2.secretLocations?.(request.query?.trim() || input.question, current2.registry.list().map((c) => c.corpusId)) ?? [];
+      return matches2.filter((location) => (location.title || location.locator) && locations.some((saved) => saved.source === location.source && saved.ref === location.ref)).map((location) => {
         const links = location.locator ? options.sourceLinks?.({ provenance: { sourceItem: { provider: location.source }, citation: { uri: location.locator } } }) : undefined;
-        return { title: location.title ?? location.locator ?? "Secret", source: location.source, ...links };
+        return { title: location.title ?? location.locator ?? "Secret", source: providerSourceLabel(location.source) ?? location.source, ...links };
       });
     },
     eligibleSecrets: (input, locations) => {
@@ -139202,7 +139204,7 @@ function createLocalPrivateAnswers(options) {
     }
   };
   const hidden = (q) => q.surface === "chatgpt" && options.panelSecretNotice?.(refOf(q)) !== true && (now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true);
-  const autoAnswerable = (q) => q.path !== "anonymous" && q.path !== "venice" && !q.hasResult && !q.result && q.state === "waiting" && q.nextAttemptAt <= now() && !hidden(q) && active(q);
+  const autoAnswerable = (q) => q.path !== "anonymous" && q.path !== "venice" && !q.hasResult && !q.result && q.state === "waiting" && q.nextAttemptAt <= now() && !hidden(q) && active(q) && (q.surface !== "chatgpt" || now() >= Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelSecretOnlyNotice?.(refOf(q)) === true);
   const current2 = (q) => {
     const fresh2 = store()?.get(q.id);
     return fresh2 && fresh2.generation === q.generation && active(fresh2) && !hidden(fresh2) ? fresh2 : undefined;
@@ -139586,6 +139588,7 @@ async function askWithAnonymousInbox(input, options) {
 }
 var LOCAL_AGENT_INBOX_ID = "@local:agents", LOCAL_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", TOKEN_TTL_MS, AUTO_ANSWER_DEFER_MS = 60000, MAX_TOKENS = 400, MAX_QUESTION_CHARS = 2000, TOKEN_PATTERN3;
 var init_local_private_answers = __esm(() => {
+  init_remote_result();
   init_vocabulary();
   init_tier_ledger();
   init_release_manifest();
@@ -153671,6 +153674,7 @@ function privateAnswersClientScript(input) {
       delete: DASHBOARD_PRIVATE_ANSWERS_COPY.delete,
       deleteAllConfirm: DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAllConfirm,
       deleted: DASHBOARD_PRIVATE_ANSWERS_COPY.deleted,
+      secretLinkUnavailable: DASHBOARD_PRIVATE_ANSWERS_COPY.secretLinkUnavailable,
       nothingDeleted: DASHBOARD_PRIVATE_ANSWERS_COPY.nothingDeleted,
       retrying: DASHBOARD_PRIVATE_ANSWERS_COPY.retrying,
       queued: DASHBOARD_PRIVATE_ANSWERS_COPY.queued,
@@ -153869,9 +153873,9 @@ function privateAnswersClientScript(input) {
   var list = root.querySelector('[data-pa-list]');
   function rows() { return Array.from(root.querySelectorAll('[data-pa-question]')); }
   function findRow(id) { return rows().find(function (row) { return row.getAttribute('data-pa-question') === id; }); }
-  function missing() {
+  function missing(text) {
     var note = root.querySelector('[data-pa-missing]');
-    if (note) { note.hidden = false; note.textContent = config.copy.deleted; }
+    if (note) { note.hidden = false; note.textContent = text || config.copy.deleted; }
   }
   async function read(row, quiet) {
     var id = row.getAttribute('data-pa-question');
@@ -153958,6 +153962,7 @@ function privateAnswersClientScript(input) {
       var resolved = await send({ action: 'resolve_secret', handle: id });
       if (window.location.hash.slice(1) !== id) return;
       if (resolved.ok && typeof resolved.result.id === 'string') row = findRow(resolved.result.id);
+      if (!row) { missing(config.copy.secretLinkUnavailable); return; }
     }
     if (!row) { missing(); return; }
     if (row.scrollIntoView) row.scrollIntoView({ block: 'center' });
@@ -200947,9 +200952,9 @@ class PrivateAnswerJobs {
     job.opens = undefined;
     return false;
   }
-  hasSecretInbox(ref) {
+  hasSecretInbox(ref, secretOnly = false) {
     this.sweep();
-    return [...this.jobs.values()].some((job) => job.preserveWaiting && job.waiting?.id === ref.id && job.waiting.generation === ref.generation && job.waiting.connectionId === ref.connectionId);
+    return [...this.jobs.values()].some((job) => job.preserveWaiting && (!secretOnly || job.secretMatch !== undefined) && job.waiting?.id === ref.id && job.waiting.generation === ref.generation && job.waiting.connectionId === ref.connectionId);
   }
   resolveSecretInbox(handle) {
     this.sweep();
@@ -208105,6 +208110,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       eligibleSecrets: local.eligibleSecrets,
       resolveSecretInbox: (handle) => privateAnswers.resolveSecretInbox(handle),
       panelSecretNotice: (ref) => privateAnswers.hasSecretInbox(ref),
+      panelSecretOnlyNotice: (ref) => privateAnswers.hasSecretInbox(ref, true),
       secretSources: local.secretSources,
       ...openCitedFile ? { openFile: openCitedFile } : {},
       ...process.platform === "darwin" ? {

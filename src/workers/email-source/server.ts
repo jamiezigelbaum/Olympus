@@ -6123,6 +6123,7 @@ export async function main(): Promise<void> {
       eligibleSecrets: local.eligibleSecrets,
       resolveSecretInbox: handle => privateAnswers.resolveSecretInbox(handle),
       panelSecretNotice: ref => privateAnswers.hasSecretInbox(ref),
+      panelSecretOnlyNotice: ref => privateAnswers.hasSecretInbox(ref, true),
       secretSources: local.secretSources,
       ...(openCitedFile ? { openFile: openCitedFile } : {}),
       ...(process.platform === 'darwin' ? {

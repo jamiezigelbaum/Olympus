@@ -264,6 +264,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       delete: W.delete,
       deleteAllConfirm: W.deleteAllConfirm,
       deleted: W.deleted,
+      secretLinkUnavailable: W.secretLinkUnavailable,
       nothingDeleted: W.nothingDeleted,
       retrying: W.retrying,
       queued: W.queued,
@@ -462,9 +463,9 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
   var list = root.querySelector('[data-pa-list]');
   function rows() { return Array.from(root.querySelectorAll('[data-pa-question]')); }
   function findRow(id) { return rows().find(function (row) { return row.getAttribute('data-pa-question') === id; }); }
-  function missing() {
+  function missing(text) {
     var note = root.querySelector('[data-pa-missing]');
-    if (note) { note.hidden = false; note.textContent = config.copy.deleted; }
+    if (note) { note.hidden = false; note.textContent = text || config.copy.deleted; }
   }
   async function read(row, quiet) {
     var id = row.getAttribute('data-pa-question');
@@ -551,6 +552,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       var resolved = await send({ action: 'resolve_secret', handle: id });
       if (window.location.hash.slice(1) !== id) return;
       if (resolved.ok && typeof resolved.result.id === 'string') row = findRow(resolved.result.id);
+      if (!row) { missing(config.copy.secretLinkUnavailable); return; }
     }
     if (!row) { missing(); return; }
     if (row.scrollIntoView) row.scrollIntoView({ block: 'center' });

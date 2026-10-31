@@ -98,3 +98,41 @@ for (const state of ['no_model', 'model_downloading'] as const) test(`Secret-onl
   expect(result.status).toBe('answered');
   expect('answer' in result && result.answer).toContain('/allowed/recovery.txt');
 });
+
+
+for (const explicitQuery of [false, true]) test(`Secret Open sources honor the saved query and human labels (query=${explicitQuery})`, async () => {
+  const { createLocalAnswerPath } = await import('../src/workers/email-source/local-private-answers.ts');
+  const { createReleaseTierCheck } = await import('../src/workers/connector-store/tier-visibility.ts');
+  const { buildSourceIndexCorpusRegistry } = await import('../src/core/source-index/corpus.ts');
+  const locations = [
+    { source: 'dropbox', ref: 'named', title: 'Recovery', locator: '/allowed/recovery.txt', findingKinds: [] },
+    { source: 'dropbox', ref: 'hidden', title: null, locator: null, findingKinds: [] },
+  ];
+  const path = createLocalAnswerPath({
+    model: undefined, available: () => false, relevanceEmbedding: () => undefined,
+    releaseCheck: createReleaseTierCheck(() => [], () => 'approval'),
+    lanes: () => ({ registry: buildSourceIndexCorpusRegistry([]), adapters: {}, contentProviders: {},
+      secretLocations: query => query === (explicitQuery ? 'recovery alias' : 'original question') ? locations : [], checkSecretLocations: () => true }),
+    sourceLinks: () => ({ localPath: '/allowed/recovery.txt' }),
+  });
+  expect(path.secretSources({ question: 'original question', ...(explicitQuery ? { selectors: { query: ' recovery alias ' } } : {}) },
+    locations.map(({ source, ref }) => ({ source, ref, fingerprint: 'current' })))).toEqual([
+    { title: 'Recovery', source: 'Dropbox', localPath: '/allowed/recovery.txt' },
+  ]);
+});
+
+for (const secretOnly of [false, true]) test(`Inbox lists a Secret notice immediately but preserves mixed-answer inference grace (only=${secretOnly})`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'secret-grace-')); let now = Date.now();
+  const store = openWaitingPrivateQuestionStore(join(dir, 'waiting.sqlite'), { now: () => now, isActive: () => true });
+  let calls = 0;
+  const controller = createLocalPrivateAnswers({ store: () => store, now: () => now,
+    panelSecretNotice: () => true, panelSecretOnlyNotice: () => secretOnly,
+    answer: async () => { calls++; return { status: 'not_found', leftOut: [] }; },
+  });
+  try {
+    const ref = store.record(store.ticket('conn'), { question: 'recovery', surface: 'chatgpt', state: 'waiting' })!;
+    expect(controller.waiting()?.questions.map(q => q.id)).toContain(ref.id);
+    await controller.tick(); expect(calls).toBe(secretOnly ? 1 : 0);
+    now += 31_000; await controller.tick(); expect(calls).toBe(1);
+  } finally { controller.close(); store.close(); rmSync(dir, { recursive: true, force: true }); }
+});

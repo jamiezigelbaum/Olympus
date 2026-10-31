@@ -159,8 +159,9 @@ The engine and the landing-page asset must ship together. The pinned
 `/openai/mcp` panel and listing remain unchanged.
 
 A Secret notice keeps its Inbox entry, including after panel acknowledgment,
-and makes it available immediately instead of waiting for the panel grace
-period. The local answer names its screened matches and uses the existing
+and makes it visible immediately. A Secret-only notice needs no inference;
+mixed Secret/Private questions retain the panel grace period before background
+inference starts. The local answer names its screened matches and uses the existing
 source-opening adapters for Open controls. Every read and open rechecks source
 scope and screening. Locations alone need no answer model. Unavailable or
 expired links direct the owner to open Olympus, then Inbox; server mode uses

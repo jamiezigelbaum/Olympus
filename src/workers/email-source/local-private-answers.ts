@@ -1,3 +1,4 @@
+import { providerSourceLabel } from '../../core/remote-result.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as W } from '../dashboard/vocabulary.ts';
 /**
  * Local Private answers inbox and Ask privately. HTTP admits only a local
@@ -83,6 +84,7 @@ export interface LocalCitationView {
 
 export interface LocalPrivateAnswersOptions {
   panelSecretNotice?: (ref: WaitingQuestionRef) => boolean;
+  panelSecretOnlyNotice?: (ref: WaitingQuestionRef) => boolean;
   resolveSecretInbox?: (handle: string) => WaitingQuestionRef | undefined;
   secretSources?: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => PrivateAnswerSourceCitation[];
   /** The computer's own ask identity; omitted by read-only/test adapters. */
@@ -207,12 +209,13 @@ export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
   return {
     eligible,
     secretSources: (input, locations) => {
-      const current = lanes(localAnswerRequest(input.question, input.selectors));
+      const request = localAnswerRequest(input.question, input.selectors);
+      const current = lanes(request);
       if (current.checkSecretLocations?.(locations) !== true) return [];
-      const matches = current.secretLocations?.(input.question, current.registry.list().map(c => c.corpusId)) ?? [];
-      return matches.filter(location => locations.some(saved => saved.source === location.source && saved.ref === location.ref)).map(location => {
+      const matches = current.secretLocations?.(request.query?.trim() || input.question, current.registry.list().map(c => c.corpusId)) ?? [];
+      return matches.filter(location => (location.title || location.locator) && locations.some(saved => saved.source === location.source && saved.ref === location.ref)).map(location => {
         const links = location.locator ? options.sourceLinks?.({ provenance: { sourceItem: { provider: location.source }, citation: { uri: location.locator } } }) : undefined;
-        return { title: location.title ?? location.locator ?? 'Secret', source: location.source, ...links };
+        return { title: location.title ?? location.locator ?? 'Secret', source: providerSourceLabel(location.source) ?? location.source, ...links };
       });
     },
     eligibleSecrets: (input, locations) => {
@@ -272,7 +275,9 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true
   );
   const autoAnswerable = (q: WaitingQuestion) => q.path !== 'anonymous' && q.path !== 'venice' && !q.hasResult && !q.result
-    && q.state === 'waiting' && q.nextAttemptAt <= now() && !hidden(q) && active(q);
+    && q.state === 'waiting' && q.nextAttemptAt <= now() && !hidden(q) && active(q)
+    // Showing a mixed Secret notice must not start inference ahead of its panel.
+    && (q.surface !== 'chatgpt' || now() >= Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelSecretOnlyNotice?.(refOf(q)) === true);
   const current = (q: WaitingQuestion) => {
     const fresh = store()?.get(q.id);
     return fresh && fresh.generation === q.generation && active(fresh) && !hidden(fresh) ? fresh : undefined;

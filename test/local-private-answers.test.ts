@@ -1302,6 +1302,13 @@ describe('the Private answers page', () => {
     return { html, document, posts, confirmations: () => confirmations, poll: async () => { await timers.shift()?.(); }, settle: () => new Promise((resolve) => setTimeout(resolve, 20)) };
   }
 
+  test('an expired Secret handle points back to Inbox without claiming deletion', async () => {
+    const page = renderAndRun(() => ({ status: 410, body: { ok: false } }), 'http://127.0.0.1:8010/dashboard?private-answers#' + 'S'.repeat(22));
+    await page.settle();
+    expect(page.document.querySelector('[data-pa-missing]')!.textContent).toBe('This link has expired or is unavailable. Choose your question in Inbox.');
+    expect(page.document.querySelector('[data-pa-question="wq_1"]')).not.toBeNull();
+  });
+
   test('a Secret handle opens exactly its resolved Inbox row', async () => {
     const page = renderAndRun(body => ({ status: 200, body: body.action === 'resolve_secret'
       ? { ok: true, id: 'wq_1' } : body.action === 'read'

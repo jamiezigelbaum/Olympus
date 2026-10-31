@@ -157,6 +157,7 @@ test('claim refresh discovering a Secret preserves Inbox through mixed Private a
     let result = await jobs.claim(match.jobId!, panel.publicKey);
     for (let i = 0; i < 20 && !modelStarted; i++) await Bun.sleep(10);
     expect(modelStarted).toBe(true);
+    expect(jobs.hasSecretInbox(ref, true)).toBe(false);
     expect(jobs.hasClaimedWaiting(ref)).toBe(false);
     releaseModel!();
     for (let i = 0; i < 20 && result.status === 202; i++) { await Bun.sleep(10); result = await jobs.claim(match.jobId!, panel.publicKey); }
@@ -192,6 +193,7 @@ test('sealed Secret Inbox handle resolves only in its engine and expires', async
   expect(opened.secretInbox.handle).toMatch(/^[A-Za-z0-9_-]{22}$/);
   expect(JSON.stringify(opened)).not.toContain(ref.id);
   expect(jobs.resolveSecretInbox(opened.secretInbox.handle)).toEqual(ref);
+  expect(jobs.hasSecretInbox(ref, true)).toBe(true);
   expect(new PrivateAnswerJobs(options).resolveSecretInbox(opened.secretInbox.handle)).toBeUndefined();
   now += 20 * 60_000;
   expect(jobs.resolveSecretInbox(opened.secretInbox.handle)).toBeUndefined();

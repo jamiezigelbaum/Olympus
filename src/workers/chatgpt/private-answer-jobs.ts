@@ -770,9 +770,9 @@ export class PrivateAnswerJobs {
   }
 
   /** Secret notices require the local Inbox immediately, not after the panel grace period. */
-  hasSecretInbox(ref: PrivateAnswerWaitingRef): boolean {
+  hasSecretInbox(ref: PrivateAnswerWaitingRef, secretOnly = false): boolean {
     this.sweep();
-    return [...this.jobs.values()].some(job => job.preserveWaiting && job.waiting?.id === ref.id
+    return [...this.jobs.values()].some(job => job.preserveWaiting && (!secretOnly || job.secretMatch !== undefined) && job.waiting?.id === ref.id
       && job.waiting.generation === ref.generation && job.waiting.connectionId === ref.connectionId);
   }
 
