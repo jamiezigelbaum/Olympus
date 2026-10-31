@@ -42,6 +42,60 @@ check_path() {
   done
 }
 
+# Names are detection hints, never deletion authority. The v1.0.0 and v1.1.0
+# installers already wrote receipts; a custom/pre-receipt install needs its
+# original inventory before we can safely remove it. Do not run installed code.
+inspect_without_receipt() {
+  python3 - <<'PY'
+import os, stat, subprocess, sys
+
+home = os.environ["HOME"]
+def roots(key, suffix): return sorted({os.path.join(home, suffix), os.environ.get(key) or os.path.join(home, suffix)})
+candidates = {os.path.join(home, ".local/bin/olympus")}
+for root in roots("XDG_CONFIG_HOME", ".config"):
+    for name in ["systemd/user/olympus-engine.service", "systemd/user/olympus-worker.service", "olympus/install-receipt.json"]:
+        candidates.add(os.path.join(root, name))
+for root in roots("XDG_DATA_HOME", ".local/share"):
+    for name in ["olympus/engine", "olympus-engine", "applications/ai.olympusplugin.Olympus.desktop",
+                 "applications/ai.olympusplugin.open.desktop", "icons/hicolor/512x512/apps/ai.olympusplugin.Olympus.png"]:
+        candidates.add(os.path.join(root, name))
+for root in roots("XDG_STATE_HOME", ".local/state"):
+    for name in ["service-current.json", "service-previous.json", "install-transaction.json"]:
+        candidates.add(os.path.join(root, "olympus/engine", name))
+
+retained = []
+for path in sorted(candidates):
+    if not os.path.isabs(path) or os.path.normpath(path) != path or any(ord(c) < 32 or ord(c) == 127 for c in path):
+        raise SystemExit("Olympus removal is incomplete: unsafe HOME/XDG path; nothing was removed.")
+    # Inspect one component at a time, stopping before a symlink is traversed.
+    current = os.path.sep
+    for component in path.split(os.path.sep)[1:]:
+        current = os.path.join(current, component)
+        try: info = os.lstat(current)
+        except FileNotFoundError: break
+        except OSError:
+            retained.append(f"Could not inspect {current}"); break
+        if stat.S_ISLNK(info.st_mode) or current == path or not stat.S_ISDIR(info.st_mode):
+            retained.append(f"Retained {current}"); break
+
+for unit in ["olympus-engine.service", "olympus-worker.service"]:
+    try:
+        result = subprocess.run(["systemctl", "--user", "show", unit,
+                                 "--property=LoadState,ActiveState,MainPID"],
+                                text=True, capture_output=True, timeout=35)
+        facts = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        if result.returncode != 0 or facts != {"LoadState": "not-found", "ActiveState": "inactive", "MainPID": "0"}:
+            retained.append(f"systemd service {unit} is present or its custody is unknown")
+    except (OSError, subprocess.TimeoutExpired):
+        retained.append(f"Could not inspect systemd service {unit}")
+
+if retained:
+    print("\n".join(dict.fromkeys(retained)), file=sys.stderr)
+    raise SystemExit("Olympus removal is incomplete: No install receipt exists. Legacy ownership must be verified from the original installer before removal; nothing was removed. Data and settings were kept.")
+print("No install receipt exists. No known Olympus machinery was found; unrecognized legacy installs may still remain. Nothing was removed. Data and settings were kept.")
+PY
+}
+
 main() {
   parse_args "$@"
   missing=''
@@ -73,7 +127,7 @@ main() {
   fi
   if [ -z "$RECEIPT" ]; then
     [ "$PURGE" = 0 ] && [ "$RESTORE_LINGER" = 0 ] || die 'No install receipt exists, so purge or linger restoration cannot be authorized.'
-    say 'No Olympus Linux install receipt exists; there is no receipt-owned machinery to remove.'
+    inspect_without_receipt
     return 0
   fi
   check_path "$RECEIPT"
