@@ -2,13 +2,68 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseConnectorStoreMountsFromEnv } from '../src/workers/email-source/server.ts';
+import { createConnectorStoreMountDiscovery, parseConnectorStoreMountsFromEnv } from '../src/workers/email-source/server.ts';
 import {
   createDropboxConnectorStore,
   DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
 } from '../src/workers/dropbox-files/connector-store.ts';
 
 describe('connector-store mount declaration guards', () => {
+  test('runtime declarations leave an absent store absent, then adopt the real store after ingestion', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-mount-deferred-'));
+    const dbPath = join(dir, 'reflect.sqlite');
+    const declaration = JSON.stringify([{ dbPath, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' }]);
+    let made: ReturnType<typeof parseConnectorStoreMountsFromEnv> = [];
+    let mounted: ReturnType<typeof parseConnectorStoreMountsFromEnv> = [];
+    try {
+      expect(parseConnectorStoreMountsFromEnv(declaration, { existingOnly: true })).toEqual([]);
+      expect(existsSync(dbPath)).toBe(false);
+      made = parseConnectorStoreMountsFromEnv(declaration);
+      expect(made).toHaveLength(1);
+      mounted = parseConnectorStoreMountsFromEnv(declaration, { existingOnly: true, collidingStores: made.map((mount) => mount.store) });
+      expect(mounted[0]?.store).toBe(made[0]?.store);
+    } finally {
+      for (const mount of made) mount.store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('discovery avoids ownership scans on repeated reads but adopts a newly created file immediately', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-discovery-'));
+    const dbPath = join(dir, 'reflect.sqlite');
+    const stores: ReturnType<typeof parseConnectorStoreMountsFromEnv>[number]['store'][] = [];
+    let scans = 0;
+    const failures: string[] = [];
+    const raw = JSON.stringify([
+      { corpusId: 'bad', family: 'typo', trustDomain: 'secure_local' },
+      { dbPath, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' },
+    ]);
+    const discover = createConnectorStoreMountDiscovery(raw, {
+      stores: () => stores, registeredCorpora: () => [],
+      storeOwner: () => { scans++; return () => undefined; }, reportFailure: message => failures.push(message),
+    });
+    let made: ReturnType<typeof parseConnectorStoreMountsFromEnv> = [];
+    try {
+      for (let i = 0; i < 20; i++) expect(discover()).toEqual([]);
+      expect(scans).toBe(0);
+      expect(failures).toHaveLength(1);
+      expect(existsSync(dbPath)).toBe(false);
+      made = parseConnectorStoreMountsFromEnv(JSON.stringify([{ dbPath, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' }]));
+      const mounts = discover();
+      expect(mounts).toHaveLength(1);
+      stores.push(mounts[0]!.store);
+      discover(); // Reconcile the changed roster once.
+      const afterMount = scans;
+      for (let i = 0; i < 20; i++) expect(discover()).toEqual([]);
+      expect(scans).toBe(afterMount);
+      expect(failures).toHaveLength(1);
+    } finally {
+      for (const store of stores) store.close();
+      for (const mount of made) mount.store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // Every secure gate in the worker is exact equality against 'secure_local',
   // so a typo'd trust domain does not degrade the mount — it leaves the secure
   // band entirely and the store is handed the internal-band embedding provider.
