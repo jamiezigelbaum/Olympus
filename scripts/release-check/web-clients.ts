@@ -15,15 +15,15 @@
  *   - no forbidden string is anywhere in the turn: the question's own, and every other question's (a Private fact or a
  *     Secret must not surface in any reply), except the strings this question expects;
  *   - a Private question gets the private note in the reply, and in ChatGPT the private answer panel under it;
- *   - a Secret question gets a refusal (the reply says it was withheld, or that it cannot be shared or found), or the private
- *     note together with the machine's answer for it saying that the item is a Secret and where it is: in ChatGPT its private
- *     answer panel, which may claim the question before the Inbox shows it, else the machine's own Inbox (read in the page:
- *     only whether it says so leaves the machine).
+ *   - a Secret question gets the fixed Secret pointer together with the machine's Inbox answer
+ *     saying that the item is a Secret and where it is. The ChatGPT panel carries only the fixed pointer;
+ *     it never substitutes for the Inbox location answer (only whether the Inbox says so leaves the machine).
  * A bot check, a signed-out app, an app whose Olympus connection needs renewing or a page with no message box is
  * inconclusive, not a product failure: the report says which sign-in to renew. Each question gets a picture of the page.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { REMOTE_SECRET_NOTE } from '../../src/core/remote-result.ts';
 import { secretLocationAnswer } from '../../src/core/secret-location-note.ts';
 import { freshAnswerSays, INBOX_ROWS, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED } from './inbox-page.ts';
 import type { Machine } from './machine.ts';
@@ -75,7 +75,6 @@ const PRIVATE_NOTE = /privately|private (answer|panel)|on (your|the) (computer|m
 /** A reply that says the app cannot reach Olympus: its connection needs renewing, not the product fixing. */
 const NOT_CONNECTED = /(connect|reconnect|authori[sz]e|sign in to) olympus|olympus (isn't|is not) (connected|available)|couldn't (reach|access) olympus|no (access|connection) to olympus/i;
 /** A refusal, as the apps reword Olympus's withheld answer (core/remote-result.ts REMOTE_ANSWER_WITHHELD) or a search with nothing it may show. */
-const REFUSAL = /withh(e|o)ld|privacy (rules|settings)|(can['’]t|cannot|can not|couldn['’]t|could not|didn['’]t|did not|won['’]t|will not|unable to|not able to|wasn['’]t able to|not allowed to) (share|provide|reveal|show|disclose|access|give|retrieve|find|locate)|no (matching )?(results|records|matches)|(is|are|was|were|marked( as)?) (a )?(secret|private)\b/i;
 
 export const WEB_DEBUG_PORT = 9333;
 export const WEB_PROFILE = '.olympus-canary/web-clients';
@@ -205,13 +204,10 @@ export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnOb
   add('no-leak', 'nothing forbidden in the reply', leaked.length === 0,
     leaked.length === 0 ? `none of ${forbid.length} forbidden string(s)` : `forbidden string(s) ${leaked.map((row) => row.index + 1).join(', ')} of ${forbid.length} appeared`);
   if (q.kind === 'secret') {
-    // A Secret is answered on the computer with where it is, never its contents; the app may only say it was withheld, or point there.
-    const title = 'the reply refuses the Secret, or points to the computer, whose answer says it is a Secret';
+    // The distinct pointer and a reachable local location answer are both required.
+    const title = 'the reply gives the Secret pointer, and the Inbox says where the Secret is';
     const mac = obs.macSecret;
-    if (REFUSAL.test(turn)) add('refused', title, true, 'the reply says it is withheld or cannot be shared');
-    else if (!PRIVATE_NOTE.test(turn)) add('refused', title, false, `the reply neither withholds, refuses nor points to the computer: ${shown}`);
-    // ChatGPT's private panel shows the computer's answer on purpose; it may say Secret before (or instead of) the Inbox.
-    else if (panelSaysSecret(client, obs.frames)) add('refused', title, true, 'the reply points to the computer, and the private answer panel says the item is a Secret and where it is');
+    if (!turnContains(turn, REMOTE_SECRET_NOTE)) add('refused', title, false, `the reply did not carry the fixed Secret pointer: ${shown}`);
     else if (!mac) add('refused', title, false, 'the reply points to the computer, but the machine\'s waiting answer was not read');
     else if ('unreadable' in mac) add('refused', title, false, `the reply points to the computer, but the machine's waiting answer could not be read: ${mac.unreadable}`);
     else add('refused', title, mac.secret, mac.secret ? `the reply points to the computer, whose answer says the item is a Secret and where it is (${mac.detail})` : `the reply points to the computer, but ${mac.detail}`);
@@ -360,7 +356,7 @@ export async function readMacSecret(inbox: Tab | string, known: Record<string, s
 }
 
 /** ChatGPT's private answer panel is on the page and gives the computer's Secret answer. */
-const panelSaysSecret = (client: WebClientId, frames: string): boolean => !!CLIENT_ADAPTERS[client].privatePanel?.test(frames) && SECRET_ANSWER_LEAD.test(frames);
+const panelSaysSecret = (client: WebClientId, frames: string): boolean => !!CLIENT_ADAPTERS[client].privatePanel?.test(frames) && turnContains(frames, REMOTE_SECRET_NOTE);
 
 export const isInconclusive = (check: CheckResult): boolean => check.status === 'skip' && (check.detail ?? '').startsWith('Inconclusive');
 
@@ -569,8 +565,8 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
   const panel = adapter.privatePanel;
   // The panel shows its heading while it still prepares the answer, so it is ready only once its facts are there too.
   const panelReady = (text: string): boolean => !!panel && panel.test(text) && (q.panel_expect ?? []).every((fact) => turnContains(text, fact));
-  // A Secret question pointed to the computer: ChatGPT's panel may give the computer's Secret answer.
-  const secretPanel = q.kind === 'secret' && !!panel && !REFUSAL.test(last) && PRIVATE_NOTE.test(last);
+  // The Secret panel is ready when its fixed pointer appears; the Inbox holds its location.
+  const secretPanel = q.kind === 'secret' && !!panel && turnContains(last, REMOTE_SECRET_NOTE);
   if ((q.kind === 'private' || secretPanel) && panel && !(secretPanel ? panelSaysSecret(client, frames) : panelReady(frames))) {
     const deadline = Date.now() + t.panelMs;
     while (!(secretPanel ? panelSaysSecret(client, frames) : panelReady(frames)) && Date.now() < deadline) {
@@ -664,7 +660,7 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
           lastAsked = Date.now();
           if (!('inconclusive' in obs)) obs = { ...obs, olympus: olympusUse(before, await readConnectionUses(machine)) };
           // A Secret question the reply points to the computer for is held to the machine's own answer for it.
-          if (!('inconclusive' in obs) && q.kind === 'secret' && !REFUSAL.test(obs.turn) && PRIVATE_NOTE.test(obs.turn) && !panelSaysSecret(client, obs.frames)) {
+          if (!('inconclusive' in obs) && q.kind === 'secret' && turnContains(obs.turn, REMOTE_SECRET_NOTE)) {
             obs = { ...obs, macSecret: await readMacSecret(macInbox!, known, t).catch((error: unknown) => ({ unreadable: error instanceof Error ? error.message : String(error) })) };
           }
           const picture = join(options.screensDir, `web-${client}-${q.id}.png`);
