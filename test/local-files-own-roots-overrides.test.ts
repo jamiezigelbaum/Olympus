@@ -23,7 +23,7 @@ import { defaultLocalFilesIngestionPolicy } from '../src/core/source-ingestion-p
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { localFilesItemId } from '../src/workers/local-files/connector.ts';
-import { LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID, createLocalFilesOwnRootsCleanup } from '../src/workers/local-files/own-roots-cleanup.ts';
+import { LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID, createLocalFilesOwnRootsCleanup, createLocalFilesOwnRootsRecovery } from '../src/workers/local-files/own-roots-cleanup.ts';
 import {
   defaultExclusionContext,
   defaultExclusionForFolder,
@@ -628,8 +628,9 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     expect(syncFactory).toContain('beforePull: async () => { await ownRootsCleanup.run(); await ownRootsCleanup.idle(); }');
     const mount = server.slice(server.indexOf('const mountLocalFiles = '), server.indexOf('const isLocalFilesTierStore = '));
     expect(mount).toContain('localFilesOwnRootsCleanup = createLocalFilesOwnRootsCleanup(');
-    expect(mount).toContain('localFilesInitialCleanup = localFilesOwnRootsCleanup.run()');
-    expect(server).toContain('sourceId === LOCAL_FILES_SOURCE_ID && !localFilesReadReady');
+    expect(mount).toContain('localFilesCleanupRecovery = createLocalFilesOwnRootsRecovery(');
+    expect(mount).toContain('localFilesInitialCleanup = localFilesCleanupRecovery.initial;');
+    expect(server).toContain('sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready()');
   });
 
   /** A real tier lane (its stores on disk) whose secure store holds `files`. */
@@ -744,6 +745,60 @@ describe('5. what an earlier version indexed inside an own folder', () => {
       await pull;
       expect(events.slice(0, 2)).toEqual(['cleanup-start', 'cleanup-idle']);
     }
+  });
+
+  test('recovery never treats an incomplete result as ready and retries transient work', async () => {
+    let calls = 0;
+    const recovery = createLocalFilesOwnRootsRecovery({
+      cleanup: { run: async () => ({ removed: 0, complete: ++calls >= 3 }), idle: async () => {} },
+      stores: () => [], retryMs: 1, maxRetryMs: 4,
+    });
+    try {
+      await recovery.initial;
+      expect(recovery.ready()).toBe(false);
+      const deadline = Date.now() + 1000;
+      while (!recovery.ready() && Date.now() < deadline) await sleep(5);
+      expect(recovery.ready()).toBe(true);
+      expect(calls).toBe(3);
+    } finally { recovery.close(); }
+    expect(recovery.ready()).toBe(false);
+  });
+
+  test('persistent cleanup failures stay closed, report once and stop retrying at shutdown', async () => {
+    let calls = 0;
+    const messages: string[] = [];
+    const recovery = createLocalFilesOwnRootsRecovery({
+      cleanup: { run: async () => { calls++; return { removed: 0, complete: false }; }, idle: async () => {} },
+      stores: () => [], retryMs: 1, maxRetryMs: 4, log: message => messages.push(message),
+    });
+    await recovery.initial;
+    await sleep(20);
+    expect(calls).toBeGreaterThan(1);
+    expect(recovery.ready()).toBe(false);
+    expect(messages).toHaveLength(1);
+    recovery.close();
+    const closedAt = calls;
+    await sleep(20);
+    expect(calls).toBe(closedAt);
+    expect(recovery.ready()).toBe(false);
+  });
+
+  test('shutdown during an in-flight cleanup prevents later backfill or runners', async () => {
+    let release!: () => void;
+    const idle = new Promise<void>(resolve => { release = resolve; });
+    let runs = 0, storeReads = 0;
+    const recovery = createLocalFilesOwnRootsRecovery({
+      cleanup: { run: async () => { runs++; return { removed: 0, complete: false }; }, idle: () => idle },
+      stores: () => { storeReads++; return []; }, retryMs: 1,
+    });
+    await recovery.initial;
+    await sleep(10);
+    recovery.close();
+    release();
+    await sleep(10);
+    expect(runs).toBe(1);
+    expect(storeReads).toBe(0);
+    expect(recovery.ready()).toBe(false);
   });
 
   test('is bounded by count, and what is left goes with the next pass of a chosen folder', async () => {

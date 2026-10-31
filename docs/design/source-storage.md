@@ -386,8 +386,12 @@ that opens files inside an account folder:
   when an import uses it; disabling Telegram keeps its exports under Archives.
   An individually enabled file lane retains extraction when search is disabled.
   Local-files own-root cleanup starts with its lane, including without an approved
-  scope. Startup awaits its first bounded run; a late mount withholds reads until
-  that run settles, and every pull waits for the cleanup run and idle barrier.
+  scope. Startup waits for one bounded run, but a run's time/count limit or an
+  unfinished locator index never opens reads. A cancellable background recovery
+  backfills locator indexes in bounded windows and resumes cleanup, even with the
+  scheduler off. Search, status and extraction stay closed until cleanup reports
+  complete; persistent failures keep the local-files lane unavailable while
+  retries continue. Every pull still waits for the cleanup run and idle barrier.
   Shutdown stops scheduler/adoption work before closing extraction queues, and a
   closed extraction runtime cannot create a runner for a later source. Retained
   archive targets cannot open a source lane after shutdown begins.

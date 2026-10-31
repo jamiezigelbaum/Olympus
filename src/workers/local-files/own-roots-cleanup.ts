@@ -195,3 +195,78 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
     },
   };
 }
+
+export interface LocalFilesOwnRootsRecovery {
+  /** One bounded startup pass; incomplete work continues without the scheduler. */
+  initial: Promise<void>;
+  /** Only a completed cleanup opens the lane to readers. */
+  ready(): boolean;
+  close(): void;
+}
+
+/** Finish bounded cleanup and upgraded locator projections without holding worker startup. */
+export function createLocalFilesOwnRootsRecovery(options: {
+  cleanup: LocalFilesOwnRootsCleanup;
+  stores(): readonly Pick<LocalConnectorStore, 'locatorIdentityIndexReady' | 'ensureLocatorIdentityIndexReady'>[];
+  retryMs?: number;
+  maxRetryMs?: number;
+  log?(message: string): void;
+}): LocalFilesOwnRootsRecovery {
+  let closed = false;
+  let complete = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const retryMs = Math.max(1, options.retryMs ?? 25);
+  const maxRetryMs = Math.max(retryMs, options.maxRetryMs ?? 1000);
+  let delay = retryMs;
+  let toldWaiting = false;
+  const schedule = (progress: boolean): void => {
+    if (closed || complete || timer) return;
+    if (!toldWaiting) {
+      toldWaiting = true;
+      options.log?.('Local-file reads wait until cleanup of Olympus-owned folders completes; recovery continues in the background.');
+    }
+    if (progress) delay = retryMs;
+    timer = setTimeout(() => { timer = undefined; void recover(); }, delay);
+    timer.unref();
+    delay = Math.min(maxRetryMs, delay * 2);
+  };
+  const observe = (result: LocalFilesOwnRootsCleanupResult): void => {
+    if (closed) return;
+    if (result.complete) complete = true;
+    else schedule(result.removed > 0);
+  };
+  const recover = async (): Promise<void> => {
+    let progress = false;
+    try {
+      // A timed-out deletion batch still owns the lane until it finishes.
+      await options.cleanup.idle();
+      if (closed) return;
+      for (const store of options.stores()) {
+        if (closed) return;
+        if (!store.locatorIdentityIndexReady()) {
+          const backfill = await store.ensureLocatorIdentityIndexReady({ maxItems: 1000, maxWindows: 1 });
+          if (closed) return;
+          progress ||= backfill.scannedItems > 0;
+          if (backfill.state !== 'ready') { schedule(progress); return; }
+        }
+      }
+      observe(await options.cleanup.run());
+    } catch {
+      // The gate stays closed on persistent errors; retries remain bounded and cancellable.
+      schedule(progress);
+    }
+  };
+  const initial = (async () => {
+    try { observe(await options.cleanup.run()); } catch { schedule(false); }
+  })();
+  return {
+    initial,
+    ready: () => !closed && complete,
+    close() {
+      closed = true;
+      complete = false;
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}

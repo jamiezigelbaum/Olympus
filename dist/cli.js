@@ -160903,6 +160903,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.run({
             ...lane,
             ...optionalNumberField(record7.limit, "limit", "limit"),
@@ -160920,6 +160921,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.plan({
             ...lane,
             limit: asOptionalNumber(record7.limit, "limit") ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
@@ -160939,6 +160941,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.plan({
             ...lane,
             limit: asOptionalNumber(record7.limit, "limit") ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
@@ -160954,6 +160957,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const extractorKindPrefix = asOptionalString(record7.extractor_kind_prefix);
           if (!extractorKindPrefix) {
             throw new EmailSourceWorkerError(400, "invalid_request", "extractor_kind_prefix is required for a lease recycle.");
@@ -160980,6 +160984,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const mode = asOptionalString(record7.mode) ?? "terminal_reclassification";
           if (mode === "terminal_reclassification" && record7.last_error_kind === undefined) {
             const result2 = runner.reclassifyTerminal({
@@ -161066,6 +161071,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const counts = runner.counts(lane);
           const body = {
             kind: "file_extraction_status",
@@ -165225,6 +165231,82 @@ function createLocalFilesOwnRootsCleanup(options) {
     async idle() {
       while (running)
         await running;
+    }
+  };
+}
+function createLocalFilesOwnRootsRecovery(options) {
+  let closed = false;
+  let complete = false;
+  let timer;
+  const retryMs = Math.max(1, options.retryMs ?? 25);
+  const maxRetryMs = Math.max(retryMs, options.maxRetryMs ?? 1000);
+  let delay2 = retryMs;
+  let toldWaiting = false;
+  const schedule = (progress) => {
+    if (closed || complete || timer)
+      return;
+    if (!toldWaiting) {
+      toldWaiting = true;
+      options.log?.("Local-file reads wait until cleanup of Olympus-owned folders completes; recovery continues in the background.");
+    }
+    if (progress)
+      delay2 = retryMs;
+    timer = setTimeout(() => {
+      timer = undefined;
+      recover();
+    }, delay2);
+    timer.unref();
+    delay2 = Math.min(maxRetryMs, delay2 * 2);
+  };
+  const observe = (result) => {
+    if (closed)
+      return;
+    if (result.complete)
+      complete = true;
+    else
+      schedule(result.removed > 0);
+  };
+  const recover = async () => {
+    let progress = false;
+    try {
+      await options.cleanup.idle();
+      if (closed)
+        return;
+      for (const store of options.stores()) {
+        if (closed)
+          return;
+        if (!store.locatorIdentityIndexReady()) {
+          const backfill = await store.ensureLocatorIdentityIndexReady({ maxItems: 1000, maxWindows: 1 });
+          if (closed)
+            return;
+          progress ||= backfill.scannedItems > 0;
+          if (backfill.state !== "ready") {
+            schedule(progress);
+            return;
+          }
+        }
+      }
+      observe(await options.cleanup.run());
+    } catch {
+      schedule(progress);
+    }
+  };
+  const initial = (async () => {
+    try {
+      observe(await options.cleanup.run());
+    } catch {
+      schedule(false);
+    }
+  })();
+  return {
+    initial,
+    ready: () => !closed && complete,
+    close() {
+      closed = true;
+      complete = false;
+      if (timer)
+        clearTimeout(timer);
+      timer = undefined;
     }
   };
 }
@@ -205784,7 +205866,7 @@ ${key2}`;
   const localFilesScopeRef = fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef(LOCAL_FILES_SOURCE_ID) : undefined;
   let localFilesOwnRootsCleanup;
   let localFilesInitialCleanup;
-  let localFilesReadReady = false;
+  let localFilesCleanupRecovery;
   let localFilesConnectorStore;
   let localFilesSecretLocations;
   let localFilesTierLane;
@@ -205823,9 +205905,9 @@ ${key2}`;
     localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
     if (localFilesTierLane) {
       localFilesOwnRootsCleanup = createLocalFilesOwnRootsCleanup({ tierSet: localFilesTierLane.set, context: localFilesExclusionContext, log: (message2) => console.warn(`[local-files] ${message2}`) });
-      localFilesInitialCleanup = localFilesOwnRootsCleanup.run().then(() => {
-        localFilesReadReady = true;
-      });
+      const lane = localFilesTierLane;
+      localFilesCleanupRecovery = createLocalFilesOwnRootsRecovery({ cleanup: localFilesOwnRootsCleanup, stores: () => lane.set.openStores(), log: (message2) => console.warn(`[local-files] ${message2}`) });
+      localFilesInitialCleanup = localFilesCleanupRecovery.initial;
     }
     if (localFilesConnectorStore)
       sourceLaneMounted([localFilesConnectorStore]);
@@ -206123,6 +206205,9 @@ ${key2}`;
     console.log("[file-extraction] Dropbox extraction waits for Dropbox to be connected.");
   }
   const assertFileSourceScopeCurrent = (provider) => {
+    if (provider === LOCAL_FILES_PROVIDER && !localFilesCleanupRecovery?.ready()) {
+      throw new OperationError("source_index_policy_violation", "Local-file cleanup is still in progress.");
+    }
     const sourceId = fileSourceScopeIdForProvider(provider);
     if (!sourceId)
       return;
@@ -206296,7 +206381,7 @@ ${key2}`;
     adoptConfiguredPrincipal(mount);
   const connectorStoreReadScope = (store) => {
     const sourceId = isDropboxTierStore(store) ? "dropbox.files" : isLocalFilesTierStore(store) ? LOCAL_FILES_SOURCE_ID : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore || store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current() ? "google_drive.docs" : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId) ? EVERNOTE_SOURCE_ID : undefined;
-    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesReadReady)
+    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready())
       return { allowed: false };
     if (!sourceId)
       return { allowed: true, contentAllowed: true };
@@ -207639,6 +207724,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     dropboxIngestionPolicy,
     ...sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {},
     ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
+    authorizeFileExtractionLane: (lane) => {
+      if (lane.provider === LOCAL_FILES_PROVIDER && !localFilesCleanupRecovery?.ready()) {
+        throw new OperationError("source_index_policy_violation", "Local-file cleanup is still in progress.");
+      }
+    },
     ...fileExtractionRuntime ? {
       pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora(), fileExtractionRuntime.corpusIds),
       pdfExtractionLaneScopeApproved: (lane) => {
@@ -208547,6 +208637,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       return;
     shuttingDown = true;
     sourceRuntimeClosed = true;
+    localFilesCleanupRecovery?.close();
     sourceScheduler?.stop();
     worker.close();
     updateChecker.stop();

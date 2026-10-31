@@ -483,6 +483,8 @@ export interface EmailSourceWorkerOptions {
    * `fileExtractionAliasFor`.
    */
   fileExtraction?: FileExtractionRunner;
+  /** Apply current lane policy before any extraction route reads jobs or items. */
+  authorizeFileExtractionLane?: (lane: ExtractionLaneKey) => void;
   /** The file lanes whose PDFs `/source/index/files/extract-pdfs` drains, resolved per call. */
   pdfExtractionLanes?: () => readonly ExtractionLaneKey[];
   /** False for a drain lane whose file source has no current scope approval. */
@@ -3162,6 +3164,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.run({
             ...lane,
             ...optionalNumberField(record.limit, 'limit', 'limit'),
@@ -3182,6 +3185,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.plan({
             ...lane,
             limit: asOptionalNumber(record.limit, 'limit') ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
@@ -3209,6 +3213,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.plan({
             ...lane,
             limit: asOptionalNumber(record.limit, 'limit') ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
@@ -3225,6 +3230,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const extractorKindPrefix = asOptionalString(record.extractor_kind_prefix);
           if (!extractorKindPrefix) {
             throw new EmailSourceWorkerError(
@@ -3260,6 +3266,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const mode = asOptionalString(record.mode) ?? 'terminal_reclassification';
           if (mode === 'terminal_reclassification' && record.last_error_kind === undefined) {
             const result = runner.reclassifyTerminal({
@@ -3359,6 +3366,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const counts = runner.counts(lane);
           const body = {
             kind: 'file_extraction_status',

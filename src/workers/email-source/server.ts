@@ -230,7 +230,7 @@ import {
   localFilesIngestionExclusionMatcher,
   localFilesWatchDir,
 } from '../local-files/store.ts';
-import { createLocalFilesOwnRootsCleanup } from '../local-files/own-roots-cleanup.ts';
+import { createLocalFilesOwnRootsCleanup, createLocalFilesOwnRootsRecovery } from '../local-files/own-roots-cleanup.ts';
 import { createLocalFilesProviderStoreSyncHandler } from '../local-files/provider-store-sync.ts';
 import { createLocalFilesSchedulerSource } from '../local-files/scheduler-source.ts';
 import { createArchiveImportRuntime } from '../archive-import/runtime.ts';
@@ -3233,7 +3233,7 @@ export async function main(): Promise<void> {
     : undefined;
   let localFilesOwnRootsCleanup: ReturnType<typeof createLocalFilesOwnRootsCleanup> | undefined;
   let localFilesInitialCleanup: Promise<void> | undefined;
-  let localFilesReadReady = false;
+  let localFilesCleanupRecovery: ReturnType<typeof createLocalFilesOwnRootsRecovery> | undefined;
   let localFilesConnectorStore: LocalConnectorStore | undefined;
   let localFilesSecretLocations: SecretLocationsIndex | undefined;
   let localFilesTierLane: ReturnType<typeof createLocalFilesTierLane> | undefined;
@@ -3283,9 +3283,11 @@ export async function main(): Promise<void> {
     localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
     if (localFilesTierLane) {
       localFilesOwnRootsCleanup = createLocalFilesOwnRootsCleanup({ tierSet: localFilesTierLane.set, context: localFilesExclusionContext, log: (message) => console.warn(`[local-files] ${message}`) });
-      // A late mount can expose old rows while its first bounded cleanup is in flight.
-      // The same read scope protects every reader until this first run settles.
-      localFilesInitialCleanup = localFilesOwnRootsCleanup.run().then(() => { localFilesReadReady = true; });
+      // An incomplete bounded pass never opens reads; upgraded indexes and remaining
+      // batches recover independently of the scheduler, without holding startup.
+      const lane = localFilesTierLane;
+      localFilesCleanupRecovery = createLocalFilesOwnRootsRecovery({ cleanup: localFilesOwnRootsCleanup, stores: () => lane.set.openStores(), log: (message) => console.warn(`[local-files] ${message}`) });
+      localFilesInitialCleanup = localFilesCleanupRecovery.initial;
     }
     if (localFilesConnectorStore) sourceLaneMounted([localFilesConnectorStore]);
   };
@@ -3666,6 +3668,9 @@ export async function main(): Promise<void> {
     console.log('[file-extraction] Dropbox extraction waits for Dropbox to be connected.');
   }
   const assertFileSourceScopeCurrent = (provider: string): void => {
+    if (provider === LOCAL_FILES_PROVIDER && !localFilesCleanupRecovery?.ready()) {
+      throw new OperationError('source_index_policy_violation', 'Local-file cleanup is still in progress.');
+    }
     const sourceId = fileSourceScopeIdForProvider(provider);
     if (!sourceId) return;
     const ref = fileSourceScopeAuthority?.policyRef(sourceId);
@@ -3926,7 +3931,7 @@ export async function main(): Promise<void> {
       : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId)
         ? EVERNOTE_SOURCE_ID
         : undefined;
-    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesReadReady) return { allowed: false };
+    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready()) return { allowed: false };
     if (!sourceId) return { allowed: true, contentAllowed: true };
     const approval = fileSourceScopeAuthority?.snapshot(sourceId);
     if (!approval || approval.status !== 'approved') return { allowed: false };
@@ -5793,6 +5798,11 @@ export async function main(): Promise<void> {
     dropboxIngestionPolicy,
     ...(sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {}),
     ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
+    authorizeFileExtractionLane: (lane) => {
+      if (lane.provider === LOCAL_FILES_PROVIDER && !localFilesCleanupRecovery?.ready()) {
+        throw new OperationError('source_index_policy_violation', 'Local-file cleanup is still in progress.');
+      }
+    },
     ...(fileExtractionRuntime
       ? {
           pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora(), fileExtractionRuntime.corpusIds),
@@ -6940,6 +6950,7 @@ export async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     sourceRuntimeClosed = true;
+    localFilesCleanupRecovery?.close();
     sourceScheduler?.stop();
     worker.close();
     updateChecker.stop();
