@@ -96,6 +96,89 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   const redrawEvent = 'olympus:redraw';
   /** A redraw was asked for while a read or a control was in flight: the next read is forced. */
   let redrawOwed = false;
+  // Only this tab's successful save keeps the walkthrough alive. A reload
+  // renders the saved policy normally; upgrades never create this state.
+  let firstRunChoice: string | undefined;
+  let firstRunCheckRequested = false;
+
+  function showSetupStep(sheet: HTMLElement, next: number): void {
+    const panels = Array.from(sheet.querySelectorAll<HTMLElement>(':scope > [data-setup-panel]'));
+    const firstRun = sheet.closest('[data-first-run-sheet]');
+    const noConnection = firstRun && firstRunChoice === 'no-sensitive';
+    panels.forEach((panel, index) => { panel.hidden = index !== next; });
+    const count = noConnection ? 2 : panels.length;
+    const position = noConnection && next === 2 ? 2 : next + 1;
+    const counter = sheet.querySelector<HTMLElement>('[data-setup-counter]');
+    if (counter) counter.textContent = `Step ${position} of ${count}`;
+    const progress = sheet.querySelector<HTMLProgressElement>('[data-setup-progress]');
+    if (progress) { progress.max = count; progress.value = position; }
+    const forward = sheet.querySelector<HTMLElement>('[data-setup-next]');
+    if (forward) forward.hidden = next === panels.length - 1 || Boolean(firstRun && next === 0);
+    const back = sheet.querySelector<HTMLButtonElement>('[data-setup-back]');
+    if (back) back.disabled = next === 0 || Boolean(firstRun && (next < 2 || noConnection));
+    const submit = sheet.querySelector<HTMLButtonElement>('[data-setup-submit]');
+    const actionForm = panels[next]?.dataset.setupForm;
+    if (submit) {
+      submit.hidden = !actionForm && next !== panels.length - 1;
+      if (actionForm) {
+        submit.setAttribute('form', actionForm);
+        submit.textContent = panels[next]!.dataset.setupLabel ?? 'Continue';
+      }
+    }
+    const actions = sheet.querySelector<HTMLElement>('[data-setup-actions]');
+    if (actions) actions.hidden = false;
+    const done = sheet.querySelector<HTMLElement>('[data-first-run-done]');
+    if (done) done.hidden = true;
+    if (sheet.querySelector('[data-setup-error]')) {
+      sheet.querySelectorAll<HTMLFormElement>('form').forEach(form => say(form, ''));
+      sheet.querySelector('[data-setup-error]')?.remove();
+    }
+    const heading = panels[next]?.querySelector<HTMLElement>('h4');
+    if (heading) { heading.tabIndex = -1; heading.focus(); }
+  }
+
+  function firstRunResult(message: string, working = false, redo?: string): void {
+    const slot = query<HTMLElement>('[data-first-run-result]');
+    if (slot) slot.textContent = message;
+    const done = query<HTMLElement>('[data-first-run-done]');
+    const verifying = query<HTMLElement>('[data-first-run-sheet] [data-model-check]')?.closest<HTMLElement>('[data-setup-panel]')?.hidden === false;
+    if (done) done.hidden = !working || !verifying;
+    const primary = query<HTMLElement>('[data-first-run-sheet] [data-setup-submit]');
+    if (primary && verifying) primary.hidden = working;
+    const retry = query<HTMLElement>('[data-first-run-redo]');
+    if (retry) { retry.hidden = !redo; retry.textContent = redo ?? ''; }
+    const keys = query<HTMLElement>('[data-first-run-keys]');
+    if (keys) keys.hidden = working || !firstRunCheckRequested;
+  }
+
+  async function readFirstRunReadiness(): Promise<void> {
+    try {
+      const page = await options.refresh();
+      if (disposed || options.signal.aborted || !firstRunChoice) return;
+      if (!page || page.status !== 200) throw new Error('unavailable');
+      canWrite = page.can_write;
+      applyWriteCapability();
+      if (!firstRunCheckRequested) return;
+      const template = document.createElement('template');
+      template.innerHTML = page.body;
+      const encoded = template.content.querySelector<HTMLElement>('[data-model-setup-status]')?.dataset.modelSetupStatus;
+      if (!encoded) throw new Error('missing readiness');
+      const status = JSON.parse(encoded);
+      if (status.privacy_choice_pending === true) {
+        firstRunResult('Olympus is still applying your choice. Check readiness again after it restarts.');
+      } else if (status.ready === true) {
+        firstRunResult('Working', true);
+      } else {
+        const card = Array.isArray(status.cards) ? status.cards.find((item: { required: boolean; state: string }) => item.required && item.state !== 'ready') : undefined;
+        const redo = card?.id === 'venice' && ['local-first', 'private-cloud-only'].includes(firstRunChoice)
+          ? 'Redo Add a Venice key' : card?.id === 'local' && firstRunChoice === 'local-only' ? 'Redo Connect my local models' : undefined;
+        firstRunResult(typeof card?.detail === 'string' ? card.detail
+          : typeof status.attention === 'string' ? status.attention : 'Olympus is not ready yet. Check readiness again after it finishes applying your choice.', false, redo);
+      }
+    } catch {
+      if (firstRunCheckRequested) firstRunResult('Could not read readiness. Olympus may be restarting; check again.');
+    }
+  }
 
   function query<T extends Element = Element>(selector: string): T | null {
     return root.querySelector(selector) as T | null;
@@ -420,6 +503,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (params.action === 'start_oauth') clearAuthorizationFallback(form);
+    if (firstRunChoice && ['check_model_setup', 'save_local_answer_model', 'connect_api_key'].includes(params.action)) {
+      firstRunCheckRequested = false;
+      firstRunResult('Check readiness after Olympus applies your changes.');
+    }
     // A form that words its own wait ("Checking Dropbox…") says that instead.
     setFormPending(form, true, form.dataset.pendingMessage || pendingMessage(params));
     let result: OlympusDashboardControlResult;
@@ -477,6 +564,29 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       renderDiscoveredModels(form, result.body.results);
       return;
     }
+    if (params.action === 'save_first_run_privacy' && form.closest('[data-first-run-sheet]')) {
+      firstRunChoice = params.choice;
+      releaseSubmittedForm(form, submittedValues);
+      form.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input,button').forEach(control => { control.disabled = true; });
+      const venice = query<HTMLElement>('[data-first-run-venice]');
+      const local = query<HTMLElement>('[data-first-run-local]');
+      if (venice) venice.hidden = !['local-first', 'private-cloud-only'].includes(params.choice);
+      if (local) local.hidden = params.choice !== 'local-only';
+      const help = query<HTMLElement>('[data-first-run-venice-help]');
+      if (help) help.textContent = params.choice === 'local-first'
+        ? 'Optional: add a key for Venice fallback, or continue with the built-in model on this computer.'
+        : 'Add your Venice key in the existing field below, then return here to check readiness.';
+      const steps = form.closest<HTMLElement>('[data-setup-steps]');
+      if (steps) showSetupStep(steps, params.choice === 'no-sensitive' ? 2 : 1);
+      return;
+    }
+    if (params.action === 'check_model_setup' && form.closest('[data-first-run-sheet]')) {
+      firstRunCheckRequested = true;
+      say(form, 'Readiness check requested.');
+      firstRunResult('Checking readiness…');
+      await readFirstRunReadiness();
+      return;
+    }
     if (params.action === 'test_local_models') {
       const checked = result.body.result;
       if (checked && typeof checked === 'object' && !Array.isArray(checked)) {
@@ -509,6 +619,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     closeAuthorizationTab(authorizationTab);
+    if (firstRunChoice && (params.action === 'save_local_answer_model' || params.action === 'connect_api_key')) {
+      firstRunCheckRequested = false;
+      firstRunResult('Saved. Check readiness after Olympus applies the change.');
+    }
     const statusMessage = result.body.status_message;
     const released = releaseSubmittedForm(form, submittedValues);
     if (released && params.action === 'connect_api_key') {
@@ -868,6 +982,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   async function refreshNow(force: boolean, requested = false): Promise<void> {
     if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted) return;
+    if (firstRunChoice) {
+      // Read authoritative readiness while leaving the active walkthrough and
+      // any typed key/model fields in place, even during worker activation.
+      inFlight = true;
+      try { await readFirstRunReadiness(); } finally { inFlight = false; }
+      return;
+    }
     if (redrawOwed) { redrawOwed = false; force = true; }
     if (!force && !presented) return;
     const ownerDocument = root.ownerDocument;
@@ -886,6 +1007,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     try {
       const result = await options.refresh();
       if (!result || disposed || options.signal.aborted) return;
+      // A choice may have saved while this earlier poll was in flight.
+      if (firstRunChoice) return;
       if (!force && (hasDirtyInput() || hasFocusedControl())) {
         canWrite = result.can_write;
         applyWriteCapability();
@@ -1083,32 +1206,20 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     void submitControl(form, tab, submittedValues);
   }
 
-  function showSetupStep(sheet: HTMLElement, step: number): void {
-    const panels = Array.from(sheet.querySelectorAll<HTMLElement>('[data-setup-panel]'));
-    panels.forEach((panel, index) => { panel.hidden = index !== step; });
-    const counter = sheet.querySelector<HTMLElement>('[data-setup-counter]');
-    if (counter) counter.textContent = `Step ${step + 1} of ${panels.length}`;
-    const progress = sheet.querySelector<HTMLProgressElement>('[data-setup-progress]');
-    if (progress) progress.value = step + 1;
-    const back = sheet.querySelector<HTMLButtonElement>('[data-setup-back]');
-    if (back) back.disabled = step === 0;
-    const next = sheet.querySelector<HTMLElement>('[data-setup-next]');
-    if (next) next.hidden = step === panels.length - 1;
-    const submit = sheet.querySelector<HTMLElement>('[data-setup-submit]');
-    if (submit) submit.hidden = step !== panels.length - 1;
-    const actions = sheet.querySelector<HTMLElement>('[data-setup-actions]');
-    if (actions) actions.hidden = false;
-    if (sheet.querySelector('[data-setup-error]')) {
-      sheet.querySelectorAll<HTMLFormElement>('form').forEach(form => say(form, ''));
-      sheet.querySelector('[data-setup-error]')?.remove();
-    }
-    const heading = panels[step]?.querySelector<HTMLElement>('h4');
-    if (heading) { heading.tabIndex = -1; heading.focus(); }
-  }
-
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
+    if (target.closest('[data-first-run-done],[data-first-run-keys]')) {
+      firstRunChoice = undefined;
+      query('[data-first-run-sheet]')?.remove();
+      void refreshNow(false, true);
+      return;
+    }
+    if (target.closest('[data-first-run-redo]')) {
+      const steps = query<HTMLElement>('[data-first-run-sheet] [data-setup-steps]');
+      if (steps) showSetupStep(steps, 1);
+      return;
+    }
     if (target.closest('[data-connect-retry]')) {
       const sheet = target.closest('.sheet');
       const error = sheet?.querySelector<HTMLElement>('[data-connect-error]');
@@ -1131,7 +1242,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (setupControl) {
       const sheet = setupControl.closest<HTMLElement>('[data-setup-steps]');
       if (!sheet) return;
-      const panels = Array.from(sheet.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+      const panels = Array.from(sheet.querySelectorAll<HTMLElement>(':scope > [data-setup-panel]'));
       const current = panels.findIndex(panel => !panel.hidden);
       const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : current + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)));
       showSetupStep(sheet, next);
