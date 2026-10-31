@@ -170061,6 +170061,9 @@ var init_source_scheduler = __esm(() => {
 import { existsSync as existsSync90, mkdirSync as mkdirSync59, opendirSync, readFileSync as readFileSync82 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname91, join as join124 } from "node:path";
+function folderAccessMemoryPath() {
+  return join124(olympusDataDir(), "local-files", "folder-access.json");
+}
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -170187,6 +170190,9 @@ class MacPermissions {
       return { state: "denied", message: this.unreadableCopy() };
     return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
+  noteGranted(guard) {
+    this.remember(guard, "granted");
+  }
   noteDenied(guard) {
     this.remember(guard, "denied");
     return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
@@ -170259,7 +170265,7 @@ class MacPermissions {
     } catch {}
   }
   load() {
-    if (this.memory)
+    if (this.memory && !this.memoryPath)
       return this.memory;
     let loaded = {};
     if (this.memoryPath && existsSync90(this.memoryPath)) {
@@ -170278,6 +170284,7 @@ class MacPermissions {
 var ENGINE_HELPER_ENV = "OLYMPUS_ENGINE_HELPER", FULL_DISK_ACCESS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles", FILES_AND_FOLDERS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders", SETTINGS_NAMES, PLACE_WORDS, ENGINE_APP = "Olympus Engine", OTHER_APP = "the app that runs Olympus (the one your Mac named when it asked)", MAC_ACCESS_COPY;
 var init_mac_permissions = __esm(() => {
   init_atomic_file();
+  init_remote_access();
   init_paths();
   SETTINGS_NAMES = {
     desktop: "Desktop Folder",
@@ -170321,7 +170328,7 @@ function createLocalFilesSchedulerSource(input) {
     return;
   const roots = input.policy.roots;
   const tasks = [];
-  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync22(homedir43()) });
+  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync22(homedir43()), memoryPath: folderAccessMemoryPath() });
   const volumeResolver = input.volumes ?? input.watch?.volumes;
   const needsHelper = (scopePath) => {
     if (!macPermissions.active || macPermissions.hasHelper())
@@ -170367,6 +170374,12 @@ function createLocalFilesSchedulerSource(input) {
             throw new SourceSchedulerTaskFailure(noHelper ? macPermissions.helperNeededCopy() : privacy ? "Your Mac did not allow Olympus to read a chosen folder." : "Your user account is not allowed to read a chosen folder.", { errorKind: errorKind2, retryAt: retryTomorrow(context2, errorKind2, PERMISSION_RETRY_MS) });
           }
           throw error2;
+        }
+        if (macPermissions.active) {
+          const real = root.path === "/" ? undefined : volumeResolver ? realPathOfScopePath(volumeResolver, root.path) : root.path;
+          const guard = real === undefined ? undefined : macPermissions.guardOf(real, volumeResolver?.volumeOf(real));
+          if (guard)
+            macPermissions.noteGranted(guard);
         }
         return {
           status: outcome.receipt.status,
@@ -182535,7 +182548,7 @@ function localFilesListing(options) {
   const readDirectory = options.readDirectory ?? ((realPath) => readdirSync28(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home: home2,
-    memoryPath: join126(olympusDataDir(), "local-files", "folder-access.json")
+    memoryPath: folderAccessMemoryPath()
   });
   const node = (scopePath, name, parentKey2, access) => {
     const own3 = isInsideOwnRoot(scopePath, context2);
@@ -182747,7 +182760,6 @@ function createArchivePathResolver(options = {}) {
 }
 var BROWSE_PAGE_SIZE2 = 100, AccessRefused, ARCHIVE_PATH_COPY;
 var init_scope_browser = __esm(() => {
-  init_remote_access();
   init_source_scope_browser();
   init_locations();
   init_mac_permissions();
