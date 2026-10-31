@@ -187,6 +187,10 @@ test('first-run primary actions share the bottom row with Back', async () => {
   await f.submit('[data-model-check]');
   expect(primary.hidden).toBe(true);
   expect(actions.querySelector('[data-first-run-done]')).not.toBeNull();
+  f.click('[data-setup-back]');
+  await f.controller.refresh();
+  expect(actions.querySelector<HTMLButtonElement>('[data-first-run-done]')!.hidden).toBe(true);
+  expect(primary.hidden).toBe(true);
 });
 
 test('preview exposes the pending first-run sheet', () => {
