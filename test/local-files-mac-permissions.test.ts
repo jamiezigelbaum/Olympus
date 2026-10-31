@@ -434,3 +434,11 @@ describe('the words fit the app the Mac actually names', () => {
     expect(make('engine_without_helper').helperNeededCopy()).toBe(MAC_ACCESS_COPY.needsHelper);
   });
 });
+
+test('missing helper copy gives an actionable installation path', () => {
+  for (const copy of [MAC_ACCESS_COPY.needsHelper, MAC_ACCESS_COPY.needsHelperWholeComputer]) {
+    expect(copy).toContain('https://olympusplugin.ai/install.sh');
+    expect(copy).toContain('olympus engine install-helper');
+    expect(copy).not.toContain('later update');
+  }
+});

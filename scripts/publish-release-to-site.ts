@@ -96,6 +96,18 @@ const BRIDGE_PLACEHOLDERS = {
   bytes: 'WHATSAPP_BRIDGE_BYTES=@WHATSAPP_BRIDGE_BYTES@',
 } as const;
 /** Pins an installer without a prebuilt bridge carries: pairing then builds the bridge from source. */
+const HELPER_PLACEHOLDERS = { name: 'MACOS_HELPER_NAME=@MACOS_HELPER_NAME@', sha256: 'MACOS_HELPER_SHA256=@MACOS_HELPER_SHA256@', bytes: 'MACOS_HELPER_BYTES=@MACOS_HELPER_BYTES@', teamId: 'MACOS_HELPER_TEAM_ID=@MACOS_HELPER_TEAM_ID@' } as const;
+type HelperPins = { name: string; sha256: string; bytes: number; teamId: string };
+const NO_HELPER: HelperPins = { name: 'none', sha256: 'none', bytes: 0, teamId: 'none' };
+function assertHelperPins(p: HelperPins): void {
+  if (!/^olympus-engine-helper-[0-9a-f]{16}\.zip$/.test(p.name) || !/^[0-9a-f]{64}$/.test(p.sha256) || !Number.isSafeInteger(p.bytes) || p.bytes <= 0 || !/^[A-Z0-9]{10}$/.test(p.teamId)) throw new Error('Invalid macOS helper pins.');
+}
+function readHelperPins(script: string): HelperPins | undefined {
+  const get = (key: string) => new RegExp(`^MACOS_HELPER_${key}=(\\S+)$`, 'm').exec(script)?.[1];
+  const name = get('NAME'), sha256 = get('SHA256'), bytes = get('BYTES'), teamId = get('TEAM_ID');
+  if (!name || name === 'none' || !sha256 || !bytes || !teamId) return undefined;
+  return { name, sha256, bytes: Number(bytes), teamId };
+}
 const NO_BRIDGE = { name: 'none', sha256: 'none', bytes: 0 } as const;
 const BRIDGE_NAME_PATTERN = /^olympus-whatsapp-bridge-[0-9a-f]{16}$/;
 const LINUX_PLACEHOLDERS = {
@@ -185,8 +197,9 @@ export function readLinuxRuntimePins(path: string): LinuxRuntimePins {
  * The template with its pin lines filled in; nothing else changes. Without
  * `bridge` the installer carries no prebuilt WhatsApp bridge (`none`).
  */
-export function renderInstallScript(template: string, pins: ReleasePins, bridge?: WhatsAppBridgePins): string {
+export function renderInstallScript(template: string, pins: ReleasePins, bridge?: WhatsAppBridgePins, helper?: HelperPins): string {
   assertReleasePins(pins);
+  if (helper) assertHelperPins(helper);
   if (bridge) assertBridgePins(bridge);
   const bridgePins = bridge ?? NO_BRIDGE;
   let rendered = template;
@@ -197,7 +210,8 @@ export function renderInstallScript(template: string, pins: ReleasePins, bridge?
   };
   for (const [key, line] of Object.entries(PLACEHOLDERS) as Array<[keyof ReleasePins, string]>) fill(line, pins[key]);
   for (const [key, line] of Object.entries(BRIDGE_PLACEHOLDERS) as Array<[keyof WhatsAppBridgePins, string]>) fill(line, bridgePins[key]);
-  if (/@(OLYMPUS|WHATSAPP)_/.test(rendered)) throw new Error(`${INSTALL_TEMPLATE} has a placeholder this script does not fill.`);
+  for (const [key, line] of Object.entries(HELPER_PLACEHOLDERS) as Array<[keyof HelperPins, string]>) fill(line, (helper ?? NO_HELPER)[key]);
+  if (/@(OLYMPUS|WHATSAPP|MACOS_HELPER)_/.test(rendered)) throw new Error(`${INSTALL_TEMPLATE} has a placeholder this script does not fill.`);
   return rendered;
 }
 
@@ -364,7 +378,7 @@ export function sourceVersion(root: string): string {
 }
 
 /** Copy a tarball into site/releases and write site/install.sh pinned to it. */
-export function publishToSite(input: { root: string; artifact: string; bridge?: string }): ReleasePins & { tarball: string; installScript: string; bridge?: WhatsAppBridgePins } {
+export function publishToSite(input: { root: string; artifact: string; bridge?: string; macosHelper?: string; macosHelperTeamId?: string }): ReleasePins & { tarball: string; installScript: string; bridge?: WhatsAppBridgePins } {
   if (!existsSync(input.artifact)) throw new Error(`${input.artifact} does not exist.`);
   const version = sourceVersion(input.root);
   const expectedName = `olympus-${version}.tgz`;
@@ -377,8 +391,10 @@ export function publishToSite(input: { root: string; artifact: string; bridge?: 
   }
   const pins = { version, ...fileDigest(input.artifact) };
   const bridge = input.bridge ? bridgePinsFor(input.bridge, input.artifact) : undefined;
+  const helper = input.macosHelper ? { name: basename(input.macosHelper), ...fileDigest(input.macosHelper), teamId: input.macosHelperTeamId ?? '' } : undefined;
+  if (helper) assertHelperPins(helper);
   const template = readFileSync(join(input.root, INSTALL_TEMPLATE), 'utf8');
-  const script = renderInstallScript(template, pins, bridge);
+  const script = renderInstallScript(template, pins, bridge, helper);
   const tarball = join(input.root, releaseTarballPath(version));
   let preserveLinuxAsset = false;
   const linuxInstaller = join(input.root, SERVED_LINUX_INSTALL_SCRIPT);
@@ -402,6 +418,11 @@ export function publishToSite(input: { root: string; artifact: string; bridge?: 
   if (bridge && input.bridge) {
     const served = join(input.root, releaseBridgePath(version, bridge.name));
     if (resolve(input.bridge) !== resolve(served)) copyFileSync(input.bridge, served);
+    chmodSync(served, 0o644);
+  }
+  if (helper && input.macosHelper) {
+    const served = join(dirname(tarball), helper.name);
+    if (resolve(served) !== resolve(input.macosHelper)) copyFileSync(input.macosHelper, served);
     chmodSync(served, 0o644);
   }
   const installScript = join(input.root, SERVED_INSTALL_SCRIPT);
@@ -511,8 +532,9 @@ export function checkSiteRelease(root: string): string[] {
     return finish();
   }
   const bridge = readInstallScriptBridgePins(served);
+  const helper = readHelperPins(served);
   try {
-    const expected = renderInstallScript(readFileSync(join(root, INSTALL_TEMPLATE), 'utf8'), pins, bridge);
+    const expected = renderInstallScript(readFileSync(join(root, INSTALL_TEMPLATE), 'utf8'), pins, bridge, helper);
     if (expected !== served) {
       problems.push(`${SERVED_INSTALL_SCRIPT} differs from ${INSTALL_TEMPLATE} rendered with its pins: run bun scripts/publish-release-to-site.ts again.`);
     }
@@ -528,6 +550,11 @@ export function checkSiteRelease(root: string): string[] {
         problems.push(`${releaseBridgePath(pins.version, bridge.name)} does not match the installer's WhatsApp bridge pins.`);
       }
     }
+  }
+  if (helper) {
+    const path = join(root, SITE_RELEASES, pins.version, helper.name);
+    if (!existsSync(path)) problems.push(`macOS helper ${helper.name} is missing.`);
+    else { const digest = fileDigest(path); if (digest.sha256 !== helper.sha256 || digest.bytes !== helper.bytes) problems.push('macOS helper does not match installer pins.'); }
   }
   const version = sourceVersion(root);
   if (pins.version !== version) problems.push(`${SERVED_INSTALL_SCRIPT} pins ${pins.version}, but package.json is ${version}.`);
@@ -737,6 +764,9 @@ function main(args: string[]): void {
     return;
   }
   // The Mac release carries its prebuilt WhatsApp bridge; leaving it out is said out loud.
+  let macosHelper: string | undefined;
+  const helperFlag = args.indexOf('--macos-helper');
+  if (helperFlag >= 0 && args[helperFlag + 1]) { macosHelper = resolve(args[helperFlag + 1]!); args = [...args.slice(0, helperFlag), ...args.slice(helperFlag + 2)]; }
   let bridge: string | undefined;
   const bridgeFlag = args.indexOf('--whatsapp-bridge');
   if (bridgeFlag >= 0 && args[bridgeFlag + 1]) {
@@ -756,7 +786,7 @@ function main(args: string[]): void {
     if (built.status !== 0) process.exit(built.status ?? 1);
     artifact = join(ROOT, 'release-artifacts', `olympus-${sourceVersion(ROOT)}.tgz`);
   }
-  const result = publishToSite({ root: ROOT, artifact, ...(bridge ? { bridge } : {}) });
+  const result = publishToSite({ root: ROOT, artifact, ...(bridge ? { bridge } : {}), ...(macosHelper ? { macosHelper, macosHelperTeamId: process.env.OLYMPUS_MACOS_HELPER_TEAM_ID ?? '' } : {}) });
   console.log(`Wrote ${result.tarball}`);
   console.log(`Wrote ${result.installScript}`);
   console.log(`Pinned olympus ${result.version}: SHA-256 ${result.sha256}, ${result.bytes} bytes.`);

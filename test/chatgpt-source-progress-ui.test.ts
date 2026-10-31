@@ -380,3 +380,10 @@ describe('a chosen folder the computer will not open: the action fits the cause'
     }
   });
 });
+
+test('dashboard helper guidance points to the installer', async () => {
+  const { DASHBOARD_FOLDER_NEEDS_HELPER } = await import('../src/workers/dashboard/vocabulary.ts');
+  expect(DASHBOARD_FOLDER_NEEDS_HELPER).toContain('https://olympusplugin.ai/install.sh');
+  expect(DASHBOARD_FOLDER_NEEDS_HELPER).toContain('olympus engine install-helper');
+  expect(DASHBOARD_FOLDER_NEEDS_HELPER).not.toContain('later update');
+});

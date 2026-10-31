@@ -66,12 +66,13 @@ function renderForTest(input: {
   bunExeSha256?: string;
   /** A prebuilt WhatsApp bridge served beside the tarball. */
   bridge?: { name: string; path: string; sha256?: string };
+  helper?: { name: string; path: string; sha256?: string };
 }): string {
   return renderInstallScript(readFileSync(TEMPLATE, 'utf8'), {
     version: input.version,
     sha256: input.sha256 ?? sha256(input.tarball),
     bytes: sizeOf(input.tarball),
-  }, input.bridge ? { name: input.bridge.name, sha256: input.bridge.sha256 ?? sha256(input.bridge.path), bytes: sizeOf(input.bridge.path) } : undefined)
+  }, input.bridge ? { name: input.bridge.name, sha256: input.bridge.sha256 ?? sha256(input.bridge.path), bytes: sizeOf(input.bridge.path) } : undefined, input.helper ? { name: input.helper.name, sha256: input.helper.sha256 ?? sha256(input.helper.path), bytes: sizeOf(input.helper.path), teamId: 'ND2P3ZTQRD' } : undefined)
     .replace(/^RELEASE_BASE=.*$/m, `RELEASE_BASE=${input.releaseBase}`)
     .replace(/^BUN_BASE=.*$/m, `BUN_BASE=${input.bunBase}`)
     .replace(/^BUN_SHA256_DARWIN_AARCH64=.*$/m, `BUN_SHA256_DARWIN_AARCH64=${sha256(input.bunZip)}`)
@@ -109,7 +110,7 @@ interface Harness {
   app: string;
   runtimeBun: string;
   uid: number;
-  run(version: string, env?: Record<string, string>, options?: { sha256?: string; bunExeSha256?: string; bridge?: { sha256?: string } }): RunResult;
+  run(version: string, env?: Record<string, string>, options?: { sha256?: string; bunExeSha256?: string; bridge?: { sha256?: string }; helper?: { sha256?: string } }): RunResult;
   /** The prebuilt bridge the installer downloads with `bridge`, and its name. */
   bridgeName: string;
   /** The same, in the background: its process id and its result. */
@@ -191,7 +192,9 @@ while [ $# -gt 0 ]; do
 done
 echo "$url" >> "${curlLog}"
 case "$url" in
-  https://releases.test/*) cp "${tarballs}/\${url##*/}" "$out" ;;
+  https://releases.test/*)
+    case "$url" in *olympus-engine-helper-*) [ -z "$FAKE_HELPER_DOWNLOAD_FAIL" ] || exit 22 ;; esac
+    cp "${tarballs}/\${url##*/}" "$out" ;;
   https://bun.test/bun-v1.3.14/bun-darwin-aarch64.zip)
     if [ -n "$FAKE_BUN_CORRUPT" ]; then printf 'not the real bun' > "$out"; else cp "${bunZip}" "$out"; fi ;;
   *) exit 22 ;;
@@ -232,6 +235,7 @@ exec /bin/mv "$@"
       `echo "${version} $*" >> "${log}"`,
       // FAKE_BLOCK_VERSION: that version's install waits (after saying so in <root>/blocked) until <root>/release exists.
       `if [ "$2" = install ] && [ "$FAKE_BLOCK_VERSION" = "${version}" ]; then : > "${root}/blocked"; while [ ! -e "${root}/release" ]; do sleep 0.1; done; fi`,
+      'if [ "$2" = install-helper ]; then [ -z "$FAKE_HELPER_FAIL" ] || exit 1; mkdir -p "$HOME/Library/Application Support/Olympus/Olympus Engine.app"; exit 0; fi',
       'if [ "$2" = verify ]; then [ -z "$FAKE_UNHEALTHY" ] || exit 1; exit 0; fi',
       `if [ "$2" = install ] && { [ "$FAKE_FAIL_VERSION" = "${version}" ] || [ -n "$FAKE_FAIL_RESTORE" ]; }; then exit 1; fi`,
       // FAKE_TERM_VERSION: that version's install stops the installer (Ctrl-C, a closed Terminal).
@@ -253,8 +257,12 @@ exec /bin/mv "$@"
   const app = join(support, 'app');
   const bridgeName = 'olympus-whatsapp-bridge-0123456789abcdef';
   const bridgePath = join(tarballs, `${bridgeName}-darwin-arm64`);
+  const helperName = 'olympus-engine-helper-0123456789abcdef.zip';
+  const helperPath = join(tarballs, helperName);
+  writeFileSync(helperPath, 'helper archive');
+  writeExecutable(join(bin, 'ditto'), '#!/bin/sh\nmkdir -p "$4/Olympus Engine.app"\n');
   writeFileSync(bridgePath, 'prebuilt bridge\n');
-  const writeScript = (version: string, options: { sha256?: string; bunExeSha256?: string; bridge?: { sha256?: string } } = {}): string => {
+  const writeScript = (version: string, options: { sha256?: string; bunExeSha256?: string; bridge?: { sha256?: string }; helper?: { sha256?: string } } = {}): string => {
     const tarball = makeTarball(version);
     const script = join(root, `install-${version}.sh`);
     writeFileSync(script, renderForTest({
@@ -266,6 +274,7 @@ exec /bin/mv "$@"
       bunExe: fakeBun,
       ...(options.sha256 ? { sha256: options.sha256 } : {}),
       ...(options.bunExeSha256 ? { bunExeSha256: options.bunExeSha256 } : {}),
+      ...(options.helper ? { helper: { name: helperName, path: helperPath, ...(options.helper.sha256 ? { sha256: options.helper.sha256 } : {}) } } : {}),
       ...(options.bridge ? { bridge: { name: bridgeName, path: bridgePath, ...(options.bridge.sha256 ? { sha256: options.bridge.sha256 } : {}) } } : {}),
     }));
     return script;
@@ -1181,4 +1190,43 @@ esac
     expect(readFileSync(join(home, '.zprofile'), 'utf8')).not.toContain('Olympus');
     expect(existsSync(join(home, '.olympus', 'engine.json'))).toBe(true);
   }, 120_000);
+});
+
+
+describe('macOS helper installer', () => {
+  shellTest('installs before engine, and skips an unchanged helper on rerun', () => {
+    const h = harness();
+    expectSucceeded(h.run('1.0.0', {}, { helper: {} }));
+    const commands = h.logLines().join('\n');
+    expect(commands.indexOf('engine install-helper')).toBeGreaterThanOrEqual(0);
+    expect(commands.indexOf('engine install-helper')).toBeLessThan(commands.indexOf('engine install --'));
+    expectSucceeded(h.run('1.0.0', {}, { helper: {} }));
+    expect(h.logLines().filter((line) => line.includes('engine install-helper'))).toHaveLength(1);
+    expectSucceeded(h.uninstall());
+    expect(existsSync(join(h.support, 'Olympus Engine.app'))).toBe(false);
+  });
+  shellTest('rejects a mismatched download before changing the home', () => {
+    const h = harness();
+    const result = h.run('1.0.0', {}, { helper: { sha256: 'a'.repeat(64) } });
+    expect(result.status).not.toBe(0);
+    expect(existsSync(h.support)).toBe(false);
+  });
+  shellTest('helper failure is visible and does not prevent installation', () => {
+    const h = harness();
+    const result = h.run('1.0.0', { FAKE_HELPER_FAIL: '1' }, { helper: {} });
+    expectSucceeded(result);
+    expect(result.stdout).toContain('Desktop, Documents, Downloads and iCloud');
+    expect(result.stdout).toContain('olympus engine install-helper');
+  });
+  shellTest('helper download failure is visible and non-fatal', () => {
+    const h = harness();
+    const result = h.run('1.0.0', { FAKE_HELPER_DOWNLOAD_FAIL: '1' }, { helper: {} });
+    expectSucceeded(result);
+    expect(result.stdout).toContain('Desktop, Documents, Downloads and iCloud');
+  });
+  shellTest('no helper pins skips helper', () => {
+    const h = harness();
+    expectSucceeded(h.run('1.0.0'));
+    expect(h.logLines().join('\n')).not.toContain('engine install-helper');
+  });
 });

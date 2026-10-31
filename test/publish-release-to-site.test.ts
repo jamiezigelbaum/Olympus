@@ -122,6 +122,10 @@ describe('renderInstallScript', () => {
       ['WHATSAPP_BRIDGE_NAME=@WHATSAPP_BRIDGE_NAME@', 'WHATSAPP_BRIDGE_NAME=none'],
       ['WHATSAPP_BRIDGE_SHA256=@WHATSAPP_BRIDGE_SHA256@', 'WHATSAPP_BRIDGE_SHA256=none'],
       ['WHATSAPP_BRIDGE_BYTES=@WHATSAPP_BRIDGE_BYTES@', 'WHATSAPP_BRIDGE_BYTES=0'],
+      ['MACOS_HELPER_NAME=@MACOS_HELPER_NAME@', 'MACOS_HELPER_NAME=none'],
+      ['MACOS_HELPER_SHA256=@MACOS_HELPER_SHA256@', 'MACOS_HELPER_SHA256=none'],
+      ['MACOS_HELPER_BYTES=@MACOS_HELPER_BYTES@', 'MACOS_HELPER_BYTES=0'],
+      ['MACOS_HELPER_TEAM_ID=@MACOS_HELPER_TEAM_ID@', 'MACOS_HELPER_TEAM_ID=none'],
     ]);
     expect(readInstallScriptBridgePins(rendered)).toBeUndefined();
     const bridge = { name: 'olympus-whatsapp-bridge-0123456789abcdef', sha256: 'b'.repeat(64), bytes: 99 };
@@ -559,4 +563,24 @@ describe('the Bun program pin', () => {
     expect(pinned.split('\n').filter((line, index) => line !== TEMPLATE.split('\n')[index])).toEqual([`BUN_EXE_SHA256_DARWIN_AARCH64=${program}`]);
     expect(() => pinBunExecutable(TEMPLATE, 'A'.repeat(64))).toThrow('64 lowercase hex');
   });
+});
+
+test('macOS helper pins are served and validated, or absent', () => {
+  const { root, artifact } = fixture();
+  const helper = join(root, 'olympus-engine-helper-0123456789abcdef.zip');
+  writeFileSync(helper, 'signed helper fixture');
+  const result = publishToSite({ root, artifact, macosHelper: helper, macosHelperTeamId: 'ND2P3ZTQRD' });
+  const served = join(root, 'site/releases', result.version, basename(helper));
+  expect(readFileSync(served)).toEqual(readFileSync(helper));
+  const script = readFileSync(join(root, 'site/install.sh'), 'utf8');
+  expect(script).toContain(`MACOS_HELPER_NAME=${basename(helper)}`);
+  expect(script).toContain('MACOS_HELPER_TEAM_ID=ND2P3ZTQRD');
+  expect(checkSiteRelease(root)).toEqual([]);
+  writeFileSync(served, 'corrupt');
+  expect(checkSiteRelease(root).join('\n')).toContain('helper');
+  const bad = join(root, 'helper.zip');
+  writeFileSync(bad, 'bad');
+  expect(() => publishToSite({ root, artifact, macosHelper: bad, macosHelperTeamId: 'ND2P3ZTQRD' })).toThrow();
+  publishToSite({ root, artifact });
+  expect(readFileSync(join(root, 'site/install.sh'), 'utf8')).toContain('MACOS_HELPER_NAME=none');
 });
