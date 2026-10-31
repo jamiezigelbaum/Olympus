@@ -356,9 +356,9 @@ function machineToolBridge(run: Run, callTimeoutMs = 180_000): ToolBridge & { to
 }
 
 /** The evidence items a search returned, with the ids a reply cites them by. Items without a title carry no name to check and are left out. */
-function evidenceOf(structured: unknown): Array<{ id: string; title: string }> {
-  const evidence = (structured as { evidence?: Array<{ id?: string; title?: string }> } | null)?.evidence ?? [];
-  return evidence.filter((item) => item.title).map((item) => ({ id: item.id ?? '', title: item.title ?? '' }));
+function evidenceOf(structured: unknown): Array<{ id: string; title: string; source: string }> {
+  const evidence = (structured as { evidence?: Array<{ id?: string; title?: string; source?: string }> } | null)?.evidence ?? [];
+  return evidence.filter((item) => item.title).map((item) => ({ id: item.id ?? '', title: item.title ?? '', source: item.source ?? '' }));
 }
 
 async function bundleAgent(workDir: string): Promise<string> {
@@ -555,6 +555,7 @@ export function exchangesObservation(question: SuiteQuestion, agentId: string, f
     answerText: finalText,
     evidenceTitles: toolCalls.flatMap((c) => evidenceOf(c.structured).map((item) => item.title)),
     evidenceIds: toolCalls.flatMap((c) => evidenceOf(c.structured).map((item) => item.id)),
+    evidenceSources: toolCalls.flatMap((c) => evidenceOf(c.structured).map((item) => item.source)),
     privateNote: toolCalls.some((c) => privateNoteKindIn(c.outputText, c.structured) !== null),
     // The note as the tool gave it, link included (a Private question only; any other question has none to judge).
     ...(question.kind === 'private' && linkIssued ? { privateNoteText: toolCalls.map((c) => privateNoteIn(c.outputText, c.structured)).find((note) => note !== null) ?? null } : {}),

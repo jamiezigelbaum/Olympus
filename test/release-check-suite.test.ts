@@ -44,6 +44,7 @@ describe('release-check suite rules', () => {
       answerText: reply,
       evidenceTitles: evidence.map((e) => e.title),
       evidenceIds: evidence.map((e) => e.id),
+      evidenceSources: evidence.map(() => 'Gmail'),
     }), markers);
 
     test('returning the item is not enough: a reply that cites nothing, or a different item, fails', () => {
@@ -55,15 +56,16 @@ describe('release-check suite rules', () => {
       expect(model('24 October, Larkspur Pavilion.').find((c) => c.id === 'personal-fact.cited')?.detail).toContain('does not cite it');
     });
 
-    test('the right evidence id passes, in any of the usual bracket forms', () => {
-      for (const reply of ['24 October, Larkspur Pavilion [E2].', '24 October [E1][E2], Larkspur Pavilion.', '24 October (see [E1, E2]), Larkspur Pavilion.']) {
+    test('the right evidence id with its source passes, in any of the usual bracket forms', () => {
+      for (const reply of ['Gmail: 24 October, Larkspur Pavilion [E2].', 'Gmail: 24 October [E1][E2], Larkspur Pavilion.', 'Gmail: 24 October (see [E1, E2]), Larkspur Pavilion.']) {
         expect(status(model(reply), 'personal-fact.cited')).toBe('pass');
       }
     });
 
-    test('naming the item counts as a citation; an unrelated bracket does not', () => {
-      expect(status(model(`24 October, Larkspur Pavilion, from the ${TITLE.toLowerCase()}.`), 'personal-fact.cited')).toBe('pass');
-      expect(status(model('24 October, Larkspur Pavilion [2] [see E2].'), 'personal-fact.cited')).toBe('pass');
+    test('the source and evidence id are both required', () => {
+      expect(status(model(`Gmail: 24 October, Larkspur Pavilion, from the ${TITLE.toLowerCase()}.`), 'personal-fact.cited')).toBe('fail');
+      expect(status(model('24 October, Larkspur Pavilion [E2].'), 'personal-fact.cited')).toBe('fail');
+      expect(status(model('Gmail: 24 October, Larkspur Pavilion [see E2].'), 'personal-fact.cited')).toBe('pass');
       expect(status(model('24 October, Larkspur Pavilion [note] E2'), 'personal-fact.cited')).toBe('fail');
     });
 

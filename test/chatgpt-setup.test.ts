@@ -1011,7 +1011,7 @@ describe('olympus_search (retrieval only)', () => {
         ],
       });
       const text = result.content[0]!.text;
-      expect(text).toStartWith('Answer only from this evidence, cite each claim by its id like [E1]');
+      expect(text).toStartWith('Answer only from this evidence, name the source and title for each claim and cite its id like [E1]');
       expect(text).toContain('[E1] Google Drive · Budget plan 2026 · 2026-03-01 · https://docs.google.com/document/d/abc');
       expect(text).toEndWith('Coverage, to mention only if the user asks why something is missing or the answer depends on it: '
         + '3 unreadable, 24 names only, 1 not yet sorted into privacy tiers.');
