@@ -1,3 +1,4 @@
+import { defaultTelegramPython } from './messaging-runtime.ts';
 import { readEngineLinger, linuxInstalledBuild } from './linux-engine-service.ts';
 import { engineServicePaths, waitForEngineHealthy } from './engine-service.ts';
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
@@ -101,6 +102,7 @@ export interface DoctorDeps {
   /** The running interpreter is a valid standalone runtime even when Bun is not on PATH. Test seam. */
   runningBun?: boolean;
   commandExists?: (command: string) => boolean | Promise<boolean>;
+  telegramPython?: string | undefined;
   pythonModuleExists?: (pythonCommand: string, moduleName: string) => boolean | Promise<boolean>;
   handleRegistry?: ConnectedHandleRegistry;
   readHandleRegistry?: () => ConnectedHandleRegistry;
@@ -468,16 +470,16 @@ async function argusLaneCheck(deps: DoctorDeps, lane: ArgusLane): Promise<Doctor
 
 async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const commandExists = deps.commandExists ?? defaultCommandExists;
-  const bun = await commandExists('bun') || ((deps.platform ?? process.platform) === 'linux' && (deps.runningBun ?? typeof Bun !== 'undefined'));
+  const bun = await commandExists('bun') || (deps.runningBun ?? typeof Bun !== 'undefined');
   const node = await commandExists('node');
   // Node runs the plugin inside an OpenClaw host; the standalone engine and
   // the CLI run on Bun alone.
   const openclaw = await commandExists('openclaw');
   const gog = await commandExists('gog');
   const op = await commandExists('op');
-  const python3 = await commandExists('python3');
-  const python = python3 ? false : await commandExists('python');
-  const pythonCommand = python3 ? 'python3' : python ? 'python' : undefined;
+  const systemPlatform = deps.platform ?? process.platform;
+  const platform = systemPlatform === 'darwin' || systemPlatform === 'linux' ? systemPlatform : 'other';
+  const pythonCommand = 'telegramPython' in deps ? deps.telegramPython : defaultTelegramPython(platform);
   const telethon = Boolean(pythonCommand && await (deps.pythonModuleExists ?? defaultPythonModuleExists)(pythonCommand, 'telethon'));
   const go = await commandExists('go');
   const missingRequired = [

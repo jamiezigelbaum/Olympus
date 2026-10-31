@@ -39184,6 +39184,74 @@ var init_engine_maintenance = __esm(() => {
   };
 });
 
+// src/core/messaging-runtime.ts
+import { existsSync as existsSync20, rmSync as rmSync6 } from "node:fs";
+import { homedir as homedir12 } from "node:os";
+import { dirname as dirname27, join as join28 } from "node:path";
+function telegramPythonVenvDir(options = {}) {
+  const env = options.env ?? process.env;
+  const home = options.homeDir ?? env.HOME ?? homedir12();
+  return join28(env.XDG_CACHE_HOME ?? join28(home, ".cache"), "olympus", "telegram-python");
+}
+async function readyTelegramPython(options = {}) {
+  if (options.pythonExecutable)
+    return options.pythonExecutable;
+  const venvDir = telegramPythonVenvDir(options);
+  const isolated = join28(venvDir, "bin", "python");
+  const hasTelethon = options.pythonHasTelethon ?? pythonImportsTelethon;
+  if (!installing.has(venvDir) && existsSync20(isolated) && await hasTelethon(isolated))
+    return isolated;
+  const system = Bun.which("python3") ?? undefined;
+  if (!installing.has(venvDir) && system && await hasTelethon(system))
+    return system;
+  let install = installing.get(venvDir);
+  if (!install) {
+    if (!system)
+      throw new Error(`Python 3 is required for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
+    options.onInstall?.(venvDir);
+    install = (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: system, venvDir }).finally(() => installing.delete(venvDir));
+    installing.set(venvDir, install);
+  }
+  if (!await install || !existsSync20(isolated))
+    throw new Error(`Olympus could not install Telethon for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
+  return isolated;
+}
+async function pythonImportsTelethon(python) {
+  const child = Bun.spawn([python, "-c", "import telethon"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  return await child.exited === 0;
+}
+async function provisionTelegramPython(input) {
+  const run = async (argv) => {
+    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    let timeout;
+    const result = await Promise.race([
+      child.exited,
+      new Promise((resolve10) => {
+        timeout = setTimeout(() => resolve10("timeout"), 5 * 60 * 1000);
+      })
+    ]);
+    if (timeout)
+      clearTimeout(timeout);
+    if (result === "timeout")
+      child.kill("SIGKILL");
+    return result === 0;
+  };
+  const cacheHome = dirname27(dirname27(input.venvDir));
+  ensurePrivateRootDirectorySync(cacheHome);
+  ensurePrivateDirectoryTreeSync(cacheHome, dirname27(input.venvDir));
+  const python = join28(input.venvDir, "bin", "python");
+  const ok = await run([input.python3, "-m", "venv", input.venvDir]) && await run([python, "-m", "pip", "install", "--quiet", TELEGRAM_TELETHON_REQUIREMENT]) && await run([python, "-c", "import telethon"]);
+  if (!ok)
+    rmSync6(input.venvDir, { recursive: true, force: true });
+  return ok;
+}
+var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0", TELEGRAM_DEPENDENCY_HINT, installing;
+var init_messaging_runtime = __esm(() => {
+  init_atomic_file();
+  TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
+  installing = new Map;
+});
+
 // src/workers/credential-broker/unpaired-sources.ts
 import { closeSync as closeSync11, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync11, openSync as openSync11, readFileSync as readFileSync18 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
@@ -63545,73 +63613,8 @@ init_engine_maintenance();
 init_worker_transport();
 init_package_root();
 
-// src/core/messaging-runtime.ts
-init_atomic_file();
-import { existsSync as existsSync20, rmSync as rmSync6 } from "node:fs";
-import { homedir as homedir12 } from "node:os";
-import { dirname as dirname27, join as join28 } from "node:path";
-function telegramPythonVenvDir(options = {}) {
-  const env = options.env ?? process.env;
-  const home = options.homeDir ?? env.HOME ?? homedir12();
-  return join28(env.XDG_CACHE_HOME ?? join28(home, ".cache"), "olympus", "telegram-python");
-}
-var TELEGRAM_TELETHON_REQUIREMENT = "Telethon==1.45.0";
-var TELEGRAM_DEPENDENCY_HINT = `Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "${TELEGRAM_TELETHON_REQUIREMENT}". Re-run olympus connect telegram --pair.`;
-var installing = new Map;
-async function readyTelegramPython(options = {}) {
-  if (options.pythonExecutable)
-    return options.pythonExecutable;
-  const venvDir = telegramPythonVenvDir(options);
-  const isolated = join28(venvDir, "bin", "python");
-  const hasTelethon = options.pythonHasTelethon ?? pythonImportsTelethon;
-  if (!installing.has(venvDir) && existsSync20(isolated) && await hasTelethon(isolated))
-    return isolated;
-  const system = Bun.which("python3") ?? undefined;
-  if (!installing.has(venvDir) && system && await hasTelethon(system))
-    return system;
-  let install = installing.get(venvDir);
-  if (!install) {
-    if (!system)
-      throw new Error(`Python 3 is required for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
-    options.onInstall?.(venvDir);
-    install = (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: system, venvDir }).finally(() => installing.delete(venvDir));
-    installing.set(venvDir, install);
-  }
-  if (!await install || !existsSync20(isolated))
-    throw new Error(`Olympus could not install Telethon for Telegram. ${TELEGRAM_DEPENDENCY_HINT}`);
-  return isolated;
-}
-async function pythonImportsTelethon(python) {
-  const child = Bun.spawn([python, "-c", "import telethon"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-  return await child.exited === 0;
-}
-async function provisionTelegramPython(input) {
-  const run = async (argv) => {
-    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    let timeout;
-    const result = await Promise.race([
-      child.exited,
-      new Promise((resolve10) => {
-        timeout = setTimeout(() => resolve10("timeout"), 5 * 60 * 1000);
-      })
-    ]);
-    if (timeout)
-      clearTimeout(timeout);
-    if (result === "timeout")
-      child.kill("SIGKILL");
-    return result === 0;
-  };
-  const cacheHome = dirname27(dirname27(input.venvDir));
-  ensurePrivateRootDirectorySync(cacheHome);
-  ensurePrivateDirectoryTreeSync(cacheHome, dirname27(input.venvDir));
-  const python = join28(input.venvDir, "bin", "python");
-  const ok = await run([input.python3, "-m", "venv", input.venvDir]) && await run([python, "-m", "pip", "install", "--quiet", TELEGRAM_TELETHON_REQUIREMENT]) && await run([python, "-c", "import telethon"]);
-  if (!ok)
-    rmSync6(input.venvDir, { recursive: true, force: true });
-  return ok;
-}
-
 // src/core/messaging-capture.ts
+init_messaging_runtime();
 init_atomic_file();
 init_olympus_layout();
 init_messaging_capture_grant_file();
@@ -63836,6 +63839,7 @@ function spawnCapture(input) {
 
 // src/core/messaging-pairing.ts
 init_atomic_file();
+init_messaging_runtime();
 init_secret_store();
 init_connect();
 init_file_lease();
