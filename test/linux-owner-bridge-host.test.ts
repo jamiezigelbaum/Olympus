@@ -4,8 +4,10 @@ import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { startEngineHost } from '../src/core/engine-host.ts';
+import { WORKER_ENDPOINT_CONFLICT_MESSAGE } from '../src/core/native-worker-service.ts';
 import { engineServicePaths } from '../src/core/engine-service.ts';
-import { prepareWorkerSocket, workerSocketPath } from '../src/core/worker-transport.ts';
+import { bindWorkerSocket, prepareWorkerSocket, workerSocketPath } from '../src/core/worker-transport.ts';
 import { startLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../src/core/linux-owner-bridge-host.ts';
 
 async function waitFor<T>(read: () => T | Promise<T>): Promise<NonNullable<T>> {
@@ -13,6 +15,35 @@ async function waitFor<T>(read: () => T | Promise<T>): Promise<NonNullable<T>> {
   do { try { const value = await read(); if (value) return value as NonNullable<T>; } catch {} await Bun.sleep(25); } while (Date.now() < deadline);
   throw new Error('Lifecycle fixture did not become ready.');
 }
+
+test('engine host survives a legacy worker socket, preserves it, and serves its own conflict waiting page', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-conflict-'));
+  const runtime = join(root, 'runtime'); mkdirSync(runtime, { mode: 0o700 });
+  const env = { HOME: root, XDG_RUNTIME_DIR: runtime, OLYMPUS_WORKER_AUTH_TOKEN: 'fixture' };
+  const transport = { platform: 'linux', env };
+  const socketPath = prepareWorkerSocket(transport)!;
+  const legacy = bindWorkerSocket(socketPath, () => Bun.serve({ unix: socketPath, fetch: () => Response.json({ ok: true }) }));
+  const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
+  const port = reservation.port!; await reservation.stop(true);
+  const paths = engineServicePaths({ homeDir: root, env, platform: 'linux' });
+  mkdirSync(join(paths.configPath, '..'), { recursive: true, mode: 0o700 });
+  writeFileSync(paths.configPath, JSON.stringify({ email: { baseUrl: `http://127.0.0.1:${port}/v1` }, remote: { enabled: false }, worker: { service: { enabled: true } } }));
+  let exited: number | undefined;
+  let host: Awaited<ReturnType<typeof startEngineHost>>;
+  try {
+    host = await startEngineHost({ moduleUrl: import.meta.url, env, platform: 'linux', log: () => {}, exit: code => { exited = code; },
+      desktop: { ready: async () => true }, services: () => [{ id: 'olympus-worker', reload: { configPrefixes: [] },
+        async start(context) { context.serviceHealth!.reportFailure(new Error(WORKER_ENDPOINT_CONFLICT_MESSAGE)); }, async stop() {} }] });
+    expect(exited).toBeUndefined();
+    expect(host).toBeDefined();
+    expect((await fetch('http://localhost/v1/health', { unix: socketPath } as RequestInit)).ok).toBe(true);
+    expect(host!.status().services['olympus-worker']?.state).toBe('failing');
+    const origin = await waitFor(() => host!.status().desktop_bridge?.origin);
+    const page = await fetch(`http://127.0.0.1:${port}/dashboard`, { headers: { Host: new URL(origin).host } });
+    expect(page.status).toBe(503);
+    expect(await page.text()).toContain('olympus worker uninstall');
+  } finally { await host?.stop(); await legacy.stop(true); rmSync(root, { recursive: true, force: true }); }
+});
 
 for (const release of ['stop', 'SIGKILL', 'logout', 'server-mode']) {
   test(`host-owned listener: reload and worker kills retain it; ${release} releases and rotates`, async () => {
@@ -181,4 +212,41 @@ test('worker health requires two consecutive failures, success resets them; logo
     expect(host.status().origin).toBe(origin);
     desktop = false; await probe(); expect(host.status().state).toBe('headless');
   } finally { host.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('loss of supervisor ownership immediately overrides cached healthy endpoint and blocks forwarding', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'bridge-ownership-'));
+  const transport = { platform: 'linux', env: { HOME: root, XDG_RUNTIME_DIR: root } };
+  const socketPath = prepareWorkerSocket(transport)!;
+  const legacy = bindWorkerSocket(socketPath, () => Bun.serve({ unix: socketPath, fetch: () => new Response('healthy competing worker') }));
+  const reserve = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
+  const port = reserve.port!; await reserve.stop(true);
+  let owned = true, opened = '', forwards = 0, loseDuringFetch = false;
+  const host = startLinuxOwnerBridgeHost({ port, socketPath, transport, desktopReady: async () => true,
+    workerOwned: () => owned, workerReady: async () => true, workerConflict: () => owned ? undefined : 'endpoint',
+    openFile: async path => { opened = path; }, fetchSocket: async () => { forwards++; if (loseDuringFetch) owned = false; return new Response('PRIVATE'); } });
+  try {
+    await waitFor(() => host.status().state === 'listening');
+    const origin = host.status().origin!;
+    const request = (path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${port}` + path,
+      { ...init, headers: { Host: new URL(origin).host, ...Object.fromEntries(new Headers(init.headers)) } });
+    expect((await fetch('http://localhost/open?target=/dashboard', { unix: host.controlPath, method: 'POST' } as RequestInit)).status).toBe(200);
+    const ticket = readFileSync(opened, 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+    const proofResponse = await request('/owner-proof', { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }) });
+    const { proof } = await proofResponse.json() as { proof: string };
+    const headers = { Cookie: proofResponse.headers.getSetCookie().find(value => value.startsWith('olympus_desktop_owner='))!.split(';')[0]!, 'X-Olympus-Owner-Proof': proof };
+    expect(await (await request('/dashboard.json', { headers })).text()).toBe('PRIVATE');
+    const before = forwards;
+    owned = false; // No health probe has run: its successful cache is still true.
+    expect(host.status().state).toBe('restarting');
+    const blocked = await request('/dashboard.json', { headers });
+    expect(blocked.status).toBe(503);
+    expect(await blocked.text()).toContain('olympus worker uninstall');
+    expect(forwards).toBe(before);
+    owned = true; loseDuringFetch = true;
+    const retiredDuringHop = await request('/dashboard.json', { headers });
+    expect(retiredDuringHop.status).toBe(503);
+    expect(await retiredDuringHop.text()).not.toContain('PRIVATE');
+  } finally { host.close(); await legacy.stop(true); rmSync(root, { recursive: true, force: true }); }
 });

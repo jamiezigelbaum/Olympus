@@ -238,9 +238,19 @@ A release is two pull requests, a tag and a site publish:
    bytes differ from the tagged release's. So:
    `gh release download vX.Y.Z -p olympus-X.Y.Z.tgz -D <dir>`, then
    `bun scripts/publish-release-to-site.ts --artifact <dir>/olympus-X.Y.Z.tgz`,
-   then `site/deploy/deploy.sh --dry-run` and `site/deploy/deploy.sh`
+   with `--whatsapp-bridge <bridge>` (or `--no-whatsapp-bridge`) and
+   `--macos-helper <zip>` for a helper release (or `--no-macos-helper`), then
+   `site/deploy/deploy.sh --dry-run` and `site/deploy/deploy.sh`
    ([`chatgpt-plugin/SUBMISSION.md`](../chatgpt-plugin/SUBMISSION.md) has the
    checks).
+
+Build the Mac helper on Xanthos with the OCU Developer ID identity in the login
+keychain, `OLYMPUS_MACOS_NOTARY_PROFILE=olympus-notary` and
+`OLYMPUS_MACOS_HELPER_TEAM_ID` set to the expected team. Run
+`scripts/release-macos-helper.sh <output-directory>` with
+`OLYMPUS_MACOS_SIGNING_IDENTITY` set; it signs, notarizes, staples and checks
+the result and writes a receipt beside the zip; publish the receipt with the zip for off-Mac publishing. Reuse the verified zip until its source fingerprint changes. The site publisher pins the required team, checksum and size; if the team
+variable is set, it must match that team.
 
 The ChatGPT directory listing has its own version. It changes only with a new
 listing upload, which restarts OpenAI's review, so an engine release never
