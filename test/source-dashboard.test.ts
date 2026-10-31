@@ -2235,6 +2235,9 @@ describe('multi-source source dashboard', () => {
     let tokenExchangeBody = '';
     const syncRequests: unknown[] = [];
     const oauthFetch: OAuthFetch = async (url, init) => {
+      if (String(url).endsWith('/2/files/list_folder')) {
+        return Response.json({ entries: [], has_more: false, cursor: 'fixture' });
+      }
       // Connect also asks Dropbox which account the grant belongs to.
       if (String(url).endsWith('/2/users/get_current_account')) {
         return new Response(JSON.stringify({ account_id: 'dbid:dashboard-fixture' }), { status: 200 });
