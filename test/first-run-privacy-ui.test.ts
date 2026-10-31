@@ -32,7 +32,7 @@ afterEach(() => {
   }
 });
 
-function fixture(upgrade = false) {
+function fixture(upgrade = false, needsLocalUnlock = false) {
   const dir = mkdtempSync(join(tmpdir(), 'privacy-sheet-ui-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'sovereignty.json');
@@ -47,8 +47,12 @@ function fixture(upgrade = false) {
   const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, pollIntervalMs: -1,
     navigate() {}, returnUrl: 'http://localhost/dashboard?keys',
     async refresh() { return { status: 200, title: 'Keys', body: html(), controller: 'dashboard', can_write: true, signature: html(), poll_interval_ms: -1 }; },
-    transport: { async control(params) {
+    transport: { async openLocalControls() { calls.push('open_local_controls'); needsLocalUnlock = false; return true; },
+    async control(params) {
       calls.push(params.action);
+      if (needsLocalUnlock && params.action === 'save_first_run_privacy') {
+        return { status: 403, body: { ok: false, error: { code: 'mac_dashboard_only', message: 'Outside help can be changed only from the dashboard on this computer, in an unlocked browser.' } } };
+      }
       if (params.action === 'save_first_run_privacy') {
         const saved = saveFirstRunPrivacyChoice(path, params.choice as SovereigntyPresetName);
         if (!saved.ok || !saved.changed) return { status: 409, body: { ok: false, error: { message: 'This choice was already made. Refresh to see the current setting.' } } };
@@ -76,6 +80,25 @@ function fixture(upgrade = false) {
 }
 
 function visiblePanel(root: HTMLElement) { return root.querySelector<HTMLElement>('[data-first-run-sheet] [data-setup-panel]:not([hidden])'); }
+
+test('a first save from a session not yet opened on this computer offers the unlock in place, then saves', async () => {
+  const f = fixture(false, true);
+  f.root.querySelector<HTMLInputElement>('input[value="local-first"]')!.checked = true;
+  await f.submit('[data-first-run-privacy]');
+  const form = f.root.querySelector<HTMLFormElement>('[data-first-run-privacy]')!;
+  // Not "the control session expired": the session is fine, it is just not opened here yet.
+  expect(form.querySelector('[data-action-message]')?.textContent).toBe('Unlock on this computer to save this.');
+  expect(f.policy()).toEqual(createPendingPrivacyPolicy());
+  const unlock = form.querySelector<HTMLButtonElement>('[data-unlock-here]');
+  expect(unlock?.textContent).toBe('Unlock on this computer');
+  unlock!.click();
+  await browser.happyDOM.waitUntilComplete();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await browser.happyDOM.waitUntilComplete();
+  expect(f.calls).toEqual(['save_first_run_privacy', 'open_local_controls', 'save_first_run_privacy']);
+  expect(f.policy()).toEqual(loadSovereigntyPreset('local-first'));
+  expect(form.querySelector('[data-unlock-here]')).toBeNull();
+});
 
 test('new-install fixture renders the shared sheet and upgrade fixture never asks', () => {
   const fresh = fixture();
