@@ -143257,6 +143257,84 @@ function mountDashboardController(options) {
   let pendingFormCount = 0;
   const redrawEvent = "olympus:redraw";
   let redrawOwed = false;
+  let firstRunChoice;
+  let firstRunCheckRequested = false;
+  function showSetupStep(sheet, next) {
+    const panels = Array.from(sheet.querySelectorAll(":scope > [data-setup-panel]"));
+    const firstRun = sheet.closest("[data-first-run-sheet]");
+    const noConnection = firstRun && firstRunChoice === "no-sensitive";
+    panels.forEach((panel, index) => {
+      panel.hidden = index !== next;
+    });
+    const count = noConnection ? 2 : panels.length;
+    const position = noConnection && next === 2 ? 2 : next + 1;
+    const counter = sheet.querySelector("[data-setup-counter]");
+    if (counter)
+      counter.textContent = `Step ${position} of ${count}`;
+    const progress = sheet.querySelector("[data-setup-progress]");
+    if (progress) {
+      progress.max = count;
+      progress.value = position;
+    }
+    const forward = sheet.querySelector("[data-setup-next]");
+    if (forward)
+      forward.hidden = next === panels.length - 1 || Boolean(firstRun && next === 0);
+    const back = sheet.querySelector("[data-setup-back]");
+    if (back)
+      back.hidden = Boolean(firstRun && (next < 2 || noConnection));
+    const heading = panels[next]?.querySelector("h4");
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus();
+    }
+  }
+  function firstRunResult(message2, working = false, redo) {
+    const slot = query("[data-first-run-result]");
+    if (slot)
+      slot.textContent = message2;
+    const done = query("[data-first-run-done]");
+    if (done)
+      done.hidden = !working;
+    const retry = query("[data-first-run-redo]");
+    if (retry) {
+      retry.hidden = !redo;
+      retry.textContent = redo ?? "";
+    }
+    const keys = query("[data-first-run-keys]");
+    if (keys)
+      keys.hidden = working || !firstRunCheckRequested;
+  }
+  async function readFirstRunReadiness() {
+    try {
+      const page2 = await options.refresh();
+      if (disposed || options.signal.aborted || !firstRunChoice)
+        return;
+      if (!page2 || page2.status !== 200)
+        throw new Error("unavailable");
+      canWrite = page2.can_write;
+      applyWriteCapability();
+      if (!firstRunCheckRequested)
+        return;
+      const template = document.createElement("template");
+      template.innerHTML = page2.body;
+      const encoded = template.content.querySelector("[data-model-setup-status]")?.dataset.modelSetupStatus;
+      if (!encoded)
+        throw new Error("missing readiness");
+      const status = JSON.parse(encoded);
+      if (status.privacy_choice_pending === true) {
+        firstRunResult("Olympus is still applying your choice. Check readiness again after it restarts.");
+      } else if (status.ready === true) {
+        firstRunResult("Working", true);
+      } else {
+        const card = Array.isArray(status.cards) ? status.cards.find((item) => item.required && item.state !== "ready") : undefined;
+        const redo = card?.id === "venice" && ["local-first", "private-cloud-only"].includes(firstRunChoice) ? "Redo Add a Venice key" : card?.id === "local" && firstRunChoice === "local-only" ? "Redo Connect my local models" : undefined;
+        firstRunResult(typeof card?.detail === "string" ? card.detail : typeof status.attention === "string" ? status.attention : "Olympus is not ready yet. Check readiness again after it finishes applying your choice.", false, redo);
+      }
+    } catch {
+      if (firstRunCheckRequested)
+        firstRunResult("Could not read readiness. Olympus may be restarting; check again.");
+    }
+  }
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -143544,6 +143622,10 @@ function mountDashboardController(options) {
     }
     if (params.action === "start_oauth")
       clearAuthorizationFallback(form);
+    if (firstRunChoice && ["check_model_setup", "save_local_answer_model", "connect_api_key"].includes(params.action)) {
+      firstRunCheckRequested = false;
+      firstRunResult("Check readiness after Olympus applies your changes.");
+    }
     setFormPending(form, true, form.dataset.pendingMessage || pendingMessage(params));
     let result;
     try {
@@ -143591,6 +143673,33 @@ function mountDashboardController(options) {
       renderDiscoveredModels(form, result.body.results);
       return;
     }
+    if (params.action === "save_first_run_privacy" && form.closest("[data-first-run-sheet]")) {
+      firstRunChoice = params.choice;
+      releaseSubmittedForm(form, submittedValues);
+      form.querySelectorAll("input,button").forEach((control) => {
+        control.disabled = true;
+      });
+      const venice = query("[data-first-run-venice]");
+      const local = query("[data-first-run-local]");
+      if (venice)
+        venice.hidden = !["local-first", "private-cloud-only"].includes(params.choice);
+      if (local)
+        local.hidden = params.choice !== "local-only";
+      const help = query("[data-first-run-venice-help]");
+      if (help)
+        help.textContent = params.choice === "local-first" ? "Optional: add a key for Venice fallback, or continue with the built-in model on this computer." : "Add your Venice key in the existing field below, then return here to check readiness.";
+      const steps = form.closest("[data-setup-steps]");
+      if (steps)
+        showSetupStep(steps, params.choice === "no-sensitive" ? 2 : 1);
+      return;
+    }
+    if (params.action === "check_model_setup" && form.closest("[data-first-run-sheet]")) {
+      firstRunCheckRequested = true;
+      say(form, "Readiness check requested.");
+      firstRunResult("Checking readiness…");
+      await readFirstRunReadiness();
+      return;
+    }
     if (params.action === "test_local_models") {
       const checked = result.body.result;
       if (checked && typeof checked === "object" && !Array.isArray(checked)) {
@@ -143619,6 +143728,10 @@ function mountDashboardController(options) {
       return;
     }
     closeAuthorizationTab(authorizationTab);
+    if (firstRunChoice && (params.action === "save_local_answer_model" || params.action === "connect_api_key")) {
+      firstRunCheckRequested = false;
+      firstRunResult("Saved. Check readiness after Olympus applies the change.");
+    }
     const statusMessage = result.body.status_message;
     const released = releaseSubmittedForm(form, submittedValues);
     if (released && params.action === "connect_api_key") {
@@ -143958,6 +144071,15 @@ function mountDashboardController(options) {
   async function refreshNow(force, requested = false) {
     if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted)
       return;
+    if (firstRunChoice) {
+      inFlight = true;
+      try {
+        await readFirstRunReadiness();
+      } finally {
+        inFlight = false;
+      }
+      return;
+    }
     if (redrawOwed) {
       redrawOwed = false;
       force = true;
@@ -143983,6 +144105,8 @@ function mountDashboardController(options) {
     try {
       const result = await options.refresh();
       if (!result || disposed || options.signal.aborted)
+        return;
+      if (firstRunChoice)
         return;
       if (!force && (hasDirtyInput() || hasFocusedControl())) {
         canWrite = result.can_write;
@@ -144037,6 +144161,18 @@ function mountDashboardController(options) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    if (target.closest("[data-first-run-done],[data-first-run-keys]")) {
+      firstRunChoice = undefined;
+      query("[data-first-run-sheet]")?.remove();
+      refreshNow(false, true);
+      return;
+    }
+    if (target.closest("[data-first-run-redo]")) {
+      const steps = query("[data-first-run-sheet] [data-setup-steps]");
+      if (steps)
+        showSetupStep(steps, 1);
+      return;
+    }
     const setupOpen = target.closest("[data-setup-open]");
     if (setupOpen) {
       const url2 = setupOpen.dataset.setupOpen;
@@ -144049,21 +144185,10 @@ function mountDashboardController(options) {
       const sheet = setupControl.closest("[data-setup-steps]");
       if (!sheet)
         return;
-      const panels = Array.from(sheet.querySelectorAll("[data-setup-panel]"));
+      const panels = Array.from(sheet.querySelectorAll(":scope > [data-setup-panel]"));
       const current2 = panels.findIndex((panel) => !panel.hidden);
       const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute("data-setup-retry") ? Number(setupControl.dataset.setupRetry) : current2 + (setupControl.hasAttribute("data-setup-next") ? 1 : -1)));
-      panels.forEach((panel, index) => {
-        panel.hidden = index !== next;
-      });
-      const counter = sheet.querySelector("[data-setup-counter]");
-      if (counter)
-        counter.textContent = `Step ${next + 1} of ${panels.length}`;
-      const progress = sheet.querySelector("[data-setup-progress]");
-      if (progress)
-        progress.value = next + 1;
-      const forward = sheet.querySelector("[data-setup-next]");
-      if (forward)
-        forward.hidden = next === panels.length - 1;
+      showSetupStep(sheet, next);
       return;
     }
     const menu = target.closest("details.rowmenu");
@@ -144844,7 +144969,7 @@ function setupStepsSheet(input) {
     const url2 = step.link && safeExternalHref(step.link.url);
     const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">Open this page in ${escapeHtml2(input.provider)}</button>` + `<p><a class="ext" href="${escapeHtml2(url2)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml2(input.provider)} ↗</a></p>` : "";
     const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
-    return `<div data-setup-panel${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm : ""}</div>`;
+    return `<div data-setup-panel${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${redirect}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm : ""}</div>`;
   }).join("");
   return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="rowform"><button class="btn" type="button" data-setup-back>Back</button><button class="btn primary" type="button" data-setup-next>I've done this, next</button></div></div>`;
 }
@@ -153027,6 +153152,8 @@ var LOCAL_PAGE_CSS = `
 .remoteterms p { margin: 0 0 8px; max-width: 72ch; }
 .remoteterms .rowform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
+[data-first-run-privacy]{display:grid;gap:12px;margin:16px 0}[data-first-run-privacy] .modelcard{display:block;cursor:pointer}
+[data-first-run-sheet] [hidden]{display:none!important}
 .modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
 .modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:var(--fs-caption)}
 .modelcard header b{font-size:var(--fs-row)}.modelcard p{margin:6px 0 0;color:var(--t2)}.modelintro{color:var(--t2);margin:0 0 4px;max-width:72ch}
@@ -153108,8 +153235,9 @@ var LOCAL_PAGE_CSS = `
 function renderModelSetup(view3, options = {}) {
   if (!view3)
     return "";
+  const status = `<span hidden data-model-setup-status="${escapeHtml2(JSON.stringify(view3))}"></span>`;
   if (view3.privacy_choice_pending)
-    return renderFirstRunPrivacyChoice();
+    return status + renderFirstRunPrivacyChoice();
   const bannerOwnsToggle = blockerOwnsLocalToggle(view3);
   const cards = view3.cards.map((card) => {
     if (card.state === "ready")
@@ -153129,11 +153257,24 @@ function renderModelSetup(view3, options = {}) {
   }).join("");
   const localCard = view3.cards.some((card) => card.id === "local");
   const extras = view3.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
-  return `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view3.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view3.attention ? `<p role="status">${escapeHtml2(view3.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
+  return status + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view3.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view3.attention ? `<p role="status">${escapeHtml2(view3.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
 }
 function renderFirstRunPrivacyChoice() {
   const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p></label>`).join("");
-  return `<section aria-label="Private answers"><h2>How should Olympus answer with Private items?</h2><p>Choose how Private answers may be made. You can change this later.</p><form data-first-run-privacy>${choices}<button class="btn primary" type="submit">Continue</button><span data-action-message role="status"></span></form></section>`;
+  const choice = `<form data-first-run-privacy>${choices}<button class="btn primary" type="submit">Continue</button><span data-action-message role="status"></span></form>`;
+  const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>' + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
+  const verify2 = `${CHECK_FORM_OPEN}<button class="btn primary" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button><button class="btn primary" type="button" data-first-run-done hidden>Done</button>';
+  return '<section aria-label="Private answers" data-first-run-sheet>' + setupStepsSheet({
+    id: "first-run-privacy",
+    provider: "Olympus",
+    steps: [
+      { title: "How should Olympus answer with Private items?", text: "Choose how Private answers may be made. You can change this later in Privacy settings." },
+      { title: "Connect your choice", text: "Your privacy choice is saved." },
+      { title: "Verify it works", text: "Check that Olympus is ready with your saved choice." }
+    ],
+    stepContent: [choice, connect],
+    finalForm: verify2
+  }).replace("data-setup-back>", "data-setup-back hidden>").replace("data-setup-next>", "data-setup-next hidden>") + "</section>";
 }
 function localModelsSheet() {
   const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Olympus tests the answer model before saving it. Search embeddings and existing vectors stay unchanged.</p><button class="btn primary" type="submit">Connect answer model</button><span data-action-message role="status"></span></form>';
