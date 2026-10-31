@@ -533,10 +533,12 @@ export function createWorkerMessagingCaptureOwnership(options: {
   packageRoot: string;
   createSupervisor?: (source: MessagingCaptureSource) => WorkerMessagingCaptureSupervisor;
   revokeGrant?: (path: string) => void;
+  shouldResumeCapture?: () => boolean;
 }): {
   captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
   nativeOwners: Record<MessagingCaptureSource, boolean>;
   stopForUnpair(source: MessagingCaptureSource): Promise<void>;
+  withMessagingCapturePaused<T>(source: MessagingCaptureSource, operation: () => Promise<T>): Promise<T>;
 } {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -560,21 +562,58 @@ export function createWorkerMessagingCaptureOwnership(options: {
         })
   ));
   const captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>> = {};
+  const rawCaptures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>> = {};
+  const paused = { telegram: 0, whatsapp: 0 };
+  const queues: Record<MessagingCaptureSource, Promise<unknown>> = { telegram: Promise.resolve(), whatsapp: Promise.resolve() };
+  const serialized = <T>(source: MessagingCaptureSource, operation: () => Promise<T>): Promise<T> => {
+    const result = queues[source].then(operation);
+    queues[source] = result.catch(() => undefined);
+    return result;
+  };
   for (const source of ['telegram', 'whatsapp'] as const) {
-    if (!nativeOwners[source]) captures[source] = createSupervisor(source);
+    if (nativeOwners[source]) continue;
+    const capture = createSupervisor(source);
+    rawCaptures[source] = capture;
+    captures[source] = {
+      reconcile: async () => {
+        const stopped = (): MessagingCaptureStatus => ({ source, state: 'stopped' });
+        if (paused[source]) return stopped();
+        return serialized(source, async () => paused[source] ? stopped() : capture.reconcile());
+      },
+      stop: () => serialized(source, () => capture.stop()),
+      ...(capture.liveness ? { liveness: () => capture.liveness!() } : {}),
+    };
   }
   const revokeGrant = options.revokeGrant ?? revokeMessagingCaptureGrant;
   return {
     captures,
     nativeOwners,
     async stopForUnpair(source) {
-      if (nativeOwners[source]) {
-        throw new NativeMessagingCaptureOwnerError(source);
-      }
-      const capture = captures[source];
+      if (nativeOwners[source]) throw new NativeMessagingCaptureOwnerError(source);
+      const capture = rawCaptures[source];
       if (!capture) throw new Error(`Worker ${source} capture ownership is unavailable.`);
-      await capture.stop();
-      revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
+      await serialized(source, async () => {
+        await capture.stop();
+        revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
+      });
+    },
+    async withMessagingCapturePaused<T>(source: MessagingCaptureSource, operation: () => Promise<T>): Promise<T> {
+      if (nativeOwners[source]) throw new NativeMessagingCaptureOwnerError(source);
+      const capture = rawCaptures[source];
+      if (!capture) throw new Error(`Worker ${source} capture ownership is unavailable.`);
+      // Mark before waiting for the queue, so a timer cannot enqueue another restart.
+      paused[source] += 1;
+      return serialized(source, async () => {
+        let stopped = false;
+        try {
+          await capture.stop();
+          stopped = true;
+          return await operation();
+        } finally {
+          paused[source] -= 1;
+          if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) await capture.reconcile();
+        }
+      });
     },
   };
 }
@@ -2402,13 +2441,14 @@ export async function main(): Promise<void> {
   const connectedHandles = readActiveConnectedHandles(process.env);
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
   const packageRoot = olympusPackageRoot();
+  let capturesClosed = false;
   const captureOwnership = createWorkerMessagingCaptureOwnership({
+    shouldResumeCapture: () => !capturesClosed,
     registryPath: connectedHandleRegistryPath!,
     packageRoot,
   });
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
-  let capturesClosed = false;
   // What each supervisor last reported, for the dashboard. Absent for a source
   // whose capture the native service owns: this worker runs nothing there.
   const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
@@ -5719,6 +5759,7 @@ export async function main(): Promise<void> {
               saveStandard: (update) => dashboardConsult.saveStandard(update),
             },
             stopMessagingCapture,
+            withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
             captureRuntime: dashboardCaptureRuntime,
             // Delete indexed data: the same supervised restart a model-key
             // change uses. `canRestart` has no side effect, so the route can

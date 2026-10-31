@@ -261,6 +261,12 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/disconnect' },
   { method: 'POST', path: '/dashboard/delete-source-data' },
   { method: 'POST', path: '/dashboard/unpair' },
+  { method: 'POST', path: '/dashboard/messaging/start' },
+  { method: 'POST', path: '/dashboard/messaging/status' },
+  { method: 'POST', path: '/dashboard/messaging/respond' },
+  { method: 'POST', path: '/dashboard/messaging/cancel' },
+  { method: 'POST', path: '/dashboard/messaging/chats' },
+  { method: 'POST', path: '/dashboard/messaging/scope' },
   // Importing an archive: the upload of a dropped file or folder (start, one
   // request per file, status, cancel), approval, Decline, Remove and Stop
   // (archive-import/dashboard.ts). Control session only.

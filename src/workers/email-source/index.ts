@@ -1,3 +1,4 @@
+import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import type { UpdateAvailable } from '../../core/update-check.ts';
@@ -533,6 +534,8 @@ export interface EmailSourceWorkerOptions {
   };
   sourceDashboard?: {
     sovereigntyEngine: SovereigntyEngine;
+    /** Pause the native capture reader while pairing or changing its capture grant. */
+    withMessagingCapturePaused?<T>(source: 'telegram' | 'whatsapp', operation: () => Promise<T>): Promise<T>;
     history?: SourceDashboardHistory;
     // Authority on which dashboard card owns which corpus. Omitted means the
     // shipped default registry; pass the operator's when one is configured so
@@ -964,11 +967,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // Per worker, so it lives exactly as long as the stores it counted and no
   // test inherits another test's counts.
   const dashboardExclusionDebt: DashboardExclusionDebtCache = new Map();
+  const dashboardMessaging = sourceDashboard?.withMessagingCapturePaused ? createDashboardMessagingService({
+    ...(sourceDashboard.registryPath ? { registryPath: sourceDashboard.registryPath } : {}),
+    secretStore: dashboardSecretStore(sourceDashboard),
+    withMessagingCapturePaused: sourceDashboard.withMessagingCapturePaused,
+    withGrantMutation: withDashboardGrantMutation,
+  }) : undefined;
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
 
   return {
     close(): void {
       dashboardWorkerClosed = true;
+      dashboardMessaging?.close();
       if (dashboardSchedulerAdoptionTick === undefined) return;
       clearInterval(dashboardSchedulerAdoptionTick);
       dashboardSchedulerAdoptionTick = undefined;
@@ -1587,6 +1597,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               options: {
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
+                messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => undefined) } : {}),
               },
             }));
@@ -2076,6 +2087,21 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // Answer, seen, Dismiss and open on a waiting question. Like the
         // consult routes below, it needs the control-session context header
         // of a locally minted session, which only the HTTP boundary sets.
+        if (request.method === 'POST' && url.pathname.startsWith('/dashboard/messaging/')) {
+          if (!request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Pairing opens only in dashboard controls on this computer.' } }, 403);
+          }
+          const operation = url.pathname.slice('/dashboard/messaging/'.length);
+          if (operation !== 'start' && operation !== 'status' && operation !== 'respond' && operation !== 'cancel' && operation !== 'chats' && operation !== 'scope') return json({ ok: false }, 404);
+          if (!dashboardMessaging) return json({ ok: false, error: { code: 'messaging_unavailable', message: 'Pairing is unavailable on this computer.' } }, 501);
+          try {
+            const record = await parseDashboardMessagingBody(request);
+            return new Response(JSON.stringify(await dashboardMessaging.handle(operation, record)), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+          } catch {
+            return new Response(JSON.stringify({ ok: false, error: { code: 'messaging_request_failed', message: 'Could not complete this pairing step. Try again from this computer.' } }), { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+          }
+        }
+
         if (request.method === 'POST' && url.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {
           const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
           if (!csrf || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
@@ -2502,6 +2528,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // anything opens them; with no supervisor to restart it the route
         // refuses before marking anything.
         if (request.method === 'POST' && url.pathname === '/dashboard/delete-source-data') {
+          const mutationRecord = await parseObjectBody(request);
+          // A pairing attempt may itself be waiting for the grant lock. Stop it before taking that lock.
+          if (mutationRecord.acknowledge === true) {
+            if (mutationRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
+            if (mutationRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
+          }
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
@@ -2510,7 +2542,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not have the source dashboard configured.',
             );
           }
-          const record = await parseObjectBody(request);
+          const record = mutationRecord;
           const sourceId = record.source_id === 'local.files'
             ? 'local.files' as const
             : parseDashboardDisconnectSource(record.source_id);
@@ -2562,6 +2594,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         //   own lane and nothing more, so the confirmation tells the reader to
         //   stop the capture service first and where to unlink the device.
         if (request.method === 'POST' && url.pathname === '/dashboard/unpair') {
+          const mutationRecord = await parseObjectBody(request);
+          // A pairing attempt may itself be waiting for the grant lock. Stop it before taking that lock.
+          if (mutationRecord.acknowledge === true) {
+            if (mutationRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
+            if (mutationRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
+          }
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
@@ -2570,7 +2608,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not have the source dashboard configured.',
             );
           }
-          const record = await parseObjectBody(request);
+          const record = mutationRecord;
           const sourceId = parseDashboardUnpairSource(record.source_id);
           if (record.acknowledge !== true) {
             throw new EmailSourceWorkerError(
@@ -5299,6 +5337,30 @@ function parseSourceDispositionsSave(
     edits,
     ...(body.document !== undefined ? { document: body.document } : {}),
   };
+}
+
+async function parseDashboardMessagingBody(request: Request): Promise<Record<string, unknown>> {
+  if (!request.body) throw new Error('invalid_request');
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > 32_768) { await reader.cancel(); throw new Error('invalid_request'); }
+      chunks.push(part.value);
+    }
+    const data = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
+    try {
+      const parsed: unknown = JSON.parse(new TextDecoder().decode(data));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid_request');
+      return parsed as Record<string, unknown>;
+    } finally { data.fill(0); }
+  } finally { for (const chunk of chunks) chunk.fill(0); reader.releaseLock(); }
 }
 
 async function parseObjectBody(request: Request): Promise<Record<string, unknown>> {

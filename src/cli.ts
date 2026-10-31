@@ -404,8 +404,10 @@ async function main(): Promise<void> {
 
   if (args[0] === 'connect') {
     try {
-      const result = await runConnect(args.slice(1));
-      console.log(JSON.stringify(result, null, 2));
+      const pairing = (args[1] === 'telegram' || args[1] === 'whatsapp') && args.includes('--pair');
+      const json = pairing && args.includes('--json');
+      const result = await runConnect(json ? args.slice(1).filter((arg) => arg !== '--json') : args.slice(1));
+      console.log(pairing && !json ? formatMessagingPairingResult(args[1] as 'telegram' | 'whatsapp', result) : JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);
@@ -2509,6 +2511,29 @@ async function runConnect(args: string[]): Promise<unknown> {
   throw new OperationError('invalid_params', `Unsupported connect source: ${source}`);
 }
 
+export function terminalMessagingCaptureApproval(
+  source: 'telegram' | 'whatsapp',
+  tell: (message: string) => void,
+): MessagingCaptureScopeApproval {
+  if (source === 'telegram') {
+    tell('Olympus reads every Telegram chat on this account, including chats started after pairing. Each message is still judged Personal, Private or Secret by what it says.\n');
+    return { source: 'telegram', explicitApproval: true, wholeAccount: true };
+  }
+  tell('Olympus reads every WhatsApp chat on this account, from new messages delivered while its bridge runs; this does not import the full historical archive. Each message is still judged Personal, Private or Secret by what it says.\n');
+  return { source: 'whatsapp', explicitApproval: true, wholeAccount: true };
+}
+
+export function formatMessagingPairingResult(source: 'telegram' | 'whatsapp', result: unknown): string {
+  const label = source === 'telegram' ? 'Telegram' : 'WhatsApp';
+  if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'connected') {
+    return `${label} was not connected. No capture started.`;
+  }
+  if ((result as { captureActivation?: unknown }).captureActivation !== 'requested') {
+    return `${label} is connected, but starting capture needs attention. Open the dashboard for next steps.`;
+  }
+  return `${label} is connected. Olympus is starting capture; open the dashboard to watch messages arrive.`;
+}
+
 async function runMessagingPairing(
   source: 'telegram' | 'whatsapp',
   secretStore: Parameters<typeof pairMessagingSource>[0]['secretStore'],
@@ -2529,15 +2554,7 @@ async function runMessagingPairing(
       whatsappQrMode: 'terminal',
       // Every chat is read, with no question to answer (owner, 2026-10-29): typing a hundred chat numbers made no sense.
       // Running the pairing is the approval; each message is still judged by what it says.
-      requestCaptureScope: async ({ chats }): Promise<MessagingCaptureScopeApproval | undefined> => {
-        if (source === 'telegram') {
-          if (chats.length === 0) { tell('No chats were available to read. Nothing will be captured.\n'); return undefined; }
-          tell(`Olympus reads all ${chats.length} of your most recent Telegram chats. Each message is still judged Personal, Private or Secret by what it says. A chat you start after pairing is read once you pair again.\n`);
-          return { source: 'telegram', explicitApproval: true, chatScopes: [...new Set(chats.map((chat) => chat.chatScope))] };
-        }
-        tell('Olympus reads every WhatsApp chat on this account, from new messages delivered while its bridge runs; this does not import the full historical archive. Each message is still judged Personal, Private or Secret by what it says.\n');
-        return { source: 'whatsapp', explicitApproval: true, wholeAccount: true };
-      },
+      requestCaptureScope: async () => terminalMessagingCaptureApproval(source, tell),
     });
     if (!paired.registered) return paired;
     saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, registryPath), pairing: paired });

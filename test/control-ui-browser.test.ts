@@ -933,3 +933,113 @@ test('a redraw asked for while a Connect is pending runs once that Connect has a
 test('the serialized controller listens for the exported redraw event name', () => {
   expect(mountDashboardController.toString()).toMatch(new RegExp(`['"]${DASHBOARD_REDRAW_EVENT}['"]`));
 });
+
+describe('local messaging pairing', () => {
+  function messagingRoot() {
+    const root = document.createElement('div');
+    root.innerHTML = '<section data-source="telegram.messages" data-messaging-source="telegram"><form method="dialog" data-messaging-kind="respond" data-field="code"><input name="value" value="12345"><button type="submit">Continue</button></form><p data-messaging-status></p><div data-messaging-input></div><img data-messaging-qr hidden><div data-messaging-chats></div></section>';
+    document.body.append(root);
+    return root;
+  }
+
+  test('clears a login code before transport and never sends it through native control', async () => {
+    const root = messagingRoot();
+    let controlCalls = 0;
+    let observed = '';
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => { controlCalls++; return { status: 200, body: {} }; },
+      messaging: async (operation, params) => {
+        expect(operation).toBe('respond');
+        expect(root.querySelector<HTMLInputElement>('input')!.value).toBe('');
+        observed = params.value!;
+        return { status: 200, body: { ok: true, state: 'paired' } };
+      },
+    } });
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(observed).toBe('12345');
+    expect(controlCalls).toBe(0);
+    controller.dispose();
+  });
+
+  test('a native transport without the local pairing method receives no secret', async () => {
+    const root = messagingRoot();
+    let controlCalls = 0;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: { control: async () => { controlCalls++; return { status: 200, body: {} }; } } });
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(controlCalls).toBe(0);
+    expect(root.querySelector<HTMLInputElement>('input')!.value).toBe('');
+    controller.dispose();
+  });
+
+  test('opens local controls through its dedicated transport and reloads the dashboard', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    delete form.dataset.messagingKind;
+    form.setAttribute('data-messaging-open-controls', '');
+    form.innerHTML = '<button type="submit">Open controls on this computer</button><span data-action-message></span>';
+    let opened = 0;
+    let controlCalls = 0;
+    let navigated = '';
+    const controller = mountDashboardController({ root, canWrite: false, signal: new AbortController().signal, navigate(href) { navigated = href; }, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => { controlCalls++; return { status: 200, body: {} }; },
+      openLocalControls: async () => { opened++; return true; },
+    } });
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(opened).toBe(1);
+    expect(controlCalls).toBe(0);
+    expect(navigated).toBe('http://localhost/dashboard?keys');
+    controller.dispose();
+  });
+
+  test('pairing status chat previews do not replace the saved-scope picker', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    form.dataset.messagingKind = 'start';
+    root.querySelector('[data-messaging-chats]')!.textContent = 'saved selection';
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: noControl,
+      messaging: async () => ({ status: 200, body: { ok: true, state: 'paired', chats: [{ chatScope: 'telegram.personal:chat:1', title: 'Preview' }] } }),
+    } });
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(root.querySelector('[data-messaging-chats]')!.textContent).toBe('saved selection');
+    controller.dispose();
+  });
+
+  test('whole-account selection clears previously checked chat scopes in the saved grant', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    form.dataset.messagingKind = 'scope';
+    form.innerHTML = '<input type="checkbox" name="wholeAccount" checked><input type="checkbox" name="chatScope" value="telegram.personal:chat:123" checked>';
+    let selection: unknown;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: noControl,
+      messaging: async (operation, params) => { expect(operation).toBe('scope'); selection = structuredClone(params); return { status: 200, body: { ok: true } }; },
+    } });
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(selection).toEqual({ source: 'telegram', wholeAccount: true, chatScopes: [] });
+    controller.dispose();
+  });
+
+  test('disposal cancels pairing status polling and erases the QR', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    form.dataset.messagingKind = 'start';
+    let calls = 0;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: noControl,
+      messaging: async () => { calls++; return { status: 200, body: { ok: true, state: 'pairing', qr: 'data:image/png;base64,YQ==' } }; },
+    } });
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(root.querySelector('img')!.hasAttribute('src')).toBe(true);
+    controller.dispose();
+    expect(root.querySelector('img')!.hasAttribute('src')).toBe(false);
+    await new Promise(resolve => setTimeout(resolve, 1250));
+    expect(calls).toBe(1);
+  });
+});

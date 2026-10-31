@@ -33,7 +33,8 @@ export type MessagingCaptureScopeApproval =
   | {
     source: 'telegram';
     explicitApproval: true;
-    chatScopes: readonly string[];
+    wholeAccount?: boolean;
+    chatScopes?: readonly string[];
   }
   | {
     source: 'whatsapp';
@@ -543,8 +544,10 @@ function producerLaunch(
     throw new Error('Capture scope approval must name the paired source and be explicit.');
   }
   if (source === 'telegram') {
-    const scopes = uniqueNonEmpty(approval.source === 'telegram' ? approval.chatScopes : []);
-    if (scopes.length === 0) throw new Error('Choose at least one Telegram chat before capture can start.');
+    const scopes = uniqueNonEmpty(approval.source === 'telegram' ? approval.chatScopes ?? [] : []);
+    const wholeAccount = approval.source === 'telegram' && approval.wholeAccount === true;
+    if (wholeAccount === (scopes.length > 0)) throw new Error('Approve either the whole Telegram account or at least one exact chat, but not both.');
+    if (scopes.some((scope) => scope.includes('*'))) throw new Error('Telegram capture approval requires exact chat identifiers.');
     const listed = new Set(chats.map((chat) => chat.chatScope));
     if (scopes.some((scope) => !listed.has(scope))) {
       throw new Error('Telegram capture approval contains a chat that was not in the verified account listing.');
@@ -557,8 +560,8 @@ function producerLaunch(
         // A folder account's spawner sets its paths from its folder (core/olympus-layout.ts, folderCaptureEnv).
         ...(layout === 'folder' ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath }),
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: 'telegram.personal',
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(','),
-        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(','),
+        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: wholeAccount ? '*' : scopes.join(','),
+        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: wholeAccount ? '*' : scopes.join(','),
       },
       secretEnvironment: [
         { env: 'OLYMPUS_TELEGRAM_API_ID', secretKey: TELEGRAM_API_ID_SECRET_KEY },

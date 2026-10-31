@@ -28421,6 +28421,10 @@ async function prepareTelegramStart(input, options) {
   }
   assertUsableFile(sessionPath, "Telegram .session");
   const approvedScopes = firstPresent(env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES, env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES);
+  const scopeValues = (approvedScopes ?? "").split(",").map((scope) => scope.trim()).filter(Boolean);
+  if (scopeValues.some((scope) => scope.includes("*")) && !(scopeValues.length === 1 && scopeValues[0] === "*")) {
+    throw new NativeProcessConfigurationError("Olympus Telegram capture service requires exact chat scopes or a whole-account grant.");
+  }
   const approvedChatCount = new Set((approvedScopes ?? "").split(",").map((scope) => scope.trim()).filter(Boolean)).size;
   if (approvedChatCount === 0) {
     throw new NativeProcessConfigurationError("Olympus Telegram capture service requires at least one approved chat scope.");

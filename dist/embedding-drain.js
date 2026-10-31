@@ -64239,6 +64239,17 @@ init_vlm();
 // src/workers/email-source/server.ts
 init_apple_vision_ocr();
 
+// src/workers/email-source/dashboard-messaging-service.ts
+init_atomic_file();
+init_file_lease();
+init_messaging_capture_grant_file();
+init_messaging_runtime();
+init_package_root();
+init_pairing_session_paths();
+
+// src/workers/email-source/dashboard-messaging-runner.ts
+var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
+
 // src/workers/email-source/index.ts
 init_source_scope_approval();
 init_release_manifest();
