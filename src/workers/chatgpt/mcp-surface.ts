@@ -547,7 +547,7 @@ async function runChatGptTool(
           // Handed off: the private job is created only when the answered
           // result is built (source_answer_result), so its id is never valid
           // before ChatGPT can see it.
-          rememberPrivateMatch(privateCaller(ctx), jobId, pending);
+          rememberPrivateMatch(privateCaller(ctx), jobId, pending, late.timedOut === true);
           return answerToolResult(raw);
         }
         const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
@@ -563,8 +563,8 @@ async function runChatGptTool(
         const done = pendingJobId(raw) === undefined;
         // Only this connection's own handed-off question, and only once it is answered.
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done);
-        const privateMatch = done && isAnswered(raw) && pending ? beginPrivateAnswer(pending, options) : undefined;
-        return answerToolResult(raw, privateMatch ? { privateMatch } : {});
+        const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
+        return answerToolResult(raw, privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {});
       }
       case ASK_ANONYMOUSLY_TOOL.name: {
         if (!askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
@@ -787,7 +787,7 @@ const PROBE_QUERY_MAX_CHARS = 500;
 const PROBE_TIMEOUT_MS = 20_000;
 
 /** A handed-off answer's probe result, until its source_answer_result collects it; keyed by caller and job id. */
-const privateMatchByJob = new Map<string, { match: PendingPrivateMatch | undefined; expiresAt: number }>();
+const privateMatchByJob = new Map<string, { match: PendingPrivateMatch | undefined; timedOut: boolean; expiresAt: number }>();
 const PRIVATE_MATCH_TTL_MS = 30 * 60_000;
 const PRIVATE_MATCH_MAX_JOBS = 1_000;
 
@@ -806,7 +806,7 @@ function privateMatchKey(caller: string | undefined, jobId: string): string {
   return `${caller ?? ''}\u0000${jobId}`;
 }
 
-function rememberPrivateMatch(caller: string | undefined, jobId: string, match: PendingPrivateMatch | undefined): void {
+function rememberPrivateMatch(caller: string | undefined, jobId: string, match: PendingPrivateMatch | undefined, timedOut: boolean): void {
   const now = Date.now();
   for (const [id, entry] of privateMatchByJob) if (entry.expiresAt <= now) privateMatchByJob.delete(id);
   while (privateMatchByJob.size >= PRIVATE_MATCH_MAX_JOBS) {
@@ -814,14 +814,14 @@ function rememberPrivateMatch(caller: string | undefined, jobId: string, match: 
     if (oldest === undefined) break;
     privateMatchByJob.delete(oldest);
   }
-  privateMatchByJob.set(privateMatchKey(caller, jobId), { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
+  privateMatchByJob.set(privateMatchKey(caller, jobId), { match, timedOut, expiresAt: now + PRIVATE_MATCH_TTL_MS });
 }
 
-function privateMatchForJob(caller: string | undefined, jobId: string, done: boolean): PendingPrivateMatch | undefined {
+function privateMatchForJob(caller: string | undefined, jobId: string, done: boolean): { match: PendingPrivateMatch | undefined; timedOut: boolean } | undefined {
   const key = privateMatchKey(caller, jobId);
   const entry = privateMatchByJob.get(key);
   if (done) privateMatchByJob.delete(key);
-  return entry !== undefined && entry.expiresAt > Date.now() ? entry.match : undefined;
+  return entry !== undefined && entry.expiresAt > Date.now() ? entry : undefined;
 }
 
 async function runOperation(name: string, ctx: OperationContext, params: Record<string, unknown>): Promise<unknown> {
