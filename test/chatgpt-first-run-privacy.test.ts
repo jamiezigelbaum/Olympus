@@ -6,6 +6,7 @@ import { createPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../src/co
 import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
 import { callSetupTool } from '../src/workers/chatgpt/setup-tools.ts';
 import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { ModelSetupService } from '../src/core/model-setup.ts';
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -47,6 +48,22 @@ test('a stale ChatGPT choice never overwrites a dashboard choice', async () => {
   saveFirstRunPrivacyChoice(path, 'local-only');
   await callSetupTool('olympus_privacy_set', { revision: meta(opened).revision, confirmation: meta(opened).confirmation, private_answer_mode: 'private-cloud-only' }, backend);
   expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(loadSovereigntyPreset('local-only'));
+});
+
+test('the dashboard status stops asking after the ChatGPT panel saves a choice', async () => {
+  const { backend, path } = setup();
+  const dashboardPending = () => new ModelSetupService({ config: JSON.parse(readFileSync(path, 'utf8')), credentialState: () => 'ready', autoCheck: false }).getStatus().privacy_choice_pending;
+  expect(dashboardPending()).toBe(true);
+  const opened = await callSetupTool('olympus_privacy_get', {}, backend);
+  await callSetupTool('olympus_privacy_set', { revision: meta(opened).revision, confirmation: meta(opened).confirmation, private_answer_mode: 'local-first' }, backend);
+  expect(dashboardPending()).toBeUndefined();
+});
+
+test('the ChatGPT panel stops asking after the shared dashboard save', async () => {
+  const { backend, path } = setup();
+  expect(meta(await callSetupTool('olympus_privacy_get', {}, backend)).privateAnswerChoice).toBeDefined();
+  expect(saveFirstRunPrivacyChoice(path, 'local-only')).toMatchObject({ ok: true, changed: true });
+  expect(meta(await callSetupTool('olympus_privacy_get', {}, backend)).privateAnswerChoice).toBeUndefined();
 });
 
 test('choosing a mode requires the owner panel confirmation', async () => {
