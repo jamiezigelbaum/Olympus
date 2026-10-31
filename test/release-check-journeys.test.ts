@@ -115,6 +115,30 @@ describe('journey runner', () => {
     expect(check.detail).toContain('step 2');
   });
 
+  test('waits for a control the page disables while Olympus sets up, and FAILS when it stays disabled', async () => {
+    class SlowDriver extends DomDriver {
+      reads = 0;
+      constructor(pages: Record<string, string>, private readonly enabledAfter: number) { super(pages); }
+      override async click(frame: 'host' | 'panel', target: WireTarget): Promise<ElementInfo | null> {
+        this.reads += 1;
+        if (this.reads <= this.enabledAfter) {
+          const info = evalIn(this.window, `__rc.find(${JSON.stringify(target)})`) as ElementInfo | null;
+          return info ? { ...info, disabled: true } : null;
+        }
+        return super.click(frame, target);
+      }
+    }
+    const pages = { '/dashboard': '<h2>Notes</h2><button>Save</button>' };
+    const eventually = new SlowDriver(pages, 3);
+    eventually.onPress.set('Save', (document) => { document.body.insertAdjacentHTML('beforeend', '<p>Saved</p>'); });
+    const opts = { now: ((): (() => number) => { let t = 0; return () => (t += 1_000); })(), sleep: async () => {} };
+    expect((await runJourney(eventually, saveJourney, opts)).ok).toBe(true);
+    expect(eventually.reads).toBeGreaterThan(3);
+    const never = await runJourney(new SlowDriver(pages, Number.MAX_SAFE_INTEGER), saveJourney, opts);
+    expect(never.ok).toBe(false);
+    expect(never.steps[1]!.actual).toContain('is there but disabled');
+  });
+
   test('FAILS when the control cannot be found, and never goes around it', async () => {
     const driver = new DomDriver({ '/dashboard': '<h2>Notes</h2>' });
     const trace = await runJourney(driver, saveJourney, options());

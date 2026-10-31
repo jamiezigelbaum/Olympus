@@ -80087,7 +80087,9 @@ function createRecordBuilder(account, fetchItem, authenticate, readChild) {
 function createWhatsAppRecordBuilder(options) {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty7(options.account, "WhatsApp account");
   const live = createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account });
-  return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), () => live.authenticate(), options.readChild);
+  return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), async () => {
+    return;
+  }, options.readChild);
 }
 function isWhatsAppChildMediaType(mediaType) {
   return CHILD_MEDIA_TYPES.has(mediaType);

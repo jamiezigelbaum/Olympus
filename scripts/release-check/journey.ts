@@ -337,6 +337,10 @@ async function inventoryOf(driver: JourneyDriver): Promise<{ text: string; contr
   return { text: text.join(' | ').slice(0, 900), controls: controls.slice(0, 60) };
 }
 
+/** How long a disabled control is waited on before the step fails. */
+const DISABLED_CONTROL_WAIT_MS = 90_000;
+type ElementInfoLike = { disabled?: boolean };
+
 const allowed = (list: Array<{ url: RegExp; status?: number }>, request: { url: string; status: number }): boolean =>
   list.some((rule) => rule.url.test(request.url) && (rule.status === undefined || rule.status === request.status));
 
@@ -353,7 +357,7 @@ function describeAction(action: Action): string {
 
 const slug = (text: string): string => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'step';
 
-async function perform(action: Action, driver: JourneyDriver): Promise<{ ok: boolean; detail: string }> {
+async function perform(action: Action, driver: JourneyDriver, clock: { now: () => number; sleep: (ms: number) => Promise<void> }): Promise<{ ok: boolean; detail: string }> {
   if ('open' in action) { await driver.open(action.open); return { ok: true, detail: 'opened' }; }
   if ('go' in action) { await driver.go(action.go); return { ok: true, detail: 'went there' }; }
   if ('reload' in action) { await driver.reload(); return { ok: true, detail: 'reloaded' }; }
@@ -362,11 +366,23 @@ async function perform(action: Action, driver: JourneyDriver): Promise<{ ok: boo
   const panel = await driver.hasPanel();
   if ('click' in action) {
     // The first frame that has the control: the page, then the framed panel.
-    for (const name of frames(action.frame, panel)) {
-      const info = await driver.click(name, wireTarget(action.click));
-      if (info) return info.disabled ? { ok: false, detail: `${describeTarget(action.click)} is there but disabled` } : { ok: true, detail: `pressed ${info.role || info.tag} "${info.name.slice(0, 50)}"` };
+    // A control the page disables while Olympus reloads its search model after an engine restart ("Available once Olympus is
+    // set up", a few seconds, longer on a slow machine) is waited for, because the page enables it on its own poll, as an owner
+    // would. One that stays disabled past the bound fails as before.
+    const until = clock.now() + DISABLED_CONTROL_WAIT_MS;
+    for (;;) {
+      let disabled: ElementInfoLike | undefined;
+      for (const name of frames(action.frame, panel)) {
+        const info = await driver.click(name, wireTarget(action.click));
+        if (!info) continue;
+        if (!info.disabled) return { ok: true, detail: `pressed ${info.role || info.tag} "${info.name.slice(0, 50)}"` };
+        disabled = info;
+        break;
+      }
+      if (!disabled) return { ok: false, detail: `${describeTarget(action.click)} is not on the page` };
+      if (clock.now() >= until) return { ok: false, detail: `${describeTarget(action.click)} is there but disabled` };
+      await clock.sleep(1_000);
     }
-    return { ok: false, detail: `${describeTarget(action.click)} is not on the page` };
   }
   if ('attach' in action) {
     for (const name of frames(action.frame, panel)) {
@@ -420,7 +436,7 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
           vars[name] = text;
         }
       }
-      actionResult = await perform(step.do, driver);
+      actionResult = await perform(step.do, driver, { now, sleep });
     } catch (caught) {
       actionResult = { ok: false, detail: `the action failed: ${caught instanceof Error ? caught.message.slice(0, 200) : String(caught)}` };
     }
