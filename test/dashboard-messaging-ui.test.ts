@@ -37,3 +37,8 @@ test('a bearer dashboard offers a local controls entry without any credential fi
   expect(html).toContain('Open controls on this computer');
   expect(html).not.toContain('<input');
 });
+
+test('messaging card keeps pair, choose chats and cancel in one action row', () => {
+  const html = renderMessagingCard('telegram', true);
+  expect(html).toMatch(/class="actionrow">[\s\S]*data-messaging-kind="start"[\s\S]*data-messaging-kind="chats"[\s\S]*data-messaging-kind="cancel"[\s\S]*?<\/div><div data-messaging-view>/);
+});
