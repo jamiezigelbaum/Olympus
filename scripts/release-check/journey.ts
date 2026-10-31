@@ -357,7 +357,7 @@ function describeAction(action: Action): string {
 
 const slug = (text: string): string => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'step';
 
-async function perform(action: Action, driver: JourneyDriver, clock: { now: () => number; sleep: (ms: number) => Promise<void> }): Promise<{ ok: boolean; detail: string }> {
+async function perform(action: Action, driver: JourneyDriver, clock: { now: () => number; sleep: (ms: number) => Promise<void> }): Promise<{ ok: boolean; detail: string; waitedMs?: number }> {
   if ('open' in action) { await driver.open(action.open); return { ok: true, detail: 'opened' }; }
   if ('go' in action) { await driver.go(action.go); return { ok: true, detail: 'went there' }; }
   if ('reload' in action) { await driver.reload(); return { ok: true, detail: 'reloaded' }; }
@@ -369,13 +369,14 @@ async function perform(action: Action, driver: JourneyDriver, clock: { now: () =
     // A control the page disables while Olympus reloads its search model after an engine restart ("Available once Olympus is
     // set up", a few seconds, longer on a slow machine) is waited for, because the page enables it on its own poll, as an owner
     // would. One that stays disabled past the bound fails as before.
-    const until = clock.now() + DISABLED_CONTROL_WAIT_MS;
+    const began = clock.now();
+    const until = began + DISABLED_CONTROL_WAIT_MS;
     for (;;) {
       let disabled: ElementInfoLike | undefined;
       for (const name of frames(action.frame, panel)) {
         const info = await driver.click(name, wireTarget(action.click));
         if (!info) continue;
-        if (!info.disabled) return { ok: true, detail: `pressed ${info.role || info.tag} "${info.name.slice(0, 50)}"` };
+        if (!info.disabled) return { ok: true, detail: `pressed ${info.role || info.tag} "${info.name.slice(0, 50)}"`, waitedMs: clock.now() - began };
         disabled = info;
         break;
       }
@@ -419,7 +420,7 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
     const stepStarted = now();
     const context = contextFor(driver, vars);
     const state = { pagesBefore: 0, initialUrl: '', counts: {} as Record<string, number> };
-    let actionResult: { ok: boolean; detail: string };
+    let actionResult: { ok: boolean; detail: string; waitedMs?: number };
     try {
       state.pagesBefore = await driver.pages();
       for (const [name, what] of Object.entries(step.remember ?? {})) {
@@ -443,7 +444,8 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
 
     // The outcomes: polled until they all hold, or until the step's time is up.
     const timeoutMs = step.timeoutMs ?? ('open' in step.do ? OPEN_STEP_TIMEOUT_MS : DEFAULT_STEP_TIMEOUT_MS);
-    const until = stepStarted + timeoutMs;
+    // Time spent waiting for a disabled control to enable is not taken from the outcomes' own budget (Codex on #718).
+    const until = stepStarted + (actionResult.waitedMs ?? 0) + timeoutMs;
     let outcomes: Outcome[] = [];
     if (actionResult.ok) {
       for (;;) {

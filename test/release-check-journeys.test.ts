@@ -139,6 +139,34 @@ describe('journey runner', () => {
     expect(never.steps[1]!.actual).toContain('is there but disabled');
   });
 
+  test('the wait for a disabled control does not use up the time the outcome gets (Codex on #718)', async () => {
+    class SlowDriver extends DomDriver {
+      reads = 0;
+      override async click(frame: 'host' | 'panel', target: WireTarget): Promise<ElementInfo | null> {
+        this.reads += 1;
+        if (this.reads <= 25) {
+          const info = evalIn(this.window, `__rc.find(${JSON.stringify(target)})`) as ElementInfo | null;
+          return info ? { ...info, disabled: true } : null;
+        }
+        return super.click(frame, target);
+      }
+    }
+    // The control enables after about 25 s, past the step's 20 s; the outcome shows 2 s after the press.
+    let t = 0;
+    let pressedAt = Number.POSITIVE_INFINITY;
+    const driver = new SlowDriver({ '/dashboard': '<h2>Notes</h2><button>Save</button>' });
+    driver.onPress.set('Save', () => { pressedAt = t; });
+    const clock = {
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += ms;
+        if (t >= pressedAt + 2_000 && !driver.window.document.body.textContent?.includes('Saved')) driver.window.document.body.insertAdjacentHTML('beforeend', '<p>Saved</p>');
+      },
+    };
+    const trace = await runJourney(driver, saveJourney, clock);
+    expect(trace.steps.filter((step) => !step.ok).map((step) => `${step.name}: ${step.actual}`)).toEqual([]);
+  });
+
   test('FAILS when the control cannot be found, and never goes around it', async () => {
     const driver = new DomDriver({ '/dashboard': '<h2>Notes</h2>' });
     const trace = await runJourney(driver, saveJourney, options());
