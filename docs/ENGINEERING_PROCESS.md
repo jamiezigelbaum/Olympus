@@ -48,7 +48,12 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
 5. **Let CI decide merge readiness.** GitHub requires every substantive lane
    directly: `static checks`, `fast tests`, `exchange tests`, all four
    `deploy tests` shards, and `Go bridge tests`. A local result is useful
-   evidence, never a substitute for those exact-head checks.
+   evidence, never a substitute for those exact-head checks. The protected `fast tests`
+   context aggregates three fast shards until the ruleset requires those shards
+   directly; its runner only checks the matrix result. On 2026-10-31 the
+   unsharded main test work took 433 seconds in run 41191132361, before relay
+   tests and setup. Shards use those per-file timings and a conservative p95
+   for unknown files.
    The `exchange tests` lane runs `test:exchange` for the publisher Google
    exchange service; `typecheck` checks both the plugin and the exchange service's
    separate WebWorker configuration. The `exchange/` subtree is critical,
