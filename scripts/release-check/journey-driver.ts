@@ -227,7 +227,9 @@ export class CdpJourneyDriver implements JourneyDriver {
     await this.cdp.send('Page.navigate', { url });
     await this.settleLoad();
     if (place === 'private') {
-      if (!(await this.waitFor('host', `!!document.querySelector('[data-private-answers]')`, 45_000))) throw new Error('the Private answers page did not open from the owner\'s opening link');
+      // Right after an engine restart the page first shows Olympus setting up while the search model reloads (about a minute on
+      // the Linux VM in the 1.3.0 check), then opens on its own poll, as an owner would see it.
+      if (!(await this.waitFor('host', `!!document.querySelector('[data-private-answers]')`, 120_000))) throw new Error('the Private answers page did not open from the owner\'s opening link');
       if ((await this.probe('host', `!!document.querySelector('[data-private-answers] form[data-pa-unlock] button')`)) === true) {
         const info = await this.click('host', { css: '[data-private-answers] form[data-pa-unlock] button' });
         if (!info) throw new Error('the page\'s Unlock button could not be pressed');
