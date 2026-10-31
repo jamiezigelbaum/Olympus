@@ -886,7 +886,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
   assertLegacySettingOverrides(l,options.env??process.env);
   const before=inspectSystemdEngine(l,exec); assertKnown(before);
   const privacyState = resolveInstallationPrivacyState({ homeDir: l.home, paths, env: options.env ?? process.env });
-  if(options.dryRun) return {...base,wrote_plist:false,wrote_config:false,wrote_worker_env:false,sovereignty:{action:existsSync(l.sovereigntyPath)?'present':'would_seed',path:l.sovereigntyPath},action:'dry_run'};
+  if(options.dryRun) return {...base,wrote_plist:false,wrote_config:false,wrote_worker_env:false,sovereignty:{action:existsSync(l.sovereigntyPath)?'present':privacyState.state==='not_installed'?'would_seed':'skipped',path:l.sovereigntyPath,...(privacyState.reason?{reason:privacyState.reason}:{})},action:'dry_run'};
   requireLinuxApprovalTransport(source);
   const existingReceipt=readLinuxEngineReceipt(l.receiptPath);
   const observedLinger=readEngineLinger(exec,options.uid);

@@ -38,10 +38,10 @@ import {
 import { engineChildrenPath, reapRecordedEngineChildren, type EngineChildReapDeps, type EngineChildReapResult } from './engine-children.ts';
 import { redactLogLine } from './log-redaction.ts';
 import { OperationError } from './operation-error.ts';
-import { loadConfig, openClawConfigPath } from './config.ts';
+import { openClawConfigPath } from './config.ts';
 import { olympusPackageRoot } from './package-root.ts';
 import { olympusDataDir, remoteAccessDir } from './remote-access.ts';
-import { loadSovereigntyEngine, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
+import { validateSovereigntyConfig, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
 import { createPendingPrivacyPolicy, isPendingPrivacyPolicy } from './first-run-privacy.ts';
 import { workerAuthTokenFromSetupEnv } from './worker-auth.ts';
 import { ensureManagedWorkerEnvironment, workerServicePaths } from './worker-service.ts';
@@ -973,26 +973,18 @@ export function resolveInstallationPrivacyState(input: {
 } = {}): { state: 'not_installed' | 'pending' | 'configured'; reason?: string } {
   const env = { ...(input.env ?? process.env), HOME: input.homeDir ?? input.env?.HOME ?? homedir() };
   const paths = input.paths ?? engineServicePaths({ env });
-  // Linux pins its default path even before first installation. That pin is
-  // not evidence of an existing policy; a genuinely custom path still is.
-  const inspectionEnv: Record<string, string | undefined> = { ...env };
-  for (const key of ['OLYMPUS_SOVEREIGNTY_CONFIG', 'OLYMPUS_SOVEREIGNTY_CONFIG_PATH']) {
-    if (inspectionEnv[key] && resolvePath(inspectionEnv[key]!) === resolvePath(paths.sovereigntyPath)
-      && !existsSync(paths.sovereigntyPath)) delete inspectionEnv[key];
+  if (existsSync(paths.sovereigntyPath)) {
+    const policy = validateSovereigntyConfig(JSON.parse(readFileSync(paths.sovereigntyPath, 'utf8')));
+    return { state: isPendingPrivacyPolicy(policy) ? 'pending' : 'configured' };
   }
-  const config = loadConfig(inspectionEnv);
-  const explicitPolicy = config.sovereignty?.policy !== undefined || !!config.sovereignty?.configPath;
-  if (explicitPolicy || existsSync(paths.sovereigntyPath)) {
-    const policy = loadSovereigntyEngine({ env, inlineConfig: config.sovereignty?.policy,
-      configPath: config.sovereignty?.configPath ?? paths.sovereigntyPath });
-    return { state: isPendingPrivacyPolicy(policy.config) ? 'pending' : 'configured',
-      reason: 'An existing effective privacy policy is preserved.' };
-  }
-  const blocker = engineSovereigntySeedBlocker({ homeDir: env.HOME, workerEnvPath: paths.workerEnvPath, env: inspectionEnv });
-  if (blocker) return { state: 'configured', reason: blocker };
+  // The installed host, not this shell, owns the effective runtime policy.
+  // launchd does not inherit ambient keys; an engine also ignores a leftover
+  // standalone config.json. Neither can stand in for consent on a fresh install.
   if (existsSync(paths.configPath) || existsSync(paths.plistPath)) return {
     state: 'configured', reason: 'An existing engine installation has no policy file; its current policy is preserved.',
   };
+  const blocker = engineSovereigntySeedBlocker({ homeDir: env.HOME, workerEnvPath: paths.workerEnvPath, env });
+  if (blocker) return { state: 'configured', reason: blocker };
   return { state: 'not_installed' };
 }
 
@@ -1016,8 +1008,6 @@ export function engineSovereigntySeedBlocker(input: {
   workerEnvPath: string;
   env?: Record<string, string | undefined>;
 }): string | undefined {
-  const envKey = Object.entries(input.env ?? process.env).find(([key, value]) => value?.trim() && ENV_POLICY_KEY.test(`${key}=`))?.[0];
-  if (envKey) return `The environment already sets ${envKey}, which chooses this worker's models and privacy routes.`;
   try {
     if (existsSync(input.workerEnvPath)) {
       const key = ENV_POLICY_KEY.exec(readFileSync(input.workerEnvPath, 'utf8'))?.[1];

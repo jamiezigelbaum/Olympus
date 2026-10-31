@@ -1336,6 +1336,7 @@ type SurfaceOnlyErrorCode =
   | 'folder_needs_helper'
   | 'confirm_whole_account'
   | 'privacy_owner_only'
+  | 'privacy_choice_required'
   | 'embedding_change_needs_approval'
   | 'model_not_configured'
   | 'sign_in_failed'
@@ -1384,6 +1385,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   picker_unavailable: 'Olympus could not list this source right now. Try again shortly.',
   folder_needs_helper: 'Olympus cannot open Desktop, Documents, Downloads, iCloud Drive or other disks on this Mac yet, or a folder that holds them. Your choices are still here. Choose folders outside them, or drag files onto the dashboard.',
   confirm_whole_account: 'Choosing the whole account needs the owner\'s confirmation in the Olympus panel.',
+  privacy_choice_required: 'Choose how Olympus may answer with Private items before editing privacy rules.',
   privacy_owner_only: 'Only the owner can remove a privacy rule or change what they said is private, in the Olympus panel.',
   embedding_change_needs_approval: 'Changing the search model re-indexes every source and needs the owner\'s approval on the computer.',
   model_not_configured: 'That model is not set up on the computer. Set it up in Olympus on the computer first.',
