@@ -65,3 +65,23 @@ test('chat selection writes the pairing grant, stops capture during the change, 
   await expect(service.handle('chats', { source: 'telegram' })).rejects.toThrow();
   service.close();
 });
+
+test('re-pair never widens a grant removed during pairing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'messaging-race-')); dirs.push(dir);
+  const grantPath = join(dir, 'messaging-capture.whatsapp.json');
+  writeFileSync(grantPath, JSON.stringify({ version: 1, source: 'whatsapp', handle: 'whatsapp.personal', sessionPath: dir, grantedAt: '2026-01-01', producer: { source: 'whatsapp', env: { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: '123@s.whatsapp.net' }, secretEnvironment: [] } }), { mode: 0o600 });
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'),
+    secretStore: { label: 'memory', get: async () => undefined, getSync: () => undefined, set: async () => {}, delete: async () => {}, list: async () => [] },
+    withMessagingCapturePaused: async (_source, operation) => operation(), withGrantMutation: async (operation) => operation(),
+    pairSource: async () => { await held; return { ok: true, source: 'whatsapp', status: 'connected', registered: true, captureStarted: false, sessionPath: dir, accountProof: 'account', chats: [], handles: ['whatsapp.personal'], secretRefs: [], producer: { source: 'whatsapp', executable: 'fixture', args: [], env: { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: '*' }, secretEnvironment: [], captureStarted: false } }; },
+  });
+  await service.handle('start', { source: 'whatsapp' });
+  rmSync(grantPath);
+  release();
+  for (let i = 0; i < 30 && !['paired', 'failed'].includes((await service.handle('status', { source: 'whatsapp' })).state); i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  expect((await service.handle('status', { source: 'whatsapp' })).state).toBe('failed');
+  expect(() => readFileSync(grantPath)).toThrow();
+  service.close();
+});

@@ -96,6 +96,12 @@ export interface PrivacyViewRule {
   raw?: Record<string, unknown>;
 }
 
+/** Session-only owner intent; never serialized to the settings API. */
+export interface PrivacyRuleIntent {
+  rule: PrivacyViewRule;
+  present: boolean;
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function privacyLogic(config: PrivacyLogicConfig) {
   const KINDS = ['folder', 'label', 'sender'];
@@ -185,24 +191,43 @@ export function privacyLogic(config: PrivacyLogicConfig) {
     return change.removed.length > 0 || change.described;
   }
 
+  /** Last explicit choice per identity. Only a confirmed save or discard clears it. */
+  function setIntent(intents: PrivacyRuleIntent[], rule: PrivacyViewRule, present: boolean): void {
+    const id = identity(rule);
+    const next = { rule: { ...rule }, present };
+    const index = intents.findIndex((intent) => identity(intent.rule) === id);
+    if (index < 0) intents.push(next);
+    else intents[index] = next;
+  }
+
+  /** Check persisted membership, not the draft view or the response's success label. */
+  function satisfies(intents: readonly PrivacyRuleIntent[], rules: readonly any[]): boolean {
+    const ids = new Set(rules.filter(validRule).map(identity));
+    return intents.every((intent) => ids.has(identity(intent.rule)) === intent.present);
+  }
+
   /**
-   * The person's changes, replayed onto settings changed elsewhere: the saved
-   * rules they removed stay removed (matched by identity), the rules they
-   * added are added again, and a changed description is kept. `fresh` is the
-   * current saved rules, already as view rules. Returns the new rule list and
-   * the description to show (null: keep the saved one).
+   * Apply explicit intent to the latest server list. Intent is independent of
+   * that list: an already-present addition or already-absent removal must
+   * survive a later conflict too. Keep absent removals as unsaved view rows so
+   * they can still be undone; they never go out in a save or require confirmation.
+   * Existing rules keep the server's latest names and opaque fields.
    */
   function replay(
-    draft: { rules: readonly any[]; description: string; savedDescription: string },
-    fresh: any[],
-  ): { rules: any[]; description: string | null } {
-    const removed: Record<string, boolean> = {};
-    for (const rule of draft.rules) if (rule.saved && rule.removed) removed[identity(rule)] = true;
-    const additions = draft.rules.filter((rule: any) => !rule.saved && !rule.removed);
+    draft: { intents: readonly PrivacyRuleIntent[]; description: string; savedDescription: string },
+    fresh: PrivacyViewRule[],
+  ): { rules: PrivacyViewRule[]; description: string | null } {
+    const rules = fresh.map((rule) => ({ ...rule }));
+    for (const intent of draft.intents) {
+      let rule = rules.find((item) => identity(item) === identity(intent.rule));
+      if (!rule) {
+        rule = { ...intent.rule, saved: false };
+        rules.push(rule);
+      }
+      rule.removed = !intent.present;
+    }
     const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
-    for (const rule of fresh) if (removed[identity(rule)]) rule.removed = true;
-    for (const rule of additions) addTo(fresh, rule);
-    return { rules: fresh, description: described };
+    return { rules, description: described };
   }
 
   /** A sender the person typed, as a rule value (trimmed, lower-cased), or '' when it is not an address or @domain. */
@@ -448,7 +473,7 @@ export function privacyLogic(config: PrivacyLogicConfig) {
   }
 
   return {
-    validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
+    setIntent, satisfies, validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
     detectTopics, topicAnswers, refineDescription, fitsAnswers, questions, questionsKey, answerTopic, withShownAnswers,
   };
 }

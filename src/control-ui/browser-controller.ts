@@ -865,11 +865,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         return;
       }
       const state = typeof body.state === 'string' ? body.state : '';
-      if (state === 'failed' && status) status.textContent = 'Pairing failed. Start pairing again to retry.';
       const field = typeof body.field === 'string' ? body.field : '';
       const labels: Record<string, string> = { api_id: 'Telegram API ID', api_hash: 'Telegram API hash', phone: 'Phone number (with country code)', code: 'Telegram login code', password: 'Telegram two-step verification password' };
       const label = labels[field];
-      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? 'Pairing failed. Start pairing again to retry.' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Paired. Capture is starting. Choose chats below; watch sync progress on the main dashboard.' : state === 'cancelled' ? 'Pairing cancelled.' : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Pairing is running on this computer…';
+      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : 'Pairing failed. Start pairing again to retry.') : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Paired. Capture is starting. Choose chats below; watch sync progress on the main dashboard.' : state === 'cancelled' ? 'Pairing cancelled.' : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Pairing is running on this computer…';
       if (qr) {
         const value = typeof body.qr === 'string' ? body.qr : '';
         // Only the local helper's raster QR image is displayed; no external requests or SVG markup.
@@ -903,7 +902,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           const button = document.createElement('button'); button.type = 'submit'; button.className = 'btn'; button.textContent = 'Save chat choices'; form.append(button); slot.append(form);
         }
       }
-      if (operation !== 'chats' && operation !== 'scope' && operation !== 'cancel' && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle'].includes(state)) {
+      if (operation !== 'chats' && operation !== 'scope' && (operation !== 'cancel' || state === 'committing') && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle'].includes(state)) {
         messagingTimers.set(card, setTimeout(() => { messagingTimers.delete(card); void messagingRequest(card, 'status'); }, 1200));
       }
     } catch {

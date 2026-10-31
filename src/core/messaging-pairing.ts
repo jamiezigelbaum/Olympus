@@ -120,6 +120,7 @@ export interface PairMessagingSourceOptions extends TelegramPythonSeams {
   onWhatsAppQr?: (pngPath: string) => void | Promise<void>;
   whatsappQrMode?: 'terminal' | 'artifact';
   signal?: AbortSignal;
+  onCommitStart?: () => void;
   runCommand?: (request: PairingCommandRequest) => Promise<PairingCommandResult>;
   registerSession?: MessagingSessionRegistrar;
   which?: (command: string) => string | null;
@@ -292,6 +293,9 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
         registered: false,
       };
     }
+
+    if (options.signal?.aborted) throw new Error('Pairing was cancelled.');
+    options.onCommitStart?.();
 
     if (options.source === 'telegram') {
       // Decided under the entry's lease by whoever owns the data, so an account it

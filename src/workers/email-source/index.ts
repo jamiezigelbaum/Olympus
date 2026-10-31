@@ -2345,6 +2345,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/disconnect') {
+          const disconnectRecord = await parseObjectBody(request);
+          if (disconnectRecord.acknowledge === true) {
+            if (disconnectRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
+            if (disconnectRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
+          }
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
@@ -2353,7 +2358,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not have the source dashboard configured.',
             );
           }
-          const record = await parseObjectBody(request);
+          const record = disconnectRecord;
           if (record.source_id === 'local.files') {
             if (record.acknowledge !== true) {
               throw new EmailSourceWorkerError(

@@ -39144,6 +39144,9 @@ async function pairMessagingSource(options) {
         registered: false
       };
     }
+    if (options.signal?.aborted)
+      throw new Error("Pairing was cancelled.");
+    options.onCommitStart?.();
     if (options.source === "telegram") {
       const recorded = historyAccount === accountProof ? "same" : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => {
         return;
@@ -53517,20 +53520,18 @@ var init_vocabulary = __esm(() => {
     needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
     needGmail: "Connect Gmail to add a label.",
     nothingToSave: "Nothing to save yet. Change a rule or the description first.",
-    pending: {
-      one: "{n} item is waiting to be checked on your computer.",
-      many: "{n} items are waiting to be checked on your computer."
-    },
     save: "Save",
     saving: "Saving…",
     cancel: "Cancel",
     saveFailed: "Olympus could not save. Your changes are still here. Try again.",
+    addRuleFailed: "Olympus could not make this private. Try again.",
     saved: "Privacy saved.",
     confirmRemove: "This removes protection from {list}.",
     confirmDescription: "This changes your description, which decides what Olympus keeps private.",
     confirm: "Confirm",
     conflict: "Your changes weren't saved because the privacy settings changed elsewhere.",
     conflictNow: "What is saved now:",
+    conflictAddBlocked: "Resolve the conflict before adding another rule.",
     conflictDescription: "Your description: {text}",
     conflictNoDescription: "No description",
     applyAgain: "Apply my changes again",
@@ -141349,7 +141350,8 @@ function createDashboardMessagingPairing(options) {
       state: item.state,
       ...item.field ? { field: item.field } : {},
       ...item.qr ? { qr: item.qr } : {},
-      ...item.chats ? { chats: item.chats } : {}
+      ...item.chats ? { chats: item.chats } : {},
+      ...item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}
     } : { ok: true, state: "idle" };
   };
   return {
@@ -141379,18 +141381,30 @@ function createDashboardMessagingPairing(options) {
                 item.qr = value2;
                 item.state = "waiting";
               }
+            },
+            commit() {
+              if (item.controller.signal.aborted)
+                throw new Error("Pairing was cancelled.");
+              delete item.reply;
+              delete item.field;
+              delete item.qr;
+              item.state = "committing";
             }
           });
           if (item.controller.signal.aborted)
             return;
+          item.state = "committing";
           await options.publish(source, result, item.controller.signal);
           if (item.controller.signal.aborted)
             return;
           item.chats = result.chats;
           item.state = "paired";
         } catch {
-          if (!item.controller.signal.aborted)
+          if (!item.controller.signal.aborted) {
+            if (item.state === "committing")
+              item.registrationMayBeSaved = true;
             item.state = "failed";
+          }
         } finally {
           delete item.reply;
           delete item.field;
@@ -141609,6 +141623,15 @@ function createDashboardMessagingService(options) {
   const packageRoot = olympusPackageRoot();
   const available = new Map;
   const selecting = new Set;
+  const initialGrants = new Map;
+  const grantSnapshot = (source) => {
+    const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+    if (read.kind === "invalid" || read.kind === "valid" && read.grant.source !== source)
+      throw new Error("Invalid capture grant.");
+    if (read.kind === "valid")
+      retainApprovedCaptureScope(source, read.grant.producer.env);
+    return JSON.stringify(read.kind === "valid" ? read.grant : null);
+  };
   const grantFor = (source) => {
     const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
     const read = readCaptureGrantFile(path);
@@ -141624,6 +141647,7 @@ function createDashboardMessagingService(options) {
         secretStore: options.secretStore,
         ...options.registryPath ? { registryPath: options.registryPath } : {},
         signal: hooks.signal,
+        onCommitStart: hooks.commit,
         whatsappQrMode: "artifact",
         captureScopeApproval: { source, explicitApproval: true, wholeAccount: true },
         runCommand: (request) => runDashboardPairingCommand(request, hooks),
@@ -141638,6 +141662,8 @@ function createDashboardMessagingService(options) {
         return;
       const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
       const prior = readCaptureGrantFile(path);
+      if (grantSnapshot(source) !== initialGrants.get(source))
+        throw new Error("Capture grant changed during pairing.");
       if (prior.kind === "invalid" || prior.kind === "valid" && prior.grant.source !== source)
         throw new Error("Invalid capture grant.");
       const retained = prior.kind === "valid" ? retainApprovedCaptureScope(source, prior.grant.producer.env) : {};
@@ -141698,7 +141724,12 @@ function createDashboardMessagingService(options) {
       if (operation === "start") {
         if (selecting.has(source))
           throw new Error("Finish choosing chats first.");
-        return manager.start(source);
+        return options.withGrantMutation(async () => {
+          if (manager.busy(source))
+            throw new Error("Pairing is already running.");
+          initialGrants.set(source, grantSnapshot(source));
+          return manager.start(source);
+        });
       }
       if (operation === "status")
         return manager.status(source);
@@ -144310,13 +144341,11 @@ function mountDashboardController(options) {
         return;
       }
       const state = typeof body.state === "string" ? body.state : "";
-      if (state === "failed" && status)
-        status.textContent = "Pairing failed. Start pairing again to retry.";
       const field = typeof body.field === "string" ? body.field : "";
       const labels = { api_id: "Telegram API ID", api_hash: "Telegram API hash", phone: "Phone number (with country code)", code: "Telegram login code", password: "Telegram two-step verification password" };
       const label = labels[field];
       if (status)
-        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? "Pairing failed. Start pairing again to retry." : state === "paired" || state === "complete" || state === "completed" ? "Paired. Capture is starting. Choose chats below; watch sync progress on the main dashboard." : state === "cancelled" ? "Pairing cancelled." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
+        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Paired. Capture is starting. Choose chats below; watch sync progress on the main dashboard." : state === "cancelled" ? "Pairing cancelled." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
       if (qr) {
         const value2 = typeof body.qr === "string" ? body.qr : "";
         if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value2)) {
@@ -144394,7 +144423,7 @@ function mountDashboardController(options) {
           slot.append(form);
         }
       }
-      if (operation !== "chats" && operation !== "scope" && operation !== "cancel" && !["paired", "complete", "completed", "failed", "cancelled", "idle"].includes(state)) {
+      if (operation !== "chats" && operation !== "scope" && (operation !== "cancel" || state === "committing") && !["paired", "complete", "completed", "failed", "cancelled", "idle"].includes(state)) {
         messagingTimers.set(card, setTimeout(() => {
           messagingTimers.delete(card);
           messagingRequest(card, "status");
@@ -148834,19 +148863,31 @@ function privacyLogic(config2) {
     const change = lowering(rules, description, savedDescription);
     return change.removed.length > 0 || change.described;
   }
+  function setIntent(intents, rule, present) {
+    const id = identity2(rule);
+    const next = { rule: { ...rule }, present };
+    const index = intents.findIndex((intent) => identity2(intent.rule) === id);
+    if (index < 0)
+      intents.push(next);
+    else
+      intents[index] = next;
+  }
+  function satisfies(intents, rules) {
+    const ids = new Set(rules.filter(validRule).map(identity2));
+    return intents.every((intent) => ids.has(identity2(intent.rule)) === intent.present);
+  }
   function replay(draft, fresh2) {
-    const removed = {};
-    for (const rule of draft.rules)
-      if (rule.saved && rule.removed)
-        removed[identity2(rule)] = true;
-    const additions = draft.rules.filter((rule) => !rule.saved && !rule.removed);
+    const rules = fresh2.map((rule) => ({ ...rule }));
+    for (const intent of draft.intents) {
+      let rule = rules.find((item) => identity2(item) === identity2(intent.rule));
+      if (!rule) {
+        rule = { ...intent.rule, saved: false };
+        rules.push(rule);
+      }
+      rule.removed = !intent.present;
+    }
     const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
-    for (const rule of fresh2)
-      if (removed[identity2(rule)])
-        rule.removed = true;
-    for (const rule of additions)
-      addTo(fresh2, rule);
-    return { rules: fresh2, description: described };
+    return { rules, description: described };
   }
   function senderValue(input) {
     const value2 = String(input || "").trim().toLowerCase();
@@ -149082,6 +149123,8 @@ function privacyLogic(config2) {
     return JSON.stringify(questions(description));
   }
   return {
+    setIntent,
+    satisfies,
     validRule,
     displayOf,
     viewRule,
@@ -151043,6 +151086,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       error: "",
       description: "",
       rules: [],
+      intents: [],
+      savedRules: [],
       pendingCount: 0,
       revision: "",
       savedDescription: "",
@@ -151095,6 +151140,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     s.edited = false;
     s.confirmStep = false;
     s.rules = data2.rules.filter(validRule).map(viewRule);
+    s.savedRules = s.rules.map(ruleOut);
+    s.intents = [];
     s.hidden = data2.rules.filter((rule) => !validRule(rule));
     s.server = null;
     s.pendingCount = typeof data2.pendingCount === "number" && isFinite(data2.pendingCount) ? Math.max(0, data2.pendingCount) : 0;
@@ -151149,9 +151196,53 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return !s.server && (s.edited || L.withShownAnswers(s.description) !== s.description);
   }
   function addRule(rule) {
+    if (s.saving || s.server)
+      return;
+    const baseline = s.savedRules.slice().concat(s.hidden);
+    if (!s.savedRules.some((item) => identity2(item) === identity2(rule)))
+      baseline.push(ruleOut(rule));
     L.addTo(s.rules, rule);
+    L.setIntent(s.intents, rule, true);
     changed();
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
+    const args = { description: s.savedDescription, rules: baseline };
+    if (s.revision)
+      args.revision = s.revision;
+    s.saving = true;
     s.saveError = "";
+    const mine = session;
+    kit.call(T.set, args).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      const data2 = settings(result);
+      const content = result && result.structuredContent;
+      if (data2 && content && content.status === "conflict")
+        return conflict(data2);
+      if (!data2 || !content || content.status !== "saved") {
+        s.saveError = W.addRuleFailed;
+        kit.render("privacy:save");
+        return;
+      }
+      if (!L.satisfies([{ rule, present: true }], data2.rules))
+        return conflict(data2);
+      draft.intents = draft.intents.filter((intent) => identity2(intent.rule) !== identity2(rule));
+      take(data2);
+      s.intents = draft.intents;
+      const replayed = L.replay(draft, s.rules);
+      s.rules = replayed.rules;
+      if (replayed.description !== null)
+        s.description = replayed.description;
+      s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
+      kit.remember(data2.rules.filter(validRule).length);
+      kit.render("privacy:add:folder");
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      s.saveError = W.addRuleFailed;
+      kit.render("privacy:save");
+    });
   }
   function lowering() {
     return L.lowering(s.rules, s.description, s.savedDescription);
@@ -151204,13 +151295,15 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       const data2 = settings(result);
       if (data2 && content && content.status === "conflict")
         return conflict(data2);
-      if (!data2 || result.isError) {
+      if (!data2 || !content || content.status !== "saved") {
         s.saveError = W.saveFailed;
         kit.render("privacy:save");
         return;
       }
       if (confirmed)
         s.confirmation = "";
+      if (!L.satisfies(s.intents, data2.rules) || data2.description !== args.description)
+        return conflict(data2);
       kit.remember(data2.rules.filter(validRule).length);
       leave(W.saved, true);
     }, () => {
@@ -151231,8 +151324,9 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     const server = s.server;
     if (!server)
       return;
-    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     take(server);
+    s.intents = draft.intents;
     const replayed = L.replay(draft, s.rules);
     s.rules = replayed.rules;
     s.confirmStep = false;
@@ -151427,6 +151521,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(li, el("p", "fname leaf muted", fill2(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, "privacy:rule:" + index, s.saving ? null : () => {
         rule.removed = false;
+        L.setIntent(s.intents, rule, true);
         changed();
         kit.render("privacy:rule:" + index);
       }, "plain");
@@ -151436,6 +151531,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     add(li, add(el("p", "fname leaf two-line"), el("span", "two-top", rule.display), el("span", "two-bottom", kindText(rule))));
     const remove = kit.button(W.remove, "privacy:rule:" + index, s.saving ? null : () => {
       rule.removed = true;
+      L.setIntent(s.intents, rule, false);
       changed();
       s.saveError = "";
       kit.render("privacy:rule:" + index);
@@ -151550,7 +151646,10 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(rules, el("p", "muted fempty", W.rulesEmpty));
     const folders = folderSources().length > 0 && !!kit.picker;
     const gmail = gmailConnected();
-    add(rules, add(el("div", "actions add-rules"), kit.button(W.addFolder, "privacy:add:folder", folders && !s.saving ? addFolder : null, "plain"), kit.button(W.addLabel, "privacy:add:label", gmail && !s.saving ? addLabel : null, "plain"), kit.button(W.addSender, "privacy:add:sender", s.saving ? null : addSender, "plain")));
+    const canAdd = !s.saving && !s.server;
+    add(rules, add(el("div", "actions add-rules"), kit.button(W.addFolder, "privacy:add:folder", folders && canAdd ? addFolder : null, "plain"), kit.button(W.addLabel, "privacy:add:label", gmail && canAdd ? addLabel : null, "plain"), kit.button(W.addSender, "privacy:add:sender", canAdd ? addSender : null, "plain")));
+    if (s.server)
+      add(rules, el("p", "reason", W.conflictAddBlocked));
     if (!folders)
       add(rules, el("p", "reason", W.needFolderSource));
     if (!gmail)
@@ -151558,9 +151657,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     add(rules, el("p", "reason", W.namesShared));
     add(page2, rules);
     const footer = el("section", "picker-footer");
-    if (s.pendingCount > 0) {
-      add(footer, el("p", "", fill2(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
-    }
     if (s.confirmStep && !s.saving && lowers()) {
       add(page2, add(footer, confirmBox()));
       return;
@@ -151706,7 +151802,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return page2;
   }
   function backOut() {
-    if (!s)
+    if (!s || s.saving)
       return;
     if (s.edited && !s.saving) {
       s.discarding = true;
@@ -161036,11 +161132,18 @@ function createEmailSourceWorker(options = {}) {
           });
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/disconnect") {
+          const disconnectRecord = await parseObjectBody(request);
+          if (disconnectRecord.acknowledge === true) {
+            if (disconnectRecord.source_id === "telegram.messages")
+              await dashboardMessaging?.cancelAndWait("telegram");
+            if (disconnectRecord.source_id === "whatsapp.personal.messages")
+              await dashboardMessaging?.cancelAndWait("whatsapp");
+          }
           return await withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
-            const record7 = await parseObjectBody(request);
+            const record7 = disconnectRecord;
             if (record7.source_id === "local.files") {
               if (record7.acknowledge !== true) {
                 throw new EmailSourceWorkerError(400, "disconnect_confirmation_required", "Confirm that Disconnect keeps the files already indexed and only stops Olympus reading this computer.");

@@ -92,6 +92,13 @@ export function createDashboardMessagingService(options: {
   const packageRoot = olympusPackageRoot();
   const available = new Map<MessagingSource, { fingerprint: string; chats: PairingChat[] }>();
   const selecting = new Set<MessagingSource>();
+  const initialGrants = new Map<MessagingSource, string>();
+  const grantSnapshot = (source: MessagingSource) => {
+    const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+    if (read.kind === 'invalid' || (read.kind === 'valid' && read.grant.source !== source)) throw new Error('Invalid capture grant.');
+    if (read.kind === 'valid') retainApprovedCaptureScope(source, read.grant.producer.env);
+    return JSON.stringify(read.kind === 'valid' ? read.grant : null);
+  };
   const grantFor = (source: MessagingSource) => {
     const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
     const read = readCaptureGrantFile(path);
@@ -103,7 +110,7 @@ export function createDashboardMessagingService(options: {
       const result = await (options.pairSource ?? pairMessagingSource)({
         source, packageRoot, secretStore: options.secretStore,
         ...(options.registryPath ? { registryPath: options.registryPath } : {}),
-        signal: hooks.signal, whatsappQrMode: 'artifact',
+        signal: hooks.signal, onCommitStart: hooks.commit, whatsappQrMode: 'artifact',
         captureScopeApproval: { source, explicitApproval: true, wholeAccount: true },
         runCommand: (request) => runDashboardPairingCommand(request, hooks),
         onWhatsAppQr: (path) => hooks.qr(readQr(path)),
@@ -115,6 +122,7 @@ export function createDashboardMessagingService(options: {
       if (signal.aborted) return;
       const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
       const prior = readCaptureGrantFile(path);
+      if (grantSnapshot(source) !== initialGrants.get(source)) throw new Error('Capture grant changed during pairing.');
       if (prior.kind === 'invalid' || (prior.kind === 'valid' && prior.grant.source !== source)) throw new Error('Invalid capture grant.');
       const retained = prior.kind === 'valid' ? retainApprovedCaptureScope(source, prior.grant.producer.env) : {};
       if (signal.aborted) return;
@@ -160,7 +168,11 @@ export function createDashboardMessagingService(options: {
       const source = sourceOf(record.source);
       if (operation === 'start') {
         if (selecting.has(source)) throw new Error('Finish choosing chats first.');
-        return manager.start(source);
+        return options.withGrantMutation(async () => {
+          if (manager.busy(source)) throw new Error('Pairing is already running.');
+          initialGrants.set(source, grantSnapshot(source));
+          return manager.start(source);
+        });
       }
       if (operation === 'status') return manager.status(source);
       if (operation === 'cancel') return manager.cancel(source);

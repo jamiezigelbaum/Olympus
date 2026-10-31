@@ -26,15 +26,15 @@ describe('dashboard messaging pairing', () => {
     expect(published).toBe(true);
   });
 
-  test('cancelling a queued publication keeps selection busy until publication has stopped', async () => {
+  test('cancelling before registration keeps selection busy until pairing has stopped', async () => {
     let release!: () => void;
     let entered!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     const publishing = new Promise<void>((resolve) => { entered = resolve; });
     let saved = false;
     const manager = createDashboardMessagingPairing({
-      pair: async () => ({ chats: [] }),
-      publish: async (_source, _result, signal) => { entered(); await held; if (!signal.aborted) saved = true; },
+      pair: async () => { entered(); await held; return { chats: [] }; },
+      publish: async () => { saved = true; },
     });
     manager.start('telegram');
     await publishing;
@@ -46,3 +46,22 @@ describe('dashboard messaging pairing', () => {
     expect(manager.busy('telegram')).toBe(false);
   });
 });
+
+test('cancellation after registration begins waits for the grant to publish', async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const committed = new Promise<void>((resolve) => { entered = resolve; });
+  let saved = false;
+  const manager = createDashboardMessagingPairing({
+    pair: async (_source, hooks) => { hooks.commit(); entered(); await held; return { chats: [] }; },
+    publish: async () => { saved = true; },
+  });
+  manager.start('telegram');
+  await Promise.race([committed, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Registration did not begin')), 1000))]);
+  manager.cancel('telegram');
+  release();
+  await manager.cancelAndWait('telegram');
+  expect(saved).toBe(true);
+  expect(manager.status('telegram').state).toBe('paired');
+}, 30_000);

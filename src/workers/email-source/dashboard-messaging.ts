@@ -6,15 +6,17 @@ export interface PairingHooks {
   signal: AbortSignal;
   prompt(field: PairingField, reply: (value: string) => void): void;
   qr(value: string): void;
+  commit(): void;
 }
 type PairResult = { chats: readonly PairingChat[] };
 type PairState = {
-  state: 'starting' | 'waiting' | 'paired' | 'failed' | 'cancelled';
+  state: 'starting' | 'waiting' | 'committing' | 'paired' | 'failed' | 'cancelled';
   controller: AbortController;
   field?: PairingField;
   reply?: (value: string) => void;
   qr?: string;
   chats?: readonly PairingChat[];
+  registrationMayBeSaved?: boolean;
   task?: Promise<void>;
 };
 
@@ -30,6 +32,7 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
       ...(item.field ? { field: item.field } : {}),
       ...(item.qr ? { qr: item.qr } : {}),
       ...(item.chats ? { chats: item.chats } : {}),
+      ...(item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}),
     } : { ok: true as const, state: 'idle' as const };
   };
   return {
@@ -51,14 +54,23 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
               item.state = 'waiting';
             },
             qr(value) { if (!item.controller.signal.aborted) { item.qr = value; item.state = 'waiting'; } },
+            commit() {
+              if (item.controller.signal.aborted) throw new Error('Pairing was cancelled.');
+              delete item.reply; delete item.field; delete item.qr;
+              item.state = 'committing';
+            },
           });
           if (item.controller.signal.aborted) return;
+          item.state = 'committing';
           await options.publish(source, result, item.controller.signal);
           if (item.controller.signal.aborted) return;
           item.chats = result.chats;
           item.state = 'paired';
         } catch {
-          if (!item.controller.signal.aborted) item.state = 'failed';
+          if (!item.controller.signal.aborted) {
+            if (item.state === 'committing') item.registrationMayBeSaved = true;
+            item.state = 'failed';
+          }
         } finally {
           delete item.reply;
           delete item.field;
