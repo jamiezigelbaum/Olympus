@@ -435,10 +435,7 @@ describe('the words fit the app the Mac actually names', () => {
   });
 });
 
-test('missing helper copy gives an actionable installation path', () => {
-  for (const copy of [MAC_ACCESS_COPY.needsHelper, MAC_ACCESS_COPY.needsHelperWholeComputer]) {
-    expect(copy).toContain('https://olympusplugin.ai/install.sh');
-    expect(copy).toContain('olympus engine install-helper');
-    expect(copy).not.toContain('later update');
-  }
+test('missing helper copy uses the approved wording', () => {
+  expect(MAC_ACCESS_COPY.needsHelper).toBe('Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.');
+  expect(MAC_ACCESS_COPY.needsHelperWholeComputer).toBe('Reading the whole computer needs the Olympus helper app. Update Olympus to add it, or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.');
 });
