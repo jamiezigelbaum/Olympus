@@ -6,7 +6,7 @@ test('Dropbox refuses a missing permission before storing the grant', async () =
   await expect(checkDropboxConnection('fixture', async (_url, init) => {
     calls++;
     expect(init?.redirect).toBe('error');
-    return new Response('', { status: 403 });
+    return Response.json({ error: { '.tag': 'missing_scope', required_scope: 'files.metadata.read' }, error_summary: 'missing_scope/' }, { status: 401 });
   }, 1000)).rejects.toThrow('Enable permissions');
   expect(calls).toBe(1);
 });

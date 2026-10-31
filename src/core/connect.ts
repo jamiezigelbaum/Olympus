@@ -614,17 +614,22 @@ function prepareOAuthSourceConnection(
   };
 }
 
-export async function checkDropboxConnection(accessToken: string, fetchImpl: OAuthFetch, timeoutMs: number): Promise<void> {
+export async function checkDropboxConnection(accessToken: string, fetchImpl: OAuthFetch, timeoutMs: number, tokenUrl = 'https://api.dropboxapi.com/oauth2/token'): Promise<void> {
   let response: Response;
+  let text: string;
   try {
-    response = await fetchWithTimeout(fetchImpl, 'https://api.dropboxapi.com/2/files/list_folder', {
+    ({ response, text } = await fetchBoundedText(fetchImpl, new URL('/2/files/list_folder', tokenUrl).toString(), {
       method: 'POST', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: '', limit: 1 }), redirect: 'error',
-    }, timeoutMs);
+    }, { timeoutMs, limitBytes: 64 * 1024 }));
   } catch {
     throw new Error('Dropbox could not be reached for the final check. No credentials were stored; try again.');
   }
-  if (response.status === 403) throw new Error('Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.');
+  let missingScope = false;
+  if (response.status === 401) {
+    try { missingScope = JSON.parse(text)?.error?.['.tag'] === 'missing_scope'; } catch { /* generic refusal */ }
+  }
+  if (missingScope) throw new Error('Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.');
   if (!response.ok) throw new Error('Dropbox could not complete the list check. No credentials were stored; try again.');
 }
 
@@ -667,7 +672,7 @@ async function completeOAuthSourceConnection(
   if (!token.refreshToken) throw new Error('OAuth provider did not return a refresh token. Re-run connect and request offline access.');
   const refreshToken = token.refreshToken;
   if (prepared.options.source === 'dropbox') {
-    await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs);
+    await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs, prepared.options.tokenUrl ?? prepared.definition.tokenUrl);
   }
 
   let xUserId: string | undefined;
@@ -1325,8 +1330,8 @@ async function validateVeniceKey(options: { apiKey: string; fetchImpl: OAuthFetc
   if (!data.accessPermitted) throw new Error('Venice does not permit this key. Redo the Create an API key step and check its restrictions. No credentials were stored.');
   const balances = data.balances;
   if (!balances || typeof balances !== 'object') throw new Error('Venice did not report a balance. No credentials were stored; try again.');
-  const amounts = ['USD', 'DIEM', 'BUNDLED_CREDITS'].map(key => balances[key]);
-  if (!amounts.every(value => typeof value === 'number' && Number.isFinite(value))) throw new Error('Venice returned an incomplete balance. No credentials were stored; try again.');
+  const amounts = ['USD', 'DIEM', 'BUNDLED_CREDITS'].map(key => balances[key]).filter(value => value !== undefined && value !== null);
+  if (!amounts.length || !amounts.every(value => typeof value === 'number' && Number.isFinite(value))) throw new Error('Venice returned an incomplete balance. No credentials were stored; try again.');
   if (!amounts.some(value => value > 0)) throw new Error('Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored.');
 }
 

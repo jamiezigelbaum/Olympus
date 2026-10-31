@@ -77,6 +77,21 @@ function oauthResult(url: string): OlympusDashboardControlResult {
 }
 
 describe('OAuth browser handoff', () => {
+  test('Dropbox publisher Connect starts its one-click flow even with own-app steps', () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<button data-sheet-toggle="#dropbox-connect">Connect</button>' + connectSetupSheet({
+      id: 'dropbox-connect', heading: 'Connect Dropbox', intro: 'Use your app', promptText: 'Help', source: 'dropbox', fields: [],
+      steps: [{ text: 'Create' }, { text: 'Key' }], provider: 'Dropbox', publisher: { intro: 'Connect Dropbox', byoSummary: 'Use my own app' },
+    });
+    document.body.append(root);
+    const calls: unknown[] = [];
+    const controller = mountDashboardController({ root, transport: { control: async (params) => { calls.push(params); return { status: 200, body: { ok: true } }; } },
+      navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+    root.querySelector<HTMLButtonElement>('[data-sheet-toggle]')!.click();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ action: 'start_oauth', source: 'dropbox' });
+    controller.dispose();
+  });
   test('setup opens the provider synchronously and keeps a safe fallback link', () => {
     const root = document.createElement('div');
     root.innerHTML = setupStepsSheet({ id: 'venice', provider: 'Venice', finalForm: '', steps: [

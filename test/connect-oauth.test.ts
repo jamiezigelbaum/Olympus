@@ -33,7 +33,7 @@ import {
 import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 
 const fundedVenice = { data: { accessPermitted: true, balances: { USD: 1, DIEM: 0, BUNDLED_CREDITS: 0 } } };
-const oauthFixtureFetch: OAuthFetch = (input, init) => String(input) === 'https://api.dropboxapi.com/2/files/list_folder'
+const oauthFixtureFetch: OAuthFetch = (input, init) => new URL(String(input)).pathname === '/2/files/list_folder'
   ? Promise.resolve(Response.json({ entries: [], has_more: false, cursor: 'fixture' }))
   : fetch(input, init);
 
@@ -1488,7 +1488,7 @@ for (const source of ['dropbox', 'x']) {
     authUrl: baseUrl + '/authorize',
     tokenUrl: baseUrl + '/token',
     openBrowser: false,
-    fetch: (input, init) => String(input) === 'https://api.dropboxapi.com/2/files/list_folder'
+    fetch: (input, init) => new URL(String(input)).pathname === '/2/files/list_folder'
       ? Promise.resolve(Response.json({ entries: [], has_more: false, cursor: 'fixture' })) : fetch(input, init),
     onAuthorizationUrl: completeBrowserRedirect,
   });

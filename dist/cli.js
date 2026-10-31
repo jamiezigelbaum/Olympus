@@ -11645,20 +11645,27 @@ function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPk
     startedAt: now()
   };
 }
-async function checkDropboxConnection(accessToken, fetchImpl, timeoutMs) {
+async function checkDropboxConnection(accessToken, fetchImpl, timeoutMs, tokenUrl = "https://api.dropboxapi.com/oauth2/token") {
   let response;
+  let text;
   try {
-    response = await fetchWithTimeout(fetchImpl, "https://api.dropboxapi.com/2/files/list_folder", {
+    ({ response, text } = await fetchBoundedText(fetchImpl, new URL("/2/files/list_folder", tokenUrl).toString(), {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ path: "", limit: 1 }),
       redirect: "error"
-    }, timeoutMs);
+    }, { timeoutMs, limitBytes: 64 * 1024 }));
   } catch {
     throw new Error("Dropbox could not be reached for the final check. No credentials were stored; try again.");
   }
-  if (response.status === 403)
-    throw new Error("Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.");
+  let missingScope = false;
+  if (response.status === 401) {
+    try {
+      missingScope = JSON.parse(text)?.error?.[".tag"] === "missing_scope";
+    } catch {}
+  }
+  if (missingScope)
+    throw new Error("Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.");
   if (!response.ok)
     throw new Error("Dropbox could not complete the list check. No credentials were stored; try again.");
 }
@@ -11682,7 +11689,7 @@ async function completeOAuthSourceConnection(prepared, code) {
     throw new Error("OAuth provider did not return a refresh token. Re-run connect and request offline access.");
   const refreshToken = token.refreshToken;
   if (prepared.options.source === "dropbox") {
-    await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs);
+    await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs, prepared.options.tokenUrl ?? prepared.definition.tokenUrl);
   }
   let xUserId;
   if (prepared.options.source === "x") {
@@ -12145,8 +12152,8 @@ async function validateVeniceKey(options) {
   const balances = data.balances;
   if (!balances || typeof balances !== "object")
     throw new Error("Venice did not report a balance. No credentials were stored; try again.");
-  const amounts = ["USD", "DIEM", "BUNDLED_CREDITS"].map((key) => balances[key]);
-  if (!amounts.every((value) => typeof value === "number" && Number.isFinite(value)))
+  const amounts = ["USD", "DIEM", "BUNDLED_CREDITS"].map((key) => balances[key]).filter((value) => value !== undefined && value !== null);
+  if (!amounts.length || !amounts.every((value) => typeof value === "number" && Number.isFinite(value)))
     throw new Error("Venice returned an incomplete balance. No credentials were stored; try again.");
   if (!amounts.some((value) => value > 0))
     throw new Error("Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored.");
@@ -144618,7 +144625,7 @@ function connectSetupSheet(input) {
   const byoForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `${inputs}` + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
   const walkthrough = input.steps && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm}`;
   if (input.publisher) {
-    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable || input.steps ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
     return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml2(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${prompt}` + `</details>` + `</div>`;
   }
   return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${cancel}` + `${prompt}` + `</div>`;
@@ -159935,7 +159942,7 @@ function createEmailSourceWorker(options = {}) {
             attempt.consumed = true;
             return dashboardOAuthFailureHtml({
               source,
-              reason: `OAuth provider returned ${errorCode2 ?? "an unrecognized error"}.`,
+              reason: source === "dropbox" && errorCode2 === "invalid_scope" && attempt.clientIdSource === "byo" ? "Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored." : `OAuth provider returned ${errorCode2 ?? "an unrecognized error"}.`,
               returnTo: attempt.returnTo,
               status: 400
             });
@@ -159967,7 +159974,7 @@ function createEmailSourceWorker(options = {}) {
             clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
             return dashboardOAuthFailureHtml({
               source,
-              reason: dashboardCallbackFailureReason(error2, source),
+              reason: dashboardCallbackFailureReason(error2, source, attempt.clientIdSource),
               returnTo: attempt.returnTo,
               status: 400
             });
@@ -160090,6 +160097,7 @@ function createEmailSourceWorker(options = {}) {
             dashboardOAuthAttempts.set(source, {
               source,
               pending,
+              clientIdSource: publisher ? "publisher" : "byo",
               returnTo: handback || computerHandback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
               startedAt: startedAtDate.toISOString(),
               expiresAt,
@@ -163352,9 +163360,9 @@ function safeVeniceCheckFailure(error2) {
   ]);
   return allowed.has(message2) ? message2 : "The Venice key could not be validated or applied. Try again.";
 }
-function dashboardCallbackFailureReason(error2, source) {
+function dashboardCallbackFailureReason(error2, source, clientIdSource) {
   const message2 = error2 instanceof Error ? error2.message : "";
-  if (source === "dropbox" && message2 === "Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.")
+  if (source === "dropbox" && clientIdSource === "byo" && message2 === "Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.")
     return message2;
   const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message2);
   if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined))
@@ -163382,7 +163390,7 @@ function dashboardBoundedExpiry(claimed, now) {
 function dashboardOAuthFailureHtml(options) {
   const label = dashboardOAuthSourceLabel(options.source);
   const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
-  const permissions = !chatgpt && options.source === "dropbox" && options.reason === "Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.";
+  const permissions = !chatgpt && options.source === "dropbox" && options.reason === "Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.";
   return dashboardOAuthLandingHtml({
     title: "Olympus connect failed",
     heading: `Could not connect ${label}`,

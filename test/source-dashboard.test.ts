@@ -2390,6 +2390,23 @@ describe('multi-source source dashboard', () => {
     expect(text).not.toContain('"error"');
   });
 
+  test('Dropbox own-app invalid scope links directly to permissions without storing a grant', async () => {
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'olympus-dropbox-scope-')), 'handles.json');
+    const secretStore = memorySecretStore({});
+    const worker = createEmailSourceWorker({ sourceDashboard: { sovereigntyEngine: fixtureSovereigntyEngine(), registryPath, secretStore } });
+    const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
+    const start = await fetch(new Request('http://worker.test/dashboard/connect/oauth/start', {
+      method: 'POST', headers: { Authorization: 'Bearer dashboard-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'dropbox', client_id: 'own-app-fixture' }),
+    }));
+    const payload = await start.json();
+    const state = new URL(payload.authorization_url).searchParams.get('state');
+    const callback = await fetch(new Request(`http://worker.test/oauth/callback/dropbox?error=invalid_scope&state=${state}`));
+    expect(callback.status).toBe(400);
+    expect(await callback.text()).toContain('href="/dashboard#olympus-open=dropbox.permissions"');
+    expect(await secretStore.get('dropbox.personal.oauth.refresh_token')).toBeUndefined();
+  });
+
   // The live 2026-08-19 incident: behind `tailscale serve` the TLS terminates
   // at the proxy, the worker sees plain HTTP, and the callback came out as
   // http://<private-host>.<tailnet>.ts.net/... — which X refuses, killing the flow on

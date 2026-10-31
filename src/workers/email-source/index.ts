@@ -1764,7 +1764,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             attempt.consumed = true;
             return dashboardOAuthFailureHtml({
               source,
-              reason: `OAuth provider returned ${errorCode ?? 'an unrecognized error'}.`,
+              reason: source === 'dropbox' && errorCode === 'invalid_scope' && attempt.clientIdSource === 'byo'
+                ? 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.'
+                : `OAuth provider returned ${errorCode ?? 'an unrecognized error'}.`,
               returnTo: attempt.returnTo,
               status: 400,
             });
@@ -1803,7 +1805,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
             return dashboardOAuthFailureHtml({
               source,
-              reason: dashboardCallbackFailureReason(error, source),
+              reason: dashboardCallbackFailureReason(error, source, attempt.clientIdSource),
               returnTo: attempt.returnTo,
               status: 400,
             });
@@ -2016,6 +2018,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           dashboardOAuthAttempts.set(source, {
             source,
             pending,
+            clientIdSource: publisher ? 'publisher' : 'byo',
             returnTo: handback || computerHandback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
             startedAt: startedAtDate.toISOString(),
             expiresAt,
@@ -6492,6 +6495,7 @@ const DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 10 * 60_000;
 interface DashboardOAuthAttempt {
   source: DashboardOAuthSource;
   pending: DashboardPendingOAuth;
+  clientIdSource?: 'publisher' | 'byo';
   returnTo: string;
   startedAt: string;
   expiresAt: string;
@@ -7290,9 +7294,9 @@ function safeVeniceCheckFailure(error: unknown): string {
   return allowed.has(message) ? message : 'The Venice key could not be validated or applied. Try again.';
 }
 
-function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSource): string {
+function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSource, clientIdSource?: 'publisher' | 'byo'): string {
   const message = error instanceof Error ? error.message : '';
-  if (source === 'dropbox' && message === 'Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.') return message;
+  if (source === 'dropbox' && clientIdSource === 'byo' && message === 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.') return message;
   const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message);
   // The code inside the shape is re-checked against the allowlist: the shape
   // alone would admit arbitrary lowercase content from a crafted message.
@@ -7335,7 +7339,7 @@ function dashboardOAuthFailureHtml(options: {
   const label = dashboardOAuthSourceLabel(options.source);
   const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
   const permissions = !chatgpt && options.source === 'dropbox'
-    && options.reason === 'Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.';
+    && options.reason === 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.';
   return dashboardOAuthLandingHtml({
     title: 'Olympus connect failed',
     heading: `Could not connect ${label}`,
