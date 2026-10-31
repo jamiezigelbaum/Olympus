@@ -13,6 +13,8 @@ starts; patch releases only for security, data loss or a privacy leak, a
 broken install or upgrade, or a directory-reviewer blocker. One full release
 check on the final candidate. Listing updates ride only on a tested minor
 release; the demo box is updated right after the tag, before any upload.
+Before the tag, run `bun run eval:real` on the owner's install with the
+private held-out set to verify chat search (#619).
 
 Centerpiece: the signed, notarized Mac helper under OCU (olympus-ops #64), so
 Files on this computer reads Desktop, Documents, Downloads and iCloud Drive.
@@ -67,14 +69,14 @@ owned by their respective builders.
 
 ## Local files source (owner direction 2026-10-21)
 
-Planned, not built. Mac Finder and the Linux home become a thin `local.files`
+Built: Mac Finder and the Linux home use a thin `local.files`
 connector on the shared spine. It uses the same folder picker as Dropbox and
 Drive, with nothing selected at first, no sign-in, file-change notifications
 for instant updates, and the same per-item tiers. Spine work lands first: a
 scope-source registry, a "this computer" account basis, and push wake.
 Guarded Mac folders (Desktop, Documents, Downloads, iCloud Drive) need a
 signed Olympus helper app, signed under the Open Coordination Unlimited
-Apple Developer organization account (owner decision 2026-10-21). Design and
+Apple Developer organization account (owner decision 2026-10-21); the installer can pin a notarized helper, with real-Mac permission and upgrade qualification still required. Design and
 delivery sequence:
 [local files](design/local-files.md).
 

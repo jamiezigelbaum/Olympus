@@ -83,7 +83,7 @@ export interface MacPermissionsOptions {
  *  - `engine_helper`: the standalone engine, started through the signed helper:
  *    the Mac names "Olympus Engine".
  *  - `engine_without_helper`: the standalone engine with no helper installed
- *    (the signed helper app fixes it; release builds do not ship it yet).
+ *    (the signed helper app fixes it).
  *  - `managed_worker`: the worker OpenClaw's Gateway supervises as its own
  *    LaunchAgent. It is never started through the helper, so installing the
  *    helper for the standalone engine does not change what the Mac names.
@@ -100,8 +100,8 @@ const OTHER_APP = 'the app that runs Olympus (the one your Mac named when it ask
 export const MAC_ACCESS_COPY = {
   needsPermission: 'Your Mac will ask before Olympus opens this folder.',
   waiting: 'Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.',
-  needsHelper: 'Olympus cannot open this folder on this Mac yet. Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.',
-  needsHelperWholeComputer: 'Olympus cannot read the whole computer on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.',
+  needsHelper: 'Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.',
+  needsHelperWholeComputer: 'Reading the whole computer needs the Olympus helper app. Update Olympus to add it, or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.',
   /** Olympus runs as OpenClaw's own worker: the helper is not part of that setup, so say what does work. */
   needsHelperManagedWorker: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. Choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.',
   needsHelperManagedWorkerWholeComputer: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.',

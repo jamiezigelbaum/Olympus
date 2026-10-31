@@ -1,6 +1,7 @@
+import { WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE, WORKER_SOCKET_RETAINED_MESSAGE } from './native-worker-service.ts';
 import { defaultTelegramPython } from './messaging-runtime.ts';
 import { readEngineLinger, linuxInstalledBuild } from './linux-engine-service.ts';
-import { engineServicePaths, waitForEngineHealthy } from './engine-service.ts';
+import { engineServicePaths, readEngineWorkerProblem, waitForEngineHealthy } from './engine-service.ts';
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { workerFetch } from './worker-transport.ts';
 // Olympus doctor: a read-only health walk across the chain the calling assistant depends on
@@ -153,7 +154,7 @@ export interface DoctorHostFacts {
   /** Absolute `openclaw` executable, when one is installed. */
   openclawPath?: string;
   /** The standalone engine LaunchAgent (macOS). */
-  engine: { installed: boolean; state: string; healthy?: boolean; detail?: string; linger?: boolean | undefined };
+  engine: { installed: boolean; state: string; workerProblem?: string | undefined; healthy?: boolean; detail?: string; linger?: boolean | undefined };
   /** The legacy worker unit from `olympus worker install`. */
   legacyWorkerUnit: boolean;
   /** Doctor is running inside the OpenClaw Gateway (the native tool surface). */
@@ -165,6 +166,7 @@ export async function defaultDoctorHostProbe(
   options: { insideOpenClaw?: boolean } = {},
 ): Promise<DoctorHostFacts> {
   const home = env.HOME?.trim() || homedir();
+  const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = (process.platform === 'darwin' || process.platform === 'linux')
     ? inspectEngine({ homeDir: home, env })
@@ -172,10 +174,10 @@ export async function defaultDoctorHostProbe(
   const legacyWorkerUnit = process.platform === 'darwin' || process.platform === 'linux'
     ? existsSync(workerServicePaths(process.platform, home).unitPath)
     : false;
-  const health = process.platform === 'linux' && engine.installed ? await waitForEngineHealthy({ paths: engineServicePaths({ homeDir: home, env }), expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
+  const health = process.platform === 'linux' && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...(openclawPath ? { openclawPath } : {}),
-    engine: { installed: engine.installed, state: engine.state, ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
+    engine: { installed: engine.installed, state: engine.state, ...(engine.state === 'running' ? { workerProblem: readEngineWorkerProblem(paths.statusPath) } : {}), ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
     legacyWorkerUnit,
     ...(options.insideOpenClaw ? { insideOpenClaw: true } : {}),
   };
@@ -534,6 +536,12 @@ async function ocrReadingCheck(deps: DoctorDeps): Promise<DoctorCheck> {
  */
 async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const facts = await deps.hostProbe!();
+  if (facts.engine.workerProblem) return { name: 'host', ok: false, detail: facts.engine.workerProblem,
+    hint: facts.engine.workerProblem === WORKER_SOCKET_RETAINED_MESSAGE
+      ? 'Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket.'
+      : [WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE].includes(facts.engine.workerProblem)
+      ? 'Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. The engine retries automatically.'
+      : 'Run olympus engine status and olympus engine logs to diagnose the worker startup failure.' };
   // Checked first: a competing worker unit is a common reason the engine's own worker is not ready.
   if (facts.engine.installed && facts.legacyWorkerUnit) return { name: 'host', ok: false, detail: 'A worker service from olympus worker install is installed beside the engine and competes with it for the same data and port.', hint: 'Run olympus worker uninstall. The engine keeps running and owns the worker.' };
   if (facts.engine.installed && (facts.engine.healthy === false || facts.engine.linger === false)) return { name: 'host', ok: false, detail: facts.engine.detail || 'The Linux engine has not proved healthy and persistent.', hint: 'Run olympus engine status and olympus engine logs. Repair configuration, then run systemctl --user reset-failed olympus-engine.service followed by olympus engine start.' };
