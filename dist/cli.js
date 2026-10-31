@@ -145741,7 +145741,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .sheet [data-setup-guided] [data-setup-counter] { color: var(--t3); font-size: var(--fs-caption); letter-spacing: 0.1em; margin-bottom: 8px; }
 [data-setup-guided] h2 { font-size: var(--fs-title); margin: 0 0 20px; }
 [data-setup-guided] [data-setup-open] { width: 100%; padding: 12px 18px; margin: 8px 0 16px; }
-[data-setup-guided] .primary { background: var(--t1); border-color: var(--t1); color: var(--bg); }
+[data-setup-guided] .setupactions > .primary { background: var(--t1); border-color: var(--t1); color: var(--bg); }
 .sheet .setupnote { background: light-dark(#efebfa, #302b43); color: var(--t2); padding: 16px; border-radius: 8px; max-width: none; }
 .sheet .setupfooter { color: var(--t3); font-size: var(--fs-caption); margin: 16px 0 0; max-width: none; }
 [data-client-paste] summary { color: var(--link); cursor: pointer; font-size: var(--fs-body); margin-bottom: 12px; }
