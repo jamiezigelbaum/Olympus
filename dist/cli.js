@@ -53517,7 +53517,7 @@ var init_vocabulary = __esm(() => {
     needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
     needGmail: "Connect Gmail to add a label.",
     nothingToSave: "Nothing to save yet. Change a rule or the description first.",
-    save: "Save",
+    save: "Save description and answers",
     saving: "Saving…",
     cancel: "Cancel",
     saveFailed: "Olympus could not save. Your changes are still here. Try again.",
@@ -150977,6 +150977,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     area.setAttribute("aria-describedby", "privacy-description-shared");
     const asked = L.questionsKey(s.description);
     area.addEventListener("input", () => {
+      const hadDescriptionEdits = s.description !== s.savedDescription;
       s.description = area.value;
       summary.textContent = L.summary(s.description) || W.summaryEmpty;
       const open7 = s.confirmStep;
@@ -150984,7 +150985,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       changed();
       const noted = !!s.questionsError;
       s.questionsError = "";
-      if (open7 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
+      if (hadDescriptionEdits !== (s.description !== s.savedDescription) || open7 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
         kit.render("privacy:description");
     });
     add(details, add(field, area));
@@ -151018,30 +151019,24 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(page2, add(footer, confirmBox()));
       return;
     }
-    const row = el("div", "actions");
+    const pendingDescription = s.description !== s.savedDescription;
+    const wrap = el("div", "save");
     if (s.saving) {
       const busy = kit.button(W.saving, "privacy:save", null, "main");
       busy.setAttribute("aria-busy", "true");
-      add(row, busy);
-    } else {
-      const button = kit.button(W.save, "privacy:save", canSave() ? save : null, "main");
-      if (!canSave())
-        button.setAttribute("aria-describedby", "privacy-save-reason");
-      add(row, button);
-    }
-    add(row, kit.button(W.cancel, "privacy:cancel", s.saving ? null : backOut, "plain"));
-    const wrap = add(el("div", "save"), row);
-    if (!s.saving && !canSave()) {
-      const reason = el("p", "reason", W.nothingToSave);
-      reason.id = "privacy-save-reason";
-      add(wrap, reason);
+      add(wrap, busy);
+    } else if (!s.server && pendingDescription) {
+      add(wrap, add(el("div", "actions"), kit.button(W.save, "privacy:save", canSave() ? save : null, "main"), kit.button(W.cancel, "privacy:cancel", backOut, "plain")));
+    } else if (!s.server && s.intents.length) {
+      add(wrap, kit.button(W.applyAgain, "privacy:save", save, "main"));
     }
     if (s.saveError) {
       const error2 = el("p", "error", s.saveError);
       error2.setAttribute("role", "alert");
       add(wrap, error2);
     }
-    add(page2, add(footer, wrap));
+    if (wrap.childNodes.length)
+      add(page2, add(footer, wrap));
   }
   function sourcesView(page2) {
     add(page2, el("h1", "", W.folderSourceTitle));
@@ -151699,8 +151694,10 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .privacy-summary{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.5;margin-top:0.75rem}
 .rule-chips{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:0.5rem;margin:0.75rem 0}
 .rule-chip{display:flex;align-items:center;gap:0.5rem;border:1px solid var(--line);border-radius:1rem;padding:0.25rem 0.5rem 0.25rem 0.75rem;max-width:100%;overflow-wrap:anywhere}
-.rule-chip .two-line{display:flex;flex-direction:column;font-size:0.875rem}
-.rule-chip .btn{border:0;min-width:2.5rem}
+.rule-chip .fname{width:auto;min-width:0;padding:0;text-align:left}
+.rule-chip .two-line{display:flex;flex-direction:column;align-items:flex-start;font-size:0.875rem}
+.rule-chip .two-line>span{max-width:100%;white-space:normal}
+.rule-chip .btn{border:0;min-width:2.5rem;flex:none;align-self:center;margin-left:auto}
 .privacy-details{margin-top:1.25rem}
 .privacy-details summary{cursor:pointer;min-height:2.5rem;align-content:center;font-weight:500}
 .privacy-details>.intro{margin:0.75rem 0}

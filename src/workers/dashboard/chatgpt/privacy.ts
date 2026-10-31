@@ -699,6 +699,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     area.setAttribute('aria-describedby', 'privacy-description-shared');
     const asked = L.questionsKey(s.description);
     area.addEventListener('input', () => {
+      const hadDescriptionEdits = s.description !== s.savedDescription;
       s.description = area.value;
       summary.textContent = L.summary(s.description) || W.summaryEmpty;
       const open = s.confirmStep;
@@ -708,7 +709,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       // what the questions show changes (an area, or an answer edited by hand).
       const noted = !!s.questionsError;
       s.questionsError = '';
-      if (open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
+      if (hadDescriptionEdits !== (s.description !== s.savedDescription) || open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
     });
     add(details, add(field, area));
     const shared = el('p', 'reason field-note', W.descriptionShared);
@@ -737,30 +738,27 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       add(page, add(footer, confirmBox()));
       return;
     }
-    const row = el('div', 'actions');
+    // Rule writes apply immediately. Only description/question edits get a save bar.
+    const pendingDescription = s.description !== s.savedDescription;
+    const wrap = el('div', 'save');
     if (s.saving) {
       const busy = kit.button(W.saving, 'privacy:save', null, 'main');
       busy.setAttribute('aria-busy', 'true');
-      add(row, busy);
-    } else {
-      const button = kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main');
-      // A Save with nothing to do says why it is off, as the folder picker's does.
-      if (!canSave()) button.setAttribute('aria-describedby', 'privacy-save-reason');
-      add(row, button);
-    }
-    add(row, kit.button(W.cancel, 'privacy:cancel', s.saving ? null : backOut, 'plain'));
-    const wrap = add(el('div', 'save'), row);
-    if (!s.saving && !canSave()) {
-      const reason = el('p', 'reason', W.nothingToSave);
-      reason.id = 'privacy-save-reason';
-      add(wrap, reason);
+      add(wrap, busy);
+    } else if (!s.server && pendingDescription) {
+      add(wrap, add(el('div', 'actions'),
+        kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main'),
+        kit.button(W.cancel, 'privacy:cancel', backOut, 'plain')));
+    } else if (!s.server && s.intents.length) {
+      // A failed addition or cancelled removal still needs its existing retry path.
+      add(wrap, kit.button(W.applyAgain, 'privacy:save', save, 'main'));
     }
     if (s.saveError) {
       const error = el('p', 'error', s.saveError);
       error.setAttribute('role', 'alert');
       add(wrap, error);
     }
-    add(page, add(footer, wrap));
+    if (wrap.childNodes.length) add(page, add(footer, wrap));
   }
 
   function sourcesView(page: HTMLElement): void {

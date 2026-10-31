@@ -349,8 +349,10 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .privacy-summary{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.5;margin-top:0.75rem}
 .rule-chips{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:0.5rem;margin:0.75rem 0}
 .rule-chip{display:flex;align-items:center;gap:0.5rem;border:1px solid var(--line);border-radius:1rem;padding:0.25rem 0.5rem 0.25rem 0.75rem;max-width:100%;overflow-wrap:anywhere}
-.rule-chip .two-line{display:flex;flex-direction:column;font-size:0.875rem}
-.rule-chip .btn{border:0;min-width:2.5rem}
+.rule-chip .fname{width:auto;min-width:0;padding:0;text-align:left}
+.rule-chip .two-line{display:flex;flex-direction:column;align-items:flex-start;font-size:0.875rem}
+.rule-chip .two-line>span{max-width:100%;white-space:normal}
+.rule-chip .btn{border:0;min-width:2.5rem;flex:none;align-self:center;margin-left:auto}
 .privacy-details{margin-top:1.25rem}
 .privacy-details summary{cursor:pointer;min-height:2.5rem;align-content:center;font-weight:500}
 .privacy-details>.intro{margin:0.75rem 0}

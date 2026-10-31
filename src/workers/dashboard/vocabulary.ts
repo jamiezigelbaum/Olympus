@@ -2830,7 +2830,7 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   needFolderSource: 'Connect Dropbox or Google Drive to add a folder.',
   needGmail: 'Connect Gmail to add a label.',
   nothingToSave: 'Nothing to save yet. Change a rule or the description first.',
-  save: 'Save',
+  save: 'Save description and answers',
   saving: 'Saving…',
   cancel: 'Cancel',
   saveFailed: 'Olympus could not save. Your changes are still here. Try again.',

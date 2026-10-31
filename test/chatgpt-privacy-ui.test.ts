@@ -218,7 +218,8 @@ function saveDraft(host: Host): void {
     expect(host.doc.querySelector('[data-key="privacy:confirm:yes"]')).not.toBeNull();
     return;
   }
-  host.button(W.save).click();
+  if (host.hasButton(W.save)) host.button(W.save).click();
+  else host.button(W.applyAgain).click();
 }
 
 describe('the Privacy screen', () => {
@@ -237,12 +238,9 @@ describe('the Privacy screen', () => {
     expect(ruleRows(host)).toEqual(['Medical RecordsFolder in Dropbox', 'Lawyer LettersGmail label', 'doctor@clinic.exampleSender']);
     expect(host.button(W.addRule).disabled).toBe(false);
     expect(text).not.toContain('waiting to be checked');
-    // Nothing to save yet: Save is inactive. A change makes it the one accent; Cancel is quiet.
-    expect(host.button(W.save).disabled).toBe(true);
-    // ...and says why beside it (release check: a disabled Save that said nothing).
-    expect(host.doc.getElementById('privacy-save-reason')?.textContent).toBe(W.nothingToSave);
-    expect(host.button(W.save).getAttribute('aria-describedby')).toBe('privacy-save-reason');
-    expect(host.doc.querySelectorAll('.btn.primary')).toHaveLength(0);
+    expect(host.hasButton(W.save)).toBe(false);
+    expect(host.hasButton(W.cancel)).toBe(false);
+    expect(host.doc.querySelector('.picker-footer')).toBeNull();
     area.value = `${DESCRIPTION} and more`;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
     expect(host.button(W.save).disabled).toBe(false);
@@ -477,7 +475,7 @@ describe('saving', () => {
     expect(saves[0].revision).toBe('rev1');
     expect(saves[0].confirmation).toBeUndefined();
     expect(host.text()).toContain('@example.com');
-    expect(host.button(W.save).disabled).toBe(true);
+    expect(host.hasButton(W.save)).toBe(false);
   });
 
   test('Cancel in the confirmation step sends nothing and keeps the changes', async () => {
@@ -491,7 +489,7 @@ describe('saving', () => {
     expect(host.toolCalls(P.set)).toEqual([]);
     // Undoing the removal leaves nothing to confirm.
     host.button('Undo removing Medical Records').click();
-    saveDraft(host);
+    expect(host.hasButton(W.save)).toBe(false);
     expect(host.doc.querySelector('.confirm-box')).toBeNull();
   });
 
@@ -523,7 +521,7 @@ describe('saving', () => {
     expect(box.textContent).toContain('lawyer@firm.example');
     expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe('old words');
     expect(ruleRows(host)).toContain('@example.comSender');
-    expect(host.button(W.save).disabled).toBe(true);
+    expect(host.hasButton(W.save)).toBe(false);
     expect(host.button(W.addRule).disabled).toBe(true);
     expect(host.text()).toContain('Resolve the conflict before adding another rule.');
     // Apply again: the addition lands on their settings, their words and rules kept, against their revision.
@@ -684,7 +682,7 @@ describe('saving', () => {
       if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
       await host.settle();
       expect(host.text()).not.toContain(W.saved);
-      host.button(failure === 'contradictory' ? W.applyAgain : W.save).click();
+      host.button(W.applyAgain).click();
       await host.settle();
       expect(host.toolCalls(P.set).at(-1).rules).toEqual([SAVED_RULES[2]]);
       expect(host.text()).toContain(W.saved);
@@ -783,7 +781,7 @@ describe('saving', () => {
     expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe('their words');
     expect(ruleRows(host)).toEqual([]);
     // What is shown is what is saved: nothing to save until something changes.
-    expect(host.button(W.save).disabled).toBe(true);
+    expect(host.hasButton(W.save)).toBe(false);
   });
 
   test('real engine rules without display load, show, and go back unchanged when only the description changes', async () => {
@@ -809,7 +807,7 @@ describe('saving', () => {
     expect(saves).toEqual([{ description: 'new words', rules: serialized, revision: 'rev1', confirmation: 'conf1' }]);
   });
 
-  test('an additive save never carries the confirmation: add a sender, change the words, Save, change them back', async () => {
+  test('reverting description edits after an immediate addition closes confirmation without another save', async () => {
     const { host, saves } = await openPrivacy({ description: 'old words', rules: SAVED_RULES });
     host.button(W.addRule).click();
     host.button(W.addSender).click();
@@ -829,11 +827,11 @@ describe('saving', () => {
     area().dispatchEvent(new host.win.Event('input') as unknown as Event);
     // The change closed the step; what it named is no longer true.
     expect(host.doc.querySelector('.confirm-box')).toBeNull();
-    saveDraft(host);
+    expect(host.hasButton(W.save)).toBe(false);
     await host.settle();
-    expect(saves).toHaveLength(2);
-    expect(saves[1].confirmation).toBeUndefined();
-    expect(saves[1].description).toBe('old words');
+    expect(saves).toHaveLength(1);
+    expect(saves[0].confirmation).toBeUndefined();
+    expect(saves[0].description).toBe('old words');
   });
 
   test('a confirmation the engine no longer accepts is fetched fresh once, then the save goes through', async () => {
@@ -939,11 +937,15 @@ describe('follow-up questions', () => {
     expectNamesOnlyInPrivacy(host);
   });
 
-  test('Save without touching a choice still writes the defaults shown, after the usual confirmation', async () => {
+  test('description edits save the defaults shown, after the usual confirmation', async () => {
     const { host, saves } = await openPrivacy({ description: OWNER });
+    expect(host.hasButton(W.save)).toBe(false);
+    const edited = host.doc.querySelector('textarea')!;
+    edited.value += ' ';
+    edited.dispatchEvent(new host.win.Event('input') as unknown as Event);
     saveDraft(host);
     const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
-    expect(area.value.split('\n')[0]).toBe(OWNER);
+    expect(area.value.split('\n')[0]!.trim()).toBe(OWNER);
     expect(area.value.split('\n')[1]).toStartWith('About family: private — ');
     expect(host.doc.querySelector('.confirm-box')!.textContent).toContain(W.confirmDescription);
     host.button(W.confirm).click();
@@ -973,7 +975,7 @@ describe('follow-up questions', () => {
     const note = host.doc.querySelector('section.questions [role="alert"]')!;
     expect(note.textContent).toBe(Q.tooLong);
     // Nothing changed, so leaving needs no discard prompt.
-    host.button(W.cancel).click();
+    host.button(W.back).click();
     expect(host.text()).not.toContain(W.discardPrompt);
   });
 
@@ -1219,4 +1221,19 @@ test('privacy summary follows every description keystroke even when topics and s
   type('my diary and a');
   type('my diary and letters');
   expect(host.doc.querySelector('[data-key="privacy:summary"]')!.textContent).toBe('my diary and letters');
+});
+
+test('the save bar follows pending covered edits, including reverting to the saved description', async () => {
+  const { host } = await openPrivacy({ description: 'my family' });
+  expect(host.doc.querySelector('.picker-footer')).toBeNull();
+  for (const value of ['my family and diary', 'my family']) {
+    const area = host.doc.querySelector('textarea')!;
+    area.value = value;
+    area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    expect(host.hasButton(W.save)).toBe(value !== 'my family');
+  }
+  const choice = host.doc.querySelector('input[data-key="privacy:q:family:medical:share"]') as HTMLInputElement;
+  choice.checked = true;
+  choice.dispatchEvent(new host.win.Event('change') as unknown as Event);
+  expect(host.button(W.save).textContent).toBe('Save description and answers');
 });
