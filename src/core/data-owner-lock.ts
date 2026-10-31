@@ -43,6 +43,8 @@ export const STOP_OLYMPUS_HINT = 'olympus engine stop, or olympus worker stop if
 
 /** How long a starting worker waits for a stopping one to let go (restarts overlap). */
 export const WORKER_OWNER_LOCK_WAIT_MS = 10_000;
+/** EX_CANTCREAT: categorical data-lock refusal, consumed by the supervisor. */
+export const WORKER_DATA_OWNER_BUSY_EXIT_CODE = 73;
 
 export class DataOwnerBusyError extends Error {
   readonly code = 'data_owner_busy';
@@ -260,7 +262,7 @@ export function takeWorkerDataOwnerLock(
     (options.report ?? console.error)(
       `Another Olympus already owns its data at ${error.root}, so this worker is exiting. Stop the running one first (${STOP_OLYMPUS_HINT}).`,
     );
-    return (options.exit ?? ((code: number) => process.exit(code)))(1);
+    return (options.exit ?? ((code: number) => process.exit(code)))(WORKER_DATA_OWNER_BUSY_EXIT_CODE);
   }
 }
 

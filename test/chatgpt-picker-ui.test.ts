@@ -900,7 +900,7 @@ describe('folder picker: folders the computer asks about', () => {
   });
 
   test('a folder the computer cannot open yet offers only Skip, says why on the row, and a refused save says why too', async () => {
-    const HELPER = { state: 'needs_helper', message: 'Olympus cannot open this folder on this Mac yet.' };
+    const HELPER = { state: 'needs_helper', message: 'Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.' };
     const host = mount({ serve: { [T.scopeList]: () => browse([node('k-desk', 'Desktop', { has_children: true, access: HELPER }), node('k-code', 'Code', { has_children: true })]), olympus_dashboard: () => ({ structuredContent: pendingDropbox }) } });
     host.push({ structuredContent: pendingDropbox });
     host.button('Choose folders').click();
