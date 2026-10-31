@@ -41,6 +41,11 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pafrom { margin: 4px 0 0; color: var(--t3); font-size: var(--fs-body); }
 .pa .paout, .pa [data-pa-failure] { grid-column: 1 / -1; }
 .pa .paout:empty { display: none; }
+.pa .srow.pa-failed { background: var(--warn-bg); border-left: 3px solid var(--warn); padding-left: 12px; padding-right: 12px; border-radius: 6px; }
+.pa [data-pa-failure] { color: var(--t1); }
+.pa [data-pa-warning]::before { content: "⚠"; }
+.pa [data-pa-warning] { display: inline-block; margin-right: 6px; color: var(--warn); font-weight: 800; }
+.pa .srow.pa-failed .pafrom { color: var(--t2); }
 .pa .srow.unread .paq { font-weight: 700; }
 .pa .pa-read { display: block; width: 100%; min-width: 0; border: 0; padding: 0; text-align: left; background: none; color: inherit; font: inherit; cursor: pointer; overflow-wrap: anywhere; white-space: normal; }
 .pa .smain { min-width: 0; }
@@ -194,7 +199,7 @@ function renderLevelChoice(level: 'strict' | 'standard', settingsHref: string): 
 
 function renderFailureNotice(reason: unknown): string {
   const failure = privateAnswerFailure(reason);
-  return `<p class="pamsg" data-pa-failure>${escapeHtml(failure.message)} ${failure.href ? `<a href="${escapeHtml(failure.href)}">${escapeHtml(failure.action)}</a>` : escapeHtml(failure.action)}</p>`;
+  return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml(failure.message)} ${failure.href ? `<a href="${escapeHtml(failure.href)}">${escapeHtml(failure.action)}</a>` : escapeHtml(failure.action)}</p>`;
 }
 
 function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean } | undefined, now: Date): string {
@@ -211,7 +216,7 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
     const state = question.state ?? (question.unchecked ? 'unchecked' : 'answering');
     const status = state === 'failed' ? '' : state === 'changed' ? W.changed : state === 'queued' ? W.queued : state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
     const from = [question.path === 'venice' ? W.veniceName : question.path === 'anonymous' ? W.anonymousPath : W.privatePath, question.from, when, status].filter(Boolean).join(' · ');
-    return `<li class="srow nodot${question.unread ? ' unread' : ''}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">`
+    return `<li class="srow nodot${state === 'failed' ? ' pa-failed' : ''}${question.unread ? ' unread' : ''}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">`
       + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom" title="${escapeHtml(question.askedAt)}"> · ${escapeHtml(from)}</span></button></div>`
       + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml(W.delete)}</button></div>`
       + (state === 'failed' ? renderFailureNotice(question.failureReason) : '')
@@ -338,6 +343,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     var failure = failureFor(reason, config.failures);
     var line = el('p', 'pamsg', failure.message + ' ');
     line.setAttribute('data-pa-failure', '');
+    var icon = el('span'); icon.setAttribute('data-pa-warning', ''); icon.setAttribute('aria-hidden', 'true'); line.insertBefore(icon, line.firstChild);
     if (failure.href) { var link = el('a', '', failure.action); link.href = failure.href; line.appendChild(link); }
     else line.appendChild(document.createTextNode(failure.action));
     return line;
@@ -536,11 +542,16 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     if (note && rows().length > 0) { note.hidden = false; note.textContent = config.copy.nothingDeleted; }
     empty();
   });
-  function openFragment() {
+  async function openFragment() {
     var id;
     try { id = decodeURIComponent(window.location.hash.slice(1)); } catch (_) { return; }
     if (!id || id === config.fragment) return;
     var row = findRow(id);
+    if (!row && /^[A-Za-z0-9_-]{22}$/.test(id)) {
+      var resolved = await send({ action: 'resolve_secret', handle: id });
+      if (window.location.hash.slice(1) !== id) return;
+      if (resolved.ok && typeof resolved.result.id === 'string') row = findRow(resolved.result.id);
+    }
     if (!row) { missing(); return; }
     if (row.scrollIntoView) row.scrollIntoView({ block: 'center' });
     read(row, false);
@@ -582,6 +593,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         var out = el('div', 'paout'); out.setAttribute('data-pa-out', ''); out.setAttribute('aria-live', 'polite'); row.appendChild(out); bind(row);
       }
       row.classList.toggle('unread', q.unread === true);
+      row.classList.toggle('pa-failed', q.state === 'failed');
       row.querySelector('.paq').textContent = q.question;
       if (selected === q.id && q.state !== 'answered' && q.state !== 'failed') {
         message(row.querySelector('[data-pa-out]'), q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);

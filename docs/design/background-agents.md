@@ -147,6 +147,28 @@ a claimed job that expires without acknowledgment also falls back. Restart
 forgets in-memory panel claims and resumes persisted questions after their
 grace window. An acknowledged answer never appears in the inbox.
 
+**Secret notice navigation (2026-10-31).** On `/mcp`, the sealed answer panel
+can open its question's local Inbox answer through a random 128-bit handle.
+The handle expires with the in-memory panel job (normally ten minutes), is
+bound to the question generation, and resolves only through the local control
+session and CSRF boundary. It carries no item name, locator, identity or count;
+none of those, or the handle, enter the model-visible response. The website's
+`/open/private/` landing page forwards the handle from its fragment to the
+existing `olympus://` handler without sending the fragment to the website.
+The engine and the landing-page asset must ship together. The pinned
+`/openai/mcp` panel and listing remain unchanged.
+
+A Secret notice keeps its Inbox entry, including after panel acknowledgment,
+and makes it available immediately instead of waiting for the panel grace
+period. The local answer names its screened matches and uses the existing
+source-opening adapters for Open controls. Every read and open rechecks source
+scope and screening. Locations alone need no answer model. Unavailable or
+expired links direct the owner to open Olympus, then Inbox; server mode uses
+the existing tunnel instructions. Items whose location cannot be disclosed or
+whose source has no opening adapter retain the existing location-only notice.
+Failed Inbox rows use the warning tint, border and icon in both themes;
+successful rows retain the ordinary appearance.
+
 **Priority and failures.** The inbox runs at background priority, at most
 one answer globally (therefore at most one per connection). Interactive
 owner work is selected before queued background calls at the worker's

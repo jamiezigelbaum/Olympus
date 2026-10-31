@@ -82,6 +82,9 @@ export interface LocalCitationView {
 }
 
 export interface LocalPrivateAnswersOptions {
+  panelSecretNotice?: (ref: WaitingQuestionRef) => boolean;
+  resolveSecretInbox?: (handle: string) => WaitingQuestionRef | undefined;
+  secretSources?: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => PrivateAnswerSourceCitation[];
   /** The computer's own ask identity; omitted by read-only/test adapters. */
   localConnectionId?: string;
   anonymousAsk?: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>;
@@ -165,6 +168,7 @@ export interface LocalAnswerPathOptions {
 export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
   eligible: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
   eligibleSecrets: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => boolean;
+  secretSources: NonNullable<LocalPrivateAnswersOptions['secretSources']>;
   answer: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
 } {
   const lanes = (request: SourceIndexAnswerRequest) => options.lanes(request, 'built_in_only');
@@ -202,6 +206,15 @@ export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
   });
   return {
     eligible,
+    secretSources: (input, locations) => {
+      const current = lanes(localAnswerRequest(input.question, input.selectors));
+      if (current.checkSecretLocations?.(locations) !== true) return [];
+      const matches = current.secretLocations?.(input.question, current.registry.list().map(c => c.corpusId)) ?? [];
+      return matches.filter(location => locations.some(saved => saved.source === location.source && saved.ref === location.ref)).map(location => {
+        const links = location.locator ? options.sourceLinks?.({ provenance: { sourceItem: { provider: location.source }, citation: { uri: location.locator } } }) : undefined;
+        return { title: location.title ?? location.locator ?? 'Secret', source: location.source, ...links };
+      });
+    },
     eligibleSecrets: (input, locations) => {
       if (!locations.length) return true;
       const current = lanes(localAnswerRequest(input.question, input.selectors));
@@ -255,7 +268,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   const active = (q: WaitingQuestion) => {
     try { return !closed && (!options.isActive || options.isActive(q.connectionId)); } catch { return false; }
   };
-  const hidden = (q: WaitingQuestion) => q.surface === 'chatgpt' && (
+  const hidden = (q: WaitingQuestion) => q.surface === 'chatgpt' && options.panelSecretNotice?.(refOf(q)) !== true && (
     now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true
   );
   const autoAnswerable = (q: WaitingQuestion) => q.path !== 'anonymous' && q.path !== 'venice' && !q.hasResult && !q.result
@@ -294,7 +307,9 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     if (result.status === 'withdrawn') return { status: 'withdrawn', sent_items: result.sentItems, reason: result.reason };
     if (result.status !== 'answered') return { status: result.status, ...(result.status === 'failed' ? failureReason(q) : {}), ...('leftOut' in result ? { left_out: result.leftOut } : {}) };
     sweep();
-    const citations: LocalCitationView[] = result.citations.map(citation => {
+    const secretSources = q && result.secretLocations?.length
+      ? options.secretSources?.({ question: q.question, selectors: q.selectors }, result.secretLocations) ?? [] : [];
+    const citations: LocalCitationView[] = [...result.citations, ...secretSources].map(citation => {
       const view: LocalCitationView = {
         ...(citation.title ? { title: citation.title } : {}),
         ...(citation.source ? { source: citation.source } : {}),
@@ -382,6 +397,12 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     waitingCount() { return api.waiting()?.questions.filter(q => q.unread && (q.state === 'answered' || q.state === 'failed')).length ?? 0; },
     async handle(body, session) {
       const action = body.action;
+      if (action === 'resolve_secret') {
+        const ref = typeof body.handle === 'string' ? options.resolveSecretInbox?.(body.handle) : undefined;
+        const q = ref ? store()?.get(ref.id) : undefined;
+        if (!ref || !q || q.generation !== ref.generation || q.connectionId !== ref.connectionId || !current(q)) return refused(410, 'gone', 'Open Olympus on your computer, then Inbox');
+        return { status: 200, body: { ok: true, id: q.id } };
+      }
       if (action === 'list') return { status: 200, body: { ok: true, ...api.waiting(), destinations: api.destinations() } };
       if (action === 'ask_anonymous') {
         if (!options.anonymousAsk) return refused(503, 'unavailable', W.anonymousNotSetUp);
@@ -478,6 +499,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           if (entry.ref) {
             const q = store()?.get(entry.ref.id);
             if (!q || q.generation !== entry.ref.generation || !q.result || !current(q)) return false;
+            if (q.result.secretLocations?.length && options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, q.result.secretLocations) !== true) return false;
           }
           const check = await eligible(entry.read);
           if (check === 'unknown') checkUnavailable = true;
@@ -488,6 +510,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           if (entry.ref) {
             const q = store()?.get(entry.ref.id);
             if (!q || q.generation !== entry.ref.generation || !q.result || !current(q)) return false;
+            if (q.result.secretLocations?.length && options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, q.result.secretLocations) !== true) return false;
           }
           return true;
         };

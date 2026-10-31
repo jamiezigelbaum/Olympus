@@ -31,7 +31,7 @@ import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } f
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
-import { resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
+import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -6017,6 +6017,11 @@ export async function main(): Promise<void> {
   // The last time the ChatGPT model was missing from the live zkAPI listing (for the card); cleared by a reply.
   let chatgptModelProblem: { at: string; message: string } | undefined;
   const privateAnswers = new PrivateAnswerJobs({
+    inboxRemote: () => {
+      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
+      return mode.remote ? remoteOpenInstructions({ port, ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}),
+        ...(process.platform === 'linux' ? { socketPath: workerSocketPath()! } : {}), target: { kind: 'private_answers' } }) : undefined;
+    },
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
@@ -6109,6 +6114,9 @@ export async function main(): Promise<void> {
       connectionName: (connectionId) => localInboxLabel(connectionId) ?? remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
       eligibleSecrets: local.eligibleSecrets,
+      resolveSecretInbox: handle => privateAnswers.resolveSecretInbox(handle),
+      panelSecretNotice: ref => privateAnswers.hasSecretInbox(ref),
+      secretSources: local.secretSources,
       ...(openCitedFile ? { openFile: openCitedFile } : {}),
       ...(process.platform === 'darwin' ? {
         openUrl: async (url: string, eligible: () => Promise<boolean>) => {

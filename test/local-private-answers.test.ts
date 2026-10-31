@@ -1136,7 +1136,7 @@ describe('the worker serves Private answers only inside a local control session'
     }
     // Deep-link locators carry no authority: every answer read/list uses the
     // same local-only boundary, including widgets and dash_ read-only viewers.
-    for (const action of [{ action: 'read', id: ref.id }, { action: 'list' }, { action: 'ask_venice', question: 'Sentinel?' }, { action: 'ask_anonymous', question: 'Sentinel?' }, { action: 'ask', question: 'Sentinel?' }]) {
+    for (const action of [{ action: 'resolve_secret', handle: 'S'.repeat(22) }, { action: 'read', id: ref.id }, { action: 'list' }, { action: 'ask_venice', question: 'Sentinel?' }, { action: 'ask_anonymous', question: 'Sentinel?' }, { action: 'ask', question: 'Sentinel?' }]) {
       expect((await fetcher(post(action, { Authorization: `Bearer ${TOKEN}`, Origin: ORIGIN }))).status).toBe(403);
       expect((await fetcher(post(action, { Authorization: 'Bearer dash_reader', Origin: ORIGIN }))).status).toBe(401);
       expect((await fetcher(post(action, { Origin: 'https://chatgpt.com' }))).status).toBe(401);
@@ -1301,6 +1301,26 @@ describe('the Private answers page', () => {
     if (!markdown) (pageWindow as { olympusMarkdown?: unknown }).olympusMarkdown = undefined;
     return { html, document, posts, confirmations: () => confirmations, poll: async () => { await timers.shift()?.(); }, settle: () => new Promise((resolve) => setTimeout(resolve, 20)) };
   }
+
+  test('a Secret handle opens exactly its resolved Inbox row', async () => {
+    const page = renderAndRun(body => ({ status: 200, body: body.action === 'resolve_secret'
+      ? { ok: true, id: 'wq_1' } : body.action === 'read'
+      ? { ok: true, status: 'answered', answer: 'Matching Secret', citations: [{ title: 'Recovery document', open: 'opaque-source' }] }
+      : { ok: true } }), 'http://127.0.0.1:8010/dashboard?private-answers#' + 'S'.repeat(22));
+    await page.settle();
+    expect(page.posts.map(post => post.body)).toEqual([{ action: 'resolve_secret', handle: 'S'.repeat(22) }, { action: 'read', id: 'wq_1' }]);
+    expect(page.document.querySelector('[data-pa-question="wq_1"] .paanswer')?.textContent).toContain('Matching Secret');
+  });
+
+  test('polling adds and removes the failure tint and icon as the row changes state', async () => {
+    let failed = true;
+    const page = renderAndRun(() => ({ status: 200, body: { ok: true, questions: [{ id: 'wq_1', question: 'Where is the lease?', from: 'ChatGPT', askedAt: '2026-10-01T01:00:00Z', state: failed ? 'failed' : 'answered', failureReason: 'no_model', unread: false }] } }));
+    await page.poll();
+    expect(page.document.querySelector('.pa-failed [data-pa-warning]')).not.toBeNull();
+    failed = false; await page.poll();
+    expect(page.document.querySelector('.pa-failed')).toBeNull();
+    expect(page.document.querySelector('[data-pa-warning]')).toBeNull();
+  });
 
   test('Ask renders Markdown safely in a panel under its question, with ordered section headings', async () => {
     const page = renderAndRun(() => ({ status: 200, body: {

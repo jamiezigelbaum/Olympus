@@ -2895,6 +2895,9 @@ export const DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
  * `{list}` are filled in by the panel. Nothing here names a source item.
  */
 export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
+  secretOpen: 'Open it in Olympus on your computer',
+  secretFallback: 'Open Olympus on your computer, then Inbox',
+
   pageTitle: 'Olympus private answer',
   title: 'Private answer from your computer',
   /** The muted line under the title once the answer is shown. */

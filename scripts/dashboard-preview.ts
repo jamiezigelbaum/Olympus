@@ -1676,7 +1676,7 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
 }
 
 export const DASHBOARD_PREVIEW_STATES = [
-  'inbox-failed', 'secret-notice',
+  'inbox-failed', 'secret-notice', 'secret-inbox',
   'review', 'review-unconfigured', 'review-indexing',
   'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
@@ -1824,7 +1824,7 @@ export function previewWaitingQuestions(count: number, state = '') {
   const questions = Array.from({ length: Math.max(0, count) }, (_, index) => {
     const base = PREVIEW_WAITING[index % PREVIEW_WAITING.length]!;
     const id = index < PREVIEW_WAITING.length ? base.id : `${base.id}_${index}`;
-    return { ...base, ...(state === 'inbox-failed' && index % PREVIEW_WAITING.length === 2 ? { state: 'failed' as const, failureReason: 'no_model' } : {}), id, unread: base.unread && !previewSeen.has(id) };
+    return { ...base, ...(state === 'secret-inbox' && index === 0 ? { path: 'private' as const, question: 'Where is my recovery document?', state: 'answered' as const } : {}), ...(state === 'inbox-failed' && index % PREVIEW_WAITING.length === 2 ? { state: 'failed' as const, failureReason: 'no_model' } : {}), id, unread: base.unread && !previewSeen.has(id) };
   }).filter((question) => !previewDeleted.has(question.id));
   return { questions, olderRemoved: count > PREVIEW_WAITING.length };
 }
@@ -1840,6 +1840,13 @@ function previewPrivateAnswersAction(body: Record<string, unknown>, count: numbe
     unanswered: ['The practice’s parking arrangements'],
     left_out: ['Gmail'],
   };
+  if (state === 'secret-inbox') {
+    answered.answer = 'A matching item is stored as a Secret. Its contents are never shown to an AI.';
+    answered.citations = [{ title: 'Recovery document.txt', source: 'Files on this computer', date: '', open: 'preview-secret-open-token-00000000' }];
+    answered.unanswered = []; answered.left_out = [];
+  }
+  if (body.action === 'resolve_secret') return body.handle === PREVIEW_SECRET_HANDLE
+    ? Response.json({ ok: true, id: 'wq_preview_1' }) : Response.json({ ok: false }, { status: 410 });
   const listed = previewWaitingQuestions(count, state);
   if (body.action === 'list') return Response.json({ ok: true, ...listed });
   if (body.action === 'ask') return Response.json(answered);
@@ -1852,7 +1859,7 @@ function previewPrivateAnswersAction(body: Record<string, unknown>, count: numbe
   }
   const question = listed.questions.find((item) => item.id === body.id);
   if (!question) return Response.json({ ok: false, error: { code: 'gone', message: 'That answer was deleted' } }, { status: 410 });
-  if (body.action === 'read') return Response.json(question.state === 'answered' ? { ...answered, ...(question.path === 'venice' ? { sent_items: [{ title: 'Appointment confirmation.pdf', source: 'Dropbox' }] } : {}), ...('path' in question && question.path === 'anonymous' ? { sent: question.question, answer: '**Outside help · preview only.** Deposit rules depend on the tenancy and location. Check the applicable public guidance.', citations: [], unanswered: [], left_out: [] } : {}) } : { ok: true, status: question.state, ...('failureReason' in question ? { failureReason: question.failureReason } : {}) });
+  if (body.action === 'read') return Response.json(question.state === 'answered' ? { ...answered, ...('path' in question && question.path === 'venice' ? { sent_items: [{ title: 'Appointment confirmation.pdf', source: 'Dropbox' }] } : {}), ...('path' in question && question.path === 'anonymous' ? { sent: question.question, answer: '**Outside help · preview only.** Deposit rules depend on the tenancy and location. Check the applicable public guidance.', citations: [], unanswered: [], left_out: [] } : {}) } : { ok: true, status: question.state, ...('failureReason' in question ? { failureReason: question.failureReason } : {}) });
   if (body.action === 'seen') {
     previewSeen.add(question.id);
     return Response.json({ ok: true, status: 'seen' });
@@ -1866,10 +1873,11 @@ function previewPrivateAnswersAction(body: Record<string, unknown>, count: numbe
 
 /** Fixed remote verdict and a synthetic panel answer; no Secret metadata. */
 export function previewSecretNotice(): string { return remotePrivateNote(undefined, true); }
+export const PREVIEW_SECRET_HANDLE = 'S'.repeat(22);
 const PREVIEW_SECRET_JOB = `oly2p.${'a'.repeat(32)}.${'B'.repeat(43)}`;
 function previewSecretPanel(origin: string): string {
   const page = privateAnswerPageHtml({ relayOrigin: origin });
-  const globals = `<script>window.openai={toolOutput:{status:'found'},toolResponseMetadata:{'olympus/privateAnswer':{v:1,count:1,state:'ready',jobId:${JSON.stringify(PREVIEW_SECRET_JOB)}}}};</script>`;
+  const globals = `<script>window.openai={openExternal:({href})=>{if(href==='https://olympusplugin.ai/open/private/#${PREVIEW_SECRET_HANDLE}')window.top.location.href='/dashboard?state=secret-inbox&private-answers&controls#${PREVIEW_SECRET_HANDLE}'},toolOutput:{status:'found'},toolResponseMetadata:{'olympus/privateAnswer':{v:1,count:1,state:'ready',jobId:${JSON.stringify(PREVIEW_SECRET_JOB)}}}};</script>`;
   return page.replace('<script>', `${globals}<script>`);
 }
 
@@ -1919,7 +1927,7 @@ if (import.meta.main) {
       const body = await request.json().catch(() => ({})) as { publicKey?: string };
       const panel = typeof body.publicKey === 'string' ? await importPanelPublicKey(body.publicKey).catch(() => undefined) : undefined;
       if (!panel) return Response.json({ status: 'failed' }, { status: 400 });
-      const plaintext = padPrivateAnswerPlaintext(JSON.stringify({ v: 1, answer: REMOTE_SECRET_NOTE, citations: [], unanswered: [] }));
+      const plaintext = padPrivateAnswerPlaintext(JSON.stringify({ v: 1, answer: REMOTE_SECRET_NOTE, citations: [], unanswered: [], secretInbox: { handle: PREVIEW_SECRET_HANDLE } }));
       return Response.json({ status: 'ready', v: 1, ...await sealPrivateAnswer(PREVIEW_SECRET_JOB, panel.key, plaintext) });
     }
     if (url.pathname === '/preview-secret-panel') return html(previewSecretPanel(url.origin));

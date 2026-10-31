@@ -134,6 +134,8 @@ export interface PrivateAnswerJobsOptions {
   eligible: PrivateEvidenceGuard;
   /** This engine's relay install id; no job is created without one. */
   installId: () => string | undefined;
+  /** Existing server-mode instructions, sealed to the panel only. */
+  inboxRemote?: () => { onComputer: string; onServer: string } | undefined;
   now?: () => number;
   ttlMs?: number;
   /** Live jobs at once; the oldest is dropped beyond this. */
@@ -310,6 +312,7 @@ interface Analysis {
 }
 
 interface Job {
+  inboxHandle?: string;
   secretMatch?: () => Promise<boolean>;
   preserveWaiting?: boolean;
   readonly id: string;
@@ -766,6 +769,31 @@ export class PrivateAnswerJobs {
     return false;
   }
 
+  /** Secret notices require the local Inbox immediately, not after the panel grace period. */
+  hasSecretInbox(ref: PrivateAnswerWaitingRef): boolean {
+    this.sweep();
+    return [...this.jobs.values()].some(job => job.preserveWaiting && job.waiting?.id === ref.id
+      && job.waiting.generation === ref.generation && job.waiting.connectionId === ref.connectionId);
+  }
+
+  /** Called exclusively by the authenticated local Inbox controller. */
+  resolveSecretInbox(handle: string): PrivateAnswerWaitingRef | undefined {
+    this.sweep();
+    if (!/^[A-Za-z0-9_-]{22}$/.test(handle)) return undefined;
+    for (const job of this.jobs.values()) {
+      if (job.inboxHandle === handle && job.preserveWaiting && job.waiting) return { ...job.waiting };
+    }
+    return undefined;
+  }
+
+  private secretInbox(job: Job): NonNullable<PrivateAnswerPlaintextV1['secretInbox']> {
+    const remote = this.options.inboxRemote?.();
+    if (remote) return { remote };
+    if (!job.waiting) return {};
+    job.inboxHandle ??= randomBytes(16).toString('base64url');
+    return { handle: job.inboxHandle };
+  }
+
   /** Drops expired jobs (cancelling analyses no live job needs) and forgets shared answers past the dedupe window. */
   sweep(at = this.now()): void {
     for (const [key, ref] of this.waitingDeletes) this.retryWaitingDelete(key, ref);
@@ -1128,7 +1156,7 @@ export class PrivateAnswerJobs {
         const check = job.secretMatch;
         if (!await check() || settled) { settle({ kind: 'failed' }, 'no_evidence'); return; }
         const ack = randomBytes(32).toString('base64url');
-        const plaintext = { v: 1 as const, answer: REMOTE_SECRET_NOTE, citations: [], ack };
+        const plaintext = { v: 1 as const, answer: REMOTE_SECRET_NOTE, citations: [], ack, secretInbox: this.secretInbox(job) };
         const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
         if (settled) return;
         if (!await check() || settled) { settle({ kind: 'failed' }, 'no_evidence'); return; }
@@ -1190,7 +1218,10 @@ export class PrivateAnswerJobs {
           const ack = randomBytes(32).toString('base64url');
           const plaintext = { ...this.withOpenTokens(job, result.plaintext, result.localPaths), ack };
           // The pointer leads so payload fitting cannot truncate it away.
-          if (job.preserveWaiting) plaintext.answer = `${REMOTE_SECRET_NOTE}\n\n${plaintext.answer}`;
+          if (job.preserveWaiting) {
+            plaintext.answer = `${REMOTE_SECRET_NOTE}\n\n${plaintext.answer}`;
+            plaintext.secretInbox = this.secretInbox(job);
+          }
           // The payload contract is enforced here, before first delivery, on
           // every job: the limits and byte budgets in private-answer-payload.ts.
           const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));

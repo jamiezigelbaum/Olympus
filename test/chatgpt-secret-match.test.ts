@@ -174,3 +174,60 @@ test('claim refresh discovering a Secret preserves Inbox through mixed Private a
     expect(opened.answer).not.toContain('SENTINEL');
   } finally { releaseModel?.(); store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test('sealed Secret Inbox handle resolves only in its engine and expires', async () => {
+  let now = 1000;
+  const options = { now: () => now, installId: () => 'a'.repeat(32), claimHoldMs: 0,
+    eligible: async (items: readonly unknown[]) => items.map(() => true),
+    model: () => ({ status: () => ({ state: 'no_model' as const }), answerPrivately: async () => { throw Error('must not infer'); } }),
+  };
+  const jobs = new PrivateAnswerJobs(options);
+  const ref = { id: 'LOCAL_QUESTION_SENTINEL', generation: 1, connectionId: 'connection' };
+  const match = jobs.begin({ question: 'vault', count: 1, evidence: [], refresh: async () => [], secretMatch: async () => true, waiting: ref });
+  const panel = await generatePanelKeyPair();
+  let result = await jobs.claim(match.jobId!, panel.publicKey);
+  for (let i = 0; i < 20 && result.status === 202; i++) { await Bun.sleep(10); result = await jobs.claim(match.jobId!, panel.publicKey); }
+  const opened = JSON.parse(await openPrivateAnswer(match.jobId!, panel.privateKey, sealedBody(result.body)));
+  expect(opened.secretInbox.handle).toMatch(/^[A-Za-z0-9_-]{22}$/);
+  expect(JSON.stringify(opened)).not.toContain(ref.id);
+  expect(jobs.resolveSecretInbox(opened.secretInbox.handle)).toEqual(ref);
+  expect(new PrivateAnswerJobs(options).resolveSecretInbox(opened.secretInbox.handle)).toBeUndefined();
+  now += 20 * 60_000;
+  expect(jobs.resolveSecretInbox(opened.secretInbox.handle)).toBeUndefined();
+});
+
+test('built ChatGPT response contains no Secret locator, title, count or Inbox handle', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'secret-built-response-'));
+  const store = openWaitingPrivateQuestionStore(join(dir, 'waiting.sqlite'));
+  const jobs = new PrivateAnswerJobs({ installId: () => 'a'.repeat(32), claimHoldMs: 0,
+    eligible: async items => items.map(() => true),
+    model: () => ({ status: () => ({ state: 'no_model' }), answerPrivately: async () => { throw Error('must not infer'); } }),
+  });
+  try {
+    const worker = createEmailSourceWorker({});
+    const ctx = createInProcessOperationContext({ config: defaultConfig(), sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller: { surface: 'remote', connectionId: 'conn' } });
+    const probe = async () => {
+      const result = await searchPrivateEvidence({ question: 'vault', lanes: () => ({
+        registry: buildSourceIndexCorpusRegistry([]), adapters: {}, contentProviders: {},
+        secretLocations: () => Array.from({ length: 17 }, (_, i) => ({ source: 'fixture', ref: `SECRET_ID_${i}`, locator: `/SECRET_PATH/${i}`, title: `SECRET_TITLE_${i}`, findingKinds: [] })),
+      }) });
+      return { count: result.matched, evidence: result.candidates as unknown as Readonly<Record<string, unknown>>[], secretMatch: true as const };
+    };
+    const response = await callChatGptTool('olympus_search', { question: 'vault' }, ctx, {
+      dashboardView: async () => { throw Error('unused'); }, privateAnswers: jobs, privateMatchProbe: probe,
+      waitingQuestions: () => store,
+      evidenceSearch: async () => ({ evidence: [], withheld: 0, coverage: { searched_corpora: 0 } }),
+    });
+    const meta = (response._meta as Record<string, unknown>)[PRIVATE_ANSWER_META_KEY] as { jobId: string };
+    const panel = await generatePanelKeyPair();
+    let result = await jobs.claim(meta.jobId, panel.publicKey);
+    for (let i = 0; i < 20 && result.status === 202; i++) { await Bun.sleep(10); result = await jobs.claim(meta.jobId, panel.publicKey); }
+    const opened = JSON.parse(await openPrivateAnswer(meta.jobId, panel.privateKey, sealedBody(result.body)));
+    const handle = opened.secretInbox.handle;
+    expect(typeof handle).toBe('string');
+    const wire = JSON.stringify(response);
+    for (const forbidden of ['SECRET_ID', 'SECRET_PATH', 'SECRET_TITLE', handle, store.list().questions[0]!.id]) expect(wire).not.toContain(forbidden);
+    expect(JSON.stringify([response.structuredContent, response.content])).not.toMatch(/secretInbox|secretLocations|"count"|17/);
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});

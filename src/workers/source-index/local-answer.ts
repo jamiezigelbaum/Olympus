@@ -147,11 +147,6 @@ export async function answerOnThisComputer(
 ): Promise<LocalAnswerResult> {
   const question = input.question.trim();
   if (!question) return { status: 'failed' };
-  const status = options.model.status();
-  if (status.state === 'no_model') return { status: 'no_model' };
-  if (status.state === 'model_downloading') {
-    return { status: 'model_downloading', ...(typeof status.percent === 'number' ? { percent: status.percent } : {}) };
-  }
   const request = localAnswerRequest(question, input.selectors);
   const lanes = options.lanes(request);
   const corpusIds = sourceAnswerCorpusIds(request);
@@ -195,6 +190,13 @@ export async function answerOnThisComputer(
     if (skip.has(index) || !corpusId || !LOCAL_TRUST_DOMAINS.includes(candidate.trustDomain)) return [];
     return [{ ...candidate, corpusId } as unknown as PrivateEvidenceItem];
   });
+  // A Secret location is a local notice, not an inference job.
+  if (secrets && candidates.length === 0) return notFound();
+  const status = options.model.status();
+  if (status.state === 'no_model') return { status: 'no_model' };
+  if (status.state === 'model_downloading') {
+    return { status: 'model_downloading', ...(typeof status.percent === 'number' ? { percent: status.percent } : {}) };
+  }
   if (candidates.length === 0) return notFound();
   let used: readonly number[] | undefined;
   let result: Awaited<ReturnType<PrivateAnswerModel['answerPrivately']>>;

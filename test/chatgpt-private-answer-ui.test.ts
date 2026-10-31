@@ -1099,7 +1099,7 @@ describe('privacy', () => {
     const html = privateAnswerResourceHtml();
     const urls = html.match(/https?:\/\/[^\s"'<>)\\]+/g) ?? [];
     // The SVG namespace is an identifier, not a request.
-    expect([...new Set(urls)].sort()).toEqual(['http://www.w3.org/2000/svg', RELAY]);
+    expect([...new Set(urls)].sort()).toEqual(['http://www.w3.org/2000/svg', RELAY, 'https://olympusplugin.ai/open/private/#'].sort());
     expect(privateAnswerResourceMeta()).toMatchObject({ ui: { csp: { connectDomains: [RELAY], resourceDomains: [] } } });
     for (const forbidden of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'localStorage', 'sessionStorage', 'setWidgetState', 'widgetState', 'update-model-context', 'ui/message', 'tools/call', 'console.', 'confirm(', 'clipboard', 'eval(', 'extractable']) {
       expect(html).not.toContain(forbidden);
@@ -1159,4 +1159,30 @@ describe('the seen acknowledgment', () => {
       expect(host.fetched).toHaveLength(1);
     }
   });
+});
+
+
+test('Secret notice opens only the opaque local Inbox target and offers fallback', async () => {
+  const handle = 'S'.repeat(22);
+  const host = mount({ plaintext: { v: 1, answer: 'A matching item is a Secret. Open it in Olympus on your computer.', citations: [], secretInbox: { handle } } });
+  host.push(ready());
+  await host.until(() => host.text().includes('A matching item is a Secret'), 'Secret notice');
+  host.button('Open it in Olympus on your computer').click();
+  await host.until(() => host.calls.some(([name]) => name === 'openExternal'), 'local Inbox link');
+  expect(host.calls.find(([name]) => name === 'openExternal')![1]).toEqual({ href: `https://olympusplugin.ai/open/private/#${handle}` });
+  expect(host.text()).toContain('Open Olympus on your computer, then Inbox');
+});
+
+
+test('remote Secret notice uses the existing tunnel guidance and no local button', async () => {
+  const host = mount({ plaintext: { v: 1, answer: 'A matching item is a Secret.', citations: [], secretInbox: { remote: { onComputer: 'ssh synthetic-tunnel', onServer: 'olympus dashboard --no-open --target private' } } } });
+  host.push(ready()); await host.until(() => host.text().includes('ssh synthetic-tunnel'), 'remote guidance');
+  expect(host.text()).toContain('Olympus runs on a server');
+  expect(host.buttons().some(button => button.textContent === 'Open it in Olympus on your computer')).toBe(false);
+});
+
+test('Secret notice without a reachable Inbox uses plain fallback guidance', async () => {
+  const host = mount({ plaintext: { v: 1, answer: 'A matching item is a Secret.', citations: [], secretInbox: {} } });
+  host.push(ready()); await host.until(() => host.text().includes('Open Olympus on your computer, then Inbox'), 'fallback guidance');
+  expect(host.buttons().some(button => button.textContent === 'Open it in Olympus on your computer')).toBe(false);
 });

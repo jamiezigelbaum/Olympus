@@ -30,3 +30,17 @@ test('initial failed preview row shows the reason and a usable setup link withou
   expect(notice.textContent).not.toContain('flight');
   window.close();
 });
+
+
+test('only a failed Inbox row has the warning treatment and icon', () => {
+  const window = new Window();
+  window.document.body.innerHTML = renderDashboardPrivateAnswersPage({
+    controlSessionCsrfToken: 'preview', outsideHelpLocalSession: true,
+    privateAnswers: { available: true, waiting: previewWaitingQuestions(3, 'inbox-failed') },
+  });
+  const failed = window.document.querySelector('[data-pa-question="wq_preview_3"]')!;
+  expect(failed.classList.contains('pa-failed')).toBe(true);
+  expect(failed.querySelector('[data-pa-warning]')).not.toBeNull();
+  expect(window.document.querySelector('[data-pa-question="wq_preview_1"]')!.classList.contains('pa-failed')).toBe(false);
+  window.close();
+});

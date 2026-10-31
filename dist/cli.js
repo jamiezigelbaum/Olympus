@@ -53633,6 +53633,8 @@ var init_vocabulary = __esm(() => {
     sentence: "Approve the model that checks what's private. Until you do, new items it would check wait. On your computer, run olympus tier classifier approve --why, followed by your reason"
   };
   DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
+    secretOpen: "Open it in Olympus on your computer",
+    secretFallback: "Open Olympus on your computer, then Inbox",
     pageTitle: "Olympus private answer",
     title: "Private answer from your computer",
     notSent: "Not sent to ChatGPT",
@@ -138808,12 +138810,6 @@ async function answerOnThisComputer(input, options) {
   const question = input.question.trim();
   if (!question)
     return { status: "failed" };
-  const status = options.model.status();
-  if (status.state === "no_model")
-    return { status: "no_model" };
-  if (status.state === "model_downloading") {
-    return { status: "model_downloading", ...typeof status.percent === "number" ? { percent: status.percent } : {} };
-  }
   const request = localAnswerRequest(question, input.selectors);
   const lanes = options.lanes(request);
   const corpusIds = sourceAnswerCorpusIds(request);
@@ -138851,6 +138847,14 @@ async function answerOnThisComputer(input, options) {
       return [];
     return [{ ...candidate, corpusId }];
   });
+  if (secrets && candidates.length === 0)
+    return notFound();
+  const status = options.model.status();
+  if (status.state === "no_model")
+    return { status: "no_model" };
+  if (status.state === "model_downloading") {
+    return { status: "model_downloading", ...typeof status.percent === "number" ? { percent: status.percent } : {} };
+  }
   if (candidates.length === 0)
     return notFound();
   let used;
@@ -139052,6 +139056,16 @@ function createLocalAnswerPath(options) {
   });
   return {
     eligible,
+    secretSources: (input, locations) => {
+      const current2 = lanes(localAnswerRequest(input.question, input.selectors));
+      if (current2.checkSecretLocations?.(locations) !== true)
+        return [];
+      const matches2 = current2.secretLocations?.(input.question, current2.registry.list().map((c) => c.corpusId)) ?? [];
+      return matches2.filter((location) => locations.some((saved) => saved.source === location.source && saved.ref === location.ref)).map((location) => {
+        const links = location.locator ? options.sourceLinks?.({ provenance: { sourceItem: { provider: location.source }, citation: { uri: location.locator } } }) : undefined;
+        return { title: location.title ?? location.locator ?? "Secret", source: location.source, ...links };
+      });
+    },
     eligibleSecrets: (input, locations) => {
       if (!locations.length)
         return true;
@@ -139113,7 +139127,7 @@ function createLocalPrivateAnswers(options) {
       return false;
     }
   };
-  const hidden = (q) => q.surface === "chatgpt" && (now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true);
+  const hidden = (q) => q.surface === "chatgpt" && options.panelSecretNotice?.(refOf(q)) !== true && (now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true);
   const autoAnswerable = (q) => q.path !== "anonymous" && q.path !== "venice" && !q.hasResult && !q.result && q.state === "waiting" && q.nextAttemptAt <= now() && !hidden(q) && active(q);
   const current2 = (q) => {
     const fresh2 = store()?.get(q.id);
@@ -139168,7 +139182,8 @@ function createLocalPrivateAnswers(options) {
     if (result.status !== "answered")
       return { status: result.status, ...result.status === "failed" ? failureReason(q) : {}, ..."leftOut" in result ? { left_out: result.leftOut } : {} };
     sweep();
-    const citations = result.citations.map((citation) => {
+    const secretSources = q && result.secretLocations?.length ? options.secretSources?.({ question: q.question, selectors: q.selectors }, result.secretLocations) ?? [] : [];
+    const citations = [...result.citations, ...secretSources].map((citation) => {
       const view3 = {
         ...citation.title ? { title: citation.title } : {},
         ...citation.source ? { source: citation.source } : {},
@@ -139285,6 +139300,13 @@ function createLocalPrivateAnswers(options) {
     },
     async handle(body, session) {
       const action = body.action;
+      if (action === "resolve_secret") {
+        const ref = typeof body.handle === "string" ? options.resolveSecretInbox?.(body.handle) : undefined;
+        const q = ref ? store()?.get(ref.id) : undefined;
+        if (!ref || !q || q.generation !== ref.generation || q.connectionId !== ref.connectionId || !current2(q))
+          return refused(410, "gone", "Open Olympus on your computer, then Inbox");
+        return { status: 200, body: { ok: true, id: q.id } };
+      }
       if (action === "list")
         return { status: 200, body: { ok: true, ...api2.waiting(), destinations: api2.destinations() } };
       if (action === "ask_anonymous") {
@@ -139406,6 +139428,8 @@ function createLocalPrivateAnswers(options) {
             const q = store()?.get(entry.ref.id);
             if (!q || q.generation !== entry.ref.generation || !q.result || !current2(q))
               return false;
+            if (q.result.secretLocations?.length && options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, q.result.secretLocations) !== true)
+              return false;
           }
           const check = await eligible(entry.read);
           if (check === "unknown")
@@ -139418,6 +139442,8 @@ function createLocalPrivateAnswers(options) {
           if (entry.ref) {
             const q = store()?.get(entry.ref.id);
             if (!q || q.generation !== entry.ref.generation || !q.result || !current2(q))
+              return false;
+            if (q.result.secretLocations?.length && options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, q.result.secretLocations) !== true)
               return false;
           }
           return true;
@@ -153456,7 +153482,7 @@ function renderLevelChoice(level, settingsHref) {
 }
 function renderFailureNotice(reason) {
   const failure2 = privateAnswerFailure(reason);
-  return `<p class="pamsg" data-pa-failure>${escapeHtml2(failure2.message)} ${failure2.href ? `<a href="${escapeHtml2(failure2.href)}">${escapeHtml2(failure2.action)}</a>` : escapeHtml2(failure2.action)}</p>`;
+  return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml2(failure2.message)} ${failure2.href ? `<a href="${escapeHtml2(failure2.href)}">${escapeHtml2(failure2.action)}</a>` : escapeHtml2(failure2.action)}</p>`;
 }
 function renderWaiting(waiting, now) {
   const parts = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>`];
@@ -153472,7 +153498,7 @@ function renderWaiting(waiting, now) {
     const state = question.state ?? (question.unchecked ? "unchecked" : "answering");
     const status = state === "failed" ? "" : state === "changed" ? DASHBOARD_PRIVATE_ANSWERS_COPY.changed : state === "queued" ? DASHBOARD_PRIVATE_ANSWERS_COPY.queued : state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
     const from = [question.path === "venice" ? DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName : question.path === "anonymous" ? DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath : DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath, question.from, when, status].filter(Boolean).join(" · ");
-    return `<li class="srow nodot${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom" title="${escapeHtml2(question.askedAt)}"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
+    return `<li class="srow nodot${state === "failed" ? " pa-failed" : ""}${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom" title="${escapeHtml2(question.askedAt)}"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
   parts.push(`<ul class="srows palist" data-pa-list>${rows.join("")}</ul>`);
   parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button></div>`);
@@ -153589,6 +153615,7 @@ function privateAnswersClientScript(input) {
     var failure = failureFor(reason, config.failures);
     var line = el('p', 'pamsg', failure.message + ' ');
     line.setAttribute('data-pa-failure', '');
+    var icon = el('span'); icon.setAttribute('data-pa-warning', ''); icon.setAttribute('aria-hidden', 'true'); line.insertBefore(icon, line.firstChild);
     if (failure.href) { var link = el('a', '', failure.action); link.href = failure.href; line.appendChild(link); }
     else line.appendChild(document.createTextNode(failure.action));
     return line;
@@ -153787,11 +153814,16 @@ function privateAnswersClientScript(input) {
     if (note && rows().length > 0) { note.hidden = false; note.textContent = config.copy.nothingDeleted; }
     empty();
   });
-  function openFragment() {
+  async function openFragment() {
     var id;
     try { id = decodeURIComponent(window.location.hash.slice(1)); } catch (_) { return; }
     if (!id || id === config.fragment) return;
     var row = findRow(id);
+    if (!row && /^[A-Za-z0-9_-]{22}$/.test(id)) {
+      var resolved = await send({ action: 'resolve_secret', handle: id });
+      if (window.location.hash.slice(1) !== id) return;
+      if (resolved.ok && typeof resolved.result.id === 'string') row = findRow(resolved.result.id);
+    }
     if (!row) { missing(); return; }
     if (row.scrollIntoView) row.scrollIntoView({ block: 'center' });
     read(row, false);
@@ -153833,6 +153865,7 @@ function privateAnswersClientScript(input) {
         var out = el('div', 'paout'); out.setAttribute('data-pa-out', ''); out.setAttribute('aria-live', 'polite'); row.appendChild(out); bind(row);
       }
       row.classList.toggle('unread', q.unread === true);
+      row.classList.toggle('pa-failed', q.state === 'failed');
       row.querySelector('.paq').textContent = q.question;
       if (selected === q.id && q.state !== 'answered' && q.state !== 'failed') {
         message(row.querySelector('[data-pa-out]'), q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
@@ -153880,6 +153913,11 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .pafrom { margin: 4px 0 0; color: var(--t3); font-size: var(--fs-body); }
 .pa .paout, .pa [data-pa-failure] { grid-column: 1 / -1; }
 .pa .paout:empty { display: none; }
+.pa .srow.pa-failed { background: var(--warn-bg); border-left: 3px solid var(--warn); padding-left: 12px; padding-right: 12px; border-radius: 6px; }
+.pa [data-pa-failure] { color: var(--t1); }
+.pa [data-pa-warning]::before { content: "⚠"; }
+.pa [data-pa-warning] { display: inline-block; margin-right: 6px; color: var(--warn); font-weight: 800; }
+.pa .srow.pa-failed .pafrom { color: var(--t2); }
 .pa .srow.unread .paq { font-weight: 700; }
 .pa .pa-read { display: block; width: 100%; min-width: 0; border: 0; padding: 0; text-align: left; background: none; color: inherit; font: inherit; cursor: pointer; overflow-wrap: anywhere; white-space: normal; }
 .pa .smain { min-width: 0; }
@@ -186909,7 +186947,12 @@ function chatgptPrivateAnswerProgram(config2) {
     }
     const unanswered = (Array.isArray(value2.unanswered) ? value2.unanswered : []).filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
     const ack = typeof value2.ack === "string" && /^[A-Za-z0-9_-]{43}$/.test(value2.ack) ? value2.ack : null;
-    return { text: value2.answer, sources, unanswered, ack };
+    const notice = value2.secretInbox;
+    const secretInbox = notice && typeof notice === "object" ? {
+      ...typeof notice.handle === "string" && /^[A-Za-z0-9_-]{22}$/.test(notice.handle) ? { handle: notice.handle } : {},
+      ...notice.remote && typeof notice.remote.onComputer === "string" && typeof notice.remote.onServer === "string" ? { remote: { onComputer: notice.remote.onComputer, onServer: notice.remote.onServer } } : {}
+    } : undefined;
+    return { text: value2.answer, sources, unanswered, ack, ...secretInbox ? { secretInbox } : {} };
   }
   function acknowledge(jobId, publicKey, ack) {
     if (!ack || acked[jobId] || !JOB_ID2.test(jobId) || typeof window.fetch !== "function")
@@ -187329,15 +187372,41 @@ function chatgptPrivateAnswerProgram(config2) {
     body.setAttribute("tabindex", "-1");
     body.setAttribute("data-key", "answer");
     const markdown = window.olympusMarkdown;
+    const text4 = shown.secretInbox?.handle ? shown.text.replace(T.secretOpen + ".", "").trim() : shown.text;
     if (typeof markdown === "function") {
       body.className = "answer md";
-      markdown(doc2, body, shown.text);
+      markdown(doc2, body, text4);
     } else {
-      const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
+      const paragraphs = text4.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
       for (const part of paragraphs)
         body.appendChild(el("p", "", part));
     }
     view3.card.appendChild(body);
+    if (shown.secretInbox) {
+      const notice = shown.secretInbox;
+      if (notice.remote) {
+        const R = config2.remoteCopy;
+        view3.card.appendChild(el("p", "sub", R.title));
+        view3.card.appendChild(el("p", "sub", R.onComputer));
+        view3.card.appendChild(el("pre", "remote-command", notice.remote.onComputer));
+        view3.card.appendChild(el("p", "sub", R.onServer));
+        view3.card.appendChild(el("pre", "remote-command", notice.remote.onServer));
+      } else if (notice.handle) {
+        view3.card.appendChild(button(T.secretOpen, "secret-inbox", () => {
+          const href = "https://olympusplugin.ai/open/private/#" + notice.handle;
+          const host = openai();
+          if (host && typeof host.openExternal === "function") {
+            try {
+              host.openExternal({ href });
+            } catch {}
+          } else
+            request("ui/open-link", { url: href }, () => {
+              return;
+            });
+        }));
+      }
+      view3.card.appendChild(el("p", "sub", T.secretFallback));
+    }
     if (shown.sources.length)
       view3.card.appendChild(sourcesView(shown.sources));
     const gaps = shown.unanswered.map((item) => item.trim()).filter(Boolean);
@@ -187468,6 +187537,7 @@ function chatgptPrivateAnswerPageHtml(options) {
     metaKey: PRIVATE_ANSWER_META_KEY,
     jobIdPattern: CHATGPT_PRIVATE_ANSWER_JOB_ID.source,
     copy: DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY,
+    remoteCopy: DASHBOARD_CHATGPT_PAGE_COPY.remote,
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
     fullPollCapMs: options.fullPollCapMs ?? CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS,
@@ -187543,6 +187613,7 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
 .answer{margin-top:0.625rem;display:flex;flex-direction:column;gap:0.625rem;font-size:0.9375rem;line-height:1.6;white-space:pre-line}
 ${CHATGPT_MARKDOWN_CSS}
 .answer:focus{outline:none}
+.remote-command{white-space:pre-wrap;overflow-wrap:anywhere;font-size:0.8125rem}
 .sources{margin-top:0.5rem}
 .src-toggle{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.8125rem;font-weight:500;line-height:1.4;color:var(--muted);background:none;border:0;border-radius:6px;padding:0.125rem 0;margin:0;cursor:pointer;-webkit-appearance:none;appearance:none}
 .src-toggle:hover{color:var(--text)}
@@ -200353,7 +200424,12 @@ function fitFirstAnswer(answer) {
 }
 function serializePrivateAnswerPlaintext(plaintext) {
   const ack = typeof plaintext.ack === "string" && ACK_PATTERN.test(plaintext.ack) ? plaintext.ack : undefined;
-  return JSON.stringify({ v: 1, ...fitFirstAnswer(plaintext), ...ack ? { ack } : {} });
+  const notice = plaintext.secretInbox;
+  const secretInbox = notice ? {
+    ...typeof notice.handle === "string" && /^[A-Za-z0-9_-]{22}$/.test(notice.handle) ? { handle: notice.handle } : {},
+    ...notice.remote && typeof notice.remote.onComputer === "string" && typeof notice.remote.onServer === "string" ? { remote: { onComputer: notice.remote.onComputer.slice(0, 1024), onServer: notice.remote.onServer.slice(0, 1024) } } : {}
+  } : undefined;
+  return JSON.stringify({ v: 1, ...fitFirstAnswer(plaintext), ...ack ? { ack } : {}, ...secretInbox ? { secretInbox } : {} });
 }
 var PRIVATE_ANSWER_PAYLOAD_LIMITS, PRIVATE_ANSWER_BYTE_BUDGETS, CUT_MARK = "…", UNSAFE, WHITESPACE_CONTROLS, encoder, OPEN_TOKEN, ACK_PATTERN;
 var init_private_answer_payload = __esm(() => {
@@ -200723,6 +200799,29 @@ class PrivateAnswerJobs {
     job.opens = undefined;
     return false;
   }
+  hasSecretInbox(ref) {
+    this.sweep();
+    return [...this.jobs.values()].some((job) => job.preserveWaiting && job.waiting?.id === ref.id && job.waiting.generation === ref.generation && job.waiting.connectionId === ref.connectionId);
+  }
+  resolveSecretInbox(handle) {
+    this.sweep();
+    if (!/^[A-Za-z0-9_-]{22}$/.test(handle))
+      return;
+    for (const job of this.jobs.values()) {
+      if (job.inboxHandle === handle && job.preserveWaiting && job.waiting)
+        return { ...job.waiting };
+    }
+    return;
+  }
+  secretInbox(job) {
+    const remote = this.options.inboxRemote?.();
+    if (remote)
+      return { remote };
+    if (!job.waiting)
+      return {};
+    job.inboxHandle ??= randomBytes31(16).toString("base64url");
+    return { handle: job.inboxHandle };
+  }
   sweep(at = this.now()) {
     for (const [key2, ref] of this.waitingDeletes)
       this.retryWaitingDelete(key2, ref);
@@ -201069,7 +201168,7 @@ class PrivateAnswerJobs {
           return;
         }
         const ack = randomBytes31(32).toString("base64url");
-        const plaintext = { v: 1, answer: REMOTE_SECRET_NOTE, citations: [], ack };
+        const plaintext = { v: 1, answer: REMOTE_SECRET_NOTE, citations: [], ack, secretInbox: this.secretInbox(job) };
         const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
         if (settled)
           return;
@@ -201124,10 +201223,12 @@ class PrivateAnswerJobs {
             return;
           const ack = randomBytes31(32).toString("base64url");
           const plaintext = { ...this.withOpenTokens(job, result.plaintext, result.localPaths), ack };
-          if (job.preserveWaiting)
+          if (job.preserveWaiting) {
             plaintext.answer = `${REMOTE_SECRET_NOTE}
 
 ${plaintext.answer}`;
+            plaintext.secretInbox = this.secretInbox(job);
+          }
           const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
           const outcome = { kind: "sealed", sealed };
           if (settled)
@@ -207761,6 +207862,15 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   let zkapiDailyLimitNow;
   let chatgptModelProblem;
   const privateAnswers = new PrivateAnswerJobs2({
+    inboxRemote: () => {
+      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
+      return mode.remote ? remoteOpenInstructions({
+        port,
+        ...mode.sshTarget ? { sshTarget: mode.sshTarget } : {},
+        ...process.platform === "linux" ? { socketPath: workerSocketPath() } : {},
+        target: { kind: "private_answers" }
+      }) : undefined;
+    },
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
@@ -207841,6 +207951,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       connectionName: (connectionId) => localInboxLabel(connectionId) ?? remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
       eligibleSecrets: local.eligibleSecrets,
+      resolveSecretInbox: (handle) => privateAnswers.resolveSecretInbox(handle),
+      panelSecretNotice: (ref) => privateAnswers.hasSecretInbox(ref),
+      secretSources: local.secretSources,
       ...openCitedFile ? { openFile: openCitedFile } : {},
       ...process.platform === "darwin" ? {
         openUrl: async (url2, eligible) => {
