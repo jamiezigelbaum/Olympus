@@ -52971,7 +52971,7 @@ var init_vocabulary = __esm(() => {
     pasteToken: "Paste the worker bearer token.",
     readToken: "That is the read-only view token; use the worker bearer token from setup.",
     refused: "That token was not accepted.",
-    openBlocked: "Your browser did not open the page.",
+    openBlocked: "If the page didn't open,",
     openBlockedLink: "Open it"
   };
   ARCHIVE_PICK_INTRO = archivePickIntro();
@@ -151740,22 +151740,16 @@ function hostProgram(input, bridge) {
         window.location.assign(parsed.pathname + parsed.search + parsed.hash);
         return;
       }
-      let tab = null;
       try {
-        tab = window.open(url2, "_blank");
-      } catch {
-        tab = null;
-      }
-      if (tab) {
-        tab.opener = null;
-        return;
-      }
+        window.open(url2, "_blank", "noopener,noreferrer");
+      } catch {}
       const offer = document.querySelector("[data-open-offer]");
       const link = document.querySelector("[data-open-offer-link]");
       if (!offer || !link)
         return;
       link.href = url2;
       offer.hidden = false;
+      link.focus();
     }
   });
   const offerLink = document.querySelector("[data-open-offer-link]");
