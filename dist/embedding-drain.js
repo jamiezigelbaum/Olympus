@@ -47273,6 +47273,9 @@ var init_file_mime = __esm(() => {
 import { existsSync as existsSync24, mkdirSync as mkdirSync16, opendirSync, readFileSync as readFileSync21 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname32, join as join33 } from "node:path";
+function folderAccessMemoryPath() {
+  return join33(olympusDataDir(), "local-files", "folder-access.json");
+}
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -47399,6 +47402,9 @@ class MacPermissions {
       return { state: "denied", message: this.unreadableCopy() };
     return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
+  noteGranted(guard) {
+    this.remember(guard, "granted");
+  }
   noteDenied(guard) {
     this.remember(guard, "denied");
     return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
@@ -47471,7 +47477,7 @@ class MacPermissions {
     } catch {}
   }
   load() {
-    if (this.memory)
+    if (this.memory && !this.memoryPath)
       return this.memory;
     let loaded = {};
     if (this.memoryPath && existsSync24(this.memoryPath)) {
@@ -47490,6 +47496,7 @@ class MacPermissions {
 var ENGINE_HELPER_ENV = "OLYMPUS_ENGINE_HELPER", FULL_DISK_ACCESS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles", FILES_AND_FOLDERS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders", SETTINGS_NAMES, PLACE_WORDS, ENGINE_APP = "Olympus Engine", OTHER_APP = "the app that runs Olympus (the one your Mac named when it asked)", MAC_ACCESS_COPY;
 var init_mac_permissions = __esm(() => {
   init_atomic_file();
+  init_remote_access();
   init_paths();
   SETTINGS_NAMES = {
     desktop: "Desktop Folder",
@@ -68482,7 +68489,6 @@ init_local_open();
 init_connector_source();
 
 // src/workers/local-files/scope-browser.ts
-init_remote_access();
 import { lstatSync as lstatSync13, readdirSync as readdirSync4, realpathSync as realpathSync8 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { join as join35 } from "node:path";
@@ -68771,7 +68777,7 @@ function localFilesListing(options) {
   const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
-    memoryPath: join35(olympusDataDir(), "local-files", "folder-access.json")
+    memoryPath: folderAccessMemoryPath()
   });
   const node = (scopePath, name, parentKey2, access) => {
     const own3 = isInsideOwnRoot(scopePath, context2);

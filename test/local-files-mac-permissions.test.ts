@@ -209,6 +209,27 @@ describe('the picker\'s states for a guarded folder', () => {
     expect(source.tasks.filter((task) => task.id.startsWith('local.files_extract.'))).toHaveLength(1);
   });
 
+  test('a scheduled read of a guarded folder clears its "Needs permission" in the picker (#724)', async () => {
+    const f = fixture({ helper: true, persist: true });
+    const documents = { kind: 'documents' as const, root: join(f.home, 'Documents') };
+    // The picker keeps its own instance on the same remembered answers.
+    const picker = new MacPermissions({ platform: 'darwin', home: f.home, helperPresent: () => true, memoryPath: f.memoryPath! });
+    expect(picker.nodeAccess(documents)?.state).toBe('needs_permission');
+    const root = (path: string) => ({ path, approved_scope_key: `scope:${path}`, default_action: 'full_extract' });
+    const source = createLocalFilesSchedulerSource({
+      policy: { corpusId: 'c', roots: [root(join(f.home, 'Documents', 'Taxes')), root(join(f.home, 'Code'))], sync: { cadence: 'daily' }, content: { plan_limit: 1, batch_size: 1 } } as never,
+      config: defaultConfig(),
+      providerSync: { pull: async () => ({ receipt: { status: 'ok', counts: {} }, checkpoint: 'x' }), connectorIdForScope: () => 'k' } as never,
+      store: { lastCompletedSyncRun: () => undefined } as never,
+      macPermissions: f.permissions,
+      volumes: new VolumeResolver({ platform: 'darwin', home: f.home, readMounts: () => '/dev/disk3s1s1 on / (apfs, local)' }),
+    })!;
+    for (const task of source.tasks.filter((task) => task.kind === 'sync')) await task.run();
+    expect(f.asked).toEqual([]);
+    expect(picker.nodeAccess(documents)).toBeUndefined();
+    expect(Object.keys(JSON.parse(readFileSync(f.memoryPath!, 'utf8')))).toEqual([join(f.home, 'Documents')]);
+  });
+
   test('Full Disk Access is only "on" when a protected folder lists; a missing one proves nothing', () => {
     const probe = (behaviour: (path: string) => void) =>
       new MacPermissions({ platform: 'darwin', home: '/h', helperPresent: () => true, listProtected: behaviour }).hasFullDiskAccess();
