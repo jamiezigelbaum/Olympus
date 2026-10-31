@@ -28360,10 +28360,14 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 import { createHash as createHash14 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
+function priorityQueryEmbeddingRequested() {
+  return priorityQueryEmbedding.getStore() === true;
+}
 function isApprovedSecureSourceEmbeddingProvider(provider) {
   return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
 }
@@ -29164,13 +29168,14 @@ function mediaJudgeMethods(provider) {
     ...provider.embedPromptTexts ? { embedPromptTexts: (texts) => provider.embedPromptTexts(texts) } : {}
   };
 }
-var SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
+var priorityQueryEmbedding, SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
 var init_embeddings = __esm(() => {
   init_operation_error();
   init_local_model_policy();
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
+  priorityQueryEmbedding = new AsyncLocalStorage2;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -59356,6 +59361,9 @@ class BuiltInSourceEmbeddingProvider {
   now;
   loading;
   loaded;
+  priorityLoaded;
+  prioritySlotBusy = false;
+  priorityWaiting = [];
   lastFailure;
   slotBusy = false;
   imageSupportWarned = false;
@@ -59506,7 +59514,7 @@ class BuiltInSourceEmbeddingProvider {
       if (this.spec.runtime === "litert") {
         if (!installed.libraryPath)
           throw new Error("the LiteRT-LM runtime is not installed.");
-        const embedder = await this.liteRtFactory({
+        const settings = {
           library: installed.libraryPath,
           model: installed.modelPath,
           cacheDir: join54(dirname49(installed.modelPath), "cache"),
@@ -59514,8 +59522,18 @@ class BuiltInSourceEmbeddingProvider {
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
           ...this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}
-        });
+        };
+        const embedder = await this.liteRtFactory(settings);
         model = { kind: "litert", embedder };
+        try {
+          const { visionTokensPerImage: _vision, ...querySettings } = settings;
+          this.priorityLoaded = { kind: "litert", embedder: await this.liteRtFactory(querySettings) };
+        } catch (error) {
+          await embedder.release().catch(() => {
+            return;
+          });
+          throw error;
+        }
         if (this.spec.vision)
           reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
       } else {
@@ -59524,6 +59542,15 @@ class BuiltInSourceEmbeddingProvider {
         const tokenizer = loadTokenizer(installed.vocabularyPath);
         const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
         model = { kind: "onnx", session, tokenizer };
+        try {
+          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+          this.priorityLoaded = { kind: "onnx", session: querySession, tokenizer };
+        } catch (error) {
+          await session.release?.().catch(() => {
+            return;
+          });
+          throw error;
+        }
       }
       reportBuiltInEmbeddingState(reporterOptions, "ready");
       return model;
@@ -59534,6 +59561,21 @@ class BuiltInSourceEmbeddingProvider {
     }
   }
   async withSlot(taskType, run) {
+    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
+      if (this.prioritySlotBusy)
+        await new Promise((resolve14) => this.priorityWaiting.push(resolve14));
+      else
+        this.prioritySlotBusy = true;
+      try {
+        return await run();
+      } finally {
+        const next = this.priorityWaiting.shift();
+        if (next)
+          next();
+        else
+          this.prioritySlotBusy = false;
+      }
+    }
     if (this.slotBusy) {
       await new Promise((resolve14) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve14));
     } else {
@@ -59550,6 +59592,11 @@ class BuiltInSourceEmbeddingProvider {
     }
   }
   async embedLoaded(model, inputs, taskType) {
+    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
+      if (!this.priorityLoaded)
+        throw new BuiltInEmbeddingNotReadyError(this.status());
+      model = this.priorityLoaded;
+    }
     if (model.kind === "litert")
       return this.embedLiteRt(model.embedder, inputs, taskType);
     const windowTokens = this.spec.maxTokens - 2;
@@ -62830,17 +62877,17 @@ function namesOnlyCoverageNote(count) {
 }
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage2;
+  localInferenceGuards ??= new AsyncLocalStorage3;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage2;
+  localInferencePriority ??= new AsyncLocalStorage3;
   return localInferencePriority.run("background", work);
 }
 function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage2;
+  localInferencePriority ??= new AsyncLocalStorage3;
   return localInferencePriority.run("maintenance", work);
 }
 function createAnswerActivity(onBusy, options = {}) {
@@ -63285,7 +63332,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel3) {
   if (!request.localOnly)
     return;
@@ -64040,7 +64087,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage3;
+  analystAbortSignalStorage = new AsyncLocalStorage4;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -64671,7 +64718,7 @@ var init_parent_label = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 import { randomUUID as randomUUID14 } from "node:crypto";
 function createSourceAnswerTrace(now = () => new Date) {
   const received = now();
@@ -64932,7 +64979,7 @@ function nonNegativeMs(value) {
 }
 var storage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
-  storage = new AsyncLocalStorage4;
+  storage = new AsyncLocalStorage5;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -65836,7 +65883,7 @@ var init_evidence_pack = __esm(() => {
 });
 
 // src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 function createReleaseManifestSink() {
   return { manifests: [] };
 }
@@ -65899,7 +65946,7 @@ function withheldSourceAnswer(reason) {
 }
 var storage2, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
-  storage2 = new AsyncLocalStorage5;
+  storage2 = new AsyncLocalStorage6;
   withheldAnswers = new WeakSet;
 });
 
