@@ -154,9 +154,17 @@ shared model completion boundary, including synthesis and audit. Evidence
 authorization is repeated after queueing, before the model call starts, for
 both inbox/panel answers and ordinary source answers sharing that model. A running
 model call finishes; subsequent background calls yield. Upgrade resumes
-bounded existing records. Failures remain row states, with persisted
-exponential backoff from 5 seconds up to 30 minutes, no raw exception text.
-Rows say Answering…, Trying again…, or Could not check yet.
+bounded existing records. Migration v6 adds a content-free reason code for each
+retry: answer failure, model unavailable/downloading, changed evidence,
+unavailable eligibility, or refused save. A question generation gets at most
+eight attempts, with persisted exponential backoff starting at five seconds.
+The eighth failed attempt stores an unread failure outcome, visible in Inbox
+and its Needs you count; opening it marks that generation read. No exception
+text, answer text, source name or locator enters the retry history. Asking the
+question again starts a fresh generation and clears its retry history. This
+bounds attempts for one question; it adds no allowance on questions asked or
+kept. Rows say Answering…, Retrying on this computer…, not checked yet, or
+Olympus could not answer this. Try again.
 
 **Storage.** Migration v2 of the question store retains answer text, citation
 labels/locators (no source content copies), an allowlist of corpus/tier/source

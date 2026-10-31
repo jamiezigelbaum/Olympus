@@ -1,3 +1,4 @@
+import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
 /**
  * The allowlisted response builder: the ONLY way a ChatGPT-bound response
  * leaves the engine. Every tool result (text content, structuredContent,
@@ -585,6 +586,12 @@ export function privateMatchNote(
   contentPrivateMatches = 0,
   releasedEvidence = false,
 ): string | undefined {
+  if (match?.secretMatch === true) {
+    // A Secret-only result needs no Private-model instructions. Mixed
+    // matches still carry the usual guidance for the readable Private part.
+    const { secretMatch: _secretMatch, ...privatePart } = match;
+    return match.hasPrivateEvidence ? `${privateMatchNote(privatePart, contentPrivateMatches, releasedEvidence)} ${REMOTE_SECRET_NOTE}` : REMOTE_SECRET_NOTE;
+  }
   const panel = copyPrivateMatch(match);
   if (panel) {
     if (panel.state !== 'ready') return PRIVATE_MATCH_PANEL_SETUP_NOTE;

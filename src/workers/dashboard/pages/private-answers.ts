@@ -202,7 +202,7 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
     const asked = Date.parse(question.askedAt);
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : '';
     const state = question.state ?? (question.unchecked ? 'unchecked' : 'answering');
-    const status = state === 'changed' ? W.changed : state === 'queued' ? W.queued : state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
+    const status = state === 'failed' ? W.failed : state === 'changed' ? W.changed : state === 'queued' ? W.queued : state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
     const from = [question.path === 'venice' ? W.veniceName : question.path === 'anonymous' ? W.anonymousPath : W.privatePath, question.from, when, status].filter(Boolean).join(' · ');
     return `<li class="srow nodot${question.unread ? ' unread' : ''}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">`
       + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom" title="${escapeHtml(question.askedAt)}"> · ${escapeHtml(from)}</span></button></div>`
@@ -458,7 +458,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     }
     render(out, outcome.result, question);
     var generation = outcome.result.generation;
-    if ((outcome.result.status === 'answered' || outcome.result.status === 'not_found' || outcome.result.status === 'withdrawn') && (typeof generation === 'number' || typeof generation === 'string') && seen[id] !== generation) {
+    if ((outcome.result.status === 'answered' || outcome.result.status === 'not_found' || outcome.result.status === 'withdrawn' || outcome.result.status === 'failed') && (typeof generation === 'number' || typeof generation === 'string') && seen[id] !== generation) {
       var ack = await send({ action: 'seen', id: id, generation: generation });
       if (ack.ok) { seen[id] = generation; row.classList.remove('unread'); }
     }
@@ -563,10 +563,10 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       }
       row.classList.toggle('unread', q.unread === true);
       row.querySelector('.paq').textContent = q.question;
-      if (selected === q.id && q.state !== 'answered') {
+      if (selected === q.id && q.state !== 'answered' && q.state !== 'failed') {
         message(row.querySelector('[data-pa-out]'), q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
       }
-      var state = q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
+      var state = q.state === 'failed' ? config.copy.failed : q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
       var date = new Date(q.askedAt);
       row.querySelector('.pafrom').textContent = ' · ' + [q.path === 'venice' ? config.copy.venicePath : q.path === 'anonymous' ? config.copy.anonymousPath : config.copy.privatePath, q.from, isNaN(date.getTime()) ? '' : relative(Date.now() - date.getTime()), state].filter(Boolean).join(' · ');
       row.querySelector('.pafrom').title = q.askedAt;

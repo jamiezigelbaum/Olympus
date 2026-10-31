@@ -35,6 +35,7 @@
 import { buildEvidencePackDetailed, type LocalContentProvider, type SecretLocationNote } from '../../core/evidence-pack.ts';
 import { providerSourceLabel } from '../../core/remote-result.ts';
 import { secretLocationAnswer } from '../../core/secret-location-note.ts';
+import { secretLocationFingerprint } from '../classification/secret-locations.ts';
 import type { EvidenceCandidate } from '../../core/contracts.ts';
 import { assertEvidencePackModelEligible, assertModelTrustTierAllowed } from '../../core/source-model-policy.ts';
 import type { SourceIndexProvenance, SourceTrustDomain } from '../../core/source-index/types.ts';
@@ -80,6 +81,7 @@ export type LocalAnswerResult =
        * before a cited item opens. Never sent to the page.
        */
       read: readonly PrivateEvidenceItem[];
+      secretLocations?: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[];
     }
   /** Nothing on this computer matched (or nothing that matched may be read now). */
   | { status: 'not_found'; leftOut: string[] }
@@ -181,8 +183,9 @@ export async function answerOnThisComputer(
   const leftOut = leftOutSources(detail.skippedCorpora, lanes.excludedCorpusIds, options.sourceName);
   // Matching Secrets, by location only (no model sees them): said beside the answer, or as the answer.
   const secrets = secretLocationAnswer((detail.secretLocations ?? []).map((location) => ({ where: secretWhere(location) })));
+  const secretLocations = (detail.secretLocations ?? []).map(({ source, ref, locator, title }) => ({ source, ref, fingerprint: secretLocationFingerprint({ locator, title }) }));
   const notFound = (): LocalAnswerResult => (secrets
-    ? { status: 'answered', answer: secrets, citations: [], unanswered: [], leftOut, read: [] }
+    ? { status: 'answered', answer: secrets, citations: [], unanswered: [], leftOut, read: [], secretLocations }
     : { status: 'not_found', leftOut });
   // Items kept as names only, and Personal names whose contents are Private
   // (read from their Private copy instead), carry no text to answer from.
@@ -235,6 +238,7 @@ export async function answerOnThisComputer(
     unanswered: result.unanswered ?? [],
     leftOut,
     read,
+    secretLocations,
   };
 }
 

@@ -2760,6 +2760,21 @@ export async function main(): Promise<void> {
       return [];
     }
   });
+  const checkTierSecretLocations = (
+    locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[],
+    searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
+  ): boolean => locations.every((location) => tierLanes.some((lane) => {
+    const scope = searched.find((entry) => entry.corpusId === lane.secureCorpusId);
+    if (!scope || !lane.secrets) return false;
+    try {
+      return lane.secrets.recheck(location, scope, {
+        hide: (identities) => hiddenProbesByParentIdentity({
+          ledger: () => lane.ledger,
+          stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
+        }, identities),
+      });
+    } catch { return false; }
+  }));
   // Each lane's ledger, its corpora and its stores that exist now: the stores
   // let a child item be judged by its parent where the gate and the release
   // check read (tier-visibility.ts).
@@ -4446,6 +4461,7 @@ export async function main(): Promise<void> {
           // A child item's citation names its parent when the parent's names may go where the child goes.
           parentLabels: parentLabelResolver,
           secretLocations: tierSecretLocations,
+          checkSecretLocations: checkTierSecretLocations,
           heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0,
         }),
       });
@@ -6092,6 +6108,7 @@ export async function main(): Promise<void> {
       store: waitingQuestionStore,
       connectionName: (connectionId) => localInboxLabel(connectionId) ?? remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
+      eligibleSecrets: local.eligibleSecrets,
       ...(openCitedFile ? { openFile: openCitedFile } : {}),
       ...(process.platform === 'darwin' ? {
         openUrl: async (url: string, eligible: () => Promise<boolean>) => {
@@ -6267,7 +6284,7 @@ export async function main(): Promise<void> {
   const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
   const remotePrivateParts = createRemotePrivateParts({
     probe: (request, timeoutMs) => (sourceAnswerLanes
-      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs })
+      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs, distinguishSecret: true })
       : Promise.resolve('unknown' as const)),
     store: waitingQuestionStore,
     isActive: connectionActive,
@@ -6469,7 +6486,7 @@ export async function main(): Promise<void> {
   const chatgptPrivateMatchProbe = sourceAnswerLanes
     ? async (question: string) => {
         const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question });
-        return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[] };
+        return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[], ...(result.secretMatch ? { secretMatch: true as const } : {}) };
       }
     : undefined;
   // The dashboard's install progress follows the built-in model's download.

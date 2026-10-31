@@ -91,6 +91,8 @@ export interface PrivateAnswerNoneMetaV1 {
 export const PRIVATE_ANSWER_NONE_META: PrivateAnswerNoneMetaV1 = Object.freeze({ v: 1, count: 0, state: 'none' }) as PrivateAnswerNoneMetaV1;
 
 export interface PrivateMatchSummary {
+  secretMatch?: true;
+  hasPrivateEvidence?: boolean;
   count: number;
   panelState: PrivateAnswerPanelState;
   percent?: number;

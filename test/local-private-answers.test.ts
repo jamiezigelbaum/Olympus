@@ -1385,6 +1385,18 @@ describe('the Private answers page', () => {
     expect(page.posts.at(-1)!.body).toEqual({ action: 'open', token: 'A'.repeat(32) });
   });
 
+  test('an exhausted Inbox answer shows failure and marks its generation seen', async () => {
+    const page = renderAndRun(body => ({ status: 200, body: body.action === 'read'
+      ? { ok: true, status: 'failed', generation: 2 }
+      : { ok: true, status: 'read' } }));
+    const row = page.document.querySelector('[data-pa-question="wq_1"]')!;
+    (row.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+    await page.settle();
+    expect(row.querySelector('[data-pa-out]')!.textContent).toContain('Olympus could not answer this. Try again.');
+    expect(page.posts.map(post => post.body)).toEqual([{ action: 'read', id: 'wq_1' }, { action: 'seen', id: 'wq_1', generation: 2 }]);
+    expect(row.classList.contains('unread')).toBe(false);
+  });
+
   test('a withdrawn Venice answer shows its sent list and reason as text, and marks the receipt seen', async () => {
     const page = renderAndRun(body => ({ status: 200, body: body.action === 'read'
       ? { ok: true, status: 'withdrawn', reason: 'Sent to Venice, but no answer was kept. <img src=x>', sent_items: [{ title: '<script>bad()</script>', source: 'test', date: '2026-10-15' }], generation: 9 }
@@ -1815,7 +1827,7 @@ for (const path of ['private', 'venice', 'anonymous'] as const) {
   test(`${path} retained answers survive an unavailable eligibility check`, async () => {
     const store = waitingStore();
     const ref = store.record(store.ticket('sender'), { question: 'Question', path, surface: 'remote', state: 'waiting' })!;
-    store.saveAnswer(ref, A('Keep this answer'), path === 'anonymous' ? 'Exact sent question' : undefined);
+    store.saveAnswer(ref, { ...A('Keep this answer'), ...(path === 'private' ? { secretLocations: [] } : {}) }, path === 'anonymous' ? 'Exact sent question' : undefined);
     let unavailable = true;
     const controller = createLocalPrivateAnswers({ store: () => store, answer: async () => ({ status: 'failed' }), eligible: async items => {
       if (unavailable) throw new Error('Transient ledger failure');
@@ -1862,4 +1874,63 @@ test('re-asking Venice retains answers and restarts not-found without allowing c
   await controller.tick();
   expect(calls).toBe(0);
   expect(store.get(first.id)?.result?.answer).toBe('Venice reply');
+});
+
+test('a repeatedly failing Inbox question settles visibly, keeps safe retry reasons, and can be asked afresh', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bounded-inbox-'));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  let clock = Date.parse('2026-10-14T12:00:00Z');
+  const store = openWaitingPrivateQuestionStore(join(dir, 'state', 'waiting.sqlite'), { now: () => clock });
+  cleanups.push(() => store.close());
+  const input = { question: 'dentist?', surface: 'remote' as const, state: 'waiting' as const };
+  const ref = store.record(store.ticket('c'), input)!;
+  let calls = 0;
+  const controller = createLocalPrivateAnswers({ store: () => store, now: () => clock, answer: async () => {
+    calls += 1;
+    throw new Error('PRIVATE EXCEPTION TEXT /Users/private/source.pdf');
+  } });
+  cleanups.push(() => controller.close());
+  for (let i = 0; i < 10; i += 1) {
+    await controller.tick();
+    clock = Math.max(clock + 1000, store.get(ref.id)!.nextAttemptAt);
+  }
+  expect(calls).toBe(8);
+  expect(store.get(ref.id)).toMatchObject({ attempts: 8, nextAttemptAt: 0, result: { status: 'failed', read: [], citations: [] }, retryReasons: Array(8).fill('answer_failed') });
+  expect(controller.waiting()!.questions[0]).toMatchObject({ state: 'failed', unread: true });
+  expect(controller.waitingCount()).toBe(1);
+  expect((await controller.handle({ action: 'read', id: ref.id }, 'owner')).body).toMatchObject({ status: 'failed', generation: ref.generation });
+  expect(JSON.stringify(store.list())).not.toContain('PRIVATE EXCEPTION TEXT');
+  const again = store.record(store.ticket('c'), input)!;
+  expect(again.generation).toBe(ref.generation + 1);
+  expect(store.get(ref.id)).toMatchObject({ attempts: 0 });
+  expect(store.get(ref.id)?.retryReasons).toBeUndefined();
+  await controller.tick();
+  expect(calls).toBe(9);
+});
+
+for (const [mode, reason] of [
+  ['no_model', 'no_model'], ['model_downloading', 'model_downloading'],
+  ['changed', 'evidence_changed'], ['ineligible', 'evidence_changed'],
+  ['unknown', 'eligibility_unavailable'], ['save_refused', 'save_refused'],
+] as const) test(`Inbox ${mode} retries have a safe reason and a terminal outcome`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'retry-reasons-'));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  let clock = Date.parse('2026-10-14T12:00:00Z');
+  const store = openWaitingPrivateQuestionStore(join(dir, 'state', 'waiting.sqlite'), { now: () => clock });
+  cleanups.push(() => store.close());
+  const ref = store.record(store.ticket('c'), { question: 'a question', surface: 'remote', state: 'waiting' })!;
+  if (mode === 'save_refused') store.saveAnswer = () => false;
+  const controller = createLocalPrivateAnswers({ store: () => store, now: () => clock,
+    answer: async () => mode === 'no_model' || mode === 'model_downloading' || mode === 'changed'
+      ? { status: mode } : { ...A('unreleased answer'), read: [{ corpusId: 'private.files', candidateId: 'synthetic' }] },
+    eligible: async items => { if (mode === 'unknown') throw new Error('private exception'); return items.map(() => mode !== 'ineligible'); },
+  });
+  cleanups.push(() => controller.close());
+  for (let i = 0; i < 8; i += 1) {
+    await controller.tick();
+    clock = Math.max(clock + 1000, store.get(ref.id)!.nextAttemptAt);
+  }
+  expect(store.get(ref.id)).toMatchObject({ result: { status: 'failed', read: [], citations: [] }, retryReasons: Array(8).fill(reason) });
+  expect((await controller.handle({ action: 'read', id: ref.id }, 'owner')).body.status).toBe('failed');
+  expect(JSON.stringify(store.get(ref.id))).not.toContain('unreleased answer');
 });

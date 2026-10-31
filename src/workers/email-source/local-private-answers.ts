@@ -9,7 +9,7 @@ import { DASHBOARD_PRIVATE_ANSWERS_COPY as W } from '../dashboard/vocabulary.ts'
  * Source opens are opaque, session-bound, expire after 30 minutes and recheck
  * every source immediately before desktop dispatch. No external URL is sent
  * to the page. Delete/revoke/withdrawal invalidates every outstanding completion.
- * Retries persist only attempts and next-attempt, never exception text.
+ * Retries persist bounded content-free reason codes and settle after eight attempts; never exception text.
  */
 import { TIER_LEDGER_IDENTITY_FIELDS } from '../classification/tier-ledger.ts';
 import { lstatSync } from 'node:fs';
@@ -29,6 +29,7 @@ import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
   answerOnThisComputer,
+  localAnswerRequest,
   checkLocalEvidenceItems,
   readLocalEvidenceItem,
   type LocalAnswerRequest,
@@ -65,7 +66,7 @@ export interface WaitingQuestionView {
   askedAt: string;
   /** The local probe could not tell yet whether Private items match. */
   unchecked: boolean;
-  state: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed';
+  state: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed' | 'failed';
   unread: boolean;
   answeredAt?: string;
 }
@@ -91,6 +92,7 @@ export interface LocalPrivateAnswersOptions {
   connectionName?: (connectionId: string) => string | undefined;
   /** The live eligibility guard, re-asked before a cited file opens. */
   eligible?: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
+  eligibleSecrets?: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => boolean;
   /** Opens a local file (macOS `open`, checked by the caller). Absent: local files do not open. */
   openFile?: (path: string, eligible: () => Promise<boolean>) => Promise<void>;
   now?: () => number;
@@ -161,6 +163,7 @@ export interface LocalAnswerPathOptions {
  */
 export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
   eligible: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
+  eligibleSecrets: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => boolean;
   answer: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
 } {
   const lanes = (request: SourceIndexAnswerRequest) => options.lanes(request, 'built_in_only');
@@ -198,6 +201,11 @@ export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
   });
   return {
     eligible,
+    eligibleSecrets: (input, locations) => {
+      if (!locations.length) return true;
+      const current = lanes(localAnswerRequest(input.question, input.selectors));
+      return current.checkSecretLocations?.(locations) === true;
+    },
     answer: (input) => answerOnThisComputer(input, {
       lanes,
       model,
@@ -321,13 +329,17 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true)
             .finally(() => { autoAnswering = false; });
           if (!current(q)) continue;
-          if ((result.status === 'answered' && await eligible(result.read) === 'eligible') || result.status === 'not_found') {
+          let check = result.status === 'answered' ? await eligible(result.read) : undefined;
+          if (result.status === 'answered' && (result.secretLocations?.length ?? 0) > 0 && options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, result.secretLocations!) !== true) check = 'ineligible';
+          if ((result.status === 'answered' && check === 'eligible') || result.status === 'not_found') {
             if (!current(q)) continue;
             const saved: StoredPrivateAnswer = result.status === 'answered'
-              ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
+              ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity), secretLocations: result.secretLocations ?? [] }
               : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] };
-            if (!currentStore.saveAnswer?.(refOf(q), saved)) currentStore.retry?.(refOf(q));
-          } else currentStore.retry?.(refOf(q));
+            if (!currentStore.saveAnswer?.(refOf(q), saved)) currentStore.retry?.(refOf(q), 'save_refused');
+          } else currentStore.retry?.(refOf(q), check === 'unknown' ? 'eligibility_unavailable'
+            : check === 'ineligible' || result.status === 'changed' ? 'evidence_changed'
+            : result.status === 'no_model' || result.status === 'model_downloading' ? result.status : 'answer_failed');
         }
       })().catch(() => undefined).finally(() => { pass = undefined; });
       return pass;
@@ -355,13 +367,13 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         return { questions: listed.questions.filter(q => active(q) && !hidden(q) && (q.path !== 'anonymous' || q.hasResult || q.result)).map(q => ({
           id: q.id, path: q.path ?? 'private', question: q.question, from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === 'chatgpt' ? 'ChatGPT' : 'An agent'),
           askedAt: q.askedAt, unchecked: q.state === 'unchecked', unread: !q.seen,
-          state: q.hasResult || q.result ? 'answered' : q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts > 0 ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering',
+          state: q.failed || q.result?.status === 'failed' ? 'failed' : q.hasResult || q.result ? 'answered' : q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts > 0 ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering',
           ...(q.answeredAt ? { answeredAt: q.answeredAt } : {}),
         })), olderRemoved: listed.olderRemoved };
       } catch { return undefined; }
     },
     destinations() { const states = options.destinations?.() ?? { computer: 'ready' as const, venice: 'not_set_up' as const }; return running ? { ...states, [runningDestination]: 'busy' as const } : states; },
-    waitingCount() { return api.waiting()?.questions.filter(q => q.unread && q.state === 'answered').length ?? 0; },
+    waitingCount() { return api.waiting()?.questions.filter(q => q.unread && (q.state === 'answered' || q.state === 'failed')).length ?? 0; },
     async handle(body, session) {
       const action = body.action;
       if (action === 'list') return { status: 200, body: { ok: true, ...api.waiting(), destinations: api.destinations() } };
@@ -397,14 +409,14 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
             try { result = venice ? await options.veniceAnswer!(request) : await answerFor(request); } catch { result = { status: 'failed' }; }
             if (result.status === 'answered') {
               const check = await eligible(result.read);
-              if (check !== 'eligible') {
+              if (check !== 'eligible' || (!venice && (result.secretLocations?.length ?? 0) > 0 && options.eligibleSecrets?.(request, result.secretLocations!) !== true)) {
                 if (venice && result.sentItems) result = { status: 'withdrawn', sentItems: result.sentItems, reason: check === 'unknown' ? 'Sent to Venice, but source eligibility could not be checked. No answer was kept.' : 'Sent to Venice, but the sources changed. No answer was kept.' };
                 else return { status: 200, body: { ok: true, status: check === 'unknown' ? 'check_unavailable' : 'changed' } };
               }
             }
             if (ref && (result.status === 'answered' || result.status === 'not_found' || result.status === 'withdrawn')) {
               retained = currentStore?.saveAnswer?.(ref, result.status === 'answered'
-                ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
+                ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity), ...(!venice ? { secretLocations: result.secretLocations ?? [] } : {}) }
                 : result.status === 'withdrawn' ? { ...result, citations: [], unanswered: [], leftOut: [], read: [] } : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
             }
             if (ref && !retained && (result.status === 'answered' || result.status === 'not_found' || result.status === 'withdrawn')) return refused(410, 'gone', W.deleted);
@@ -416,10 +428,12 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         const q = typeof body.id === 'string' ? store()?.get(body.id) : undefined;
         if (!q || !current(q)) return refused(410, 'gone', 'That answer was deleted');
         if (!q.result) return { status: 200, body: { ok: true, status: q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering' } };
-        if (q.result.status === 'withdrawn') return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q) } };
+        if (q.result.status === 'withdrawn' || q.result.status === 'failed') return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q) } };
         const check = await eligible(q.result.read);
         if (check === 'unknown') return { status: 200, body: { ok: true, status: 'check_unavailable' } };
-        if (check === 'ineligible' || !current(q)) {
+        const secretCheck = q.result.status !== 'answered' || q.path === 'venice' || q.path === 'anonymous'
+          || (q.result.secretLocations !== undefined && (q.result.secretLocations.length === 0 || options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, q.result.secretLocations) === true));
+        if (check === 'ineligible' || !secretCheck || !current(q)) {
           invalidate(q);
           const fresh = store()?.get(q.id);
           const withdrawn = fresh?.result;

@@ -14158,6 +14158,28 @@ class SecretLocationsIndex {
   count() {
     return this.db.query("SELECT COUNT(*) AS n FROM secret_locations").get().n;
   }
+  recheck(expected, scope, options = {}) {
+    const rows = this.db.query(`SELECT * FROM secret_locations ${scope.accountScope ? "WHERE account_scope = ?" : ""}`).all(...scope.accountScope ? [scope.accountScope] : []);
+    for (const row of rows) {
+      const location = locationFromRow(row);
+      if (location.source !== expected.source || secretLocationRef(location) !== expected.ref || !secretLocationWithinScope(location, scope))
+        continue;
+      const identity = {
+        provider: location.source,
+        accountScope: location.accountScope,
+        providerItemId: location.providerItemId,
+        ...location.conversationKey ? { providerConversationId: location.conversationKey } : {}
+      };
+      try {
+        if (options.hide?.([identity]).has(identity))
+          return false;
+      } catch {
+        return false;
+      }
+      return secretLocationFingerprint({ locator: location.namesReleasable ? location.locator : null, title: location.namesReleasable ? location.title : null }) === expected.fingerprint;
+    }
+    return false;
+  }
   search(query, scope, options = {}) {
     const terms = secretLocationQueryTerms(query);
     if (terms.length === 0)
@@ -14206,6 +14228,9 @@ class SecretLocationsIndex {
       detectedAt: location.detectedAt
     }));
   }
+}
+function secretLocationFingerprint(location) {
+  return createHash10("sha256").update(JSON.stringify([location.locator, location.title])).digest("hex");
 }
 function secretLocationRef(location) {
   return `secret:${createHash10("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
@@ -33483,6 +33508,7 @@ var DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_PO
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
+  init_embeddings();
   init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();
@@ -38534,6 +38560,7 @@ var init_local_answer = __esm(() => {
   init_evidence_pack();
   init_remote_result();
   init_secret_location_note();
+  init_secret_locations();
   init_source_model_policy();
   init_private_answer_contract();
   init_analyst_answer();
@@ -68431,6 +68458,7 @@ init_connector_store();
 init_principal();
 
 // src/workers/email-source/source-answer-lanes.ts
+init_analyst_answer();
 init_embeddings();
 init_connector_store();
 
