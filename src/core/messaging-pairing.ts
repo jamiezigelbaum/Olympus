@@ -300,6 +300,19 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     if (options.signal?.aborted) throw new Error('Pairing was cancelled.');
     options.onCommitStart?.();
 
+    // Renewing credentials preserves exact consent even if an old chat is no longer listed.
+    // Only a trusted grant for this session and an already confirmed account can supply those scopes.
+    const prior = options.source === 'telegram' && historyAccount === accountProof ? readCaptureGrantFile(options.registryPath
+      ? captureGrantPathBeside('telegram', options.registryPath)
+      : captureGrantPathFromEnv('telegram', registryEnv)) : undefined;
+    const priorEnv = prior?.kind === 'valid' && prior.grant.source === 'telegram'
+      && (prior.grant.sessionPath === sessionPath || (layout === 'folder' && prior.grant.sessionPath === undefined))
+      ? prior.grant.producer.env : undefined;
+    const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
+    const priorScopes = typeof priorRaw === 'string' ? priorRaw.split(',') : [];
+    const retained = priorRaw === priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES
+      && priorScopes.every(scope => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
+    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     if (options.source === 'telegram') {
       // Decided under the entry's lease by whoever owns the data, so an account it
       // was given since the read above decides. Not recorded (no worker answered)
@@ -312,19 +325,6 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
         throw telegramHistoryAccountError('different');
       }
     }
-    // Renewing credentials preserves exact consent even if an old chat is no longer listed.
-    // Only a trusted grant for this session can supply those additional scopes.
-    const prior = options.source === 'telegram' ? readCaptureGrantFile(options.registryPath
-      ? captureGrantPathBeside('telegram', options.registryPath)
-      : captureGrantPathFromEnv('telegram', registryEnv)) : undefined;
-    const priorEnv = prior?.kind === 'valid' && prior.grant.source === 'telegram'
-      && (prior.grant.sessionPath === sessionPath || (layout === 'folder' && prior.grant.sessionPath === undefined))
-      ? prior.grant.producer.env : undefined;
-    const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
-    const priorScopes = typeof priorRaw === 'string' ? priorRaw.split(',') : [];
-    const retained = priorRaw === priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES
-      && priorScopes.every(scope => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
-    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     const rollbackCredentials = options.source === 'telegram'
       ? await persistTelegramCredentials(secretStore, result.privatePayload)
       : async () => {};

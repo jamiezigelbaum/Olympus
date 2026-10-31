@@ -39152,6 +39152,12 @@ async function pairMessagingSource(options) {
     if (options.signal?.aborted)
       throw new Error("Pairing was cancelled.");
     options.onCommitStart?.();
+    const prior = options.source === "telegram" && historyAccount === accountProof ? readCaptureGrantFile(options.registryPath ? captureGrantPathBeside("telegram", options.registryPath) : captureGrantPathFromEnv("telegram", registryEnv)) : undefined;
+    const priorEnv = prior?.kind === "valid" && prior.grant.source === "telegram" && (prior.grant.sessionPath === sessionPath || layout === "folder" && prior.grant.sessionPath === undefined) ? prior.grant.producer.env : undefined;
+    const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
+    const priorScopes = typeof priorRaw === "string" ? priorRaw.split(",") : [];
+    const retained = priorRaw === priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES && priorScopes.every((scope) => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
+    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     if (options.source === "telegram") {
       const recorded = historyAccount === accountProof ? "same" : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => {
         return;
@@ -39162,12 +39168,6 @@ async function pairMessagingSource(options) {
         throw telegramHistoryAccountError("different");
       }
     }
-    const prior = options.source === "telegram" ? readCaptureGrantFile(options.registryPath ? captureGrantPathBeside("telegram", options.registryPath) : captureGrantPathFromEnv("telegram", registryEnv)) : undefined;
-    const priorEnv = prior?.kind === "valid" && prior.grant.source === "telegram" && (prior.grant.sessionPath === sessionPath || layout === "folder" && prior.grant.sessionPath === undefined) ? prior.grant.producer.env : undefined;
-    const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
-    const priorScopes = typeof priorRaw === "string" ? priorRaw.split(",") : [];
-    const retained = priorRaw === priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES && priorScopes.every((scope) => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
-    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     const rollbackCredentials = options.source === "telegram" ? await persistTelegramCredentials(secretStore, result.privatePayload) : async () => {};
     const register = options.registerSession ?? connectGuidedSession;
     let connected;
