@@ -12423,7 +12423,7 @@ export function createConnectorStoreCorpusAdapter(
       }
       const lanes = [
         { name: 'keyword', items: rows },
-        { name: 'recency', items: recencyRows },
+        { name: 'recency', items: recencyRows, weight: CHAT_RECENCY_WEIGHT },
       ];
       const fused = fuseRankedCandidateLanes({
         lanes,
@@ -12629,6 +12629,7 @@ export function createConnectorStoreCorpusAdapter(
 // (capability-not-source): any chat connector store gets it, none of the
 // document/note families pay for it.
 const CHAT_RECENCY_LANE_LIMIT = 8;
+const CHAT_RECENCY_WEIGHT = 0.25;
 // RRF alone cannot guarantee the newest message survives the final cut: when
 // the query matches many items, older recent+matching candidates are
 // dual-lane and outscore a single-lane fresh arrival. The newest messages
@@ -12691,7 +12692,7 @@ function withPinnedNewestChatHits(input: {
   locatorPathScope?: string;
 }): SourceIndexSearchHit[] {
   const limit = Math.max(1, Math.min(Math.floor(input.limit), MAX_SEARCH_RESULTS));
-  const pinCount = Math.min(CHAT_RECENCY_PIN_COUNT, limit, input.recencyRows.length);
+  const pinCount = Math.min(CHAT_RECENCY_PIN_COUNT, input.hits.length ? limit - 1 : limit, input.recencyRows.length);
   if (pinCount === 0) return input.hits;
   const result = [...input.hits];
   const present = new Set(result.map((hit) => hit.sourceItem.localItemId));
@@ -12702,7 +12703,7 @@ function withPinnedNewestChatHits(input: {
     result.push(connectorStoreHitFromRow(
       input.store,
       row,
-      reciprocalRank(index + 1),
+      CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1),
       input.resultProjector,
       input.locatorPathScope,
     ));
@@ -12792,7 +12793,7 @@ async function hybridConnectorStoreSearch(
   const lanes = [
     { name: 'keyword', items: keywordRows },
     { name: 'vector', items: vectorRows },
-    ...(recencyRows.length > 0 ? [{ name: 'recency', items: recencyRows }] : []),
+    ...(recencyRows.length > 0 ? [{ name: 'recency', items: recencyRows, weight: CHAT_RECENCY_WEIGHT }] : []),
   ];
   const fused = fuseRankedCandidateLanes({
     lanes,
