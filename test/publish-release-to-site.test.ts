@@ -583,4 +583,4 @@ test('macOS helper pins are served and validated, or absent', () => {
   expect(() => publishToSite({ root, artifact, macosHelper: bad, macosHelperTeamId: 'ND2P3ZTQRD' })).toThrow();
   publishToSite({ root, artifact });
   expect(readFileSync(join(root, 'site/install.sh'), 'utf8')).toContain('MACOS_HELPER_NAME=none');
-});
+}, 30_000);

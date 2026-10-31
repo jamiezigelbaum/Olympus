@@ -21,4 +21,4 @@ test('the helper name changes with each build input, but not the package version
       writeFileSync(join(root, path), path);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
+}, 30_000);

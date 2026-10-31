@@ -313,8 +313,9 @@ test('Bun-free uninstaller tree digest matches lifecycle recursive ordering', ()
   expect(treeSha(root)).toBe(linuxMachineArtifactDigest(root, 'tree'));
 });
 
+// Re-pinned for #654: the Mac helper install and uninstall changes.
 test('Mac installer and uninstaller stay byte-for-byte unchanged', () => {
-  expect(sha(readFileSync(join(REPO, 'scripts/install-macos.sh')))).toBe('49de3de17de758a2bd904fb66fd56b0bf0309f30f67e2b4d9596edc818048a00');
+  expect(sha(readFileSync(join(REPO, 'scripts/install-macos.sh')))).toBe('95df4e53d74f86f3ed57e533b7718ee5dab0605e8fc6d17a409c82dc29e26e04');
   expect(sha(readFileSync(join(REPO, 'site/uninstall.sh')))).toBe('3dfa9aea2b519900bb8bd1ad6d166339ef6b05eb54ad9dcf830ad7812a309f82');
 });
 

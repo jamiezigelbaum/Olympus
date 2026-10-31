@@ -496,7 +496,7 @@ main() {
 
   HELPER_CHANGED=0
   if [ "$MACOS_HELPER_NAME" != none ]; then
-    if [ "$HELPER_READY" = 1 ] && [ ! -L "$SUPPORT/Olympus Engine.app" ] && [ -d "$SUPPORT/Olympus Engine.app" ] && diff -rq "$WORK/helper/Olympus Engine.app" "$SUPPORT/Olympus Engine.app" >/dev/null 2>&1; then
+    if [ "$HELPER_READY" = 1 ] && [ ! -L "$SUPPORT/Olympus Engine.app" ] && [ -d "$SUPPORT/Olympus Engine.app" ] && [ -x "$SUPPORT/Olympus Engine.app/Contents/MacOS/OlympusEngineHost" ] && diff -rq "$WORK/helper/Olympus Engine.app" "$SUPPORT/Olympus Engine.app" >/dev/null 2>&1; then
       : # The installed bundle is already the verified download.
     elif [ "$HELPER_READY" = 1 ] && OLYMPUS_MACOS_HELPER_TEAM_ID="$MACOS_HELPER_TEAM_ID" cli "$RELEASE" engine install-helper --from "$WORK/helper/Olympus Engine.app"; then
       HELPER_CHANGED=1
