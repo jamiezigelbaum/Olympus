@@ -939,7 +939,7 @@ describe('built-in embedding with a LiteRT model', () => {
     const { provider, log } = liteRtProvider();
     await expect(provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_QUERY' })).rejects.toBeInstanceOf(BuiltInEmbeddingNotReadyError);
     await provider.prepare();
-    expect(log.options).toHaveLength(1);
+    expect(log.options).toHaveLength(2); // ordinary helper and the reserved text-only probe helper
     await provider.embed([{ text: 'hello' }], { taskType: 'RETRIEVAL_QUERY' });
     expect(log.batches).toHaveLength(1);
   });

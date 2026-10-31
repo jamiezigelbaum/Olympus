@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import type { IncomingMessage } from 'node:http';
@@ -12,6 +13,11 @@ import { resolveEmbeddingEpoch } from './embedding-identity.ts';
 
 export type SourceEmbeddingBackend = 'cloud' | 'local';
 export type SourceEmbeddingTaskType = 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY';
+
+const priorityQueryEmbedding = new AsyncLocalStorage<boolean>();
+/** Deadline-bound probes may embed their query without waiting for answer/index embedding work. */
+export function withPriorityQueryEmbedding<T>(run: () => T): T { return priorityQueryEmbedding.run(true, run); }
+export function priorityQueryEmbeddingRequested(): boolean { return priorityQueryEmbedding.getStore() === true; }
 
 export interface SourceEmbeddingInput {
   text: string;
