@@ -32,6 +32,11 @@ import {
 } from '../src/workers/credential-broker/connected-handles.ts';
 import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 
+const fundedVenice = { data: { accessPermitted: true, balances: { USD: 1, DIEM: 0, BUNDLED_CREDITS: 0 } } };
+const oauthFixtureFetch: OAuthFetch = (input, init) => String(input) === 'https://api.dropboxapi.com/2/files/list_folder'
+  ? Promise.resolve(Response.json({ entries: [], has_more: false, cursor: 'fixture' }))
+  : fetch(input, init);
+
 describe('olympus connect OAuth authorization-code flow', () => {
   test('connect verbs preserve credential contention as a typed retryable refusal', async () => {
     const busy = new CredentialBrokerError(
@@ -57,7 +62,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
       source: 'venice',
       apiKey: 'venice-key-fixture',
       secretStore: store,
-      fetch: async () => new Response(JSON.stringify({ data: [] }), {
+      fetch: async () => new Response(JSON.stringify(fundedVenice), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }),
@@ -240,6 +245,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
         oauth2StateStore: new JsonCredentialOAuth2StateStore(credentialBrokerStatePath),
         secretStore: store,
         openBrowser: false,
+        fetch: oauthFixtureFetch,
         onAuthorizationUrl: async (url) => {
           const authResponse = await fetch(url, { redirect: 'manual' });
           const location = authResponse.headers.get('location');
@@ -393,6 +399,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
           registryPath,
           secretStore: store,
           openBrowser: false,
+          fetch: oauthFixtureFetch,
           onAuthorizationUrl: async (url) => {
             const authResponse = await fetch(url, { redirect: 'manual' });
             const location = authResponse.headers.get('location');
@@ -451,6 +458,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
           registryPath,
           secretStore: store,
           openBrowser: false,
+          fetch: oauthFixtureFetch,
           onAuthorizationUrl: async (url) => {
             const authResponse = await fetch(url, { redirect: 'manual' });
             const location = authResponse.headers.get('location');
@@ -497,6 +505,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
         redirectUri: 'http://127.0.0.1:17777/oauth/callback/dropbox',
         registryPath,
         secretStore: store,
+        fetch: oauthFixtureFetch,
       });
       await personal.completeCallback({ state: personal.state, code: 'personal-code-fixture' });
 
@@ -509,6 +518,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
         redirectUri: 'http://127.0.0.1:17777/oauth/callback/dropbox',
         registryPath,
         secretStore: store,
+        fetch: oauthFixtureFetch,
       });
       await expect(work.completeCallback({ state: work.state, code: 'work-code-fixture' }))
         .rejects.toThrow('one connected account per provider');
@@ -557,6 +567,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
         redirectUri: 'http://127.0.0.1:17777/oauth/callback/dropbox',
         registryPath,
         secretStore: store,
+        fetch: oauthFixtureFetch,
       });
       const result = await pending.completeCallback({ state: pending.state, code: 'dropbox-code-fixture' });
 
@@ -652,6 +663,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
           registryPath,
           secretStore: store,
           openBrowser: false,
+          fetch: oauthFixtureFetch,
           onAuthorizationUrl: async (url) => {
             const authResponse = await fetch(url, { redirect: 'manual' });
             const location = authResponse.headers.get('location');
@@ -710,6 +722,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
         oauth2StateStore: new JsonCredentialOAuth2StateStore(statePath),
         secretStore: store,
         openBrowser: false,
+        fetch: oauthFixtureFetch,
         onAuthorizationUrl: async (url) => {
           const authResponse = await fetch(url, { redirect: 'manual' });
           const location = authResponse.headers.get('location');
@@ -1015,7 +1028,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
     }
   });
 
-  test('Venice API key connect probes models before storing credentials', async () => {
+  test('Venice API key connect checks access and credit before storing credentials', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-connect-venice-validate-'));
     const store = new EncryptedFileSecretStore({
       encryptedFilePath: join(dir, 'secrets.enc'),
@@ -1024,7 +1037,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
     const calls: Array<{ url: string; authorization: string | null }> = [];
     const fetchImpl: OAuthFetch = async (input, init) => {
       calls.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') });
-      return new Response(JSON.stringify({ data: [{ id: 'e2ee-glm-5-2-p' }] }), {
+      return new Response(JSON.stringify(fundedVenice), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -1076,6 +1089,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
         registryPath,
         secretStore: store,
         openBrowser: false,
+        fetch: oauthFixtureFetch,
         statePath,
         logPath,
         pid: 12345,
@@ -1355,6 +1369,7 @@ async function connectAndRefreshWithMode(
     registryPath,
     secretStore: store,
     openBrowser: false,
+    fetch: oauthFixtureFetch,
     onAuthorizationUrl: async (url) => {
       const authResponse = await fetch(url, { redirect: 'manual' });
       const location = authResponse.headers.get('location');
@@ -1473,6 +1488,8 @@ for (const source of ['dropbox', 'x']) {
     authUrl: baseUrl + '/authorize',
     tokenUrl: baseUrl + '/token',
     openBrowser: false,
+    fetch: (input, init) => String(input) === 'https://api.dropboxapi.com/2/files/list_folder'
+      ? Promise.resolve(Response.json({ entries: [], has_more: false, cursor: 'fixture' })) : fetch(input, init),
     onAuthorizationUrl: completeBrowserRedirect,
   });
 }

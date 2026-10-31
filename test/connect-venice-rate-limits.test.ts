@@ -14,3 +14,12 @@ for (const connect of [connectApiKeySource, connectPublicApiKeySource]) {
     expect(saved).toEqual([]);
   });
 }
+
+test('Venice validation times out when the response body stalls after headers', async () => {
+  const saved: string[] = [];
+  const store: SecretStore = { label: 'test', async get() { return undefined; }, async set(_key, value) { saved.push(value); }, async delete() {}, async list() { return []; } };
+  const pending = connectApiKeySource({ source: 'venice', apiKey: 'fixture', secretStore: store, validationTimeoutMs: 20,
+    fetch: async () => new Response(new ReadableStream({ start() {} })) }).then(() => 'saved', () => 'refused');
+  expect(await Promise.race([pending, new Promise(resolve => setTimeout(() => resolve('hung'), 200))])).toBe('refused');
+  expect(saved).toEqual([]);
+});

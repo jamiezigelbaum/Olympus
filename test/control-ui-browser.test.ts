@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
 import { DASHBOARD_REDRAW_EVENT, mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
-import { connectSetupSheet } from '../src/workers/dashboard/components.ts';
+import { connectSetupSheet, setupStepsSheet } from '../src/workers/dashboard/components.ts';
 
 const GLOBALS = [
   'window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement',
@@ -77,6 +77,61 @@ function oauthResult(url: string): OlympusDashboardControlResult {
 }
 
 describe('OAuth browser handoff', () => {
+  test('setup opens the provider synchronously and keeps a safe fallback link', () => {
+    const root = document.createElement('div');
+    root.innerHTML = setupStepsSheet({ id: 'venice', provider: 'Venice', finalForm: '', steps: [
+      { text: 'Account', link: { label: 'Venice', url: 'https://venice.ai/settings/api' } },
+    ] });
+    document.body.append(root);
+    const calls: unknown[][] = [];
+    Object.defineProperty(window, 'open', { configurable: true, value: (...args: unknown[]) => { calls.push(args); return null; } });
+    const controller = mountDashboardController({ root, transport: { control: noControl }, navigate() {}, async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+    root.querySelector<HTMLButtonElement>('[data-setup-open]')!.click();
+    expect(calls).toEqual([['https://venice.ai/settings/api', '_blank', 'noopener,noreferrer']]);
+    const fallback = root.querySelector<HTMLAnchorElement>('a.ext')!;
+    expect(fallback.href).toBe('https://venice.ai/settings/api');
+    expect(fallback.target).toBe('_blank');
+    expect(fallback.rel).toContain('noopener');
+    controller.dispose();
+  });
+  for (const [message, index] of [
+    ['Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored.', 0],
+    ['Venice could not accept this key. Redo the Create an API key step and check its restrictions. No credentials were stored.', 1],
+  ] as const) {
+    test(`Venice failure returns to step ${index + 1}`, async () => {
+      const root = document.createElement('div');
+      root.innerHTML = setupStepsSheet({ id: 'venice', provider: 'Venice', steps: [{ text: 'Account' }, { text: 'Key' }, { text: 'Paste' }],
+        finalForm: '<form data-connect-kind="api_key"><input name="source" value="venice"><input name="api_key" value="fixture"><button type="submit">Connect</button><span data-action-message></span></form>' });
+      document.body.append(root);
+      const controller = mountDashboardController({ root, transport: { control: async () => ({ status: 400, body: { ok: false, error: { message } } }) },
+        navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true,
+        signal: new AbortController().signal, pollIntervalMs: 0 });
+      const next = root.querySelector<HTMLButtonElement>('[data-setup-next]')!;
+      next.click(); next.click();
+      root.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await happyWindow.happyDOM.waitUntilComplete();
+      expect(root.querySelector('[data-action-message]')?.textContent).toBe(message);
+      root.querySelector<HTMLButtonElement>('[data-setup-retry]')!.click();
+      expect(Array.from(root.querySelectorAll<HTMLElement>('[data-setup-panel]')).findIndex(p => !p.hidden)).toBe(index);
+      controller.dispose();
+    });
+  }
+  test('Dropbox permissions recovery opens the walkthrough at its permissions step', () => {
+    happyWindow.location.hash = '#olympus-open=dropbox.permissions';
+    const root = document.createElement('div');
+    root.innerHTML = '<div data-source-id="dropbox.files"><button data-sheet-toggle="#dropbox-sheet">Connect</button>'
+      + '<div class="sheet" id="dropbox-sheet"><details>' + setupStepsSheet({ id: 'd', provider: 'Dropbox', finalForm: '<form></form>',
+        steps: [{ text: 'Create' }, { text: 'Access' }, { text: 'Permissions' }, { text: 'Redirect' }, { text: 'Key' }] }) + '</details></div></div>';
+    document.body.append(root);
+    const controller = mountDashboardController({ root, transport: { control: noControl }, navigate() {}, async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+    expect(root.querySelector('.sheet')?.classList.contains('on')).toBe(true);
+    expect(root.querySelector('details')?.open).toBe(true);
+    expect(Array.from(root.querySelectorAll<HTMLElement>('[data-setup-panel]')).findIndex(p => !p.hidden)).toBe(2);
+    expect(root.querySelector('[data-setup-counter]')?.textContent).toBe('Step 3 of 5');
+    controller.dispose();
+  });
   for (const mode of ['publisher', 'byo', 'pending', 'read-only'] as const) {
     test(`Setup Connect opens ${mode} sheet and starts only ready publisher OAuth`, async () => {
       const root = document.createElement('div');

@@ -1308,10 +1308,11 @@ async function validatePublicApiKeySource(options: {
 async function validateVeniceKey(options: { apiKey: string; fetchImpl: OAuthFetch; veniceModelsUrl?: string; timeoutMs: number }): Promise<void> {
   const url = options.veniceModelsUrl ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL ?? 'https://api.venice.ai/api/v1/api_keys/rate_limits';
   let response: Response;
+  let text: string;
   try {
-    response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
+    ({ response, text } = await fetchBoundedText(modelEndpointFetch(options.fetchImpl), url, {
       method: 'GET', headers: { Authorization: `Bearer ${options.apiKey}`, Accept: 'application/json' }, redirect: 'error',
-    }, options.timeoutMs);
+    }, { timeoutMs: options.timeoutMs, limitBytes: 64 * 1024 }));
   } catch (error) {
     if (isZkapiDaemonEndpointRefusal(error)) throw error;
     throw new Error('Venice could not be reached to check your key. No credentials were stored; try again.');
@@ -1319,7 +1320,7 @@ async function validateVeniceKey(options: { apiKey: string; fetchImpl: OAuthFetc
   if (response.status === 401 || response.status === 403) throw new Error('Venice could not accept this key. Redo the Create an API key step and check its restrictions. No credentials were stored.');
   if (!response.ok) throw new Error('Venice could not check the key now. No credentials were stored; try again.');
   let data: any;
-  try { data = (await response.json() as { data?: unknown }).data; } catch { throw new Error('Venice returned an unreadable check. No credentials were stored; try again.'); }
+  try { data = (JSON.parse(text) as { data?: unknown }).data; } catch { throw new Error('Venice returned an unreadable check. No credentials were stored; try again.'); }
   if (!data || typeof data !== 'object' || typeof data.accessPermitted !== 'boolean') throw new Error('Venice returned an incomplete check. No credentials were stored; try again.');
   if (!data.accessPermitted) throw new Error('Venice does not permit this key. Redo the Create an API key step and check its restrictions. No credentials were stored.');
   const balances = data.balances;

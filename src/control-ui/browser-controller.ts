@@ -1026,6 +1026,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       'connect.telegram': 'telegram.messages',
       'connect.whatsapp': 'whatsapp.personal.messages',
       'connect.evernote': 'evernote.notes',
+      'dropbox.permissions': 'dropbox.files',
     };
     let focus: HTMLElement | null = null;
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
@@ -1038,6 +1039,19 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         if (sheet) {
           queryAll<HTMLElement>('.sheet.on').forEach((other) => { if (other !== sheet) setSheetOpen(other, false); });
           setSheetOpen(sheet, true);
+          if (wanted === 'dropbox.permissions') {
+            const walkthrough = sheet.querySelector<HTMLElement>('[data-setup-steps]');
+            const panels = walkthrough ? Array.from(walkthrough.querySelectorAll<HTMLElement>('[data-setup-panel]')) : [];
+            if (walkthrough && panels.length > 2) {
+              panels.forEach((panel, index) => { panel.hidden = index !== 2; });
+              const counter = walkthrough.querySelector<HTMLElement>('[data-setup-counter]');
+              if (counter) counter.textContent = `Step 3 of ${panels.length}`;
+              const progress = walkthrough.querySelector<HTMLProgressElement>('[data-setup-progress]');
+              if (progress) progress.value = 3;
+              const disclosure = walkthrough.closest('details');
+              if (disclosure) disclosure.open = true;
+            }
+          }
           if (!sheet.hasAttribute('tabindex')) sheet.setAttribute('tabindex', '-1');
           focus = sheet;
         } else {

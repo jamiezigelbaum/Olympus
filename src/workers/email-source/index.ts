@@ -7334,6 +7334,8 @@ function dashboardOAuthFailureHtml(options: {
 }): Response {
   const label = dashboardOAuthSourceLabel(options.source);
   const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
+  const permissions = !chatgpt && options.source === 'dropbox'
+    && options.reason === 'Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.';
   return dashboardOAuthLandingHtml({
     title: 'Olympus connect failed',
     heading: `Could not connect ${label}`,
@@ -7343,8 +7345,8 @@ function dashboardOAuthFailureHtml(options: {
         ? 'Go back to ChatGPT and try again from your Olympus dashboard.'
         : 'You can close this tab and go back to the Olympus dashboard tab you started from.',
     ],
-    returnTo: options.returnTo,
-    returnLabel: chatgpt ? 'Back to ChatGPT' : 'Back to the dashboard tab',
+    returnTo: permissions ? '/dashboard#olympus-open=dropbox.permissions' : options.returnTo,
+    returnLabel: permissions ? 'Go to Dropbox permissions' : chatgpt ? 'Back to ChatGPT' : 'Back to the dashboard tab',
     status: options.status,
   });
 }

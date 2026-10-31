@@ -12116,12 +12116,13 @@ async function validatePublicApiKeySource(options) {
 async function validateVeniceKey(options) {
   const url = options.veniceModelsUrl ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL ?? "https://api.venice.ai/api/v1/api_keys/rate_limits";
   let response;
+  let text;
   try {
-    response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
+    ({ response, text } = await fetchBoundedText(modelEndpointFetch(options.fetchImpl), url, {
       method: "GET",
       headers: { Authorization: `Bearer ${options.apiKey}`, Accept: "application/json" },
       redirect: "error"
-    }, options.timeoutMs);
+    }, { timeoutMs: options.timeoutMs, limitBytes: 64 * 1024 }));
   } catch (error) {
     if (isZkapiDaemonEndpointRefusal(error))
       throw error;
@@ -12133,7 +12134,7 @@ async function validateVeniceKey(options) {
     throw new Error("Venice could not check the key now. No credentials were stored; try again.");
   let data;
   try {
-    data = (await response.json()).data;
+    data = JSON.parse(text).data;
   } catch {
     throw new Error("Venice returned an unreadable check. No credentials were stored; try again.");
   }
@@ -143918,7 +143919,8 @@ function mountDashboardController(options) {
       "connect.readwise": "readwise.library",
       "connect.telegram": "telegram.messages",
       "connect.whatsapp": "whatsapp.personal.messages",
-      "connect.evernote": "evernote.notes"
+      "connect.evernote": "evernote.notes",
+      "dropbox.permissions": "dropbox.files"
     };
     let focus = null;
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
@@ -143934,6 +143936,24 @@ function mountDashboardController(options) {
               setSheetOpen(other, false);
           });
           setSheetOpen(sheet, true);
+          if (wanted === "dropbox.permissions") {
+            const walkthrough = sheet.querySelector("[data-setup-steps]");
+            const panels = walkthrough ? Array.from(walkthrough.querySelectorAll("[data-setup-panel]")) : [];
+            if (walkthrough && panels.length > 2) {
+              panels.forEach((panel, index) => {
+                panel.hidden = index !== 2;
+              });
+              const counter = walkthrough.querySelector("[data-setup-counter]");
+              if (counter)
+                counter.textContent = `Step 3 of ${panels.length}`;
+              const progress = walkthrough.querySelector("[data-setup-progress]");
+              if (progress)
+                progress.value = 3;
+              const disclosure = walkthrough.closest("details");
+              if (disclosure)
+                disclosure.open = true;
+            }
+          }
           if (!sheet.hasAttribute("tabindex"))
             sheet.setAttribute("tabindex", "-1");
           focus = sheet;
@@ -163362,6 +163382,7 @@ function dashboardBoundedExpiry(claimed, now) {
 function dashboardOAuthFailureHtml(options) {
   const label = dashboardOAuthSourceLabel(options.source);
   const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
+  const permissions = !chatgpt && options.source === "dropbox" && options.reason === "Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.";
   return dashboardOAuthLandingHtml({
     title: "Olympus connect failed",
     heading: `Could not connect ${label}`,
@@ -163369,8 +163390,8 @@ function dashboardOAuthFailureHtml(options) {
       `Could not connect ${label}: ${options.reason}`,
       chatgpt ? "Go back to ChatGPT and try again from your Olympus dashboard." : "You can close this tab and go back to the Olympus dashboard tab you started from."
     ],
-    returnTo: options.returnTo,
-    returnLabel: chatgpt ? "Back to ChatGPT" : "Back to the dashboard tab",
+    returnTo: permissions ? "/dashboard#olympus-open=dropbox.permissions" : options.returnTo,
+    returnLabel: permissions ? "Go to Dropbox permissions" : chatgpt ? "Back to ChatGPT" : "Back to the dashboard tab",
     status: options.status
   });
 }
