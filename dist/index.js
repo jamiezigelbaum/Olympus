@@ -25077,6 +25077,13 @@ function createNativeProcessService(options) {
       } catch (error) {
         if (error instanceof NativeProcessServiceStoppedError)
           return;
+        if (!options.retryInitialStartFailure) {
+          await stopChild(lifetime);
+          const message2 = reportStartFailure(lifetime, error);
+          if (current2 === lifetime)
+            current2 = undefined;
+          throw new NativeProcessReportedStartError(message2);
+        }
         if (!await stopFailedStart(lifetime))
           return;
         const message = reportStartFailure(lifetime, error);
@@ -28090,6 +28097,7 @@ function createNativeWorkerService(options) {
   const service = createNativeProcessService({
     id: SERVICE_ID3,
     label: SERVICE_LABEL,
+    retryInitialStartFailure: true,
     reload: {
       configPrefixes: [
         "plugins.entries.olympus.config.worker",

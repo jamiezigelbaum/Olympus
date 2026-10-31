@@ -59,7 +59,7 @@ interface Harness {
 
 type Launch = string | { command: string; args: string[] };
 
-function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { descendantSettleMs?: number; restartDelaysMs?: readonly number[]; stableUptimeMs?: number } = {}): Harness {
+function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { retryInitialStartFailure?: boolean; descendantSettleMs?: number; restartDelaysMs?: readonly number[]; stableUptimeMs?: number } = {}): Harness {
   const directory = mkdtempSync(join(tmpdir(), 'olympus-native-restart-'));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const readyPath = join(directory, 'ready');
@@ -74,6 +74,7 @@ function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { de
     label: 'fixture',
     initialConfig: {},
     reload: { configPrefixes: [] },
+    ...(options.retryInitialStartFailure === undefined ? {} : {retryInitialStartFailure: options.retryInitialStartFailure}),
     readinessPollMs: 10,
     stopGraceMs: 200,
     restartDelaysMs: options.restartDelaysMs ?? [20, 40],
@@ -586,7 +587,7 @@ test('a resolved ownership conflict does not mask a later unrelated startup fail
   const run = harness(() => {
     if (attempts++ === 0) throw new NativeProcessRetryableStartError('Known ownership conflict; retrying.');
     return 'process.exit(17)';
-  });
+  }, {retryInitialStartFailure: true});
   try {
     await expect(run.service.start(run.context)).rejects.toThrow('Known ownership conflict');
     await waitUntil(() => run.spawned.length >= 1 && run.spawned[0]!.exitCode !== null, 'the unrelated startup failure');

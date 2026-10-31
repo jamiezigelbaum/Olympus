@@ -104,6 +104,7 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
   const service = createNativeProcessService<WorkerLaunchSettings>({
     id: SERVICE_ID,
     label: SERVICE_LABEL,
+    retryInitialStartFailure: true,
     reload: {
       configPrefixes: [
         'plugins.entries.olympus.config.worker',

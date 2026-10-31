@@ -152,6 +152,11 @@ export interface NativeProcessServiceOptions<TSettings extends NativeProcessStar
    */
   restartOnCleanExit?: boolean;
   /**
+   * Keep the lifetime and retry an unsuccessful initial launch. Defaults to
+   * false: callers such as finite-job loops own their failure/cleanup policy.
+   */
+  retryInitialStartFailure?: boolean;
+  /**
    * How long a ready child must stay up before restart backoff resets.
    * Default 0: readiness resets it at once (the historical behavior). A
    * service whose readiness proves only that the process started (not that
@@ -582,6 +587,14 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         await launch(lifetime);
       } catch (error) {
         if (error instanceof NativeProcessServiceStoppedError) return;
+        if (!options.retryInitialStartFailure) {
+          // Preserve the shared kernel's caller-owned initial failure path.
+          // A failed cleanup throws while retaining the exact child's custody.
+          await stopChild(lifetime);
+          const message = reportStartFailure(lifetime, error);
+          if (current === lifetime) current = undefined;
+          throw new NativeProcessReportedStartError(message);
+        }
         // Keep the lifetime after an initial failure, just as after a failed
         // restart. Cleanup retains custody until the direct child is gone.
         if (!await stopFailedStart(lifetime)) return;
