@@ -52624,7 +52624,10 @@ function archiveFindingList(kind) {
   const lists = DASHBOARD_ARCHIVE_COPY.listOf;
   return Object.prototype.hasOwnProperty.call(lists, kind) ? lists[kind] : "not_imported";
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "A folder you chose is in Desktop, Documents, Downloads, iCloud Drive or another disk, which Olympus cannot open on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
+function privateAnswerFailure(reason, mapping = PRIVATE_ANSWER_FAILURES) {
+  return typeof reason === "string" && Object.prototype.hasOwnProperty.call(mapping, reason) ? mapping[reason] : { message: "Olympus could not answer this.", action: "Try again." };
+}
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "A folder you chose is in Desktop, Documents, Downloads, iCloud Drive or another disk, which Olympus cannot open on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -54116,6 +54119,14 @@ var init_vocabulary = __esm(() => {
     unlock: "Unlock on this computer",
     native: "Anonymous answers are set up on this computer's own dashboard only, never from an agent or ChatGPT.",
     unavailable: "Anonymous answers are not available from this worker."
+  };
+  PRIVATE_ANSWER_FAILURES = {
+    answer_failed: { message: "The model could not finish the answer.", href: "/dashboard?keys", action: "Check models" },
+    no_model: { message: "Your local model is not available.", href: "/dashboard?keys", action: "Set up local models" },
+    model_downloading: { message: "Your local model is still downloading.", href: "/dashboard?keys", action: "Check models" },
+    evidence_changed: { message: "Items changed before Olympus could finish the answer.", href: "/dashboard?keys", action: "Check setup" },
+    eligibility_unavailable: { message: "Olympus could not check whether the items are still available.", href: "/dashboard?keys", action: "Check setup" },
+    save_refused: { message: "Olympus could not save the answer.", href: "/dashboard?keys", action: "Check setup" }
   };
 });
 
@@ -139145,11 +139156,17 @@ function createLocalPrivateAnswers(options) {
         opens.delete(id);
     wake();
   };
+  const failureReason = (q) => {
+    if (!q || !(q.failed || q.result?.status === "failed"))
+      return {};
+    const reason = q.retryReasons?.at(-1);
+    return reason && WAITING_QUESTION_RETRY_REASONS.includes(reason) ? { failureReason: reason } : {};
+  };
   const answerBody = (result, session, q) => {
     if (result.status === "withdrawn")
       return { status: "withdrawn", sent_items: result.sentItems, reason: result.reason };
     if (result.status !== "answered")
-      return { status: result.status, ..."leftOut" in result ? { left_out: result.leftOut } : {} };
+      return { status: result.status, ...result.status === "failed" ? failureReason(q) : {}, ..."leftOut" in result ? { left_out: result.leftOut } : {} };
     sweep();
     const citations = result.citations.map((citation) => {
       const view3 = {
@@ -139251,6 +139268,7 @@ function createLocalPrivateAnswers(options) {
           askedAt: q.askedAt,
           unchecked: q.state === "unchecked",
           unread: !q.seen,
+          ...failureReason(q),
           state: q.failed || q.result?.status === "failed" ? "failed" : q.hasResult || q.result ? "answered" : q.path === "venice" && q.answeredAt ? "changed" : q.state === "unchecked" ? "unchecked" : q.attempts > 0 ? "retrying" : q.nextAttemptAt > now() || options.backgroundBusy?.() ? "queued" : "answering",
           ...q.answeredAt ? { answeredAt: q.answeredAt } : {}
         })), olderRemoved: listed.olderRemoved };
@@ -153436,6 +153454,10 @@ function renderLevelChoice(level, settingsHref) {
   const standardHint = escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandardHint).replace("{models}", `<a href="${escapeHtml2(settingsHref)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelModelsLink)}</a>`);
   return `<fieldset class="palevel" data-pa-level><legend>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelLegend)}</legend>` + option("strict", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrict, escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrictHint)) + option("standard", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandard, standardHint) + "</fieldset>";
 }
+function renderFailureNotice(reason) {
+  const failure2 = privateAnswerFailure(reason);
+  return `<p class="pamsg" data-pa-failure>${escapeHtml2(failure2.message)} ${failure2.href ? `<a href="${escapeHtml2(failure2.href)}">${escapeHtml2(failure2.action)}</a>` : escapeHtml2(failure2.action)}</p>`;
+}
 function renderWaiting(waiting, now) {
   const parts = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>`];
   if (!waiting) {
@@ -153448,9 +153470,9 @@ function renderWaiting(waiting, now) {
     const asked = Date.parse(question.askedAt);
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : "";
     const state = question.state ?? (question.unchecked ? "unchecked" : "answering");
-    const status = state === "failed" ? DASHBOARD_PRIVATE_ANSWERS_COPY.failed : state === "changed" ? DASHBOARD_PRIVATE_ANSWERS_COPY.changed : state === "queued" ? DASHBOARD_PRIVATE_ANSWERS_COPY.queued : state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
+    const status = state === "failed" ? "" : state === "changed" ? DASHBOARD_PRIVATE_ANSWERS_COPY.changed : state === "queued" ? DASHBOARD_PRIVATE_ANSWERS_COPY.queued : state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
     const from = [question.path === "venice" ? DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName : question.path === "anonymous" ? DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath : DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath, question.from, when, status].filter(Boolean).join(" · ");
-    return `<li class="srow nodot${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom" title="${escapeHtml2(question.askedAt)}"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
+    return `<li class="srow nodot${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom" title="${escapeHtml2(question.askedAt)}"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
   parts.push(`<ul class="srows palist" data-pa-list>${rows.join("")}</ul>`);
   parts.push(`<div class="pbuttons"><button type="button" class="btn" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button></div>`);
@@ -153462,6 +153484,7 @@ function privateAnswersClientScript(input) {
   const config2 = {
     csrfToken: input.csrfToken,
     path: POST_PATH,
+    failures: PRIVATE_ANSWER_FAILURES,
     unlockPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock,
     unlockOnly: input.unlockOnly,
     fragment: DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT,
@@ -153561,6 +153584,15 @@ function privateAnswersClientScript(input) {
     if (bad) line.setAttribute('data-state', 'error');
     card.appendChild(line);
   }
+  var failureFor = (${privateAnswerFailure.toString()});
+  function failureNotice(reason) {
+    var failure = failureFor(reason, config.failures);
+    var line = el('p', 'pamsg', failure.message + ' ');
+    line.setAttribute('data-pa-failure', '');
+    if (failure.href) { var link = el('a', '', failure.action); link.href = failure.href; line.appendChild(link); }
+    else line.appendChild(document.createTextNode(failure.action));
+    return line;
+  }
   function errorText(outcome) {
     var error = outcome.result && outcome.result.error;
     if (error && typeof error.message === 'string' && error.message) return error.message;
@@ -153625,6 +153657,8 @@ function privateAnswersClientScript(input) {
       return;
     } else if (status === 'answering' || status === 'retrying' || status === 'unchecked' || status === 'queued' || status === 'check_unavailable') {
       card.appendChild(el('p', 'pamsg', status === 'check_unavailable' ? config.copy.checkUnavailable : status === 'queued' ? config.copy.queued : status === 'retrying' ? config.copy.retrying : status === 'unchecked' ? config.copy.unchecked : config.copy.answering));
+    } else if (status === 'failed') {
+      card.appendChild(failureNotice(result.failureReason));
     } else if (status === 'not_found') {
       card.appendChild(el('p', 'pamsg', config.copy.notFound));
     } else {
@@ -153803,7 +153837,10 @@ function privateAnswersClientScript(input) {
       if (selected === q.id && q.state !== 'answered' && q.state !== 'failed') {
         message(row.querySelector('[data-pa-out]'), q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'unchecked' ? config.copy.unchecked : config.copy.answering, false, q.question);
       }
-      var state = q.state === 'failed' ? config.copy.failed : q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
+      var previousFailure = row.querySelector('[data-pa-failure]');
+      if (previousFailure && previousFailure.parentNode === row) previousFailure.remove();
+      if (q.state === 'failed') row.insertBefore(failureNotice(q.failureReason), row.querySelector('[data-pa-out]'));
+      var state = q.state === 'failed' ? '' : q.state === 'changed' ? config.copy.changed : q.state === 'queued' ? config.copy.queued : q.state === 'retrying' ? config.copy.retrying : q.state === 'answering' ? config.copy.answering : q.state === 'unchecked' ? config.copy.unchecked : '';
       var date = new Date(q.askedAt);
       row.querySelector('.pafrom').textContent = ' · ' + [q.path === 'venice' ? config.copy.venicePath : q.path === 'anonymous' ? config.copy.anonymousPath : config.copy.privatePath, q.from, isNaN(date.getTime()) ? '' : relative(Date.now() - date.getTime()), state].filter(Boolean).join(' · ');
       row.querySelector('.pafrom').title = q.askedAt;
@@ -153841,7 +153878,7 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa ul.palist { list-style: none; padding: 0; margin-top: 0; }
 .pa .paq { color: var(--t1); font-size: var(--fs-row); overflow-wrap: anywhere; }
 .pa .pafrom { margin: 4px 0 0; color: var(--t3); font-size: var(--fs-body); }
-.pa .paout { grid-column: 1 / -1; }
+.pa .paout, .pa [data-pa-failure] { grid-column: 1 / -1; }
 .pa .paout:empty { display: none; }
 .pa .srow.unread .paq { font-weight: 700; }
 .pa .pa-read { display: block; width: 100%; min-width: 0; border: 0; padding: 0; text-align: left; background: none; color: inherit; font: inherit; cursor: pointer; overflow-wrap: anywhere; white-space: normal; }

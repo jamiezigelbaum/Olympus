@@ -15,7 +15,7 @@ import { TIER_LEDGER_IDENTITY_FIELDS } from '../classification/tier-ledger.ts';
 import { lstatSync } from 'node:fs';
 import { answerReleaseWithheldReason, type ReleaseCheck } from '../../core/release-manifest.ts';
 import { randomBytes } from 'node:crypto';
-import { CHATGPT_INBOX_GRACE_MS, type StoredPrivateAnswer, type WaitingQuestion, type WaitingQuestionRef, type WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
+import { CHATGPT_INBOX_GRACE_MS, WAITING_QUESTION_RETRY_REASONS, type WaitingQuestionRetryReason, type StoredPrivateAnswer, type WaitingQuestion, type WaitingQuestionRef, type WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
 import { answerPrivately, type BuiltInAnalystModel } from '../../core/analyst-built-in.ts';
 import type { PrivateAnswerSourceCitation, PrivateEvidenceItem } from '../chatgpt/private-answer-contract.ts';
 import {
@@ -69,6 +69,7 @@ export interface WaitingQuestionView {
   state: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed' | 'failed';
   unread: boolean;
   answeredAt?: string;
+  failureReason?: WaitingQuestionRetryReason;
 }
 
 /** A citation as the page gets it: never a path; a local file opens by token. */
@@ -284,9 +285,14 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     for (const [id, entry] of opens) if (entry.ref?.id === q.id) opens.delete(id);
     wake();
   };
+  const failureReason = (q: WaitingQuestion | undefined): { failureReason?: WaitingQuestionRetryReason } => {
+    if (!q || !(q.failed || q.result?.status === 'failed')) return {};
+    const reason = q.retryReasons?.at(-1);
+    return reason && WAITING_QUESTION_RETRY_REASONS.includes(reason) ? { failureReason: reason } : {};
+  };
   const answerBody = (result: LocalAnswerResult | StoredPrivateAnswer, session: string, q?: WaitingQuestion): Record<string, unknown> => {
     if (result.status === 'withdrawn') return { status: 'withdrawn', sent_items: result.sentItems, reason: result.reason };
-    if (result.status !== 'answered') return { status: result.status, ...('leftOut' in result ? { left_out: result.leftOut } : {}) };
+    if (result.status !== 'answered') return { status: result.status, ...(result.status === 'failed' ? failureReason(q) : {}), ...('leftOut' in result ? { left_out: result.leftOut } : {}) };
     sweep();
     const citations: LocalCitationView[] = result.citations.map(citation => {
       const view: LocalCitationView = {
@@ -366,7 +372,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         if (!listed) return undefined;
         return { questions: listed.questions.filter(q => active(q) && !hidden(q) && (q.path !== 'anonymous' || q.hasResult || q.result)).map(q => ({
           id: q.id, path: q.path ?? 'private', question: q.question, from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === 'chatgpt' ? 'ChatGPT' : 'An agent'),
-          askedAt: q.askedAt, unchecked: q.state === 'unchecked', unread: !q.seen,
+          askedAt: q.askedAt, unchecked: q.state === 'unchecked', unread: !q.seen, ...failureReason(q),
           state: q.failed || q.result?.status === 'failed' ? 'failed' : q.hasResult || q.result ? 'answered' : q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts > 0 ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering',
           ...(q.answeredAt ? { answeredAt: q.answeredAt } : {}),
         })), olderRemoved: listed.olderRemoved };

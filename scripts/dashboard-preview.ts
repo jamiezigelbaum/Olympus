@@ -1824,7 +1824,7 @@ export function previewWaitingQuestions(count: number, state = '') {
   const questions = Array.from({ length: Math.max(0, count) }, (_, index) => {
     const base = PREVIEW_WAITING[index % PREVIEW_WAITING.length]!;
     const id = index < PREVIEW_WAITING.length ? base.id : `${base.id}_${index}`;
-    return { ...base, ...(state === 'inbox-failed' && index % PREVIEW_WAITING.length === 2 ? { state: 'failed' as const } : {}), id, unread: base.unread && !previewSeen.has(id) };
+    return { ...base, ...(state === 'inbox-failed' && index % PREVIEW_WAITING.length === 2 ? { state: 'failed' as const, failureReason: 'no_model' } : {}), id, unread: base.unread && !previewSeen.has(id) };
   }).filter((question) => !previewDeleted.has(question.id));
   return { questions, olderRemoved: count > PREVIEW_WAITING.length };
 }
@@ -1852,7 +1852,7 @@ function previewPrivateAnswersAction(body: Record<string, unknown>, count: numbe
   }
   const question = listed.questions.find((item) => item.id === body.id);
   if (!question) return Response.json({ ok: false, error: { code: 'gone', message: 'That answer was deleted' } }, { status: 410 });
-  if (body.action === 'read') return Response.json(question.state === 'answered' ? { ...answered, ...(question.path === 'venice' ? { sent_items: [{ title: 'Appointment confirmation.pdf', source: 'Dropbox' }] } : {}), ...('path' in question && question.path === 'anonymous' ? { sent: question.question, answer: '**Outside help · preview only.** Deposit rules depend on the tenancy and location. Check the applicable public guidance.', citations: [], unanswered: [], left_out: [] } : {}) } : { ok: true, status: question.state });
+  if (body.action === 'read') return Response.json(question.state === 'answered' ? { ...answered, ...(question.path === 'venice' ? { sent_items: [{ title: 'Appointment confirmation.pdf', source: 'Dropbox' }] } : {}), ...('path' in question && question.path === 'anonymous' ? { sent: question.question, answer: '**Outside help · preview only.** Deposit rules depend on the tenancy and location. Check the applicable public guidance.', citations: [], unanswered: [], left_out: [] } : {}) } : { ok: true, status: question.state, ...('failureReason' in question ? { failureReason: question.failureReason } : {}) });
   if (body.action === 'seen') {
     previewSeen.add(question.id);
     return Response.json({ ok: true, status: 'seen' });

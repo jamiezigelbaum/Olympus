@@ -1385,6 +1385,41 @@ describe('the Private answers page', () => {
     expect(page.posts.at(-1)!.body).toEqual({ action: 'open', token: 'A'.repeat(32) });
   });
 
+  for (const [reason, message] of [
+    ['answer_failed', 'The model could not finish the answer.'],
+    ['no_model', 'Your local model is not available.'],
+    ['model_downloading', 'Your local model is still downloading.'],
+    ['evidence_changed', 'Items changed before Olympus could finish the answer.'],
+    ['eligibility_unavailable', 'Olympus could not check whether the items are still available.'],
+    ['save_refused', 'Olympus could not save the answer.'],
+  ]) test(`exhausted Inbox ${reason} explains the failure and links to model setup`, async () => {
+    const page = renderAndRun(body => ({ status: 200, body: body.action === 'list'
+      ? { ok: true, questions: [{ id: 'wq_1', question: 'Where is the lease?', state: 'failed', failureReason: reason, askedAt: DASHBOARD_PREVIEW_NOW.toISOString() }] }
+      : body.action === 'read' ? { ok: true, status: 'failed', failureReason: reason, generation: 2 }
+      : { ok: true } }));
+    await page.poll();
+    const row = page.document.querySelector('[data-pa-question="wq_1"]')!;
+    expect(row.querySelector('[data-pa-failure]')!.textContent).toContain(message!);
+    expect(row.querySelector('[data-pa-failure] a')!.getAttribute('href')).toBe('/dashboard?keys');
+    (row.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+    await page.settle();
+    const out = row.querySelector('[data-pa-out]')!;
+    expect(out.textContent).toContain(message!);
+    expect(out.querySelector('a')!.getAttribute('href')).toBe('/dashboard?keys');
+    expect(out.querySelector('[data-pa-failure]')!.textContent).not.toContain('Where is the lease?');
+  });
+
+  for (const reason of [undefined, 'PRIVATE EXCEPTION /secret/file', '__proto__', 'constructor'])
+    test(`unknown Inbox failure code ${reason} keeps the content-free fallback`, async () => {
+      const page = renderAndRun(() => ({ status: 200, body: { ok: true, status: 'failed', failureReason: reason, generation: 2 } }));
+      const row = page.document.querySelector('[data-pa-question="wq_1"]')!;
+      (row.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+      await page.settle();
+      const notice = row.querySelector('[data-pa-out] [data-pa-failure]')!;
+      expect(notice.textContent).toBe('Olympus could not answer this. Try again.');
+      expect(notice.querySelector('a')).toBeNull();
+    });
+
   test('an exhausted Inbox answer shows failure and marks its generation seen', async () => {
     const page = renderAndRun(body => ({ status: 200, body: body.action === 'read'
       ? { ok: true, status: 'failed', generation: 2 }
@@ -1896,7 +1931,7 @@ test('a repeatedly failing Inbox question settles visibly, keeps safe retry reas
   }
   expect(calls).toBe(8);
   expect(store.get(ref.id)).toMatchObject({ attempts: 8, nextAttemptAt: 0, result: { status: 'failed', read: [], citations: [] }, retryReasons: Array(8).fill('answer_failed') });
-  expect(controller.waiting()!.questions[0]).toMatchObject({ state: 'failed', unread: true });
+  expect(controller.waiting()!.questions[0]).toMatchObject({ state: 'failed', unread: true, failureReason: 'answer_failed' });
   expect(controller.waitingCount()).toBe(1);
   expect((await controller.handle({ action: 'read', id: ref.id }, 'owner')).body).toMatchObject({ status: 'failed', generation: ref.generation });
   expect(JSON.stringify(store.list())).not.toContain('PRIVATE EXCEPTION TEXT');
@@ -1931,6 +1966,17 @@ for (const [mode, reason] of [
     clock = Math.max(clock + 1000, store.get(ref.id)!.nextAttemptAt);
   }
   expect(store.get(ref.id)).toMatchObject({ result: { status: 'failed', read: [], citations: [] }, retryReasons: Array(8).fill(reason) });
-  expect((await controller.handle({ action: 'read', id: ref.id }, 'owner')).body.status).toBe('failed');
+  expect(controller.waiting()!.questions[0]).toMatchObject({ state: 'failed', failureReason: reason });
+  expect((await controller.handle({ action: 'read', id: ref.id }, 'owner')).body).toMatchObject({ status: 'failed', failureReason: reason });
   expect(JSON.stringify(store.get(ref.id))).not.toContain('unreleased answer');
+});
+
+test('failed Inbox views use only the last recorded retry code', async () => {
+  const { store, controller } = scripted();
+  cleanups.push(() => controller.close());
+  const ref = store.record(store.ticket('conn-a'), { question: 'Private question sentinel', surface: 'remote', state: 'waiting' })!;
+  for (let i = 0; i < 7; i++) store.retry(ref, 'answer_failed');
+  store.retry(ref, 'no_model');
+  expect(controller.waiting()!.questions[0]).toMatchObject({ state: 'failed', failureReason: 'no_model' });
+  expect((await controller.handle({ action: 'read', id: ref.id }, 'owner')).body).toMatchObject({ status: 'failed', failureReason: 'no_model' });
 });

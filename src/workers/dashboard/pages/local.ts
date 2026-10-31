@@ -94,6 +94,7 @@ export interface DashboardWaitingQuestion {
   state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed' | 'failed';
   unread?: boolean;
   answeredAt?: string;
+  failureReason?: string;
 }
 
 const CONNECTOR_SHEET_ID = 'connector-sheet';
