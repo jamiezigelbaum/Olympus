@@ -26,6 +26,21 @@ function validScope(source: MessagingSource, scope: string): boolean {
     : /^whatsapp\.personal:chat:[A-Za-z0-9._:-]{1,192}@[A-Za-z0-9.-]{1,63}$/.test(scope);
 }
 
+/** Re-pairing may renew credentials, but does not change what capture was approved to read. */
+export function retainApprovedCaptureScope(source: MessagingSource, env: Record<string, string>): Record<string, string> {
+  const key = source === 'telegram' ? 'OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES' : 'OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS';
+  const alternate = source === 'telegram' ? env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES : undefined;
+  const raw = env[key]?.trim() || alternate?.trim();
+  if (!raw || (alternate && alternate.trim() !== raw)) throw new Error('Invalid capture grant scope.');
+  if (raw !== '*') {
+    const values = raw.split(',').map((value) => value.trim());
+    if (!values.length || values.some((value) => !validScope(source, source === 'whatsapp' ? `whatsapp.personal:chat:${value}` : value))) throw new Error('Invalid capture grant scope.');
+  }
+  return source === 'telegram'
+    ? { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: raw, OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: raw }
+    : { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: raw };
+}
+
 function readQr(path: string): string {
   if (basename(path) !== 'qr.png') throw new Error('Invalid QR artifact.');
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -72,6 +87,7 @@ export function createDashboardMessagingService(options: {
   withMessagingCapturePaused<T>(source: MessagingSource, operation: () => Promise<T>): Promise<T>;
   withGrantMutation<T>(operation: () => Promise<T>): Promise<T>;
   listCommand?: typeof listHelper;
+  pairSource?: typeof pairMessagingSource;
 }) {
   const packageRoot = olympusPackageRoot();
   const available = new Map<MessagingSource, { fingerprint: string; chats: PairingChat[] }>();
@@ -84,7 +100,7 @@ export function createDashboardMessagingService(options: {
   };
   const manager = createDashboardMessagingPairing({
     pair: (source, hooks) => options.withMessagingCapturePaused(source, async () => {
-      const result = await pairMessagingSource({
+      const result = await (options.pairSource ?? pairMessagingSource)({
         source, packageRoot, secretStore: options.secretStore,
         ...(options.registryPath ? { registryPath: options.registryPath } : {}),
         signal: hooks.signal, whatsappQrMode: 'artifact',
@@ -95,8 +111,14 @@ export function createDashboardMessagingService(options: {
       if (!result.registered) throw new Error('Pairing did not finish.');
       return result;
     }),
-    publish: (source, result) => options.withGrantMutation(async () => {
-      saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, options.registryPath), pairing: result });
+    publish: (source, result, signal) => options.withGrantMutation(async () => {
+      if (signal.aborted) return;
+      const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
+      const prior = readCaptureGrantFile(path);
+      if (prior.kind === 'invalid' || (prior.kind === 'valid' && prior.grant.source !== source)) throw new Error('Invalid capture grant.');
+      const retained = prior.kind === 'valid' ? retainApprovedCaptureScope(source, prior.grant.producer.env) : {};
+      if (signal.aborted) return;
+      saveMessagingCaptureGrant({ path, pairing: { ...result, producer: { ...result.producer, env: { ...result.producer.env, ...retained } } } });
       available.delete(source);
     }),
   });
@@ -148,8 +170,7 @@ export function createDashboardMessagingService(options: {
         delete record.value;
         return manager.respond(source, record.field, value);
       }
-      const pairingState = manager.status(source).state;
-      if (pairingState === 'starting' || pairingState === 'waiting') throw new Error('Finish or cancel pairing first.');
+      if (manager.busy(source)) throw new Error('Finish or cancel pairing first.');
       if (operation !== 'chats' && operation !== 'scope') throw new Error('Unknown operation.');
       if (selecting.has(source)) throw new Error('Chat selection is already running.');
       selecting.add(source);

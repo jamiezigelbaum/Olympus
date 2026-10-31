@@ -25,4 +25,24 @@ describe('dashboard messaging pairing', () => {
     expect(manager.status('telegram').state).toBe('paired');
     expect(published).toBe(true);
   });
+
+  test('cancelling a queued publication keeps selection busy until publication has stopped', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const publishing = new Promise<void>((resolve) => { entered = resolve; });
+    let saved = false;
+    const manager = createDashboardMessagingPairing({
+      pair: async () => ({ chats: [] }),
+      publish: async (_source, _result, signal) => { entered(); await held; if (!signal.aborted) saved = true; },
+    });
+    manager.start('telegram');
+    await publishing;
+    manager.cancel('telegram');
+    expect(manager.busy('telegram')).toBe(true);
+    release();
+    await manager.cancelAndWait('telegram');
+    expect(saved).toBe(false);
+    expect(manager.busy('telegram')).toBe(false);
+  });
 });

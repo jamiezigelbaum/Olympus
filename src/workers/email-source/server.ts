@@ -537,6 +537,7 @@ export function createWorkerMessagingCaptureOwnership(options: {
   createSupervisor?: (source: MessagingCaptureSource) => WorkerMessagingCaptureSupervisor;
   revokeGrant?: (path: string) => void;
   shouldResumeCapture?: () => boolean;
+  onResumeFailure?: (source: MessagingCaptureSource) => void;
 }): {
   captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
   nativeOwners: Record<MessagingCaptureSource, boolean>;
@@ -614,7 +615,10 @@ export function createWorkerMessagingCaptureOwnership(options: {
           return await operation();
         } finally {
           paused[source] -= 1;
-          if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) await capture.reconcile();
+          if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
+            try { await capture.reconcile(); }
+            catch { options.onResumeFailure?.(source); }
+          }
         }
       });
     },
@@ -2445,8 +2449,10 @@ export async function main(): Promise<void> {
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
   const packageRoot = olympusPackageRoot();
   let capturesClosed = false;
+  const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
     shouldResumeCapture: () => !capturesClosed,
+    onResumeFailure: (source) => { captureFailures[source] = true; },
     registryPath: connectedHandleRegistryPath!,
     packageRoot,
   });
@@ -2456,7 +2462,6 @@ export async function main(): Promise<void> {
   // whose capture the native service owns: this worker runs nothing there.
   const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   // Sources whose last reconcile threw: their old status is no fact about the helper.
-  const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
   const captureEntries = () => Object.entries(captures) as Array<['telegram' | 'whatsapp', WorkerMessagingCaptureSupervisor]>;
   const reconcileCaptures = async () => {
     if (capturesClosed || captureReconcileRunning) return;

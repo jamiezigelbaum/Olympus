@@ -20,7 +20,7 @@ type PairState = {
 
 export function createDashboardMessagingPairing<T extends PairResult>(options: {
   pair(source: MessagingSource, hooks: PairingHooks): Promise<T>;
-  publish(source: MessagingSource, result: T): Promise<void>;
+  publish(source: MessagingSource, result: T, signal: AbortSignal): Promise<void>;
 }) {
   const states = new Map<MessagingSource, PairState>();
   const status = (source: MessagingSource) => {
@@ -34,6 +34,7 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
   };
   return {
     status,
+    busy(source: MessagingSource) { return states.get(source)?.task !== undefined; },
     start(source: MessagingSource) {
       const prior = states.get(source);
       if (prior?.task) throw new Error('Pairing is already running.');
@@ -52,7 +53,7 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
             qr(value) { if (!item.controller.signal.aborted) { item.qr = value; item.state = 'waiting'; } },
           });
           if (item.controller.signal.aborted) return;
-          await options.publish(source, result);
+          await options.publish(source, result, item.controller.signal);
           if (item.controller.signal.aborted) return;
           item.chats = result.chats;
           item.state = 'paired';

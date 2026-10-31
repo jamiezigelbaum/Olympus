@@ -141354,6 +141354,9 @@ function createDashboardMessagingPairing(options) {
   };
   return {
     status,
+    busy(source) {
+      return states.get(source)?.task !== undefined;
+    },
     start(source) {
       const prior = states.get(source);
       if (prior?.task)
@@ -141380,7 +141383,7 @@ function createDashboardMessagingPairing(options) {
           });
           if (item.controller.signal.aborted)
             return;
-          await options.publish(source, result);
+          await options.publish(source, result, item.controller.signal);
           if (item.controller.signal.aborted)
             return;
           item.chats = result.chats;
@@ -141540,6 +141543,19 @@ function sourceOf(value2) {
 function validScope(source, scope) {
   return source === "telegram" ? /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope) : /^whatsapp\.personal:chat:[A-Za-z0-9._:-]{1,192}@[A-Za-z0-9.-]{1,63}$/.test(scope);
 }
+function retainApprovedCaptureScope(source, env) {
+  const key2 = source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS";
+  const alternate = source === "telegram" ? env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES : undefined;
+  const raw = env[key2]?.trim() || alternate?.trim();
+  if (!raw || alternate && alternate.trim() !== raw)
+    throw new Error("Invalid capture grant scope.");
+  if (raw !== "*") {
+    const values = raw.split(",").map((value2) => value2.trim());
+    if (!values.length || values.some((value2) => !validScope(source, source === "whatsapp" ? `whatsapp.personal:chat:${value2}` : value2)))
+      throw new Error("Invalid capture grant scope.");
+  }
+  return source === "telegram" ? { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: raw, OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: raw } : { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: raw };
+}
 function readQr(path) {
   if (basename19(path) !== "qr.png")
     throw new Error("Invalid QR artifact.");
@@ -141602,7 +141618,7 @@ function createDashboardMessagingService(options) {
   };
   const manager = createDashboardMessagingPairing({
     pair: (source, hooks) => options.withMessagingCapturePaused(source, async () => {
-      const result = await pairMessagingSource({
+      const result = await (options.pairSource ?? pairMessagingSource)({
         source,
         packageRoot,
         secretStore: options.secretStore,
@@ -141617,8 +141633,17 @@ function createDashboardMessagingService(options) {
         throw new Error("Pairing did not finish.");
       return result;
     }),
-    publish: (source, result) => options.withGrantMutation(async () => {
-      saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, options.registryPath), pairing: result });
+    publish: (source, result, signal) => options.withGrantMutation(async () => {
+      if (signal.aborted)
+        return;
+      const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
+      const prior = readCaptureGrantFile(path);
+      if (prior.kind === "invalid" || prior.kind === "valid" && prior.grant.source !== source)
+        throw new Error("Invalid capture grant.");
+      const retained = prior.kind === "valid" ? retainApprovedCaptureScope(source, prior.grant.producer.env) : {};
+      if (signal.aborted)
+        return;
+      saveMessagingCaptureGrant({ path, pairing: { ...result, producer: { ...result.producer, env: { ...result.producer.env, ...retained } } } });
       available.delete(source);
     })
   });
@@ -141686,8 +141711,7 @@ function createDashboardMessagingService(options) {
         delete record5.value;
         return manager.respond(source, record5.field, value2);
       }
-      const pairingState = manager.status(source).state;
-      if (pairingState === "starting" || pairingState === "waiting")
+      if (manager.busy(source))
         throw new Error("Finish or cancel pairing first.");
       if (operation !== "chats" && operation !== "scope")
         throw new Error("Unknown operation.");
@@ -204825,8 +204849,13 @@ function createWorkerMessagingCaptureOwnership(options) {
           return await operation();
         } finally {
           paused[source] -= 1;
-          if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true))
-            await capture.reconcile();
+          if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
+            try {
+              await capture.reconcile();
+            } catch {
+              options.onResumeFailure?.(source);
+            }
+          }
         }
       });
     }
@@ -205942,15 +205971,18 @@ async function main() {
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
   const packageRoot = olympusPackageRoot();
   let capturesClosed = false;
+  const captureFailures = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
     shouldResumeCapture: () => !capturesClosed,
+    onResumeFailure: (source) => {
+      captureFailures[source] = true;
+    },
     registryPath: connectedHandleRegistryPath,
     packageRoot
   });
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
   const captureStatuses = {};
-  const captureFailures = {};
   const captureEntries = () => Object.entries(captures);
   const reconcileCaptures = async () => {
     if (capturesClosed || captureReconcileRunning)

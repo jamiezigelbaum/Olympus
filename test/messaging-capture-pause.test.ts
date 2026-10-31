@@ -74,3 +74,14 @@ test('failed stop keeps pairing out of the session and shutdown prevents resume'
   expect(runOperation).toBe(true);
   expect(resumes).toBe(0);
 });
+
+test('a resume failure is reported without hiding an operation that already succeeded', async () => {
+  const failures: string[] = [];
+  const ownership = createWorkerMessagingCaptureOwnership({
+    env: {}, registryPath: '/fixture/handles.json', packageRoot: '/fixture',
+    onResumeFailure: (source) => { failures.push(source); },
+    createSupervisor: () => ({ reconcile: async () => { throw new Error('cannot start'); }, stop: async () => {} }),
+  });
+  expect(await ownership.withMessagingCapturePaused('telegram', async () => 'saved')).toBe('saved');
+  expect(failures).toEqual(['telegram']);
+});
