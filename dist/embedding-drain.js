@@ -46138,6 +46138,15 @@ var init_privacy_profile = __esm(() => {
   init_tier_rules();
 });
 
+// src/workers/classification/installed-sniffer-runtime.ts
+var init_installed_sniffer_runtime = __esm(() => {
+  init_analyst_built_in();
+  init_config();
+  init_sovereignty();
+  init_worker_auth();
+  init_built_in_sniffer();
+});
+
 // src/core/delphi.ts
 var init_delphi = __esm(() => {
   init_operation_error();
@@ -65132,11 +65141,10 @@ init_data_lifecycle();
 init_mail_source_scope();
 init_connected_handles();
 init_operation_error();
-init_sovereignty();
 init_classification_ledger();
 init_sniffer();
 init_privacy_profile();
-init_sniffer_lane();
+init_installed_sniffer_runtime();
 init_sniffer_store();
 init_tier_classifier();
 init_tier_ledger();
