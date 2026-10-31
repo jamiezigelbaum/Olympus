@@ -429,6 +429,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
 .messaging-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 12px; }
+.messaging-card .actionrow > .btn, .messaging-card .actionrow > form > .btn { min-width: 11rem; }
 .messaging-card p { color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
 .messaging-card form, .messaging-card details { margin: 10px 0; }
 /* Where an open link landed (#olympus-open=…): an accent outline that fades. */

@@ -643,6 +643,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     // read is not deferred by the owner's own finished form. Unrelated unsaved
     // input still defers it: `refreshNow` keeps those guards.
     await refreshNow(false, released);
+    // Checking changes nothing on a page whose models are already ready, and a redraw clears the line the form just said:
+    // the owner must still see that the check ran.
+    if (params.action === 'check_model_setup' && !disposed) {
+      const again = query<HTMLFormElement>('form[data-model-check]');
+      if (again && !again.querySelector('[data-action-message]')?.textContent) say(again, 'Checked just now.');
+    }
   }
 
   function renderDiscoveredModels(form: HTMLFormElement, value: unknown): void {
@@ -1056,7 +1062,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function resumeMessaging(): void {
     messagingTimers.forEach((timer, card) => { if (!card.isConnected) { clearTimeout(timer); messagingTimers.delete(card); } });
-    queryAll<HTMLElement>('[data-messaging-source]').forEach(card => { void messagingRequest(card, 'status'); });
+    // A card showing "Open controls on this computer" has no pairing controls: this session cannot use the routes, so it must not ask them.
+    queryAll<HTMLElement>('[data-messaging-source]').forEach(card => { if (!card.querySelector('[data-messaging-open-controls]')) void messagingRequest(card, 'status'); });
   }
 
   async function messagingRequest(card: HTMLElement, operation: 'start' | 'status' | 'respond' | 'cancel' | 'scope' | 'chats', extra: { field?: string; value?: string; wholeAccount?: boolean; chatScopes?: string[] } = {}): Promise<void> {
@@ -1068,6 +1075,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     const source = card.dataset.messagingSource;
     if (source !== 'telegram' && source !== 'whatsapp') return;
+    if (card.querySelector('[data-messaging-open-controls]')) return;
     const timer = messagingTimers.get(card);
     if (timer) clearTimeout(timer);
     messagingTimers.delete(card);
@@ -1084,7 +1092,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const inputSlot = card.querySelector<HTMLElement>('[data-messaging-input]');
       const qr = card.querySelector<HTMLImageElement>('[data-messaging-qr]');
       if (result.status < 200 || result.status >= 300 || body.ok === false) {
-        if (status) status.textContent = 'Could not complete this step. Try again from this computer.';
+        if (status) status.textContent = result.status === 401 || result.status === 403 ? 'Open dashboard controls on this computer to use this, then try again.' : 'Could not complete this step. Try again from this computer.';
         if (qr) { qr.hidden = true; qr.removeAttribute('src'); }
         if (inputSlot) inputSlot.replaceChildren();
         return;
@@ -1098,7 +1106,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const setupSheet = card.querySelector<HTMLElement>('[data-messaging-setup]');
       if (setupSheet) {
         const intro = setupSheet.querySelector<HTMLElement>('[data-messaging-setup-intro]');
-        const active = !['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired'].includes(state);
+        const active = !['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired', 'not_paired'].includes(state);
         if (intro) intro.hidden = active || state === 'failed';
         const cancel = setupSheet.querySelector<HTMLElement>('[data-messaging-kind="cancel"]');
         if (cancel) cancel.hidden = !active;
@@ -1117,7 +1125,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           error.append(details, retry); setupSheet.append(error);
         }
       }
-      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : 'Pairing failed. Start pairing again to retry.') : state === 'idle' ? 'Pair this account to choose the chats Olympus may read.' : state === 'scope_selection_required' ? 'Paired. Nothing is being captured. Choose what Olympus may read.' : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard.' : state === 'cancelled' ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === 'telegram' ? 'Telegram active sessions' : 'WhatsApp linked devices'} to unlink it.` : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Pairing is running on this computer…';
+      // Cancel pairing is offered only while a pairing is running, including while it waits for the chat choice; at any other time it would do nothing.
+      const cardCancel = card.querySelector<HTMLElement>('.actionrow [data-messaging-kind="cancel"]');
+      if (cardCancel) cardCancel.hidden = ['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired', 'not_paired'].includes(state);
+      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : 'Pairing failed. Start pairing again to retry.') : state === 'not_paired' ? 'Not paired yet. Pair this account first, then choose the chats Olympus may read.' : state === 'idle' ? 'Pair this account to choose the chats Olympus may read.' : state === 'scope_selection_required' ? 'Paired. Nothing is being captured. Choose what Olympus may read.' : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard.' : state === 'cancelled' ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === 'telegram' ? 'Telegram active sessions' : 'WhatsApp linked devices'} to unlink it.` : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Pairing is running on this computer…';
       if (qr) {
         const value = typeof body.qr === 'string' ? body.qr : '';
         // Only the local helper's raster QR image is displayed; no external requests or SVG markup.
@@ -1167,7 +1178,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           } else slot.append(form);
         }
       }
-      if (operation !== 'chats' && (operation !== 'cancel' || state === 'committing') && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle', 'scope_selection_required'].includes(state)) {
+      if (operation !== 'chats' && (operation !== 'cancel' || state === 'committing') && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle', 'not_paired', 'scope_selection_required'].includes(state)) {
         messagingTimers.set(card, setTimeout(() => { messagingTimers.delete(card); void messagingRequest(card, 'status'); }, 1200));
       }
     } catch {
