@@ -10,7 +10,10 @@ const root = process.env.HOME!;
 const mode = process.argv[2];
 const keepAlive = setInterval(() => {}, 1000);
 if (mode === 'host') {
-  await startEngineHost({ moduleUrl: import.meta.url, services: () => [], log: () => {}, desktop: {
+  await startEngineHost({ moduleUrl: import.meta.url, // This fixture launches its supervised worker manually from the parent.
+    // Model the supervisor's own readiness receipt independently of /health.
+    services: () => [{ id: 'olympus-worker', reload: { configPrefixes: [] },
+      async start(context) { context.serviceHealth!.clearFailure(); }, async stop() {} }], log: () => {}, desktop: {
     ready: async () => readFileSync(join(root, 'desktop'), 'utf8') === 'ready',
     openFile: async path => { writeFileSync(join(root, 'opened'), path); },
   } });

@@ -33,7 +33,7 @@ export const DASHBOARD_UPDATE_COPY = {
 
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
 export const DASHBOARD_FOLDER_NEEDS_PERMISSION = 'Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).';
-export const DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose is in Desktop, Documents, Downloads, iCloud Drive or another disk, which Olympus cannot open on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.';
+export const DASHBOARD_FOLDER_NEEDS_HELPER = 'Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.';
 export const DASHBOARD_FOLDER_UNREADABLE = 'Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.';
 
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';

@@ -12,9 +12,10 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { configFromPluginConfig } from './config.ts';
 import { engineBriefReport } from './engine-brief.ts';
-import { engineStatusPath, type EngineStatusFile } from './engine-host.ts';
+import type { EngineStatusFile } from './engine-host.ts';
 import {
   engineConflictWarnings,
+  readEngineWorkerHealth,
   enginePaths,
   engineServicePaths,
   waitForEngineHealthy,
@@ -148,9 +149,16 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     });
     // An agent already on the helper is unchanged, but its running launcher is
     // the old app: restart it so the new one is what runs.
-    if (engine.action === 'unchanged') (deps.restartEngine ?? restartEngine)(service);
+    let health = engine.health;
+    if (engine.action === 'unchanged') {
+      const since = (deps.health?.now ?? Date.now)();
+      (deps.restartEngine ?? restartEngine)(service);
+      health = await waitForEngineHealthy({ paths, expectedBuild: engine.program.build ?? null, since }, { ...deps.health, exec: deps.exec });
+    }
+    const usesHelper = installedProgram(paths.plistPath)?.helperPath === helper.executable_path;
+    const ok = health?.ok === true && usesHelper;
     const { plist: _plist, ...summary } = engine;
-    return { ...helper, engine: summary, restarted_engine: true, note: 'The engine was restarted so its agent starts through the helper app.', next: engine.ok ? 'Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine.' : 'Run olympus engine logs to see why the engine did not become healthy.' };
+    return { ...helper, ok, engine: { ...summary, ok, health }, restarted_engine: true, note: ok ? 'The engine was restarted through the helper app.' : 'The engine did not prove it started through the helper app.', next: ok ? 'Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine.' : 'Run olympus engine logs to see why the engine did not become healthy.' };
   }
   if (command === 'verify') {
     return verifyEngine({ ...service, ...parseVerifyArgs(rest), ...(deps.health ? { health: deps.health } : {}) });
@@ -243,14 +251,18 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   const parsed = pluginConfig ? configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false }) : undefined;
   const remoteMode = parsed ? resolveRemoteAccessMode(parsed.remote) : { mode: 'off' as const };
   const baseUrl = parsed?.email.baseUrl ?? 'http://127.0.0.1:8010/v1';
-  const host = readEngineStatusFile(env);
+  const host = readEngineStatusFile(paths.statusPath);
   const relayDir = remoteAccessDirForCli(env);
   const relayStatus = readRemoteAccessStatus(relayDir);
   const relayRunning = relayProcessRunning(relayDir);
   const openclaw = (deps.openclawPath ?? (() => resolveOpenClawExecutable({ env, homeDir })))();
   const worker = await probeWorker(deps.fetchImpl ?? workerFetch, baseUrl, paths.linux?.workerSocketPath);
   const linuxHealth = paths.linux ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ ...deps, homeDir }) }, { ...deps.health, timeoutMs: 0, fetchImpl: deps.fetchImpl, exec: deps.exec }) : undefined;
+  const engineWorker = readEngineWorkerHealth(paths.statusPath);
+  const workerProblem = agent.state === 'running' && engineWorker?.state !== 'ok'
+    ? engineWorker?.message ?? 'The engine worker is not ready yet: see olympus engine logs.' : undefined;
   const missing: string[] = [];
+  if (workerProblem) missing.push(workerProblem);
   if (linuxHealth && !linuxHealth.ok) missing.push(linuxHealth.reason ?? 'Linux engine health is unknown.');
   if (!agent.installed) missing.push('The engine agent is not installed: run olympus engine install.');
   else if (agent.state === 'not_loaded') missing.push('The engine agent is installed but not loaded: run olympus engine install.');
@@ -273,7 +285,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
     missing.push('Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.');
   }
   return {
-    ok: (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && !helperUnused && !helperGone && (remoteMode.mode !== 'relay' || relayRunning),
+    ok: !workerProblem && (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && !helperUnused && !helperGone && (remoteMode.mode !== 'relay' || relayRunning),
     host: openclaw
       ? { mode: 'standalone', openclaw: 'installed (optional; not used by the engine)', openclaw_path: openclaw }
       : { mode: 'standalone', openclaw: 'not installed (not needed)' },
@@ -301,9 +313,9 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   };
 }
 
-function readEngineStatusFile(env: Record<string, string | undefined>): EngineStatusFile | undefined {
+function readEngineStatusFile(statusPath: string): EngineStatusFile | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(engineStatusPath(env), 'utf8')) as EngineStatusFile;
+    const parsed = JSON.parse(readFileSync(statusPath, 'utf8')) as EngineStatusFile;
     return parsed?.schema === 'olympus.engine.status.v1' ? parsed : undefined;
   } catch {
     return undefined;

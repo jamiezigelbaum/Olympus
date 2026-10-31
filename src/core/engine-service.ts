@@ -149,6 +149,24 @@ export function engineStatusPath(env: Record<string, string | undefined> = proce
   return join(olympusDataDir(env), 'engine', 'status.json');
 }
 
+/** The live host's own worker health; a competing endpoint cannot clear it. */
+export function readEngineWorkerHealth(statusPath: string): { state: string; message: string | null } | undefined {
+  try {
+    const status = JSON.parse(readFileSync(statusPath, 'utf8'));
+    if (status?.schema !== 'olympus.engine.status.v1' || status.state !== 'running'
+      || !Number.isSafeInteger(status.pid) || status.pid <= 0) return undefined;
+    process.kill(status.pid, 0);
+    const worker = status.services?.['olympus-worker'];
+    if (!['off', 'starting', 'ok', 'failing', 'stopped'].includes(worker?.state)) return undefined;
+    return { state: worker.state, message: typeof worker.message === 'string' ? worker.message : null };
+  } catch { return undefined; }
+}
+
+export function readEngineWorkerProblem(statusPath: string): string | undefined {
+  const worker = readEngineWorkerHealth(statusPath);
+  return worker?.state === 'failing' ? worker.message ?? 'The engine worker failed to become ready.' : undefined;
+}
+
 /** What launchd runs: an absolute Bun and the packaged CLI entrypoint. */
 export interface EngineProgram {
   /** Linux generation receipt pin for the exact matching Bun executable. */

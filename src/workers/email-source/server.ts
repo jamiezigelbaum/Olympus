@@ -39,6 +39,7 @@ import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   createFileExtractionRuntime,
+  createRefreshableFileExtractionRuntime,
   pdfExtractionLanes,
   fileExtractionCorporaRoster,
   connectorStoreExtractionCandidateReader,
@@ -229,7 +230,7 @@ import {
   localFilesIngestionExclusionMatcher,
   localFilesWatchDir,
 } from '../local-files/store.ts';
-import { createLocalFilesOwnRootsCleanup } from '../local-files/own-roots-cleanup.ts';
+import { createLocalFilesOwnRootsCleanup, createLocalFilesOwnRootsRecovery } from '../local-files/own-roots-cleanup.ts';
 import { createLocalFilesProviderStoreSyncHandler } from '../local-files/provider-store-sync.ts';
 import { createLocalFilesSchedulerSource } from '../local-files/scheduler-source.ts';
 import { createArchiveImportRuntime } from '../archive-import/runtime.ts';
@@ -293,11 +294,13 @@ import type { ConnectorStoreStatusScope } from '../connector-store/local-index.t
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from './gmail-status-scope.ts';
 import {
   onDemandTierStore,
+  tieredStoreSetLedgerPath,
   rehomeChatLaneOverrides,
   type ExistingStoreTierLane,
   type OnDemandTierStore,
   type TieredStoreSet,
 } from '../connector-store/tiered-store-set.ts';
+import { telegramArchiveTarget } from '../telegram-messages/archive-target.ts';
 import { EVERNOTE_SOURCE_ID } from '../evernote/connector.ts';
 import { EVERNOTE_SYNC_CAPABILITY, EVERNOTE_TIER_CORPUS_IDS } from '../evernote/live-sync.ts';
 import { createEvernoteRuntime } from '../evernote/runtime.ts';
@@ -2661,6 +2664,19 @@ export async function main(): Promise<void> {
   // visibility authority for its stores, bound to every leg at boot so no
   // reader ever consults a different ledger; its secret-locations index sits
   // beside the same store.
+  let sourceRuntimeClosed = false;
+  let sourceLaneGeneration = 0;
+  let mountConfiguredSourceStores = (): void => {};
+  const earlySourceStores: LocalConnectorStore[][] = [];
+  let sourceLaneMounted = (stores: LocalConnectorStore[]): void => {
+    sourceLaneGeneration += 1;
+    earlySourceStores.push(stores);
+  };
+  const sourceHasStores = (sourceId: string): boolean => (['internal', 'secure_local', 'public_safe'] as const)
+    .some((domain) => {
+      const path = resolvedStorePath(sourceId, domain, process.env);
+      return existsSync(path) || existsSync(tieredStoreSetLedgerPath(path)) || existsSync(secretLocationsPathForStore(path));
+    });
   const tierLanes: Array<{
     ledger: TierLedger;
     secureCorpusId: string;
@@ -2828,28 +2844,35 @@ export async function main(): Promise<void> {
     });
     return lane.set;
   };
-  const refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
-    enabled: readwiseConnectorStoreLane.enabled,
-    ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
-    ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
-    env: process.env,
-    tierSetFor: (store) => {
-      const secrets = openTierSecretLocations(
-        { sourceId: READWISE_SOURCE_ID },
-        resolvedStorePath(READWISE_SOURCE_ID, 'secure_local', process.env),
-        READWISE_SECURE_LIBRARY_CORPUS_ID,
-      );
-      return existingStoreTierSet(createReadwiseTierLane({
-        store,
-        env: process.env,
-        ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
-        ...(tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {}),
-        ...(secrets ? { secretLocations: secrets } : {}),
-        onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null),
-      }), { store, ...(secrets ? { secrets } : {}) });
-    },
-  });
-  const readwiseConnectorStore = refreshableReadwiseRuntime?.store;
+  let refreshableReadwiseRuntime: ReturnType<typeof createRefreshableReadwiseConnectorStoreRuntime> | undefined;
+  let readwiseConnectorStore: LocalConnectorStore | undefined;
+  const mountReadwise = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
+    if (refreshableReadwiseRuntime) return;
+    refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
+      enabled: readwiseConnectorStoreLane.enabled,
+      ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
+      ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
+      env: process.env,
+      tierSetFor: (store) => {
+        const secrets = openTierSecretLocations(
+          { sourceId: READWISE_SOURCE_ID },
+          resolvedStorePath(READWISE_SOURCE_ID, 'secure_local', process.env),
+          READWISE_SECURE_LIBRARY_CORPUS_ID,
+        );
+        return existingStoreTierSet(createReadwiseTierLane({
+          store,
+          env: process.env,
+          ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
+          ...(tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {}),
+          ...(secrets ? { secretLocations: secrets } : {}),
+          onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null),
+        }), { store, ...(secrets ? { secrets } : {}) });
+      },
+    });
+    readwiseConnectorStore = refreshableReadwiseRuntime?.store;
+    if (readwiseConnectorStore) sourceLaneMounted([readwiseConnectorStore]);
+  };
   const xBookmarksConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(
     process.env,
     'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED',
@@ -2858,30 +2881,37 @@ export async function main(): Promise<void> {
   // The X lane's tier stores beyond its own, for the account guard's
   // "does this source hold items" check.
   let xBookmarksTierStores: OnDemandTierStore[] = [];
-  const refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
-    enabled: xBookmarksConnectorStoreLane.enabled,
-    ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
-    ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
-    env: process.env,
-    tierSetFor: (store) => {
-      const secrets = openTierSecretLocations(
-        { sourceId: X_BOOKMARKS_SOURCE_ID },
-        resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'secure_local', process.env),
-        X_BOOKMARKS_SECURE_CORPUS_ID,
-      );
-      const lane = createXBookmarksTierLane({
-        store,
-        env: process.env,
-        ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
-        ...(tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {}),
-        ...(secrets ? { secretLocations: secrets } : {}),
-        onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null),
-      });
-      xBookmarksTierStores = Object.values(lane.newStores).filter((leg): leg is OnDemandTierStore => leg !== undefined);
-      return existingStoreTierSet(lane, { store, ...(secrets ? { secrets } : {}) });
-    },
-  });
-  const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
+  let refreshableXBookmarksRuntime: ReturnType<typeof createRefreshableXBookmarksConnectorStoreRuntime> | undefined;
+  let xBookmarksConnectorStore: LocalConnectorStore | undefined;
+  const mountXBookmarks = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
+    if (refreshableXBookmarksRuntime) return;
+    refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
+      enabled: xBookmarksConnectorStoreLane.enabled,
+      ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
+      ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
+      env: process.env,
+      tierSetFor: (store) => {
+        const secrets = openTierSecretLocations(
+          { sourceId: X_BOOKMARKS_SOURCE_ID },
+          resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'secure_local', process.env),
+          X_BOOKMARKS_SECURE_CORPUS_ID,
+        );
+        const lane = createXBookmarksTierLane({
+          store,
+          env: process.env,
+          ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
+          ...(tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {}),
+          ...(secrets ? { secretLocations: secrets } : {}),
+          onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null),
+        });
+        xBookmarksTierStores = Object.values(lane.newStores).filter((leg): leg is OnDemandTierStore => leg !== undefined);
+        return existingStoreTierSet(lane, { store, ...(secrets ? { secrets } : {}) });
+      },
+    });
+    xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
+    if (xBookmarksConnectorStore) sourceLaneMounted([xBookmarksConnectorStore]);
+  };
   const gmailConnectorStoreLane = sourceIndexLaneAccountDecision(
     sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled),
     { sourceId: GMAIL_SOURCE_ID },
@@ -2896,43 +2926,51 @@ export async function main(): Promise<void> {
   const gmailRequestBudget = gmailConnectorStoreLane.enabled
     ? createGmailDailyRequestBudget({ env: process.env })
     : undefined;
-  const gmailInternalConnectorStore = gmailConnectorStoreLane.enabled
-    ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-      dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'internal', process.env),
-      corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
-      family: 'email',
-      trustDomain: 'internal',
-    })
-    : undefined;
-  const gmailSecureConnectorStore = gmailInternalConnectorStore
-    ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-      dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'secure_local', process.env),
-      corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
-      family: 'email',
-      trustDomain: 'secure_local',
-    })
-    : undefined;
-  // Per-tier stores (design per-item-four-tier-classification.md, 3.2): the
-  // lane's two stores plus a Public store created only when a message is
-  // routed there, all governed by ONE ledger — the secure store's own.
-  const gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore
-    ? tierLane({
-        account: { sourceId: GMAIL_SOURCE_ID },
-        internal: gmailInternalConnectorStore,
-        secure: gmailSecureConnectorStore,
-        publicStore: onDemandTierStore({
-          corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
-          dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'public_safe', process.env),
-          create: () => openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-            dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'public_safe', process.env),
-            corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
-            family: 'email',
-            trustDomain: 'public_safe',
-          }),
-          onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID),
-        }),
+  let gmailInternalConnectorStore: LocalConnectorStore | undefined;
+  let gmailSecureConnectorStore: LocalConnectorStore | undefined;
+  let gmailTierLane: ReturnType<typeof tierLane> | undefined;
+  const mountGmail = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
+    if (gmailInternalConnectorStore) return;
+    gmailInternalConnectorStore = gmailConnectorStoreLane.enabled
+      ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+        dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'internal', process.env),
+        corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+        family: 'email',
+        trustDomain: 'internal',
       })
-    : undefined;
+      : undefined;
+    gmailSecureConnectorStore = gmailInternalConnectorStore
+      ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+        dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'secure_local', process.env),
+        corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
+        family: 'email',
+        trustDomain: 'secure_local',
+      })
+      : undefined;
+    // Per-tier stores (design per-item-four-tier-classification.md, 3.2): the
+    // lane's two stores plus a Public store created only when a message is
+    // routed there, all governed by ONE ledger — the secure store's own.
+    gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore
+      ? tierLane({
+          account: { sourceId: GMAIL_SOURCE_ID },
+          internal: gmailInternalConnectorStore,
+          secure: gmailSecureConnectorStore,
+          publicStore: onDemandTierStore({
+            corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+            dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'public_safe', process.env),
+            create: () => openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+              dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'public_safe', process.env),
+              corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+              family: 'email',
+              trustDomain: 'public_safe',
+            }),
+            onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID),
+          }),
+        })
+      : undefined;
+    if (gmailInternalConnectorStore && gmailSecureConnectorStore) sourceLaneMounted([gmailInternalConnectorStore, gmailSecureConnectorStore]);
+  };
   // The account scope Gmail's items are kept under (gmail-archive-target.ts
   // `gmailItemAccountScope`): the handle's role, unless the stores already
   // hold the account's mail under one other scope (an import made before the
@@ -2948,7 +2986,7 @@ export async function main(): Promise<void> {
   // Gmail stores, matched by Gmail's own ids, under the account it proves and
   // the owner confirms. Without the Gmail lane, every mbox stays under
   // Archives, as before.
-  if (gmailInternalConnectorStore && gmailSecureConnectorStore) {
+  if (gmailConnectorStoreLane.enabled) {
     let gmailArchiveSet: { key: string; set: ReturnType<typeof createLaneTieredStoreSet> } | undefined;
     // Every Gmail request an import makes passes one gate: imports keep to their share of the day.
     const gmailImportGate = gmailImportAllowance({ usage: () => gmailRequestBudget?.status() });
@@ -2960,6 +2998,8 @@ export async function main(): Promise<void> {
         ? runExclusiveForSource(connectedHandleRegistryPath, GMAIL_SOURCE_ID, task)
         : task(),
       lane: () => {
+        mountGmail();
+        if (!gmailInternalConnectorStore || !gmailSecureConnectorStore) throw new Error('Gmail stores are unavailable.');
         const handle = selectedSourceCredentialHandle({
           env: process.env, pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
           provider: 'gmail', capability: 'gmail.email.sync', handles: readActiveConnectedHandles(process.env),
@@ -3079,45 +3119,53 @@ export async function main(): Promise<void> {
   const googleDriveExclusions = googleDriveConnectorStoreLane.enabled
     ? googleDriveIngestionExclusionMatcher(process.env)
     : undefined;
-  const googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled
-    ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', process.env),
-      corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
-      family: 'file',
-      trustDomain: 'internal',
-      ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
-    })
-    : undefined;
-  const googleDriveSecureConnectorStore = googleDriveInternalConnectorStore
-    ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'secure_local', process.env),
-      corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
-      family: 'file',
-      trustDomain: 'secure_local',
-      ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
-    })
-    : undefined;
-  // The Public Drive store carries the same exclusion gate and the same
-  // approved-scope read filter as its siblings (connectorStoreReadScope).
-  const googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
-    ? tierLane({
-        account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
-        internal: googleDriveInternalConnectorStore,
-        secure: googleDriveSecureConnectorStore,
-        publicStore: onDemandTierStore({
-          corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
-          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'public_safe', process.env),
-          create: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-            dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'public_safe', process.env),
-            corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
-            family: 'file',
-            trustDomain: 'public_safe',
-            ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
-          }),
-          onOpened: (store) => registerTierLegStore(store, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID),
-        }),
+  let googleDriveInternalConnectorStore: LocalConnectorStore | undefined;
+  let googleDriveSecureConnectorStore: LocalConnectorStore | undefined;
+  let googleDriveTierLane: ReturnType<typeof tierLane> | undefined;
+  const mountGoogleDrive = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
+    if (googleDriveInternalConnectorStore) return;
+    googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled
+      ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', process.env),
+        corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
+        family: 'file',
+        trustDomain: 'internal',
+        ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
       })
-    : undefined;
+      : undefined;
+    googleDriveSecureConnectorStore = googleDriveInternalConnectorStore
+      ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'secure_local', process.env),
+        corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
+        family: 'file',
+        trustDomain: 'secure_local',
+        ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
+      })
+      : undefined;
+    // The Public Drive store carries the same exclusion gate and the same
+    // approved-scope read filter as its siblings (connectorStoreReadScope).
+    googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
+      ? tierLane({
+          account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
+          internal: googleDriveInternalConnectorStore,
+          secure: googleDriveSecureConnectorStore,
+          publicStore: onDemandTierStore({
+            corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
+            dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'public_safe', process.env),
+            create: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+              dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'public_safe', process.env),
+              corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
+              family: 'file',
+              trustDomain: 'public_safe',
+              ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
+            }),
+            onOpened: (store) => registerTierLegStore(store, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID),
+          }),
+        })
+      : undefined;
+    if (googleDriveInternalConnectorStore && googleDriveSecureConnectorStore) sourceLaneMounted([googleDriveInternalConnectorStore, googleDriveSecureConnectorStore]);
+  };
   // Dropbox product state: the lane's original store, secure_local. Every
   // file stored before per-item routing stays here; the lane's tier set
   // (below) adds Personal and Public stores on first need.
@@ -3125,73 +3173,68 @@ export async function main(): Promise<void> {
     sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled),
     { sourceId: DROPBOX_FILES_SOURCE_ID },
   );
-  const dropboxConnectorStore = dropboxConnectorStoreLane.enabled
-    ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy })
-    : undefined;
   const dropboxProviderAccount = dropboxHandle?.accountRole?.trim()
     || dropboxFilesAccount
     || 'personal';
-  // Per-tier stores (P1c, design per-item-four-tier-classification.md): the
-  // lane's original secure store keeps every existing file where it is; a new
-  // file's names go to the Personal store (by default) when it is listed, and
-  // its text to the store its content tier decides once extraction reads it.
-  // The Personal and Public stores are created on first need.
-  const dropboxSecretLocations = dropboxConnectorStore
-    ? openTierSecretLocations({ sourceId: DROPBOX_FILES_SOURCE_ID }, dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
-    : undefined;
-  const dropboxTierLane = dropboxConnectorStore
-    ? createDropboxTierLane({
-        secureStore: dropboxConnectorStore,
-        env: process.env,
-        policy: dropboxIngestionPolicy,
-        ...(dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {}),
-        onStoreOpened: (store) => registerTierLegStore(
-          store,
-          DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
-          sourceIndexEmbeddingProvider ?? null,
-        ),
-      })
-    : undefined;
-  // The Dropbox set declares no embedder on its legs; the Private store's real
-  // one is chosen here and handed to the scheduler. Tell the set, so the Private
-  // row re-home pass knows whether it is local (it moves only when it is).
-  if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
-    dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
-      // Rows moved into the Private store embed under the current scope binding, as the lane's own pass does.
-      embedWith: () => (dropboxScopeRef && fileSourceScopeAuthority
-        ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef)
-        : undefined),
-    });
-  }
-  if (dropboxTierLane && dropboxConnectorStore) {
-    adoptTierLane({
-      ledger: dropboxTierLane.ledger,
-      secureCorpusId: dropboxConnectorStore.corpusId,
-      corpusIds: [dropboxConnectorStore.corpusId, dropboxTierLane.internal.corpusId, dropboxTierLane.public.corpusId],
-      onDemand: [dropboxTierLane.internal, dropboxTierLane.public],
-      ...(dropboxSecretLocations ? { secrets: dropboxSecretLocations } : {}),
-    });
-  }
-  const dropboxExtractionView = dropboxTierLane ? tieredExtractionView(dropboxTierLane.set) : undefined;
+  let dropboxConnectorStore: LocalConnectorStore | undefined;
+  let dropboxSecretLocations: SecretLocationsIndex | undefined;
+  let dropboxTierLane: ReturnType<typeof createDropboxTierLane> | undefined;
+  let dropboxExtractionView: ReturnType<typeof tieredExtractionView> | undefined;
+  const mountDropbox = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
+    if (dropboxConnectorStore) return;
+    dropboxConnectorStore = dropboxConnectorStoreLane.enabled
+      ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy })
+      : undefined;
+    // Per-tier stores (P1c, design per-item-four-tier-classification.md): the
+    // lane's original secure store keeps every existing file where it is; a new
+    // file's names go to the Personal store (by default) when it is listed, and
+    // its text to the store its content tier decides once extraction reads it.
+    // The Personal and Public stores are created on first need.
+    dropboxSecretLocations = dropboxConnectorStore
+      ? openTierSecretLocations({ sourceId: DROPBOX_FILES_SOURCE_ID }, dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
+      : undefined;
+    dropboxTierLane = dropboxConnectorStore
+      ? createDropboxTierLane({
+          secureStore: dropboxConnectorStore,
+          env: process.env,
+          policy: dropboxIngestionPolicy,
+          ...(dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {}),
+          onStoreOpened: (store) => registerTierLegStore(
+            store,
+            DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
+            sourceIndexEmbeddingProvider ?? null,
+          ),
+        })
+      : undefined;
+    // The Dropbox set declares no embedder on its legs; the Private store's real
+    // one is chosen here and handed to the scheduler. Tell the set, so the Private
+    // row re-home pass knows whether it is local (it moves only when it is).
+    if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
+      dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
+        // Rows moved into the Private store embed under the current scope binding, as the lane's own pass does.
+        embedWith: () => {
+          const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
+          return ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, ref) : undefined;
+        },
+      });
+    }
+    if (dropboxTierLane && dropboxConnectorStore) {
+      adoptTierLane({
+        ledger: dropboxTierLane.ledger,
+        secureCorpusId: dropboxConnectorStore.corpusId,
+        corpusIds: [dropboxConnectorStore.corpusId, dropboxTierLane.internal.corpusId, dropboxTierLane.public.corpusId],
+        onDemand: [dropboxTierLane.internal, dropboxTierLane.public],
+        ...(dropboxSecretLocations ? { secrets: dropboxSecretLocations } : {}),
+      });
+    }
+    dropboxExtractionView = dropboxTierLane ? tieredExtractionView(dropboxTierLane.set) : undefined;
+    if (dropboxConnectorStore) sourceLaneMounted([dropboxConnectorStore]);
+  };
   /** Whether a store is one of the Dropbox lane's tier stores. */
   const isDropboxTierStore = (store: LocalConnectorStore): boolean => store === dropboxConnectorStore
     || (dropboxTierLane !== undefined
       && (store === dropboxTierLane.internal.current() || store === dropboxTierLane.public.current()));
-  const dropboxScopeRef = dropboxHandle && fileSourceScopeAuthority
-    ? fileSourceScopeAuthority.policyRef('dropbox.files')
-    : undefined;
-  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxTierLane && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority
-    ? createDropboxProviderStoreSyncHandler({
-        tierSet: dropboxTierLane.set,
-        store: dropboxConnectorStore,
-        account: dropboxProviderAccount,
-        credentialHandle: dropboxHandle.handle,
-        scope: createScopeBoundDropboxContentScope({ authority: fileSourceScopeAuthority, ref: dropboxScopeRef }),
-        ...(dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)
-          ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) }
-          : {}),
-      })
-    : undefined;
   // Local files: the folders the owner chose on this computer. No credential;
   // the lane exists once the owner connects it and approves folders. Same three
   // per-tier stores, exclusion gate and tier set as Dropbox.
@@ -3200,49 +3243,69 @@ export async function main(): Promise<void> {
     { sourceId: LOCAL_FILES_SOURCE_ID },
   );
   const localFilesIngestionPolicy = defaultLocalFilesIngestionPolicy();
-  const localFilesConnectorStore = localFilesConnectorStoreLane.enabled
-    ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy })
-    : undefined;
-  const localFilesSecretLocations = localFilesConnectorStore
-    ? openTierSecretLocations({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID)
-    : undefined;
-  const localFilesTierLane = localFilesConnectorStore
-    ? createLocalFilesTierLane({
-        secureStore: localFilesConnectorStore,
-        env: process.env,
-        policy: localFilesIngestionPolicy,
-        ...(localFilesSecretLocations ? { secretLocations: localFilesSecretLocations } : {}),
-        onStoreOpened: (store) => registerTierLegStore(
-          store,
-          LOCAL_FILES_CORPUS_ID,
-          sourceIndexEmbeddingProvider ?? null,
-        ),
-      })
-    : undefined;
   const localFilesScopeRef = fileSourceScopeAuthority
     ? fileSourceScopeAuthority.policyRef(LOCAL_FILES_SOURCE_ID)
     : undefined;
-  if (localFilesTierLane && localFilesConnectorStore && localFilesEmbeddingProvider
-    && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)) {
-    localFilesTierLane.set.declarePrivateEmbedder(localFilesEmbeddingProvider, {
-      embedWith: () => {
-        const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
-        return ref && fileSourceScopeAuthority
-          ? scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref)
-          : undefined;
-      },
-    });
-  }
-  if (localFilesTierLane && localFilesConnectorStore) {
-    adoptTierLane({
-      ledger: localFilesTierLane.ledger,
-      secureCorpusId: localFilesConnectorStore.corpusId,
-      corpusIds: [localFilesConnectorStore.corpusId, localFilesTierLane.internal.corpusId, localFilesTierLane.public.corpusId],
-      onDemand: [localFilesTierLane.internal, localFilesTierLane.public],
-      ...(localFilesSecretLocations ? { secrets: localFilesSecretLocations } : {}),
-    });
-  }
-  const localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
+  let localFilesOwnRootsCleanup: ReturnType<typeof createLocalFilesOwnRootsCleanup> | undefined;
+  let localFilesInitialCleanup: Promise<void> | undefined;
+  let localFilesCleanupRecovery: ReturnType<typeof createLocalFilesOwnRootsRecovery> | undefined;
+  let localFilesConnectorStore: LocalConnectorStore | undefined;
+  let localFilesSecretLocations: SecretLocationsIndex | undefined;
+  let localFilesTierLane: ReturnType<typeof createLocalFilesTierLane> | undefined;
+  let localFilesExtractionView: ReturnType<typeof tieredExtractionView> | undefined;
+  const mountLocalFiles = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
+    if (localFilesConnectorStore) return;
+    localFilesConnectorStore = localFilesConnectorStoreLane.enabled
+      ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy })
+      : undefined;
+    localFilesSecretLocations = localFilesConnectorStore
+      ? openTierSecretLocations({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID)
+      : undefined;
+    localFilesTierLane = localFilesConnectorStore
+      ? createLocalFilesTierLane({
+          secureStore: localFilesConnectorStore,
+          env: process.env,
+          policy: localFilesIngestionPolicy,
+          ...(localFilesSecretLocations ? { secretLocations: localFilesSecretLocations } : {}),
+          onStoreOpened: (store) => registerTierLegStore(
+            store,
+            LOCAL_FILES_CORPUS_ID,
+            sourceIndexEmbeddingProvider ?? null,
+          ),
+        })
+      : undefined;
+    if (localFilesTierLane && localFilesConnectorStore && localFilesEmbeddingProvider
+      && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)) {
+      localFilesTierLane.set.declarePrivateEmbedder(localFilesEmbeddingProvider, {
+        embedWith: () => {
+          const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
+          return ref && fileSourceScopeAuthority
+            ? scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref)
+            : undefined;
+        },
+      });
+    }
+    if (localFilesTierLane && localFilesConnectorStore) {
+      adoptTierLane({
+        ledger: localFilesTierLane.ledger,
+        secureCorpusId: localFilesConnectorStore.corpusId,
+        corpusIds: [localFilesConnectorStore.corpusId, localFilesTierLane.internal.corpusId, localFilesTierLane.public.corpusId],
+        onDemand: [localFilesTierLane.internal, localFilesTierLane.public],
+        ...(localFilesSecretLocations ? { secrets: localFilesSecretLocations } : {}),
+      });
+    }
+    localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
+    if (localFilesTierLane) {
+      localFilesOwnRootsCleanup = createLocalFilesOwnRootsCleanup({ tierSet: localFilesTierLane.set, context: localFilesExclusionContext, log: (message) => console.warn(`[local-files] ${message}`) });
+      // An incomplete bounded pass never opens reads; upgraded indexes and remaining
+      // batches recover independently of the scheduler, without holding startup.
+      const lane = localFilesTierLane;
+      localFilesCleanupRecovery = createLocalFilesOwnRootsRecovery({ cleanup: localFilesOwnRootsCleanup, stores: () => lane.set.openStores(), log: (message) => console.warn(`[local-files] ${message}`) });
+      localFilesInitialCleanup = localFilesCleanupRecovery.initial;
+    }
+    if (localFilesConnectorStore) sourceLaneMounted([localFilesConnectorStore]);
+  };
   const isLocalFilesTierStore = (store: LocalConnectorStore): boolean => store === localFilesConnectorStore
     || (localFilesTierLane !== undefined
       && (store === localFilesTierLane.internal.current() || store === localFilesTierLane.public.current()));
@@ -3260,16 +3323,11 @@ export async function main(): Promise<void> {
   // Olympus's own folders are never indexed, and what an earlier version indexed
   // inside one (a folder the person had chosen by name) is removed here: before
   // the worker answers anything, and again with each pass until none is left.
-  const localFilesOwnRootsCleanup = localFilesConnectorStore && localFilesTierLane
-    ? createLocalFilesOwnRootsCleanup({
-        tierSet: localFilesTierLane.set,
-        context: localFilesExclusionContext,
-        log: (message) => console.warn(`[local-files] ${message}`),
-      })
-    : undefined;
   let localFilesSyncCache: { key: string; handler: ReturnType<typeof createLocalFilesProviderStoreSyncHandler> } | undefined;
   const localFilesSyncFor = (ref: SourceScopePolicyRef) => {
     if (!localFilesConnectorStore || !localFilesTierLane || !fileSourceScopeAuthority) return undefined;
+    const ownRootsCleanup = localFilesOwnRootsCleanup;
+    if (!ownRootsCleanup) return undefined;
     const key = `${ref.accountGeneration}:${ref.revision}`;
     if (localFilesSyncCache?.key === key) return localFilesSyncCache.handler;
     // The watch folder is the account's raw state, written only from here on. The store is open
@@ -3284,9 +3342,7 @@ export async function main(): Promise<void> {
       snapshotDir: localFilesWatchDir(process.env),
       ignore: localFilesWatchIgnore,
       // A pass writes the same stores: it starts only once no clean-up batch is still in flight.
-      ...(localFilesOwnRootsCleanup
-        ? { beforePull: async () => { await localFilesOwnRootsCleanup.run(); await localFilesOwnRootsCleanup.idle(); } }
-        : {}),
+      beforePull: async () => { await ownRootsCleanup.run(); await ownRootsCleanup.idle(); },
       ...(localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)
         ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) }
         : {}),
@@ -3332,30 +3388,38 @@ export async function main(): Promise<void> {
     'OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED',
     sourceIndexReadEnabled,
   ), { sourceId: WHATSAPP_PERSONAL_SOURCE_ID });
-  const whatsappConnectorStore = whatsappConnectorStoreLane.enabled
-    ? createWhatsAppConnectorStore(process.env)
-    : undefined;
-  // Per-tier stores (P1c): each message is tiered by its own content; Private
-  // ones rest in the lane's own store and Personal ones in the Personal store.
-  const whatsappSecretLocations = whatsappConnectorStore
-    ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID)
-    : undefined;
-  const whatsappTierSet = whatsappConnectorStore
-    ? existingStoreTierSet(createWhatsAppTierLane({
-        store: whatsappConnectorStore,
-        env: process.env,
-        ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
-        ...(whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {}),
-        onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null),
-      }), {
-        store: whatsappConnectorStore,
-        ...(whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}),
-      })
-    : undefined;
-  if (whatsappTierSet && tierSecureEmbeddingProvider) whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
-  if (whatsappTierSet && whatsappConnectorStore) {
-    reportRehomedChatOverrides('whatsapp', rehomeChatLaneOverrides(whatsappTierSet.ledger, 'whatsapp', [whatsappConnectorStore]));
-  }
+  let whatsappConnectorStore: LocalConnectorStore | undefined;
+  let whatsappSecretLocations: SecretLocationsIndex | undefined;
+  let whatsappTierSet: TieredStoreSet | undefined;
+  const mountWhatsApp = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
+    if (whatsappConnectorStore) return;
+    whatsappConnectorStore = whatsappConnectorStoreLane.enabled
+      ? createWhatsAppConnectorStore(process.env)
+      : undefined;
+    // Per-tier stores (P1c): each message is tiered by its own content; Private
+    // ones rest in the lane's own store and Personal ones in the Personal store.
+    whatsappSecretLocations = whatsappConnectorStore
+      ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID)
+      : undefined;
+    whatsappTierSet = whatsappConnectorStore
+      ? existingStoreTierSet(createWhatsAppTierLane({
+          store: whatsappConnectorStore,
+          env: process.env,
+          ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
+          ...(whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {}),
+          onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null),
+        }), {
+          store: whatsappConnectorStore,
+          ...(whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}),
+        })
+      : undefined;
+    if (whatsappTierSet && tierSecureEmbeddingProvider) whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
+    if (whatsappTierSet && whatsappConnectorStore) {
+      reportRehomedChatOverrides('whatsapp', rehomeChatLaneOverrides(whatsappTierSet.ledger, 'whatsapp', [whatsappConnectorStore]));
+    }
+    if (whatsappConnectorStore) sourceLaneMounted([whatsappConnectorStore]);
+  };
   // A WhatsApp chat export is an input of the WhatsApp connector: it writes this
   // account's own stores (docs/design/archive-live-one-dataset.md). With no
   // live lane open yet (the export creates the account), the import opens the
@@ -3369,6 +3433,8 @@ export async function main(): Promise<void> {
   archiveSourceTargets.register(createWhatsAppArchiveTarget({
     env: process.env,
     set: () => {
+      mountWhatsApp();
+      whatsappImportTierSet ??= whatsappTierSet;
       if (whatsappImportTierSet) return whatsappImportTierSet;
       const store = createWhatsAppConnectorStore(process.env);
       const secrets = openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, store.dbPath, WHATSAPP_LIVE_CORPUS_ID);
@@ -3385,7 +3451,7 @@ export async function main(): Promise<void> {
     },
     readChild: whatsappReadChild,
   }));
-  const whatsappConnectorStoreSync: WhatsAppConnectorStoreSyncHandler | undefined = whatsappConnectorStore && whatsappTierSet
+  let whatsappConnectorStoreSync: WhatsAppConnectorStoreSyncHandler | undefined = whatsappConnectorStore && whatsappTierSet
     ? createWhatsAppConnectorStoreSyncHandler({
         tierSet: whatsappTierSet,
         store: whatsappConnectorStore,
@@ -3406,41 +3472,71 @@ export async function main(): Promise<void> {
     'OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED',
     sourceIndexReadEnabled,
   ), { sourceId: TELEGRAM_MESSAGES_SOURCE_ID });
-  const telegramConnectorStores = telegramConnectorStoreLane.enabled
-    ? createTelegramConnectorStores(process.env)
-    : undefined;
-  const telegramTierLane = telegramConnectorStores
-    ? tierLane({
-        account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
-        internal: telegramConnectorStores.internal,
-        secure: telegramConnectorStores.secureLocal,
-      })
-    : undefined;
-  if (telegramTierLane && telegramConnectorStores) {
-    reportRehomedChatOverrides('telegram', rehomeChatLaneOverrides(
-      telegramTierLane.ledger,
-      'telegram',
-      [telegramConnectorStores.internal, telegramConnectorStores.secureLocal],
-    ));
-  }
-  const telegramConnectorStoreSync: TelegramConnectorStoreSyncHandler | undefined = telegramConnectorStores
-    ? createTelegramConnectorStoreSyncHandler({
-        stores: telegramConnectorStores,
-        env: process.env,
-        ...(telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {}),
-        ...(tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}),
-      })
-    : undefined;
-  // A Telegram Desktop export of this account is one more input of the Telegram connector, read into
-  // these stores beside live capture (docs/design/archive-live-one-dataset.md). Without the live lane
-  // an export stays under Archives, as before.
-  if (telegramConnectorStoreSync) archiveSourceTargets.register(telegramConnectorStoreSync.archiveTarget());
+  let telegramConnectorStores: ReturnType<typeof createTelegramConnectorStores> | undefined;
+  let telegramTierLane: ReturnType<typeof tierLane> | undefined;
+  let telegramConnectorStoreSync: TelegramConnectorStoreSyncHandler | undefined;
+  const mountTelegram = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
+    if (telegramConnectorStores) return;
+    telegramConnectorStores = telegramConnectorStoreLane.enabled
+      ? createTelegramConnectorStores(process.env)
+      : undefined;
+    telegramTierLane = telegramConnectorStores
+      ? tierLane({
+          account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
+          internal: telegramConnectorStores.internal,
+          secure: telegramConnectorStores.secureLocal,
+        })
+      : undefined;
+    if (telegramTierLane && telegramConnectorStores) {
+      reportRehomedChatOverrides('telegram', rehomeChatLaneOverrides(
+        telegramTierLane.ledger,
+        'telegram',
+        [telegramConnectorStores.internal, telegramConnectorStores.secureLocal],
+      ));
+    }
+    telegramConnectorStoreSync = telegramConnectorStores
+      ? createTelegramConnectorStoreSyncHandler({
+          stores: telegramConnectorStores,
+          env: process.env,
+          ...(telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {}),
+          ...(tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}),
+        })
+      : undefined;
+    if (telegramConnectorStores) sourceLaneMounted([telegramConnectorStores.internal, telegramConnectorStores.secureLocal]);
+  };
+  // Register source knowledge before pairing or mounting: preview and saved-import resumption
+  // can find the target without creating stores. An approved import opens the same canonical lane.
+  if (telegramConnectorStoreLane.enabled) archiveSourceTargets.register(telegramArchiveTarget({
+    account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
+    lane: () => {
+      mountTelegram();
+      if (!telegramConnectorStoreSync) throw new Error('Telegram stores are unavailable.');
+      return telegramConnectorStoreSync.archiveTarget().lane({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: '1' }, process.env);
+    },
+    liveSince: () => telegramConnectorStoreSync?.archiveTarget().liveSince?.({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: '1' }, process.env),
+  }));
   const telegramSpoolChanges = createSpoolChangeSubscription(defaultTelegramCaptureSpoolDir(process.env));
   const whatsappSpoolChanges = createSpoolChangeSubscription(defaultWhatsAppSpoolDir(process.env));
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(
     process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS,
     'OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS',
   );
+  const mountSourceLanes = (handles: readonly ConnectedCredentialHandle[]): void => {
+    if (sourceRuntimeClosed) return;
+    const connected = (provider: ConnectedCredentialHandle['provider'], capability: string): boolean =>
+      activeCredentialHandle(handles, { provider, capability }) !== undefined;
+    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected('gmail', 'gmail.email.sync'))) mountGmail();
+    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && (sourceHasStores(GOOGLE_DRIVE_SOURCE_ID) || connected('google_drive', 'google_drive.docs.sync'))) mountGoogleDrive();
+    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && (sourceHasStores(DROPBOX_FILES_SOURCE_ID) || connected('dropbox', 'dropbox.files.sync'))) mountDropbox();
+    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && (sourceHasStores(LOCAL_FILES_SOURCE_ID) || fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID))) mountLocalFiles();
+    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && (sourceHasStores(WHATSAPP_PERSONAL_SOURCE_ID) || connected('whatsapp_personal', 'whatsapp.personal.messages.sync'))) mountWhatsApp();
+    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && (sourceHasStores(TELEGRAM_MESSAGES_SOURCE_ID) || connected('telegram', 'telegram.messages.sync'))) mountTelegram();
+    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && (sourceHasStores(READWISE_SOURCE_ID) || connected('readwise', 'readwise.sync'))) mountReadwise();
+    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && (sourceHasStores(X_BOOKMARKS_SOURCE_ID) || connected('x', 'x.bookmarks.sync'))) mountXBookmarks();
+    mountConfiguredSourceStores();
+  };
+  mountSourceLanes(connectedHandles);
   const laneConnectorStores = [
     ...(dropboxConnectorStore ? [dropboxConnectorStore] : []),
     ...(localFilesConnectorStore ? [localFilesConnectorStore] : []),
@@ -3461,19 +3557,19 @@ export async function main(): Promise<void> {
   // identities before opening any declared store so the declaration can add a
   // principal without replacing the lane handle or opening the SQLite file a
   // second time.
-  const configuredConnectorStoreMounts = parseConnectorStoreMountsFromEnv(
-    process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON,
-    {
-      collidingStores: laneConnectorStores,
-      registeredCorpora: sourceCorpusRegistry.list(),
-      storeOwner: lifecycleStoreFileOwner(process.env),
-    },
-  );
+  let configuredMountStores: readonly LocalConnectorStore[] = laneConnectorStores;
+  const discoverConfiguredStores = createConnectorStoreMountDiscovery(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
+    stores: () => configuredMountStores,
+    registeredCorpora: () => sourceCorpusRegistry.list(),
+    storeOwner: () => lifecycleStoreFileOwner(process.env),
+  });
+  const configuredConnectorStoreMounts = discoverConfiguredStores();
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
   const connectorStores = mergeConnectorStores([
     ...configuredConnectorStores,
     ...laneConnectorStores,
   ]);
+  configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
 
   // The source-neutral extraction factory. Off unless its roster names a corpus
@@ -3497,7 +3593,7 @@ export async function main(): Promise<void> {
     capability: 'google_drive.docs.sync',
     handles: readActiveConnectedHandles(process.env),
   });
-  const fileExtractionCorpora = fileExtractionCorporaRoster({
+  const fileExtractionCorpora = () => fileExtractionCorporaRoster({
     configured: configuredFileExtractionCorpora,
     ...(dropboxConnectorStore
       ? {
@@ -3587,6 +3683,9 @@ export async function main(): Promise<void> {
     console.log('[file-extraction] Dropbox extraction waits for Dropbox to be connected.');
   }
   const assertFileSourceScopeCurrent = (provider: string): void => {
+    if (provider === LOCAL_FILES_PROVIDER && !localFilesCleanupRecovery?.ready()) {
+      throw new OperationError('source_index_policy_violation', 'Local-file cleanup is still in progress.');
+    }
     const sourceId = fileSourceScopeIdForProvider(provider);
     if (!sourceId) return;
     const ref = fileSourceScopeAuthority?.policyRef(sourceId);
@@ -3599,7 +3698,8 @@ export async function main(): Promise<void> {
   // factory lands their content by the same routing as the lane's sync, over
   // the same stores and ledger. The sync's own set stays the one the ledger's
   // background passes find.
-  const googleDriveExtractionTierSet = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
+  let googleDriveExtractionTierSet: TieredStoreSet | undefined;
+  const driveExtractionSet = () => googleDriveExtractionTierSet ??= googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
     ? createGoogleDriveLaneTierSet({
         setId: 'google_drive.extraction',
         internalStore: googleDriveInternalConnectorStore,
@@ -3608,8 +3708,8 @@ export async function main(): Promise<void> {
           ? {
               publicLeg: {
                 corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
-                open: () => googleDriveTierLane.publicStore!.open(),
-                exists: () => googleDriveTierLane.publicStore!.exists(),
+                open: () => googleDriveTierLane!.publicStore!.open(),
+                exists: () => googleDriveTierLane!.publicStore!.exists(),
               },
             }
           : {}),
@@ -3617,21 +3717,24 @@ export async function main(): Promise<void> {
         registerWithLedger: false,
       })
     : undefined;
-  const fileExtractionTierSets = new Map<string, TieredStoreSet>([
-    // The Dropbox lane reads and lands text across its tier stores.
-    ...(dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set] as const] : []),
-    ...(localFilesTierLane ? [[LOCAL_FILES_CORPUS_ID, localFilesTierLane.set] as const] : []),
-    // WhatsApp's media children (and voice notes) are read and land across its tier stores.
-    ...(whatsappTierSet ? [[WHATSAPP_LIVE_CORPUS_ID, whatsappTierSet] as const] : []),
-    // Each Drive store's corpus lists its own store (and the Private one the
-    // routed-only Public store too).
-    ...(googleDriveExtractionTierSet && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
-      ? [
-          [googleDriveInternalConnectorStore.corpusId, googleDriveExtractionTierSet] as const,
-          [googleDriveSecureConnectorStore.corpusId, googleDriveExtractionTierSet] as const,
-        ]
-      : []),
-  ]);
+  const fileExtractionTierSets = () => {
+    const googleDriveExtractionTierSet = driveExtractionSet();
+    return new Map<string, TieredStoreSet>([
+      // The Dropbox lane reads and lands text across its tier stores.
+      ...(dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set] as const] : []),
+      ...(localFilesTierLane ? [[LOCAL_FILES_CORPUS_ID, localFilesTierLane.set] as const] : []),
+      // WhatsApp's media children (and voice notes) are read and land across its tier stores.
+      ...(whatsappTierSet ? [[WHATSAPP_LIVE_CORPUS_ID, whatsappTierSet] as const] : []),
+      // Each Drive store's corpus lists its own store (and the Private one the
+      // routed-only Public store too).
+      ...(googleDriveExtractionTierSet && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
+        ? [
+            [googleDriveInternalConnectorStore.corpusId, googleDriveExtractionTierSet] as const,
+            [googleDriveSecureConnectorStore.corpusId, googleDriveExtractionTierSet] as const,
+          ]
+        : []),
+    ]);
+  };
   // The extractor configuration the main runtime and the imported archives' runtime share.
   const fileExtractionExtractors: ExtractorRegistryConfig = {
     // An owner-configured command wins; otherwise audio is read by the
@@ -3720,11 +3823,13 @@ export async function main(): Promise<void> {
         }
       : {}),
   };
-  const fileExtractionRuntime = createFileExtractionRuntime({
+  const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
-    enabled: fileExtractionCorpora.length > 0,
+    enabled: fileExtractionCorpora().length > 0 || dropboxConnectorStoreLane.enabled || localFilesConnectorStoreLane.enabled
+      || whatsappConnectorStoreLane.enabled || googleDriveConnectorStoreLane.enabled,
+    allowEmpty: true,
     connectorStores,
-    corpora: fileExtractionCorpora,
+    corpora: fileExtractionCorpora(),
     extraSourceFactories: new Map([
       [LOCAL_FILES_PROVIDER, ({ config, store, view }) => {
         const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
@@ -3753,7 +3858,7 @@ export async function main(): Promise<void> {
       // WhatsApp's media, its children an export brought included.
       ['whatsapp', ({ config, store, view }) => whatsappExtraction({ config, store, ...(view ? { view } : {}) })],
     ]),
-    ...(fileExtractionTierSets.size > 0 ? { tierSets: fileExtractionTierSets } : {}),
+    tierSets: fileExtractionTierSets(),
     scopeGuard: {
       assertAuthorized({ config }) {
         assertFileSourceScopeCurrent(config.provider);
@@ -3769,6 +3874,11 @@ export async function main(): Promise<void> {
       },
     },
     extractors: fileExtractionExtractors,
+  });
+  const fileExtractionRuntime = createRefreshableFileExtractionRuntime({
+    build: buildFileExtractionRuntime,
+    generation: () => sourceLaneGeneration,
+    beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env)),
   });
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
   const connectorStoreAccountScopes = new Map<string, string>();
@@ -3809,15 +3919,15 @@ export async function main(): Promise<void> {
       );
     }
   }
-  for (const mount of configuredConnectorStoreMounts) {
+  const adoptConfiguredPrincipal = (mount: ConnectorStoreMount): void => {
     if (mount.principal && !connectorStorePrincipals.has(mount.store.corpusId)) {
       connectorStorePrincipals.set(mount.store.corpusId, mount.principal);
     }
-    if (mount.store.family !== 'chat' || !mount.chatPrincipal) continue;
-    if (!connectorStoreAccountScopes.has(mount.store.corpusId)) {
+    if (mount.store.family === 'chat' && mount.chatPrincipal && !connectorStoreAccountScopes.has(mount.store.corpusId)) {
       connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
     }
-  }
+  };
+  for (const mount of configuredConnectorStoreMounts) adoptConfiguredPrincipal(mount);
   const connectorStoreReadScope = (store: LocalConnectorStore):
     { allowed: false } | {
       allowed: true;
@@ -3836,6 +3946,7 @@ export async function main(): Promise<void> {
       : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId)
         ? EVERNOTE_SOURCE_ID
         : undefined;
+    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready()) return { allowed: false };
     if (!sourceId) return { allowed: true, contentAllowed: true };
     const approval = fileSourceScopeAuthority?.snapshot(sourceId);
     if (!approval || approval.status !== 'approved') return { allowed: false };
@@ -3927,6 +4038,15 @@ export async function main(): Promise<void> {
   // Private or Personal store is handed the identity for its domain.
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
     if (!connectorStores.includes(store)) connectorStores.push(store);
+    if (!fullyDefinedCorpusIds.has(store.corpusId)) {
+      const definition = registeredCorpusDefinitions.get(store.corpusId);
+      fullCorpusDefinitions.push(defineConnectorCorpus({
+        corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain,
+        ...(definition ? { activationMode: definition.activationMode } : {}),
+        ...(secureEmbeddingCloudApproved && store.trustDomain === 'secure_local' ? { embeddingPolicy: 'cloud_allowed_by_policy' as const } : {}),
+      }));
+      fullyDefinedCorpusIds.add(store.corpusId);
+    }
     const accountScope = connectorStoreAccountScopes.get(siblingCorpusId);
     if (accountScope) connectorStoreAccountScopes.set(store.corpusId, accountScope);
     const principal = connectorStorePrincipals.get(siblingCorpusId);
@@ -3941,6 +4061,36 @@ export async function main(): Promise<void> {
         providers: connectorStoreEmbeddingProviders,
         retrievalAvailability,
       });
+    }
+  };
+  sourceLaneMounted = (stores): void => {
+    if (stores.some((store) => !connectorStores.includes(store))) sourceLaneGeneration += 1;
+    for (const store of stores) {
+      const provider = store === readwiseConnectorStore ? readwiseEmbeddingProvider
+        : store === xBookmarksConnectorStore ? xBookmarksEmbeddingProvider
+        : store.trustDomain === 'secure_local' ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider;
+      registerTierLegStore(store, store.corpusId, provider ?? null);
+      if (store === dropboxConnectorStore) {
+        connectorStoreAccountScopes.set(store.corpusId, dropboxProviderAccount);
+        connectorStorePrincipals.set(store.corpusId, { provider: 'dropbox', accountScope: dropboxProviderAccount });
+      } else if (store === localFilesConnectorStore) {
+        connectorStoreAccountScopes.set(store.corpusId, LOCAL_FILES_ACCOUNT_SCOPE);
+        connectorStorePrincipals.set(store.corpusId, { provider: LOCAL_FILES_PROVIDER, accountScope: LOCAL_FILES_ACCOUNT_SCOPE });
+      } else if (store === whatsappConnectorStore || store === telegramConnectorStores?.internal || store === telegramConnectorStores?.secureLocal) {
+        const telegram = store !== whatsappConnectorStore;
+        const accountScope = telegram ? telegramConnectorAccountScope : WHATSAPP_PERSONAL_ACCOUNT_SCOPE;
+        connectorStoreAccountScopes.set(store.corpusId, accountScope);
+        connectorStorePrincipals.set(store.corpusId, canonicalConnectorStoreChatPrincipal(telegram ? 'telegram' : 'whatsapp', accountScope));
+      }
+    }
+  };
+  for (const stores of earlySourceStores.splice(0)) sourceLaneMounted(stores);
+  mountConfiguredSourceStores = (): void => {
+    if (sourceRuntimeClosed) return;
+    const mounts = discoverConfiguredStores();
+    for (const mount of mounts) {
+      if (!connectorStores.includes(mount.store)) sourceLaneMounted([mount.store]);
+      adoptConfiguredPrincipal(mount);
     }
   };
   for (const registration of tierLegsOpenedEarly.splice(0)) registerTierLegStore(...registration);
@@ -4160,7 +4310,8 @@ export async function main(): Promise<void> {
   ) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
-    const privateDefinition = gmailSecureConnectorStore && sourceCorpusRegistry.definitions().find(entry => entry.corpusId === gmailSecureConnectorStore.corpusId);
+    const privateCorpusId = gmailSecureConnectorStore?.corpusId;
+    const privateDefinition = privateCorpusId && sourceCorpusRegistry.definitions().find(entry => entry.corpusId === privateCorpusId);
     return handle && scopeRef && approval && fileSourceScopeAuthority
       && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget
     ? createGmailConnectorStoreSyncHandler({
@@ -4448,7 +4599,7 @@ export async function main(): Promise<void> {
         // is audited as skipped/no_adapter instead of silently disappearing
         // from unified fan-out.
         lanes: sourceAnswerLanes = createSourceAnswerLanes({
-          stores: () => readConnectorStores,
+          stores: () => { mountConfiguredSourceStores(); return readConnectorStores; },
           registry: () => buildSourceIndexCorpusRegistry(
             sourceCorpusRegistry.definitions('answer', fullCorpusDefinitions)
               .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
@@ -4611,8 +4762,11 @@ export async function main(): Promise<void> {
     ? createSourceIndexStatusHandler({
       // Read per request: a per-tier store its tier set creates while the
       // runtime is up is reported from that moment, with no restart.
-      corpusDefinitions: () => sourceCorpusRegistry.definitions('status', fullCorpusDefinitions)
-        .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
+      corpusDefinitions: () => {
+        mountConfiguredSourceStores();
+        return sourceCorpusRegistry.definitions('status', fullCorpusDefinitions)
+          .filter((definition) => !onDemandCorpusAbsent(definition.corpusId));
+      },
       connectorStores,
       connectorStoreStatusScope,
       ...(unreadableFiles ? { unreadableCount: (corpusId: string) => unreadableFiles.recheck(corpusId).unreadable } : {}),
@@ -4660,6 +4814,7 @@ export async function main(): Promise<void> {
       capability: 'x.bookmarks.sync',
       handles: readActiveConnectedHandles(process.env),
     });
+    if (handle) mountXBookmarks();
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
     if (!runtime) return undefined;
     connectorStoreAccountScopes.set(
@@ -4672,6 +4827,7 @@ export async function main(): Promise<void> {
     return guard ? accountCheckedXBookmarksRuntime(runtime, guard) : runtime;
   };
   const readwiseSyncForHandle = (handle: ConnectedCredentialHandle | undefined) => {
+    if (handle) mountReadwise();
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
     if (sync && readwiseConnectorStore) {
       connectorStoreAccountScopes.set(
@@ -4785,6 +4941,8 @@ export async function main(): Promise<void> {
     sources: SourceSchedulerSource[];
     decisions: SourceSchedulerConstructionDecision[];
   } => {
+    mountSourceLanes(handles);
+    if (whatsappConnectorStore && whatsappTierSet) whatsappConnectorStoreSync ??= createWhatsAppConnectorStoreSyncHandler({ tierSet: whatsappTierSet, store: whatsappConnectorStore, account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE, env: process.env, readChild: whatsappReadChild });
     const decisions: SourceSchedulerConstructionDecision[] = [];
     laneGuards.clear();
     // Every lane reports why it did or did not build. A constructed source is
@@ -4878,13 +5036,7 @@ export async function main(): Promise<void> {
       : undefined;
     const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef
       && fileSourceScopeAuthority && dropboxConnectorStore && dropboxTierLane
-      ? currentDropboxHandle.handle === dropboxHandle?.handle
-        && currentDropboxScopeRef.sourceId === dropboxScopeRef?.sourceId
-        && currentDropboxScopeRef.accountGeneration === dropboxScopeRef?.accountGeneration
-        && currentDropboxScopeRef.revision === dropboxScopeRef?.revision
-        && dropboxProviderStoreSync
-        ? dropboxProviderStoreSync
-        : createDropboxProviderStoreSyncHandler({
+      ? createDropboxProviderStoreSyncHandler({
             tierSet: dropboxTierLane.set,
             store: dropboxConnectorStore,
             account: currentDropboxHandle.accountRole?.trim() || dropboxFilesAccount || 'personal',
@@ -5662,9 +5814,14 @@ export async function main(): Promise<void> {
     dropboxIngestionPolicy,
     ...(sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {}),
     ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
+    authorizeFileExtractionLane: (lane) => {
+      if (lane.provider === LOCAL_FILES_PROVIDER && !localFilesCleanupRecovery?.ready()) {
+        throw new OperationError('source_index_policy_violation', 'Local-file cleanup is still in progress.');
+      }
+    },
     ...(fileExtractionRuntime
       ? {
-          pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds),
+          pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora(), fileExtractionRuntime.corpusIds),
           pdfExtractionLaneScopeApproved: (lane: { provider: string }) => {
             try {
               assertFileSourceScopeCurrent(lane.provider);
@@ -5676,19 +5833,16 @@ export async function main(): Promise<void> {
           },
         }
       : {}),
-    ...(connectorStores.length > 0 ? { connectorStores } : {}),
-    ...(tierLanes.length > 0
-      ? {
-          connectorStoreTierSiblings: (corpusId: string) => [
-            ...(tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []),
-          ].filter((sibling) => sibling !== corpusId),
-          sourceIndexVisibilityGate: tierVisibilityGate,
-          secretLocationSearch: tierSecretLocations,
-        }
-      : {}),
-    ...(connectorStoreEmbeddingProviders.size > 0 ? { connectorStoreEmbeddingProviders } : {}),
-    ...(connectorStoreAccountScopes.size > 0 ? { connectorStoreAccountScopes } : {}),
-    ...(connectorStorePrincipals.size > 0 ? { connectorStorePrincipals } : {}),
+    connectorStores,
+    refreshConnectorStores: () => mountConfiguredSourceStores(),
+    connectorStoreTierSiblings: (corpusId: string) => [
+      ...(tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []),
+    ].filter((sibling) => sibling !== corpusId),
+    sourceIndexVisibilityGate: tierVisibilityGate,
+    secretLocationSearch: tierSecretLocations,
+    connectorStoreEmbeddingProviders,
+    connectorStoreAccountScopes,
+    connectorStorePrincipals,
     connectorStoreReadScope,
     ...(sourceScheduler ? { sourceScheduler } : {}),
     ...(sourceWatchPass
@@ -6677,7 +6831,7 @@ export async function main(): Promise<void> {
   };
   // Nothing is answered from the local files index before what an earlier version
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
-  await localFilesOwnRootsCleanup?.run();
+  await localFilesInitialCleanup;
   const startServer = () => socketPath
     ? Bun.serve({ unix: socketPath, fetch(request, server) {
         server.timeout(request, 0);
@@ -6821,6 +6975,10 @@ export async function main(): Promise<void> {
     closeDesktopBridge();
     if (shuttingDown) return;
     shuttingDown = true;
+    sourceRuntimeClosed = true;
+    localFilesCleanupRecovery?.close();
+    sourceScheduler?.stop();
+    worker.close();
     updateChecker.stop();
     capturesClosed = true;
     desktopPollingClosed = true;
@@ -6841,8 +6999,7 @@ export async function main(): Promise<void> {
     waitingStoreClosed = true;
     waitingStore?.close();
     waitingStore = undefined;
-    worker.close();
-    sourceScheduler?.stop();
+    fileExtractionRuntime?.close();
     void server.stop();
     // The data owner lock stays held: the teardown above is still running, and
     // the kernel releases the lock when this process exits.
@@ -7678,6 +7835,8 @@ export interface ConnectorStoreMount {
 }
 
 export interface ConnectorStoreMountParsingOptions {
+  /** A runtime read declaration waits for ingestion to create its store. */
+  existingOnly?: boolean;
   reportFailure?: (message: string) => void;
   collidingStores?: readonly LocalConnectorStore[];
   /**
@@ -7709,6 +7868,55 @@ export function parseConnectorStoreMountsFromEnv(
   raw: string | undefined,
   options: ConnectorStoreMountParsingOptions = {},
 ): ConnectorStoreMount[] {
+  return mountConnectorStoreDeclarations(compileConnectorStoreMountDeclarations(raw, options), options);
+}
+
+/** Compile fixed configuration once; only pending absent files need probes on reads. */
+export function createConnectorStoreMountDiscovery(raw: string | undefined, options: {
+  stores(): readonly LocalConnectorStore[];
+  registeredCorpora(): NonNullable<ConnectorStoreMountParsingOptions['registeredCorpora']>;
+  storeOwner(): StoreFileOwner;
+  reportFailure?(message: string): void;
+}): () => ConnectorStoreMount[] {
+  const reported = new Set<string>();
+  const reportFailure = (message: string): void => {
+    const label = message.split(' skipped:')[0]!;
+    if (reported.has(label)) return;
+    reported.add(label);
+    (options.reportFailure ?? console.error)(message);
+  };
+  const declarations = compileConnectorStoreMountDeclarations(raw, { reportFailure });
+  const registeredCorpora = options.registeredCorpora();
+  let previousStores: readonly LocalConnectorStore[] | undefined;
+  let pending: readonly ValidatedConnectorStoreMountDeclaration[] = declarations;
+  return () => {
+    const stores = options.stores();
+    if (!previousStores || previousStores.length !== stores.length || stores.some((store, i) => store !== previousStores![i])) {
+      pending = declarations;
+      previousStores = [...stores];
+    }
+    if (!pending.length) return [];
+    const byCorpus = new Map(stores.map(store => [store.corpusId, store]));
+    const ready: ValidatedConnectorStoreMountDeclaration[] = [];
+    const absent: ValidatedConnectorStoreMountDeclaration[] = [];
+    for (const declaration of pending) {
+      const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
+      if (byCorpus.has(declaration.corpusId) || (!placed && (!declaration.dbPath || existsSync(declaration.dbPath)))) ready.push(declaration);
+      else absent.push(declaration);
+    }
+    pending = absent;
+    if (!ready.length) return [];
+    return mountConnectorStoreDeclarations(ready, {
+      existingOnly: true, collidingStores: stores, registeredCorpora: options.registeredCorpora(),
+      storeOwner: options.storeOwner(), reportFailure,
+    });
+  };
+}
+
+function compileConnectorStoreMountDeclarations(
+  raw: string | undefined,
+  options: ConnectorStoreMountParsingOptions,
+): ValidatedConnectorStoreMountDeclaration[] {
   const value = raw?.trim();
   if (!value) return [];
   let parsed: unknown;
@@ -7722,16 +7930,6 @@ export function parseConnectorStoreMountsFromEnv(
   }
 
   const reportFailure = options.reportFailure ?? ((message: string) => console.error(message));
-  const collidingStoresByCorpusId = new Map(
-    (options.collidingStores ?? []).map((store) => [store.corpusId, store]),
-  );
-  // The resource being fenced is the SQLite file, and corpusId is the field an
-  // operator varies when adding a mount. Keyed on corpusId alone, a new id over
-  // an existing dbPath skips the identity check entirely and opens a second
-  // handle that relabels the same rows with a different family/trustDomain.
-  const ownerCorpusIdByDbPath = new Map(
-    (options.collidingStores ?? []).map((store) => [store.dbPath, store.corpusId]),
-  );
   const declarations: ValidatedConnectorStoreMountDeclaration[] = [];
   // Validate every declaration before opening any SQLite store. A malformed
   // later entry therefore cannot strand a handle opened for an earlier one.
@@ -7751,6 +7949,24 @@ export function parseConnectorStoreMountsFromEnv(
     }
   }
 
+  return declarations;
+}
+
+function mountConnectorStoreDeclarations(
+  declarations: readonly ValidatedConnectorStoreMountDeclaration[],
+  options: ConnectorStoreMountParsingOptions,
+): ConnectorStoreMount[] {
+  const reportFailure = options.reportFailure ?? ((message: string) => console.error(message));
+  const collidingStoresByCorpusId = new Map(
+    (options.collidingStores ?? []).map((store) => [store.corpusId, store]),
+  );
+  // The resource being fenced is the SQLite file, and corpusId is the field an
+  // operator varies when adding a mount. Keyed on corpusId alone, a new id over
+  // an existing dbPath skips the identity check entirely and opens a second
+  // handle that relabels the same rows with a different family/trustDomain.
+  const ownerCorpusIdByDbPath = new Map(
+    (options.collidingStores ?? []).map((store) => [store.dbPath, store.corpusId]),
+  );
   const mounts: ConnectorStoreMount[] = [];
   for (const declaration of declarations) {
     try {
@@ -7760,6 +7976,7 @@ export function parseConnectorStoreMountsFromEnv(
       // its lane opened, and a dbPath it carries is ignored.
       if (hasFolderLayout(storageAccountForCorpus(declaration, options.registeredCorpora).sourceId)) {
         if (!collidingStore) {
+          if (options.existingOnly) continue;
           throw new Error('its source keeps its stores where Olympus places them; a declaration can only add a principal to the store its lane opened, and that lane is not open.');
         }
         const { dbPath: _ignored, ...placed } = declaration;
@@ -7773,6 +7990,7 @@ export function parseConnectorStoreMountsFromEnv(
       }
       if (!declaration.dbPath) throw new Error('Connector store entries require dbPath, corpusId, family, trustDomain.');
       if (collidingStore) assertConnectorStoreMountIdentity(declaration, collidingStore);
+      if (options.existingOnly && !collidingStore && !existsSync(declaration.dbPath)) continue;
       const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
         throw new Error(

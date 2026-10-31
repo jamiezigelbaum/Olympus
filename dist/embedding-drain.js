@@ -29261,7 +29261,10 @@ var init_local_index = __esm(() => {
             return true;
           if (!weights)
             return false;
-          const matched = (matchedGroupIndexes.get(row.item_pk) ?? []).reduce((sum, index) => sum + weights.of[index], 0);
+          const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+          if (groups.length >= 3 && weights.population >= 10 && indexes.length >= 2 && indexes.length * 2 >= groups.length && indexes.filter((index) => weights.counts[index] <= Math.floor(weights.population / 10)).length >= 2)
+            return true;
+          const matched = indexes.reduce((sum, index) => sum + weights.of[index], 0);
           return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
         });
       }
@@ -29315,11 +29318,12 @@ var init_local_index = __esm(() => {
     }
     conceptWeights(groups, exact) {
       const items = this.db.query("SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0").get().count;
-      const of = groups.map((group) => {
+      const counts = groups.map((group) => {
         const { count } = this.db.query("SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?").get(sourceIndexFtsGroupQuery(group, exact));
-        return Math.max(0, Math.log((items + 1) / (count + 0.5)));
+        return count;
       });
-      return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
+      const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
+      return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
     }
     chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
       const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
@@ -37069,7 +37073,7 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "A folder you chose is in Desktop, Documents, Downloads, iCloud Drive or another disk, which Olympus cannot open on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -39022,6 +39026,636 @@ var init_remote_request_body = __esm(() => {
   REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
 });
 
+// src/core/linux-owner-bridge.ts
+import { createHmac, createHash as createHash20, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
+import { closeSync as closeSync10, openSync as openSync10, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
+import { dirname as dirname26, join as join27 } from "node:path";
+function randomOwnerHostname() {
+  const bytes = randomBytes3(16);
+  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+  let bits2 = 0, value = 0, text3 = "";
+  for (const byte of bytes) {
+    value = value << 8 | byte;
+    bits2 += 8;
+    while (bits2 >= 5) {
+      bits2 -= 5;
+      text3 += alphabet[value >>> bits2 & 31];
+    }
+  }
+  if (bits2)
+    text3 += alphabet[value << 5 - bits2 & 31];
+  return `${text3}.localhost`;
+}
+function matchCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const [a, b, c, d, e, f] = [...randomBytes3(6)].map((byte) => alphabet[byte & 31]);
+  return `${a}${b}${c}-${d}${e}${f}`;
+}
+function equal(a, b) {
+  return typeof a === "string" && /^[A-Za-z0-9_-]+$/.test(a) && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+async function boundedBody(request, limit) {
+  const result = await readBoundedRequestText(request, limit, { deadlineMs: 5000 });
+  if (!result.ok)
+    throw new Error("Body refused.");
+  return result.text;
+}
+function page(body, status = 200) {
+  return new Response(`<!doctype html><html><head><meta charset="utf-8"><title>Olympus owner confirmation</title></head><body>${body}</body></html>`, { status, headers: {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": CSP,
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY"
+  } });
+}
+function restarting(conflict) {
+  const response = page(`${openingView().replace("Opening your dashboard…", restartWords(conflict))}<script>setTimeout(()=>location.reload(),1000)</script>`, 503);
+  response.headers.set("Retry-After", "1");
+  if (conflict)
+    response.headers.set(WORKER_CONFLICT_HEADER, conflict);
+  return response;
+}
+function refusal(status = 403) {
+  const response = page(`<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>`, status);
+  response.headers.set("X-Olympus-Owner-Refused", "1");
+  return response;
+}
+function safeTarget(value) {
+  return typeof value === "string" && value.length <= 16384 && value.startsWith("/") && !value.startsWith("//") && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith("/owner-") && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);
+}
+function documentPolicy(policy) {
+  const hash = "'sha256-" + createHash20("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
+  const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
+  const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
+  const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
+  const index = directives.findIndex((s) => /^script-src(\s|$)/.test(s));
+  if (index >= 0) {
+    if (needsHash(directives[index]))
+      directives[index] = withHash(directives[index].slice("script-src".length));
+  } else {
+    const fallback = directives.find((s) => /^default-src(\s|$)/.test(s));
+    if (fallback && needsHash(fallback))
+      directives.push(withHash(fallback.slice("default-src".length)));
+  }
+  return directives.filter((s) => !/^worker-src(\s|$)/.test(s)).join("; ") + "; worker-src 'none'";
+}
+function metaPolicy(policy) {
+  return policy.split("; ").filter((s) => !/^(frame-ancestors|report-uri|report-to|sandbox)(\s|$)/.test(s)).join("; ");
+}
+function attribute(value) {
+  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
+}
+function confirmation() {
+  return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><p id="code" hidden></p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
+(async function(){
+ const message=document.getElementById('message'), code=document.getElementById('code'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
+ let resuming=false, opening=false, waiting=false, claim='', claiming=false, poll, timeout;
+ const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;claim='';code.hidden=true;confirm.disabled=opening;};
+ async function resume(){
+  if(resuming||!localStorage.getItem(key))return;
+  resuming=true;
+  try{const r=await fetch(location.pathname+location.search);if(!r.ok&&r.status!==503){resuming=false;return;}
+   const html=await r.text();stopWaiting();document.open();document.write(html);document.close();
+  }catch{resuming=false;}
+ }
+ function onStorage(event){if(event.key===key)void resume();}
+ // An Olympus window in another browser cannot share this page's storage: once
+ // the owner approves there (codes matching), the engine hands this claim its own proof.
+ async function collect(){
+  if(!claim||claiming||resuming)return;
+  claiming=true;
+  try{const r=await fetch('/owner-claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({claim})});
+   if(r.status===202||r.status===503)return;
+   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);await resume();return;}
+   const declined=r.headers.has(${JSON.stringify(DECLINED_HEADER)});stopWaiting();
+   message.textContent=declined?"The Olympus window said this wasn't you. Press Confirm it's you to try again.":"This confirmation expired or was replaced. Press Confirm it's you to try again.";
+  }catch{}finally{claiming=false;}
+ }
+ confirm.onclick=async function(){
+  if(opening||waiting)return;
+  opening=true;confirm.disabled=true;
+  try{const r=await fetch('/owner-open',{method:'POST'});
+   if(!r.ok){message.textContent=r.status!==429?${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)}:r.headers.get(${JSON.stringify(OWNER_LIMIT_HEADER)})==='hourly'?${JSON.stringify(BROWSER_OPEN_LIMIT_MESSAGE)}:${JSON.stringify(BROWSER_OPEN_RECENT_MESSAGE)};return;}
+   // A refused replacement must leave the current wait intact. Only a
+   // successful open replaces its ticket and starts a fresh 60-second wait.
+   stopWaiting();waiting=true;confirm.disabled=true;claim=r.headers.get(${JSON.stringify(CLAIM_HEADER)})||'';
+   const approval=r.headers.get(${JSON.stringify(APPROVAL_HEADER)});if(approval)try{localStorage.setItem(${JSON.stringify(WAIT_STORAGE)},approval);}catch{}
+   const shown=r.headers.get(${JSON.stringify(CODE_HEADER)});if(shown){code.textContent='If the Olympus window asks, it shows this code: '+shown;code.hidden=false;}
+   message.textContent='Approve in the Olympus window that just opened. This page continues by itself.';
+   // Check storage after subscribing too: the opener may already have proved.
+   addEventListener('storage',onStorage);
+   poll=setInterval(()=>{void resume();void collect();},1000);
+   timeout=setTimeout(()=>{stopWaiting();message.textContent="This confirmation timed out. Press Confirm it's you to try again.";},${CLAIM_MS});
+   await resume();
+  }catch{message.textContent=${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)};}
+  finally{opening=false;confirm.disabled=waiting;}
+ };
+ await resume();
+})();</script>`);
+}
+function openingView() {
+  return `<meta name="viewport" content="width=device-width, initial-scale=1"><style>
+html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
+</style><main><h1>Olympus</h1><p id="message" role="status">Opening your dashboard…</p></main>`;
+}
+function proofPage() {
+  const response = page(`${openingView()}<script>
+// A page in another browser asked for this window. Its own browser keeps the
+// approval id, so a page in this browser continues by itself with no question.
+function approve(request,proof){return new Promise(function(done){
+ const wait=${JSON.stringify(WAIT_STORAGE)}, same=()=>{try{return localStorage.getItem(wait)===request.id;}catch{return false;}};
+ if(same()){done();return;}
+ const panel=document.createElement('div'), text=document.createElement('p'), code=document.createElement('p'), yes=document.createElement('button'), no=document.createElement('button');
+ text.textContent="A page in another browser is waiting for you to confirm it's you. Approve only if that page shows this code:";
+ code.id='approval-code';code.style.cssText='font-size:1.5rem;font-weight:600;letter-spacing:.1em';code.textContent=request.code;
+ yes.id='approve';yes.textContent='Approve';no.id='decline';no.textContent='Not me';no.style.marginLeft='.5rem';
+ panel.append(text,code,yes,no);document.querySelector('main').append(panel);
+ const message=document.getElementById('message'), opening=message.textContent;message.textContent='Olympus';message.hidden=true;
+ const finish=()=>{removeEventListener('storage',onStorage);panel.remove();message.textContent=opening;message.hidden=false;done();};
+ function onStorage(event){if(event.key===wait&&same())finish();}
+ addEventListener('storage',onStorage);
+ const answer=async approved=>{yes.disabled=no.disabled=true;
+  try{await fetch('/owner-approve',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json',${JSON.stringify(PROOF_HEADER)}:proof},body:JSON.stringify({id:request.id,approve:approved})});}catch{}
+  finish();};
+ yes.onclick=()=>answer(true);no.onclick=()=>answer(false);
+});}
+(async function(){
+ const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
+ if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
+ try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent=${restartWordsScript("r")};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ if(result.approval)await approve(result.approval,result.proof);
+ // Render the requested document in this window. The proof stays at this
+ // origin. The bridge header policy and worker meta policy constrain this view;
+ // header-only worker CSP directives cannot be carried through document.write.
+ // The ticket is spent now, so a worker restart here must wait, not fail.
+ let documentResponse;do{documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});if(documentResponse.status===503&&documentResponse.headers.has('Retry-After')){document.getElementById('message').textContent=${restartWordsScript("documentResponse")};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ const destination=documentResponse.headers.get('X-Olympus-Owner-Location');
+ if(destination){location.replace(destination);return;} // ordinary navigation, without a proof header
+ if(!documentResponse.ok||!documentResponse.headers.get('Content-Type')?.includes('text/html'))throw new Error();
+ const html=await documentResponse.text();history.replaceState(null,'',result.target);document.open();document.write(html);document.close();
+ }catch{document.getElementById('message').textContent='This private ticket expired or was refused. Run olympus dashboard again. Use the owner SSH socket forward if this browser cannot resolve the session origin.';}
+})();</script>`);
+  response.headers.set("Access-Control-Allow-Origin", "*");
+  return response;
+}
+function equalHash(value, hash) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(hashSecret(value), "hex"), Buffer.from(hash, "hex"));
+}
+
+class LinuxOwnerBridge {
+  options;
+  hostname;
+  origin;
+  entryOrigin;
+  tickets = new Map;
+  sessions = [];
+  claim;
+  lastBrowserOpen = -Infinity;
+  browserOpens = [];
+  closed = false;
+  now;
+  constructor(options) {
+    this.options = options;
+    this.now = options.now ?? Date.now;
+    this.origin = `http://${randomOwnerHostname()}:${options.port}`;
+    this.hostname = new URL(this.origin).hostname;
+    this.entryOrigin = `http://127.0.0.1:${options.port}`;
+  }
+  live() {
+    return !this.closed && this.options.ready();
+  }
+  close() {
+    this.closed = true;
+    this.sessions = [];
+    this.claim = undefined;
+    this.clearTicket();
+  }
+  clearTicket(ticket) {
+    for (const [lane, current2] of this.tickets) {
+      if (ticket && current2 !== ticket)
+        continue;
+      if (current2.timer)
+        clearTimeout(current2.timer);
+      try {
+        unlinkSync(current2.path);
+      } catch {}
+      this.tickets.delete(lane);
+    }
+  }
+  async openTicket(target, lane = "control") {
+    if (!safeTarget(target) || !this.live())
+      throw new Error("Desktop owner confirmation is unavailable.");
+    if (lane === "control")
+      return this.launchTicket(target, lane);
+    const openedAt = this.now(), previousOpen = this.lastBrowserOpen;
+    this.browserOpens = this.browserOpens.filter((time) => time > openedAt - 60 * 60 * 1000);
+    if (this.browserOpens.length >= 6)
+      throw new OwnerOpenLimited("Wait before opening another owner ticket.", true);
+    if (openedAt - this.lastBrowserOpen < 1e4)
+      throw new OwnerOpenLimited("Wait ten seconds before opening another owner ticket.", false);
+    this.browserOpens.push(openedAt);
+    this.lastBrowserOpen = openedAt;
+    try {
+      await this.launchTicket(target, lane);
+    } catch (error) {
+      if (this.lastBrowserOpen === openedAt)
+        this.lastBrowserOpen = previousOpen;
+      const index = this.browserOpens.lastIndexOf(openedAt);
+      if (index >= 0)
+        this.browserOpens.splice(index, 1);
+      throw error;
+    }
+  }
+  async launchTicket(target, lane) {
+    if (validateWorkerSocket(this.options.transport) !== this.options.socketPath)
+      throw new Error("Owner socket changed.");
+    const previous = this.tickets.get(lane);
+    if (previous)
+      this.clearTicket(previous);
+    const value = secret(), challenge = secret();
+    const answer = createHmac("sha256", value).update(challenge).digest("base64url");
+    const path = join27(dirname26(this.options.socketPath), `owner-ticket-${randomBytes3(16).toString("hex")}.html`);
+    const url = `${this.origin}/owner-proof#${value}`;
+    const html2 = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
+(async function(){
+ const message=document.getElementById('message');
+ try{let r;do{r=await fetch(${JSON.stringify(this.origin + "/owner-proof?challenge=" + challenge)},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'});if(r.status===503&&r.headers.get('Retry-After')){message.textContent=${restartWordsScript("r")};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ if(!r.ok||await r.text()!==${JSON.stringify(answer)}){message.textContent='Olympus refused: the private ticket expired or this listener could not prove its identity. The private ticket was not sent. Run olympus dashboard again.';return;}
+ location.replace(${JSON.stringify(url)});
+ }catch{message.textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. The private ticket was not sent. " + DESKTOP_BRIDGE_REMEDY)};}
+})();</script>`;
+    const fd2 = openSync10(path, "wx", 384);
+    try {
+      writeFileSync5(fd2, html2);
+    } finally {
+      closeSync10(fd2);
+    }
+    const ticket = { value, challenge, target, path, expires: this.now() + TICKET_MS };
+    this.tickets.set(lane, ticket);
+    ticket.timer = setTimeout(() => this.clearTicket(ticket), TICKET_MS);
+    ticket.timer.unref();
+    if (lane === "browser") {
+      const claimSecret = secret();
+      this.claim = { secret: claimSecret, record: { hash: hashSecret(claimSecret), code: matchCode(), approvalId: secret(), ticket, expires: this.now() + CLAIM_MS, state: "waiting" } };
+    }
+    try {
+      await (this.options.openFile ?? openLinuxOwnerTicketFile)(path);
+      if (!this.live())
+        throw new Error("Graphical session ended.");
+    } catch (error) {
+      if (this.claim?.record.ticket === ticket)
+        this.claim = undefined;
+      this.clearTicket(ticket);
+      throw error;
+    }
+  }
+  cookieSession(request) {
+    const cookie = request.headers.get("cookie")?.split(";").map((v) => v.trim()).find((v) => v.startsWith(COOKIE + "="))?.slice(COOKIE.length + 1);
+    if (this.sessions.some((s) => s.expires <= this.now()))
+      this.sessions = this.sessions.filter((s) => s.expires > this.now()).slice(-15);
+    return this.sessions.find((s) => equalHash(cookie, s.cookieHash));
+  }
+  provenSession(request) {
+    const session = this.cookieSession(request);
+    return !!session && equalHash(request.headers.get(PROOF_HEADER), session.proofHash);
+  }
+  grantSession(dashboardCookies, extra) {
+    const cookie = secret(), proof = secret();
+    const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
+    this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-14), session];
+    const response = Response.json({ proof, ...extra }, { headers: {
+      "Set-Cookie": `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
+      "Cache-Control": "no-store",
+      "Clear-Site-Data": '"cache"',
+      "Content-Security-Policy": CSP
+    } });
+    for (const cookie2 of dashboardCookies)
+      response.headers.append("Set-Cookie", cookie2);
+    return response;
+  }
+  async handle(request, ownerRequestAdmitted) {
+    if (!this.live())
+      return refusal(503);
+    const url = new URL(request.url);
+    const host = request.headers.get("host");
+    if (request.headers.has("Service-Worker"))
+      return refusal();
+    if (host === new URL(this.entryOrigin).host && url.host === host) {
+      if (request.method !== "GET" && request.method !== "HEAD")
+        return refusal();
+      return new Response(null, { status: 303, headers: {
+        Location: this.origin + url.pathname + url.search,
+        "Cache-Control": "no-store",
+        "Clear-Site-Data": '"cache", "storage"',
+        "Content-Security-Policy": "default-src 'none'; worker-src 'none'",
+        "Referrer-Policy": "no-referrer"
+      } });
+    }
+    if (host !== new URL(this.origin).host || url.origin !== this.origin)
+      return refusal(421);
+    if (request.headers.has("x-olympus-relay") || ["x-forwarded-host", "x-forwarded-for", "x-forwarded-proto", "forwarded"].some((h) => request.headers.has(h)))
+      return refusal();
+    const origin = request.headers.get("origin");
+    const site = request.headers.get("sec-fetch-site");
+    if (request.method !== "GET" && request.method !== "HEAD" && (origin !== this.origin || site !== null && site !== "same-origin"))
+      return refusal();
+    if (url.pathname === "/owner-proof" && request.method === "GET") {
+      if (!url.searchParams.has("challenge"))
+        return proofPage();
+      const challenge = url.searchParams.get("challenge");
+      const ticket = [...this.tickets.values()].find((t) => t.expires > this.now() && equal(challenge, t.challenge));
+      const response2 = !ticket ? refusal() : this.options.workerReady?.() === false ? restarting(this.options.workerConflict?.()) : new Response(createHmac("sha256", ticket.value).update(ticket.challenge).digest("base64url"), { headers: { "Cache-Control": "no-store" } });
+      response2.headers.set("Access-Control-Allow-Origin", "*");
+      response2.headers.set("Access-Control-Expose-Headers", `Retry-After, ${WORKER_CONFLICT_HEADER}`);
+      return response2;
+    }
+    if (this.options.workerReady?.() === false)
+      return restarting(this.options.workerConflict?.());
+    if (url.pathname === "/owner-proof" && request.method === "POST") {
+      let body2;
+      try {
+        body2 = JSON.parse(await boundedBody(request, 1024));
+      } catch {
+        return refusal();
+      }
+      const ticket = [...this.tickets.values()].find((t) => equal(body2.ticket, t.value));
+      if (!this.live() || !ticket || ticket.expires <= this.now() || !equal(body2.ticket, ticket.value))
+        return refusal();
+      if (ticket.claimed)
+        return restarting(this.options.workerConflict?.());
+      ticket.claimed = true;
+      try {
+        unlinkSync(ticket.path);
+      } catch {}
+      const current2 = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
+      let dashboardCookies;
+      try {
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
+        if (result === null) {
+          this.clearTicket(ticket);
+          return refusal();
+        }
+        dashboardCookies = result;
+      } catch {
+        if (this.live() && current2()) {
+          ticket.claimed = false;
+          return restarting(this.options.workerConflict?.());
+        }
+        this.clearTicket(ticket);
+        return refusal(503);
+      }
+      if (!this.live() || !current2()) {
+        this.clearTicket(ticket);
+        return refusal(503);
+      }
+      this.clearTicket(ticket);
+      const claim = this.claim?.record;
+      const asking = claim?.ticket === ticket && claim.state === "waiting" && claim.expires > this.now();
+      if (asking)
+        claim.state = "asked";
+      return this.grantSession(dashboardCookies, { target: ticket.target, ...asking ? { approval: { id: claim.approvalId, code: claim.code } } : {} });
+    }
+    if (url.pathname === "/owner-claim" && request.method === "POST") {
+      let body2;
+      try {
+        body2 = JSON.parse(await boundedBody(request, 1024));
+      } catch {
+        return refusal();
+      }
+      const claim = this.claim?.record;
+      if (!claim || claim.expires <= this.now() || !equalHash(body2.claim, claim.hash))
+        return refusal();
+      if (claim.state === "declined") {
+        this.claim = undefined;
+        const declined = refusal();
+        declined.headers.set(DECLINED_HEADER, "1");
+        return declined;
+      }
+      if (claim.state !== "approved")
+        return new Response(null, { status: 202, headers: { "Cache-Control": "no-store" } });
+      if (claim.collecting)
+        return restarting(this.options.workerConflict?.());
+      claim.collecting = true;
+      const current2 = () => this.claim?.record === claim && claim.expires > this.now();
+      let dashboardCookies;
+      try {
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
+        if (result === null) {
+          if (current2())
+            this.claim = undefined;
+          return refusal();
+        }
+        dashboardCookies = result;
+      } catch {
+        if (this.live() && current2()) {
+          claim.collecting = false;
+          return restarting(this.options.workerConflict?.());
+        }
+        return refusal(503);
+      }
+      if (!this.live() || !current2())
+        return refusal(503);
+      this.claim = undefined;
+      return this.grantSession(dashboardCookies, {});
+    }
+    if (url.pathname === "/owner-approve" && request.method === "POST") {
+      let body2;
+      try {
+        body2 = JSON.parse(await boundedBody(request, 1024));
+      } catch {
+        return refusal();
+      }
+      const claim = this.claim?.record;
+      if (!this.provenSession(request) || !claim || claim.state !== "asked" || claim.expires <= this.now() || !equal(body2.id, claim.approvalId))
+        return refusal();
+      claim.state = body2.approve === true ? "approved" : "declined";
+      return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
+    }
+    if (url.pathname === "/owner-open" && request.method === "POST") {
+      try {
+        await this.openTicket("/dashboard", "browser");
+        const claim = this.claim;
+        const headers2 = new Headers({ "Cache-Control": "no-store" });
+        if (claim) {
+          headers2.set(CLAIM_HEADER, claim.secret);
+          headers2.set(CODE_HEADER, claim.record.code);
+          headers2.set(APPROVAL_HEADER, claim.record.approvalId);
+        }
+        return new Response(null, { status: 204, headers: headers2 });
+      } catch (error) {
+        if (!(error instanceof OwnerOpenLimited)) {
+          const failed = page(`<p>${BROWSER_OPEN_FAILED_MESSAGE}</p>`, 503);
+          failed.headers.set("X-Olympus-Owner-Refused", "1");
+          return failed;
+        }
+        const response2 = page(`<p>${error.hourly ? BROWSER_OPEN_LIMIT_MESSAGE : BROWSER_OPEN_RECENT_MESSAGE}</p>`, 429);
+        response2.headers.set("X-Olympus-Owner-Refused", "1");
+        response2.headers.set(OWNER_LIMIT_HEADER, error.hourly ? "hourly" : "recent");
+        const retryAt = Math.max(this.lastBrowserOpen + 1e4, this.browserOpens.length >= 6 ? this.browserOpens[0] + 60 * 60 * 1000 : 0);
+        response2.headers.set("Retry-After", String(Math.max(1, Math.ceil((retryAt - this.now()) / 1000))));
+        return response2;
+      }
+    }
+    if (url.pathname === DESKTOP_OWNER_OPEN_PATH || url.pathname.startsWith("/owner-"))
+      return refusal();
+    const session = this.cookieSession(request);
+    let proof = request.headers.get(PROOF_HEADER);
+    let body;
+    const binary = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() === "application/octet-stream";
+    if (request.method !== "GET" && request.method !== "HEAD" && !binary) {
+      try {
+        body = await boundedBody(request, 1048576);
+      } catch {
+        return refusal(413);
+      }
+      if (request.headers.get("content-type")?.startsWith("application/x-www-form-urlencoded")) {
+        const form = new URLSearchParams(body);
+        proof ??= form.get(FORM_PROOF);
+        form.delete(FORM_PROOF);
+        body = form.toString();
+      }
+    }
+    if (!session || !equalHash(proof, session.proofHash)) {
+      if (request.method === "GET" && !proof && (request.headers.get("accept") ?? "").includes("text/html"))
+        return confirmation();
+      return refusal();
+    }
+    if (!this.live())
+      return refusal(503);
+    if (this.options.workerReady?.() === false)
+      return restarting(this.options.workerConflict?.());
+    if (binary && request.body)
+      body = request.body;
+    ownerRequestAdmitted?.();
+    const headers = new Headers(request.headers);
+    headers.delete(PROOF_HEADER);
+    headers.delete("content-length");
+    headers.set("Host", new URL(this.entryOrigin).host);
+    if (origin === this.origin)
+      headers.set("Origin", this.entryOrigin);
+    const referer = headers.get("referer");
+    if (referer?.startsWith(this.origin + "/"))
+      headers.set("Referer", this.entryOrigin + referer.slice(this.origin.length));
+    headers.set("Cookie", (headers.get("cookie") ?? "").split(";").filter((v) => !v.trim().startsWith(COOKIE + "=")).join(";"));
+    let response;
+    try {
+      response = await this.options.fetchSocket(new Request(this.entryOrigin + url.pathname + url.search, {
+        method: request.method,
+        headers,
+        ...body !== undefined ? { body, duplex: "half" } : {},
+        redirect: "manual",
+        ...typeof body === "object" ? { signal: request.signal } : {}
+      }));
+    } catch {
+      return this.live() ? restarting(this.options.workerConflict?.()) : refusal(503);
+    }
+    if (!this.live())
+      return refusal(503);
+    if (this.options.workerReady?.() === false) {
+      await response.body?.cancel().catch(() => {});
+      return restarting(this.options.workerConflict?.());
+    }
+    const outgoing = new Headers(response.headers);
+    outgoing.delete("access-control-allow-origin");
+    outgoing.delete("access-control-allow-credentials");
+    outgoing.set("Cache-Control", "no-store");
+    outgoing.set("Cross-Origin-Opener-Policy", "same-origin");
+    const policy = documentPolicy(response.headers.get("content-security-policy"));
+    outgoing.set("Content-Security-Policy", policy);
+    outgoing.set("Referrer-Policy", "same-origin");
+    outgoing.set("X-Content-Type-Options", "nosniff");
+    const location = outgoing.get("location");
+    if (location) {
+      const target = location.startsWith(this.entryOrigin + "/") ? this.origin + location.slice(this.entryOrigin.length) : location;
+      if (request.headers.has(PROOF_HEADER)) {
+        outgoing.delete("location");
+        outgoing.set("X-Olympus-Owner-Location", target);
+        return new Response(null, { status: 200, headers: outgoing });
+      }
+      outgoing.set("Location", target);
+    }
+    if (outgoing.get("content-type")?.includes("text/html")) {
+      outgoing.delete("content-length");
+      outgoing.delete("content-encoding");
+      const html2 = (await response.text()).replace(/<meta name="referrer" content="no-referrer">/g, '<meta name="referrer" content="same-origin">');
+      if (!this.live())
+        return refusal(503);
+      const htmlPolicy = documentPolicy(response.headers.get("content-security-policy"));
+      outgoing.set("Content-Security-Policy", htmlPolicy);
+      return new Response(html2.replace(/<head([^>]*)>/i, `<head$1><meta name="referrer" content="same-origin"><meta http-equiv="Content-Security-Policy" content="${attribute(metaPolicy(htmlPolicy))}">${BOOTSTRAP}`), { status: response.status, headers: outgoing });
+    }
+    return new Response(response.body, { status: location ? 303 : response.status, headers: outgoing });
+  }
+}
+var COOKIE = "olympus_desktop_owner", PROOF_HEADER = "X-Olympus-Owner-Proof", FORM_PROOF = "_olympus_owner_proof", STORAGE = "olympus-desktop-owner-v1", TICKET_MS = 60000, CLAIM_HEADER = "X-Olympus-Owner-Claim", CODE_HEADER = "X-Olympus-Owner-Code", APPROVAL_HEADER = "X-Olympus-Owner-Approval", DECLINED_HEADER = "X-Olympus-Owner-Declined", WAIT_STORAGE = "olympus-desktop-owner-wait-v1", CLAIM_MS, SESSION_MS, DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open", DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.", CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'", secret = () => randomBytes3(32).toString("base64url"), WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict", restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…", restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`, BOOTSTRAP, BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.", OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit", BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.", BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.", OwnerOpenLimited, hashSecret = (value) => createHash20("sha256").update(value).digest("hex");
+var init_linux_owner_bridge = __esm(() => {
+  init_worker_transport();
+  init_linux_desktop_opener();
+  init_remote_request_body();
+  CLAIM_MS = 3 * 60000;
+  SESSION_MS = 12 * 60 * 60 * 1000;
+  BOOTSTRAP = `<script>(function(){
+const key=${JSON.stringify(STORAGE)}, header=${JSON.stringify(PROOF_HEADER)}, field=${JSON.stringify(FORM_PROOF)};
+const nativeFetch=window.fetch.bind(window);
+window.fetch=async function(input,init){
+ const url=new URL(input instanceof Request?input.url:input,location.href);
+ if(url.origin!==location.origin)return nativeFetch(input,init);
+ const opts=Object.assign({},init||{}), headers=new Headers(opts.headers||(input instanceof Request?input.headers:undefined));
+ const proof=localStorage.getItem(key);if(proof)headers.set(header,proof);
+ opts.headers=headers;opts.redirect='manual';
+ const response=await nativeFetch(input,opts);
+ const destination=response.headers.get('X-Olympus-Owner-Location');
+ if(destination){location.replace(destination);throw new Error('Navigating');}
+ return response;
+};
+// An upload's pieces go by XMLHttpRequest (for its progress): same-origin ones carry the proof too. A proven request is
+// never redirected (handle() turns its Location into a header), so the proof cannot follow one elsewhere. The proof
+// page writes the document into its own window, so this runs twice there: a header set twice is joined, and refused.
+const sameOrigin=new WeakSet(), sent=Symbol.for('olympus-owner-proof'), nativeOpen=XMLHttpRequest.prototype.open, nativeSend=XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.open=function(method,url){
+ if(new URL(url,location.href).origin===location.origin)sameOrigin.add(this);else sameOrigin.delete(this);
+ return nativeOpen.apply(this,arguments);
+};
+XMLHttpRequest.prototype.send=function(body){
+ const proof=localStorage.getItem(key);if(proof&&sameOrigin.has(this)&&!this[sent]){this[sent]=true;this.setRequestHeader(header,proof);}
+ return nativeSend.call(this,body);
+};
+document.addEventListener('submit',function(event){
+ const form=event.target;if(!(form instanceof HTMLFormElement))return;
+ if(new URL(form.action,location.href).origin!==location.origin){event.preventDefault();return;}
+ if(form.method.toLowerCase()!=='post')return;
+ let input=form.querySelector('input[name="'+field+'"]');if(!input){input=document.createElement('input');input.type='hidden';input.name=field;form.appendChild(input);}
+ input.value=localStorage.getItem(key)||'';
+},true);
+})();</script>`;
+  OwnerOpenLimited = class OwnerOpenLimited extends Error {
+    hourly;
+    constructor(message2, hourly) {
+      super(message2);
+      this.hourly = hourly;
+    }
+  };
+});
+
+// src/core/linux-owner-bridge-host.ts
+var init_linux_owner_bridge_host = __esm(() => {
+  init_linux_desktop_opener();
+  init_linux_owner_bridge();
+  init_worker_transport();
+});
+
 // src/core/package-root.ts
 var init_package_root = () => {};
 
@@ -39541,6 +40175,20 @@ var init_pairing_session_paths = __esm(() => {
   init_olympus_layout();
   init_source_placement();
   init_source_registry();
+});
+
+// src/core/native-process-service.ts
+var init_native_process_service = () => {};
+
+// src/core/native-worker-service.ts
+var init_native_worker_service = __esm(() => {
+  init_data_owner_lock();
+  init_linux_owner_bridge_host();
+  init_worker_transport();
+  init_config();
+  init_native_process_service();
+  init_olympus_layout();
+  init_worker_auth();
 });
 
 // src/core/remote-open.ts
@@ -46556,8 +47204,8 @@ var init_mac_permissions = __esm(() => {
   MAC_ACCESS_COPY = {
     needsPermission: "Your Mac will ask before Olympus opens this folder.",
     waiting: "Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.",
-    needsHelper: "Olympus cannot open this folder on this Mac yet. Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.",
-    needsHelperWholeComputer: "Olympus cannot read the whole computer on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.",
+    needsHelper: "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.",
+    needsHelperWholeComputer: "Reading the whole computer needs the Olympus helper app. Update Olympus to add it, or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.",
     needsHelperManagedWorker: "Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. Choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.",
     needsHelperManagedWorkerWholeComputer: "Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.",
     denied: (kind, app = ENGINE_APP) => `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under ${app}. Then choose Try again.`,
@@ -63109,636 +63757,7 @@ import { dirname as dirname34, isAbsolute as isAbsolute14 } from "node:path";
 init_source_placement();
 init_vocabulary();
 init_local_private_answers();
-
-// src/core/linux-owner-bridge-host.ts
-init_linux_desktop_opener();
-
-// src/core/linux-owner-bridge.ts
-import { createHmac, createHash as createHash20, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
-import { closeSync as closeSync10, openSync as openSync10, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
-import { dirname as dirname26, join as join27 } from "node:path";
-init_worker_transport();
-init_linux_desktop_opener();
-init_remote_request_body();
-var COOKIE = "olympus_desktop_owner";
-var PROOF_HEADER = "X-Olympus-Owner-Proof";
-var FORM_PROOF = "_olympus_owner_proof";
-var STORAGE = "olympus-desktop-owner-v1";
-var TICKET_MS = 60000;
-var CLAIM_HEADER = "X-Olympus-Owner-Claim";
-var CODE_HEADER = "X-Olympus-Owner-Code";
-var APPROVAL_HEADER = "X-Olympus-Owner-Approval";
-var DECLINED_HEADER = "X-Olympus-Owner-Declined";
-var WAIT_STORAGE = "olympus-desktop-owner-wait-v1";
-var CLAIM_MS = 3 * 60000;
-var SESSION_MS = 12 * 60 * 60 * 1000;
-var DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open";
-var DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.";
-var CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'";
-function randomOwnerHostname() {
-  const bytes = randomBytes3(16);
-  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
-  let bits2 = 0, value = 0, text3 = "";
-  for (const byte of bytes) {
-    value = value << 8 | byte;
-    bits2 += 8;
-    while (bits2 >= 5) {
-      bits2 -= 5;
-      text3 += alphabet[value >>> bits2 & 31];
-    }
-  }
-  if (bits2)
-    text3 += alphabet[value << 5 - bits2 & 31];
-  return `${text3}.localhost`;
-}
-var secret = () => randomBytes3(32).toString("base64url");
-function matchCode() {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const [a, b, c, d, e, f] = [...randomBytes3(6)].map((byte) => alphabet[byte & 31]);
-  return `${a}${b}${c}-${d}${e}${f}`;
-}
-function equal(a, b) {
-  return typeof a === "string" && /^[A-Za-z0-9_-]+$/.test(a) && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-async function boundedBody(request, limit) {
-  const result = await readBoundedRequestText(request, limit, { deadlineMs: 5000 });
-  if (!result.ok)
-    throw new Error("Body refused.");
-  return result.text;
-}
-function page(body, status = 200) {
-  return new Response(`<!doctype html><html><head><meta charset="utf-8"><title>Olympus owner confirmation</title></head><body>${body}</body></html>`, { status, headers: {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-    "Content-Security-Policy": CSP,
-    "Cross-Origin-Opener-Policy": "same-origin",
-    "Referrer-Policy": "no-referrer",
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY"
-  } });
-}
-function restarting() {
-  const response = page(`${openingView().replace("Opening your dashboard…", "Olympus is restarting…")}<script>setTimeout(()=>location.reload(),1000)</script>`, 503);
-  response.headers.set("Retry-After", "1");
-  return response;
-}
-function refusal(status = 403) {
-  const response = page(`<p>This Olympus window is out of date, usually because Olympus restarted. Close it and open Olympus again.</p>`, status);
-  response.headers.set("X-Olympus-Owner-Refused", "1");
-  return response;
-}
-function safeTarget(value) {
-  return typeof value === "string" && value.length <= 16384 && value.startsWith("/") && !value.startsWith("//") && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith("/owner-") && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);
-}
-var BOOTSTRAP = `<script>(function(){
-const key=${JSON.stringify(STORAGE)}, header=${JSON.stringify(PROOF_HEADER)}, field=${JSON.stringify(FORM_PROOF)};
-const nativeFetch=window.fetch.bind(window);
-window.fetch=async function(input,init){
- const url=new URL(input instanceof Request?input.url:input,location.href);
- if(url.origin!==location.origin)return nativeFetch(input,init);
- const opts=Object.assign({},init||{}), headers=new Headers(opts.headers||(input instanceof Request?input.headers:undefined));
- const proof=localStorage.getItem(key);if(proof)headers.set(header,proof);
- opts.headers=headers;opts.redirect='manual';
- const response=await nativeFetch(input,opts);
- const destination=response.headers.get('X-Olympus-Owner-Location');
- if(destination){location.replace(destination);throw new Error('Navigating');}
- return response;
-};
-// An upload's pieces go by XMLHttpRequest (for its progress): same-origin ones carry the proof too. A proven request is
-// never redirected (handle() turns its Location into a header), so the proof cannot follow one elsewhere. The proof
-// page writes the document into its own window, so this runs twice there: a header set twice is joined, and refused.
-const sameOrigin=new WeakSet(), sent=Symbol.for('olympus-owner-proof'), nativeOpen=XMLHttpRequest.prototype.open, nativeSend=XMLHttpRequest.prototype.send;
-XMLHttpRequest.prototype.open=function(method,url){
- if(new URL(url,location.href).origin===location.origin)sameOrigin.add(this);else sameOrigin.delete(this);
- return nativeOpen.apply(this,arguments);
-};
-XMLHttpRequest.prototype.send=function(body){
- const proof=localStorage.getItem(key);if(proof&&sameOrigin.has(this)&&!this[sent]){this[sent]=true;this.setRequestHeader(header,proof);}
- return nativeSend.call(this,body);
-};
-document.addEventListener('submit',function(event){
- const form=event.target;if(!(form instanceof HTMLFormElement))return;
- if(new URL(form.action,location.href).origin!==location.origin){event.preventDefault();return;}
- if(form.method.toLowerCase()!=='post')return;
- let input=form.querySelector('input[name="'+field+'"]');if(!input){input=document.createElement('input');input.type='hidden';input.name=field;form.appendChild(input);}
- input.value=localStorage.getItem(key)||'';
-},true);
-})();</script>`;
-function documentPolicy(policy) {
-  const hash = "'sha256-" + createHash20("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
-  const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
-  const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
-  const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
-  const index = directives.findIndex((s) => /^script-src(\s|$)/.test(s));
-  if (index >= 0) {
-    if (needsHash(directives[index]))
-      directives[index] = withHash(directives[index].slice("script-src".length));
-  } else {
-    const fallback = directives.find((s) => /^default-src(\s|$)/.test(s));
-    if (fallback && needsHash(fallback))
-      directives.push(withHash(fallback.slice("default-src".length)));
-  }
-  return directives.filter((s) => !/^worker-src(\s|$)/.test(s)).join("; ") + "; worker-src 'none'";
-}
-function metaPolicy(policy) {
-  return policy.split("; ").filter((s) => !/^(frame-ancestors|report-uri|report-to|sandbox)(\s|$)/.test(s)).join("; ");
-}
-function attribute(value) {
-  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
-}
-var BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.";
-var OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit";
-var BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.";
-var BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.";
-
-class OwnerOpenLimited extends Error {
-  hourly;
-  constructor(message2, hourly) {
-    super(message2);
-    this.hourly = hourly;
-  }
-}
-function confirmation() {
-  return page(`<h1>Confirm it's you on this computer</h1><p id="message">Open the private owner ticket in your desktop browser.</p><p id="code" hidden></p><button id="confirm">Confirm it's you</button>${BOOTSTRAP}<script>
-(async function(){
- const message=document.getElementById('message'), code=document.getElementById('code'), confirm=document.getElementById('confirm'), key=${JSON.stringify(STORAGE)};
- let resuming=false, opening=false, waiting=false, claim='', claiming=false, poll, timeout;
- const stopWaiting=()=>{removeEventListener('storage',onStorage);clearInterval(poll);clearTimeout(timeout);waiting=false;claim='';code.hidden=true;confirm.disabled=opening;};
- async function resume(){
-  if(resuming||!localStorage.getItem(key))return;
-  resuming=true;
-  try{const r=await fetch(location.pathname+location.search);if(!r.ok&&r.status!==503){resuming=false;return;}
-   const html=await r.text();stopWaiting();document.open();document.write(html);document.close();
-  }catch{resuming=false;}
- }
- function onStorage(event){if(event.key===key)void resume();}
- // An Olympus window in another browser cannot share this page's storage: once
- // the owner approves there (codes matching), the engine hands this claim its own proof.
- async function collect(){
-  if(!claim||claiming||resuming)return;
-  claiming=true;
-  try{const r=await fetch('/owner-claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({claim})});
-   if(r.status===202||r.status===503)return;
-   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);await resume();return;}
-   const declined=r.headers.has(${JSON.stringify(DECLINED_HEADER)});stopWaiting();
-   message.textContent=declined?"The Olympus window said this wasn't you. Press Confirm it's you to try again.":"This confirmation expired or was replaced. Press Confirm it's you to try again.";
-  }catch{}finally{claiming=false;}
- }
- confirm.onclick=async function(){
-  if(opening||waiting)return;
-  opening=true;confirm.disabled=true;
-  try{const r=await fetch('/owner-open',{method:'POST'});
-   if(!r.ok){message.textContent=r.status!==429?${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)}:r.headers.get(${JSON.stringify(OWNER_LIMIT_HEADER)})==='hourly'?${JSON.stringify(BROWSER_OPEN_LIMIT_MESSAGE)}:${JSON.stringify(BROWSER_OPEN_RECENT_MESSAGE)};return;}
-   // A refused replacement must leave the current wait intact. Only a
-   // successful open replaces its ticket and starts a fresh 60-second wait.
-   stopWaiting();waiting=true;confirm.disabled=true;claim=r.headers.get(${JSON.stringify(CLAIM_HEADER)})||'';
-   const approval=r.headers.get(${JSON.stringify(APPROVAL_HEADER)});if(approval)try{localStorage.setItem(${JSON.stringify(WAIT_STORAGE)},approval);}catch{}
-   const shown=r.headers.get(${JSON.stringify(CODE_HEADER)});if(shown){code.textContent='If the Olympus window asks, it shows this code: '+shown;code.hidden=false;}
-   message.textContent='Approve in the Olympus window that just opened. This page continues by itself.';
-   // Check storage after subscribing too: the opener may already have proved.
-   addEventListener('storage',onStorage);
-   poll=setInterval(()=>{void resume();void collect();},1000);
-   timeout=setTimeout(()=>{stopWaiting();message.textContent="This confirmation timed out. Press Confirm it's you to try again.";},${CLAIM_MS});
-   await resume();
-  }catch{message.textContent=${JSON.stringify(BROWSER_OPEN_FAILED_MESSAGE)};}
-  finally{opening=false;confirm.disabled=waiting;}
- };
- await resume();
-})();</script>`);
-}
-function openingView() {
-  return `<meta name="viewport" content="width=device-width, initial-scale=1"><style>
-html{color-scheme:light dark;background:#faf9f6;color:#24231f;font:16px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif}body{margin:0;min-height:100vh;display:grid;place-items:center}main{width:min(32rem,calc(100vw - 4rem))}h1{font-size:2rem;font-weight:600;margin:0 0 1rem}p{line-height:1.6} @media(prefers-color-scheme:dark){html{background:#171715;color:#efeee8}}
-</style><main><h1>Olympus</h1><p id="message" role="status">Opening your dashboard…</p></main>`;
-}
-function proofPage() {
-  const response = page(`${openingView()}<script>
-// A page in another browser asked for this window. Its own browser keeps the
-// approval id, so a page in this browser continues by itself with no question.
-function approve(request,proof){return new Promise(function(done){
- const wait=${JSON.stringify(WAIT_STORAGE)}, same=()=>{try{return localStorage.getItem(wait)===request.id;}catch{return false;}};
- if(same()){done();return;}
- const panel=document.createElement('div'), text=document.createElement('p'), code=document.createElement('p'), yes=document.createElement('button'), no=document.createElement('button');
- text.textContent="A page in another browser is waiting for you to confirm it's you. Approve only if that page shows this code:";
- code.id='approval-code';code.style.cssText='font-size:1.5rem;font-weight:600;letter-spacing:.1em';code.textContent=request.code;
- yes.id='approve';yes.textContent='Approve';no.id='decline';no.textContent='Not me';no.style.marginLeft='.5rem';
- panel.append(text,code,yes,no);document.querySelector('main').append(panel);
- const message=document.getElementById('message'), opening=message.textContent;message.textContent='Olympus';message.hidden=true;
- const finish=()=>{removeEventListener('storage',onStorage);panel.remove();message.textContent=opening;message.hidden=false;done();};
- function onStorage(event){if(event.key===wait&&same())finish();}
- addEventListener('storage',onStorage);
- const answer=async approved=>{yes.disabled=no.disabled=true;
-  try{await fetch('/owner-approve',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json',${JSON.stringify(PROOF_HEADER)}:proof},body:JSON.stringify({id:request.id,approve:approved})});}catch{}
-  finish();};
- yes.onclick=()=>answer(true);no.onclick=()=>answer(false);
-});}
-(async function(){
- const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
- if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
- try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
- if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
- if(result.approval)await approve(result.approval,result.proof);
- // Render the requested document in this window. The proof stays at this
- // origin. The bridge header policy and worker meta policy constrain this view;
- // header-only worker CSP directives cannot be carried through document.write.
- // The ticket is spent now, so a worker restart here must wait, not fail.
- let documentResponse;do{documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});if(documentResponse.status===503&&documentResponse.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
- const destination=documentResponse.headers.get('X-Olympus-Owner-Location');
- if(destination){location.replace(destination);return;} // ordinary navigation, without a proof header
- if(!documentResponse.ok||!documentResponse.headers.get('Content-Type')?.includes('text/html'))throw new Error();
- const html=await documentResponse.text();history.replaceState(null,'',result.target);document.open();document.write(html);document.close();
- }catch{document.getElementById('message').textContent='This private ticket expired or was refused. Run olympus dashboard again. Use the owner SSH socket forward if this browser cannot resolve the session origin.';}
-})();</script>`);
-  response.headers.set("Access-Control-Allow-Origin", "*");
-  return response;
-}
-var hashSecret = (value) => createHash20("sha256").update(value).digest("hex");
-function equalHash(value, hash) {
-  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(hashSecret(value), "hex"), Buffer.from(hash, "hex"));
-}
-
-class LinuxOwnerBridge {
-  options;
-  hostname;
-  origin;
-  entryOrigin;
-  tickets = new Map;
-  sessions = [];
-  claim;
-  lastBrowserOpen = -Infinity;
-  browserOpens = [];
-  closed = false;
-  now;
-  constructor(options) {
-    this.options = options;
-    this.now = options.now ?? Date.now;
-    this.origin = `http://${randomOwnerHostname()}:${options.port}`;
-    this.hostname = new URL(this.origin).hostname;
-    this.entryOrigin = `http://127.0.0.1:${options.port}`;
-  }
-  live() {
-    return !this.closed && this.options.ready();
-  }
-  close() {
-    this.closed = true;
-    this.sessions = [];
-    this.claim = undefined;
-    this.clearTicket();
-  }
-  clearTicket(ticket) {
-    for (const [lane, current2] of this.tickets) {
-      if (ticket && current2 !== ticket)
-        continue;
-      if (current2.timer)
-        clearTimeout(current2.timer);
-      try {
-        unlinkSync(current2.path);
-      } catch {}
-      this.tickets.delete(lane);
-    }
-  }
-  async openTicket(target, lane = "control") {
-    if (!safeTarget(target) || !this.live())
-      throw new Error("Desktop owner confirmation is unavailable.");
-    if (lane === "control")
-      return this.launchTicket(target, lane);
-    const openedAt = this.now(), previousOpen = this.lastBrowserOpen;
-    this.browserOpens = this.browserOpens.filter((time) => time > openedAt - 60 * 60 * 1000);
-    if (this.browserOpens.length >= 6)
-      throw new OwnerOpenLimited("Wait before opening another owner ticket.", true);
-    if (openedAt - this.lastBrowserOpen < 1e4)
-      throw new OwnerOpenLimited("Wait ten seconds before opening another owner ticket.", false);
-    this.browserOpens.push(openedAt);
-    this.lastBrowserOpen = openedAt;
-    try {
-      await this.launchTicket(target, lane);
-    } catch (error) {
-      if (this.lastBrowserOpen === openedAt)
-        this.lastBrowserOpen = previousOpen;
-      const index = this.browserOpens.lastIndexOf(openedAt);
-      if (index >= 0)
-        this.browserOpens.splice(index, 1);
-      throw error;
-    }
-  }
-  async launchTicket(target, lane) {
-    if (validateWorkerSocket(this.options.transport) !== this.options.socketPath)
-      throw new Error("Owner socket changed.");
-    const previous = this.tickets.get(lane);
-    if (previous)
-      this.clearTicket(previous);
-    const value = secret(), challenge = secret();
-    const answer = createHmac("sha256", value).update(challenge).digest("base64url");
-    const path = join27(dirname26(this.options.socketPath), `owner-ticket-${randomBytes3(16).toString("hex")}.html`);
-    const url = `${this.origin}/owner-proof#${value}`;
-    const html2 = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
-(async function(){
- const message=document.getElementById('message');
- try{let r;do{r=await fetch(${JSON.stringify(this.origin + "/owner-proof?challenge=" + challenge)},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'});if(r.status===503&&r.headers.get('Retry-After')){message.textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
- if(!r.ok||await r.text()!==${JSON.stringify(answer)}){message.textContent='Olympus refused: the private ticket expired or this listener could not prove its identity. The private ticket was not sent. Run olympus dashboard again.';return;}
- location.replace(${JSON.stringify(url)});
- }catch{message.textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. The private ticket was not sent. " + DESKTOP_BRIDGE_REMEDY)};}
-})();</script>`;
-    const fd2 = openSync10(path, "wx", 384);
-    try {
-      writeFileSync5(fd2, html2);
-    } finally {
-      closeSync10(fd2);
-    }
-    const ticket = { value, challenge, target, path, expires: this.now() + TICKET_MS };
-    this.tickets.set(lane, ticket);
-    ticket.timer = setTimeout(() => this.clearTicket(ticket), TICKET_MS);
-    ticket.timer.unref();
-    if (lane === "browser") {
-      const claimSecret = secret();
-      this.claim = { secret: claimSecret, record: { hash: hashSecret(claimSecret), code: matchCode(), approvalId: secret(), ticket, expires: this.now() + CLAIM_MS, state: "waiting" } };
-    }
-    try {
-      await (this.options.openFile ?? openLinuxOwnerTicketFile)(path);
-      if (!this.live())
-        throw new Error("Graphical session ended.");
-    } catch (error) {
-      if (this.claim?.record.ticket === ticket)
-        this.claim = undefined;
-      this.clearTicket(ticket);
-      throw error;
-    }
-  }
-  cookieSession(request) {
-    const cookie = request.headers.get("cookie")?.split(";").map((v) => v.trim()).find((v) => v.startsWith(COOKIE + "="))?.slice(COOKIE.length + 1);
-    if (this.sessions.some((s) => s.expires <= this.now()))
-      this.sessions = this.sessions.filter((s) => s.expires > this.now()).slice(-15);
-    return this.sessions.find((s) => equalHash(cookie, s.cookieHash));
-  }
-  provenSession(request) {
-    const session = this.cookieSession(request);
-    return !!session && equalHash(request.headers.get(PROOF_HEADER), session.proofHash);
-  }
-  grantSession(dashboardCookies, extra) {
-    const cookie = secret(), proof = secret();
-    const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
-    this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-14), session];
-    const response = Response.json({ proof, ...extra }, { headers: {
-      "Set-Cookie": `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
-      "Cache-Control": "no-store",
-      "Clear-Site-Data": '"cache"',
-      "Content-Security-Policy": CSP
-    } });
-    for (const cookie2 of dashboardCookies)
-      response.headers.append("Set-Cookie", cookie2);
-    return response;
-  }
-  async handle(request, ownerRequestAdmitted) {
-    if (!this.live())
-      return refusal(503);
-    const url = new URL(request.url);
-    const host = request.headers.get("host");
-    if (request.headers.has("Service-Worker"))
-      return refusal();
-    if (host === new URL(this.entryOrigin).host && url.host === host) {
-      if (request.method !== "GET" && request.method !== "HEAD")
-        return refusal();
-      return new Response(null, { status: 303, headers: {
-        Location: this.origin + url.pathname + url.search,
-        "Cache-Control": "no-store",
-        "Clear-Site-Data": '"cache", "storage"',
-        "Content-Security-Policy": "default-src 'none'; worker-src 'none'",
-        "Referrer-Policy": "no-referrer"
-      } });
-    }
-    if (host !== new URL(this.origin).host || url.origin !== this.origin)
-      return refusal(421);
-    if (request.headers.has("x-olympus-relay") || ["x-forwarded-host", "x-forwarded-for", "x-forwarded-proto", "forwarded"].some((h) => request.headers.has(h)))
-      return refusal();
-    const origin = request.headers.get("origin");
-    const site = request.headers.get("sec-fetch-site");
-    if (request.method !== "GET" && request.method !== "HEAD" && (origin !== this.origin || site !== null && site !== "same-origin"))
-      return refusal();
-    if (url.pathname === "/owner-proof" && request.method === "GET") {
-      if (!url.searchParams.has("challenge"))
-        return proofPage();
-      const challenge = url.searchParams.get("challenge");
-      const ticket = [...this.tickets.values()].find((t) => t.expires > this.now() && equal(challenge, t.challenge));
-      const response2 = !ticket ? refusal() : this.options.workerReady?.() === false ? restarting() : new Response(createHmac("sha256", ticket.value).update(ticket.challenge).digest("base64url"), { headers: { "Cache-Control": "no-store" } });
-      response2.headers.set("Access-Control-Allow-Origin", "*");
-      response2.headers.set("Access-Control-Expose-Headers", "Retry-After");
-      return response2;
-    }
-    if (this.options.workerReady?.() === false)
-      return restarting();
-    if (url.pathname === "/owner-proof" && request.method === "POST") {
-      let body2;
-      try {
-        body2 = JSON.parse(await boundedBody(request, 1024));
-      } catch {
-        return refusal();
-      }
-      const ticket = [...this.tickets.values()].find((t) => equal(body2.ticket, t.value));
-      if (!this.live() || !ticket || ticket.expires <= this.now() || !equal(body2.ticket, ticket.value))
-        return refusal();
-      if (ticket.claimed)
-        return restarting();
-      ticket.claimed = true;
-      try {
-        unlinkSync(ticket.path);
-      } catch {}
-      const current2 = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
-      let dashboardCookies;
-      try {
-        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
-        if (result === null) {
-          this.clearTicket(ticket);
-          return refusal();
-        }
-        dashboardCookies = result;
-      } catch {
-        if (this.live() && current2()) {
-          ticket.claimed = false;
-          return restarting();
-        }
-        this.clearTicket(ticket);
-        return refusal(503);
-      }
-      if (!this.live() || !current2()) {
-        this.clearTicket(ticket);
-        return refusal(503);
-      }
-      this.clearTicket(ticket);
-      const claim = this.claim?.record;
-      const asking = claim?.ticket === ticket && claim.state === "waiting" && claim.expires > this.now();
-      if (asking)
-        claim.state = "asked";
-      return this.grantSession(dashboardCookies, { target: ticket.target, ...asking ? { approval: { id: claim.approvalId, code: claim.code } } : {} });
-    }
-    if (url.pathname === "/owner-claim" && request.method === "POST") {
-      let body2;
-      try {
-        body2 = JSON.parse(await boundedBody(request, 1024));
-      } catch {
-        return refusal();
-      }
-      const claim = this.claim?.record;
-      if (!claim || claim.expires <= this.now() || !equalHash(body2.claim, claim.hash))
-        return refusal();
-      if (claim.state === "declined") {
-        this.claim = undefined;
-        const declined = refusal();
-        declined.headers.set(DECLINED_HEADER, "1");
-        return declined;
-      }
-      if (claim.state !== "approved")
-        return new Response(null, { status: 202, headers: { "Cache-Control": "no-store" } });
-      if (claim.collecting)
-        return restarting();
-      claim.collecting = true;
-      const current2 = () => this.claim?.record === claim && claim.expires > this.now();
-      let dashboardCookies;
-      try {
-        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
-        if (result === null) {
-          if (current2())
-            this.claim = undefined;
-          return refusal();
-        }
-        dashboardCookies = result;
-      } catch {
-        if (this.live() && current2()) {
-          claim.collecting = false;
-          return restarting();
-        }
-        return refusal(503);
-      }
-      if (!this.live() || !current2())
-        return refusal(503);
-      this.claim = undefined;
-      return this.grantSession(dashboardCookies, {});
-    }
-    if (url.pathname === "/owner-approve" && request.method === "POST") {
-      let body2;
-      try {
-        body2 = JSON.parse(await boundedBody(request, 1024));
-      } catch {
-        return refusal();
-      }
-      const claim = this.claim?.record;
-      if (!this.provenSession(request) || !claim || claim.state !== "asked" || claim.expires <= this.now() || !equal(body2.id, claim.approvalId))
-        return refusal();
-      claim.state = body2.approve === true ? "approved" : "declined";
-      return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
-    }
-    if (url.pathname === "/owner-open" && request.method === "POST") {
-      try {
-        await this.openTicket("/dashboard", "browser");
-        const claim = this.claim;
-        const headers2 = new Headers({ "Cache-Control": "no-store" });
-        if (claim) {
-          headers2.set(CLAIM_HEADER, claim.secret);
-          headers2.set(CODE_HEADER, claim.record.code);
-          headers2.set(APPROVAL_HEADER, claim.record.approvalId);
-        }
-        return new Response(null, { status: 204, headers: headers2 });
-      } catch (error) {
-        if (!(error instanceof OwnerOpenLimited)) {
-          const failed = page(`<p>${BROWSER_OPEN_FAILED_MESSAGE}</p>`, 503);
-          failed.headers.set("X-Olympus-Owner-Refused", "1");
-          return failed;
-        }
-        const response2 = page(`<p>${error.hourly ? BROWSER_OPEN_LIMIT_MESSAGE : BROWSER_OPEN_RECENT_MESSAGE}</p>`, 429);
-        response2.headers.set("X-Olympus-Owner-Refused", "1");
-        response2.headers.set(OWNER_LIMIT_HEADER, error.hourly ? "hourly" : "recent");
-        const retryAt = Math.max(this.lastBrowserOpen + 1e4, this.browserOpens.length >= 6 ? this.browserOpens[0] + 60 * 60 * 1000 : 0);
-        response2.headers.set("Retry-After", String(Math.max(1, Math.ceil((retryAt - this.now()) / 1000))));
-        return response2;
-      }
-    }
-    if (url.pathname === DESKTOP_OWNER_OPEN_PATH || url.pathname.startsWith("/owner-"))
-      return refusal();
-    const session = this.cookieSession(request);
-    let proof = request.headers.get(PROOF_HEADER);
-    let body;
-    const binary = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() === "application/octet-stream";
-    if (request.method !== "GET" && request.method !== "HEAD" && !binary) {
-      try {
-        body = await boundedBody(request, 1048576);
-      } catch {
-        return refusal(413);
-      }
-      if (request.headers.get("content-type")?.startsWith("application/x-www-form-urlencoded")) {
-        const form = new URLSearchParams(body);
-        proof ??= form.get(FORM_PROOF);
-        form.delete(FORM_PROOF);
-        body = form.toString();
-      }
-    }
-    if (!session || !equalHash(proof, session.proofHash)) {
-      if (request.method === "GET" && !proof && (request.headers.get("accept") ?? "").includes("text/html"))
-        return confirmation();
-      return refusal();
-    }
-    if (!this.live())
-      return refusal(503);
-    if (binary && request.body)
-      body = request.body;
-    ownerRequestAdmitted?.();
-    const headers = new Headers(request.headers);
-    headers.delete(PROOF_HEADER);
-    headers.delete("content-length");
-    headers.set("Host", new URL(this.entryOrigin).host);
-    if (origin === this.origin)
-      headers.set("Origin", this.entryOrigin);
-    const referer = headers.get("referer");
-    if (referer?.startsWith(this.origin + "/"))
-      headers.set("Referer", this.entryOrigin + referer.slice(this.origin.length));
-    headers.set("Cookie", (headers.get("cookie") ?? "").split(";").filter((v) => !v.trim().startsWith(COOKIE + "=")).join(";"));
-    let response;
-    try {
-      response = await this.options.fetchSocket(new Request(this.entryOrigin + url.pathname + url.search, {
-        method: request.method,
-        headers,
-        ...body !== undefined ? { body, duplex: "half" } : {},
-        redirect: "manual",
-        ...typeof body === "object" ? { signal: request.signal } : {}
-      }));
-    } catch {
-      return this.live() ? restarting() : refusal(503);
-    }
-    if (!this.live())
-      return refusal(503);
-    const outgoing = new Headers(response.headers);
-    outgoing.delete("access-control-allow-origin");
-    outgoing.delete("access-control-allow-credentials");
-    outgoing.set("Cache-Control", "no-store");
-    outgoing.set("Cross-Origin-Opener-Policy", "same-origin");
-    const policy = documentPolicy(response.headers.get("content-security-policy"));
-    outgoing.set("Content-Security-Policy", policy);
-    outgoing.set("Referrer-Policy", "same-origin");
-    outgoing.set("X-Content-Type-Options", "nosniff");
-    const location = outgoing.get("location");
-    if (location) {
-      const target = location.startsWith(this.entryOrigin + "/") ? this.origin + location.slice(this.entryOrigin.length) : location;
-      if (request.headers.has(PROOF_HEADER)) {
-        outgoing.delete("location");
-        outgoing.set("X-Olympus-Owner-Location", target);
-        return new Response(null, { status: 200, headers: outgoing });
-      }
-      outgoing.set("Location", target);
-    }
-    if (outgoing.get("content-type")?.includes("text/html")) {
-      outgoing.delete("content-length");
-      outgoing.delete("content-encoding");
-      const html2 = (await response.text()).replace(/<meta name="referrer" content="no-referrer">/g, '<meta name="referrer" content="same-origin">');
-      if (!this.live())
-        return refusal(503);
-      const htmlPolicy = documentPolicy(response.headers.get("content-security-policy"));
-      outgoing.set("Content-Security-Policy", htmlPolicy);
-      return new Response(html2.replace(/<head([^>]*)>/i, `<head$1><meta name="referrer" content="same-origin"><meta http-equiv="Content-Security-Policy" content="${attribute(metaPolicy(htmlPolicy))}">${BOOTSTRAP}`), { status: response.status, headers: outgoing });
-    }
-    return new Response(response.body, { status: location ? 303 : response.status, headers: outgoing });
-  }
-}
-
-// src/core/linux-owner-bridge-host.ts
-init_worker_transport();
+init_linux_owner_bridge_host();
 
 // src/core/update-check.ts
 init_package_root();
@@ -63746,6 +63765,7 @@ var UPDATE_MAX_BYTES = 512 * 1024;
 
 // src/workers/email-source/server.ts
 init_open_targets();
+init_linux_owner_bridge();
 init_linux_desktop_opener();
 init_dashboard_opening();
 init_worker_transport();
@@ -64018,11 +64038,8 @@ if (false)
 // src/core/messaging-pairing.ts
 init_provider_account_history();
 
-// src/core/native-worker-service.ts
-init_worker_transport();
-init_config();
-init_olympus_layout();
-init_worker_auth();
+// src/workers/email-source/server.ts
+init_native_worker_service();
 
 // src/core/model-setup.ts
 init_model_transport();
@@ -68588,6 +68605,7 @@ var GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observ
 
 // src/workers/email-source/server.ts
 init_tiered_store_set();
+init_archive_target();
 init_connector5();
 init_live_sync3();
 

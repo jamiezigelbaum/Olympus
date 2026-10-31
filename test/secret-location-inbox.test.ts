@@ -100,6 +100,32 @@ for (const state of ['no_model', 'model_downloading'] as const) test(`Secret-onl
 });
 
 
+test('background Inbox saves a Secret-only answer on its first attempt with no installed model', async () => {
+  const { createLocalAnswerPath } = await import('../src/workers/email-source/local-private-answers.ts');
+  const { createReleaseTierCheck } = await import('../src/workers/connector-store/tier-visibility.ts');
+  const { buildSourceIndexCorpusRegistry } = await import('../src/core/source-index/corpus.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'secret-model-free-'));
+  const store = openWaitingPrivateQuestionStore(join(dir, 'waiting.sqlite'), { isActive: () => true });
+  const path = createLocalAnswerPath({
+    model: undefined, available: () => false, relevanceEmbedding: () => undefined,
+    releaseCheck: createReleaseTierCheck(() => [], () => 'approval'),
+    lanes: () => ({ registry: buildSourceIndexCorpusRegistry([]), adapters: {}, contentProviders: {},
+      secretLocations: () => [{ source: 'fixture', ref: 'secret:one', title: 'Recovery document', locator: '/allowed/recovery.txt', findingKinds: [] }],
+      checkSecretLocations: () => true }),
+  });
+  const controller = createLocalPrivateAnswers({ store: () => store, ...path,
+    panelSecretNotice: () => true, panelSecretOnlyNotice: () => true });
+  try {
+    const ref = store.record(store.ticket('conn'), { question: 'Recovery', surface: 'chatgpt', state: 'waiting' })!;
+    await controller.tick();
+    expect(store.get(ref.id)?.result?.status).toBe('answered');
+    expect(store.get(ref.id)?.attempts).toBe(0);
+    const read = await controller.handle({ action: 'read', id: ref.id }, 'owner');
+    expect(read.body.status).toBe('answered');
+    expect(read.body.answer).toContain('/allowed/recovery.txt');
+  } finally { controller.close(); store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 for (const explicitQuery of [false, true]) test(`Secret Open sources honor the saved query and human labels (query=${explicitQuery})`, async () => {
   const { createLocalAnswerPath } = await import('../src/workers/email-source/local-private-answers.ts');
   const { createReleaseTierCheck } = await import('../src/workers/connector-store/tier-visibility.ts');

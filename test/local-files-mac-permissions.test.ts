@@ -434,3 +434,8 @@ describe('the words fit the app the Mac actually names', () => {
     expect(make('engine_without_helper').helperNeededCopy()).toBe(MAC_ACCESS_COPY.needsHelper);
   });
 });
+
+test('missing helper copy uses the approved wording', () => {
+  expect(MAC_ACCESS_COPY.needsHelper).toBe('Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.');
+  expect(MAC_ACCESS_COPY.needsHelperWholeComputer).toBe('Reading the whole computer needs the Olympus helper app. Update Olympus to add it, or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.');
+});
