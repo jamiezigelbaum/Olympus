@@ -28,6 +28,7 @@ import type {
   SourceDashboardViewModel,
 } from '../../source-dashboard.ts';
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
+import { renderMessagingCard } from '../messaging.ts';
 import { DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken } from '../../../core/open-targets.ts';
 import { renderDashboardAgentsSection, type AgentConnectHost } from '../agents.ts';
 import {
@@ -59,6 +60,8 @@ import {
 
 export interface DashboardPageOptions {
   now?: Date;
+  /** Pairing credentials and chat choices require locally minted controls. */
+  messagingLocalSession?: boolean;
   degradedCredentials?: readonly WorkerCredentialDegradation[];
   /** Where the page's "Olympus" lead links back to: /dashboard, with a dash_ reader's token. */
   basePath?: string;
@@ -92,9 +95,10 @@ export interface DashboardWaitingQuestion {
   from: string;
   askedAt: string;
   unchecked: boolean;
-  state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed';
+  state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed' | 'failed';
   unread?: boolean;
   answeredAt?: string;
+  failureReason?: string;
 }
 
 const CONNECTOR_SHEET_ID = 'connector-sheet';
@@ -152,7 +156,7 @@ function localShell(input: {
 /** Keys: the model keys, then the sources that connect on this computer. */
 export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?: DashboardPageOptions): string {
   const blocked = view.model_setup !== undefined && !view.model_setup.ready;
-  const sources = view.sources.filter((source) => source.connection.action.kind !== 'none');
+  const sources = view.sources.filter((source) => source.connection.action.kind !== 'none' || source.source_id === 'telegram.messages' || source.source_id === 'whatsapp.personal.messages');
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
     renderModelSetupBlocker(view.model_setup),
@@ -163,7 +167,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
     sources.length === 0 ? '' : '<div class="sect" id="sources">Sources</div>',
     sources.length === 0
       ? ''
-      : `<div class="srows">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard')).join('\n')}</div>`,
+      : `<div class="srows">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard', options?.messagingLocalSession === true)).join('\n')}</div>`,
   ].filter((block) => block !== '').join('\n');
   return localShell({
     crumb: W.keys.title,
@@ -214,8 +218,11 @@ function refusalNotice(source: DashboardSourceCard): { notice?: string; noticeDe
   };
 }
 
-function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewModel, blocked: boolean, basePath: string): string {
+function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewModel, blocked: boolean, basePath: string, messagingLocalSession = false): string {
   const action = source.connection.action;
+  if (source.source_id === 'telegram.messages' || source.source_id === 'whatsapp.personal.messages') {
+    return renderMessagingCard(source.source_id === 'telegram.messages' ? 'telegram' : 'whatsapp', messagingLocalSession);
+  }
   const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
   const id = { sourceId: source.source_id };
   // Imports happen on the main page, from the source's card: the button goes there and opens its Import an archive.
@@ -226,6 +233,9 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
       blurb: setupBlurb(source),
       action: { label: action.label, kind: 'link', href: `${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardImportLandingToken(source.source_id)}` },
     });
+  }
+  if (action.kind === 'guided_session' && (action.source === 'telegram' || action.source === 'whatsapp')) {
+    return renderMessagingCard(action.source, messagingLocalSession);
   }
   if (action.kind === 'guided_session') {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;

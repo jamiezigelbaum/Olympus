@@ -15152,6 +15152,18 @@ var init_vocabulary = __esm(() => {
     }
   };
   DASHBOARD_CHATGPT_PRIVACY_COPY = {
+    addRule: "Add a rule",
+    details: "Details",
+    judgingDetails: "Olympus reads your own words when judging each item. Your answers to the follow-up questions become sentences in that description. Always-private rules can only add protection; secrets always stay on your computer.",
+    kindPrompt: "What would you like to keep private?",
+    step: "Step {step} of 3",
+    stepPick: "Step 2 of 3",
+    sheetBack: "Back",
+    next: "Next",
+    select: "Choose",
+    selected: "Selected",
+    selectFor: "Choose {name}",
+    confirmRule: "Keep this private?",
     back: "Back to Olympus",
     title: "What's private for you?",
     intro: "Olympus shares your items with ChatGPT unless you say they're private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.",
@@ -15179,7 +15191,7 @@ var init_vocabulary = __esm(() => {
     needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
     needGmail: "Connect Gmail to add a label.",
     nothingToSave: "Nothing to save yet. Change a rule or the description first.",
-    save: "Save",
+    save: "Save description and answers",
     saving: "Saving…",
     cancel: "Cancel",
     saveFailed: "Olympus could not save. Your changes are still here. Try again.",
@@ -15227,6 +15239,8 @@ var init_vocabulary = __esm(() => {
     },
     rowNoCount: "Uses your description and always-private rules.",
     edit: "Edit",
+    descriptionEmpty: "You haven't said what's private yet.",
+    descriptionStart: "Describe what's private",
     editLabel: "Edit what's private",
     dashboardPending: {
       one: "{n} item waiting to be checked",
@@ -19445,6 +19459,7 @@ var DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_PO
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
+  init_embeddings();
   init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();
@@ -28508,6 +28523,10 @@ async function prepareTelegramStart(input, options) {
   }
   assertUsableFile(sessionPath, "Telegram .session");
   const approvedScopes = firstPresent(env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES, env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES);
+  const scopeValues = (approvedScopes ?? "").split(",").map((scope) => scope.trim()).filter(Boolean);
+  if (scopeValues.some((scope) => scope.includes("*")) && !(scopeValues.length === 1 && scopeValues[0] === "*")) {
+    throw new NativeProcessConfigurationError("Olympus Telegram capture service requires exact chat scopes or a whole-account grant.");
+  }
   const approvedChatCount = new Set((approvedScopes ?? "").split(",").map((scope) => scope.trim()).filter(Boolean)).size;
   if (approvedChatCount === 0) {
     throw new NativeProcessConfigurationError("Olympus Telegram capture service requires at least one approved chat scope.");

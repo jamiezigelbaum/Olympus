@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=2228bfcb6c65"
+          "resourceUri": "ui://olympus/dashboard?v=0866c0deca7c"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=2228bfcb6c65",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=0866c0deca7c",
         "openai/ui": {
           "entrypoints": [
             {
@@ -81,9 +81,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=ab3d6500c799"
+          "resourceUri": "ui://olympus/private-answer?v=294f06194b13"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=ab3d6500c799"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
       }
     },
     {
@@ -145,9 +145,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=ab3d6500c799"
+          "resourceUri": "ui://olympus/private-answer?v=294f06194b13"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=ab3d6500c799"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
       }
     },
     {
@@ -180,9 +180,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=ab3d6500c799"
+          "resourceUri": "ui://olympus/private-answer?v=294f06194b13"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=ab3d6500c799"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
       }
     },
     {
@@ -250,9 +250,9 @@
       },
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-question?v=d87fa9f76ad4"
+          "resourceUri": "ui://olympus/private-question?v=6a855045efb7"
         },
-        "openai/outputTemplate": "ui://olympus/private-question?v=d87fa9f76ad4"
+        "openai/outputTemplate": "ui://olympus/private-question?v=6a855045efb7"
       },
       "annotations": {
         "readOnlyHint": false,
@@ -963,17 +963,17 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=2228bfcb6c65",
+      "uri": "ui://olympus/dashboard?v=0866c0deca7c",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-answer?v=ab3d6500c799",
+      "uri": "ui://olympus/private-answer?v=294f06194b13",
       "name": "Olympus private answer",
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-question?v=d87fa9f76ad4",
+      "uri": "ui://olympus/private-question?v=6a855045efb7",
       "name": "Olympus private question",
       "mimeType": "text/html;profile=mcp-app"
     }

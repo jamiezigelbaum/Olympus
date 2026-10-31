@@ -122,6 +122,21 @@ describe('packaged messaging pairing', () => {
     expect(JSON.stringify(result)).not.toContain('fixture-hash');
   });
 
+  test('Telegram whole-account approval includes chats created after pairing', async () => {
+    const root = packageFixture();
+    const result = await pairMessagingSource({
+      source: 'telegram', packageRoot: root, homeDir: join(root, 'home'), env: {},
+      pythonExecutable: '/usr/bin/python3', secretStore: memorySecretStore(),
+      captureScopeApproval: { source: 'telegram', explicitApproval: true, wholeAccount: true } as never,
+      runCommand: async (request) => telegramReady(request.env.OLYMPUS_TELEGRAM_SESSION_PATH),
+      registerSession: async () => ({ ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] }),
+    });
+    expect(result.status).toBe('connected');
+    if (result.status !== 'connected') throw new Error('expected connected result');
+    expect(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES).toBe('*');
+    expect(result.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES).toBe('*');
+  });
+
   test('Telegram publishes ready only after an exact listed-chat approval', async () => {
     const root = packageFixture();
     const secrets = memorySecretStore();
@@ -776,3 +791,39 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
     expect(hashOf(root)).toBe(PROVED);
   });
 });
+
+
+
+for (const scenario of ['same-account', 'unapproved', 'unknown-account', 'other-session', 'mismatched-scopes', 'wildcard', 'malformed'] as const) {
+  test(`Telegram retained missing-chat approval: ${scenario}`, async () => {
+    const root = packageFixture();
+    const registryPath = join(root, 'handles.json');
+    if (scenario !== 'unknown-account') updateSourceRegistry({ HOME: join(root, 'home') }, registry => {
+      registry.accounts.push({ source_id: 'telegram.messages', slot: '1', state: 'active', layout: 'folder', corpus_ids: ['secure_local.telegram.messages'], provider_account_hash: 'telegram:abcdef0123456789', created_at: '2026-10-25T00:00:00.000Z' });
+    });
+    const raw = scenario === 'wildcard' ? '*' : scenario === 'malformed' ? '*,telegram.personal:chat:999' : 'telegram.personal:chat:999';
+    writeFileSync(join(root, 'messaging-capture.telegram.json'), JSON.stringify({ version: 1, source: 'telegram', handle: 'telegram.personal', grantedAt: '2026-01-01', ...(scenario === 'other-session' ? { sessionPath: join(root, 'other-session') } : {}), producer: { source: 'telegram', secretEnvironment: [], env: { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: raw, OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scenario === 'mismatched-scopes' ? 'telegram.personal:chat:888' : raw } } }), { mode: 0o600 });
+    let registered = false;
+    const pairing = pairMessagingSource({
+      source: 'telegram', packageRoot: root, homeDir: join(root, 'home'), env: {}, registryPath,
+      pythonExecutable: '/usr/bin/python3', secretStore: memorySecretStore(),
+      captureScopeApproval: { source: 'telegram', explicitApproval: true, chatScopes: [scenario === 'unapproved' ? 'telegram.personal:chat:888' : 'telegram.personal:chat:999'] },
+      runCommand: async request => {
+        const base = request.env.OLYMPUS_TELEGRAM_SESSION_PATH!;
+        mkdirSync(dirname(base), { recursive: true }); writeFileSync(`${base}.session`, 'fixture-login');
+        return telegramReady(base);
+      },
+      registerSession: async () => { registered = true; return { ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] }; },
+    });
+    if (scenario !== 'same-account') {
+      await expect(pairing).rejects.toThrow('not in the verified account listing');
+      expect(registered).toBe(false);
+      if (scenario === 'unknown-account') expect(readSourceRegistry({ HOME: join(root, 'home') }).accounts[0]?.provider_account_hash).toBeUndefined();
+    } else {
+      const result = await pairing;
+      expect(result.registered).toBe(true);
+      if (!result.registered) throw new Error('Expected re-pair');
+      expect(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES).toBe('telegram.personal:chat:999');
+    }
+  });
+}

@@ -209,6 +209,9 @@ export interface SecretLocationNote {
   findingKinds: readonly string[];
 }
 
+// The screened location an owner-only saved answer must revalidate on read.
+export interface SavedSecretLocation { source: string; ref: string; fingerprint: string }
+
 // Items stored and keyword-searchable but not yet final (not embedded).
 export interface ClassificationCoverageNote {
   corpusId: string;
