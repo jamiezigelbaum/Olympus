@@ -42052,7 +42052,7 @@ function privacyLogic(config) {
     for (const rule of draft.rules)
       if (rule.saved && rule.removed)
         removed[identity(rule)] = true;
-    const additions = draft.rules.filter((rule) => !rule.saved && !rule.removed);
+    const additions = draft.rules.filter((rule) => (!rule.saved || rule.readded) && !rule.removed);
     const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
     for (const rule of fresh)
       if (removed[identity(rule)])
@@ -44383,6 +44383,9 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       const content = result && result.structuredContent;
       if (data2 && content && content.status === "conflict") {
         L.addTo(s.rules, rule);
+        for (const item of s.rules)
+          if (identity(item) === identity(rule))
+            item.readded = true;
         changed();
         return conflict(data2);
       }

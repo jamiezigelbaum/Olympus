@@ -258,6 +258,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       const content = result && result.structuredContent;
       if (data && content && content.status === 'conflict') {
         L.addTo(s.rules, rule);
+        // Restoring a previously saved rule is also an explicit addition:
+        // another editor may have removed it in the conflicting revision.
+        for (const item of s.rules) if (identity(item) === identity(rule)) item.readded = true;
         changed();
         return conflict(data);
       }

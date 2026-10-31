@@ -503,6 +503,44 @@ describe('saving', () => {
     expect(host.text()).toContain(W.saved);
   });
 
+  for (const kind of ['folder', 'label', 'sender'] as const) {
+    test(`re-adding a removed ${kind} survives a conflict when another editor removed it`, async () => {
+      const rule = SAVED_RULES.find((item) => item.kind === kind)!;
+      const sent: any[] = [];
+      const theirs = [{ kind: 'sender', source_id: 'gmail.email', value: 'other@example.com' }];
+      const { host } = await openPrivacy({
+        rules: [rule],
+        setResult: (args) => {
+          sent.push(args);
+          return sent.length === 1
+            ? privacyResult('their words', theirs, 0, { revision: 'rev2', status: 'conflict' })
+            : privacyResult(args.description, args.rules, 0, { revision: 'rev3', status: 'saved' });
+        },
+      });
+      const name = kind === 'folder' ? 'Medical Records' : kind === 'label' ? 'Lawyer Letters' : 'doctor@clinic.example';
+      host.button(`Remove ${name}`).click();
+      if (kind === 'sender') {
+        host.button(W.addSender).click();
+        const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
+        input.value = name;
+        input.dispatchEvent(new host.win.Event('input') as unknown as Event);
+        host.button(W.senderAdd).click();
+      } else {
+        host.button(kind === 'folder' ? W.addFolder : W.addLabel).click();
+        await host.settle();
+        host.button(`Make ${name} private`).click();
+      }
+      await host.settle();
+      expect(host.text()).toContain(W.conflict);
+      host.button(W.applyAgain).click();
+      await host.settle();
+      expect(sent).toHaveLength(2);
+      expect(sent[1].revision).toBe('rev2');
+      expect(sent[1].rules).toEqual([...theirs, rule]);
+      expect(host.text()).toContain(W.saved);
+    });
+  }
+
   test('after a conflict, a re-applied removal still asks first, then saves against the new revision', async () => {
     let conflicted = false;
     const sent: any[] = [];

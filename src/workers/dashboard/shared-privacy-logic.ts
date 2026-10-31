@@ -198,7 +198,7 @@ export function privacyLogic(config: PrivacyLogicConfig) {
   ): { rules: any[]; description: string | null } {
     const removed: Record<string, boolean> = {};
     for (const rule of draft.rules) if (rule.saved && rule.removed) removed[identity(rule)] = true;
-    const additions = draft.rules.filter((rule: any) => !rule.saved && !rule.removed);
+    const additions = draft.rules.filter((rule: any) => (!rule.saved || rule.readded) && !rule.removed);
     const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
     for (const rule of fresh) if (removed[identity(rule)]) rule.removed = true;
     for (const rule of additions) addTo(fresh, rule);
