@@ -472,8 +472,13 @@ export function privacyLogic(config: PrivacyLogicConfig) {
     return JSON.stringify(questions(description));
   }
 
+  /** Compact display only: the complete owner wording and choices remain in Details. */
+  function summary(description: string): string {
+    return String(description || '').replace(/\s+/g, ' ').trim();
+  }
+
   return {
-    setIntent, satisfies, validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
+    summary, setIntent, satisfies, validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
     detectTopics, topicAnswers, refineDescription, fitsAnswers, questions, questionsKey, answerTopic, withShownAnswers,
   };
 }

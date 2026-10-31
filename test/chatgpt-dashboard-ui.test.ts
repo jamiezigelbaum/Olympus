@@ -1022,6 +1022,8 @@ describe('freshness: the page re-reads the dashboard while it is visible', () =>
       _meta: { [CHATGPT_PRIVACY_META_KEY]: { description: 'my health and money', rules: [], pendingCount: 0 } },
     });
     await flush();
+    expect(host.win.document.querySelector('textarea')).toBeNull();
+    host.button('Edit').click();
     const area = host.win.document.querySelector('textarea') as unknown as HTMLTextAreaElement;
     area.focus();
     area.setSelectionRange(3, 8);
