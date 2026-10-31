@@ -60,3 +60,21 @@ test('retries failed setup and rearms after a watcher error, then stops retrying
     expect(attempts).toBe(before);
   } finally { close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('a change event without a file name wakes instead of throwing (Bun on Linux passes undefined)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'spool-noname-'));
+  const spool = join(root, 'spool');
+  mkdirSync(spool);
+  const listeners: Array<(event: string, name: string | null | undefined) => void> = [];
+  const fakeWatch = ((_dir: string, _options: unknown, listener: (event: string, name: string | null | undefined) => void) => {
+    listeners.push(listener);
+    return Object.assign(new EventEmitter(), { close: () => {} });
+  }) as unknown as typeof import('node:fs').watch;
+  let wakes = 0;
+  const close = createSpoolChangeSubscription(spool, { watch: fakeWatch })(() => { wakes++; });
+  try {
+    expect(listeners.length).toBe(2);
+    for (const listener of listeners.slice(0, 2)) expect(() => listener('rename', undefined)).not.toThrow();
+    expect(wakes).toBe(2);
+  } finally { close(); rmSync(root, { recursive: true, force: true }); }
+});

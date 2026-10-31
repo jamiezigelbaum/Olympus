@@ -138943,7 +138943,7 @@ function createSpoolChangeSubscription(spoolDir, options = {}) {
       const next = target.slice(parent.length + (parent === "/" ? 0 : 1)).split("/")[0];
       try {
         const watcher = watchDir(parent, { persistent: false }, (_event, name) => {
-          if (name === null || (name.toString() === next || name.toString().startsWith(`${next}/`))) {
+          if (name == null || (name.toString() === next || name.toString().startsWith(`${next}/`))) {
             arm();
             wake();
           }
@@ -138952,7 +138952,7 @@ function createSpoolChangeSubscription(spoolDir, options = {}) {
         watchers.push(watcher);
         if (existsSync84(target)) {
           const spool = watchDir(target, { persistent: false }, (_event, name) => {
-            if (name === null || name.toString().endsWith(".jsonl"))
+            if (name == null || name.toString().endsWith(".jsonl"))
               wake();
           });
           spool.on("error", retry);
