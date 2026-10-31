@@ -197,6 +197,27 @@ describe('v0.4 positive public surface', () => {
     expect(paths.filter(path => !isV04PublicDashboardRoute('POST', path))).toEqual([]);
   });
 
+  test('every dashboard path the UI calls reaches the engine, or is named as answered by the host', () => {
+    // Answered by the HTTP host itself and never forwarded to the engine (src/workers/http.ts).
+    const hostAnswered = new Set(['/dashboard/control/session/lock']);
+    const roots = ['../src/workers/dashboard', '../src/control-ui'].map(dir => join(import.meta.dir, dir));
+    const missing: string[] = [];
+    for (const root of roots) {
+      for (const file of new Bun.Glob('**/*.ts').scanSync(root)) {
+        const source = readFileSync(join(root, file), 'utf8');
+        for (const [, path] of source.matchAll(/['"`](\/dashboard\/[A-Za-z0-9_\-\/]+)/g)) {
+          if (hostAnswered.has(path!)) continue;
+          // A path the UI completes at run time ('/dashboard/messaging/' + operation) needs a public route under it.
+          const reached = path!.endsWith('/')
+            ? V0_4_PUBLIC_DASHBOARD_ROUTES.some(route => route.path.startsWith(path!))
+            : isV04PublicDashboardRoute('POST', path!) || isV04PublicDashboardRoute('GET', path!);
+          if (!reached) missing.push(`${path} (${file})`);
+        }
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
   test('one complete connector-owned catalog feeds dashboard, doctor, and docs', () => {
     expect(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((source) => source.source_id))
       .toEqual([...V0_4_PUBLIC_SOURCE_IDS]);
