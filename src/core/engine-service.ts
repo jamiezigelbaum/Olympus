@@ -38,12 +38,12 @@ import {
 import { engineChildrenPath, reapRecordedEngineChildren, type EngineChildReapDeps, type EngineChildReapResult } from './engine-children.ts';
 import { redactLogLine } from './log-redaction.ts';
 import { OperationError } from './operation-error.ts';
-import { openClawConfigPath } from './config.ts';
+import { loadConfig, openClawConfigPath } from './config.ts';
 import { olympusPackageRoot } from './package-root.ts';
 import { olympusDataDir, remoteAccessDir } from './remote-access.ts';
-import { validateSovereigntyConfig, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
+import { loadSovereigntyEngine, validateSovereigntyConfig, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
 import { createPendingPrivacyPolicy, isPendingPrivacyPolicy } from './first-run-privacy.ts';
-import { workerAuthTokenFromSetupEnv } from './worker-auth.ts';
+import { environmentWithWorkerSetupEnv, workerAuthTokenFromSetupEnv } from './worker-auth.ts';
 import { ensureManagedWorkerEnvironment, workerServicePaths } from './worker-service.ts';
 import { defaultZkapiStatePath, zkapiConsultInFlightOnDisk } from './consult-transport-zkapi.ts';
 
@@ -983,7 +983,22 @@ export function resolveInstallationPrivacyState(input: {
   if (existsSync(paths.configPath) || existsSync(paths.plistPath)) return {
     state: 'configured', reason: 'An existing engine installation has no policy file; its current policy is preserved.',
   };
-  const blocker = engineSovereigntySeedBlocker({ homeDir: env.HOME, workerEnvPath: paths.workerEnvPath, env });
+  const platform = paths.linux ? 'linux' : 'darwin';
+  const worker = workerServicePaths(platform, env.HOME, env);
+  if (existsSync(worker.unitPath)) {
+    // Only an installed worker gives config.json authority. A leftover config
+    // on a fresh machine must never bypass the owner's first-run choice.
+    const workerEnv = environmentWithWorkerSetupEnv({ env, workerEnvPath: worker.envPath });
+    const config = loadConfig(workerEnv);
+    const policy = loadSovereigntyEngine({
+      inlineConfig: config.sovereignty?.policy,
+      ...(config.sovereignty?.configPath ? { configPath: config.sovereignty.configPath } : {}),
+      env: workerEnv,
+    }).config;
+    return { state: isPendingPrivacyPolicy(policy) ? 'pending' : 'configured',
+      reason: `The installed worker from olympus worker install (${worker.unitPath}) retains its effective policy.` };
+  }
+  const blocker = engineSovereigntySeedBlocker({ homeDir: env.HOME, workerEnvPath: paths.workerEnvPath, env, platform });
   if (blocker) return { state: 'configured', reason: blocker };
   return { state: 'not_installed' };
 }
@@ -1007,6 +1022,7 @@ export function engineSovereigntySeedBlocker(input: {
   homeDir: string;
   workerEnvPath: string;
   env?: Record<string, string | undefined>;
+  platform?: 'linux' | 'darwin';
 }): string | undefined {
   try {
     if (existsSync(input.workerEnvPath)) {
@@ -1016,8 +1032,8 @@ export function engineSovereigntySeedBlocker(input: {
   } catch {
     return `${input.workerEnvPath} could not be read to check for an existing policy.`;
   }
-  const legacy = workerServicePaths('darwin', input.homeDir).unitPath;
-  if (existsSync(legacy)) return `the worker LaunchAgent from olympus worker install (${legacy}) already runs Olympus with its own environment.`;
+  const legacy = workerServicePaths(input.platform ?? (process.platform === 'linux' ? 'linux' : 'darwin'), input.homeDir, input.env).unitPath;
+  if (existsSync(legacy)) return `the worker service from olympus worker install (${legacy}) already runs Olympus with its own environment.`;
   const openclawConfig = openClawConfigPath(input.homeDir, input.env ?? process.env);
   if (existsSync(openclawConfig)) {
     let text: string;

@@ -32,7 +32,11 @@ source reads, including picker metadata, while the authenticated local
 computer dashboard can browse. Agent setup and engine installation share the
 installed-policy state resolver, preserving environment-backed, inline
 and custom-path upgrades without asking again. Ambient shell keys and abandoned
-config files do not count as an installation. Pending setup shows the choice
+config files do not count as an installation. Legacy worker detection uses the
+platform service path (including Linux XDG overrides), then resolves its inline,
+custom-file or environment policy. The shared doctor operation skips source
+diagnostics before consent across CLI, native and stdio MCP while retaining
+non-source health checks. Pending setup shows the choice
 before profile editing and refuses profile writes, preserving any saved rules.
 
 In scope:

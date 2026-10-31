@@ -6598,57 +6598,6 @@ var init_router = __esm(() => {
   NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
 });
 
-// src/core/engine-maintenance.ts
-function maintenanceTarget(statePath) {
-  return `${statePath}.maintenance`;
-}
-function admissionTarget(statePath) {
-  return `${statePath}.session`;
-}
-async function assertMaintenanceClear(statePath) {
-  try {
-    await withFileLease(maintenanceTarget(statePath), async () => {
-      return;
-    }, {
-      ...MAINTENANCE_OPTIONS,
-      ...PROBE_OPTIONS
-    });
-  } catch (error) {
-    if (error instanceof FileLeaseBusyError)
-      throw new EngineMaintenanceInProgressError;
-    throw error;
-  }
-}
-function admissionOptions(options) {
-  return {
-    ...options,
-    staleAfterMs: Number.MAX_SAFE_INTEGER
-  };
-}
-async function withEngineConsultAdmission(statePath, callback, options = {}) {
-  return withFileLease(admissionTarget(statePath), async () => {
-    await assertMaintenanceClear(statePath);
-    return callback();
-  }, admissionOptions(options));
-}
-var ENGINE_MAINTENANCE_IN_PROGRESS_MESSAGE = "Olympus engine maintenance is in progress; try again after it finishes.", EngineMaintenanceInProgressError, PROBE_OPTIONS, MAINTENANCE_OPTIONS;
-var init_engine_maintenance = __esm(() => {
-  init_file_lease();
-  EngineMaintenanceInProgressError = class EngineMaintenanceInProgressError extends Error {
-    code = "engine_maintenance_in_progress";
-    constructor() {
-      super(ENGINE_MAINTENANCE_IN_PROGRESS_MESSAGE);
-    }
-  };
-  PROBE_OPTIONS = {
-    acquireTimeoutMs: 1,
-    pollIntervalMs: 1,
-    staleAfterMs: Number.MAX_SAFE_INTEGER
-  };
-  MAINTENANCE_OPTIONS = {
-    staleAfterMs: Number.MAX_SAFE_INTEGER
-  };
-});
 // src/core/source-model-policy.ts
 function assertModelTrustTierAllowed(trustTier) {
   if (trustTier === "S5") {
@@ -6774,8 +6723,8 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync as chmodSync2, existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync20 } from "node:fs";
-import { dirname as dirname18, join as join26, resolve as resolve8 } from "node:path";
+import { chmodSync as chmodSync2, existsSync as existsSync8, mkdirSync as mkdirSync9, readFileSync as readFileSync19 } from "node:fs";
+import { dirname as dirname16, join as join24, resolve as resolve8 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID as randomUUID6 } from "node:crypto";
@@ -6792,7 +6741,7 @@ function loadSovereigntyEngine(options = {}) {
   }
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
-  if (existsSync10(configPath)) {
+  if (existsSync8(configPath)) {
     const isDefaultPath = (path) => {
       try {
         return resolve8(path) === resolve8(defaultSovereigntyConfigPath(env));
@@ -6810,7 +6759,7 @@ function loadSovereigntyEngine(options = {}) {
         console.warn("Private meaning search upgrade could not finish; loading the current privacy policy. It will retry on the next start.");
       }
     }
-    const parsed = JSON.parse(readFileSync20(configPath, "utf8"));
+    const parsed = JSON.parse(readFileSync19(configPath, "utf8"));
     if (options.migratePrivateMeaning && !standaloneDefault && parsed?.retrieval?.trustDomains?.secure_local?.activationMode === "metadata_only") {
       console.info("Pinned or hosted privacy policy still uses the 1.0.0 keyword-only Private setting; no migration was performed.");
     }
@@ -7083,16 +7032,16 @@ function migratePrivateMeaningSearch(path) {
       }
     } }
   };
-  if (!existsSync10(path))
+  if (!existsSync8(path))
     return;
   const eligible = (current2) => {
     const config = current2;
     return config?.schemaVersion === 1 && isDeepStrictEqual(config.retrieval?.trustDomains?.secure_local, legacy.retrieval.trustDomains.secure_local) && isDeepStrictEqual(config.modelProfiles?.["built-in-embedding"], legacy.modelProfiles["built-in-embedding"]);
   };
-  if (!eligible(JSON.parse(readFileSync20(path, "utf8"))))
+  if (!eligible(JSON.parse(readFileSync19(path, "utf8"))))
     return;
   return withFileLeaseSync(path, (lease) => {
-    const original = readFileSync20(path, "utf8");
+    const original = readFileSync19(path, "utf8");
     const current2 = JSON.parse(original);
     if (!eligible(current2))
       return;
@@ -7119,10 +7068,10 @@ function migratePrivateMeaningSearch(path) {
   }, { acquireTimeoutMs: 5000 });
 }
 function loadSovereigntyPreset(name) {
-  const sourceLayoutPath = join26(dirname18(fileURLToPath5(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
-  const bundledLayoutPath = join26(dirname18(fileURLToPath5(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
-  const path = existsSync10(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
-  const parsed = JSON.parse(readFileSync20(path, "utf8"));
+  const sourceLayoutPath = join24(dirname16(fileURLToPath5(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
+  const bundledLayoutPath = join24(dirname16(fileURLToPath5(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
+  const path = existsSync8(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
+  const parsed = JSON.parse(readFileSync19(path, "utf8"));
   return validateSovereigntyConfig(parsed);
 }
 function parseSovereigntyConfig(value, label) {
@@ -7554,6 +7503,57 @@ var init_sovereignty = __esm(() => {
   };
 });
 
+// src/core/engine-maintenance.ts
+function maintenanceTarget(statePath) {
+  return `${statePath}.maintenance`;
+}
+function admissionTarget(statePath) {
+  return `${statePath}.session`;
+}
+async function assertMaintenanceClear(statePath) {
+  try {
+    await withFileLease(maintenanceTarget(statePath), async () => {
+      return;
+    }, {
+      ...MAINTENANCE_OPTIONS,
+      ...PROBE_OPTIONS
+    });
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError)
+      throw new EngineMaintenanceInProgressError;
+    throw error;
+  }
+}
+function admissionOptions(options) {
+  return {
+    ...options,
+    staleAfterMs: Number.MAX_SAFE_INTEGER
+  };
+}
+async function withEngineConsultAdmission(statePath, callback, options = {}) {
+  return withFileLease(admissionTarget(statePath), async () => {
+    await assertMaintenanceClear(statePath);
+    return callback();
+  }, admissionOptions(options));
+}
+var ENGINE_MAINTENANCE_IN_PROGRESS_MESSAGE = "Olympus engine maintenance is in progress; try again after it finishes.", EngineMaintenanceInProgressError, PROBE_OPTIONS, MAINTENANCE_OPTIONS;
+var init_engine_maintenance = __esm(() => {
+  init_file_lease();
+  EngineMaintenanceInProgressError = class EngineMaintenanceInProgressError extends Error {
+    code = "engine_maintenance_in_progress";
+    constructor() {
+      super(ENGINE_MAINTENANCE_IN_PROGRESS_MESSAGE);
+    }
+  };
+  PROBE_OPTIONS = {
+    acquireTimeoutMs: 1,
+    pollIntervalMs: 1,
+    staleAfterMs: Number.MAX_SAFE_INTEGER
+  };
+  MAINTENANCE_OPTIONS = {
+    staleAfterMs: Number.MAX_SAFE_INTEGER
+  };
+});
 // src/core/worker-service.ts
 import { basename as basename4, dirname as dirname19, isAbsolute as isAbsolute16, join as join27, relative as relative3, sep as sep3 } from "node:path";
 function workerServicePaths(platform2, homeDir, env = {}) {
@@ -29268,22 +29268,28 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/operations.ts
 init_release_manifest();
 
+// src/core/first-run-privacy.ts
+init_sovereignty();
+function isPendingPrivacyPolicy(config) {
+  return config.privacyChoicePending === true || config.routes?.secure_local?.disabledReason === PENDING_PRIVACY_REASON;
+}
+
 // src/core/messaging-runtime.ts
 init_atomic_file();
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync8, rmSync as rmSync4 } from "node:fs";
+import { existsSync as existsSync9, rmSync as rmSync4 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { dirname as dirname16, join as join24 } from "node:path";
+import { dirname as dirname17, join as join25 } from "node:path";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir9();
-  return join24(env.XDG_CACHE_HOME ?? join24(home, ".cache"), "olympus", "telegram-python");
+  return join25(env.XDG_CACHE_HOME ?? join25(home, ".cache"), "olympus", "telegram-python");
 }
 function telegramPythonExecutable(options = {}) {
   if (options.pythonExecutable)
     return options.pythonExecutable;
-  const isolated = join24(telegramPythonVenvDir(options), "bin", "python");
-  if (existsSync8(isolated))
+  const isolated = join25(telegramPythonVenvDir(options), "bin", "python");
+  if (existsSync9(isolated))
     return isolated;
   if (typeof Bun !== "undefined")
     return Bun.which("python3") ?? undefined;
@@ -29330,16 +29336,16 @@ import { basename as basename5, dirname as dirname23, isAbsolute as isAbsolute19
 // src/core/engine-children.ts
 init_atomic_file();
 init_remote_access();
-import { existsSync as existsSync9, mkdirSync as mkdirSync9, readFileSync as readFileSync19 } from "node:fs";
-import { dirname as dirname17, join as join25 } from "node:path";
+import { existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync20 } from "node:fs";
+import { dirname as dirname18, join as join26 } from "node:path";
 var ENGINE_CHILDREN_SCHEMA = "olympus.engine.children.v2";
 var ENGINE_CHILDREN_SCHEMA_V1 = "olympus.engine.children.v1";
 function engineChildrenPath(env = process.env) {
-  return join25(olympusDataDir(env), "engine", "children.json");
+  return join26(olympusDataDir(env), "engine", "children.json");
 }
 function readEngineChildren(path) {
   try {
-    const parsed = JSON.parse(readFileSync19(path, "utf8"));
+    const parsed = JSON.parse(readFileSync20(path, "utf8"));
     if (!Array.isArray(parsed?.children))
       return;
     if (parsed.schema !== ENGINE_CHILDREN_SCHEMA && parsed.schema !== ENGINE_CHILDREN_SCHEMA_V1)
@@ -29376,11 +29382,6 @@ init_operation_error();
 init_config();
 init_remote_access();
 init_sovereignty();
-
-// src/core/first-run-privacy.ts
-init_sovereignty();
-
-// src/core/engine-service.ts
 init_worker_auth();
 init_worker_service();
 init_consult_transport_zkapi();
@@ -32002,28 +32003,40 @@ var ON_DEMAND_TIER_CORPUS_IDS = new Set(ON_DEMAND_TIER_CORPORA.map((corpus) => c
 async function runDoctor(input) {
   const inputEnv = input.env;
   const deps = inputEnv === undefined ? input : doctorDepsWithLayeredEnvironment(input, inputEnv);
+  let sourceDiagnostics;
+  try {
+    const policy = doctorSovereigntyEngine(deps)?.config;
+    sourceDiagnostics = policy && isPendingPrivacyPolicy(policy) ? "pending" : "allowed";
+  } catch {
+    sourceDiagnostics = "unavailable";
+  }
+  const sourceCheck = (name, run) => sourceDiagnostics === "allowed" ? safeCheck(name, run) : Promise.resolve({
+    name,
+    ok: sourceDiagnostics === "pending",
+    detail: sourceDiagnostics === "pending" ? "Skipped: source diagnostics await the first-run privacy choice." : "Skipped: source diagnostics are unavailable until the privacy policy can be read."
+  });
   const checks = [
     ...deps.hostProbe ? [await safeCheck("host", () => hostCheck(deps))] : [],
     await safeCheck("dependencies", () => dependencyCheck(deps)),
     ...deps.ocrProbe ? [await safeCheck("ocr_reading", () => ocrReadingCheck(deps))] : [],
-    await safeCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
+    await sourceCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
     await safeCheck("sovereignty_prerequisites", () => sovereigntyPrerequisiteCheck(deps)),
-    await safeCheck("credential_handles", () => credentialHandleCheck(deps)),
-    await safeCheck("detached_oauth_connections", () => detachedOAuthConnectionCheck(deps)),
-    await safeCheck("google_oauth_refresh_lifetime", () => googleOAuthRefreshLifetimeCheck(deps)),
-    await safeCheck("credential_reauthorization_backlog", () => credentialReauthorizationBacklogCheck(deps)),
+    await sourceCheck("credential_handles", () => credentialHandleCheck(deps)),
+    await sourceCheck("detached_oauth_connections", () => detachedOAuthConnectionCheck(deps)),
+    await sourceCheck("google_oauth_refresh_lifetime", () => googleOAuthRefreshLifetimeCheck(deps)),
+    await sourceCheck("credential_reauthorization_backlog", () => credentialReauthorizationBacklogCheck(deps)),
     await safeCheck("argus_model_pool", () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck("sovereignty_model_lanes", () => sovereigntyModelLaneCheck(deps)),
     await safeCheck("zkapi_consult_transport", () => zkapiConsultTransportCheck(deps)),
     await safeCheck("consult_settings", () => consultSettingsCheck(deps)),
     await safeCheck("consult_vocabulary", () => consultVocabularyCheck(deps)),
-    await safeCheck("email_worker", () => emailWorkerCheck(deps)),
-    await safeCheck("worker_credential_lanes", () => workerCredentialLanesCheck(deps)),
-    await safeCheck("dropbox_content_extraction_throughput", () => dropboxContentExtractionThroughputCheck(deps)),
+    await sourceCheck("email_worker", () => emailWorkerCheck(deps)),
+    await sourceCheck("worker_credential_lanes", () => workerCredentialLanesCheck(deps)),
+    await sourceCheck("dropbox_content_extraction_throughput", () => dropboxContentExtractionThroughputCheck(deps)),
     await safeCheck("photo_search", () => photoSearchCheck(deps)),
-    await safeCheck("source_index_status", () => sourceIndexStatusCheck(deps)),
-    await safeCheck("source_scheduler_status", () => sourceSchedulerStatusCheck(deps)),
-    await safeCheck("source_ingestion_health", () => sourceIngestionHealthCheck(deps))
+    await sourceCheck("source_index_status", () => sourceIndexStatusCheck(deps)),
+    await sourceCheck("source_scheduler_status", () => sourceSchedulerStatusCheck(deps)),
+    await sourceCheck("source_ingestion_health", () => sourceIngestionHealthCheck(deps))
   ];
   return {
     ok: checks.every((check) => check.ok),

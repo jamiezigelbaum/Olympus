@@ -100205,6 +100205,37 @@ var init_operation_exposure = __esm(() => {
   init_public_surface();
 });
 
+// src/core/first-run-privacy.ts
+import { readFileSync as readFileSync49 } from "node:fs";
+function createPendingPrivacyPolicy() {
+  const config = loadSovereigntyPreset("no-sensitive");
+  config.privacyChoicePending = true;
+  config.routes.internal = { mode: "disabled", pool: { members: [] }, disabledReason: PENDING_PRIVACY_REASON };
+  config.routes.secure_local = { mode: "disabled", pool: { members: [] }, disabledReason: PENDING_PRIVACY_REASON };
+  config.retrieval.trustDomains.internal.allowCloudQuery = false;
+  return validateSovereigntyConfig(config);
+}
+function isPendingPrivacyPolicy(config) {
+  return config.privacyChoicePending === true || config.routes?.secure_local?.disabledReason === PENDING_PRIVACY_REASON;
+}
+function saveFirstRunPrivacyChoice(path, choice) {
+  return updateSovereigntyConfigFile({ path, patch: (current2) => isPendingPrivacyPolicy(current2) ? loadSovereigntyPreset(choice) : current2 });
+}
+function privacyChoicePending(policy) {
+  if (!isPendingPrivacyPolicy(policy.config))
+    return false;
+  if (!policy.path)
+    return true;
+  try {
+    return isPendingPrivacyPolicy(validateSovereigntyConfig(JSON.parse(readFileSync49(policy.path, "utf8"))));
+  } catch {
+    return true;
+  }
+}
+var init_first_run_privacy = __esm(() => {
+  init_sovereignty();
+});
+
 // src/core/linux-owner-bridge-host.ts
 import { randomBytes as randomBytes14 } from "node:crypto";
 import { lstatSync as lstatSync31, unlinkSync as unlinkSync3 } from "node:fs";
@@ -101239,14 +101270,14 @@ var init_engine_maintenance = __esm(() => {
 
 // src/core/engine-children.ts
 import { spawnSync as spawnSync12 } from "node:child_process";
-import { existsSync as existsSync65, mkdirSync as mkdirSync42, readFileSync as readFileSync49 } from "node:fs";
+import { existsSync as existsSync65, mkdirSync as mkdirSync42, readFileSync as readFileSync50 } from "node:fs";
 import { dirname as dirname67, join as join92 } from "node:path";
 function engineChildrenPath(env = process.env) {
   return join92(olympusDataDir(env), "engine", "children.json");
 }
 function readEngineChildren(path) {
   try {
-    const parsed = JSON.parse(readFileSync49(path, "utf8"));
+    const parsed = JSON.parse(readFileSync50(path, "utf8"));
     if (!Array.isArray(parsed?.children))
       return;
     if (parsed.schema !== ENGINE_CHILDREN_SCHEMA && parsed.schema !== ENGINE_CHILDREN_SCHEMA_V1)
@@ -101476,37 +101507,6 @@ var init_engine_children = __esm(() => {
   LSTART = String.raw`[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}`;
   TABLE_LINE = new RegExp(String.raw`^\s*(\d+)\s+(\d+)\s+(${LSTART})\s+(.*)$`);
   PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8", TZ: "UTC" };
-});
-
-// src/core/first-run-privacy.ts
-import { readFileSync as readFileSync50 } from "node:fs";
-function createPendingPrivacyPolicy() {
-  const config = loadSovereigntyPreset("no-sensitive");
-  config.privacyChoicePending = true;
-  config.routes.internal = { mode: "disabled", pool: { members: [] }, disabledReason: PENDING_PRIVACY_REASON };
-  config.routes.secure_local = { mode: "disabled", pool: { members: [] }, disabledReason: PENDING_PRIVACY_REASON };
-  config.retrieval.trustDomains.internal.allowCloudQuery = false;
-  return validateSovereigntyConfig(config);
-}
-function isPendingPrivacyPolicy(config) {
-  return config.privacyChoicePending === true || config.routes?.secure_local?.disabledReason === PENDING_PRIVACY_REASON;
-}
-function saveFirstRunPrivacyChoice(path, choice) {
-  return updateSovereigntyConfigFile({ path, patch: (current2) => isPendingPrivacyPolicy(current2) ? loadSovereigntyPreset(choice) : current2 });
-}
-function privacyChoicePending(policy) {
-  if (!isPendingPrivacyPolicy(policy.config))
-    return false;
-  if (!policy.path)
-    return true;
-  try {
-    return isPendingPrivacyPolicy(validateSovereigntyConfig(JSON.parse(readFileSync50(policy.path, "utf8"))));
-  } catch {
-    return true;
-  }
-}
-var init_first_run_privacy = __esm(() => {
-  init_sovereignty();
 });
 
 // src/core/managed-tools.ts
@@ -107056,7 +107056,22 @@ function resolveInstallationPrivacyState(input = {}) {
       state: "configured",
       reason: "An existing engine installation has no policy file; its current policy is preserved."
     };
-  const blocker = engineSovereigntySeedBlocker({ homeDir: env.HOME, workerEnvPath: paths.workerEnvPath, env });
+  const platform2 = paths.linux ? "linux" : "darwin";
+  const worker = workerServicePaths(platform2, env.HOME, env);
+  if (existsSync67(worker.unitPath)) {
+    const workerEnv = environmentWithWorkerSetupEnv({ env, workerEnvPath: worker.envPath });
+    const config = loadConfig(workerEnv);
+    const policy = loadSovereigntyEngine({
+      inlineConfig: config.sovereignty?.policy,
+      ...config.sovereignty?.configPath ? { configPath: config.sovereignty.configPath } : {},
+      env: workerEnv
+    }).config;
+    return {
+      state: isPendingPrivacyPolicy(policy) ? "pending" : "configured",
+      reason: `The installed worker from olympus worker install (${worker.unitPath}) retains its effective policy.`
+    };
+  }
+  const blocker = engineSovereigntySeedBlocker({ homeDir: env.HOME, workerEnvPath: paths.workerEnvPath, env, platform: platform2 });
   if (blocker)
     return { state: "configured", reason: blocker };
   return { state: "not_installed" };
@@ -107071,9 +107086,9 @@ function engineSovereigntySeedBlocker(input) {
   } catch {
     return `${input.workerEnvPath} could not be read to check for an existing policy.`;
   }
-  const legacy = workerServicePaths("darwin", input.homeDir).unitPath;
+  const legacy = workerServicePaths(input.platform ?? (process.platform === "linux" ? "linux" : "darwin"), input.homeDir, input.env).unitPath;
   if (existsSync67(legacy))
-    return `the worker LaunchAgent from olympus worker install (${legacy}) already runs Olympus with its own environment.`;
+    return `the worker service from olympus worker install (${legacy}) already runs Olympus with its own environment.`;
   const openclawConfig = openClawConfigPath(input.homeDir, input.env ?? process.env);
   if (existsSync67(openclawConfig)) {
     let text3;
@@ -112998,28 +113013,40 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
 async function runDoctor(input) {
   const inputEnv = input.env;
   const deps = inputEnv === undefined ? input : doctorDepsWithLayeredEnvironment(input, inputEnv);
+  let sourceDiagnostics;
+  try {
+    const policy = doctorSovereigntyEngine(deps)?.config;
+    sourceDiagnostics = policy && isPendingPrivacyPolicy(policy) ? "pending" : "allowed";
+  } catch {
+    sourceDiagnostics = "unavailable";
+  }
+  const sourceCheck = (name, run) => sourceDiagnostics === "allowed" ? safeCheck(name, run) : Promise.resolve({
+    name,
+    ok: sourceDiagnostics === "pending",
+    detail: sourceDiagnostics === "pending" ? "Skipped: source diagnostics await the first-run privacy choice." : "Skipped: source diagnostics are unavailable until the privacy policy can be read."
+  });
   const checks = [
     ...deps.hostProbe ? [await safeCheck("host", () => hostCheck(deps))] : [],
     await safeCheck("dependencies", () => dependencyCheck(deps)),
     ...deps.ocrProbe ? [await safeCheck("ocr_reading", () => ocrReadingCheck(deps))] : [],
-    await safeCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
+    await sourceCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
     await safeCheck("sovereignty_prerequisites", () => sovereigntyPrerequisiteCheck(deps)),
-    await safeCheck("credential_handles", () => credentialHandleCheck(deps)),
-    await safeCheck("detached_oauth_connections", () => detachedOAuthConnectionCheck(deps)),
-    await safeCheck("google_oauth_refresh_lifetime", () => googleOAuthRefreshLifetimeCheck(deps)),
-    await safeCheck("credential_reauthorization_backlog", () => credentialReauthorizationBacklogCheck(deps)),
+    await sourceCheck("credential_handles", () => credentialHandleCheck(deps)),
+    await sourceCheck("detached_oauth_connections", () => detachedOAuthConnectionCheck(deps)),
+    await sourceCheck("google_oauth_refresh_lifetime", () => googleOAuthRefreshLifetimeCheck(deps)),
+    await sourceCheck("credential_reauthorization_backlog", () => credentialReauthorizationBacklogCheck(deps)),
     await safeCheck("argus_model_pool", () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck("sovereignty_model_lanes", () => sovereigntyModelLaneCheck(deps)),
     await safeCheck("zkapi_consult_transport", () => zkapiConsultTransportCheck(deps)),
     await safeCheck("consult_settings", () => consultSettingsCheck(deps)),
     await safeCheck("consult_vocabulary", () => consultVocabularyCheck(deps)),
-    await safeCheck("email_worker", () => emailWorkerCheck(deps)),
-    await safeCheck("worker_credential_lanes", () => workerCredentialLanesCheck(deps)),
-    await safeCheck("dropbox_content_extraction_throughput", () => dropboxContentExtractionThroughputCheck(deps)),
+    await sourceCheck("email_worker", () => emailWorkerCheck(deps)),
+    await sourceCheck("worker_credential_lanes", () => workerCredentialLanesCheck(deps)),
+    await sourceCheck("dropbox_content_extraction_throughput", () => dropboxContentExtractionThroughputCheck(deps)),
     await safeCheck("photo_search", () => photoSearchCheck(deps)),
-    await safeCheck("source_index_status", () => sourceIndexStatusCheck(deps)),
-    await safeCheck("source_scheduler_status", () => sourceSchedulerStatusCheck(deps)),
-    await safeCheck("source_ingestion_health", () => sourceIngestionHealthCheck(deps))
+    await sourceCheck("source_index_status", () => sourceIndexStatusCheck(deps)),
+    await sourceCheck("source_scheduler_status", () => sourceSchedulerStatusCheck(deps)),
+    await sourceCheck("source_ingestion_health", () => sourceIngestionHealthCheck(deps))
   ];
   return {
     ok: checks.every((check) => check.ok),
@@ -114370,6 +114397,7 @@ function errorDetail2(error) {
 }
 var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.", EMAIL_WORKER_HINT = "Run olympus engine status and olympus engine logs, then olympus engine restart. On a host without the engine, run olympus worker status, then olympus worker start.", SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.", SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.", CREDENTIAL_HINT2 = "Run the matching olympus connect command again for each handle that needs reauthorization.", STALE_RUNNING_SYNC_MS, EMBEDDING_LAG_RATIO = 0.1, DROPBOX_FILES_CORPUS_ID2 = "secure_local.dropbox.files", ARGUS_GENERATION_PROBE_TIMEOUT_MS = 15000, INGESTION_STUCK_WARNING_HOURS = 24, INGESTION_STUCK_ERROR_HOURS = 72, INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10, CONNECTED_SOURCE_LANES, ON_DEMAND_TIER_CORPORA, ON_DEMAND_TIER_CORPUS_IDS, TIER_MIGRATION_STOPPED_GRACE_DAYS_ENV = "OLYMPUS_TIER_MIGRATION_STOPPED_GRACE_DAYS", DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS = 7, DAY_MS2;
 var init_doctor = __esm(() => {
+  init_first_run_privacy();
   init_native_worker_service();
   init_messaging_runtime();
   init_linux_engine_service();
