@@ -80,9 +80,8 @@ describe('verification contract', () => {
     expect(pkg.scripts['typecheck:exchange']).toBe('tsc --noEmit -p exchange/tsconfig.json');
     expect(pkg.scripts['typecheck:connect-relay']).toBe('tsc --noEmit -p connect-relay/tsconfig.json');
     expect(fastSection).toContain('bun scripts/test-lane.ts fast --shard=${{ matrix.shard }}/3');
-    expect(fastSection).toContain('needs: [fast_shards]');
-    expect(fastSection).toContain('if: ${{ always() }}');
-    expect(fastSection).toContain('run: test "${{ needs.fast_shards.result }}" = success');
+    expect(fastSection).toContain('name: fast tests ${{ matrix.shard }}/3');
+    expect(workflow).not.toContain('name: fast tests\n');
     expect(fastSection).toContain('shard: [1, 2, 3]');
     expect(fastSection).toContain('if: ${{ matrix.shard == 1 }}');
     expect(fastSection).toContain('run: bun run test:connect-relay');
