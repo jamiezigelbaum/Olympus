@@ -313,8 +313,12 @@ describe('source storage, end to end on this host', () => {
       import { LocalConnectorStore } from ${JSON.stringify(join(REPO, 'src/workers/connector-store/index.ts'))};
       const sync = LocalConnectorStore.prototype.syncFromConnector;
       LocalConnectorStore.prototype.syncFromConnector = async function(connector, ...args) {
-        if (connector.id.includes('local.files.own-roots-cleanup')) await Bun.sleep(1500);
-        return sync.call(this, connector, ...args);
+        const cleanup = connector.id.includes('local.files.own-roots-cleanup');
+        if (cleanup) await Bun.sleep(1500);
+        const result = await sync.call(this, connector, ...args);
+        // Deletion is visible before the cleanup walk and its read gate finish.
+        if (cleanup) await Bun.sleep(500);
+        return result;
       };
     `);
     const worker = await boot(env, preload);
@@ -335,7 +339,16 @@ describe('source storage, end to end on this host', () => {
       const deadline = Date.now() + 10_000;
       while (ownItemStillActive(dbPath, ownPath) && Date.now() < deadline) await Bun.sleep(100);
       expect(ownItemStillActive(dbPath, ownPath), worker.errors()).toBe(false);
-      expect((await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzownhistory' })).json.hits).toEqual([]);
+      // A tombstone is committed before the cleanup walk finishes every tier.
+      // Wait for the public read boundary, checking that no own data escapes meanwhile.
+      let after = await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzownhistory' });
+      while (after.status !== 200 && Date.now() < deadline) {
+        expect(after.json.hits ?? []).toEqual([]);
+        await Bun.sleep(100);
+        after = await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzownhistory' });
+      }
+      expect(after.status, JSON.stringify(after.json)).toBe(200);
+      expect(after.json.hits).toEqual([]);
       expect((await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzuserhistory' })).json.hits).toHaveLength(1);
     } finally { await worker.stop(); }
   }, 180_000);
@@ -658,7 +671,24 @@ describe('source storage, end to end on this host', () => {
     const internalPath = resolvedStorePath(sourceId, 'internal', env);
     const ledgerPath = tierLedgerPathForStore(securePath);
     const authority = new FileSourceScopeAuthority({ registryPath: env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH });
-    const worker = await boot(env);
+    // Widen the real cross-process interval where the file and items table
+    // exist but the constructor has not finished its schema yet (#701).
+    const preload = join(env.HOME!, 'slow-store-schema.ts');
+    const schemaPaused = join(env.HOME!, 'schema-paused');
+    writeFileSync(preload, `
+      import { Database } from 'bun:sqlite';
+      import { writeFileSync } from 'node:fs';
+      const exec = Database.prototype.exec;
+      Database.prototype.exec = function(sql, ...args) {
+        if ([${JSON.stringify(securePath)}, ${JSON.stringify(internalPath)}].includes(this.filename)
+            && sql.includes('CREATE TABLE IF NOT EXISTS chunks (')) {
+          writeFileSync(${JSON.stringify(schemaPaused)}, 'paused');
+          Bun.sleepSync(500);
+        }
+        return exec.call(this, sql, ...args);
+      };
+    `);
+    const worker = await boot(env, preload);
     try {
       expect(worker.output(), listening(worker)).toContain('worker listening');
       expect(existsSync(securePath)).toBe(false);
@@ -676,14 +706,20 @@ describe('source storage, end to end on this host', () => {
       });
       // The real connect route refreshes the live scheduler, as it does for a saved folder choice.
       expect((await ask(env, worker, '/dashboard/connect/this-computer', { source: sourceId })).status).toBe(200);
+      // File existence is not schema readiness: this process can see a new
+      // SQLite file while the worker is still constructing it. Wait at the
+      // public read boundary before taking strict storage snapshots.
       const deadline = Date.now() + 30_000;
-      let text = '';
-      while (Date.now() < deadline) {
-        text = [securePath, internalPath].filter(existsSync).map((path) => JSON.stringify(snapshotStore(path).chunks)).join('\n');
-        if (text.includes('zephyrtide')) break;
+      const searchInput = { query: 'zephyrtide', corpus_id: 'secure_local.local.files', approved_scope_key: `local_files.this_computer:${folder}` };
+      let search = await ask(env, worker, '/v1/source/index/search', searchInput);
+      while ((!Array.isArray(search.json.hits) || search.json.hits.length === 0) && Date.now() < deadline) {
         await Bun.sleep(100);
+        search = await ask(env, worker, '/v1/source/index/search', searchInput);
       }
-      expect(text, `${worker.errors()}\n${worker.output()}`).toContain('zephyrtide');
+      expect(search.status, JSON.stringify(search.json)).toBe(200);
+      expect(search.json.hits, `${worker.errors()}\n${worker.output()}`).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt', corpus_id: 'internal.local.files' }) })]));
+      expect(JSON.stringify(snapshotStore(internalPath).chunks)).toContain('zephyrtide');
+      expect(existsSync(schemaPaused)).toBe(true);
       expect(existsSync(internalPath)).toBe(true);
       const secure = new LocalConnectorStore({ dbPath: securePath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local', readOnly: true });
       const internal = new LocalConnectorStore({ dbPath: internalPath, corpusId: 'internal.local.files', family: 'file', trustDomain: 'internal', readOnly: true });
@@ -699,9 +735,6 @@ describe('source storage, end to end on this host', () => {
       }
       const status = await ask(env, worker, '/v1/source/index/status', {});
       expect(status.status).toBe(200);
-      const search = await ask(env, worker, '/v1/source/index/search', { query: 'zephyrtide', corpus_id: 'secure_local.local.files', approved_scope_key: `local_files.this_computer:${folder}` });
-      expect(search.status, JSON.stringify(search.json)).toBe(200);
-      expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt', corpus_id: 'internal.local.files' }) })]));
     } finally {
       await worker.stop();
     }

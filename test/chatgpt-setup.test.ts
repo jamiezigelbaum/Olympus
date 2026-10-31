@@ -1,3 +1,4 @@
+import { withFirstRunPrivacyGate } from '../src/workers/first-run-privacy-gate.ts';
 import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // Setup from ChatGPT and retrieval-only search: the setup tools, the
 // one-time sign-in links, the model switch, olympus_search, and the privacy
@@ -20,7 +21,7 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { configFromPluginConfig, defaultConfig, loadConfig } from '../src/core/config.ts';
-import { seedEngineSovereignty, STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
+import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { isPublicTierRetired, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import type { OlympusFolderScopeBrowseResult, OlympusMailScopeDraft } from '../src/control-ui-contract.ts';
@@ -83,7 +84,7 @@ describe('one-time sign-in links', () => {
 /* ------------------------------------------------------------------ */
 
 describe('model choice', () => {
-  const seed = (): SovereigntyConfig => loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+  const seed = (): SovereigntyConfig => loadSovereigntyPreset('no-sensitive');
 
   test('the standalone seed embeds every tier with the built-in model', () => {
     expect(embeddingIsBuiltIn(seed())).toBe(true);
@@ -119,16 +120,17 @@ describe('standalone engine config', () => {
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'olympus-chatgpt-engine-')); });
   afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
-  test('engine install seeds the keyless built-in preset only when sovereignty.json is absent', () => {
+  test('engine install seeds a pending local-only policy only when sovereignty.json is absent', () => {
     const path = join(home, '.olympus', 'sovereignty.json');
-    expect(seedEngineSovereignty(path)).toBe('no-sensitive');
+    expect(seedEngineSovereignty(path)).toBe('pending');
     const written = JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig;
     expect(embeddingIsBuiltIn(written)).toBe(true);
     // Personal, Private and Secret only: a fresh install has no Public tier.
     expect(isPublicTierRetired(written)).toBe(true);
     expect(written.routes.public_safe).toBeUndefined();
     expect(written.retrieval.trustDomains.public_safe).toBeUndefined();
-    expect(written.retrieval.trustDomains.internal?.allowCloudQuery).toBe(true);
+    expect(written.retrieval.trustDomains.internal?.allowCloudQuery).toBe(false);
+    expect(written.routes.internal?.mode).toBe('disabled');
     writeFileSync(path, '{"owner":"kept"}');
     expect(seedEngineSovereignty(path)).toBeUndefined();
     expect(readFileSync(path, 'utf8')).toBe('{"owner":"kept"}');
@@ -409,6 +411,7 @@ let server: ReturnType<typeof Bun.serve>;
 let base: string;
 let backendState: FakeBackendState;
 let answerModel: boolean;
+let privacyPending = false;
 let searchCalls: Array<{ question: string; limit?: number }>;
 
 beforeEach(() => {
@@ -424,6 +427,7 @@ beforeEach(() => {
     },
   };
   answerModel = false;
+  privacyPending = false;
   searchCalls = [];
   const worker = createEmailSourceWorker({});
   const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
@@ -448,7 +452,7 @@ beforeEach(() => {
       answerModelAvailable: () => answerModel,
     },
   });
-  server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: handler });
+  server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: withFirstRunPrivacyGate(handler, { pending: () => privacyPending }) });
   base = `http://127.0.0.1:${server.port}`;
 });
 
@@ -498,7 +502,7 @@ describe('olympus_model_set through the real setup backend', () => {
     const home = join(dir, 'home');
     mkdirSync(home, { recursive: true });
     const policyPath = join(home, 'sovereignty.json');
-    const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+    const policy = loadSovereigntyPreset('no-sensitive');
     policy.modelProfiles[ANSWER_PROFILE_IDS.local] = { ...answerProfile('local'), model: 'gpt-oss:120b-cloud' };
     const onDisk = JSON.stringify(policy);
     writeFileSync(policyPath, onDisk);
@@ -563,6 +567,30 @@ describe('olympus_model_set through the real setup backend', () => {
 });
 
 describe('setup tools over the remote handler', () => {
+  test('pending privacy blocks every picker payload, including widget metadata, until chosen', async () => {
+    const client = await connectClient();
+    try {
+      // Positive controls prove these fixtures actually return source metadata.
+      for (const source_id of ['google_drive.docs', 'gmail.email']) {
+        const before = await callRaw(client, 'olympus_scope_list', { source_id });
+        expect(before.isError).toBeFalsy();
+        expect(JSON.stringify(before)).toMatch(SENTINEL_PATTERN);
+      }
+      privacyPending = true;
+      for (const source_id of ['google_drive.docs', 'gmail.email', 'dropbox.files', 'local.files']) {
+        const blocked = await callRaw(client, 'olympus_scope_list', { source_id });
+        expect(blocked.isError).toBe(true);
+        expect(JSON.stringify(blocked)).not.toMatch(SENTINEL_PATTERN);
+        expect(JSON.stringify(blocked)).not.toContain('news@site.example');
+        expect(blocked._meta).toBeUndefined();
+      }
+      expect((await callRaw(client, 'olympus_search', { question: 'anything' })).isError).toBe(true);
+      expect(searchCalls).toHaveLength(0);
+      privacyPending = false;
+      expect((await callRaw(client, 'olympus_scope_list', { source_id: 'gmail.email' })).isError).toBeFalsy();
+    } finally { await client.close(); }
+  });
+
   test('olympus_connect_source returns a one-time relay link; bad input and a missing relay link are refused', async () => {
     const client = await connectClient();
     try {

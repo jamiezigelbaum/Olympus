@@ -29,7 +29,6 @@ import { join } from 'node:path';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { isPublicTierRetired, loadSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
-import { STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import {
   BUILT_IN_SNIFFER_LANE,
@@ -137,7 +136,7 @@ async function freshInstall(options: {
   structuredBankName?: boolean;
 } = {}) {
   ownerWords = undefined;
-  const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+  const policy = loadSovereigntyPreset('no-sensitive');
   const installed = configureInstalledTierClassification({
     env,
     ...(options.lane ? { lane: { kind: options.lane.kind, modelId: options.lane.modelId } } : {}),
@@ -234,7 +233,7 @@ function registeredBuiltIn(verdict: string | ((request: AnalystModelRequest) => 
   });
   const builtIn = registeredBuiltInPrivateModel()!;
   const runtime = resolveTierSnifferRuntime({
-    engine: loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET) }),
+    engine: loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset('no-sensitive') }),
     builtIn,
   });
   expect(runtime.source).toBe('built_in');

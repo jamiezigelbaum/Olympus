@@ -131,7 +131,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>(
-      'form[data-connect-kind],form[data-model-check],form[data-agent-kind]',
+      'form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]',
     ).forEach((form) => {
       // A form whose request is still outstanding keeps its submit controls
       // disabled, so a second click cannot issue a second transport call,
@@ -330,6 +330,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function controlParams(form: HTMLFormElement): OlympusDashboardControlParams | undefined {
     if (form.hasAttribute('data-model-check')) return { action: 'check_model_setup' };
     const body = formRecord(form);
+    if (form.hasAttribute('data-local-models-discover')) return { action: 'discover_local_models', base_url: body.base_url ?? '' };
+    if (form.hasAttribute('data-local-models-test')) return { action: 'save_local_answer_model', base_url: body.base_url ?? '', answer_model: body.answer_model ?? '' };
+    if (form.hasAttribute('data-first-run-privacy')) return { action: 'save_first_run_privacy', choice: body.choice ?? '' };
     const connect = form.dataset.connectKind;
     if (connect === 'oauth') {
       return {
@@ -470,6 +473,19 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
       return;
     }
+    if (params.action === 'discover_local_models') {
+      renderDiscoveredModels(form, result.body.results);
+      return;
+    }
+    if (params.action === 'test_local_models') {
+      const checked = result.body.result;
+      if (checked && typeof checked === 'object' && !Array.isArray(checked)) {
+        const detail = checked as Record<string, unknown>;
+        say(form, detail.working === true ? 'Working. Synthetic checks passed. Your configured models have not changed.'
+          : `${typeof detail.step === 'string' ? detail.step : 'Model'}: ${typeof detail.detail === 'string' ? detail.detail : 'The model check failed.'}`);
+      } else say(form, 'The local model check did not return a result.');
+      return;
+    }
     if (typeof authorizationUrl === 'string' && authorizationUrl.startsWith('https://')) {
       // The provider has not answered yet. Only the server's card may ever
       // report a live connection, so the page states what it is waiting for
@@ -512,6 +528,59 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     // read is not deferred by the owner's own finished form. Unrelated unsaved
     // input still defers it: `refreshNow` keeps those guards.
     await refreshNow(false, released);
+  }
+
+  function renderDiscoveredModels(form: HTMLFormElement, value: unknown): void {
+    const sheet = form.closest('.sheet');
+    const output = sheet?.querySelector<HTMLElement>('[data-local-models-results]');
+    const testForm = sheet?.querySelector<HTMLFormElement>('[data-local-models-test]');
+    if (!output || !testForm) return;
+    output.replaceChildren();
+    testForm.hidden = true;
+    const results = Array.isArray(value) ? value : [];
+    if (!results.length) { say(form, 'No model servers were found. Start an existing server or enter its loopback URL.'); return; }
+    let selected = false;
+    results.forEach(result => {
+      if (!result || typeof result !== 'object' || Array.isArray(result)) return;
+      const item = result as Record<string, unknown>;
+      const row = document.createElement('div');
+      const description = document.createElement('p');
+      description.textContent = `${typeof item.provider === 'string' ? item.provider : 'Local server'}: ${typeof item.detail === 'string' ? item.detail : 'No result'}`;
+      row.append(description);
+      const models = Array.isArray(item.models) ? item.models.filter(model => model && typeof model === 'object' && !Array.isArray(model) && typeof model.id === 'string') : [];
+      models.filter(model => model.allowed !== true).forEach(model => {
+        const notice = document.createElement('p');
+        notice.textContent = `${model.id}: ${typeof model.reason === 'string' ? model.reason : 'Cannot be used as a local model.'}`;
+        row.append(notice);
+      });
+      const allowed = models.filter(model => model.allowed === true);
+      if (item.working === true && allowed.length && typeof item.baseUrl === 'string') {
+        const choose = (): void => {
+          const endpoint = testForm.querySelector<HTMLInputElement>('input[name="base_url"]');
+          if (endpoint) endpoint.value = item.baseUrl as string;
+          testForm.querySelectorAll<HTMLSelectElement>('select').forEach(select => {
+            select.replaceChildren();
+            allowed.forEach(model => {
+              const option = document.createElement('option');
+              option.value = model.id;
+              option.textContent = model.id;
+              select.append(option);
+            });
+          });
+          testForm.hidden = false;
+          say(testForm, `Using ${item.baseUrl}. Choose an answer model, then test.`);
+        };
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn';
+        button.textContent = `Use ${item.baseUrl}`;
+        button.addEventListener('click', choose);
+        row.append(button);
+        if (!selected) { choose(); selected = true; }
+      }
+      output.append(row);
+    });
+    say(form, selected ? 'Server detected. Select an answer model below.' : 'No usable local models found. Olympus does not download models.');
   }
 
   /**
@@ -1003,7 +1072,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (!form.matches(
-      '[data-connect-kind],[data-model-check]',
+      '[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-local-models-discover],[data-local-models-test]',
     )) return;
     event.preventDefault();
     // Every control form records what it submitted: the answer may only
