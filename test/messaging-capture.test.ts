@@ -353,6 +353,18 @@ describe('approved capture scope, as a count', () => {
     expect(readMessagingCaptureScope('telegram', path)).toEqual({ kind: 'chats', count: 2 });
   });
 
+  test('Telegram whole-account scope is explicit and malformed mixed wildcard grants have no scope', () => {
+    const { registryPath } = grants();
+    const path = defaultMessagingCaptureGrantPath('telegram', registryPath);
+    const pairing = telegramPairing('/fixture/telegram');
+    pairing.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES = '*';
+    saveMessagingCaptureGrant({ path, pairing });
+    expect(readMessagingCaptureScope('telegram', path)).toEqual({ kind: 'whole_account' });
+    pairing.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES = '*,telegram.personal:chat:101';
+    saveMessagingCaptureGrant({ path, pairing });
+    expect(readMessagingCaptureScope('telegram', path)).toBeUndefined();
+  });
+
   test('a WhatsApp grant of * is the whole linked account; exact chats are a count', () => {
     const { registryPath } = grants();
     const path = defaultMessagingCaptureGrantPath('whatsapp', registryPath);

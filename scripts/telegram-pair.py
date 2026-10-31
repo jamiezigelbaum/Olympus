@@ -3,7 +3,8 @@
 
 Prompts are read from the controlling terminal so the phone number, login
 code, API hash, and 2FA password never travel through argv, stdin, stdout, or
-the calling agent. Stdout is reserved for one safe JSON receipt.
+the calling agent. An explicit dashboard mode instead uses a private stdin/stdout
+JSON-line prompt channel; stdout never includes prompt values.
 """
 
 from __future__ import annotations
@@ -19,8 +20,6 @@ from pathlib import Path
 from typing import Any, TextIO
 
 
-MAX_DIALOGS = 200
-
 
 class SafePairingError(Exception):
     def __init__(self, code: str) -> None:
@@ -31,7 +30,7 @@ class SafePairingError(Exception):
 def main() -> int:
     os.umask(0o077)
     try:
-        receipt = asyncio.run(pair())
+        receipt = asyncio.run(list_existing_chats() if os.environ.get("OLYMPUS_TELEGRAM_LIST_CHATS") == "1" else pair())
         sys.stdout.write(json.dumps(receipt, separators=(",", ":")) + "\n")
         return 0
     except SafePairingError as error:
@@ -53,11 +52,11 @@ async def pair() -> dict[str, Any]:
     except Exception as error:
         raise SafePairingError("telethon_not_installed") from error
 
-    with controlling_terminal() as terminal:
-        api_id_text = prompt(terminal, "Telegram app api_id: ")
+    with pairing_terminal() as terminal:
+        api_id_text = prompt(terminal, "Telegram app api_id: ", field="api_id")
         if not api_id_text.isdigit() or int(api_id_text) <= 0:
             raise SafePairingError("invalid_api_id")
-        api_hash = prompt_secret(terminal, "Telegram app api_hash: ")
+        api_hash = prompt_secret(terminal, "Telegram app api_hash: ", field="api_hash")
         if not api_hash:
             raise SafePairingError("invalid_api_hash")
 
@@ -65,20 +64,27 @@ async def pair() -> dict[str, Any]:
         await client.connect()
         try:
             if not await client.is_user_authorized():
-                phone = prompt(terminal, "Telegram phone number (with country code): ")
+                phone = prompt(terminal, "Telegram phone number (with country code): ", field="phone")
                 if not phone:
                     raise SafePairingError("phone_required")
                 await client.send_code_request(phone)
-                code = prompt_secret(terminal, "Telegram login code: ")
+                code = prompt_secret(terminal, "Telegram login code: ", field="code")
                 if not code:
                     raise SafePairingError("login_code_required")
                 try:
-                    await client.sign_in(phone=phone, code=code)
+                    try:
+                        await client.sign_in(phone=phone, code=code)
+                    finally:
+                        # Release our reference before asking for a 2FA password.
+                        code = ""
                 except SessionPasswordNeededError:
-                    password = prompt_secret(terminal, "Telegram 2FA password: ")
+                    password = prompt_secret(terminal, "Telegram 2FA password: ", field="password")
                     if not password:
                         raise SafePairingError("two_factor_password_required")
-                    await client.sign_in(password=password)
+                    try:
+                        await client.sign_in(password=password)
+                    finally:
+                        password = ""
 
             if not await client.is_user_authorized():
                 raise SafePairingError("authorization_not_confirmed")
@@ -87,27 +93,7 @@ async def pair() -> dict[str, Any]:
             if not isinstance(user_id, int) or user_id <= 0:
                 raise SafePairingError("account_not_confirmed")
 
-            dialogs: list[dict[str, Any]] = []
-            async for dialog in client.iter_dialogs(limit=MAX_DIALOGS):
-                entity = dialog.entity
-                if bool(getattr(dialog, "is_user", False)):
-                    kind = "bot" if bool(getattr(entity, "bot", False)) else "dm"
-                elif bool(getattr(dialog, "is_channel", False)) and not bool(
-                    getattr(entity, "megagroup", False)
-                ):
-                    kind = "channel"
-                else:
-                    kind = "group"
-                dialog_id = getattr(dialog, "id", None)
-                if not isinstance(dialog_id, int):
-                    continue
-                dialogs.append(
-                    {
-                        "chat_scope": f"telegram.personal:chat:{dialog_id}",
-                        "kind": kind,
-                        "title": safe_one_line(str(getattr(dialog, "name", "") or ""))[:120],
-                    }
-                )
+            dialogs = await read_dialogs(client)
         finally:
             await client.disconnect()
 
@@ -137,6 +123,68 @@ async def pair() -> dict[str, Any]:
         "dialogs": dialogs,
         "capture_started": False,
     }
+
+
+async def read_dialogs(client: Any) -> list[dict[str, Any]]:
+    dialogs: list[dict[str, Any]] = []
+    async for dialog in client.iter_dialogs():
+        entity = dialog.entity
+        if bool(getattr(dialog, "is_user", False)):
+            kind = "bot" if bool(getattr(entity, "bot", False)) else "dm"
+        elif bool(getattr(dialog, "is_channel", False)) and not bool(
+            getattr(entity, "megagroup", False)
+        ):
+            kind = "channel"
+        else:
+            kind = "group"
+        dialog_id = getattr(dialog, "id", None)
+        if not isinstance(dialog_id, int):
+            continue
+        dialogs.append(
+            {
+                "chat_scope": f"telegram.personal:chat:{dialog_id}",
+                "kind": kind,
+                "title": safe_one_line(str(getattr(dialog, "name", "") or ""))[:120],
+            }
+        )
+    return dialogs
+
+
+async def list_existing_chats() -> dict[str, Any]:
+    """Re-list a paired account without ever initiating a login.
+
+    The caller must pause its reader before opening the same Telethon session.
+    API credentials arrive only on the private stdin pipe.
+    """
+    session_base = required_session_base()
+    if not Path(f"{session_base}.session").is_file():
+        raise SafePairingError("session_not_persisted")
+    line = sys.stdin.readline(16385)
+    try:
+        if len(line) > 16384 or not line.endswith("\n"):
+            raise ValueError()
+        credentials = json.loads(line)
+        if (not isinstance(credentials, dict) or set(credentials) != {"api_id", "api_hash"}
+                or type(credentials["api_id"]) is not int or credentials["api_id"] <= 0
+                or not isinstance(credentials["api_hash"], str) or not credentials["api_hash"]):
+            raise ValueError()
+        try:
+            from telethon import TelegramClient
+        except Exception:
+            raise SafePairingError("telethon_not_installed") from None
+        client = TelegramClient(str(session_base), credentials["api_id"], credentials["api_hash"])
+    except (ValueError, TypeError):
+        raise SafePairingError("dashboard_prompt_invalid") from None
+    finally:
+        line = ""
+        credentials = None
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            raise SafePairingError("authorization_not_confirmed")
+        return {"event": "dialogs", "dialogs": await read_dialogs(client)}
+    finally:
+        await client.disconnect()
 
 
 def transfer_credentials(value: dict[str, Any]) -> None:
@@ -181,7 +229,48 @@ def controlling_terminal() -> Terminal:
     return Terminal(stream)
 
 
-def prompt(terminal: TextIO, label: str) -> str:
+class DashboardPrompts:
+    """Private child-process pipes only; no listener, file, or value echo."""
+
+    def __enter__(self) -> DashboardPrompts:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        pass
+
+    def ask(self, field: str) -> str:
+        if field not in {"api_id", "api_hash", "phone", "code", "password"}:
+            raise SafePairingError("dashboard_prompt_invalid")
+        sys.stdout.write(json.dumps({"event": "prompt", "field": field}, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+        line = sys.stdin.readline(16385)
+        if line == "":
+            raise SafePairingError("dashboard_prompt_closed")
+        try:
+            if len(line) > 16384 or not line.endswith("\n"):
+                raise ValueError()
+            response = json.loads(line)
+            if (not isinstance(response, dict) or set(response) != {"field", "value"}
+                    or response["field"] != field or not isinstance(response["value"], str)):
+                raise ValueError()
+            return response["value"].strip()
+        except (ValueError, TypeError):
+            raise SafePairingError("dashboard_prompt_invalid") from None
+        finally:
+            line = ""
+            # Python strings cannot be securely zeroed; release our references.
+            response = None
+
+
+def pairing_terminal() -> Terminal | DashboardPrompts:
+    if os.environ.get("OLYMPUS_TELEGRAM_DASHBOARD_PROMPTS") == "1":
+        return DashboardPrompts()
+    return controlling_terminal()
+
+
+def prompt(terminal: TextIO | DashboardPrompts, label: str, *, field: str = "") -> str:
+    if isinstance(terminal, DashboardPrompts):
+        return terminal.ask(field)
     terminal.write(label)
     terminal.flush()
     value = terminal.readline()
@@ -190,7 +279,9 @@ def prompt(terminal: TextIO, label: str) -> str:
     return value.strip()
 
 
-def prompt_secret(terminal: TextIO, label: str) -> str:
+def prompt_secret(terminal: TextIO | DashboardPrompts, label: str, *, field: str = "") -> str:
+    if isinstance(terminal, DashboardPrompts):
+        return terminal.ask(field)
     try:
         return getpass.getpass(label, stream=terminal).strip()
     except (EOFError, OSError) as error:

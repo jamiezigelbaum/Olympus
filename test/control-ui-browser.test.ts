@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
+import { DASHBOARD_THEME_CSS } from '../src/workers/dashboard/theme.ts';
 import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
 import { DASHBOARD_REDRAW_EVENT, mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
+import { renderMessagingCard } from '../src/workers/dashboard/messaging.ts';
 import { connectSetupSheet, setupStepsSheet } from '../src/workers/dashboard/components.ts';
 import { buildDashboardPreviewView, setupPreviewScript } from '../scripts/dashboard-preview.ts';
 import { dashboardHtmlRoutePage, renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
@@ -1037,6 +1039,192 @@ test('local discovery lists models safely and synthetic errors stay beside the s
   expect(form.textContent).toContain('Model lacks chat.');
   controller.dispose();
 });
+describe('local messaging pairing', () => {
+  function messagingRoot() {
+    const root = document.createElement('div');
+    root.innerHTML = '<section data-source="telegram.messages" data-messaging-source="telegram"><form method="dialog" data-messaging-kind="respond" data-field="code"><input name="value" value="12345"><button type="submit">Continue</button></form><p data-messaging-status></p><div data-messaging-input></div><img data-messaging-qr hidden><div data-messaging-chats></div></section>';
+    document.body.append(root);
+    return root;
+  }
+
+  test('clears a login code before transport and never sends it through native control', async () => {
+    const root = messagingRoot();
+    let controlCalls = 0;
+    let observed = '';
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => { controlCalls++; return { status: 200, body: {} }; },
+      messaging: async (operation, params) => {
+        if (operation === 'status') return { status: 200, body: { state: 'idle' } };
+        expect(operation).toBe('respond');
+        expect(root.querySelector<HTMLInputElement>('input')!.value).toBe('');
+        observed = params.value!;
+        return { status: 200, body: { ok: true, state: 'paired' } };
+      },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(observed).toBe('12345');
+    expect(controlCalls).toBe(0);
+    controller.dispose();
+  });
+
+  test('a native transport without the local pairing method receives no secret', async () => {
+    const root = messagingRoot();
+    let controlCalls = 0;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: { control: async () => { controlCalls++; return { status: 200, body: {} }; } } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(controlCalls).toBe(0);
+    expect(root.querySelector<HTMLInputElement>('input')!.value).toBe('');
+    controller.dispose();
+  });
+
+  test('opens local controls through its dedicated transport and reloads the dashboard', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    delete form.dataset.messagingKind;
+    form.setAttribute('data-messaging-open-controls', '');
+    form.innerHTML = '<button type="submit">Open controls on this computer</button><span data-action-message></span>';
+    let opened = 0;
+    let controlCalls = 0;
+    let navigated = '';
+    const controller = mountDashboardController({ root, canWrite: false, signal: new AbortController().signal, navigate(href) { navigated = href; }, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => { controlCalls++; return { status: 200, body: {} }; },
+      openLocalControls: async () => { opened++; return true; },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(opened).toBe(1);
+    expect(controlCalls).toBe(0);
+    expect(navigated).toBe('http://localhost/dashboard?keys');
+    controller.dispose();
+  });
+
+  test('pairing status chat previews do not replace the saved-scope picker', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    form.dataset.messagingKind = 'start';
+    root.querySelector('[data-messaging-chats]')!.textContent = 'saved selection';
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: noControl,
+      messaging: async () => ({ status: 200, body: { ok: true, state: 'paired', chats: [{ chatScope: 'telegram.personal:chat:1', title: 'Preview' }] } }),
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(root.querySelector('[data-messaging-chats]')!.textContent).toBe('saved selection');
+    controller.dispose();
+  });
+
+  test('whole-account selection clears previously checked chat scopes in the saved grant', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    form.dataset.messagingKind = 'scope';
+    form.innerHTML = '<input type="checkbox" name="wholeAccount" checked><input type="checkbox" name="chatScope" value="telegram.personal:chat:123" checked>';
+    let selection: unknown;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: noControl,
+      messaging: async (operation, params) => { if (operation === 'status') return { status: 200, body: { state: 'idle' } }; expect(operation).toBe('scope'); selection = structuredClone(params); return { status: 200, body: { ok: true } }; },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(selection).toEqual({ source: 'telegram', wholeAccount: true, chatScopes: [] });
+    controller.dispose();
+  });
+
+  test('disposal cancels pairing status polling and erases the QR', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    form.dataset.messagingKind = 'start';
+    let calls = 0;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: noControl,
+      messaging: async () => { calls++; return { status: 200, body: { ok: true, state: 'pairing', qr: 'data:image/png;base64,YQ==' } }; },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(root.querySelector('img')!.hasAttribute('src')).toBe(true);
+    controller.dispose();
+    expect(root.querySelector('img')!.hasAttribute('src')).toBe(false);
+    await new Promise(resolve => setTimeout(resolve, 1250));
+    expect(calls).toBe(2);
+  });
+});
+
+test('messaging cards remain visible when another source sheet opens', () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderMessagingCard('telegram', true) + renderMessagingCard('whatsapp', true) + '<button data-sheet-toggle="#other">Connect</button><section id="other" class="sheet"></section>';
+  document.body.append(root);
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
+  root.querySelector<HTMLButtonElement>('[data-sheet-toggle]')!.click();
+  for (const card of root.querySelectorAll('[data-messaging-source]')) {
+    expect(card.getAttribute('aria-hidden')).not.toBe('true');
+    expect(card.classList.contains('sheet')).toBe(false);
+  }
+  controller.dispose();
+});
+
+test.each(['telegram', 'whatsapp'])('mount restores %s pairing and continues polling without restarting it', async source => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard(source as 'telegram' | 'whatsapp', true); document.body.append(root);
+  const operations: string[] = [];
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl,
+    messaging: async operation => { operations.push(operation); return { status: 200, body: source === 'telegram' ? { state: 'waiting', field: 'code' } : { state: 'waiting', qr: 'data:image/png;base64,YQ==' } }; },
+  }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(operations).toEqual(['status']);
+    if (source === 'telegram') expect(root.querySelector('[data-messaging-input] input')).not.toBeNull();
+    else expect(root.querySelector('img')!.getAttribute('src')).toBe('data:image/png;base64,YQ==');
+    await new Promise(resolve => setTimeout(resolve, 1250));
+    expect(operations).toEqual(['status', 'status']);
+  } finally { controller.dispose(); }
+});
+
+test.each([{ source: 'telegram', wholeAccount: false }, { source: 'telegram', wholeAccount: true }, { source: 'whatsapp', wholeAccount: false }, { source: 'whatsapp', wholeAccount: true }] as const)('post-pair choice layout and explicit consent: %j', async ({ source, wholeAccount }) => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard(source, true); document.body.append(root);
+  const choices: unknown[] = [];
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl,
+    messaging: async (operation, params) => {
+      if (operation === 'scope') { choices.push(structuredClone(params)); return { status: 200, body: { state: 'paired' } }; }
+      return { status: 200, body: { state: 'scope_selection_required', chats: [{ chatScope: 'telegram.personal:chat:101', title: 'One', kind: 'dm' }], wholeAccount: false, chatScopes: [] } };
+    },
+  }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(choices).toEqual([]);
+    expect(root.textContent).toContain('Nothing is being captured');
+    expect(root.textContent).toContain('Pick chats (recommended)');
+    expect(root.textContent).toContain('Everything in this account');
+    const slot = root.querySelector('[data-messaging-chats]')!;
+    expect(slot.classList.contains('messagingchoices')).toBe(true);
+    expect(slot.classList.contains('actionrow')).toBe(false);
+    const explanation = slot.querySelector(':scope > p.hint');
+    expect(explanation?.textContent).toBe('Allow Olympus to read every chat, including new chats.');
+    expect(slot.querySelector('details > summary + form')).not.toBeNull();
+    expect(slot.querySelector(':scope > form > p')).toBeNull();
+    const check = slot.querySelector<HTMLInputElement>('[name="chatScope"]')!;
+    expect(check.checked).toBe(false);
+    check.checked = true;
+    const form = wholeAccount ? slot.querySelector<HTMLInputElement>('[name="wholeAccount"]')!.closest('form')! : check.closest('form')!;
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(choices).toEqual([{ source, wholeAccount, chatScopes: wholeAccount ? [] : ['telegram.personal:chat:101'] }]);
+    expect(slot.textContent).toBe('');
+  } finally { controller.dispose(); }
+});
+
+ test('chat disclosure list spans the row below its grey caption', () => {
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: start;');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3;');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3);');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details:not([open]) > form { display: none; }');
+});
+
 
 for (const [state, provider, step] of [
   ['connect-dropbox', 'dropbox', '1'], ['connect-dropbox', 'dropbox', '5'],

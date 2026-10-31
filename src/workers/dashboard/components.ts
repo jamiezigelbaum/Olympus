@@ -927,6 +927,20 @@ export function standaloneDashboardControllerScript(
       var controller = mount({
         root: root,
         transport: {
+          async openLocalControls() {
+            var response = await fetch('/dashboard/control/session/local', {
+              method: 'POST', credentials: 'same-origin', cache: 'no-store',
+            });
+            return response.ok;
+          },
+          async messaging(operation, params) {
+            var response = await fetch('/dashboard/messaging/' + operation, {
+              method: 'POST', credentials: 'same-origin', cache: 'no-store',
+              headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
+              body: JSON.stringify(params),
+            });
+            return { status: response.status, body: await json(response) };
+          },
           async control(params) {
             var target = route(params);
             if (!target) return { status: 400, body: { error: { message: 'Unsupported dashboard action.' } } };

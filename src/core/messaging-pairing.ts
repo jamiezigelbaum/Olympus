@@ -17,6 +17,7 @@ import { tryHoldFileFlock, type HeldFileFlock } from './data-owner-lock.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedLogins, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
 import { recordPairingAccount, settlePairingPlacement } from './pairing-placement.ts';
 import { whatsappBridgeFileName } from './whatsapp-bridge-name.ts';
+import { captureGrantPathBeside, captureGrantPathFromEnv, readCaptureGrantFile } from './messaging-capture-grant-file.ts';
 import { assertTelegramHistoryAccount, telegramHistoryAccount, telegramHistoryAccountError } from './provider-account-history.ts';
 
 export type MessagingPairingSource = 'telegram' | 'whatsapp';
@@ -33,7 +34,8 @@ export type MessagingCaptureScopeApproval =
   | {
     source: 'telegram';
     explicitApproval: true;
-    chatScopes: readonly string[];
+    wholeAccount?: boolean;
+    chatScopes?: readonly string[];
   }
   | {
     source: 'whatsapp';
@@ -114,11 +116,13 @@ export interface PairMessagingSourceOptions extends TelegramPythonSeams {
   requestCaptureScope?: (input: {
     source: MessagingPairingSource;
     accountProof: string;
+    sessionPath: string;
     chats: readonly MessagingChatMetadata[];
   }) => Promise<MessagingCaptureScopeApproval | undefined>;
   onWhatsAppQr?: (pngPath: string) => void | Promise<void>;
   whatsappQrMode?: 'terminal' | 'artifact';
   signal?: AbortSignal;
+  onCommitStart?: () => void;
   runCommand?: (request: PairingCommandRequest) => Promise<PairingCommandResult>;
   registerSession?: MessagingSessionRegistrar;
   which?: (command: string) => string | null;
@@ -276,6 +280,7 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
       source: options.source,
       accountProof,
+      sessionPath,
       chats,
     });
     if (!approval) {
@@ -292,6 +297,22 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
       };
     }
 
+    if (options.signal?.aborted) throw new Error('Pairing was cancelled.');
+    options.onCommitStart?.();
+
+    // Renewing credentials preserves exact consent even if an old chat is no longer listed.
+    // Only a trusted grant for this session and an already confirmed account can supply those scopes.
+    const prior = options.source === 'telegram' && historyAccount === accountProof ? readCaptureGrantFile(options.registryPath
+      ? captureGrantPathBeside('telegram', options.registryPath)
+      : captureGrantPathFromEnv('telegram', registryEnv)) : undefined;
+    const priorEnv = prior?.kind === 'valid' && prior.grant.source === 'telegram'
+      && (prior.grant.sessionPath === sessionPath || (layout === 'folder' && prior.grant.sessionPath === undefined))
+      ? prior.grant.producer.env : undefined;
+    const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
+    const priorScopes = typeof priorRaw === 'string' ? priorRaw.split(',') : [];
+    const retained = priorRaw === priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES
+      && priorScopes.every(scope => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
+    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     if (options.source === 'telegram') {
       // Decided under the entry's lease by whoever owns the data, so an account it
       // was given since the read above decides. Not recorded (no worker answered)
@@ -304,7 +325,6 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
         throw telegramHistoryAccountError('different');
       }
     }
-    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
     const rollbackCredentials = options.source === 'telegram'
       ? await persistTelegramCredentials(secretStore, result.privatePayload)
       : async () => {};
@@ -538,14 +558,17 @@ function producerLaunch(
   sessionPath: string,
   chats: readonly MessagingChatMetadata[],
   layout: LayoutAccountLayout,
+  retainedChatScopes: readonly string[],
 ): MessagingProducerLaunch {
   if (approval.source !== source || approval.explicitApproval !== true) {
     throw new Error('Capture scope approval must name the paired source and be explicit.');
   }
   if (source === 'telegram') {
-    const scopes = uniqueNonEmpty(approval.source === 'telegram' ? approval.chatScopes : []);
-    if (scopes.length === 0) throw new Error('Choose at least one Telegram chat before capture can start.');
-    const listed = new Set(chats.map((chat) => chat.chatScope));
+    const scopes = uniqueNonEmpty(approval.source === 'telegram' ? approval.chatScopes ?? [] : []);
+    const wholeAccount = approval.source === 'telegram' && approval.wholeAccount === true;
+    if (wholeAccount === (scopes.length > 0)) throw new Error('Approve either the whole Telegram account or at least one exact chat, but not both.');
+    if (scopes.some((scope) => scope.includes('*'))) throw new Error('Telegram capture approval requires exact chat identifiers.');
+    const listed = new Set([...chats.map((chat) => chat.chatScope), ...retainedChatScopes]);
     if (scopes.some((scope) => !listed.has(scope))) {
       throw new Error('Telegram capture approval contains a chat that was not in the verified account listing.');
     }
@@ -557,8 +580,8 @@ function producerLaunch(
         // A folder account's spawner sets its paths from its folder (core/olympus-layout.ts, folderCaptureEnv).
         ...(layout === 'folder' ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath }),
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: 'telegram.personal',
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(','),
-        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(','),
+        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: wholeAccount ? '*' : scopes.join(','),
+        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: wholeAccount ? '*' : scopes.join(','),
       },
       secretEnvironment: [
         { env: 'OLYMPUS_TELEGRAM_API_ID', secretKey: TELEGRAM_API_ID_SECRET_KEY },
