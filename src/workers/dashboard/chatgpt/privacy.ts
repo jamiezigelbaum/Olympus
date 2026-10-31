@@ -1073,7 +1073,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     if (s.discarding) {
       s.discarding = false;
       kit.render('privacy:back');
-    } else if (s.screen !== 'main') {
+    } else if (s.screen !== 'main' && s.screen !== 'answers') {
       sheetBack();
     } else backOut();
   }

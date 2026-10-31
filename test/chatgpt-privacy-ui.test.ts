@@ -1197,6 +1197,23 @@ describe('words', () => {
 });
 
 
+test('Escape leaves the pending first-run chooser without opening a profile sheet', async () => {
+  const pending = { pending: true as const, options: PRIVATE_ANSWER_OPTIONS };
+  const { host, saves } = await openPrivacy({
+    getResult: () => privacyToolResult({ configured: false, description: '', rules: [], pendingCount: 0, revision: 'rev1', privateAnswerChoice: pending }, 'current', 'owner-token'),
+  });
+  expect(host.text()).toContain('How should Olympus answer with Private items?');
+  host.doc.dispatchEvent(new host.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }) as unknown as Event);
+  await host.settle();
+  expect(host.doc.querySelectorAll('.privacy')).toHaveLength(0);
+  expect(host.doc.querySelectorAll('.privacy-sheet')).toHaveLength(0);
+  expect(host.doc.querySelector('textarea')).toBeNull();
+  expect(saves).toHaveLength(0);
+  host.button('Set up').click();
+  await host.settle();
+  expect(host.text()).toContain('How should Olympus answer with Private items?');
+});
+
 test('pending first-run opens the shared mode choice before any profile edit', async () => {
   const saves: any[] = [];
   const pending = { pending: true as const, options: PRIVATE_ANSWER_OPTIONS };

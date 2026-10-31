@@ -46011,7 +46011,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     if (s.discarding) {
       s.discarding = false;
       kit.render("privacy:back");
-    } else if (s.screen !== "main") {
+    } else if (s.screen !== "main" && s.screen !== "answers") {
       sheetBack();
     } else
       backOut();
