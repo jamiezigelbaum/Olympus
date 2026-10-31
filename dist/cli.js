@@ -53505,20 +53505,18 @@ var init_vocabulary = __esm(() => {
     needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
     needGmail: "Connect Gmail to add a label.",
     nothingToSave: "Nothing to save yet. Change a rule or the description first.",
-    pending: {
-      one: "{n} item is waiting to be checked on your computer.",
-      many: "{n} items are waiting to be checked on your computer."
-    },
     save: "Save",
     saving: "Saving…",
     cancel: "Cancel",
     saveFailed: "Olympus could not save. Your changes are still here. Try again.",
+    addRuleFailed: "Olympus could not make this private. Try again.",
     saved: "Privacy saved.",
     confirmRemove: "This removes protection from {list}.",
     confirmDescription: "This changes your description, which decides what Olympus keeps private.",
     confirm: "Confirm",
     conflict: "Your changes weren't saved because the privacy settings changed elsewhere.",
     conflictNow: "What is saved now:",
+    conflictAddBlocked: "Resolve the conflict before adding another rule.",
     conflictDescription: "Your description: {text}",
     conflictNoDescription: "No description",
     applyAgain: "Apply my changes again",
@@ -148176,19 +148174,31 @@ function privacyLogic(config2) {
     const change = lowering(rules, description, savedDescription);
     return change.removed.length > 0 || change.described;
   }
+  function setIntent(intents, rule, present) {
+    const id = identity2(rule);
+    const next = { rule: { ...rule }, present };
+    const index = intents.findIndex((intent) => identity2(intent.rule) === id);
+    if (index < 0)
+      intents.push(next);
+    else
+      intents[index] = next;
+  }
+  function satisfies(intents, rules) {
+    const ids = new Set(rules.filter(validRule).map(identity2));
+    return intents.every((intent) => ids.has(identity2(intent.rule)) === intent.present);
+  }
   function replay(draft, fresh2) {
-    const removed = {};
-    for (const rule of draft.rules)
-      if (rule.saved && rule.removed)
-        removed[identity2(rule)] = true;
-    const additions = draft.rules.filter((rule) => !rule.saved && !rule.removed);
+    const rules = fresh2.map((rule) => ({ ...rule }));
+    for (const intent of draft.intents) {
+      let rule = rules.find((item) => identity2(item) === identity2(intent.rule));
+      if (!rule) {
+        rule = { ...intent.rule, saved: false };
+        rules.push(rule);
+      }
+      rule.removed = !intent.present;
+    }
     const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
-    for (const rule of fresh2)
-      if (removed[identity2(rule)])
-        rule.removed = true;
-    for (const rule of additions)
-      addTo(fresh2, rule);
-    return { rules: fresh2, description: described };
+    return { rules, description: described };
   }
   function senderValue(input) {
     const value2 = String(input || "").trim().toLowerCase();
@@ -148424,6 +148434,8 @@ function privacyLogic(config2) {
     return JSON.stringify(questions(description));
   }
   return {
+    setIntent,
+    satisfies,
     validRule,
     displayOf,
     viewRule,
@@ -150385,6 +150397,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       error: "",
       description: "",
       rules: [],
+      intents: [],
+      savedRules: [],
       pendingCount: 0,
       revision: "",
       savedDescription: "",
@@ -150437,6 +150451,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     s.edited = false;
     s.confirmStep = false;
     s.rules = data2.rules.filter(validRule).map(viewRule);
+    s.savedRules = s.rules.map(ruleOut);
+    s.intents = [];
     s.hidden = data2.rules.filter((rule) => !validRule(rule));
     s.server = null;
     s.pendingCount = typeof data2.pendingCount === "number" && isFinite(data2.pendingCount) ? Math.max(0, data2.pendingCount) : 0;
@@ -150491,9 +150507,53 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return !s.server && (s.edited || L.withShownAnswers(s.description) !== s.description);
   }
   function addRule(rule) {
+    if (s.saving || s.server)
+      return;
+    const baseline = s.savedRules.slice().concat(s.hidden);
+    if (!s.savedRules.some((item) => identity2(item) === identity2(rule)))
+      baseline.push(ruleOut(rule));
     L.addTo(s.rules, rule);
+    L.setIntent(s.intents, rule, true);
     changed();
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
+    const args = { description: s.savedDescription, rules: baseline };
+    if (s.revision)
+      args.revision = s.revision;
+    s.saving = true;
     s.saveError = "";
+    const mine = session;
+    kit.call(T.set, args).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      const data2 = settings(result);
+      const content = result && result.structuredContent;
+      if (data2 && content && content.status === "conflict")
+        return conflict(data2);
+      if (!data2 || !content || content.status !== "saved") {
+        s.saveError = W.addRuleFailed;
+        kit.render("privacy:save");
+        return;
+      }
+      if (!L.satisfies([{ rule, present: true }], data2.rules))
+        return conflict(data2);
+      draft.intents = draft.intents.filter((intent) => identity2(intent.rule) !== identity2(rule));
+      take(data2);
+      s.intents = draft.intents;
+      const replayed = L.replay(draft, s.rules);
+      s.rules = replayed.rules;
+      if (replayed.description !== null)
+        s.description = replayed.description;
+      s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
+      kit.remember(data2.rules.filter(validRule).length);
+      kit.render("privacy:add:folder");
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      s.saveError = W.addRuleFailed;
+      kit.render("privacy:save");
+    });
   }
   function lowering() {
     return L.lowering(s.rules, s.description, s.savedDescription);
@@ -150546,13 +150606,15 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       const data2 = settings(result);
       if (data2 && content && content.status === "conflict")
         return conflict(data2);
-      if (!data2 || result.isError) {
+      if (!data2 || !content || content.status !== "saved") {
         s.saveError = W.saveFailed;
         kit.render("privacy:save");
         return;
       }
       if (confirmed)
         s.confirmation = "";
+      if (!L.satisfies(s.intents, data2.rules) || data2.description !== args.description)
+        return conflict(data2);
       kit.remember(data2.rules.filter(validRule).length);
       leave(W.saved, true);
     }, () => {
@@ -150573,8 +150635,9 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     const server = s.server;
     if (!server)
       return;
-    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     take(server);
+    s.intents = draft.intents;
     const replayed = L.replay(draft, s.rules);
     s.rules = replayed.rules;
     s.confirmStep = false;
@@ -150769,6 +150832,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(li, el("p", "fname leaf muted", fill2(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, "privacy:rule:" + index, s.saving ? null : () => {
         rule.removed = false;
+        L.setIntent(s.intents, rule, true);
         changed();
         kit.render("privacy:rule:" + index);
       }, "plain");
@@ -150778,6 +150842,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     add(li, add(el("p", "fname leaf two-line"), el("span", "two-top", rule.display), el("span", "two-bottom", kindText(rule))));
     const remove = kit.button(W.remove, "privacy:rule:" + index, s.saving ? null : () => {
       rule.removed = true;
+      L.setIntent(s.intents, rule, false);
       changed();
       s.saveError = "";
       kit.render("privacy:rule:" + index);
@@ -150892,7 +150957,10 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(rules, el("p", "muted fempty", W.rulesEmpty));
     const folders = folderSources().length > 0 && !!kit.picker;
     const gmail = gmailConnected();
-    add(rules, add(el("div", "actions add-rules"), kit.button(W.addFolder, "privacy:add:folder", folders && !s.saving ? addFolder : null, "plain"), kit.button(W.addLabel, "privacy:add:label", gmail && !s.saving ? addLabel : null, "plain"), kit.button(W.addSender, "privacy:add:sender", s.saving ? null : addSender, "plain")));
+    const canAdd = !s.saving && !s.server;
+    add(rules, add(el("div", "actions add-rules"), kit.button(W.addFolder, "privacy:add:folder", folders && canAdd ? addFolder : null, "plain"), kit.button(W.addLabel, "privacy:add:label", gmail && canAdd ? addLabel : null, "plain"), kit.button(W.addSender, "privacy:add:sender", canAdd ? addSender : null, "plain")));
+    if (s.server)
+      add(rules, el("p", "reason", W.conflictAddBlocked));
     if (!folders)
       add(rules, el("p", "reason", W.needFolderSource));
     if (!gmail)
@@ -150900,9 +150968,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     add(rules, el("p", "reason", W.namesShared));
     add(page2, rules);
     const footer = el("section", "picker-footer");
-    if (s.pendingCount > 0) {
-      add(footer, el("p", "", fill2(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
-    }
     if (s.confirmStep && !s.saving && lowers()) {
       add(page2, add(footer, confirmBox()));
       return;
@@ -151048,7 +151113,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return page2;
   }
   function backOut() {
-    if (!s)
+    if (!s || s.saving)
       return;
     if (s.edited && !s.saving) {
       s.discarding = true;
