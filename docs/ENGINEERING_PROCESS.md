@@ -53,7 +53,8 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    directly; its runner only checks the matrix result. On 2026-10-31 the
    unsharded main test work took 433 seconds in run 41191132361, before relay
    tests and setup. Shards use those per-file timings and a conservative p95
-   for unknown files.
+   for unknown files. The first sharded PR run (41191925041) finished the
+   three jobs in 3m23s, 2m52s and 2m04s; the aggregate took 2 seconds.
    The `exchange tests` lane runs `test:exchange` for the publisher Google
    exchange service; `typecheck` checks both the plugin and the exchange service's
    separate WebWorker configuration. The `exchange/` subtree is critical,
