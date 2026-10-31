@@ -1607,9 +1607,9 @@ describe('CLI tool surface', () => {
     const keyPath = join(dir, 'secrets.key');
     const server = createServer((request, response) => {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-      if (url.pathname === '/models') {
+      if (url.pathname === '/rate_limits') {
         response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
-          data: [{ id: 'e2ee-glm-5-2-p' }],
+          data: { accessPermitted: true, balances: { USD: 1, DIEM: 0 } },
         }));
         return;
       }
@@ -1618,7 +1618,7 @@ describe('CLI tool surface', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('mock server did not bind');
-    const modelsUrl = `http://127.0.0.1:${address.port}/models`;
+    const modelsUrl = `http://127.0.0.1:${address.port}/rate_limits`;
     try {
       const proc = Bun.spawn([
         process.execPath,
