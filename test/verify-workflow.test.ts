@@ -22,7 +22,7 @@ describe('verification contract', () => {
     expect(JSON.stringify(pkg)).not.toMatch(/hooksPath|\.githooks|husky|simple-git-hooks/);
   });
 
-  test('required CI exposes every substantive lane directly without a billed aggregate job', () => {
+  test('required CI preserves the protected fast context', () => {
     const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'verify.yml'), 'utf8');
     expect(workflow).toContain("cancel-in-progress: ${{ github.event_name == 'pull_request' }}");
     expect(workflow).toContain('push:\n    branches: [main]');
@@ -40,9 +40,9 @@ describe('verification contract', () => {
     expect(workflow).toContain('release-artifacts/ci-provenance.json');
     expect(workflow).toContain('cache-dependency-path: |\n            tools/whatsapp-bridge/go.sum\n            config/go-cache-version');
     expect(workflow).toContain('command -v shellcheck >/dev/null ||');
-    expect(workflow).toContain('OLYMPUS_JUNIT_PATH: test-results/fast.xml');
-    expect(workflow).toContain('name: fast-timing-${{ github.sha }}');
-    expect(workflow).toContain('path: test-results/fast.xml');
+    expect(workflow).toContain('OLYMPUS_JUNIT_PATH: test-results/fast-${{ matrix.shard }}.xml');
+    expect(workflow).toContain('name: fast-timing-${{ github.sha }}-${{ matrix.shard }}');
+    expect(workflow).toContain('path: test-results/fast-${{ matrix.shard }}.xml');
     expect(workflow).toContain('OLYMPUS_JUNIT_PATH: test-results/deploy-${{ matrix.shard }}.xml');
     expect(workflow).toContain("if: ${{ always() && github.event_name == 'push' }}");
     expect(workflow).toMatch(/\n  static:\n/);
@@ -79,7 +79,13 @@ describe('verification contract', () => {
     expect(pkg.scripts.typecheck).toBe('tsc --noEmit && bun run typecheck:exchange && bun run typecheck:connect-relay');
     expect(pkg.scripts['typecheck:exchange']).toBe('tsc --noEmit -p exchange/tsconfig.json');
     expect(pkg.scripts['typecheck:connect-relay']).toBe('tsc --noEmit -p connect-relay/tsconfig.json');
-    expect(fastSection).toContain('run: bun run test:fast');
+    expect(fastSection).toContain('bun scripts/test-lane.ts fast --shard=${{ matrix.shard }}/3');
+    expect(fastSection).toContain('needs: [fast_shards]');
+    expect(fastSection).toContain('if: ${{ always() }}');
+    expect(fastSection).toContain('run: test "${{ needs.fast_shards.result }}" = success');
+    expect(fastSection).toContain('shard: [1, 2, 3]');
+    expect(fastSection).toContain('if: ${{ matrix.shard == 1 }}');
+    expect(fastSection).toContain('run: bun run test:connect-relay');
     expect(pkg.scripts['test:fast']).toBe(
       'bun run build && bun scripts/test-lane.ts fast && bun run test:connect-relay',
     );
