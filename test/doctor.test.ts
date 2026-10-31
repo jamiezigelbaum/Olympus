@@ -1,3 +1,4 @@
+import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -2560,4 +2561,32 @@ describe('runDoctor: photo search', () => {
     expect(check.detail).toContain('image encoder');
     expect(check.hint).not.toContain('pacman');
   });
+});
+
+test('pending doctor never reads source registries or calls source probes, then resumes after consent', async () => {
+  const config = defaultConfig();
+  config.sourceIndex.enabled = true;
+  config.email.enabled = true;
+  config.sovereignty = { policy: createPendingPrivacyPolicy() };
+  let registryReads = 0;
+  const requests: string[] = [];
+  const deps = doctorDeps({ config, delphi: healthyDelphi(),
+    readHandleRegistry: () => { registryReads++; return { version: 1, handles: [] }; },
+    fetchImpl: (async (url: string | URL | Request) => {
+      requests.push(String(url)); return Response.json({ status: 'ok', reachable: true });
+    }) as typeof fetch,
+  });
+  const pending = await runDoctor(deps);
+  expect(registryReads).toBe(0);
+  expect(requests).toEqual([]);
+  for (const name of ['source_capability_catalog', 'credential_handles', 'detached_oauth_connections',
+    'google_oauth_refresh_lifetime', 'credential_reauthorization_backlog', 'email_worker',
+    'worker_credential_lanes', 'dropbox_content_extraction_throughput', 'source_index_status',
+    'source_scheduler_status', 'source_ingestion_health']) {
+    expect(checkByName(pending.checks, name).detail).toContain('privacy choice');
+  }
+  config.sovereignty = { policy: loadSovereigntyPreset('local-only') };
+  await runDoctor(deps);
+  expect(registryReads).toBeGreaterThan(0);
+  expect(requests.some(url => url.includes('/source/index/status'))).toBe(true);
 });
