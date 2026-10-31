@@ -190726,7 +190726,7 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         const pending = match.count > 0 ? { question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, waiting } : undefined;
         const jobId = pendingJobId(raw);
         if (jobId) {
-          rememberPrivateMatch(privateCaller(ctx), jobId, pending);
+          rememberPrivateMatch(privateCaller(ctx), jobId, pending, late.timedOut === true);
           return answerToolResult(raw);
         }
         const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
@@ -190743,8 +190743,8 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
           return askAnonymouslyToolResult(raw);
         const done = pendingJobId(raw) === undefined;
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done);
-        const privateMatch = done && isAnswered(raw) && pending ? beginPrivateAnswer(pending, options) : undefined;
-        return answerToolResult(raw, privateMatch ? { privateMatch } : {});
+        const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
+        return answerToolResult(raw, privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {});
       }
       case ASK_ANONYMOUSLY_TOOL.name: {
         if (!askToolListed(ctx))
@@ -190908,7 +190908,7 @@ function isAnswered(raw) {
 function privateMatchKey(caller, jobId) {
   return `${caller ?? ""}\x00${jobId}`;
 }
-function rememberPrivateMatch(caller, jobId, match) {
+function rememberPrivateMatch(caller, jobId, match, timedOut) {
   const now = Date.now();
   for (const [id, entry] of privateMatchByJob)
     if (entry.expiresAt <= now)
@@ -190919,14 +190919,14 @@ function rememberPrivateMatch(caller, jobId, match) {
       break;
     privateMatchByJob.delete(oldest);
   }
-  privateMatchByJob.set(privateMatchKey(caller, jobId), { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
+  privateMatchByJob.set(privateMatchKey(caller, jobId), { match, timedOut, expiresAt: now + PRIVATE_MATCH_TTL_MS });
 }
 function privateMatchForJob(caller, jobId, done) {
   const key2 = privateMatchKey(caller, jobId);
   const entry = privateMatchByJob.get(key2);
   if (done)
     privateMatchByJob.delete(key2);
-  return entry !== undefined && entry.expiresAt > Date.now() ? entry.match : undefined;
+  return entry !== undefined && entry.expiresAt > Date.now() ? entry : undefined;
 }
 async function runOperation(name, ctx, params) {
   const operation = findOperationByName(name);
