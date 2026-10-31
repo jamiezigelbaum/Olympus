@@ -568,7 +568,15 @@ describe('the Bun program pin', () => {
 test('macOS helper pins are served and validated, or absent', () => {
   const { root, artifact } = fixture();
   const helper = join(root, 'olympus-engine-helper-0123456789abcdef.zip');
-  writeFileSync(helper, 'signed helper fixture');
+  const app = join(root, 'fixture', 'Olympus Engine.app', 'Contents');
+  mkdirSync(join(app, '_CodeSignature'), { recursive: true });
+  writeFileSync(join(app, 'Info.plist'), '<plist><key>CFBundleIdentifier</key><string>ai.olympusplugin.engine-host</string></plist>');
+  writeFileSync(join(app, '_CodeSignature', 'CodeResources'), 'signature structure');
+  expect(spawnSync('zip', ['-qr', helper, 'Olympus Engine.app'], { cwd: join(root, 'fixture') }).status).toBe(0);
+  if (process.platform === 'darwin') {
+    expect(() => publishToSite({ root, artifact, macosHelper: helper, macosHelperTeamId: 'ND2P3ZTQRD' })).toThrow('verification failed');
+    return;
+  }
   const result = publishToSite({ root, artifact, macosHelper: helper, macosHelperTeamId: 'ND2P3ZTQRD' });
   const served = join(root, 'site/releases', result.version, basename(helper));
   expect(readFileSync(served)).toEqual(readFileSync(helper));
@@ -583,4 +591,39 @@ test('macOS helper pins are served and validated, or absent', () => {
   expect(() => publishToSite({ root, artifact, macosHelper: bad, macosHelperTeamId: 'ND2P3ZTQRD' })).toThrow();
   publishToSite({ root, artifact });
   expect(readFileSync(join(root, 'site/install.sh'), 'utf8')).toContain('MACOS_HELPER_NAME=none');
+}, 30_000);
+
+
+test('publishing refuses a missing helper choice and arbitrary helper bytes', () => {
+  const missing = spawnSync('bun', [join(REPO, 'scripts/publish-release-to-site.ts'), '--no-whatsapp-bridge', '--artifact', '/nonexistent/olympus.tgz'], { cwd: REPO, encoding: 'utf8' });
+  expect(missing.status).toBe(2);
+  const { root, artifact } = fixture();
+  const helper = join(root, 'olympus-engine-helper-0123456789abcdef.zip');
+  writeFileSync(helper, 'not a zip');
+  expect(() => publishToSite({ root, artifact, macosHelper: helper, macosHelperTeamId: 'ND2P3ZTQRD' })).toThrow();
+  expect(() => publishToSite({ root, artifact, macosHelper: helper, macosHelperTeamId: 'ABCDEFGHIJ' })).toThrow();
+}, 30_000);
+
+test('refuses an operator-selected signing team', () => {
+  const { root, artifact } = fixture();
+  const helper = join(root, 'olympus-engine-helper-0123456789abcdef.zip');
+  writeFileSync(helper, 'fixture');
+  expect(() => publishToSite({ root, artifact, macosHelper: helper, macosHelperTeamId: 'ABCDEFGHIJ' })).toThrow('team');
+  expect(readFileSync(join(REPO, 'scripts/release-macos-helper.sh'), 'utf8')).toContain('ND2P3ZTQRD');
+}, 30_000);
+
+test('refuses arbitrary bytes as a helper zip', () => {
+  const { root, artifact } = fixture();
+  const helper = join(root, 'olympus-engine-helper-0123456789abcdef.zip');
+  writeFileSync(helper, 'not a zip');
+  expect(() => publishToSite({ root, artifact, macosHelper: helper, macosHelperTeamId: 'ND2P3ZTQRD' })).toThrow();
+}, 30_000);
+
+
+test('release helper refuses another team before starting a build', () => {
+  const result = spawnSync('bash', [join(REPO, 'scripts/release-macos-helper.sh'), '/unused'], {
+    env: { ...process.env, OLYMPUS_MACOS_SIGNING_IDENTITY: 'fixture', OLYMPUS_MACOS_NOTARY_PROFILE: 'fixture', OLYMPUS_MACOS_HELPER_TEAM_ID: 'ABCDEFGHIJ' }, encoding: 'utf8',
+  });
+  if (process.platform === 'darwin') expect(result.stderr).toContain('required team');
+  expect(result.status).not.toBe(0);
 }, 30_000);

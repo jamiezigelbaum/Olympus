@@ -211669,10 +211669,16 @@ async function runEngineCommand(args, deps = {}) {
       ...current2 ? { fromCheckout: dirname83(dirname83(current2.entryPath)), bunBin: current2.runtimePath } : {},
       ...deps.health ? { health: deps.health } : {}
     });
-    if (engine.action === "unchanged")
+    let health = engine.health;
+    if (engine.action === "unchanged") {
+      const since = (deps.health?.now ?? Date.now)();
       (deps.restartEngine ?? restartEngine)(service);
+      health = await waitForEngineHealthy({ paths, expectedBuild: engine.program.build ?? null, since }, { ...deps.health, exec: deps.exec });
+    }
+    const usesHelper = installedProgram(paths.plistPath)?.helperPath === helper.executable_path;
+    const ok = health?.ok === true && usesHelper;
     const { plist: _plist, ...summary } = engine;
-    return { ...helper, engine: summary, restarted_engine: true, note: "The engine was restarted so its agent starts through the helper app.", next: engine.ok ? "Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine." : "Run olympus engine logs to see why the engine did not become healthy." };
+    return { ...helper, ok, engine: { ...summary, ok, health }, restarted_engine: true, note: ok ? "The engine was restarted through the helper app." : "The engine did not prove it started through the helper app.", next: ok ? "Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine." : "Run olympus engine logs to see why the engine did not become healthy." };
   }
   if (command === "verify") {
     return verifyEngine({ ...service, ...parseVerifyArgs(rest), ...deps.health ? { health: deps.health } : {} });
@@ -212168,7 +212174,7 @@ Run: ${ocr.repairHint}`);
       const brief = args[1] === "status" && args.includes("--brief");
       if (result !== undefined)
         console.log(brief ? JSON.stringify(result) : JSON.stringify(result, null, 2));
-      const healthExit = process.platform === "linux" || ["install", "verify", "rollback"].includes(args[1] ?? "");
+      const healthExit = process.platform === "linux" || ["install", "install-helper", "verify", "rollback"].includes(args[1] ?? "");
       if (healthExit && result && typeof result === "object" && result.ok === false)
         process.exitCode = 1;
     } catch (error2) {

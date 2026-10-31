@@ -505,6 +505,8 @@ main() {
     else
       say "Desktop, Documents, Downloads and iCloud need the Olympus helper. Retry: curl -fsSL https://olympusplugin.ai/install.sh | sh, or run olympus engine install-helper --from <signed app> if you have the app."
     fi
+  else
+    say "Desktop, Documents, Downloads and iCloud are not available in this release."
   fi
 
   # 3. The same release again: the installed files must be the verified

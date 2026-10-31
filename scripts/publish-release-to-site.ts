@@ -97,10 +97,11 @@ const BRIDGE_PLACEHOLDERS = {
 } as const;
 /** Pins an installer without a prebuilt bridge carries: pairing then builds the bridge from source. */
 const HELPER_PLACEHOLDERS = { name: 'MACOS_HELPER_NAME=@MACOS_HELPER_NAME@', sha256: 'MACOS_HELPER_SHA256=@MACOS_HELPER_SHA256@', bytes: 'MACOS_HELPER_BYTES=@MACOS_HELPER_BYTES@', teamId: 'MACOS_HELPER_TEAM_ID=@MACOS_HELPER_TEAM_ID@' } as const;
+const EXPECTED_HELPER_TEAM = 'ND2P3ZTQRD';
 type HelperPins = { name: string; sha256: string; bytes: number; teamId: string };
 const NO_HELPER: HelperPins = { name: 'none', sha256: 'none', bytes: 0, teamId: 'none' };
 function assertHelperPins(p: HelperPins): void {
-  if (!/^olympus-engine-helper-[0-9a-f]{16}\.zip$/.test(p.name) || !/^[0-9a-f]{64}$/.test(p.sha256) || !Number.isSafeInteger(p.bytes) || p.bytes <= 0 || !/^[A-Z0-9]{10}$/.test(p.teamId)) throw new Error('Invalid macOS helper pins.');
+  if (!/^olympus-engine-helper-[0-9a-f]{16}\.zip$/.test(p.name) || !/^[0-9a-f]{64}$/.test(p.sha256) || !Number.isSafeInteger(p.bytes) || p.bytes <= 0 || p.teamId !== EXPECTED_HELPER_TEAM) throw new Error('Invalid macOS helper pins.');
 }
 function readHelperPins(script: string): HelperPins | undefined {
   const get = (key: string) => new RegExp(`^MACOS_HELPER_${key}=(\\S+)$`, 'm').exec(script)?.[1];
@@ -377,6 +378,32 @@ export function sourceVersion(root: string): string {
   return pkg.version;
 }
 
+/** Inspect the actual archive before publishing. Linux checks structure only; macOS verifies the signature and notarization. */
+function verifyHelperArchive(path: string): void {
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-helper-verify-'));
+  try {
+    const extracted = spawnSync('unzip', ['-q', path, '-d', dir], { encoding: 'utf8' });
+    if (extracted.status !== 0) throw new Error('Could not unzip macOS helper.');
+    const app = join(dir, 'Olympus Engine.app');
+    const plist = join(app, 'Contents', 'Info.plist');
+    if (!existsSync(plist) || !/<key>CFBundleIdentifier<\/key>\s*<string>ai\.olympusplugin\.engine-host<\/string>/.test(readFileSync(plist, 'utf8')) || !existsSync(join(app, 'Contents', '_CodeSignature', 'CodeResources'))) {
+      throw new Error('macOS helper has an invalid bundle identifier or signature structure.');
+    }
+    if (process.platform === 'darwin') {
+      const check = (command: string, args: string[]) => {
+        const result = spawnSync(command, args, { encoding: 'utf8' });
+        if (result.status !== 0) throw new Error(`macOS helper verification failed: ${command} ${result.stderr}`);
+        return result.stdout + result.stderr;
+      };
+      check('/usr/bin/codesign', ['--verify', '--strict', '--deep', app]);
+      const details = check('/usr/bin/codesign', ['-dvv', app]);
+      if (!/^Identifier=ai\.olympusplugin\.engine-host$/m.test(details) || !/^TeamIdentifier=ND2P3ZTQRD$/m.test(details)) throw new Error('macOS helper signing identifier or team does not match.');
+      if (!check('/usr/sbin/spctl', ['-a', '-t', 'exec', '-vv', app]).includes('source=Notarized Developer ID')) throw new Error('macOS helper is not notarized.');
+      check('/usr/bin/xcrun', ['stapler', 'validate', app]);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
 /** Copy a tarball into site/releases and write site/install.sh pinned to it. */
 export function publishToSite(input: { root: string; artifact: string; bridge?: string; macosHelper?: string; macosHelperTeamId?: string }): ReleasePins & { tarball: string; installScript: string; bridge?: WhatsAppBridgePins } {
   if (!existsSync(input.artifact)) throw new Error(`${input.artifact} does not exist.`);
@@ -391,7 +418,9 @@ export function publishToSite(input: { root: string; artifact: string; bridge?: 
   }
   const pins = { version, ...fileDigest(input.artifact) };
   const bridge = input.bridge ? bridgePinsFor(input.bridge, input.artifact) : undefined;
-  const helper = input.macosHelper ? { name: basename(input.macosHelper), ...fileDigest(input.macosHelper), teamId: input.macosHelperTeamId ?? '' } : undefined;
+  if (input.macosHelperTeamId && input.macosHelperTeamId !== EXPECTED_HELPER_TEAM) throw new Error('The macOS helper team does not match the required team.');
+  if (input.macosHelper) verifyHelperArchive(input.macosHelper);
+  const helper = input.macosHelper ? { name: basename(input.macosHelper), ...fileDigest(input.macosHelper), teamId: EXPECTED_HELPER_TEAM } : undefined;
   if (helper) assertHelperPins(helper);
   const template = readFileSync(join(input.root, INSTALL_TEMPLATE), 'utf8');
   const script = renderInstallScript(template, pins, bridge, helper);
@@ -764,9 +793,19 @@ function main(args: string[]): void {
     return;
   }
   // The Mac release carries its prebuilt WhatsApp bridge; leaving it out is said out loud.
+  if (process.env.OLYMPUS_MACOS_HELPER_TEAM_ID && process.env.OLYMPUS_MACOS_HELPER_TEAM_ID !== EXPECTED_HELPER_TEAM) {
+    console.error('The macOS helper team does not match the required team.');
+    process.exit(2);
+  }
   let macosHelper: string | undefined;
   const helperFlag = args.indexOf('--macos-helper');
   if (helperFlag >= 0 && args[helperFlag + 1]) { macosHelper = resolve(args[helperFlag + 1]!); args = [...args.slice(0, helperFlag), ...args.slice(helperFlag + 2)]; }
+  const noHelper = args.includes('--no-macos-helper');
+  args = args.filter((arg) => arg !== '--no-macos-helper');
+  if ((!macosHelper && !noHelper) || (macosHelper && noHelper)) {
+    console.error('Choose --macos-helper <zip> or --no-macos-helper.');
+    process.exit(2);
+  }
   let bridge: string | undefined;
   const bridgeFlag = args.indexOf('--whatsapp-bridge');
   if (bridgeFlag >= 0 && args[bridgeFlag + 1]) {

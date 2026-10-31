@@ -1248,7 +1248,9 @@ describe('macOS helper installer', () => {
   }, 30_000);
   shellTest('no helper pins skips helper', () => {
     const h = harness();
-    expectSucceeded(h.run('1.0.0'));
+    const result = h.run('1.0.0');
+    expectSucceeded(result);
+    expect(result.stdout).toContain('Desktop, Documents, Downloads and iCloud are not available in this release');
     expect(h.logLines().join('\n')).not.toContain('engine install-helper');
   }, 30_000);
 });
