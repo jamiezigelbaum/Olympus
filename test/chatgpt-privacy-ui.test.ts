@@ -490,6 +490,8 @@ describe('saving', () => {
     expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe('old words');
     expect(ruleRows(host)).toContain('@example.comSender');
     expect(host.button(W.save).disabled).toBe(true);
+    for (const label of [W.addFolder, W.addLabel, W.addSender]) expect(host.button(label).disabled).toBe(true);
+    expect(host.text()).toContain('Resolve the conflict before adding another rule.');
     // Apply again: the addition lands on their settings, their words and rules kept, against their revision.
     host.button(W.applyAgain).click();
     await host.settle();
@@ -586,6 +588,7 @@ describe('saving', () => {
     await host.settle();
     host.button(W.discardMine).click();
     expect(host.doc.querySelector('.confirm-box')).toBeNull();
+    for (const label of [W.addFolder, W.addLabel, W.addSender]) expect(host.button(label).disabled).toBe(false);
     expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe('their words');
     expect(ruleRows(host)).toEqual([]);
     // What is shown is what is saved: nothing to save until something changes.

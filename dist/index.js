@@ -15163,6 +15163,7 @@ var init_vocabulary = __esm(() => {
     confirm: "Confirm",
     conflict: "Your changes weren't saved because the privacy settings changed elsewhere.",
     conflictNow: "What is saved now:",
+    conflictAddBlocked: "Resolve the conflict before adding another rule.",
     conflictDescription: "Your description: {text}",
     conflictNoDescription: "No description",
     applyAgain: "Apply my changes again",

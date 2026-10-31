@@ -2831,6 +2831,7 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   /** A save refused because the settings changed elsewhere: the draft stays until the person picks. */
   conflict: 'Your changes weren\'t saved because the privacy settings changed elsewhere.',
   conflictNow: 'What is saved now:',
+  conflictAddBlocked: 'Resolve the conflict before adding another rule.',
   conflictDescription: 'Your description: {text}',
   conflictNoDescription: 'No description',
   applyAgain: 'Apply my changes again',

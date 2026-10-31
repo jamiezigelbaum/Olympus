@@ -712,10 +712,12 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     } else add(rules, el('p', 'muted fempty', W.rulesEmpty));
     const folders = folderSources().length > 0 && !!kit.picker;
     const gmail = gmailConnected();
+    const canAdd = !s.saving && !s.server;
     add(rules, add(el('div', 'actions add-rules'),
-      kit.button(W.addFolder, 'privacy:add:folder', folders && !s.saving ? addFolder : null, 'plain'),
-      kit.button(W.addLabel, 'privacy:add:label', gmail && !s.saving ? addLabel : null, 'plain'),
-      kit.button(W.addSender, 'privacy:add:sender', s.saving ? null : addSender, 'plain')));
+      kit.button(W.addFolder, 'privacy:add:folder', folders && canAdd ? addFolder : null, 'plain'),
+      kit.button(W.addLabel, 'privacy:add:label', gmail && canAdd ? addLabel : null, 'plain'),
+      kit.button(W.addSender, 'privacy:add:sender', canAdd ? addSender : null, 'plain')));
+    if (s.server) add(rules, el('p', 'reason', W.conflictAddBlocked));
     if (!folders) add(rules, el('p', 'reason', W.needFolderSource));
     if (!gmail) add(rules, el('p', 'reason', W.needGmail));
     add(rules, el('p', 'reason', W.namesShared));

@@ -37831,6 +37831,7 @@ var init_vocabulary = __esm(() => {
     confirm: "Confirm",
     conflict: "Your changes weren't saved because the privacy settings changed elsewhere.",
     conflictNow: "What is saved now:",
+    conflictAddBlocked: "Resolve the conflict before adding another rule.",
     conflictDescription: "Your description: {text}",
     conflictNoDescription: "No description",
     applyAgain: "Apply my changes again",
@@ -44806,7 +44807,10 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(rules, el("p", "muted fempty", W.rulesEmpty));
     const folders = folderSources().length > 0 && !!kit.picker;
     const gmail = gmailConnected();
-    add(rules, add(el("div", "actions add-rules"), kit.button(W.addFolder, "privacy:add:folder", folders && !s.saving ? addFolder : null, "plain"), kit.button(W.addLabel, "privacy:add:label", gmail && !s.saving ? addLabel : null, "plain"), kit.button(W.addSender, "privacy:add:sender", s.saving ? null : addSender, "plain")));
+    const canAdd = !s.saving && !s.server;
+    add(rules, add(el("div", "actions add-rules"), kit.button(W.addFolder, "privacy:add:folder", folders && canAdd ? addFolder : null, "plain"), kit.button(W.addLabel, "privacy:add:label", gmail && canAdd ? addLabel : null, "plain"), kit.button(W.addSender, "privacy:add:sender", canAdd ? addSender : null, "plain")));
+    if (s.server)
+      add(rules, el("p", "reason", W.conflictAddBlocked));
     if (!folders)
       add(rules, el("p", "reason", W.needFolderSource));
     if (!gmail)
