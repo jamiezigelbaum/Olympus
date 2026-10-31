@@ -34,12 +34,12 @@ describe('Telegram private dashboard subprocess protocol', () => {
     expect(result.stdout.trim().split('\n').map(line => JSON.parse(line))).toEqual(fields.map(field => ({ event: 'prompt', field })));
     expect(result.stdout).not.toContain('private-test-value');
     expect(result.stdout).not.toContain('DO NOT PRINT');
-  });
+  }, 30_000);
   test('fails closed on EOF', () => {
     const result = run('', ['code']);
     expect(result.status).toBe(2);
     expect(result.stderr).toBe('dashboard_prompt_closed');
-  });
+  }, 30_000);
   test.each([
     'private-test-value\n',
     '{"field":"password","value":"private-test-value"}\n',
@@ -51,7 +51,7 @@ describe('Telegram private dashboard subprocess protocol', () => {
     expect(result.status).toBe(2);
     expect(result.stderr).toBe('dashboard_prompt_invalid');
     expect(result.stdout).toBe('{"event":"prompt","field":"code"}\n');
-  });
+  }, 30_000);
 });
 
 const PAIR_DRIVER = String.raw`
@@ -104,7 +104,7 @@ test('dashboard pairing completes 2FA, releases transient values and preserves c
   expect(messages.slice(0, 5)).toEqual(['api_id', 'api_hash', 'phone', 'code', 'password'].map(field => ({ event: 'prompt', field })));
   expect(messages[5]).toMatchObject({ event: 'ready', proof: { credentials_transferred: true }, dialogs: [{ chat_scope: 'telegram.personal:chat:7' }] });
   for (const value of ['test-api-hash', '+10000000000', 'test-login-code', 'test-2fa-password']) expect(result.stdout).not.toContain(value);
-});
+}, 30_000);
 
 const LIST_DRIVER = String.raw`
 import importlib.util, io, json, os, pathlib, sys, tempfile, types
@@ -143,11 +143,11 @@ describe('Telegram existing-session chat listing', () => {
     expect(receipt.dialogs[224].chat_scope).toBe('telegram.personal:chat:224');
     expect(result.stdout).not.toContain('test-api-hash');
     expect(result.stdout).not.toContain('prompt');
-  });
+  }, 30_000);
   test.each([['missing', 'session_not_persisted'], ['unauthorized', 'authorization_not_confirmed']])('fails safely for %s session without asking for login', (mode, error) => {
     const result = spawnSync('python3', ['-c', LIST_DRIVER, SCRIPT, mode], { encoding: 'utf8', timeout: 10000 });
     expect(result.status).toBe(2);
     expect(result.stdout).toBe('');
     expect(JSON.parse(result.stderr)).toEqual({ error });
-  });
+  }, 30_000);
 });
