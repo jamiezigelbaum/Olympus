@@ -2073,8 +2073,8 @@ export const DASHBOARD_HOST_GATE_COPY = {
   pasteToken: 'Paste the worker bearer token.',
   readToken: 'That is the read-only view token; use the worker bearer token from setup.',
   refused: 'That token was not accepted.',
-  /** Beside the panel when the browser kept a page the panel opened (a sign-in) from opening. */
-  openBlocked: 'Your browser did not open the page.',
+  /** Beside the panel as a fallback when opening an external page. */
+  openBlocked: "If the page didn't open,",
   openBlockedLink: 'Open it',
 } as const;
 
@@ -2818,14 +2818,11 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   needFolderSource: 'Connect Dropbox or Google Drive to add a folder.',
   needGmail: 'Connect Gmail to add a label.',
   nothingToSave: 'Nothing to save yet. Change a rule or the description first.',
-  pending: {
-    one: '{n} item is waiting to be checked on your computer.',
-    many: '{n} items are waiting to be checked on your computer.',
-  },
   save: 'Save',
   saving: 'Saving…',
   cancel: 'Cancel',
   saveFailed: 'Olympus could not save. Your changes are still here. Try again.',
+  addRuleFailed: 'Olympus could not make this private. Try again.',
   saved: 'Privacy saved.',
   /** The inline step before a save that lowers protection; {list} names the removed rules. */
   confirmRemove: 'This removes protection from {list}.',
@@ -2834,6 +2831,7 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   /** A save refused because the settings changed elsewhere: the draft stays until the person picks. */
   conflict: 'Your changes weren\'t saved because the privacy settings changed elsewhere.',
   conflictNow: 'What is saved now:',
+  conflictAddBlocked: 'Resolve the conflict before adding another rule.',
   conflictDescription: 'Your description: {text}',
   conflictNoDescription: 'No description',
   applyAgain: 'Apply my changes again',

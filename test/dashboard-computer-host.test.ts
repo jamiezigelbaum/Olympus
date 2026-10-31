@@ -935,6 +935,7 @@ describe('the host page when its session expires', () => {
     Object.defineProperty(frame, 'contentWindow', { configurable: true, get: () => child });
     const assigned: string[] = [];
     const opened: string[] = [];
+    const openFeatures: string[] = [];
     const fetched: string[] = [];
     let status = 200;
     const fakeFetch = async (url: string) => {
@@ -946,11 +947,11 @@ describe('the host page when its session expires', () => {
       setInterval: win.setInterval.bind(win),
       location: { hash: '', pathname: '/dashboard', search: '', href: `${pageOrigin}/dashboard`, origin: pageOrigin, assign: (url: string) => assigned.push(url), reload: () => assigned.push('reload') },
       history: { replaceState: () => undefined },
-      open: (url: string) => { opened.push(url); return tab; },
+      open: (url: string, _target: string, features: string) => { opened.push(url); openFeatures.push(features); return tab; },
     };
     new Function('window', 'document', 'fetch', 'navigator', script)(fakeWindow, win.document, fakeFetch, win.navigator);
     const send = (message: Record<string, unknown>) => win.dispatchEvent(new win.MessageEvent('message', { data: { jsonrpc: '2.0', ...message }, source: child as any }));
-    return { win, received, assigned, opened, fetched, send, expire: () => { status = 401; } };
+    return { win, received, assigned, opened, openFeatures, fetched, send, expire: () => { status = 401; } };
   }
 
   test('the dashboard\'s own pages open in place, even behind the Linux bridge\'s other address; pages elsewhere open in the browser', async () => {
@@ -975,17 +976,22 @@ describe('the host page when its session expires', () => {
     expect(page.opened).toEqual(['https://www.dropbox.com/oauth2/authorize?state=x']);
     expect(offer.hidden).toBe(false);
     expect([link.getAttribute('href'), link.getAttribute('target'), link.getAttribute('rel')]).toEqual(['https://www.dropbox.com/oauth2/authorize?state=x', '_blank', 'noopener noreferrer']);
+    expect(page.win.document.activeElement?.hasAttribute('data-open-offer-link')).toBe(true);
     link.dispatchEvent(new page.win.Event('click') as never);
     expect(offer.hidden).toBe(true);
   });
 
-  test('a page that opens says nothing more, and the opened tab cannot reach back to the dashboard', async () => {
-    const tab = { opener: 'the dashboard' as unknown };
-    const page = hostPage(undefined, ORIGIN, tab);
+  test('the link remains available even when the browser reports a window', async () => {
+    const page = hostPage(undefined, ORIGIN, { opener: null });
     page.send({ id: 1, method: 'ui/open-link', params: { url: 'https://www.dropbox.com/oauth2/authorize?state=x' } });
     await settle();
-    expect(tab.opener).toBeNull();
-    expect((page.win.document.querySelector('[data-open-offer]') as unknown as HTMLElement).hidden).toBe(true);
+    expect(page.openFeatures).toEqual(['noopener,noreferrer']);
+    const offer = page.win.document.querySelector('[data-open-offer]') as unknown as HTMLElement;
+    const link = page.win.document.querySelector('[data-open-offer-link]') as unknown as HTMLAnchorElement;
+    expect(offer.hidden).toBe(false);
+    expect(link.href).toBe('https://www.dropbox.com/oauth2/authorize?state=x');
+    link.click();
+    expect(offer.hidden).toBe(true);
   });
 
   test('without a reader\'s token it locks in place: the banner shows, the panel is told, reads keep the last answer, never a raw 401', async () => {
