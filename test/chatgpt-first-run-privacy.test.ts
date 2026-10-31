@@ -1,3 +1,4 @@
+import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -5,24 +6,24 @@ import { join } from 'node:path';
 import { createPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../src/core/first-run-privacy.ts';
 import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
 import { callSetupTool } from '../src/workers/chatgpt/setup-tools.ts';
-import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { ModelSetupService } from '../src/core/model-setup.ts';
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
-function setup() {
+function setup(credentialPresent = false) {
   const dir = mkdtempSync(join(tmpdir(), 'first-run-chatgpt-'));
   dirs.push(dir);
   const path = join(dir, 'sovereignty.json');
   const config = createPendingPrivacyPolicy();
   writeFileSync(path, JSON.stringify(config));
   const backend = createChatGptSetupBackend({
-    sovereignty: { config, source: 'file', path }, credentialPresent: () => false, requestReload: () => true,
+    sovereignty: { config, source: 'file', path }, credentialPresent: () => credentialPresent, requestReload: () => true,
     workerFetch: async () => new Response('{}'), publicUrls: () => undefined,
     handoffs: {} as never,
     env: { HOME: dir, OLYMPUS_PRIVACY_PROFILE_PATH: join(dir, 'privacy.json'), OLYMPUS_TIER_RULES_PATH: join(dir, 'rules.json') },
   });
-  return { backend, path };
+  return { backend, path, dir };
 }
 const meta = (result: any) => result._meta['olympus/privacy'];
 
@@ -78,4 +79,29 @@ test('an existing install never gets the first-run choice', async () => {
   const { backend, path } = setup();
   writeFileSync(path, JSON.stringify(loadSovereigntyPreset('no-sensitive')));
   expect(meta(await callSetupTool('olympus_privacy_get', {}, backend)).privateAnswerChoice).toBeUndefined();
+});
+
+
+test('model selection cannot clear the durable first-run choice across tools and reload', async () => {
+  const { backend, path } = setup(true);
+  await callSetupTool('olympus_model_set', { answers: 'venice' }, backend);
+  const saved = JSON.parse(readFileSync(path, 'utf8'));
+  expect(saved.privacyChoicePending).toBe(true);
+  expect(() => createSovereigntyEngine(saved).resolveAnalystPool({ trustDomain: 'internal' })).toThrow('Choose the first-run privacy policy');
+  const status = new ModelSetupService({ config: saved, credentialState: () => 'ready', autoCheck: false }).getStatus();
+  expect(status.ready).toBe(false);
+  expect(status.privacy_choice_pending).toBe(true);
+  expect(meta(await callSetupTool('olympus_privacy_get', {}, backend)).privateAnswerChoice.pending).toBe(true);
+  expect(saveFirstRunPrivacyChoice(path, 'local-only')).toMatchObject({ ok: true, changed: true });
+  expect(JSON.parse(readFileSync(path, 'utf8')).privacyChoicePending).toBeUndefined();
+});
+
+
+test('the pending chooser returns no existing source rules or backlog', async () => {
+  const { backend, dir } = setup();
+  writePrivacyProfile({ description: 'SENTINEL_SOURCE_DESCRIPTION', rules: [{ kind: 'sender', source_id: 'gmail.email', value: 'SENTINEL_SENDER@example.test' }] },
+    { env: { HOME: dir, OLYMPUS_PRIVACY_PROFILE_PATH: join(dir, 'privacy.json'), OLYMPUS_TIER_RULES_PATH: join(dir, 'rules.json') } });
+  const result = await callSetupTool('olympus_privacy_get', {}, backend);
+  expect(meta(result).privateAnswerChoice.pending).toBe(true);
+  expect(JSON.stringify(result)).not.toContain('SENTINEL');
 });

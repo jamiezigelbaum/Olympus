@@ -117,8 +117,12 @@ export interface SovereigntyTrustDomainPolicy {
   secureHandling?: 'answerable' | 'metadata_only_gap';
 }
 
+export const PENDING_PRIVACY_REASON = 'Choose how Olympus may answer with Private items before setup continues.';
+
 export interface SovereigntyConfig {
   schemaVersion: 1;
+  /** Only the explicit first-run privacy choice removes this durable marker. */
+  privacyChoicePending?: true;
   modelProfiles: Record<string, SovereigntyModelProfile>;
   routes: Partial<Record<Extract<SourceTrustDomain, 'public_safe' | 'internal' | 'secure_local'>, SovereigntyAnalystRoute>>;
   retrieval: {
@@ -256,6 +260,7 @@ export function createSovereigntyEngine(
     trustDomain: SourceTrustDomain;
     requestedProvider?: 'default' | 'local' | 'cloud' | 'venice';
   }): SovereigntyResolvedAnalystPool => {
+    if (config.privacyChoicePending) throw new OperationError('source_index_policy_violation', 'Choose the first-run privacy policy before answering from source data.');
     const trustDomain = builtinTrustDomain(input.trustDomain);
     const requestedProvider = input.requestedProvider ?? 'default';
     const route = config.routes[trustDomain];
@@ -854,6 +859,9 @@ function parseSovereigntyConfig(value: unknown, label: string): SovereigntyConfi
   if (record.schemaVersion !== SOVEREIGNTY_SCHEMA_VERSION) {
     throw new OperationError('config_error', `${label} schemaVersion must be ${SOVEREIGNTY_SCHEMA_VERSION}.`);
   }
+  if (record.privacyChoicePending !== undefined && record.privacyChoicePending !== true) {
+    throw new OperationError('config_error', `${label}.privacyChoicePending must be true or absent.`);
+  }
   const modelProfiles = parseProfiles(record.modelProfiles, label);
   const routes = parseRoutes(record.routes, label);
   const retrievalRecord = asRecord(record.retrieval);
@@ -865,6 +873,7 @@ function parseSovereigntyConfig(value: unknown, label: string): SovereigntyConfi
   }
   return {
     schemaVersion: SOVEREIGNTY_SCHEMA_VERSION,
+    ...((record.privacyChoicePending === true || routes.secure_local?.disabledReason === PENDING_PRIVACY_REASON) ? { privacyChoicePending: true as const } : {}),
     modelProfiles,
     routes,
     retrieval: { trustDomains },

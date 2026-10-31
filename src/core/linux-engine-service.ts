@@ -129,7 +129,7 @@ export function systemdMust(exec: EngineExec, args: string[]): string {
 import { randomBytes, createHash, randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync, removeFileDurablySync, syncDirectorySync } from './atomic-file.ts';
 import { createLinuxPrivateDirectory, legacyLinuxSettings, isLegacyLinuxSetting, LEGACY_LINUX_SETTINGS_DIRECTORIES, LEGACY_LINUX_POLICY_FILES, linuxEngineEnvironment, linuxEngineLayoutsEqual, preflightLinuxEngineLayout, publishLinuxEngineReceipt, readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
-import { engineBuildIdentity, engineServicePaths, reconcileEngineConfig, seedEngineSovereignty, resolveEngineProgram, waitForQuietEngine, waitForEngineHealthy,
+import { resolveInstallationPrivacyState, engineBuildIdentity, engineServicePaths, reconcileEngineConfig, seedEngineSovereignty, resolveEngineProgram, waitForQuietEngine, waitForEngineHealthy,
  type EngineInstallOptions, type EngineInstallResult, type EngineServiceOptions, type EngineHealthDeps, type EngineHealthProof, type EngineLifecycleCheckpoint, type EngineRollbackResult } from './engine-service.ts';
 import { reapRecordedEngineChildren, readEngineChildren, parseProcessTable } from './engine-children.ts';
 import type { EngineChildReapDeps } from './engine-children.ts';
@@ -885,6 +885,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
   assertLegacySettingDestinations(l);
   assertLegacySettingOverrides(l,options.env??process.env);
   const before=inspectSystemdEngine(l,exec); assertKnown(before);
+  const privacyState = resolveInstallationPrivacyState({ homeDir: l.home, paths, env: options.env ?? process.env });
   if(options.dryRun) return {...base,wrote_plist:false,wrote_config:false,wrote_worker_env:false,sovereignty:{action:existsSync(l.sovereigntyPath)?'present':'would_seed',path:l.sovereigntyPath},action:'dry_run'};
   requireLinuxApprovalTransport(source);
   const existingReceipt=readLinuxEngineReceipt(l.receiptPath);
@@ -932,7 +933,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    for(const path of [paths.logPath,paths.errorLogPath]) { assertLinuxManagedPath(path); if(!existsSync(path)) writePrivateFileAtomicSync(path,''); }
    const oldUnit=optionalText(l.unitPath),oldProgram=currentProgram(l);
    if(oldUnit && oldProgram && oldProgram.build!==program.build) writePrivateFileAtomicSync(join(l.stateDir,'service-previous.json'),JSON.stringify({program:oldProgram,unit:oldUnit,config:readFileSync(l.configPath,'utf8')}));
-   const existingWithoutPolicy = !existsSync(l.sovereigntyPath) && (existingReceipt?.installationState === 'installed' || existsSync(l.configPath) || existsSync(l.unitPath));
+   const existingWithoutPolicy = !existsSync(l.sovereigntyPath) && (existingReceipt?.installationState === 'installed' || privacyState.state !== 'not_installed');
    const config=reconcileEngineConfig(l.configPath), seeded=existingWithoutPolicy ? undefined : seedEngineSovereignty(l.sovereigntyPath);
    let wroteEnv=false;
    if(!existsSync(l.workerEnvPath)) { writePrivateFileAtomicSync(l.workerEnvPath,`OLYMPUS_WORKER_AUTH_TOKEN='${randomBytes(32).toString('base64url')}'\nOLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true\n`); wroteEnv=true; }

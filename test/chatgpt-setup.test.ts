@@ -1,3 +1,4 @@
+import { withFirstRunPrivacyGate } from '../src/workers/first-run-privacy-gate.ts';
 import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // Setup from ChatGPT and retrieval-only search: the setup tools, the
 // one-time sign-in links, the model switch, olympus_search, and the privacy
@@ -410,6 +411,7 @@ let server: ReturnType<typeof Bun.serve>;
 let base: string;
 let backendState: FakeBackendState;
 let answerModel: boolean;
+let privacyPending = false;
 let searchCalls: Array<{ question: string; limit?: number }>;
 
 beforeEach(() => {
@@ -425,6 +427,7 @@ beforeEach(() => {
     },
   };
   answerModel = false;
+  privacyPending = false;
   searchCalls = [];
   const worker = createEmailSourceWorker({});
   const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
@@ -449,7 +452,7 @@ beforeEach(() => {
       answerModelAvailable: () => answerModel,
     },
   });
-  server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: handler });
+  server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: withFirstRunPrivacyGate(handler, { pending: () => privacyPending }) });
   base = `http://127.0.0.1:${server.port}`;
 });
 
@@ -564,6 +567,30 @@ describe('olympus_model_set through the real setup backend', () => {
 });
 
 describe('setup tools over the remote handler', () => {
+  test('pending privacy blocks every picker payload, including widget metadata, until chosen', async () => {
+    const client = await connectClient();
+    try {
+      // Positive controls prove these fixtures actually return source metadata.
+      for (const source_id of ['google_drive.docs', 'gmail.email']) {
+        const before = await callRaw(client, 'olympus_scope_list', { source_id });
+        expect(before.isError).toBeFalsy();
+        expect(JSON.stringify(before)).toMatch(SENTINEL_PATTERN);
+      }
+      privacyPending = true;
+      for (const source_id of ['google_drive.docs', 'gmail.email', 'dropbox.files', 'local.files']) {
+        const blocked = await callRaw(client, 'olympus_scope_list', { source_id });
+        expect(blocked.isError).toBe(true);
+        expect(JSON.stringify(blocked)).not.toMatch(SENTINEL_PATTERN);
+        expect(JSON.stringify(blocked)).not.toContain('news@site.example');
+        expect(blocked._meta).toBeUndefined();
+      }
+      expect((await callRaw(client, 'olympus_search', { question: 'anything' })).isError).toBe(true);
+      expect(searchCalls).toHaveLength(0);
+      privacyPending = false;
+      expect((await callRaw(client, 'olympus_scope_list', { source_id: 'gmail.email' })).isError).toBeFalsy();
+    } finally { await client.close(); }
+  });
+
   test('olympus_connect_source returns a one-time relay link; bad input and a missing relay link are refused', async () => {
     const client = await connectClient();
     try {
