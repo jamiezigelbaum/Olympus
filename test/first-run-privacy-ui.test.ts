@@ -9,7 +9,7 @@ import { ModelSetupService, type ModelSetupView } from '../src/core/model-setup.
 import { loadSovereigntyPreset, type SovereigntyPresetName } from '../src/core/sovereignty.ts';
 import { renderModelSetup } from '../src/workers/dashboard/model-setup.ts';
 import { renderDashboardKeysPage } from '../src/workers/dashboard/pages/local.ts';
-import { buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
+import { buildDashboardPreviewView, setupPreviewScript } from '../scripts/dashboard-preview.ts';
 
 const globals = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS'] as const;
 const previous = new Map<string, PropertyDescriptor | undefined>();
@@ -156,10 +156,55 @@ test('pending worker activation never reports Working and a later read can compl
   expect(visiblePanel(f.root)?.textContent).toContain('Working');
 });
 
-test('a save conflict leaves the choice step and never claims verification', async () => {
+test('a save conflict uses the separate error state and returns to the choice', async () => {
   const f = fixture();
   saveFirstRunPrivacyChoice(f.path, 'local-only');
   await f.submit('[data-first-run-privacy]');
-  expect(visiblePanel(f.root)?.textContent).toContain('This choice was already made');
+  expect(visiblePanel(f.root)).toBeNull();
+  expect(f.root.querySelector('[data-setup-error]')?.textContent).toContain('This choice was already made');
+  f.click('[data-setup-retry]');
+  expect(visiblePanel(f.root)?.textContent).toContain('How should Olympus answer');
+  expect(f.root.querySelector('[data-setup-error]')).toBeNull();
   expect(f.policy()).toEqual(loadSovereigntyPreset('local-only'));
+});
+
+test('first-run primary actions share the bottom row with Back', async () => {
+  const f = fixture();
+  const actions = f.root.querySelector('[data-setup-actions]')!;
+  const primary = actions.querySelector<HTMLButtonElement>('[data-setup-submit]')!;
+  expect(primary.hidden).toBe(false);
+  expect(primary.textContent).toBe('Continue');
+  expect(primary.form).toBe(f.root.querySelector('[data-first-run-privacy]'));
+  expect(actions.querySelector<HTMLButtonElement>('[data-setup-back]')!.disabled).toBe(true);
+  expect(visiblePanel(f.root)?.querySelector('button[type="submit"]')).toBeNull();
+  await f.submit('[data-first-run-privacy]');
+  expect(primary.hidden).toBe(true);
+  f.click('[data-setup-next]');
+  expect(primary.hidden).toBe(false);
+  expect(primary.textContent).toBe('Check readiness');
+  expect(primary.form).toBe(f.root.querySelector('[data-model-check]'));
+  expect(actions.querySelector<HTMLButtonElement>('[data-setup-back]')!.disabled).toBe(false);
+  await f.submit('[data-model-check]');
+  expect(primary.hidden).toBe(true);
+  expect(actions.querySelector('[data-first-run-done]')).not.toBeNull();
+});
+
+test('preview exposes the pending first-run sheet', () => {
+  const view = buildDashboardPreviewView('first-run');
+  expect(view.model_setup?.privacy_choice_pending).toBe(true);
+  expect(renderDashboardKeysPage(view)).toContain('data-first-run-sheet');
+});
+
+for (const [sheet, step, text] of [
+  ['first-run', '1', 'How should Olympus answer'],
+  ['first-run', '2', 'Add a Venice key'],
+  ['first-run-local', '2', 'Connect my local models'],
+  ['first-run', '3', 'Verify it works'],
+  ['first-run-no-sensitive', '2', 'Verify it works'],
+] as const) test(`preview link ${sheet} step ${step} opens the intended panel`, async () => {
+  const f = fixture();
+  new Function('setTimeout', setupPreviewScript(sheet, step).replace(/^<script>|<\/script>$/g, ''))(browser.setTimeout.bind(browser));
+  browser.dispatchEvent(new browser.Event('DOMContentLoaded'));
+  await browser.happyDOM.waitUntilComplete();
+  expect(visiblePanel(f.root)?.textContent).toContain(text);
 });

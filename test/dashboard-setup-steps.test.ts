@@ -5,11 +5,57 @@ test('setup sheet renders one provider-neutral step at a time with a fallback li
   const html = setupStepsSheet({ id: 'sample', provider: 'Example', steps: [
     { text: 'Create an app', link: { label: 'Example', url: 'https://example.com/apps' } },
     { text: 'Paste the key' },
-  ], finalForm: '<form>KEY</form>' });
+  ], finalForm: (id) => `<form id="${id}">KEY</form>` });
   expect(html).toContain('Step 1 of 2');
   expect(html).toContain('Open this page in Example');
   expect(html).toContain('https://example.com/apps');
   expect(html).toContain("I've done this, next");
   expect(html).toContain('data-setup-next');
   expect(html).toContain('data-setup-open');
+});
+
+import { Window, type HTMLButtonElement, type HTMLInputElement } from 'happy-dom';
+import { buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
+import { renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
+
+function preview(state: string) {
+  const window = new Window();
+  window.document.body.innerHTML = renderDashboardLocalPage('keys', {
+    url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView(state),
+    options: { controlSessionCsrfToken: 'fixture' },
+  });
+  return window.document;
+}
+
+test('Dropbox final input has its own row and Back precedes Connect in one shared footer', () => {
+  const doc = preview('connect-dropbox');
+  const sheet = doc.querySelector('#connect-dropbox-files')!;
+  const footer = sheet.querySelector('[data-setup-actions]');
+  expect(footer).not.toBeNull();
+  const buttons = footer!.querySelectorAll('button');
+  expect(buttons[0]?.textContent).toBe('Back');
+  const submit = footer!.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  expect(submit.textContent).toBe('Connect');
+  const field = sheet.querySelector<HTMLInputElement>('[name="client_id"]')!;
+  expect(field.closest('[data-setup-actions]')).toBeNull();
+  expect(submit.getAttribute('form')).toBe(field.form!.id);
+  expect(sheet.querySelector('[data-setup-back]')!.hasAttribute('disabled')).toBe(true);
+});
+
+test('refused Dropbox shows only error state with collapsed details and no Cancel', () => {
+  const doc = preview('connect-dropbox-refused');
+  const sheet = doc.querySelector('#connect-dropbox-files')!;
+  expect(sheet.querySelector('[data-connect-error]')).not.toBeNull();
+  expect(sheet.querySelector('[data-connect-content]')!.hasAttribute('hidden')).toBe(true);
+  expect(sheet.querySelector('details.howto')!.hasAttribute('open')).toBe(false);
+  expect(sheet.textContent).not.toContain('Cancel connection attempt');
+});
+
+test('normal Dropbox has no error banner or Cancel; connecting alone offers Cancel', () => {
+  const normal = preview('connect-dropbox').querySelector('#connect-dropbox-files')!;
+  expect(normal.querySelector('[data-connect-error]')).toBeNull();
+  expect(normal.textContent).not.toContain('Cancel connection attempt');
+  const connecting = preview('connect-dropbox-connecting').querySelector('#connect-dropbox-files')!;
+  expect(connecting.textContent).toContain('Cancel connection attempt');
+  expect(connecting.querySelector('[data-connect-error]')).toBeNull();
 });
