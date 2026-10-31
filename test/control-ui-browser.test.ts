@@ -1256,6 +1256,8 @@ test.each([{ source: 'telegram', wholeAccount: false }, { source: 'telegram', wh
   expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3;');
   expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3);');
   expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details:not([open]) > form { display: none; }');
+  // Pair buttons of both cards share one width, so Choose chats starts at the same left edge in every card.
+  expect(DASHBOARD_THEME_CSS).toContain('.messaging-card .actionrow > .btn, .messaging-card .actionrow > form > .btn { min-width: 11rem; }');
 });
 
 
@@ -1480,4 +1482,63 @@ test('Google own-app hides the shared warning and reaches STEP 6 OF 6 with the f
     expect(sheet.querySelector<HTMLElement>('[data-setup-choice]')!.hidden).toBe(false);
     expect(sheet.querySelector<HTMLElement>('[data-setup-walkthrough]')!.hidden).toBe(true);
   } finally { controller.dispose(); }
+});
+
+describe('messaging card in a session that is not local-grade, and its idle controls', () => {
+  const mount = (html: string, messaging: NonNullable<Parameters<typeof mountDashboardController>[0]['transport']['messaging']>, refresh: () => Promise<undefined | { status: number; body: string; signature: string; can_write: boolean; poll_interval_ms: number }> = async () => undefined) => {
+    const root = document.createElement('div'); root.innerHTML = html; document.body.append(root);
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl, messaging }, navigate() {}, refresh: refresh as never, returnUrl: 'http://localhost/dashboard?keys' });
+    return { root, controller };
+  };
+
+  test('a card that offers "Open controls" asks no pairing route on mount, on a redraw, or from a press', async () => {
+    const operations: string[] = [];
+    const html = renderMessagingCard('telegram', false) + renderMessagingCard('whatsapp', false);
+    const { root, controller } = mount(html, async operation => { operations.push(operation); return { status: 403, body: { ok: false } }; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(operations).toEqual([]);
+    expect(root.textContent).toContain('Open controls on this computer');
+    controller.dispose();
+  });
+
+  test('Choose chats with nothing paired says to pair first and does not keep asking', async () => {
+    const operations: string[] = [];
+    const { root, controller } = mount(renderMessagingCard('whatsapp', true), async operation => { operations.push(operation); return operation === 'chats' ? { status: 200, body: { ok: true, state: 'not_paired' } } : { status: 200, body: { ok: true, state: 'idle' } }; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    root.querySelector<HTMLFormElement>('[data-messaging-kind="chats"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(root.querySelector('[data-messaging-status]')!.textContent).toContain('Not paired yet');
+    await new Promise(resolve => setTimeout(resolve, 1400));
+    expect(operations).toEqual(['status', 'chats']);
+    controller.dispose();
+  });
+
+  test('Cancel pairing is hidden until a pairing is running, and hidden again when it ends', async () => {
+    let state = 'idle';
+    const { root, controller } = mount(renderMessagingCard('whatsapp', true), async () => ({ status: 200, body: { ok: true, state } }));
+    const cancel = root.querySelector<HTMLElement>('[data-messaging-kind="cancel"]')!;
+    expect(cancel.hidden).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(cancel.hidden).toBe(true);
+    state = 'waiting';
+    root.querySelector<HTMLFormElement>('[data-messaging-kind="start"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cancel.hidden).toBe(false);
+    state = 'cancelled';
+    cancel.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cancel.hidden).toBe(true);
+    controller.dispose();
+  });
+
+  test('Check readiness still says it ran when the redraw that follows clears its line', async () => {
+    const page = '<div class="top"><span class="meta">checked</span></div><form data-model-check method="post" action="/dashboard/models/check"><button class="btn" type="submit">Check readiness</button><span data-action-message role="status"></span></form>';
+    const root = document.createElement('div'); root.innerHTML = page; document.body.append(root);
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: async () => ({ status: 200, body: { ok: true } }) }, navigate() {}, returnUrl: 'http://localhost/dashboard?keys',
+      refresh: async () => ({ status: 200, body: page, signature: 'changed', can_write: true, poll_interval_ms: 0 }) as never });
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(root.querySelector('[data-action-message]')!.textContent).toBe('Checked just now.');
+    controller.dispose();
+  });
 });
