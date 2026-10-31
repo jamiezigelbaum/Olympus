@@ -700,6 +700,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     const asked = L.questionsKey(s.description);
     area.addEventListener('input', () => {
       s.description = area.value;
+      summary.textContent = L.summary(s.description) || W.summaryEmpty;
       const open = s.confirmStep;
       const could = canSave();
       changed();

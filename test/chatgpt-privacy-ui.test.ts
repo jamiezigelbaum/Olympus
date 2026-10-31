@@ -1208,3 +1208,15 @@ describe('privacy sheet persistence boundaries', () => {
     expect(details.textContent).toContain(W.namesShared);
   });
 });
+
+test('privacy summary follows every description keystroke even when topics and save availability stay the same', async () => {
+  const { host } = await openPrivacy({ description: 'my diary' });
+  const type = (value: string) => {
+    const area = host.doc.querySelector('textarea')!;
+    area.value = value;
+    area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+  };
+  type('my diary and a');
+  type('my diary and letters');
+  expect(host.doc.querySelector('[data-key="privacy:summary"]')!.textContent).toBe('my diary and letters');
+});

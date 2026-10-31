@@ -150978,6 +150978,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     const asked = L.questionsKey(s.description);
     area.addEventListener("input", () => {
       s.description = area.value;
+      summary.textContent = L.summary(s.description) || W.summaryEmpty;
       const open7 = s.confirmStep;
       const could = canSave();
       changed();
