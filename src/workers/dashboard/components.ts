@@ -581,8 +581,7 @@ export function setupStepsSheet(input: { id: string; provider: string; steps: re
   const formId = `${id}-form`;
   const panels = input.steps.map((step, index) => {
     const url = step.link && safeExternalHref(step.link.url);
-    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">${escapeHtml(step.button_label ?? `Open this page in ${input.provider}`)}</button>`
-      + `<p><a class="ext" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml(input.provider)} ↗</a></p>` : '';
+    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">${escapeHtml(step.button_label ?? `Open this page in ${input.provider}`)}</button>` : '';
     const extraLinks = (step.links ?? []).map(link => { const href = safeExternalHref(link.url); return href ? `<p><a class="ext" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)} ↗</a></p>` : ''; }).join('');
     const redirect = step.redirect_uri && input.redirect
       ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : '';
@@ -618,7 +617,7 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
       + detailsDisclosure('How to fix', input.noticeDetail ? `<p class="hint">${escapeHtml(input.noticeDetail)}</p>` : '')
       + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>`
     : '';
-  const providerNote = input.providerNote?.trim() ? `<p class="providernote">${escapeHtml(input.providerNote)}</p>` : '';
+  const providerNote = input.providerNote?.trim() && (!input.credentialFile || input.publisher) ? `<p class="providernote"${input.credentialFile ? ' data-shared-app-note' : ''}>${escapeHtml(input.providerNote)}</p>` : '';
   const registration = callbackRegistrationSteps(id, input.registration);
   // The redirect URI sits above the key fields and is selectable text with its
   // own copy button (.promptbox is already `user-select: all`), because every

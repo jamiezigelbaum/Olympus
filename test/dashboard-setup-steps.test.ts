@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { setupStepsSheet } from '../src/workers/dashboard/components.ts';
 
-test('setup sheet renders one provider-neutral step at a time with a fallback link', () => {
+test('setup sheet renders one provider-neutral step at a time without a duplicate link', () => {
   const html = setupStepsSheet({ id: 'sample', provider: 'Example', steps: [
     { text: 'Create an app', link: { label: 'Example', url: 'https://example.com/apps' } },
     { text: 'Paste the key' },
@@ -12,6 +12,8 @@ test('setup sheet renders one provider-neutral step at a time with a fallback li
   expect(html).toContain("I've done this, next");
   expect(html).toContain('data-setup-next');
   expect(html).toContain('data-setup-open');
+  expect(html).not.toContain('Open the page in');
+  expect(html.match(/https:\/\/example.com\/apps/g)).toHaveLength(1);
 });
 
 import { Window, type HTMLButtonElement, type HTMLInputElement } from 'happy-dom';
@@ -88,4 +90,16 @@ test('Google full signal uses owner copy; otherwise shared Connect stays first',
   expect(ordinary.querySelector('button[type="submit"]')!.textContent).toBe('Connect');
   expect(ordinary.querySelector('[data-setup-begin]')!.textContent).toBe('Use my own Google app');
   expect(ordinary.querySelector('[data-setup-walkthrough]')!.hasAttribute('hidden')).toBe(true);
+});
+
+test('Google own-app has exactly three stops with the file drop in the Desktop key step', () => {
+  for (const state of ['connect-google-loopback', 'connect-google-full', 'connect-google-error']) {
+    const sheet = preview(state).querySelector('#connect-gmail-email')!;
+    const panels = sheet.querySelectorAll('[data-setup-panel]');
+    expect(panels.length).toBe(3);
+    expect(sheet.querySelector('[data-setup-counter]')!.textContent).toBe('Step 1 of 3');
+    expect(panels[2]!.querySelector('[data-client-file-drop]')).not.toBeNull();
+    expect(sheet.querySelector('.providernote')).toBeNull();
+  }
+  expect(preview('connect-google-publisher').querySelector('#connect-gmail-email .providernote')).not.toBeNull();
 });

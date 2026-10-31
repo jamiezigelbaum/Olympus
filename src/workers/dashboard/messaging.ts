@@ -12,9 +12,9 @@ function telegramSetupSheet(): string {
     finalForm: formId => `<form id="${formId}" method="dialog" data-messaging-kind="start"></form>`,
   });
   return '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>'
-    + '<div class="sheet" id="telegram-setup" aria-hidden="true" data-messaging-setup><h4>Connect Telegram</h4>'
+    + '<div class="sheet" id="telegram-setup" aria-hidden="true" data-messaging-setup><h4>Connect Telegram</h4><p data-messaging-status role="status" aria-live="polite"></p>'
     + `<div data-messaging-setup-intro>${walkthrough}</div>`
-    + '<div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><div data-messaging-input></div><div data-messaging-chats></div></div>'
+    + '<div data-messaging-view><div data-messaging-input></div><div data-messaging-chats></div></div>'
     + '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form></div>';
 }
 

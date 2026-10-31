@@ -1139,6 +1139,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         const heading = walkthrough.querySelector<HTMLElement>('h4');
         if (heading) { heading.tabIndex = -1; heading.focus(); }
       }
+      const sharedNote = sheet?.querySelector<HTMLElement>('[data-shared-app-note]');
+      if (sharedNote) sharedNote.hidden = true;
       const lead = sheet?.querySelector<HTMLElement>('[data-setup-lead]');
       if (lead) lead.hidden = true;
       return;

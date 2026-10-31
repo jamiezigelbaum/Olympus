@@ -95556,8 +95556,7 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
           { label: "Enable Google Drive API", url: "https://console.cloud.google.com/apis/library/drive.googleapis.com" }
         ] },
         { title: "Set up the sign-in screen and publish it", text: "External, your own email, then Publish app.", button_label: "Open the sign-in screen", link: { label: "Sign-in screen", url: "https://console.cloud.google.com/auth/overview" }, links: [{ label: "Publish app in Audience", url: "https://console.cloud.google.com/auth/audience" }] },
-        { title: "Make a Desktop app key and download it", text: "Choose Download JSON when Google shows the key.", button_label: "Open Clients", link: { label: "Clients", url: "https://console.cloud.google.com/auth/clients" } },
-        { title: "Add your app key", text: "Drive uses the same app." }
+        { title: "Make a Desktop app key and download it", text: "Choose Download JSON when Google shows the key.", button_label: "Open Clients", link: { label: "Clients", url: "https://console.cloud.google.com/auth/clients" } }
       ],
       secret_shown_once: false,
       fields: [clientIdField, clientSecretField]
@@ -145073,6 +145072,9 @@ function mountDashboardController(options) {
           heading.focus();
         }
       }
+      const sharedNote = sheet?.querySelector("[data-shared-app-note]");
+      if (sharedNote)
+        sharedNote.hidden = true;
       const lead = sheet?.querySelector("[data-setup-lead]");
       if (lead)
         lead.hidden = true;
@@ -145930,7 +145932,7 @@ function setupStepsSheet(input) {
   const formId = `${id}-form`;
   const panels = input.steps.map((step, index) => {
     const url2 = step.link && safeExternalHref(step.link.url);
-    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">${escapeHtml2(step.button_label ?? `Open this page in ${input.provider}`)}</button>` + `<p><a class="ext" href="${escapeHtml2(url2)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml2(input.provider)} ↗</a></p>` : "";
+    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">${escapeHtml2(step.button_label ?? `Open this page in ${input.provider}`)}</button>` : "";
     const extraLinks = (step.links ?? []).map((link2) => {
       const href = safeExternalHref(link2.url);
       return href ? `<p><a class="ext" href="${escapeHtml2(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml2(link2.label)} ↗</a></p>` : "";
@@ -145950,7 +145952,7 @@ function connectSetupSheet(input) {
   }).join("");
   const hasError = Boolean(input.notice?.trim());
   const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
-  const providerNote = input.providerNote?.trim() ? `<p class="providernote">${escapeHtml2(input.providerNote)}</p>` : "";
+  const providerNote = input.providerNote?.trim() && (!input.credentialFile || input.publisher) ? `<p class="providernote"${input.credentialFile ? " data-shared-app-note" : ""}>${escapeHtml2(input.providerNote)}</p>` : "";
   const registration = callbackRegistrationSteps(id, input.registration);
   const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml2(input.redirectUri.guidance)}</p>`}`;
   const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
@@ -153542,7 +153544,7 @@ function telegramSetupSheet() {
     ],
     finalForm: (formId) => `<form id="${formId}" method="dialog" data-messaging-kind="start"></form>`
   });
-  return '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>' + '<div class="sheet" id="telegram-setup" aria-hidden="true" data-messaging-setup><h4>Connect Telegram</h4>' + `<div data-messaging-setup-intro>${walkthrough}</div>` + '<div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><div data-messaging-input></div><div data-messaging-chats></div></div>' + '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form></div>';
+  return '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>' + '<div class="sheet" id="telegram-setup" aria-hidden="true" data-messaging-setup><h4>Connect Telegram</h4><p data-messaging-status role="status" aria-live="polite"></p>' + `<div data-messaging-setup-intro>${walkthrough}</div>` + "<div data-messaging-view><div data-messaging-input></div><div data-messaging-chats></div></div>" + '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form></div>';
 }
 function renderMessagingCard(source, localSession) {
   const label = source === "telegram" ? "Telegram" : "WhatsApp";

@@ -4363,7 +4363,6 @@ function oauthSetupInstructions(
         ] },
         { title: 'Set up the sign-in screen and publish it', text: 'External, your own email, then Publish app.', button_label: 'Open the sign-in screen', link: { label: 'Sign-in screen', url: 'https://console.cloud.google.com/auth/overview' }, links: [{ label: 'Publish app in Audience', url: 'https://console.cloud.google.com/auth/audience' }] },
         { title: 'Make a Desktop app key and download it', text: 'Choose Download JSON when Google shows the key.', button_label: 'Open Clients', link: { label: 'Clients', url: 'https://console.cloud.google.com/auth/clients' } },
-        { title: 'Add your app key', text: 'Drive uses the same app.' },
       ],
       secret_shown_once: false,
       fields: [clientIdField, clientSecretField],

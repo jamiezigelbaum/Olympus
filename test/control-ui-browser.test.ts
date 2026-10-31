@@ -95,7 +95,7 @@ describe('OAuth browser handoff', () => {
     expect(calls[0]).toMatchObject({ action: 'start_oauth', source: 'dropbox' });
     controller.dispose();
   });
-  test('setup opens the provider synchronously and keeps a safe fallback link', () => {
+  test('setup opens the provider synchronously without a duplicate link', () => {
     const root = document.createElement('div');
     root.innerHTML = setupStepsSheet({ id: 'venice', provider: 'Venice', finalForm: () => '', steps: [
       { text: 'Account', link: { label: 'Venice', url: 'https://venice.ai/settings/api' } },
@@ -107,10 +107,7 @@ describe('OAuth browser handoff', () => {
       returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
     root.querySelector<HTMLButtonElement>('[data-setup-open]')!.click();
     expect(calls).toEqual([['https://venice.ai/settings/api', '_blank', 'noopener,noreferrer']]);
-    const fallback = root.querySelector<HTMLAnchorElement>('a.ext')!;
-    expect(fallback.href).toBe('https://venice.ai/settings/api');
-    expect(fallback.target).toBe('_blank');
-    expect(fallback.rel).toContain('noopener');
+    expect(root.querySelector('a.ext')).toBeNull();
     controller.dispose();
   });
   for (const [message, index] of [
@@ -1372,5 +1369,24 @@ test('Telegram preserves an open sheet and a deliberate close across dashboard r
     await controller.refresh(); await happyWindow.happyDOM.waitUntilComplete();
     expect(reads).toBe(2);
     expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('true');
+  } finally { controller.dispose(); }
+});
+
+test('Google own-app hides the shared warning and reaches Step 3 of 3 with the file input', () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-publisher'), options: { controlSessionCsrfToken: 'fixture' } });
+  document.body.append(root);
+  const controller = mountDashboardController({ root, transport: { control: async () => { throw new Error('No consent should start'); } }, navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+  try {
+    const sheet = root.querySelector('#connect-gmail-email')!;
+    const note = sheet.querySelector<HTMLElement>('.providernote')!;
+    expect(note.hidden).toBe(false);
+    sheet.querySelector<HTMLButtonElement>('[data-setup-begin]')!.click();
+    expect(note.hidden).toBe(true);
+    const next = sheet.querySelector<HTMLButtonElement>('[data-setup-next]')!;
+    next.click(); next.click();
+    expect(sheet.querySelector('[data-setup-counter]')!.textContent).toBe('Step 3 of 3');
+    expect(sheet.querySelector<HTMLElement>('[data-client-file-drop]')!.closest<HTMLElement>('[data-setup-panel]')!.hidden).toBe(false);
+    expect(sheet.querySelector<HTMLButtonElement>('[data-setup-submit]')!.hidden).toBe(false);
   } finally { controller.dispose(); }
 });

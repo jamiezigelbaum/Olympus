@@ -94,3 +94,9 @@ test('cancelling Telegram credential entry clears prompts without publishing a c
   expect(published).toBe(false);
   expect(() => manager.respond('telegram', 'api_hash', 'fixture-api-hash')).toThrow('No matching pairing prompt.');
 });
+
+test('Telegram status belongs above the walkthrough action row', () => {
+  const html = renderMessagingCard('telegram', true);
+  expect(html.indexOf('data-messaging-status')).toBeLessThan(html.indexOf('data-messaging-setup-intro'));
+  expect(html.indexOf('data-messaging-status')).toBeLessThan(html.indexOf('data-setup-actions'));
+});
