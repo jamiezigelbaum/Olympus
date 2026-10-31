@@ -2489,7 +2489,7 @@ describe('createConnectorStoreCorpusAdapter', () => {
   // Regression for the 2026-07-05 "Test 15" miss: a chat message that
   // arrived seconds ago must reach the candidate cut even when many older
   // items outrank it lexically and no embedding exists for it yet.
-  test('chat relevance beats recency and an empty strict query falls back to any word', async () => {
+  test('chat relevance beats recency, including with trusted local keyword fallback', async () => {
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'internal.fakechat.messages', family: 'chat', trustDomain: 'internal' });
     const items: RawItem[] = Array.from({ length: 13 }, (_, index) => ({
       identity: { family: 'chat', provider: 'fakechat', accountScope: ACCOUNT, providerItemId: String(index), localItemId: `${ACCOUNT}:${index}`, sourceVersion: 'v1' },
@@ -2498,7 +2498,7 @@ describe('createConnectorStoreCorpusAdapter', () => {
     }));
     const connector: SourceConnector = { id: 'fakechat', family: 'chat', async authenticate() {}, async *listItems() { yield { items, done: true }; }, async fetchItem(id) { return items.find((item) => item.identity.localItemId === id)!; }, classificationSignals() { return {}; } };
     await store.syncFromConnector(connector, { fetchContent: true });
-    const adapter = createConnectorStoreCorpusAdapter({ store });
+    const adapter = createConnectorStoreCorpusAdapter({ store, localKeywordFallback: true });
     const corpus = defineConnectorCorpus({ corpusId: store.corpusId, family: 'chat', trustDomain: 'internal' });
     for (const query of ['Tiago drinks after', 'Use Olympus to find what Tiago said about drinks after work']) {
       const response = await adapter({ query, maxResults: 4, corpus, context: { allowedTrustDomains: ['internal'] } });
