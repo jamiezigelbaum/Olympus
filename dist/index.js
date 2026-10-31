@@ -15125,6 +15125,18 @@ var init_vocabulary = __esm(() => {
     }
   };
   DASHBOARD_CHATGPT_PRIVACY_COPY = {
+    addRule: "Add a rule",
+    details: "Details",
+    summaryEmpty: "No personal topics chosen yet. Add your description in Details.",
+    kindPrompt: "What would you like to keep private?",
+    step: "Step {step} of 3",
+    stepPick: "Step 2 of 3",
+    sheetBack: "Back",
+    next: "Next",
+    select: "Choose",
+    selected: "Selected",
+    selectFor: "Choose {name}",
+    confirmRule: "Keep this private?",
     back: "Back to Olympus",
     title: "What's private for you?",
     intro: "Olympus shares your items with ChatGPT unless you say they're private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.",

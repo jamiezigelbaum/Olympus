@@ -37840,6 +37840,18 @@ var init_vocabulary = __esm(() => {
     }
   };
   DASHBOARD_CHATGPT_PRIVACY_COPY = {
+    addRule: "Add a rule",
+    details: "Details",
+    summaryEmpty: "No personal topics chosen yet. Add your description in Details.",
+    kindPrompt: "What would you like to keep private?",
+    step: "Step {step} of 3",
+    stepPick: "Step 2 of 3",
+    sheetBack: "Back",
+    next: "Next",
+    select: "Choose",
+    selected: "Selected",
+    selectFor: "Choose {name}",
+    confirmRule: "Keep this private?",
     back: "Back to Olympus",
     title: "What's private for you?",
     intro: "Olympus shares your items with ChatGPT unless you say they're private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.",
@@ -42353,7 +42365,11 @@ function privacyLogic(config) {
   function questionsKey(description) {
     return JSON.stringify(questions(description));
   }
+  function summary(description) {
+    return String(description || "").replace(/\s+/g, " ").trim();
+  }
   return {
+    summary,
     setIntent,
     satisfies,
     validRule,
@@ -43685,7 +43701,15 @@ function chatgptPickerProgram(kit) {
     const words2 = p.pick.words;
     if (p.pick.taken.indexOf(key2) >= 0)
       return kit.button(words2.alreadyPrivate, focusKey, null, "plain");
-    const control = kit.button(words2.makePrivate, focusKey, p.loading ? null : () => leave("", false, { key: key2, name }), "plain");
+    const selected = p.pick.selected && p.pick.selected.key === key2;
+    const control = kit.button(words2.makePrivate, focusKey, p.loading ? null : () => {
+      if (!words2.stepSheet)
+        return leave("", false, { key: key2, name });
+      p.pick.selected = { key: key2, name };
+      kit.render(focusKey);
+    }, "plain");
+    if (words2.stepSheet)
+      control.setAttribute("aria-pressed", String(!!selected));
     control.setAttribute("aria-label", fill2(words2.makePrivateFor, { name }));
     return control;
   }
@@ -44216,7 +44240,16 @@ function chatgptPickerProgram(kit) {
     }
     backButton.className = "btn back";
     add(top, backButton);
-    add(page2, top);
+    if (p.pick && p.pick.words.stepSheet) {
+      page2.className += " privacy";
+      add(page2, el("p", "muted", p.pick.words.stepSheet.step));
+      const progress = el("progress");
+      progress.max = 3;
+      progress.value = 2;
+      progress.setAttribute("aria-label", p.pick.words.stepSheet.step);
+      add(page2, progress);
+    } else
+      add(page2, top);
     if (p.discarding) {
       const confirm = el("div", "confirm-box");
       confirm.setAttribute("role", "alert");
@@ -44232,6 +44265,10 @@ function chatgptPickerProgram(kit) {
       mailView(page2);
     else
       foldersView(page2);
+    if (p.pick && p.pick.words.stepSheet) {
+      const words2 = p.pick.words.stepSheet;
+      add(page2, add(el("div", "actions privacy-sheet-actions"), kit.button(words2.back, deep ? "picker:up" : "picker:back", escape2, "plain"), kit.button(words2.next, "picker:pick-next", p.pick.selected && !p.loading ? () => leave("", false, p.pick.selected) : null, "main")));
+    }
     return page2;
   }
   function escape2() {
@@ -44337,7 +44374,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       labelsError: "",
       sender: "",
       senderError: "",
-      questionsError: ""
+      questionsError: "",
+      detailsOpen: false,
+      conflictDetailsOpen: false,
+      candidate: null,
+      ruleKind: ""
     };
     load();
   }
@@ -44398,7 +44439,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }
       take(data2);
       s.loaded = true;
-      kit.render("privacy:description");
+      kit.render("privacy:add");
     }, () => {
       if (mine !== session || !s)
         return;
@@ -44466,7 +44507,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         s.description = replayed.description;
       s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
       kit.remember(data2.rules.filter(validRule).length);
-      kit.render("privacy:add:folder");
+      kit.render("privacy:add");
     }, () => {
       if (mine !== session || !s)
         return;
@@ -44574,7 +44615,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     if (!server)
       return;
     take(server);
-    kit.render("privacy:description");
+    kit.render("privacy:add");
   }
   function conflictBox() {
     const box = el("div", "confirm-box");
@@ -44588,7 +44629,9 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(list, el("li", "", W.rulesEmpty));
     for (const rule of rules)
       add(list, el("li", "", displayOf(rule) + " · " + kindText(rule)));
-    add(box, list, add(el("div", "actions"), kit.button(W.applyAgain, "privacy:conflict:apply", applyAgain, "main"), kit.button(W.discardMine, "privacy:conflict:discard", discardMine, "plain")));
+    const detail = disclosure(true);
+    add(detail, list);
+    add(box, detail, add(el("div", "actions"), kit.button(W.applyAgain, "privacy:conflict:apply", applyAgain, "main"), kit.button(W.discardMine, "privacy:conflict:discard", discardMine, "plain")));
     return box;
   }
   function renewConfirmation(then) {
@@ -44673,17 +44716,18 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       back: W.backToPrivacy,
       title: W.folderTitle,
       intro: W.folderIntro,
-      makePrivate: W.makePrivate,
-      makePrivateFor: W.makePrivateFor,
+      makePrivate: W.select,
+      makePrivateFor: W.selectFor,
+      stepSheet: { step: W.stepPick, next: W.next, back: W.sheetBack },
       alreadyPrivate: W.alreadyPrivate
     }, taken, (folder) => {
       if (mine !== session || !s)
         return;
       s.picking = false;
-      s.screen = "main";
+      s.screen = "kinds";
       if (folder)
-        addRule({ kind: "folder", source_id: id, key: folder.key, display: folder.name, removed: false });
-      kit.render("privacy:add:folder");
+        reviewRule({ kind: "folder", source_id: id, key: folder.key, display: folder.name, removed: false });
+      kit.render(folder ? "privacy:sheet:confirm" : "privacy:add:folder");
     });
   }
   function addLabel() {
@@ -44720,7 +44764,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
   }
   function addSender() {
     s.screen = "sender";
-    s.sender = "";
     s.senderError = "";
     kit.render("privacy:sender");
   }
@@ -44737,9 +44780,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       kit.render("privacy:sender");
       return;
     }
-    addRule(rule);
-    s.screen = "main";
-    kit.render("privacy:add:sender");
+    reviewRule(rule);
   }
   function kindText(rule) {
     if (rule.kind === "folder")
@@ -44747,7 +44788,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return rule.kind === "label" ? W.kindLabel : W.kindSender;
   }
   function ruleRow(rule, index) {
-    const li = el("li", "frow pick rule");
+    const li = el("li", "rule rule-chip");
     if (rule.removed) {
       add(li, el("p", "fname leaf muted", fill2(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, "privacy:rule:" + index, s.saving ? null : () => {
@@ -44760,12 +44801,12 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       return add(li, undo);
     }
     add(li, add(el("p", "fname leaf two-line"), el("span", "two-top", rule.display), el("span", "two-bottom", kindText(rule))));
-    const remove = kit.button(W.remove, "privacy:rule:" + index, s.saving ? null : () => {
+    const remove = kit.button("×", "privacy:rule:" + index, s.saving ? null : () => {
       rule.removed = true;
       L.setIntent(s.intents, rule, false);
       changed();
       s.saveError = "";
-      kit.render("privacy:rule:" + index);
+      save();
     }, "plain");
     remove.setAttribute("aria-label", fill2(W.removeFor, { name: rule.display }));
     return add(li, remove);
@@ -44824,7 +44865,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
   }
   function mainView(page2) {
     add(page2, el("h1", "", W.title));
-    add(page2, el("p", "muted intro", W.intro));
     if (s.server)
       add(page2, conflictBox());
     if (s.error) {
@@ -44841,6 +44881,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }
       return;
     }
+    const summary = el("p", "privacy-summary", L.summary(s.description) || W.summaryEmpty);
+    summary.setAttribute("data-key", "privacy:summary");
+    add(page2, summary);
+    const details = disclosure();
+    add(details, el("p", "muted intro", W.intro));
     const field = el("label", "field");
     add(field, el("span", "field-label", W.descriptionLabel));
     const area = el("textarea", "text");
@@ -44861,32 +44906,32 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       if (open3 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
         kit.render("privacy:description");
     });
-    add(page2, add(field, area));
+    add(details, add(field, area));
     const shared = el("p", "reason field-note", W.descriptionShared);
     shared.id = "privacy-description-shared";
-    add(page2, shared);
+    add(details, shared);
     const questions = questionsSection();
     if (questions)
-      add(page2, questions);
+      add(details, questions);
+    add(details, el("p", "reason", W.namesShared));
     const rules = add(el("section", "fsection"), el("h2", "", W.rulesTitle));
     if (s.rules.length) {
-      const listNode = el("ul", "flist");
+      const listNode = el("ul", "rule-chips");
       s.rules.forEach((rule, index) => add(listNode, ruleRow(rule, index)));
       add(rules, listNode);
     } else
       add(rules, el("p", "muted fempty", W.rulesEmpty));
-    const folders = folderSources().length > 0 && !!kit.picker;
-    const gmail = gmailConnected();
-    const canAdd = !s.saving && !s.server;
-    add(rules, add(el("div", "actions add-rules"), kit.button(W.addFolder, "privacy:add:folder", folders && canAdd ? addFolder : null, "plain"), kit.button(W.addLabel, "privacy:add:label", gmail && canAdd ? addLabel : null, "plain"), kit.button(W.addSender, "privacy:add:sender", canAdd ? addSender : null, "plain")));
+    add(rules, kit.button(W.addRule, "privacy:add", !s.saving && !s.server ? () => {
+      s.screen = "kinds";
+      s.ruleKind = "";
+      s.candidate = null;
+      s.sender = "";
+      s.senderError = "";
+      kit.render("privacy:add:folder");
+    } : null, "plain"));
     if (s.server)
       add(rules, el("p", "reason", W.conflictAddBlocked));
-    if (!folders)
-      add(rules, el("p", "reason", W.needFolderSource));
-    if (!gmail)
-      add(rules, el("p", "reason", W.needGmail));
-    add(rules, el("p", "reason", W.namesShared));
-    add(page2, rules);
+    add(page2, rules, details);
     const footer = el("section", "picker-footer");
     if (s.confirmStep && !s.saving && lowers()) {
       add(page2, add(footer, confirmBox()));
@@ -44959,12 +45004,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       if (kept().some((other) => other.kind === "label" && other.source_id === mail && other.key === label.id)) {
         add(li, kit.button(W.alreadyPrivate, "privacy:label:" + index, null, "plain"));
       } else {
-        const control = kit.button(W.makePrivate, "privacy:label:" + index, () => {
-          addRule(rule);
-          s.screen = "main";
-          kit.render("privacy:add:label");
+        const control = kit.button(s.candidate && identity(s.candidate) === identity(rule) ? W.selected : W.select, "privacy:label:" + index, () => {
+          s.candidate = rule;
+          kit.render("privacy:sheet:next");
         }, "plain");
-        control.setAttribute("aria-label", fill2(W.makePrivateFor, { name }));
+        control.setAttribute("aria-label", fill2(W.selectFor, { name }));
         add(li, control);
       }
       add(listNode, li);
@@ -45003,7 +45047,109 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(field, error);
     }
     add(page2, field);
-    add(page2, add(el("div", "actions"), kit.button(W.senderAdd, "privacy:sender:add", submitSender, "main")));
+  }
+  function disclosure(conflict2 = false) {
+    const details = el("details", "privacy-details");
+    const key2 = conflict2 ? "conflictDetailsOpen" : "detailsOpen";
+    details.open = s[key2];
+    const summary = el("summary", "", W.details);
+    summary.setAttribute("data-key", conflict2 ? "privacy:conflict:details" : "privacy:details");
+    add(details, summary);
+    details.addEventListener("toggle", () => {
+      if (s)
+        s[key2] = details.open;
+    });
+    return details;
+  }
+  function reviewRule(rule) {
+    s.candidate = rule;
+    s.screen = "review";
+    kit.render("privacy:sheet:confirm");
+  }
+  function kindsView(page2) {
+    add(page2, el("h1", "", W.addRule), el("p", "muted intro", W.kindPrompt));
+    const folders = folderSources().length > 0 && !!kit.picker;
+    const choices = el("div", "privacy-kinds");
+    choices.setAttribute("role", "group");
+    choices.setAttribute("aria-label", W.kindPrompt);
+    for (const [kind, label, enabled] of [
+      ["folder", W.addFolder, folders],
+      ["label", W.addLabel, gmailConnected()],
+      ["sender", W.addSender, true]
+    ]) {
+      const button = kit.button(label, "privacy:add:" + kind, enabled ? () => {
+        s.candidate = null;
+        s.ruleKind = kind;
+        kit.render("privacy:add:" + kind);
+      } : null, "plain");
+      button.setAttribute("aria-pressed", String(s.ruleKind === kind));
+      add(choices, button);
+    }
+    add(page2, choices);
+    if (!folders)
+      add(page2, el("p", "reason", W.needFolderSource));
+    if (!gmailConnected())
+      add(page2, el("p", "reason", W.needGmail));
+  }
+  function sheetBack() {
+    if (!s || s.saving)
+      return;
+    if (s.screen === "review") {
+      if (s.ruleKind === "sender")
+        s.screen = "sender";
+      else if (s.ruleKind === "label")
+        s.screen = "labels";
+      else {
+        addFolder();
+        return;
+      }
+    } else
+      s.screen = s.screen === "kinds" ? "main" : "kinds";
+    kit.render(s.screen === "main" ? "privacy:add" : "privacy:sheet:back");
+  }
+  function sheetView(page2) {
+    const step = s.screen === "kinds" ? 1 : s.screen === "review" ? 3 : 2;
+    add(page2, el("p", "muted", fill2(W.step, { step })));
+    const progress = el("progress");
+    progress.max = 3;
+    progress.value = step;
+    progress.setAttribute("aria-label", fill2(W.step, { step }));
+    add(page2, progress);
+    if (s.screen === "kinds")
+      kindsView(page2);
+    else if (s.screen === "sources")
+      sourcesView(page2);
+    else if (s.screen === "labels")
+      labelsView(page2);
+    else if (s.screen === "sender")
+      senderView(page2);
+    else {
+      add(page2, el("h1", "", W.confirmRule), el("p", "", s.candidate.display), el("p", "reason", kindText(s.candidate)), el("p", "reason", W.namesShared));
+    }
+    const row = add(el("div", "actions privacy-sheet-actions"), kit.button(W.sheetBack, "privacy:sheet:back", sheetBack, "plain"));
+    if (s.screen === "kinds")
+      add(row, kit.button(W.next, "privacy:sheet:next", s.ruleKind ? () => {
+        if (s.ruleKind === "folder")
+          addFolder();
+        else if (s.ruleKind === "label")
+          addLabel();
+        else
+          addSender();
+      } : null, "main"));
+    if (s.screen === "sender")
+      add(row, kit.button(W.next, "privacy:sender:add", submitSender, "main"));
+    if (s.screen === "labels")
+      add(row, kit.button(W.next, "privacy:sheet:next", s.candidate ? () => reviewRule(s.candidate) : null, "main"));
+    if (s.screen === "review")
+      add(row, kit.button(W.makePrivate, "privacy:sheet:confirm", () => {
+        if (!s || s.screen !== "review" || s.saving || s.server)
+          return;
+        const rule = s.candidate;
+        s.screen = "main";
+        addRule(rule);
+        kit.render("privacy:add");
+      }, "main"));
+    add(page2, row);
   }
   function view() {
     const page2 = el("main", "page picker privacy");
@@ -45012,7 +45158,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     const top = el("div", "picker-top");
     const backButton = kit.button(s.screen === "main" ? W.back : W.backToPrivacy, "privacy:back", escape2, "plain");
     backButton.className = "btn back";
-    add(page2, add(top, backButton));
+    if (s.screen === "main")
+      add(page2, add(top, backButton));
     if (s.discarding) {
       const confirm = el("div", "confirm-box");
       confirm.setAttribute("role", "alert");
@@ -45022,12 +45169,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }, "plain")));
       add(page2, confirm);
     }
-    if (s.screen === "sources")
-      sourcesView(page2);
-    else if (s.screen === "labels")
-      labelsView(page2);
-    else if (s.screen === "sender")
-      senderView(page2);
+    if (s.screen !== "main")
+      sheetView(page2);
     else
       mainView(page2);
     return page2;
@@ -45043,15 +45186,13 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     leave("", false);
   }
   function escape2() {
-    if (!s || s.picking)
+    if (!s || s.picking || s.saving)
       return;
     if (s.discarding) {
       s.discarding = false;
       kit.render("privacy:back");
     } else if (s.screen !== "main") {
-      const from = s.screen;
-      s.screen = "main";
-      kit.render(from === "sources" ? "privacy:add:folder" : from === "labels" ? "privacy:add:label" : "privacy:add:sender");
+      sheetBack();
     } else
       backOut();
   }
@@ -45474,6 +45615,19 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .qchoice input{flex:none;width:1.125rem;height:1.125rem;margin:0;accent-color:var(--accent)}
 .fsection>.reason{margin-top:0.375rem}
 .privacy>.intro{margin-bottom:0.5rem}
+.privacy-summary{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.5;margin-top:0.75rem}
+.rule-chips{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:0.5rem;margin:0.75rem 0}
+.rule-chip{display:flex;align-items:center;gap:0.5rem;border:1px solid var(--line);border-radius:1rem;padding:0.25rem 0.5rem 0.25rem 0.75rem;max-width:100%;overflow-wrap:anywhere}
+.rule-chip .two-line{display:flex;flex-direction:column;font-size:0.875rem}
+.rule-chip .btn{border:0;min-width:2.5rem}
+.privacy-details{margin-top:1.25rem}
+.privacy-details summary{cursor:pointer;min-height:2.5rem;align-content:center;font-weight:500}
+.privacy-details>.intro{margin:0.75rem 0}
+.privacy-sheet-actions{display:flex;justify-content:space-between;flex-wrap:nowrap;margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--line)}
+.privacy .btn[aria-pressed=true]{background:var(--info-bg);border-color:var(--accent)}
+.privacy-kinds{display:flex;flex-direction:column;gap:0.75rem;margin-top:1rem}
+.privacy progress{width:100%;height:0.375rem;accent-color:var(--accent);margin:0.5rem 0 1.5rem}
+.privacy .field,.privacy .text{width:100%;box-sizing:border-box}
 .source-progress{display:flex;flex-direction:column;gap:0.25rem;margin-top:0.375rem}
 .source-progress .bar{height:0.375rem}
 .source-progress.stalled .bar-fill{background:var(--warn)}

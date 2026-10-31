@@ -31,8 +31,8 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //                A drop zone takes files from the browser's own dialog or a drop; the preview
 //                only keeps their names and sizes (nothing is written).
 //
-// Privacy previews: /dashboard?controls&state=privacy-edit&picker=key:privacy:edit
-// Conflict: /dashboard?controls&state=privacy-conflict&picker=key:privacy:edit,key:privacy:add:sender,preview-sender,key:privacy:sender:add
+// Privacy previews: /dashboard?controls&state=privacy-edit (or privacy-add-kind,
+// privacy-add-pick, privacy-add-confirm, privacy-details, privacy-conflict).
 // Privacy changes are fixture-only and never reach a worker.
 import {
   buildEnvBridgeSovereigntyConfig,
@@ -374,7 +374,7 @@ export function buildDashboardPreviewOptions(state: string): Pick<ChatGptDashboa
 }
 
 export function buildDashboardPreviewView(state: string): SourceDashboardViewModel {
-  if (state === 'privacy-edit' || state === 'privacy-conflict') return buildDashboardPreviewView('full');
+  if (state.startsWith('privacy-')) return buildDashboardPreviewView('full');
   if (state === 'review' || state === 'review-unconfigured' || state === 'review-indexing') return reviewPreview(state);
   if (state === 'models') {
     const view = buildDashboardPreviewView('fresh');
@@ -1679,6 +1679,7 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
 
 export const DASHBOARD_PREVIEW_STATES = [
   'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-conflict',
+  'privacy-add-kind', 'privacy-add-pick', 'privacy-add-confirm', 'privacy-details', 'privacy-add-folder', 'privacy-add-label',
   'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
   'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
@@ -1690,6 +1691,33 @@ export const DASHBOARD_PREVIEW_STATES = [
   ...ARCHIVE_STATES,
   ...SOURCE_IMPORT_STATES,
 ] as const;
+
+/** Only synthetic navigation; names never enter real page URLs or widget state. */
+export function previewPrivacySteps(state: string): string | undefined {
+  if (!state.startsWith('privacy-')) return undefined;
+  const start = 'key:privacy:edit';
+  if (state === 'privacy-edit') return start;
+  if (state === 'privacy-details') return start + ',key:privacy:details';
+  const kind = start + ',key:privacy:add';
+  if (state === 'privacy-add-kind') return kind;
+  if (state === 'privacy-add-folder') return kind + ',key:privacy:add:folder,key:privacy:sheet:next';
+  if (state === 'privacy-add-label') return kind + ',key:privacy:add:label,key:privacy:sheet:next';
+  const pick = kind + ',key:privacy:add:sender,key:privacy:sheet:next,preview-sender';
+  if (state === 'privacy-add-pick') return pick;
+  const confirm = pick + ',key:privacy:sender:add';
+  return state === 'privacy-conflict' ? confirm + ',key:privacy:sheet:confirm' : confirm;
+}
+
+export function previewPrivacyScope(sourceId: unknown) {
+  const labels = [{ id: 'Label_preview', name: 'Family' }, { id: 'Label_travel', name: 'Travel' }];
+  const data = sourceId === 'gmail.email'
+    ? { kind: 'mail', source_id: sourceId, labels }
+    : { kind: 'folders', source_id: sourceId, account_generation: 'preview', scope_revision: 'preview', status: 'approved',
+      nodes: [{ key: '/Health', name: 'Health', kind: 'folder', has_children: false, selectable: true },
+        { key: '/Travel', name: 'Travel', kind: 'folder', has_children: false, selectable: true }],
+      selections: [], whole_account_selected: false };
+  return { structuredContent: { kind: data.kind }, _meta: { [SCOPE_UI_META_KEY]: data } };
+}
 
 /** Invented settings only; the conflict simulates another editor changing them. */
 let previewPrivacySaved: PrivacySettings | undefined;
@@ -1798,7 +1826,7 @@ export function previewScopeList(state: string, args: { parent_key?: unknown }) 
  * control exists.
  */
 function pickerAutoScript(spec: string): string {
-  const steps = spec.split(',').map((step) => step.trim()).filter((step) => /^[A-Za-z0-9:_ ./-]+$/.test(step)).slice(0, 6);
+  const steps = spec.split(',').map((step) => step.trim()).filter((step) => /^[A-Za-z0-9:_ ./-]+$/.test(step)).slice(0, 12);
   return `<script>(function(){var steps=${JSON.stringify(steps)};var i=0;var tries=0;`
     + `function find(step){if(step==='open'||step==='import'){var label=step==='open'?'Choose folders':'Import another archive';return Array.prototype.filter.call(document.querySelectorAll('button'),function(b){return b.textContent===label})[0];}`
     + `if(step==='everything')return document.querySelector('[data-key="picker:seg:@account:ingest"]');`
@@ -1956,9 +1984,10 @@ if (import.meta.main) {
     }
     if (request.method === 'POST' && url.pathname === '/dashboard/tools/call') {
       const body = await request.json().catch(() => ({})) as { name?: unknown; arguments?: { source_id?: unknown; parent_key?: unknown } };
-      if ((state === 'privacy-edit' || state === 'privacy-conflict') && (body.name === PRIVACY_GET_TOOL_NAME || body.name === PRIVACY_SET_TOOL_NAME)) {
+      if ((state.startsWith('privacy-')) && (body.name === PRIVACY_GET_TOOL_NAME || body.name === PRIVACY_SET_TOOL_NAME)) {
         return Response.json(previewPrivacyToolResult(state, body.name === PRIVACY_GET_TOOL_NAME ? 'get' : 'set', body.arguments as PrivacySetInput));
       }
+      if (state.startsWith('privacy-') && body.name === SCOPE_LIST_TOOL_NAME) return Response.json(previewPrivacyScope(body.arguments?.source_id));
       if (body.name === SCOPE_LIST_TOOL_NAME && body.arguments?.source_id === 'local.files' && state.startsWith('local-files')) {
         return Response.json(previewScopeList(state, body.arguments));
       }
@@ -2015,7 +2044,7 @@ if (import.meta.main) {
       const namedState = url.searchParams.get('state') ?? '';
       const stateOverride = (DASHBOARD_PREVIEW_STATES as readonly string[]).includes(namedState) ? namedState : undefined;
       if (stateOverride === 'delete-data') previewDataDeleted = false;
-      if (stateOverride === 'privacy-edit' || stateOverride === 'privacy-conflict') { previewPrivacySaved = undefined; previewPrivacyConflicted = false; }
+      if (stateOverride?.startsWith('privacy-')) { previewPrivacySaved = undefined; previewPrivacyConflicted = false; }
       const unlocked = previewUnlocked || url.searchParams.has('controls');
       const cookies = [
         ...(stateOverride ? [`olympus_preview_state=${stateOverride}; Path=/; SameSite=Strict`] : []),
@@ -2031,7 +2060,7 @@ if (import.meta.main) {
         return withCookies(html(renderComputerHostPage({
           panelHtml: (() => {
             const panel = dashboardResourceHtml();
-            const auto = url.searchParams.get('picker');
+            const auto = url.searchParams.get('picker') ?? previewPrivacySteps(pageState);
             const at = panel.lastIndexOf('</body>');
             return auto && at >= 0 ? `${panel.slice(0, at)}${pickerAutoScript(auto)}${panel.slice(at)}` : panel;
           })(),
