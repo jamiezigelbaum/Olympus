@@ -228,6 +228,7 @@ describe('privacy main-view essentials', () => {
     const { host } = await openPrivacy({ description, rules: SAVED_RULES });
     const summary = host.doc.querySelector('[data-key="privacy:summary"]')!;
     expect(summary.textContent).toBe(description);
+    expect(host.doc.activeElement?.getAttribute('data-key')).toBe('privacy:title');
     expect(summary.closest('details')).toBeNull();
     expect(host.doc.querySelector('textarea')).toBeNull();
     expect(host.button('Edit')).toBeDefined();

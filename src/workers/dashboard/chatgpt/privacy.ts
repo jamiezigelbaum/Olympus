@@ -201,7 +201,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       take(data);
       s.loaded = true;
-      kit.render('privacy:add');
+      kit.render('privacy:title');
     }, () => {
       if (mine !== session || !s) return;
       s.loading = false;
@@ -670,7 +670,10 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   }
 
   function mainView(page: HTMLElement): void {
-    add(page, el('h1', '', W.title), el('p', 'muted intro', W.intro));
+    const title = el('h1', '', W.title);
+    title.setAttribute('tabindex', '-1');
+    title.setAttribute('data-key', 'privacy:title');
+    add(page, title, el('p', 'muted intro', W.intro));
 
     if (s.server) add(page, conflictBox());
     if (s.error) {
@@ -774,6 +777,12 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     } else if (!s.server && s.intents.length) {
       // A failed addition or cancelled removal still needs its existing retry path.
       add(wrap, kit.button(W.applyAgain, 'privacy:save', save, 'main'));
+    }
+    if (s.editingDescription && !s.saving && !s.server && !canSave()) {
+      const reason = el('p', 'reason', W.nothingToSave);
+      reason.id = 'privacy-save-reason';
+      wrap.querySelector('[data-key="privacy:save"]')?.setAttribute('aria-describedby', reason.id);
+      add(wrap, reason);
     }
     if (s.saveError) {
       const error = el('p', 'error', s.saveError);

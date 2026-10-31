@@ -150828,7 +150828,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }
       take(data2);
       s.loaded = true;
-      kit.render("privacy:add");
+      kit.render("privacy:title");
     }, () => {
       if (mine !== session || !s)
         return;
@@ -151259,7 +151259,10 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return section;
   }
   function mainView(page2) {
-    add(page2, el("h1", "", W.title), el("p", "muted intro", W.intro));
+    const title = el("h1", "", W.title);
+    title.setAttribute("tabindex", "-1");
+    title.setAttribute("data-key", "privacy:title");
+    add(page2, title, el("p", "muted intro", W.intro));
     if (s.server)
       add(page2, conflictBox());
     if (s.error) {
@@ -151364,6 +151367,12 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }, "plain")));
     } else if (!s.server && s.intents.length) {
       add(wrap, kit.button(W.applyAgain, "privacy:save", save, "main"));
+    }
+    if (s.editingDescription && !s.saving && !s.server && !canSave()) {
+      const reason = el("p", "reason", W.nothingToSave);
+      reason.id = "privacy-save-reason";
+      wrap.querySelector('[data-key="privacy:save"]')?.setAttribute("aria-describedby", reason.id);
+      add(wrap, reason);
     }
     if (s.saveError) {
       const error2 = el("p", "error", s.saveError);
