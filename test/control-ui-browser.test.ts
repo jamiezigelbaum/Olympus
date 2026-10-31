@@ -1268,7 +1268,7 @@ test('Google JSON stays out of visible text and is checked before any provider U
     picker.dispatchEvent(new Event('change', { bubbles: true }));
     await happyWindow.happyDOM.waitUntilComplete();
     expect(sheet.querySelector('[data-client-file-status]')!.textContent).toContain('Desktop app file ready');
-    expect(sheet.textContent).not.toContain('fixture-upload-secret');
+    expect(sheet.outerHTML).not.toContain('fixture-upload-secret');
     const form = picker.form!;
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await happyWindow.happyDOM.waitUntilComplete();
@@ -1277,7 +1277,7 @@ test('Google JSON stays out of visible text and is checked before any provider U
     expect(sheet.querySelector('[data-setup-error]')!.textContent).toContain('Google did not accept');
     expect(sheet.querySelector('[data-setup-error] details')!.hasAttribute('open')).toBe(false);
     expect([...sheet.querySelectorAll<HTMLElement>('[data-setup-panel]')].every(panel => panel.hidden)).toBe(true);
-    expect(sheet.textContent).not.toContain('fixture-upload-secret');
+    expect(sheet.outerHTML).not.toContain('fixture-upload-secret');
   } finally { controller.dispose(); }
 });
 
@@ -1304,4 +1304,38 @@ test('Telegram setup hands over to private prompts, shows Cancel only during pai
     root.querySelector<HTMLButtonElement>('[data-messaging-retry]')!.click();
     expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(false);
   } finally { controller.dispose(); }
+});
+
+
+test('Google paste inputs remain editable after refusal and clear after success', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-loopback'), options: { controlSessionCsrfToken: 'fixture' } }); document.body.append(root);
+  let success = false;
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => success ? { status: 200, body: { ok: true, authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth' } } : { status: 400, body: { ok: false, error: { message: 'Check the app key.' } } } },
+  });
+  try {
+    const sheet = root.querySelector<HTMLElement>('#connect-gmail-email')!;
+    sheet.querySelector<HTMLElement>('[data-client-paste] summary')!.click();
+    const id = sheet.querySelector<HTMLInputElement>('[name="client_id"]')!; id.value = 'fixture.apps.googleusercontent.com';
+    const key = sheet.querySelector<HTMLInputElement>('[name="client_secret"]')!; key.value = 'fixture-manual-secret';
+    id.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(key.disabled).toBe(false);
+    sheet.querySelector<HTMLButtonElement>('[data-setup-retry]')!.click();
+    success = true;
+    id.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(key.value).not.toBe('fixture-manual-secret');
+    expect(sheet.outerHTML).not.toContain('fixture-manual-secret');
+  } finally { controller.dispose(); }
+});
+
+test('completed Telegram pairing still offers setup to pair again', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async () => ({ status: 200, body: { ok: true, state: 'paired' } }) },
+  });
+  try { await happyWindow.happyDOM.waitUntilComplete(); expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(false); }
+  finally { controller.dispose(); }
 });

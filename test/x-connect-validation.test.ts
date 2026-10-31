@@ -54,6 +54,10 @@ async function fixture(bookmarks: OAuthFetch, timeoutMs = 1000) {
 for (const [name, body] of [
   ['empty account', { meta: { result_count: 0 } }],
   ['one bookmark', { data: [{ id: '456789', text: 'Fixture bookmark' }], meta: { result_count: 1 } }],
+  ['one bookmark with a partial resource error', {
+    data: [{ id: '456789', text: 'Fixture bookmark' }], meta: { result_count: 1 },
+    errors: [{ title: 'Not Found Error', resource_type: 'tweet', resource_id: '987654', detail: 'A different bookmarked post is unavailable.' }],
+  }],
 ] as const) {
   test(`X connect checks bookmarks before saving: ${name}`, async () => {
     const item = await fixture(async () => Response.json(body));

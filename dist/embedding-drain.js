@@ -39451,6 +39451,7 @@ var init_unpaired_sources = __esm(() => {
 
 // src/core/google-own-app.ts
 var init_google_own_app = __esm(() => {
+  init_provider_account_identity();
   init_http_timeout();
 });
 

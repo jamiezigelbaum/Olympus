@@ -88,6 +88,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   /** That start's wait line and the sheet it shows in: a redraw replaces the form, so it is said again until the owner comes back. */
   let authorizationWait: { sheetId: string; message: string } | undefined;
   const root = options.root;
+  const uploadedClientFiles = new WeakMap<HTMLFormElement, string>();
   const submittedFormValues = new WeakMap<HTMLFormElement, Record<string, string>>();
   const startedFromSheet = new WeakSet<HTMLFormElement>();
   const pendingForms = new WeakSet<HTMLFormElement>();
@@ -338,7 +339,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         ...(body.client_id ? { client_id: body.client_id } : {}),
         ...(body.client_secret ? { client_secret: body.client_secret } : {}),
         ...(body.google_desktop === 'true' ? { google_desktop: true } : {}),
-        ...(body.google_client_json ? { google_client_json: body.google_client_json } : {}),
+        ...(uploadedClientFiles.has(form) ? { google_client_json: uploadedClientFiles.get(form)! } : {}),
       };
     }
     if (connect === 'this_computer') {
@@ -418,7 +419,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       closeAuthorizationTab(authorizationTab);
       return;
     }
-    if (params.action === 'start_oauth') clearAuthorizationFallback(form);
+    if (params.action === 'start_oauth') {
+      clearAuthorizationFallback(form);
+      uploadedClientFiles.delete(form);
+    }
     // A form that words its own wait ("Checking Dropbox…") says that instead.
     setFormPending(form, true, form.dataset.pendingMessage || pendingMessage(params));
     let result: OlympusDashboardControlResult;
@@ -882,10 +886,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       if (setupSheet) {
         const intro = setupSheet.querySelector<HTMLElement>('[data-messaging-setup-intro]');
         const active = !['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired'].includes(state);
-        if (intro) intro.hidden = state !== 'idle' && state !== 'cancelled';
+        if (intro) intro.hidden = active || state === 'failed';
         const cancel = setupSheet.querySelector<HTMLElement>('[data-messaging-kind="cancel"]');
         if (cancel) cancel.hidden = !active;
-        if (operation !== 'status' || active || state === 'failed') setSheetOpen(setupSheet, true);
+        if (operation !== 'status') setSheetOpen(setupSheet, true);
         setupSheet.querySelector('[data-pairing-error]')?.remove();
         if (state === 'failed') {
           const error = document.createElement('div'); error.dataset.pairingError = '';
@@ -1066,22 +1070,23 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   async function readClientFile(form: HTMLFormElement, file: File | undefined): Promise<void> {
-    const raw = form.querySelector<HTMLInputElement>('[name="google_client_json"]');
+    const revision = form.querySelector<HTMLInputElement>('[name="client_file_revision"]');
     const status = form.querySelector<HTMLElement>('[data-client-file-status]');
-    if (!raw || !status || !file) return;
-    raw.value = '';
+    if (!revision || !status || !file) return;
+    uploadedClientFiles.delete(form);
     try {
       if (file.size > 64 * 1024) throw new Error();
       const text = await file.text();
       const app = JSON.parse(text)?.installed;
       if (!app || typeof app.client_id !== 'string' || typeof app.client_secret !== 'string' || !app.client_id.endsWith('.apps.googleusercontent.com') || !app.client_secret.trim()) throw new Error();
-      raw.value = text;
-      for (const field of Array.from(form.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]'))) { field.value = ''; field.disabled = true; }
+      uploadedClientFiles.set(form, text);
+      revision.value = String(Number(revision.value) + 1);
+      for (const field of Array.from(form.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]'))) { field.value = ''; field.disabled = true; field.dataset.olympusOriginallyDisabled = 'true'; }
       status.textContent = 'Desktop app file ready. Connect to check the key with Google.';
     } catch {
       status.textContent = '';
       showSetupFailure(form, 'Choose the JSON downloaded for a Desktop app in Google Cloud Clients. Web app keys cannot use this flow.');
-      for (const field of Array.from(form.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]'))) field.disabled = false;
+      for (const field of Array.from(form.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]'))) { field.disabled = false; field.dataset.olympusOriginallyDisabled = 'false'; }
     }
     const picker = form.querySelector<HTMLInputElement>('[data-client-file]');
     if (picker) picker.value = '';
@@ -1114,11 +1119,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     if (target.closest('[data-client-paste] summary')) {
       const form = target.closest('form');
-      const raw = form?.querySelector<HTMLInputElement>('[name="google_client_json"]');
-      if (raw) raw.value = '';
+      if (form) uploadedClientFiles.delete(form);
       const fileStatus = form?.querySelector<HTMLElement>('[data-client-file-status]');
       if (fileStatus) fileStatus.textContent = '';
-      form?.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]').forEach(field => { field.disabled = false; });
+      form?.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]').forEach(field => { field.disabled = false; field.dataset.olympusOriginallyDisabled = 'false'; });
     }
     const begin = target.closest('[data-setup-begin]');
     if (begin) {

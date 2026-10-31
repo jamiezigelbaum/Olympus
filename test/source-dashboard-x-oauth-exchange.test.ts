@@ -46,7 +46,7 @@ interface XWorkerFixture {
   runtimeCalls?: string[];
 }
 
-function xWorkerFixture(initialSecrets: Record<string, string>): XWorkerFixture {
+function xWorkerFixture(initialSecrets: Record<string, string>, refuseBookmarks = false): XWorkerFixture {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-dashboard-x-oauth-'));
   dirs.push(dir);
   const secretStore = memorySecretStore(initialSecrets);
@@ -56,7 +56,7 @@ function xWorkerFixture(initialSecrets: Record<string, string>): XWorkerFixture 
   const runtime = xRuntimeFixture(runtimeCalls);
   const oauthFetch: OAuthFetch = async (url, init) => {
     if (new URL(String(url)).pathname === '/2/users/882404022/bookmarks') {
-      return Response.json({ meta: { result_count: 0 } });
+      return refuseBookmarks ? Response.json({ detail: 'fixture-secret-never-echo' }, { status: 403 }) : Response.json({ meta: { result_count: 0 } });
     }
     if (String(url).includes('/2/users/me')) {
       return new Response(JSON.stringify({ data: { id: '882404022' } }), {
@@ -77,6 +77,7 @@ function xWorkerFixture(initialSecrets: Record<string, string>): XWorkerFixture 
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
   const worker = createEmailSourceWorker({
+    sourceIndexStatus: { async status() { return { kind: 'source_index_status', generated_at: new Date().toISOString(), corpora: [], policy: { read_only: true, raw_source_exposed: false, source_packets_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true } } as import('../src/workers/source-index/status.ts').SourceIndexStatusResult; } },
     sourceDashboard: {
       sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
       registryPath,
@@ -673,3 +674,23 @@ function xRuntimeFixture(calls: string[]): {
     },
   };
 }
+
+
+test('failed bookmarks check stays visible on the setup sheet and consumes the callback state', async () => {
+  const fixture = xWorkerFixture({ 'x.personal.oauth.client_id': 'fixture-client', 'x.personal.oauth.client_secret': 'fixture-secret' }, true);
+  const start = await startXConnect(fixture, {});
+  const state = new URL((await start.json()).authorization_url).searchParams.get('state')!;
+  const callback = `http://worker.test/oauth/callback/x?code=fixture-code&state=${state}`;
+  const failed = await fixture.fetch(new Request(callback));
+  expect(failed.status).toBe(400);
+  const failureText = await failed.text();
+  expect(failureText).toContain('Check the cost');
+  expect(failureText).not.toContain('fixture-secret');
+  const dashboard = await fixture.fetch(new Request('http://worker.test/dashboard.json', { headers: { Authorization: 'Bearer dashboard-secret' } }));
+  const view = await dashboard.json();
+  const card = view.sources.find((source: { source_id: string }) => source.source_id === 'x.bookmarks');
+  expect(card.connection.provider_refusal.code).toBe('connection_check_failed');
+  expect(JSON.stringify(view)).not.toContain('fixture-secret');
+  expect((await fixture.fetch(new Request(callback))).status).toBe(410);
+  expect(await fixture.secretStore.get('x.personal.oauth.refresh_token')).toBeUndefined();
+});

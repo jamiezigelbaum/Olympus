@@ -14170,17 +14170,6 @@ var init_connected_handles = __esm(() => {
   };
 });
 
-// src/core/google-handle-compatibility.ts
-var init_google_handle_compatibility = () => {};
-
-// src/workers/credential-broker/unpaired-sources.ts
-var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
-var init_unpaired_sources = __esm(() => {
-  init_atomic_file();
-  UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
-  UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
-});
-
 // src/core/provider-account-identity.ts
 var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
 var init_provider_account_identity = __esm(() => {
@@ -14193,6 +14182,17 @@ var init_provider_account_identity = __esm(() => {
     google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
   };
   IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+});
+
+// src/core/google-handle-compatibility.ts
+var init_google_handle_compatibility = () => {};
+
+// src/workers/credential-broker/unpaired-sources.ts
+var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
+var init_unpaired_sources = __esm(() => {
+  init_atomic_file();
+  UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
+  UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
 });
 
 // src/core/source-account-binding.ts
@@ -30018,6 +30018,7 @@ function unique(values) {
 init_connected_handles();
 
 // src/core/google-own-app.ts
+init_provider_account_identity();
 init_http_timeout();
 
 // src/core/connect.ts

@@ -204,7 +204,7 @@ describe('the card walks the owner through registering the callback itself', () 
       expect(sheet).toContain('Make a Desktop app key and download it');
       expect(sheet).toContain('data-client-file-drop');
       expect(sheet).toContain('name="google_desktop" value="true"');
-      expect(sheet).toContain('name="google_client_json"');
+      expect(sheet).not.toContain('name="google_client_json"'); // Uploaded secrets live in memory, never an HTML field.
       expect(sheet).toContain('Paste the ID and secret instead');
       expect(sheet).toMatch(/type="password" name="client_secret"/);
       expect(sheet).not.toContain('Authorized redirect URIs');

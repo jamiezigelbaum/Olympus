@@ -1822,7 +1822,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               }
             });
           } catch (error) {
-            clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
+            // Keep a fixed, credential-free failure on the original sheet, but
+            // never retain a usable callback state or overwrite a newer attempt.
+            if (dashboardOAuthAttempts.get(source) === attempt) {
+              attempt.consumed = true;
+              attempt.error = { code: 'connection_check_failed', at: new Date().toISOString() };
+            }
             return dashboardOAuthFailureHtml({
               source,
               reason: dashboardCallbackFailureReason(error, source, attempt.clientIdSource),
@@ -1931,7 +1936,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // no registration of its own for the source — a submitted client id
           // is a bring-your-own registration and always wins, and so does one
           // already on file. X is never publisher-owned.
-          const publisher = submittedClientId
+          const publisher = submittedClientId || ownDesktop
             ? undefined
             : dashboardPublisherOAuthFlow(
               source,
@@ -1943,11 +1948,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (computerHandback && (submittedClientId || publisher?.loopback !== true)) {
             throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'This source does not sign in on this computer; connect it in the Olympus dashboard.');
           }
+          const savedDesktop = ownDesktop ? await readGoogleOwnAppRegistration(secretStore) : undefined;
           const clientId = submittedClientId
-            ?? publisher?.clientId
-            ?? dashboardOAuthClientIdForSource(source, clientIdSets.all);
+            ?? (ownDesktop ? savedDesktop?.clientId : publisher?.clientId ?? dashboardOAuthClientIdForSource(source, clientIdSets.all));
           if (!clientId) {
-            throw new EmailSourceWorkerError(409, 'oauth_client_id_missing', `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
+            throw new EmailSourceWorkerError(409, 'oauth_client_id_missing', ownDesktop ? 'Choose the downloaded Desktop app file, or paste the Client ID and secret.' : `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
           }
           // The saved-secret field's stand-in value means "keep what is stored";
           // it must never be sent to a provider or stored as a secret.
@@ -1986,9 +1991,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // later Reconnect must find it without the owner re-pasting it.
           if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
             await secretStore.set(dashboardOAuthClientSecretConfigKey(source), submittedClientSecret);
-          }
-          if (ownDesktop && submittedClientId) {
-            await secretStore.set('google.own_app.registration', JSON.stringify({ clientId: submittedClientId, clientSecret }));
           }
           // ONE redirect URI per flow, and the same string reaches the token
           // exchange: `startExternalOAuthSourceConnection` keeps it on the

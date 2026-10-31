@@ -1,3 +1,4 @@
+import { DEFAULT_PROVIDER_IDENTITY_ENDPOINTS } from './provider-account-identity.ts';
 import { fetchBoundedText } from './http-timeout.ts';
 import type { OAuthFetch } from './connect.ts';
 import type { SecretStore } from './secret-store.ts';
@@ -49,7 +50,7 @@ export async function checkGoogleOwnApp(client: GoogleDesktopClient, fetchImpl: 
 export async function checkGoogleOwnAppAccess(source: 'gmail' | 'google-drive' | 'google', accessToken: string, fetchImpl: OAuthFetch = fetch): Promise<void> {
   const checks = source === 'google' ? ['gmail', 'google-drive'] as const : [source];
   for (const check of checks) {
-    const url = check === 'gmail' ? 'https://gmail.googleapis.com/gmail/v1/users/me/profile' : 'https://www.googleapis.com/drive/v3/about?fields=user(permissionId)';
+    const url = check === 'gmail' ? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail : 'https://www.googleapis.com/drive/v3/about?fields=user(permissionId)';
     let response: Response;
     let text: string;
     try {

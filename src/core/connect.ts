@@ -660,9 +660,11 @@ async function checkXBookmarksConnection(options: { tokenUrl: string; userId: st
     if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
       const count = payload.meta?.result_count;
       const data = payload.data;
-      const noErrors = payload.errors === undefined || (Array.isArray(payload.errors) && payload.errors.length === 0);
-      valid = noErrors && (count === 0
-        ? data === undefined || (Array.isArray(data) && data.length === 0)
+      const errors = payload.errors;
+      // X may return readable bookmarks alongside errors for other resources.
+      // An empty result with errors alone does not prove bookmark access.
+      valid = (errors === undefined || Array.isArray(errors)) && (count === 0
+        ? (errors === undefined || errors.length === 0) && (data === undefined || (Array.isArray(data) && data.length === 0))
         : count === 1 && Array.isArray(data) && data.length === 1
           && typeof data[0]?.id === 'string' && /^\d+$/.test(data[0].id)
           && typeof data[0]?.text === 'string');
@@ -881,6 +883,11 @@ async function completeOAuthSourceConnection(
       const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
       const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
       secretWrites.push([clientIdKey, prepared.clientId]);
+      // Only a completed, API-checked Desktop grant changes the reusable app.
+      // Abandoned or refused setup must leave shared Connect available.
+      if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
+        secretWrites.push(['google.own_app.registration', JSON.stringify({ clientId: prepared.clientId, clientSecret })]);
+      }
       secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
       // Written only when the caller states it, which today means only the
       // dashboard's publisher-relay start route: the plain CLI connect path has

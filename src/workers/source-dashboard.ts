@@ -4638,6 +4638,7 @@ function providerRefusalReason(
   redirectUri: string | undefined,
   settingLabel: string | undefined,
 ): string {
+  if (error.code === 'connection_check_failed') return 'Check the app key, enabled APIs, permissions and provider access. The sign-in tab explains which check failed. Then connect again.';
   // The refusal names the same setting the walkthrough on the card names, so
   // the sentence and the steps under it cannot send the owner to two places.
   if (redirectUri && settingLabel) {

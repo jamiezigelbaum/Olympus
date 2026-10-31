@@ -75,9 +75,16 @@ for (const accepted of [false, true]) test(`Google file route checks before sign
     expect(body).not.toContain(secret);
     expect(response.status).toBe(accepted ? 200 : 400);
     expect(starts).toBe(accepted ? 1 : 0);
-    expect(values.get('google.own_app.registration')).toBe(accepted ? JSON.stringify({ clientId: id, clientSecret: secret }) : undefined);
+    expect(values.get('google.own_app.registration')).toBeUndefined();
     expect(values.get('gmail.personal.oauth.client_id')).toBeUndefined();
     if (accepted) {
+      values.set('google-drive.personal.oauth.client_id', 'legacy-web.apps.googleusercontent.com');
+      values.set('google-drive.personal.oauth.client_secret', 'legacy-secret');
+      const noDesktop = await withWorkerBearerAuth(worker.fetch, { authToken: 'fixture' })(new Request('https://dashboard.example/dashboard/connect/oauth/start', { method: 'POST', headers: { Authorization: 'Bearer fixture', 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'google-drive', google_desktop: true }) }));
+      expect(noDesktop.status).toBe(409);
+      expect(await noDesktop.text()).toContain('Choose the downloaded Desktop app file');
+      // A completed grant supplies the reusable registration; a key probe alone does not.
+      values.set('google.own_app.registration', JSON.stringify({ clientId: id, clientSecret: secret }));
       const drive = await withWorkerBearerAuth(worker.fetch, { authToken: 'fixture' })(new Request('https://dashboard.example/dashboard/connect/oauth/start', { method: 'POST', headers: { Authorization: 'Bearer fixture', 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'google-drive', google_desktop: true }) }));
       expect(drive.status).toBe(200);
       expect(await drive.text()).not.toContain(secret);
@@ -98,4 +105,35 @@ test('authorized Google check names API step and rejects unavailable or malforme
       return Response.json(source === 'gmail' ? { emailAddress: 'fixture@example.test' } : { user: { permissionId: '123' } });
     });
   }
+});
+
+
+import { startExternalOAuthSourceConnection } from '../src/core/connect.ts';
+import { readConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
+
+for (const allowed of [false, true]) test(`only an API-checked Google grant publishes the reusable registration: ${allowed}`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'google-own-grant-'));
+  const values = new Map<string, string>();
+  const registryPath = join(dir, 'handles.json');
+  try {
+    const pending = await startExternalOAuthSourceConnection({
+      source: 'gmail', clientId: id, clientSecret: secret, googleOwnApp: true, openBrowser: false,
+      redirectUri: 'http://127.0.0.1:8010/oauth/callback/gmail', registryPath,
+      secretStore: { label: 'test', async get(k) { return values.get(k); }, async set(k, v) { values.set(k, v); }, async delete(k) { values.delete(k); }, async list() { return [...values.keys()]; } },
+      fetch: async url => {
+        if (String(url).endsWith('/token')) return Response.json({ access_token: 'fixture-access', refresh_token: 'fixture-refresh', expires_in: 3600, token_type: 'Bearer', scope: 'openid https://www.googleapis.com/auth/gmail.readonly' });
+        return allowed ? Response.json({ emailAddress: 'fixture@example.test', email: 'fixture@example.test', sub: '123456', scope: 'openid https://www.googleapis.com/auth/gmail.readonly' }) : Response.json({ error: secret }, { status: 403 });
+      },
+    });
+    expect(values.size).toBe(0);
+    if (allowed) {
+      await pending.completeCallback({ state: pending.state, code: 'fixture-code' });
+      expect(values.get('google.own_app.registration')).toBe(JSON.stringify({ clientId: id, clientSecret: secret }));
+      expect(readConnectedHandleRegistry(registryPath).handles.length).toBe(1);
+    } else {
+      await expect(pending.completeCallback({ state: pending.state, code: 'fixture-code' })).rejects.toThrow('turn on Gmail and Drive');
+      expect(values.size).toBe(0);
+      expect(readConnectedHandleRegistry(registryPath).handles.length).toBe(0);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -6553,6 +6553,307 @@ var init_secret_store = __esm(() => {
   };
 });
 
+// src/core/provider-account-identity.ts
+import { createHash as createHash3 } from "node:crypto";
+function isAccountBoundProvider(provider) {
+  return ACCOUNT_BOUND_PROVIDERS.includes(provider);
+}
+function dropboxAccountIdFromTokenPayload(payload) {
+  const value = typeof payload.account_id === "string" ? payload.account_id.trim() : "";
+  return DROPBOX_ACCOUNT_ID.test(value) ? value : undefined;
+}
+function googleAccountIdFromAddress(address) {
+  return `google:${createHash3("sha256").update(address.trim().toLowerCase()).digest("hex").slice(0, 40)}`;
+}
+function googleSubjectLabel(subject) {
+  return `google-sub:${createHash3("sha256").update(`sub
+${subject.trim()}`).digest("hex").slice(0, 32)}`;
+}
+function googlePermissionLabel(permissionId) {
+  return `google-perm:${createHash3("sha256").update(`perm
+${permissionId.trim()}`).digest("hex").slice(0, 32)}`;
+}
+function composeProviderAccountId(labels) {
+  const byKind = new Map;
+  for (const label of labels) {
+    const kind = LABEL.exec(label)?.[1];
+    if (kind && !byKind.has(kind))
+      byKind.set(kind, label);
+  }
+  const ordered = [
+    ...IMMUTABLE_LABEL_KINDS.map((kind) => byKind.get(kind)),
+    byKind.get("google")
+  ].filter((label) => Boolean(label));
+  return ordered.length > 0 ? ordered.join(".") : undefined;
+}
+function parseProviderAccountId(id) {
+  const labels = new Map;
+  for (const label of id.trim().split(".")) {
+    const kind = LABEL.exec(label)?.[1];
+    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
+      return;
+    if (labels.has(kind))
+      return;
+    labels.set(kind, label);
+  }
+  return labels.size > 0 ? labels : undefined;
+}
+function compareProviderAccounts(recorded, observed) {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b)
+    return recorded.trim() === observed.trim() ? "same" : "different";
+  let shared = false;
+  for (const kind of IMMUTABLE_LABEL_KINDS) {
+    const left = a.get(kind);
+    const right = b.get(kind);
+    if (left === undefined || right === undefined)
+      continue;
+    if (left !== right)
+      return "different";
+    shared = true;
+  }
+  if (shared)
+    return "same";
+  if (hasImmutableAccountLabel(recorded))
+    return "unproven";
+  const address = a.get("google");
+  return address !== undefined && address === b.get("google") ? "same" : "different";
+}
+function sameProviderAccount(recorded, observed) {
+  return compareProviderAccounts(recorded, observed) === "same";
+}
+function namesAccountByAddressOnly(id) {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && labels.has("google") && !hasImmutableAccountLabel(id);
+}
+function compareAddressToRecord(recorded, address) {
+  const mine = parseProviderAccountId(address)?.get("google");
+  const theirs = parseProviderAccountId(recorded)?.get("google");
+  if (mine === undefined || theirs === undefined)
+    return "unproven";
+  return mine === theirs ? "same" : "different";
+}
+function hasImmutableAccountLabel(id) {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
+}
+function mergeProviderAccountIds(recorded, observed) {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b)
+    return observed.trim();
+  const labels = IMMUTABLE_LABEL_KINDS.map((kind) => b.get(kind) ?? a.get(kind)).concat(b.get("google") ?? a.get("google")).filter((label) => Boolean(label));
+  return composeProviderAccountId(labels);
+}
+async function fetchProviderAccountId(options) {
+  const endpoint = options.endpoints?.[options.provider] ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS[options.provider];
+  const init = options.provider === "dropbox" ? {
+    method: "POST",
+    headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
+    body: "null"
+  } : { method: "GET", headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" } };
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, init, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
+  } catch {
+    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not answer the account lookup.`);
+  }
+  if (!response.ok) {
+    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} refused the account lookup with status ${response.status}.`);
+  }
+  let payload;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("not an object");
+    payload = parsed;
+  } catch {
+    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} returned an unreadable account lookup.`);
+  }
+  if (options.provider === "x") {
+    const id = xUserIdFromPayload(payload);
+    if (!id)
+      throw new ProviderAccountIdentityError("X did not name the connected account.");
+    return id;
+  }
+  const labels = labelsFromIdentityPayload(options.provider, payload);
+  if (!labels) {
+    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not name the connected account.`);
+  }
+  if (options.provider === "gmail" || options.provider === "google_drive") {
+    const subject = await fetchGoogleSubject({
+      accessToken: options.accessToken,
+      endpoint: options.endpoints?.google_tokeninfo ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo,
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs
+    });
+    if (subject)
+      labels.push(googleSubjectLabel(subject));
+  }
+  return composeProviderAccountId(labels);
+}
+async function fetchGoogleSubject(options) {
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), options.endpoint, { method: "POST", headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" } }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
+  } catch {
+    throw new ProviderAccountIdentityError("Google did not answer the token lookup.");
+  }
+  if (!response.ok)
+    throw new ProviderAccountIdentityError(`Google refused the token lookup with status ${response.status}.`);
+  let payload;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("not an object");
+    payload = parsed;
+  } catch {
+    throw new ProviderAccountIdentityError("Google returned an unreadable token lookup.");
+  }
+  const subject = typeof payload.sub === "string" ? payload.sub.trim() : "";
+  if (/^[A-Za-z0-9_-]{1,255}$/.test(subject))
+    return subject;
+  const scopes = typeof payload.scope === "string" ? payload.scope.split(/\s+/) : [];
+  if (subject || scopes.includes("openid")) {
+    throw new ProviderAccountIdentityError("Google did not name the subject of an openid token.");
+  }
+  return;
+}
+function xUserIdFromPayload(payload) {
+  const data = payload.data;
+  const id = data && typeof data === "object" && !Array.isArray(data) ? data.id : undefined;
+  return typeof id === "string" && X_USER_ID.test(id.trim()) ? id.trim() : undefined;
+}
+function labelsFromIdentityPayload(provider, payload) {
+  if (provider === "dropbox") {
+    const id = dropboxAccountIdFromTokenPayload(payload);
+    return id ? [id] : undefined;
+  }
+  const user = payload.user && typeof payload.user === "object" && !Array.isArray(payload.user) ? payload.user : undefined;
+  const address = provider === "gmail" ? payload.emailAddress : user?.emailAddress;
+  if (typeof address !== "string" || !address.includes("@"))
+    return;
+  const labels = [googleAccountIdFromAddress(address)];
+  const permissionId = typeof user?.permissionId === "string" ? user.permissionId.trim() : "";
+  if (provider === "google_drive" && /^[A-Za-z0-9_-]{1,255}$/.test(permissionId)) {
+    labels.push(googlePermissionLabel(permissionId));
+  }
+  return labels;
+}
+function providerLabel(provider) {
+  return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : provider === "x" ? "X" : "Google Drive";
+}
+async function dropboxOwnsOneOfFolders(options) {
+  const endpoint = options.endpoint ?? "https://api.dropboxapi.com/2/files/get_metadata";
+  let unknown = false;
+  for (const id of options.folderIds) {
+    if (!/^id:[A-Za-z0-9_-]{1,200}$/.test(id)) {
+      unknown = true;
+      continue;
+    }
+    let response;
+    let text;
+    try {
+      ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ path: id })
+      }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
+    } catch {
+      unknown = true;
+      continue;
+    }
+    if (response.ok) {
+      let entry;
+      try {
+        entry = JSON.parse(text);
+      } catch {
+        entry = undefined;
+      }
+      if (!entry || typeof entry !== "object") {
+        unknown = true;
+        continue;
+      }
+      if (entry[".tag"] === "folder" && entry.id === id && entry.sharing_info === undefined)
+        return true;
+      continue;
+    }
+    if (response.status === 409 && /"not_found"/.test(text))
+      continue;
+    unknown = true;
+  }
+  return unknown ? undefined : false;
+}
+async function dropboxOwnRootFolderIds(options) {
+  const limit = options.limit ?? 5;
+  const listUrl = options.endpoint ?? "https://api.dropboxapi.com/2/files/list_folder";
+  const found = [];
+  let cursor;
+  for (let page2 = 0;page2 < 20; page2 += 1) {
+    let response;
+    let text;
+    try {
+      ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), cursor === undefined ? listUrl : `${listUrl}/continue`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify(cursor === undefined ? { path: "", recursive: false, limit: 200 } : { cursor })
+      }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: 1024 * 1024 }));
+    } catch {
+      return;
+    }
+    if (!response.ok)
+      return;
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(parsed.entries))
+      return;
+    for (const raw of parsed.entries) {
+      const entry = raw;
+      if (entry && typeof entry === "object" && entry[".tag"] === "folder" && typeof entry.id === "string" && /^id:[A-Za-z0-9_-]{1,200}$/.test(entry.id) && entry.sharing_info === undefined) {
+        found.push(entry.id);
+        if (found.length >= limit)
+          return found;
+      }
+    }
+    if (parsed.has_more !== true)
+      return found;
+    if (typeof parsed.cursor !== "string" || !parsed.cursor)
+      return;
+    cursor = parsed.cursor;
+  }
+  return found.length > 0 ? found : undefined;
+}
+var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, X_USER_ID, ProviderAccountIdentityError, IMMUTABLE_LABEL_KINDS, LABEL;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive", "x"];
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+  };
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
+  X_USER_ID = /^\d{1,32}$/;
+  ProviderAccountIdentityError = class ProviderAccountIdentityError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "ProviderAccountIdentityError";
+    }
+  };
+  IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
+  LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
+});
+
 // src/core/google-own-app.ts
 function parseGoogleDesktopClient(text) {
   try {
@@ -6600,7 +6901,7 @@ async function checkGoogleOwnApp(client, fetchImpl = fetch) {
 async function checkGoogleOwnAppAccess(source, accessToken, fetchImpl = fetch) {
   const checks = source === "google" ? ["gmail", "google-drive"] : [source];
   for (const check of checks) {
-    const url = check === "gmail" ? "https://gmail.googleapis.com/gmail/v1/users/me/profile" : "https://www.googleapis.com/drive/v3/about?fields=user(permissionId)";
+    const url = check === "gmail" ? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail : "https://www.googleapis.com/drive/v3/about?fields=user(permissionId)";
     let response;
     let text;
     try {
@@ -6634,6 +6935,7 @@ async function readGoogleOwnAppRegistration(store) {
 }
 var FILE_ERROR = "Choose the JSON downloaded for a Desktop app in Google Cloud Clients. Web app keys cannot use this flow.";
 var init_google_own_app = __esm(() => {
+  init_provider_account_identity();
   init_http_timeout();
 });
 
@@ -8399,7 +8701,7 @@ var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_JWT_B
 var init_google_service_account = () => {};
 
 // src/workers/credential-broker/index.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { mkdir as mkdir2, readFile } from "node:fs/promises";
 import { dirname as dirname15 } from "node:path";
 function isCredentialProvider(value) {
@@ -8447,7 +8749,7 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest2 = createHash3("sha256").update(handle).digest("hex");
+    const digest2 = createHash4("sha256").update(handle).digest("hex");
     return `${this.path}.refresh-${digest2}`;
   }
   async save(handle, state) {
@@ -9146,7 +9448,7 @@ function bearerSessionFromMintedToken(options) {
 }
 function mintedSessionCacheKey(namespace, definition, capability, env) {
   const envRefreshToken = firstNonEmptyEnv(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
-  const envGrant = envRefreshToken ? createHash3("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  const envGrant = envRefreshToken ? createHash4("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
   return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
 ${envGrant}`;
 }
@@ -10479,15 +10781,15 @@ function normalizeConnectedHandle(value) {
     return { ok: false, reason: "entry_not_object" };
   const record = value;
   const handle = optionalSafeLabel(record.handle);
-  const providerLabel = optionalSafeLabel(record.provider);
+  const providerLabel2 = optionalSafeLabel(record.provider);
   const connectedAt = typeof record.connectedAt === "string" ? record.connectedAt : undefined;
   if (!handle)
     return { ok: false, reason: "invalid_handle" };
-  if (!providerLabel)
+  if (!providerLabel2)
     return { ok: false, reason: "invalid_provider" };
-  if (!isCredentialProvider(providerLabel))
+  if (!isCredentialProvider(providerLabel2))
     return { ok: false, reason: "unknown_provider" };
-  const provider = providerLabel;
+  const provider = providerLabel2;
   if (!connectedAt)
     return { ok: false, reason: "invalid_connected_at" };
   const allowedCapabilities = stringArray(record.allowedCapabilities);
@@ -10872,307 +11174,6 @@ var init_unpaired_sources = __esm(() => {
     "telegram.messages": "telegram",
     "whatsapp.personal.messages": "whatsapp_personal"
   };
-});
-
-// src/core/provider-account-identity.ts
-import { createHash as createHash4 } from "node:crypto";
-function isAccountBoundProvider(provider) {
-  return ACCOUNT_BOUND_PROVIDERS.includes(provider);
-}
-function dropboxAccountIdFromTokenPayload(payload) {
-  const value = typeof payload.account_id === "string" ? payload.account_id.trim() : "";
-  return DROPBOX_ACCOUNT_ID.test(value) ? value : undefined;
-}
-function googleAccountIdFromAddress(address) {
-  return `google:${createHash4("sha256").update(address.trim().toLowerCase()).digest("hex").slice(0, 40)}`;
-}
-function googleSubjectLabel(subject) {
-  return `google-sub:${createHash4("sha256").update(`sub
-${subject.trim()}`).digest("hex").slice(0, 32)}`;
-}
-function googlePermissionLabel(permissionId) {
-  return `google-perm:${createHash4("sha256").update(`perm
-${permissionId.trim()}`).digest("hex").slice(0, 32)}`;
-}
-function composeProviderAccountId(labels) {
-  const byKind = new Map;
-  for (const label of labels) {
-    const kind = LABEL.exec(label)?.[1];
-    if (kind && !byKind.has(kind))
-      byKind.set(kind, label);
-  }
-  const ordered = [
-    ...IMMUTABLE_LABEL_KINDS.map((kind) => byKind.get(kind)),
-    byKind.get("google")
-  ].filter((label) => Boolean(label));
-  return ordered.length > 0 ? ordered.join(".") : undefined;
-}
-function parseProviderAccountId(id) {
-  const labels = new Map;
-  for (const label of id.trim().split(".")) {
-    const kind = LABEL.exec(label)?.[1];
-    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
-      return;
-    if (labels.has(kind))
-      return;
-    labels.set(kind, label);
-  }
-  return labels.size > 0 ? labels : undefined;
-}
-function compareProviderAccounts(recorded, observed) {
-  const a = parseProviderAccountId(recorded);
-  const b = parseProviderAccountId(observed);
-  if (!a || !b)
-    return recorded.trim() === observed.trim() ? "same" : "different";
-  let shared = false;
-  for (const kind of IMMUTABLE_LABEL_KINDS) {
-    const left = a.get(kind);
-    const right = b.get(kind);
-    if (left === undefined || right === undefined)
-      continue;
-    if (left !== right)
-      return "different";
-    shared = true;
-  }
-  if (shared)
-    return "same";
-  if (hasImmutableAccountLabel(recorded))
-    return "unproven";
-  const address = a.get("google");
-  return address !== undefined && address === b.get("google") ? "same" : "different";
-}
-function sameProviderAccount(recorded, observed) {
-  return compareProviderAccounts(recorded, observed) === "same";
-}
-function namesAccountByAddressOnly(id) {
-  const labels = parseProviderAccountId(id);
-  return labels !== undefined && labels.has("google") && !hasImmutableAccountLabel(id);
-}
-function compareAddressToRecord(recorded, address) {
-  const mine = parseProviderAccountId(address)?.get("google");
-  const theirs = parseProviderAccountId(recorded)?.get("google");
-  if (mine === undefined || theirs === undefined)
-    return "unproven";
-  return mine === theirs ? "same" : "different";
-}
-function hasImmutableAccountLabel(id) {
-  const labels = parseProviderAccountId(id);
-  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
-}
-function mergeProviderAccountIds(recorded, observed) {
-  const a = parseProviderAccountId(recorded);
-  const b = parseProviderAccountId(observed);
-  if (!a || !b)
-    return observed.trim();
-  const labels = IMMUTABLE_LABEL_KINDS.map((kind) => b.get(kind) ?? a.get(kind)).concat(b.get("google") ?? a.get("google")).filter((label) => Boolean(label));
-  return composeProviderAccountId(labels);
-}
-async function fetchProviderAccountId(options) {
-  const endpoint = options.endpoints?.[options.provider] ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS[options.provider];
-  const init = options.provider === "dropbox" ? {
-    method: "POST",
-    headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
-    body: "null"
-  } : { method: "GET", headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" } };
-  let response;
-  let text;
-  try {
-    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, init, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
-  } catch {
-    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not answer the account lookup.`);
-  }
-  if (!response.ok) {
-    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} refused the account lookup with status ${response.status}.`);
-  }
-  let payload;
-  try {
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      throw new Error("not an object");
-    payload = parsed;
-  } catch {
-    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} returned an unreadable account lookup.`);
-  }
-  if (options.provider === "x") {
-    const id = xUserIdFromPayload(payload);
-    if (!id)
-      throw new ProviderAccountIdentityError("X did not name the connected account.");
-    return id;
-  }
-  const labels = labelsFromIdentityPayload(options.provider, payload);
-  if (!labels) {
-    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not name the connected account.`);
-  }
-  if (options.provider === "gmail" || options.provider === "google_drive") {
-    const subject = await fetchGoogleSubject({
-      accessToken: options.accessToken,
-      endpoint: options.endpoints?.google_tokeninfo ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo,
-      fetchImpl: options.fetchImpl,
-      timeoutMs: options.timeoutMs
-    });
-    if (subject)
-      labels.push(googleSubjectLabel(subject));
-  }
-  return composeProviderAccountId(labels);
-}
-async function fetchGoogleSubject(options) {
-  let response;
-  let text;
-  try {
-    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), options.endpoint, { method: "POST", headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" } }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
-  } catch {
-    throw new ProviderAccountIdentityError("Google did not answer the token lookup.");
-  }
-  if (!response.ok)
-    throw new ProviderAccountIdentityError(`Google refused the token lookup with status ${response.status}.`);
-  let payload;
-  try {
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      throw new Error("not an object");
-    payload = parsed;
-  } catch {
-    throw new ProviderAccountIdentityError("Google returned an unreadable token lookup.");
-  }
-  const subject = typeof payload.sub === "string" ? payload.sub.trim() : "";
-  if (/^[A-Za-z0-9_-]{1,255}$/.test(subject))
-    return subject;
-  const scopes = typeof payload.scope === "string" ? payload.scope.split(/\s+/) : [];
-  if (subject || scopes.includes("openid")) {
-    throw new ProviderAccountIdentityError("Google did not name the subject of an openid token.");
-  }
-  return;
-}
-function xUserIdFromPayload(payload) {
-  const data = payload.data;
-  const id = data && typeof data === "object" && !Array.isArray(data) ? data.id : undefined;
-  return typeof id === "string" && X_USER_ID.test(id.trim()) ? id.trim() : undefined;
-}
-function labelsFromIdentityPayload(provider, payload) {
-  if (provider === "dropbox") {
-    const id = dropboxAccountIdFromTokenPayload(payload);
-    return id ? [id] : undefined;
-  }
-  const user = payload.user && typeof payload.user === "object" && !Array.isArray(payload.user) ? payload.user : undefined;
-  const address = provider === "gmail" ? payload.emailAddress : user?.emailAddress;
-  if (typeof address !== "string" || !address.includes("@"))
-    return;
-  const labels = [googleAccountIdFromAddress(address)];
-  const permissionId = typeof user?.permissionId === "string" ? user.permissionId.trim() : "";
-  if (provider === "google_drive" && /^[A-Za-z0-9_-]{1,255}$/.test(permissionId)) {
-    labels.push(googlePermissionLabel(permissionId));
-  }
-  return labels;
-}
-function providerLabel(provider) {
-  return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : provider === "x" ? "X" : "Google Drive";
-}
-async function dropboxOwnsOneOfFolders(options) {
-  const endpoint = options.endpoint ?? "https://api.dropboxapi.com/2/files/get_metadata";
-  let unknown = false;
-  for (const id of options.folderIds) {
-    if (!/^id:[A-Za-z0-9_-]{1,200}$/.test(id)) {
-      unknown = true;
-      continue;
-    }
-    let response;
-    let text;
-    try {
-      ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ path: id })
-      }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
-    } catch {
-      unknown = true;
-      continue;
-    }
-    if (response.ok) {
-      let entry;
-      try {
-        entry = JSON.parse(text);
-      } catch {
-        entry = undefined;
-      }
-      if (!entry || typeof entry !== "object") {
-        unknown = true;
-        continue;
-      }
-      if (entry[".tag"] === "folder" && entry.id === id && entry.sharing_info === undefined)
-        return true;
-      continue;
-    }
-    if (response.status === 409 && /"not_found"/.test(text))
-      continue;
-    unknown = true;
-  }
-  return unknown ? undefined : false;
-}
-async function dropboxOwnRootFolderIds(options) {
-  const limit = options.limit ?? 5;
-  const listUrl = options.endpoint ?? "https://api.dropboxapi.com/2/files/list_folder";
-  const found = [];
-  let cursor;
-  for (let page2 = 0;page2 < 20; page2 += 1) {
-    let response;
-    let text;
-    try {
-      ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), cursor === undefined ? listUrl : `${listUrl}/continue`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify(cursor === undefined ? { path: "", recursive: false, limit: 200 } : { cursor })
-      }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: 1024 * 1024 }));
-    } catch {
-      return;
-    }
-    if (!response.ok)
-      return;
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return;
-    }
-    if (!Array.isArray(parsed.entries))
-      return;
-    for (const raw of parsed.entries) {
-      const entry = raw;
-      if (entry && typeof entry === "object" && entry[".tag"] === "folder" && typeof entry.id === "string" && /^id:[A-Za-z0-9_-]{1,200}$/.test(entry.id) && entry.sharing_info === undefined) {
-        found.push(entry.id);
-        if (found.length >= limit)
-          return found;
-      }
-    }
-    if (parsed.has_more !== true)
-      return found;
-    if (typeof parsed.cursor !== "string" || !parsed.cursor)
-      return;
-    cursor = parsed.cursor;
-  }
-  return found.length > 0 ? found : undefined;
-}
-var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, X_USER_ID, ProviderAccountIdentityError, IMMUTABLE_LABEL_KINDS, LABEL;
-var init_provider_account_identity = __esm(() => {
-  init_http_timeout();
-  ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive", "x"];
-  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-    x: "https://api.x.com/2/users/me",
-    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-  };
-  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-  DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
-  X_USER_ID = /^\d{1,32}$/;
-  ProviderAccountIdentityError = class ProviderAccountIdentityError extends Error {
-    constructor(message) {
-      super(message);
-      this.name = "ProviderAccountIdentityError";
-    }
-  };
-  IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
-  LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
 });
 
 // src/core/source-account-binding.ts
@@ -11785,8 +11786,8 @@ async function checkXBookmarksConnection(options) {
     if (payload && typeof payload === "object" && !Array.isArray(payload)) {
       const count = payload.meta?.result_count;
       const data = payload.data;
-      const noErrors = payload.errors === undefined || Array.isArray(payload.errors) && payload.errors.length === 0;
-      valid = noErrors && (count === 0 ? data === undefined || Array.isArray(data) && data.length === 0 : count === 1 && Array.isArray(data) && data.length === 1 && typeof data[0]?.id === "string" && /^\d+$/.test(data[0].id) && typeof data[0]?.text === "string");
+      const errors = payload.errors;
+      valid = (errors === undefined || Array.isArray(errors)) && (count === 0 ? (errors === undefined || errors.length === 0) && (data === undefined || Array.isArray(data) && data.length === 0) : count === 1 && Array.isArray(data) && data.length === 1 && typeof data[0]?.id === "string" && /^\d+$/.test(data[0].id) && typeof data[0]?.text === "string");
     }
   } catch {}
   if (!valid)
@@ -11930,6 +11931,9 @@ async function completeOAuthSourceConnection(prepared, code) {
     const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
     const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
     secretWrites.push([clientIdKey, prepared.clientId]);
+    if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
+      secretWrites.push(["google.own_app.registration", JSON.stringify({ clientId: prepared.clientId, clientSecret })]);
+    }
     secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
     if (prepared.options.clientIdSource !== undefined) {
       const clientIdSourceKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id_source`;
@@ -52407,6 +52411,8 @@ function dashboardProviderRefusalLine(source, options) {
   const code = source.connection.provider_refusal?.code ?? "";
   if (options?.surface === "chatgpt")
     return DASHBOARD_CHATGPT_REFUSAL_COPY.line[chatgptRefusalKind(code)];
+  if (code === "connection_check_failed")
+    return `${source.label} could not complete its access check. How to fix has the details.`;
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `rejected the sign-in address — fix it in your ${source.label} app settings`;
   }
@@ -95716,6 +95722,8 @@ function oauthCallbackRegistration(source, baseUrl, googleCloudProjectId, google
   };
 }
 function providerRefusalReason(error, redirectUri, settingLabel) {
+  if (error.code === "connection_check_failed")
+    return "Check the app key, enabled APIs, permissions and provider access. The sign-in tab explains which check failed. Then connect again.";
   if (redirectUri && settingLabel) {
     return `Provider refused the callback (${error.code}): register ${redirectUri} at ${settingLabel}, then Connect again`;
   }
@@ -143925,6 +143933,7 @@ function mountDashboardController(options) {
   let awaitingAuthorizationReturn = false;
   let authorizationWait;
   const root = options.root;
+  const uploadedClientFiles = new WeakMap;
   const submittedFormValues = new WeakMap;
   const startedFromSheet = new WeakSet;
   const pendingForms = new WeakSet;
@@ -144138,7 +144147,7 @@ function mountDashboardController(options) {
         ...body.client_id ? { client_id: body.client_id } : {},
         ...body.client_secret ? { client_secret: body.client_secret } : {},
         ...body.google_desktop === "true" ? { google_desktop: true } : {},
-        ...body.google_client_json ? { google_client_json: body.google_client_json } : {}
+        ...uploadedClientFiles.has(form) ? { google_client_json: uploadedClientFiles.get(form) } : {}
       };
     }
     if (connect === "this_computer") {
@@ -144212,8 +144221,10 @@ function mountDashboardController(options) {
       closeAuthorizationTab(authorizationTab);
       return;
     }
-    if (params.action === "start_oauth")
+    if (params.action === "start_oauth") {
       clearAuthorizationFallback(form);
+      uploadedClientFiles.delete(form);
+    }
     setFormPending(form, true, form.dataset.pendingMessage || pendingMessage(params));
     let result;
     try {
@@ -144667,11 +144678,11 @@ function mountDashboardController(options) {
         const intro = setupSheet.querySelector("[data-messaging-setup-intro]");
         const active = !["idle", "failed", "cancelled", "completed", "complete", "paired"].includes(state);
         if (intro)
-          intro.hidden = state !== "idle" && state !== "cancelled";
+          intro.hidden = active || state === "failed";
         const cancel = setupSheet.querySelector('[data-messaging-kind="cancel"]');
         if (cancel)
           cancel.hidden = !active;
-        if (operation !== "status" || active || state === "failed")
+        if (operation !== "status")
           setSheetOpen(setupSheet, true);
         setupSheet.querySelector("[data-pairing-error]")?.remove();
         if (state === "failed") {
@@ -144965,11 +144976,11 @@ function mountDashboardController(options) {
     }
   }
   async function readClientFile(form, file) {
-    const raw = form.querySelector('[name="google_client_json"]');
+    const revision = form.querySelector('[name="client_file_revision"]');
     const status = form.querySelector("[data-client-file-status]");
-    if (!raw || !status || !file)
+    if (!revision || !status || !file)
       return;
-    raw.value = "";
+    uploadedClientFiles.delete(form);
     try {
       if (file.size > 64 * 1024)
         throw new Error;
@@ -144977,17 +144988,21 @@ function mountDashboardController(options) {
       const app = JSON.parse(text3)?.installed;
       if (!app || typeof app.client_id !== "string" || typeof app.client_secret !== "string" || !app.client_id.endsWith(".apps.googleusercontent.com") || !app.client_secret.trim())
         throw new Error;
-      raw.value = text3;
+      uploadedClientFiles.set(form, text3);
+      revision.value = String(Number(revision.value) + 1);
       for (const field of Array.from(form.querySelectorAll('[name="client_id"], [name="client_secret"]'))) {
         field.value = "";
         field.disabled = true;
+        field.dataset.olympusOriginallyDisabled = "true";
       }
       status.textContent = "Desktop app file ready. Connect to check the key with Google.";
     } catch {
       status.textContent = "";
       showSetupFailure(form, "Choose the JSON downloaded for a Desktop app in Google Cloud Clients. Web app keys cannot use this flow.");
-      for (const field of Array.from(form.querySelectorAll('[name="client_id"], [name="client_secret"]')))
+      for (const field of Array.from(form.querySelectorAll('[name="client_id"], [name="client_secret"]'))) {
         field.disabled = false;
+        field.dataset.olympusOriginallyDisabled = "false";
+      }
     }
     const picker = form.querySelector("[data-client-file]");
     if (picker)
@@ -145025,14 +145040,14 @@ function mountDashboardController(options) {
     }
     if (target.closest("[data-client-paste] summary")) {
       const form = target.closest("form");
-      const raw = form?.querySelector('[name="google_client_json"]');
-      if (raw)
-        raw.value = "";
+      if (form)
+        uploadedClientFiles.delete(form);
       const fileStatus = form?.querySelector("[data-client-file-status]");
       if (fileStatus)
         fileStatus.textContent = "";
       form?.querySelectorAll('[name="client_id"], [name="client_secret"]').forEach((field) => {
         field.disabled = false;
+        field.dataset.olympusOriginallyDisabled = "false";
       });
     }
     const begin = target.closest("[data-setup-begin]");
@@ -145931,7 +145946,7 @@ function connectSetupSheet(input) {
   const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
   const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
-  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="google_client_json" value=""><div data-client-file-drop tabindex="0" role="group" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div><p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><p class="hint">The key check runs before sign-in. Google confirms consent and API access after you sign in.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="group" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div><p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><p class="hint">The key check runs before sign-in. Google confirms consent and API access after you sign in.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
   const walkthroughBody = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm()}`;
   const walkthrough = `${input.setupHeading ? `<h4>${escapeHtml2(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
   const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml2(input.lead.title)}</h4><p>${escapeHtml2(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml2(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml2(note)}</p>`).join("")}</div>` : "";
@@ -161425,7 +161440,10 @@ function createEmailSourceWorker(options = {}) {
               }
             });
           } catch (error2) {
-            clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
+            if (dashboardOAuthAttempts.get(source) === attempt) {
+              attempt.consumed = true;
+              attempt.error = { code: "connection_check_failed", at: new Date().toISOString() };
+            }
             return dashboardOAuthFailureHtml({
               source,
               reason: dashboardCallbackFailureReason(error2, source, attempt.clientIdSource),
@@ -161500,16 +161518,17 @@ function createEmailSourceWorker(options = {}) {
                 policy: { raw_runtime_secrets_exposed: false, client_secret_returned: false }
               });
             }
-            const publisher = submittedClientId ? undefined : dashboardPublisherOAuthFlow(source, dashboardOAuthClientIdForSource(source, clientIdSets.own));
+            const publisher = submittedClientId || ownDesktop ? undefined : dashboardPublisherOAuthFlow(source, dashboardOAuthClientIdForSource(source, clientIdSets.own));
             if (handback && (submittedClientId || publisher?.relay !== true)) {
               throw new EmailSourceWorkerError(409, "oauth_handback_unavailable", "This source uses your own app registration; connect it in Olympus on your Mac.");
             }
             if (computerHandback && (submittedClientId || publisher?.loopback !== true)) {
               throw new EmailSourceWorkerError(409, "oauth_handback_unavailable", "This source does not sign in on this computer; connect it in the Olympus dashboard.");
             }
-            const clientId = submittedClientId ?? publisher?.clientId ?? dashboardOAuthClientIdForSource(source, clientIdSets.all);
+            const savedDesktop = ownDesktop ? await readGoogleOwnAppRegistration(secretStore) : undefined;
+            const clientId = submittedClientId ?? (ownDesktop ? savedDesktop?.clientId : publisher?.clientId ?? dashboardOAuthClientIdForSource(source, clientIdSets.all));
             if (!clientId) {
-              throw new EmailSourceWorkerError(409, "oauth_client_id_missing", `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
+              throw new EmailSourceWorkerError(409, "oauth_client_id_missing", ownDesktop ? "Choose the downloaded Desktop app file, or paste the Client ID and secret." : `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
             }
             const rawClientSecret = uploadedClient?.clientSecret ?? asOptionalString(record7.client_secret);
             const submittedClientSecret = rawClientSecret === DASHBOARD_SAVED_SECRET_FIELD_VALUE ? undefined : rawClientSecret;
@@ -161530,9 +161549,6 @@ function createEmailSourceWorker(options = {}) {
             }
             if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
               await secretStore.set(dashboardOAuthClientSecretConfigKey(source), submittedClientSecret);
-            }
-            if (ownDesktop && submittedClientId) {
-              await secretStore.set("google.own_app.registration", JSON.stringify({ clientId: submittedClientId, clientSecret }));
             }
             const redirectUri = publisher?.loopback || ownDesktop ? `${dashboardGoogleLoopbackOrigin(dashboardOrigin, sourceDashboard.loopbackPort)}/oauth/callback/${encodeURIComponent(source)}` : publisher?.redirectUri ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
             const relayNonce = publisher?.relay === true ? handback ? `${handback.installId}_${createOAuthRelayNonce()}` : createOAuthRelayNonce() : undefined;
