@@ -239,7 +239,7 @@ keychain, `OLYMPUS_MACOS_NOTARY_PROFILE=olympus-notary` and
 `OLYMPUS_MACOS_HELPER_TEAM_ID` set to the expected team. Run
 `scripts/release-macos-helper.sh <output-directory>` with
 `OLYMPUS_MACOS_SIGNING_IDENTITY` set; it signs, notarizes, staples and checks
-the result. Reuse the verified zip until its source fingerprint changes. The site publisher pins the required team, checksum and size; if the team
+the result and writes a receipt beside the zip; publish the receipt with the zip for off-Mac publishing. Reuse the verified zip until its source fingerprint changes. The site publisher pins the required team, checksum and size; if the team
 variable is set, it must match that team.
 
 The ChatGPT directory listing has its own version. It changes only with a new

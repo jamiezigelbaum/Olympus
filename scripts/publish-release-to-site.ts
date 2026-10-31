@@ -378,8 +378,18 @@ export function sourceVersion(root: string): string {
   return pkg.version;
 }
 
-/** Inspect the actual archive before publishing. Linux checks structure only; macOS verifies the signature and notarization. */
+/** On macOS verify the archive; elsewhere require the receipt from Mac verification. */
 function verifyHelperArchive(path: string): void {
+  {
+    let receipt: Record<string, unknown>;
+    try { receipt = JSON.parse(readFileSync(`${path}.receipt.json`, 'utf8')); }
+    catch { throw new Error('macOS helper receipt is missing or invalid.'); }
+    const digest = fileDigest(path);
+    if (!receipt || receipt.name !== basename(path) || receipt.sha256 !== digest.sha256 || receipt.bytes !== digest.bytes || receipt.team !== EXPECTED_HELPER_TEAM || receipt.bundleId !== 'ai.olympusplugin.engine-host') {
+      throw new Error('macOS helper receipt does not match the archive.');
+    }
+    if (process.platform !== 'darwin') return;
+  }
   const dir = mkdtempSync(join(tmpdir(), 'olympus-helper-verify-'));
   try {
     const extracted = spawnSync('unzip', ['-q', path, '-d', dir], { encoding: 'utf8' });
@@ -453,6 +463,11 @@ export function publishToSite(input: { root: string; artifact: string; bridge?: 
     const served = join(dirname(tarball), helper.name);
     if (resolve(served) !== resolve(input.macosHelper)) copyFileSync(input.macosHelper, served);
     chmodSync(served, 0o644);
+    const receipt = `${input.macosHelper}.receipt.json`;
+    if (existsSync(receipt)) {
+      if (resolve(receipt) !== resolve(`${served}.receipt.json`)) copyFileSync(receipt, `${served}.receipt.json`);
+      chmodSync(`${served}.receipt.json`, 0o644);
+    }
   }
   const installScript = join(input.root, SERVED_INSTALL_SCRIPT);
   writeFileSync(installScript, script, { mode: 0o644 });

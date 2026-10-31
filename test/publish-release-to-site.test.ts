@@ -566,31 +566,28 @@ describe('the Bun program pin', () => {
   });
 });
 
-test('macOS helper pins are served and validated, or absent', () => {
+test('off-macOS publishing requires a matching helper receipt', () => {
   const { root, artifact } = fixture();
   const helper = join(root, 'olympus-engine-helper-0123456789abcdef.zip');
-  writeFileSync(helper, zipSync({
-    'Olympus Engine.app/Contents/Info.plist': strToU8('<plist><key>CFBundleIdentifier</key><string>ai.olympusplugin.engine-host</string></plist>'),
-    'Olympus Engine.app/Contents/_CodeSignature/CodeResources': strToU8('signature structure'),
-  }));
-  if (process.platform === 'darwin') {
-    expect(() => publishToSite({ root, artifact, macosHelper: helper, macosHelperTeamId: 'ND2P3ZTQRD' })).toThrow('verification failed');
-    return;
-  }
-  const result = publishToSite({ root, artifact, macosHelper: helper, macosHelperTeamId: 'ND2P3ZTQRD' });
-  const served = join(root, 'site/releases', result.version, basename(helper));
-  expect(readFileSync(served)).toEqual(readFileSync(helper));
-  const script = readFileSync(join(root, 'site/install.sh'), 'utf8');
-  expect(script).toContain(`MACOS_HELPER_NAME=${basename(helper)}`);
-  expect(script).toContain('MACOS_HELPER_TEAM_ID=ND2P3ZTQRD');
-  expect(checkSiteRelease(root)).toEqual([]);
-  writeFileSync(served, 'corrupt');
-  expect(checkSiteRelease(root).join('\n')).toContain('helper');
-  const bad = join(root, 'helper.zip');
-  writeFileSync(bad, 'bad');
-  expect(() => publishToSite({ root, artifact, macosHelper: bad, macosHelperTeamId: 'ND2P3ZTQRD' })).toThrow();
-  publishToSite({ root, artifact });
-  expect(readFileSync(join(root, 'site/install.sh'), 'utf8')).toContain('MACOS_HELPER_NAME=none');
+  writeFileSync(helper, 'fixture zip');
+  const receiptPath = `${helper}.receipt.json`;
+  const receipt = { name: basename(helper), ...fileDigest(helper), team: 'ND2P3ZTQRD', bundleId: 'ai.olympusplugin.engine-host', notarySubmissionId: 'test-id', createdAt: '2026-10-31T00:00:00Z' };
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+  try {
+    const publish = () => publishToSite({ root, artifact, macosHelper: helper });
+    expect(publish).toThrow('receipt');
+    writeFileSync(receiptPath, JSON.stringify({ ...receipt, sha256: '0'.repeat(64) }));
+    expect(publish).toThrow('receipt');
+    writeFileSync(receiptPath, JSON.stringify({ ...receipt, team: 'ABCDEFGHIJ' }));
+    expect(publish).toThrow('receipt');
+    writeFileSync(receiptPath, JSON.stringify(receipt));
+    const result = publish();
+    const served = join(root, 'site/releases', result.version, basename(helper));
+    expect(readFileSync(served)).toEqual(readFileSync(helper));
+    expect(readFileSync(`${served}.receipt.json`)).toEqual(readFileSync(receiptPath));
+    expect(checkSiteRelease(root)).toEqual([]);
+  } finally { Object.defineProperty(process, 'platform', platform); }
 }, 30_000);
 
 
