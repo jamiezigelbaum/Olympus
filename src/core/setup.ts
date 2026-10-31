@@ -1,7 +1,7 @@
 import { PRIVACY_PRESET_LABELS } from './privacy-language.ts';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { telegramPythonExecutable, TELEGRAM_DEPENDENCY_HINT } from './messaging-runtime.ts';
+import { defaultTelegramPython, TELEGRAM_DEPENDENCY_HINT } from './messaging-runtime.ts';
 import { homedir } from 'node:os';
 import { installManagedWorkerFiles, type ManagedWorkerFilesResult } from './lifecycle.ts';
 import { OperationError } from './operation-error.ts';
@@ -196,7 +196,9 @@ export function runSetupDependencyCheck(input: {
       required: false,
       ok: Boolean(pythonCommand && pythonModuleExists(pythonCommand, 'telethon')),
       detail: 'Optional Telegram guided-session reader.',
-      repairHint: TELEGRAM_DEPENDENCY_HINT,
+      repairHint: platform === 'darwin'
+        ? 'Install Python 3 for macOS, then run olympus connect telegram --pair. Olympus sets up Telethon when needed.'
+        : TELEGRAM_DEPENDENCY_HINT,
     }),
     dependencyFinding({
       id: 'go',
@@ -406,14 +408,6 @@ function defaultCommandExists(command: string): boolean {
     stdio: 'ignore',
   });
   return result.status === 0;
-}
-
-function defaultTelegramPython(platform: SetupDependencyCheck['platform']): string | undefined {
-  const python = telegramPythonExecutable();
-  // Without the Command Line Tools, macOS's /usr/bin/python3 is a stub whose first run opens an install dialog:
-  // doctor never starts one. `xcode-select -p` only reads where the tools are.
-  if (platform === 'darwin' && python === '/usr/bin/python3' && spawnSync('/usr/bin/xcode-select', ['-p'], { stdio: 'ignore' }).status !== 0) return undefined;
-  return python;
 }
 
 function defaultPythonModuleExists(pythonCommand: string, moduleName: string): boolean {

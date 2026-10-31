@@ -181,6 +181,7 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
   process.on('exit', () => rmSync(stateRoot, { recursive: true, force: true }));
   return {
     runningBun: false,
+    telegramPython: undefined,
     commandExists: async (command) => command === 'bun' || command === 'node',
     pythonModuleExists: async () => false,
     // Doctor tests must never inherit a live local worker from the host. Tests
@@ -199,6 +200,19 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
 }
 
 describe('runDoctor', () => {
+  test('Mac doctor checks the running Bun and Telegram private Python', async () => {
+    const probed: string[] = [];
+    const result = await runDoctor(doctorDeps({
+      config: defaultConfig(), delphi: healthyDelphi(), platform: 'darwin', runningBun: true,
+      commandExists: () => false, telegramPython: '/private/telegram/bin/python',
+      pythonModuleExists: (python) => { probed.push(python); return true; },
+    }));
+    const dependencies = checkByName(result.checks, 'dependencies');
+    expect(dependencies.ok).toBe(true);
+    expect(dependencies.detail).not.toContain('python-telethon');
+    expect(probed).toEqual(['/private/telegram/bin/python']);
+  });
+
   test('Linux accepts its running managed Bun without a PATH bun and names its socket', async () => {
     const result = await runDoctor(doctorDeps({ config: enabledEmailConfig(), delphi: healthyDelphi(), platform: 'linux', runningBun: true,
       commandExists: () => false, env: { HOME: '/tmp/doctor-linux', XDG_RUNTIME_DIR: '/run/user/1000' },

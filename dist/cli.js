@@ -5739,6 +5739,7 @@ function olympusPackageRoot() {
 var init_package_root = () => {};
 
 // src/core/messaging-runtime.ts
+import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync5, rmSync as rmSync2 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname11, join as join12 } from "node:path";
@@ -5751,7 +5752,18 @@ function telegramPythonExecutable(options = {}) {
   if (options.pythonExecutable)
     return options.pythonExecutable;
   const isolated = join12(telegramPythonVenvDir(options), "bin", "python");
-  return existsSync5(isolated) ? isolated : Bun.which("python3") ?? undefined;
+  if (existsSync5(isolated))
+    return isolated;
+  if (typeof Bun !== "undefined")
+    return Bun.which("python3") ?? undefined;
+  const resolved = spawnSync5("which", ["python3"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  return resolved.status === 0 ? resolved.stdout.trim() || undefined : undefined;
+}
+function defaultTelegramPython(platform) {
+  const python = telegramPythonExecutable();
+  if (platform === "darwin" && python === "/usr/bin/python3" && spawnSync5("/usr/bin/xcode-select", ["-p"], { stdio: "ignore" }).status !== 0)
+    return;
+  return python;
 }
 async function readyTelegramPython(options = {}) {
   if (options.pythonExecutable)
@@ -6046,7 +6058,7 @@ __export(exports_secret_store, {
   LinuxLibsecretSecretStore: () => LinuxLibsecretSecretStore,
   EncryptedFileSecretStore: () => EncryptedFileSecretStore
 });
-import { spawnSync as spawnSync5 } from "node:child_process";
+import { spawnSync as spawnSync6 } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes3, scryptSync } from "node:crypto";
 import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync10 } from "node:fs";
 import { homedir as homedir7, platform } from "node:os";
@@ -6435,7 +6447,7 @@ function isSecretObjectPath(value) {
   return typeof value === "string" && /^\/(?:[A-Za-z0-9_]+(?:\/[A-Za-z0-9_]+)*)?$/.test(value);
 }
 function runLinuxSecretCommand(command, args, input) {
-  const result = spawnSync5(command, args, { input, encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 5000, killSignal: "SIGKILL", env: { ...process.env, LC_ALL: "C" } });
+  const result = spawnSync6(command, args, { input, encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 5000, killSignal: "SIGKILL", env: { ...process.env, LC_ALL: "C" } });
   return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "", ...result.error ? { errorCode: result.error.code ?? "UNKNOWN" } : {} };
 }
 async function resolveSecretRefValue(secretRef, options = {}) {
@@ -6471,7 +6483,7 @@ function assertSafeKey(key) {
     throw new Error("Secret key must contain only safe label characters.");
 }
 function runCommand2(command, args, input) {
-  const result = spawnSync5(command, args, {
+  const result = spawnSync6(command, args, {
     input,
     encoding: "utf8",
     maxBuffer: 1024 * 1024
@@ -7238,7 +7250,7 @@ var init_worker_auth = __esm(() => {
 import { chmodSync as chmodSync2, closeSync as closeSync6, existsSync as existsSync7, lstatSync as lstatSync11, mkdirSync as mkdirSync6, openSync as openSync6, readFileSync as readFileSync14, readSync, statSync as statSync7 } from "node:fs";
 import { homedir as homedir11, platform as osPlatform, tmpdir } from "node:os";
 import { basename as basename2, dirname as dirname14, isAbsolute as isAbsolute10, join as join18, relative as relative4, sep as sep6 } from "node:path";
-import { spawnSync as spawnSync6 } from "node:child_process";
+import { spawnSync as spawnSync7 } from "node:child_process";
 function installWorkerService(options = {}) {
   const platform2 = normalizePlatform(options.platform ?? osPlatform());
   const homeDir = validatedAbsolutePath(options.homeDir ?? homedir11(), "home directory");
@@ -7551,7 +7563,7 @@ function boundedServiceDetail(result) {
   return text.slice(0, 240);
 }
 function defaultWorkerServiceExec(command, args) {
-  const result = spawnSync6(command, args, { encoding: "utf8" });
+  const result = spawnSync7(command, args, { encoding: "utf8" });
   return {
     status: result.status,
     stdout: result.stdout ?? "",
@@ -14650,12 +14662,12 @@ var init_assets = __esm(() => {
 });
 
 // src/core/still-image-readiness.ts
-import { spawnSync as spawnSync7 } from "node:child_process";
+import { spawnSync as spawnSync8 } from "node:child_process";
 import { mkdtempSync, readFileSync as readFileSync21, rmSync as rmSync7, writeFileSync as writeFileSync5 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { join as join25 } from "node:path";
 function spawnRun(command, args, timeoutMs) {
-  const result = spawnSync7(command, args, { stdio: "ignore", timeout: timeoutMs, killSignal: "SIGKILL" });
+  const result = spawnSync8(command, args, { stdio: "ignore", timeout: timeoutMs, killSignal: "SIGKILL" });
   return { ok: !result.error && result.status === 0 };
 }
 function isJpegBytes(bytes) {
@@ -51537,7 +51549,7 @@ var init_forget = __esm(() => {
 });
 
 // src/core/this-computer.ts
-import { spawnSync as spawnSync9 } from "node:child_process";
+import { spawnSync as spawnSync10 } from "node:child_process";
 import { existsSync as existsSync44, readFileSync as readFileSync35 } from "node:fs";
 import { createHash as createHash31, randomUUID as randomUUID13 } from "node:crypto";
 import { dirname as dirname43, join as join48 } from "node:path";
@@ -51682,7 +51694,7 @@ var MACHINE_ID_PATTERN, cachedSystemHostIdentity, systemHostIdentity = () => {
   let value;
   try {
     if (process.platform === "darwin") {
-      const result = spawnSync9("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { encoding: "utf8", timeout: 5000 });
+      const result = spawnSync10("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { encoding: "utf8", timeout: 5000 });
       value = /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(result.stdout ?? "")?.[1];
     } else if (process.platform === "linux") {
       for (const path of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
@@ -86317,7 +86329,7 @@ var init_remote_vlm = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/install.ts
-import { spawnSync as spawnSync10 } from "node:child_process";
+import { spawnSync as spawnSync11 } from "node:child_process";
 import { createHash as createHash61, randomUUID as randomUUID19 } from "node:crypto";
 import {
   closeSync as closeSync24,
@@ -86612,7 +86624,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
   }
 }
 function extractWithTar(archivePath, targetDir) {
-  const result = spawnSync10("tar", ["-xzf", archivePath, "-C", targetDir], {
+  const result = spawnSync11("tar", ["-xzf", archivePath, "-C", targetDir], {
     stdio: ["ignore", "ignore", "pipe"],
     timeout: EXTRACT_TIMEOUT_MS
   });
@@ -100105,7 +100117,7 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/core/engine-children.ts
-import { spawnSync as spawnSync11 } from "node:child_process";
+import { spawnSync as spawnSync12 } from "node:child_process";
 import { existsSync as existsSync65, mkdirSync as mkdirSync42, readFileSync as readFileSync49 } from "node:fs";
 import { dirname as dirname66, join as join90 } from "node:path";
 function engineChildrenPath(env = process.env) {
@@ -100296,7 +100308,7 @@ function normalizeStart(value) {
   return value.trim().replace(/\s+/g, " ");
 }
 function listProcessTable() {
-  const result = spawnSync11("ps", ["-axww", "-o", "pid=,pgid=,lstart=,command="], {
+  const result = spawnSync12("ps", ["-axww", "-o", "pid=,pgid=,lstart=,command="], {
     encoding: "utf8",
     timeout: 1e4,
     maxBuffer: 32 * 1024 * 1024,
@@ -100309,7 +100321,7 @@ function listProcessTable() {
 function processStartTime(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1)
     return;
-  const result = spawnSync11("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, env: PS_ENV });
+  const result = spawnSync12("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, env: PS_ENV });
   if (result.status !== 0 || typeof result.stdout !== "string")
     return;
   const value = normalizeStart(result.stdout);
@@ -105247,7 +105259,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 });
 
 // src/core/engine-service.ts
-import { spawnSync as spawnSync12 } from "node:child_process";
+import { spawnSync as spawnSync13 } from "node:child_process";
 import { createHash as createHash70, randomBytes as randomBytes16 } from "node:crypto";
 import { existsSync as existsSync67, lstatSync as lstatSync33, readdirSync as readdirSync22, readFileSync as readFileSync54, renameSync as renameSync14, statSync as statSync32 } from "node:fs";
 import { homedir as homedir30, platform as osPlatform3 } from "node:os";
@@ -106282,7 +106294,7 @@ function boundedDetail(result) {
   return (text3 || `exit ${result.status ?? "unknown"}`).slice(0, 300);
 }
 function defaultExec2(command, args) {
-  const result = spawnSync12(command, args, { encoding: "utf8" });
+  const result = spawnSync13(command, args, { encoding: "utf8" });
   return {
     status: result.status,
     stdout: result.stdout ?? "",
@@ -106403,14 +106415,14 @@ var init_engine_service = __esm(() => {
 });
 
 // src/core/linux-engine-service.ts
-import { spawnSync as spawnSync13 } from "node:child_process";
+import { spawnSync as spawnSync14 } from "node:child_process";
 import { chmodSync as chmodSync27, closeSync as closeSync27, constants as constants14, copyFileSync, existsSync as existsSync68, fstatSync as fstatSync5, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync34, linkSync as linkSync2, mkdirSync as mkdirSync45, openSync as openSync26, readFileSync as readFileSync55, readlinkSync as readlinkSync4, readdirSync as readdirSync23, realpathSync as realpathSync19, renameSync as renameSync15, rmSync as rmSync30, rmdirSync as rmdirSync7, statSync as statSync33, symlinkSync as symlinkSync2, writeFileSync as writeFileSync17 } from "node:fs";
 import { createRequire as createRequire6 } from "node:module";
 import { basename as basename15, dirname as dirname71, join as join96, relative as relative15, resolve as resolve21, sep as sep17 } from "node:path";
 import { userInfo } from "node:os";
 import { randomBytes as randomBytes17, createHash as createHash71, randomUUID as randomUUID23 } from "node:crypto";
 function linuxEngineExec(command, args) {
-  const r = spawnSync13(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
+  const r = spawnSync14(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
 }
 function value(s, exec = false) {
@@ -111772,7 +111784,7 @@ var init_consult_settings = __esm(() => {
 });
 
 // src/core/doctor.ts
-import { spawnSync as spawnSync14 } from "node:child_process";
+import { spawnSync as spawnSync15 } from "node:child_process";
 import { existsSync as existsSync71, readFileSync as readFileSync57 } from "node:fs";
 import { join as join99 } from "node:path";
 import { homedir as homedir32 } from "node:os";
@@ -111944,14 +111956,14 @@ async function argusProfileCheck(deps, profile) {
 }
 async function dependencyCheck(deps) {
   const commandExists = deps.commandExists ?? defaultCommandExists;
-  const bun = await commandExists("bun") || (deps.platform ?? process.platform) === "linux" && (deps.runningBun ?? typeof Bun !== "undefined");
+  const bun = await commandExists("bun") || (deps.runningBun ?? typeof Bun !== "undefined");
   const node = await commandExists("node");
   const openclaw = await commandExists("openclaw");
   const gog = await commandExists("gog");
   const op = await commandExists("op");
-  const python3 = await commandExists("python3");
-  const python = python3 ? false : await commandExists("python");
-  const pythonCommand = python3 ? "python3" : python ? "python" : undefined;
+  const systemPlatform = deps.platform ?? process.platform;
+  const platform2 = systemPlatform === "darwin" || systemPlatform === "linux" ? systemPlatform : "other";
+  const pythonCommand = "telegramPython" in deps ? deps.telegramPython : defaultTelegramPython(platform2);
   const telethon = Boolean(pythonCommand && await (deps.pythonModuleExists ?? defaultPythonModuleExists)(pythonCommand, "telethon"));
   const go = await commandExists("go");
   const missingRequired = [
@@ -113143,7 +113155,7 @@ function defaultCommandExists(command) {
   return path.split(":").some((dir) => Boolean(dir) && existsSync71(join99(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
-  const proc = spawnSync14(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+  const proc = spawnSync15(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
 function asRecord11(value2) {
@@ -113157,6 +113169,7 @@ function errorDetail2(error) {
 }
 var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.", EMAIL_WORKER_HINT = "Run olympus engine status and olympus engine logs, then olympus engine restart. On a host without the engine, run olympus worker status, then olympus worker start.", SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.", SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.", CREDENTIAL_HINT2 = "Run the matching olympus connect command again for each handle that needs reauthorization.", STALE_RUNNING_SYNC_MS, EMBEDDING_LAG_RATIO = 0.1, DROPBOX_FILES_CORPUS_ID2 = "secure_local.dropbox.files", ARGUS_GENERATION_PROBE_TIMEOUT_MS = 15000, INGESTION_STUCK_WARNING_HOURS = 24, INGESTION_STUCK_ERROR_HOURS = 72, INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10, CONNECTED_SOURCE_LANES, ON_DEMAND_TIER_CORPORA, ON_DEMAND_TIER_CORPUS_IDS, TIER_MIGRATION_STOPPED_GRACE_DAYS_ENV = "OLYMPUS_TIER_MIGRATION_STOPPED_GRACE_DAYS", DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS = 7, DAY_MS2;
 var init_doctor = __esm(() => {
+  init_messaging_runtime();
   init_linux_engine_service();
   init_engine_service();
   init_linux_engine_layout();
@@ -209345,7 +209358,7 @@ import { resolve as resolve27 } from "node:path";
 init_open_targets();
 init_package_root();
 init_linux_engine_layout();
-import { spawnSync as spawnSync8 } from "node:child_process";
+import { spawnSync as spawnSync9 } from "node:child_process";
 import { existsSync as existsSync32, lstatSync as lstatSync18, mkdirSync as mkdirSync20, readFileSync as readFileSync29, renameSync as renameSync6, rmSync as rmSync12, statSync as statSync18, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir20, platform as osPlatform2 } from "node:os";
 import { dirname as dirname32, isAbsolute as isAbsolute15, join as join38 } from "node:path";
@@ -209644,7 +209657,7 @@ function truncatedDetail(text2) {
   return text2.slice(0, 300);
 }
 function defaultExec(command, args, env) {
-  const result = spawnSync8(command, args, { encoding: "utf8", ...env ? { env } : {} });
+  const result = spawnSync9(command, args, { encoding: "utf8", ...env ? { env } : {} });
   return {
     status: result.status,
     stdout: result.stdout ?? "",
@@ -209666,7 +209679,7 @@ init_remote_open();
 init_worker_transport();
 init_atomic_file();
 import { createHash as createHash75 } from "node:crypto";
-import { spawnSync as spawnSync16 } from "node:child_process";
+import { spawnSync as spawnSync17 } from "node:child_process";
 import { existsSync as existsSync75, lstatSync as lstatSync37, mkdirSync as mkdirSync46, readFileSync as readFileSync62 } from "node:fs";
 import { homedir as homedir33, platform as osPlatform4 } from "node:os";
 import { dirname as dirname74, isAbsolute as isAbsolute31, join as join103 } from "node:path";
@@ -209675,7 +209688,7 @@ import { dirname as dirname74, isAbsolute as isAbsolute31, join as join103 } fro
 init_atomic_file();
 init_operation_error();
 import { createHash as createHash74, randomUUID as randomUUID24 } from "node:crypto";
-import { spawnSync as spawnSync15 } from "node:child_process";
+import { spawnSync as spawnSync16 } from "node:child_process";
 import {
   chmodSync as chmodSync28,
   closeSync as closeSync29,
@@ -209850,7 +209863,7 @@ function extractArchive(artifactPath, staging) {
   runTar(["-xzf", artifactPath, "-C", staging, "--strip-components=1"], "extract");
 }
 function runTar(args, action) {
-  const result = spawnSync15("tar", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const result = spawnSync16("tar", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
   if (result.status !== 0) {
     throw new OperationError("invalid_params", `Could not ${action} the Olympus upgrade artifact.`, (result.stderr || result.stdout || "").trim().slice(0, 240) || undefined);
   }
@@ -209886,7 +209899,7 @@ function validateExtractedPackage(root, bunBin, executePreflight) {
     throw new OperationError("invalid_params", "Upgrade artifact package and plugin manifest versions do not match.");
   }
   if (executePreflight) {
-    const result = spawnSync15(bunBin, [cliPath, "--version"], { encoding: "utf8", timeout: 15000 });
+    const result = spawnSync16(bunBin, [cliPath, "--version"], { encoding: "utf8", timeout: 15000 });
     if (result.status !== 0 || result.stdout.trim() !== `olympus ${version}`) {
       throw new OperationError("invalid_params", "Upgrade artifact CLI preflight did not report its declared Olympus version.");
     }
@@ -210679,7 +210692,7 @@ function defaultWorkerReadinessProbe(url, bunBin) {
     "} catch { process.exit(1); }"
   ].join(`
 `);
-  const result = spawnSync16(executable, ["-e", script2, url], {
+  const result = spawnSync17(executable, ["-e", script2, url], {
     encoding: "utf8",
     stdio: ["ignore", "ignore", "ignore"],
     timeout: 5000
@@ -210936,7 +210949,7 @@ init_olympus_layout();
 init_privacy_language();
 init_messaging_runtime();
 import { randomBytes as randomBytes18 } from "node:crypto";
-import { spawnSync as spawnSync17 } from "node:child_process";
+import { spawnSync as spawnSync18 } from "node:child_process";
 import { homedir as homedir34 } from "node:os";
 init_operation_error();
 init_sovereignty();
@@ -210997,7 +211010,7 @@ function runSetupDependencyCheck(input = {}) {
       required: false,
       ok: Boolean(pythonCommand && pythonModuleExists(pythonCommand, "telethon")),
       detail: "Optional Telegram guided-session reader.",
-      repairHint: TELEGRAM_DEPENDENCY_HINT
+      repairHint: platform2 === "darwin" ? "Install Python 3 for macOS, then run olympus connect telegram --pair. Olympus sets up Telethon when needed." : TELEGRAM_DEPENDENCY_HINT
     }),
     dependencyFinding({
       id: "go",
@@ -211165,23 +211178,17 @@ function normalizeSetupPlatform(platform2) {
   return "other";
 }
 function defaultCommandExists2(command) {
-  const result = spawnSync17("sh", ["-lc", `command -v ${shellQuote4(command)} >/dev/null 2>&1`], {
+  const result = spawnSync18("sh", ["-lc", `command -v ${shellQuote4(command)} >/dev/null 2>&1`], {
     stdio: "ignore"
   });
   return result.status === 0;
 }
-function defaultTelegramPython(platform2) {
-  const python = telegramPythonExecutable();
-  if (platform2 === "darwin" && python === "/usr/bin/python3" && spawnSync17("/usr/bin/xcode-select", ["-p"], { stdio: "ignore" }).status !== 0)
-    return;
-  return python;
-}
 function defaultPythonModuleExists2(pythonCommand, moduleName) {
-  const result = spawnSync17(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+  const result = spawnSync18(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return result.status === 0;
 }
 function defaultCommandVersion(command) {
-  const result = spawnSync17(command, ["--version"], {
+  const result = spawnSync18(command, ["--version"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"]
   });
@@ -211246,7 +211253,7 @@ import { dirname as dirname83, join as join112 } from "node:path";
 init_engine_service();
 init_operation_error();
 init_package_root();
-import { spawnSync as spawnSync18 } from "node:child_process";
+import { spawnSync as spawnSync19 } from "node:child_process";
 import { existsSync as existsSync80, lstatSync as lstatSync40, mkdirSync as mkdirSync52, mkdtempSync as mkdtempSync5, renameSync as renameSync18, rmSync as rmSync33 } from "node:fs";
 import { homedir as homedir37 } from "node:os";
 import { join as join111, resolve as resolve22 } from "node:path";
@@ -211255,7 +211262,7 @@ var MACOS_HELPER_TEAM_ENV = "OLYMPUS_MACOS_HELPER_TEAM_ID";
 function run(exec, command, args, env) {
   if (exec)
     return exec(command, args);
-  const result = spawnSync18(command, args, { encoding: "utf8", ...env ? { env } : {} });
+  const result = spawnSync19(command, args, { encoding: "utf8", ...env ? { env } : {} });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 function parseCodesignDetails(text3) {

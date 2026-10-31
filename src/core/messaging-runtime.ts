@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -17,7 +18,17 @@ export function telegramPythonExecutable(options: {
 } = {}): string | undefined {
   if (options.pythonExecutable) return options.pythonExecutable;
   const isolated = join(telegramPythonVenvDir(options), 'bin', 'python');
-  return existsSync(isolated) ? isolated : Bun.which('python3') ?? undefined;
+  if (existsSync(isolated)) return isolated;
+  if (typeof Bun !== 'undefined') return Bun.which('python3') ?? undefined;
+  const resolved = spawnSync('which', ['python3'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  return resolved.status === 0 ? resolved.stdout.trim() || undefined : undefined;
+}
+
+/** Select the pairing interpreter without launching the macOS Command Line Tools stub. */
+export function defaultTelegramPython(platform: 'darwin' | 'linux' | 'other'): string | undefined {
+  const python = telegramPythonExecutable();
+  if (platform === 'darwin' && python === '/usr/bin/python3' && spawnSync('/usr/bin/xcode-select', ['-p'], { stdio: 'ignore' }).status !== 0) return undefined;
+  return python;
 }
 
 /** The one Telethon the helpers are written against, installed into the private environment. */

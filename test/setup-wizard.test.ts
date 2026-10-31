@@ -226,7 +226,10 @@ describe('olympus setup wizard', () => {
       telegramPython: undefined,
       pythonModuleExists: () => { throw new Error('no Python may run'); },
     });
-    expect(result.checks.find((check) => check.id === 'python-telethon')?.ok).toBe(false);
+    const telethon = result.checks.find((check) => check.id === 'python-telethon');
+    expect(telethon?.ok).toBe(false);
+    expect(telethon?.repairHint).toContain('Install Python 3 for macOS');
+    expect(telethon?.repairHint).not.toContain('python3 -m venv');
   });
 
   test('no-sensitive needs no embedding key: the built-in model indexes Personal and Private content', async () => {
