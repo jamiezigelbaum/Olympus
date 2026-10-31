@@ -1,3 +1,6 @@
+import { remotePrivateNote, REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
+import { privateAnswerPageHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
+import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { ModelSetupService } from '../src/core/model-setup.ts';
 import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 // Local design-iteration harness for the dashboard (unified dashboard phase
@@ -13,6 +16,8 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard            the host page, locked (the Open dashboard controls banner)
 //   /dashboard?controls   the same page with a pretend control session
 //   /dashboard?state=<name>  that preview state, in one load
+//   /dashboard?state=inbox-failed&private-answers&controls  settled Inbox failure
+//   /dashboard?state=secret-notice  ChatGPT private panel and remote verdict
 //   /dashboard?keys | ?agents | ?private-answers | ?connector
 //                the computer's own pages, as the worker renders them.
 //   &waiting=0..9  how many private inbox questions appear (default 3; remembered):
@@ -1671,6 +1676,7 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
 }
 
 export const DASHBOARD_PREVIEW_STATES = [
+  'inbox-failed', 'secret-notice',
   'review', 'review-unconfigured', 'review-indexing',
   'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
@@ -1814,17 +1820,17 @@ const PREVIEW_WAITING = [
 const previewDeleted = new Set<string>();
 const previewSeen = new Set<string>();
 
-export function previewWaitingQuestions(count: number) {
+export function previewWaitingQuestions(count: number, state = '') {
   const questions = Array.from({ length: Math.max(0, count) }, (_, index) => {
     const base = PREVIEW_WAITING[index % PREVIEW_WAITING.length]!;
     const id = index < PREVIEW_WAITING.length ? base.id : `${base.id}_${index}`;
-    return { ...base, id, unread: base.unread && !previewSeen.has(id) };
+    return { ...base, ...(state === 'inbox-failed' && index % PREVIEW_WAITING.length === 2 ? { state: 'failed' as const } : {}), id, unread: base.unread && !previewSeen.has(id) };
   }).filter((question) => !previewDeleted.has(question.id));
   return { questions, olderRemoved: count > PREVIEW_WAITING.length };
 }
 
 /** The inbox's real client actions against synthetic, in-memory fixture state. */
-function previewPrivateAnswersAction(body: Record<string, unknown>, count: number): Response {
+function previewPrivateAnswersAction(body: Record<string, unknown>, count: number, state: string): Response {
   const answered = {
     ok: true,
     status: 'answered',
@@ -1834,7 +1840,7 @@ function previewPrivateAnswersAction(body: Record<string, unknown>, count: numbe
     unanswered: ['The practice’s parking arrangements'],
     left_out: ['Gmail'],
   };
-  const listed = previewWaitingQuestions(count);
+  const listed = previewWaitingQuestions(count, state);
   if (body.action === 'list') return Response.json({ ok: true, ...listed });
   if (body.action === 'ask') return Response.json(answered);
   if (body.action === 'ask_venice') return Response.json({ ...answered, sent_items: [{ title: 'Appointment confirmation.pdf', source: 'Dropbox' }] });
@@ -1856,6 +1862,15 @@ function previewPrivateAnswersAction(body: Record<string, unknown>, count: numbe
     return Response.json({ ok: true, status: 'deleted' });
   }
   return Response.json({ ok: false, error: { code: 'preview_only', message: 'Preview only: this action is not available.' } }, { status: 501 });
+}
+
+/** Fixed remote verdict and a synthetic panel answer; no Secret metadata. */
+export function previewSecretNotice(): string { return remotePrivateNote(undefined, true); }
+const PREVIEW_SECRET_JOB = `oly2p.${'a'.repeat(32)}.${'B'.repeat(43)}`;
+function previewSecretPanel(origin: string): string {
+  const page = privateAnswerPageHtml({ relayOrigin: origin });
+  const globals = `<script>window.openai={toolOutput:{status:'found'},toolResponseMetadata:{'olympus/privateAnswer':{v:1,count:1,state:'ready',jobId:${JSON.stringify(PREVIEW_SECRET_JOB)}}}};</script>`;
+  return page.replace('<script>', `${globals}<script>`);
 }
 
 function previewWaitingCount(request: Request, url: URL): number {
@@ -1900,10 +1915,18 @@ if (import.meta.main) {
         headers: { 'content-type': 'application/json', 'set-cookie': 'olympus_preview_controls=1; Path=/; SameSite=Strict' },
       });
     }
+    if (request.method === 'POST' && url.pathname === `/private/${PREVIEW_SECRET_JOB}`) {
+      const body = await request.json().catch(() => ({})) as { publicKey?: string };
+      const panel = typeof body.publicKey === 'string' ? await importPanelPublicKey(body.publicKey).catch(() => undefined) : undefined;
+      if (!panel) return Response.json({ status: 'failed' }, { status: 400 });
+      const plaintext = padPrivateAnswerPlaintext(JSON.stringify({ v: 1, answer: REMOTE_SECRET_NOTE, citations: [], unanswered: [] }));
+      return Response.json({ status: 'ready', v: 1, ...await sealPrivateAnswer(PREVIEW_SECRET_JOB, panel.key, plaintext) });
+    }
+    if (url.pathname === '/preview-secret-panel') return html(previewSecretPanel(url.origin));
     const waitingCount = previewWaitingCount(request, url);
     if (request.method === 'POST' && url.pathname === '/dashboard/private-answers') {
       if (!previewUnlocked) return Response.json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Unlock first.' } }, { status: 403 });
-      return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>, waitingCount);
+      return previewPrivateAnswersAction(await request.json().catch(() => ({})) as Record<string, unknown>, waitingCount, state);
     }
     // One file of an upload: the body is read (slowly in archives-upload-slow, so progress and Cancel can be seen) and only its size kept.
     if (request.method === 'POST' && url.pathname === '/dashboard/archive-import/upload-file') {
@@ -1984,6 +2007,7 @@ if (import.meta.main) {
         ...(url.searchParams.has('waiting') ? [`olympus_preview_waiting=${waitingCount}; Path=/; SameSite=Strict`] : []),
       ];
       const pageState = stateOverride ?? state;
+      if (pageState === 'secret-notice') return withCookies(html(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Secret notice preview</title><style>body{font:16px system-ui;max-width:700px;margin:48px auto;padding:0 20px;color:#222}iframe{width:100%;height:300px;border:1px solid #ddd;border-radius:12px}</style></head><body><h1>ChatGPT answer preview</h1><p>${previewSecretNotice()}</p><iframe title="Private answer panel" src="/preview-secret-panel"></iframe></body></html>`), cookies);
       const page = dashboardHtmlRoutePage(url);
       if (page === 'legacy') return new Response(null, { status: 302, headers: { location: '/dashboard' } });
       if (page === 'outside_help_moved') return new Response(null, { status: 302, headers: { location: dashboardOutsideHelpRedirect(url) } });
@@ -2010,7 +2034,7 @@ if (import.meta.main) {
           // The pretend session is a local one, so Private answers shows its list.
           outsideHelpLocalSession: unlocked,
           outsideHelp: previewOutsideHelp(url.searchParams.get('anonymous') === 'on'),
-          privateAnswers: { available: true, destinations: { computer: 'ready', venice: url.searchParams.get('venice') === 'ready' ? 'ready' : url.searchParams.get('venice') === 'unset' ? 'not_set_up' : 'not_allowed' }, ...(unlocked ? { waiting: previewWaitingQuestions(waitingCount) } : {}) },
+          privateAnswers: { available: true, destinations: { computer: 'ready', venice: url.searchParams.get('venice') === 'ready' ? 'ready' : url.searchParams.get('venice') === 'unset' ? 'not_set_up' : 'not_allowed' }, ...(unlocked ? { waiting: previewWaitingQuestions(waitingCount, pageState) } : {}) },
         },
       }), undefined, url.searchParams.get('theme')), cookies);
     }
