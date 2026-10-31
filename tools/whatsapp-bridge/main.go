@@ -234,15 +234,21 @@ func main() {
 // tests substitute recorders so flag handling is provable without a provider
 // connection.
 type bridgeDeps struct {
-	pairOnly func(stateDir string, container *sqlstore.Container) error
-	native   func(stateDir, spoolDir string, native nativeCaptureConfig, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string, error)
-	manual   func(stateDir, spoolDir string, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string)
-	wait     func(client *whatsmeow.Client, writer *spoolWriter, fatalEvents chan string)
+	listChats func(stateDir string, container *sqlstore.Container) error
+	pairOnly  func(stateDir string, container *sqlstore.Container) error
+	native    func(stateDir, spoolDir string, native nativeCaptureConfig, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string, error)
+	manual    func(stateDir, spoolDir string, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string)
+	wait      func(client *whatsmeow.Client, writer *spoolWriter, fatalEvents chan string)
 }
 
 func defaultBridgeDeps() bridgeDeps {
 	return bridgeDeps{
 		pairOnly: runPairOnlyMode,
+		listChats: func(_ string, container *sqlstore.Container) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			return runListChatsMode(ctx, container)
+		},
 		native: func(stateDir, spoolDir string, native nativeCaptureConfig, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string, error) {
 			return startNativeCapture(stateDir, spoolDir, native, allowed, container, newWhatsmeowClient)
 		},
@@ -261,12 +267,13 @@ func defaultBridgeDeps() bridgeDeps {
 // provider is touched.
 func run(args []string, deps bridgeDeps) error {
 	flags := flag.NewFlagSet("olympus-whatsapp-bridge", flag.ContinueOnError)
+	listChats := flags.Bool("list-chats", false, "list contact and joined-group metadata from an already linked account; never captures messages")
 	pairOnly := flags.Bool("pair-only", false, "pair or verify the linked device, then exit without capturing messages")
 	captureApproved := flags.Bool("capture-approved", false, "require and enforce an explicitly approved chat scope")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *pairOnly && *captureApproved {
+	if (*pairOnly && *captureApproved) || (*listChats && (*pairOnly || *captureApproved)) {
 		return errors.New("incompatible_modes")
 	}
 	var allowed map[string]struct{}
@@ -286,6 +293,28 @@ func run(args []string, deps bridgeDeps) error {
 	// manually instead of through the systemd unit (which also sets UMask=0077).
 	syscall.Umask(0o077)
 	configureDeviceIdentity()
+
+	if *listChats {
+		stateDir, err := resolveStateDir()
+		if err != nil {
+			return errors.New("state_dir_unavailable")
+		}
+		dbPath := filepath.Join(stateDir, sessionDBName)
+		if info, err := os.Stat(dbPath); err != nil || !info.Mode().IsRegular() {
+			return errors.New("session_not_paired")
+		}
+		release, err := holdBridgeSessionLock(stateDir)
+		if err != nil {
+			return err
+		}
+		defer release()
+		container, err := openSessionContainer(dbPath)
+		if err != nil {
+			return errors.New("session_store_failed")
+		}
+		defer container.Close()
+		return deps.listChats(stateDir, container)
+	}
 
 	if *pairOnly {
 		// Pairing never captures: it ignores the native-capture switch and

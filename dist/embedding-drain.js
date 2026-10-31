@@ -64232,6 +64232,7 @@ if (false)
   ;
 
 // src/core/messaging-pairing.ts
+init_messaging_capture_grant_file();
 init_provider_account_history();
 
 // src/workers/email-source/server.ts
@@ -64600,6 +64601,17 @@ init_vlm();
 
 // src/workers/email-source/server.ts
 init_apple_vision_ocr();
+
+// src/workers/email-source/dashboard-messaging-service.ts
+init_atomic_file();
+init_file_lease();
+init_messaging_capture_grant_file();
+init_messaging_runtime();
+init_package_root();
+init_pairing_session_paths();
+
+// src/workers/email-source/dashboard-messaging-runner.ts
+var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
 
 // src/workers/email-source/index.ts
 init_source_scope_approval();
@@ -65050,6 +65062,15 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 [data-setup-steps] [hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 .actionrow > form { margin: 0 !important; }
+/* The native disclosure shares the choice row; its list spans both columns. */
+.messagingchoices { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: start; gap: 12px; }
+.messagingchoices > details, .messagingchoices > details::details-content { display: contents; }
+.messagingchoices > details > summary { grid-column: 1; grid-row: 1; margin: 0; box-sizing: border-box; }
+.messagingchoices > form { grid-column: 2; grid-row: 1; margin: 0 !important; }
+.messagingchoices > form > .btn { margin: 0; }
+.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3); margin: 0; }
+.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3; margin: 0; }
+.messagingchoices > details:not([open]) > form { display: none; }
 .actionrow:not(.setupactions) > .primary { order: -1; }
 .setupactions { margin-top: 24px; }
 .setupactions > .primary { margin-left: auto; }
@@ -65065,6 +65086,9 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
    it, never further down the page. */
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
+.messaging-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 12px; }
+.messaging-card p { color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
+.messaging-card form, .messaging-card details { margin: 10px 0; }
 /* Where an open link landed (#olympus-open=…): an accent outline that fades. */
 .landed { outline: 3px solid var(--link); outline-offset: 4px; border-radius: 10px; animation: landed-fade 2.5s ease-out 1.5s forwards; }
 @keyframes landed-fade { to { outline-color: transparent; } }

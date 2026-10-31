@@ -1686,6 +1686,8 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
 }
 
 export const DASHBOARD_PREVIEW_STATES = [
+  'telegram-pair-phone', 'telegram-pair-code', 'telegram-pair-2fa', 'telegram-pair-error', 'telegram-post-pair', 'telegram-chats', 'telegram-capturing',
+  'whatsapp-qr', 'whatsapp-post-pair', 'whatsapp-chats', 'whatsapp-capturing',
   'inbox-failed', 'secret-notice', 'secret-inbox',
   'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-empty', 'privacy-description-editing', 'privacy-questions', 'privacy-conflict',
   'privacy-add-kind', 'privacy-add-pick', 'privacy-add-confirm', 'privacy-details', 'privacy-add-folder', 'privacy-add-label',
@@ -1700,6 +1702,37 @@ export const DASHBOARD_PREVIEW_STATES = [
   ...ARCHIVE_STATES,
   ...SOURCE_IMPORT_STATES,
 ] as const;
+
+// Synthetic messaging data; no provider, credential, or worker is involved.
+export function previewMessagingFixture(state: string): Record<string, unknown> | undefined {
+  const fields: Record<string, string> = { 'telegram-pair-phone': 'phone', 'telegram-pair-code': 'code', 'telegram-pair-2fa': 'password' };
+  if (fields[state]) return { ok: true, state: 'waiting', field: fields[state] };
+  if (state === 'telegram-pair-error') return { ok: true, state: 'failed' };
+  if (state === 'whatsapp-qr') return { ok: true, state: 'waiting', qr: PREVIEW_QR };
+  if (state === 'telegram-capturing' || state === 'whatsapp-capturing') return { ok: true, state: 'paired' };
+  if (['telegram-chats', 'whatsapp-chats', 'telegram-post-pair', 'whatsapp-post-pair'].includes(state)) return {
+    ok: true, chats: [
+      { chatScope: 'preview:1', title: 'Alex Example', kind: 'person' },
+      { chatScope: 'preview:2', title: 'Weekend plans', kind: 'group' },
+      { chatScope: 'preview:3', title: 'Book club', kind: 'group' },
+    ], wholeAccount: false, chatScopes: state.endsWith('-post-pair') ? [] : ['preview:1'],
+    ...(state.endsWith('-post-pair') ? { state: 'scope_selection_required' } : {}),
+  };
+  return undefined;
+}
+
+// A deliberately non-functional QR-like image, generated solely for screenshots.
+const PREVIEW_QR = 'data:image/png;base64,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';
+
+export function renderMessagingPreviewPage(state: string): string {
+  const source = state.startsWith('telegram-') ? 'telegram' : 'whatsapp';
+  const page = renderDashboardLocalPage('keys', {
+    url: new URL('http://127.0.0.1:8930/dashboard?controls&keys'),
+    view: view(state),
+    options: { now: NOW, controlSessionCsrfToken: 'preview-csrf-token', messagingLocalSession: true },
+  });
+  return page.replace('</body>', '<script data-preview-messaging>/* Initial status read supplies this fixture. */</script></body>');
+}
 
 /** Only synthetic navigation; names never enter real page URLs or widget state. */
 export function previewPrivacySteps(state: string): string | undefined {
@@ -2071,6 +2104,11 @@ if (import.meta.main) {
     if (request.method === 'POST' && url.pathname === '/dashboard/agents/revoke') {
       return Response.json({ ok: true, status_message: 'Preview only: nothing was revoked.' });
     }
+    if (request.method === 'POST' && url.pathname.startsWith('/dashboard/messaging/')) {
+      const fixture = previewMessagingFixture(state);
+      const input = await request.json() as { source?: unknown };
+      if (fixture && previewUnlocked) return Response.json(state.startsWith(`${input.source}-`) ? fixture : { ok: true, state: 'idle' });
+    }
     // Every other control POST needs a worker. Say so in the words the page
     // prints, instead of a bare "Request failed.".
     if (request.method === 'POST' && url.pathname.startsWith('/dashboard/')) {
@@ -2110,6 +2148,9 @@ if (import.meta.main) {
           origin: url.origin,
           ...(unlocked ? { csrfToken: 'preview-csrf-token' } : {}),
         }), COMPUTER_HOST_PAGE_CSP), cookies);
+      }
+      if (page === 'keys' && unlocked && previewMessagingFixture(pageState)) {
+        return withCookies(html(renderMessagingPreviewPage(pageState), undefined, url.searchParams.get('theme')), cookies);
       }
       return withCookies(html(renderDashboardLocalPage(page, {
         url,

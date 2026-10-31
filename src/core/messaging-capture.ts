@@ -131,7 +131,8 @@ export function readMessagingCaptureGrantFacts(
     if (typeof raw === 'string') {
       const scopes = raw.split(',').map((item) => item.trim()).filter(Boolean);
       if (scopes.length > 0) {
-        facts.scope = scopes.includes('*') ? { kind: 'whole_account' } : { kind: 'chats', count: new Set(scopes).size };
+        if (scopes.length === 1 && scopes[0] === '*') facts.scope = { kind: 'whole_account' };
+        else if (scopes.every((scope) => !scope.includes('*'))) facts.scope = { kind: 'chats', count: new Set(scopes).size };
       }
     }
     return facts;
