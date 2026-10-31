@@ -938,7 +938,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const choosingScope = state === 'scope_selection_required';
       const chatSlot = card.querySelector<HTMLElement>('[data-messaging-chats]');
       if (!choosingScope && chatSlot?.dataset.pendingChoice === 'true') chatSlot.replaceChildren();
-      if (chatSlot) chatSlot.dataset.pendingChoice = String(choosingScope);
+      if (chatSlot) { chatSlot.dataset.pendingChoice = String(choosingScope); chatSlot.classList.toggle('messagingchoices', choosingScope); }
       if (Array.isArray(body.chats) && typeof body.wholeAccount === 'boolean' && Array.isArray(body.chatScopes)) {
         const slot = card.querySelector<HTMLElement>('[data-messaging-chats]');
         if (slot) {
@@ -957,13 +957,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           const button = document.createElement('button'); button.type = 'submit'; button.className = 'btn'; button.textContent = choosingScope ? 'Read selected chats' : 'Save chat choices'; form.append(button);
           if (choosingScope) {
             const pick = document.createElement('details');
-            const summary = document.createElement('summary'); summary.textContent = 'Pick chats (recommended)'; pick.append(summary, form); slot.append(pick);
+            const summary = document.createElement('summary'); summary.className = 'btn primary'; summary.textContent = 'Pick chats (recommended)'; pick.append(summary, form); slot.append(pick);
             if (!body.chats.length) { const empty = document.createElement('p'); empty.textContent = 'No chats are available to select yet. You can cancel and try pairing again later.'; form.prepend(empty); button.disabled = true; }
             const allForm = document.createElement('form'); allForm.method = 'dialog'; allForm.dataset.messagingKind = 'scope';
             const all = document.createElement('input'); all.type = 'checkbox'; all.name = 'wholeAccount'; all.checked = true; all.hidden = true;
             const allButton = document.createElement('button'); allButton.type = 'submit'; allButton.className = 'btn'; allButton.textContent = 'Everything in this account';
-            const explanation = document.createElement('p'); explanation.textContent = 'Allow Olympus to read every chat, including new chats.';
-            allForm.append(all, allButton, explanation); slot.append(allForm);
+            const explanation = document.createElement('p'); explanation.className = 'hint'; explanation.textContent = 'Allow Olympus to read every chat, including new chats.';
+            allForm.append(all, allButton); slot.append(allForm, explanation);
           } else slot.append(form);
         }
       }

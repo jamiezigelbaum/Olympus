@@ -385,8 +385,18 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 [data-client-file-drop]:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
 [data-client-file-drop] input { max-width: 100%; }
 .setupfields .keyfield { width: 100%; box-sizing: border-box; }
+[data-setup-steps] [hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 .actionrow > form { margin: 0 !important; }
+/* The native disclosure shares the choice row; its list spans both columns. */
+.messagingchoices { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: start; gap: 12px; }
+.messagingchoices > details, .messagingchoices > details::details-content { display: contents; }
+.messagingchoices > details > summary { grid-column: 1; grid-row: 1; margin: 0; box-sizing: border-box; }
+.messagingchoices > form { grid-column: 2; grid-row: 1; margin: 0 !important; }
+.messagingchoices > form > .btn { margin: 0; }
+.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3); margin: 0; }
+.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3; margin: 0; }
+.messagingchoices > details:not([open]) > form { display: none; }
 .actionrow:not(.setupactions) > .primary { order: -1; }
 .setupactions { margin-top: 24px; }
 .setupactions > .primary { margin-left: auto; }

@@ -64,7 +64,7 @@ test('cancellation after registration begins waits for the grant to publish', as
   await manager.cancelAndWait('telegram');
   expect(saved).toBe(true);
   expect(manager.status('telegram').state).toBe('paired');
-}, 30_000);
+});
 
 test('cancelling the post-pair choice releases the waiting task without publishing', async () => {
   let published = false;

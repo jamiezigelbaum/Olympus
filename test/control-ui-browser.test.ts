@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
+import { DASHBOARD_THEME_CSS } from '../src/workers/dashboard/theme.ts';
 import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
 import { DASHBOARD_REDRAW_EVENT, mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
 import { connectSetupSheet, setupStepsSheet } from '../src/workers/dashboard/components.ts';
@@ -1221,8 +1222,8 @@ test.each(['telegram', 'whatsapp'])('mount restores %s pairing and continues pol
   } finally { controller.dispose(); }
 });
 
-test.each([false, true])('post-pair choice sends only explicit consent (wholeAccount=%s)', async wholeAccount => {
-  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+test.each([{ source: 'telegram', wholeAccount: false }, { source: 'telegram', wholeAccount: true }, { source: 'whatsapp', wholeAccount: false }, { source: 'whatsapp', wholeAccount: true }] as const)('post-pair choice layout and explicit consent: %j', async ({ source, wholeAccount }) => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard(source, true); document.body.append(root);
   const choices: unknown[] = [];
   const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl,
     messaging: async (operation, params) => {
@@ -1237,13 +1238,19 @@ test.each([false, true])('post-pair choice sends only explicit consent (wholeAcc
     expect(root.textContent).toContain('Pick chats (recommended)');
     expect(root.textContent).toContain('Everything in this account');
     const slot = root.querySelector('[data-messaging-chats]')!;
+    expect(slot.classList.contains('messagingchoices')).toBe(true);
+    expect(slot.classList.contains('actionrow')).toBe(false);
+    const explanation = slot.querySelector(':scope > p.hint');
+    expect(explanation?.textContent).toBe('Allow Olympus to read every chat, including new chats.');
+    expect(slot.querySelector('details > summary + form')).not.toBeNull();
+    expect(slot.querySelector(':scope > form > p')).toBeNull();
     const check = slot.querySelector<HTMLInputElement>('[name="chatScope"]')!;
     expect(check.checked).toBe(false);
     check.checked = true;
     const form = wholeAccount ? slot.querySelector<HTMLInputElement>('[name="wholeAccount"]')!.closest('form')! : check.closest('form')!;
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
-    expect(choices).toEqual([{ source: 'telegram', wholeAccount, chatScopes: wholeAccount ? [] : ['telegram.personal:chat:101'] }]);
+    expect(choices).toEqual([{ source, wholeAccount, chatScopes: wholeAccount ? [] : ['telegram.personal:chat:101'] }]);
     expect(slot.textContent).toBe('');
   } finally { controller.dispose(); }
 });
@@ -1403,4 +1410,78 @@ test('Google own-app hides the shared warning and reaches STEP 6 OF 6 with the f
     expect(sheet.querySelector<HTMLElement>('[data-setup-choice]')!.hidden).toBe(false);
     expect(sheet.querySelector<HTMLElement>('[data-setup-walkthrough]')!.hidden).toBe(true);
   } finally { controller.dispose(); }
+});
+
+ test('chat disclosure list spans the row below its grey caption', () => {
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: start;');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3;');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3);');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details:not([open]) > form { display: none; }');
+});
+
+
+for (const [state, provider, step] of [
+  ['connect-dropbox', 'dropbox', '1'], ['connect-dropbox', 'dropbox', '5'],
+  ['connect-dropbox-refused', 'dropbox', '1'], ['connect-venice', 'venice', '3'],
+] as const) {
+  test(`preview deep link reaches ${state} step ${step} without starting a connection`, () => {
+    const root = document.createElement('div');
+    const url = new URL(`http://localhost/dashboard?keys&controls&state=${state}&sheet=${provider}&step=${step}`);
+    expect(dashboardHtmlRoutePage(url)).toBe('keys');
+    root.innerHTML = renderDashboardLocalPage('keys', {
+      url, view: buildDashboardPreviewView(state),
+      options: { controlSessionCsrfToken: 'fixture' },
+    });
+    document.body.append(root);
+    let calls = 0;
+    const controller = mountDashboardController({ root, transport: { control: async () => { calls++; return { status: 200, body: { ok: true } }; } },
+      navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true,
+      signal: new AbortController().signal, pollIntervalMs: 0 });
+    const script = setupPreviewScript(provider, step).replace(/^<script>|<\/script>$/g, '');
+    new Function(script)();
+    happyWindow.dispatchEvent(new happyWindow.Event('DOMContentLoaded'));
+    const sheet = provider === 'dropbox' ? root.querySelector<HTMLElement>('#connect-dropbox-files')!
+      : root.querySelector<HTMLElement>('[data-model-card="venice"]')!;
+    if (state.endsWith('refused')) {
+      expect(sheet.querySelector<HTMLElement>('[data-connect-content]')!.hidden).toBe(true);
+      expect(sheet.querySelector<HTMLElement>('[data-connect-error]')!.hidden).toBe(false);
+      sheet.querySelector<HTMLButtonElement>('[data-connect-retry]')!.click();
+      expect(sheet.querySelector<HTMLElement>('[data-connect-content]')!.hidden).toBe(false);
+      expect(sheet.querySelector<HTMLElement>('[data-connect-error]')!.hidden).toBe(true);
+    }
+    expect(sheet.querySelector('[data-setup-counter]')!.textContent).toContain(`Step ${step} of`);
+    const back = sheet.querySelector<HTMLButtonElement>('[data-setup-back]')!;
+    const submit = sheet.querySelector<HTMLButtonElement>('[data-setup-submit]')!;
+    expect(back.disabled).toBe(step === '1');
+    expect(submit.hidden).toBe(step === '1');
+    expect(back.parentElement).toBe(submit.parentElement);
+    expect(calls).toBe(0);
+    controller.dispose();
+  });
+}
+
+test('shared footer submit respects write access, pending state and accepted keys', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = setupStepsSheet({ id: 'key', provider: 'Venice', steps: [{ text: 'Paste key' }],
+    finalForm: id => `<form id="${id}" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input name="api_key" value="fixture"><span data-action-message></span></form>` });
+  document.body.append(root);
+  let complete!: (result: OlympusDashboardControlResult) => void;
+  let calls = 0;
+  const controller = mountDashboardController({ root, transport: { control: () => { calls++; return new Promise(resolve => { complete = resolve; }); } },
+    navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: false,
+    signal: new AbortController().signal, pollIntervalMs: 0 });
+  const submit = root.querySelector<HTMLButtonElement>('[data-setup-submit]')!;
+  expect(submit.disabled).toBe(true);
+  controller.update({ canWrite: true });
+  expect(submit.disabled).toBe(false);
+  submit.click();
+  expect(calls).toBe(1);
+  expect(submit.disabled).toBe(true);
+  submit.click();
+  expect(calls).toBe(1);
+  complete({ status: 200, body: { ok: true } });
+  await happyWindow.happyDOM.waitUntilComplete();
+  expect(submit.disabled).toBe(true);
+  expect(submit.textContent).toBe('Key saved');
+  controller.dispose();
 });
