@@ -145729,8 +145729,9 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .setupfields .keyfield { width: 100%; box-sizing: border-box; }
 .actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 .actionrow > form { margin: 0 !important; }
+.actionrow:not(.setupactions) > .primary { order: -1; }
 .setupactions { margin-top: 24px; }
-[data-setup-guided] .setupactions > .primary { margin-left: auto; }
+.setupactions > .primary { margin-left: auto; }
 .setupheader { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 12px; }
 .sheet .setupheader h2 { font-size: var(--fs-title); line-height: 1.3; margin: 0; }
 .setupclose { border: 0; color: var(--t3); font-size: var(--fs-title); padding: 0 4px; }
@@ -145747,8 +145748,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 [data-client-paste] summary { color: var(--link); cursor: pointer; font-size: var(--fs-body); margin-bottom: 12px; }
 [data-client-paste] .keyfield + .keyfield { margin-top: 8px; }
 @media (max-width: 480px) {
-  .actionrow, .setupactions, .rowform { flex-direction: column; align-items: stretch; }
-  [data-setup-guided] .setupactions > .primary { margin-left: 0; }
+  .actionrow:not(.setupactions), .rowform { flex-direction: column; align-items: stretch; }
 }
 [data-setup-steps] [hidden], [data-setup-choice][hidden], [data-setup-walkthrough][hidden], [data-setup-lead][hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .keyfield::placeholder { color: var(--t4); }
