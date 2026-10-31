@@ -166,16 +166,21 @@ describe('the card walks the owner through registering the callback itself', () 
     const sheet = connectSheet('dropbox.files', { dropbox: 'dropbox-app-key' });
 
     expect(sheet).toContain('href="https://www.dropbox.com/developers/apps"');
-    expect(sheet).toContain('Open the Dropbox App Console');
-    expect(sheet).toContain('Scoped access app');
-    expect(sheet).toContain('files.metadata.read and files.content.read');
-    expect(sheet).toContain('<b>OAuth 2 → Redirect URIs</b>');
+    expect(sheet).toContain('Open this page in Dropbox');
+    expect(sheet).toContain('Choose Scoped access');
+    expect(sheet).toContain('files.metadata.read, files.content.read, sharing.read, and account_info.read');
+    expect(sheet).toContain('On Settings, add this exact URI under OAuth 2 redirect URIs.');
     expect(sheet).toContain(`<div class="promptbox" id="connect-dropbox-files-redirect">${TAILNET}/oauth/callback/dropbox</div>`);
     expect(sheet).toContain('data-copy-target="#connect-dropbox-files-redirect"');
-    expect(sheet).toContain('Copy the App key back into the field below and press Connect');
-    // Four steps, in order, above the fields.
-    expect(sheet.split('<li>')).toHaveLength(5);
-    expect(sheet.indexOf('<ol class="steps">')).toBeLessThan(sheet.indexOf('name="client_id"'));
+    expect(sheet).toContain('Copy the App key from Settings and paste it here.');
+    // Five guided steps replace the old four-item list; the key is last.
+    const panels = sheet.split('<div data-setup-panel');
+    expect(panels).toHaveLength(6);
+    for (const [index, title] of ['Create your app', 'Choose access', 'Enable permissions', 'Register the redirect URI', 'Add your app key'].entries()) {
+      expect(panels[index + 1]).toContain(`<h4>${title}</h4>`);
+      if (index < 4) expect(panels[index + 1]).not.toContain('name="client_id"');
+    }
+    expect(panels[5]).toContain('name="client_id"');
   });
 
   test('X names its portal, its scopes, its paid-access requirement, and its setting', () => {

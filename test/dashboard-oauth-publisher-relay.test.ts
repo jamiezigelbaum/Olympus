@@ -135,6 +135,14 @@ function fixture(
     // The connected-account lookup (provider-account-identity.ts) is not a
     // token exchange; it answers here and stays out of the exchange record.
     if (isGoogleIdentityLookup(String(url))) return googleIdentityResponse();
+    // A permission probe is not another code exchange. Keep the one-exchange
+    // assertions intact, and answer the probe through the existing transport seam.
+    if (String(url) === 'https://api.dropboxapi.com/2/files/list_folder') {
+      expect(init?.method).toBe('POST');
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer dropbox-access-token-fixture');
+      expect(JSON.parse(String(init?.body))).toEqual({ path: '', limit: 1 });
+      return Response.json({ entries: [], cursor: 'permission-check', has_more: false });
+    }
     exchangeUrls.push(String(url));
     const body = String(init?.body ?? '');
     const contentType = new Headers(init?.headers).get('content-type');
