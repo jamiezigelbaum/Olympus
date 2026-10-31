@@ -48,7 +48,7 @@ function fixture() {
   return { store, dbPath, record, now: () => clock, advance: (ms: number) => { clock += ms; } };
 }
 function saved(): StoredPrivateAnswer {
-  return { status: 'answered', answer: 'Synthetic retained answer', citations: [{ title: 'Synthetic source', url: 'https://example.invalid/source' }],
+  return { status: 'answered', secretLocations: [], answer: 'Synthetic retained answer', citations: [{ title: 'Synthetic source', url: 'https://example.invalid/source' }],
     unanswered: [], leftOut: [], read: EVIDENCE.map(({ text: _text, ...identity }) => identity) };
 }
 function localResult(): Extract<LocalAnswerResult, { status: 'answered' }> {

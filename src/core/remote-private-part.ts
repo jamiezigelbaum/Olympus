@@ -67,7 +67,7 @@ export type RemotePrivateOutcome =
   | 'excluded_by_policy'
   | 'route_unavailable'
   | 'none';
-export type PrivateMatchVerdict = 'match' | 'no_match' | 'unknown';
+export type PrivateMatchVerdict = 'match' | 'secret_match' | 'no_match' | 'unknown';
 
 /** What the surface knows about the call, beyond its arguments. */
 export interface RemotePrivatePartContext {
@@ -99,6 +99,7 @@ export interface RemotePrivatePart {
 export interface RemotePrivatePartCall {
   /** Opaque local row locator, never a capability or answer. */
   readonly answerId?: string | undefined;
+  readonly secretMatch?: boolean | undefined;
   /**
    * Settles the call's raw result, given the remote output it releases:
    * records a waiting question when the outcome and the probe say so. True
@@ -159,6 +160,9 @@ export function remotePrivateOutcome(
 ): RemotePrivateOutcome {
   const record = asRecord(raw);
   if (!record || typeof record.answer !== 'string') return 'none';
+  // A location-only Secret is never delivered remotely, even when another
+  // part of the answer was released. Re-probe it before recording a pointer.
+  if (Array.isArray(record.secret_locations) && record.secret_locations.length > 0) return 'excluded_by_policy';
   const audit = asRecord(record.audit);
   if (!audit) return 'none';
   const decision = asRecord(asRecord(record.opsec)?.release_decision)?.decision;
@@ -220,6 +224,7 @@ interface Handoff {
   expiresAt: number;
   settled: Promise<boolean>;
   answerId?: string;
+  secretMatch?: boolean;
 }
 
 /**
@@ -288,7 +293,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     released: Readonly<Record<string, unknown>> | undefined,
     args: Readonly<Record<string, unknown>>,
     ticket: WaitingQuestionTicket | undefined,
-    recordedId?: (id: string) => void,
+    recordedId?: (id: string, secretMatch: boolean) => void,
   ): Promise<boolean> => {
     try {
       if (closed || !ticket) return false;
@@ -317,23 +322,23 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     ticket: WaitingQuestionTicket,
     question: string,
     selectors: NonNullable<ReturnType<typeof normalizeWaitingSelectors>>,
-    verdict: 'match' | 'unknown',
-    recordedId?: (id: string) => void,
+    verdict: 'match' | 'secret_match' | 'unknown',
+    recordedId?: (id: string, secretMatch: boolean) => void,
   ): boolean => {
     let recorded = false;
     try {
       const ref = options.store()?.record(ticket, {
         question,
         surface: 'remote',
-        state: verdict === 'match' ? 'waiting' : 'unchecked',
+        state: verdict === 'unknown' ? 'unchecked' : 'waiting',
         selectors,
       });
       recorded = ref !== undefined;
-      if (ref) recordedId?.(ref.id);
+      if (ref) recordedId?.(ref.id, verdict === 'secret_match');
     } catch {
       console.warn('[olympus:remote] waiting private question not recorded reason=store_unavailable');
     }
-    return verdict === 'match' && recorded;
+    return verdict !== 'unknown' && recorded;
   };
 
   /**
@@ -349,6 +354,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     // The search takes the question alone, so nothing narrows a replay of it.
     const selectors = normalizeWaitingSelectors({});
     let answerId: string | undefined;
+    let secretMatch = false;
     // Never left unhandled: when the search fails, or is cancelled, nothing reads this.
     const verdict: Promise<PrivateMatchVerdict | undefined> = (async () => {
       if (closed || signal?.aborted || !ticket || !question || !selectors) return undefined;
@@ -357,6 +363,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     })().catch(() => undefined);
     return {
       get answerId() { return answerId; },
+      get secretMatch() { return secretMatch; },
       async settle() {
         try {
           const found = await untilCancelled(verdict, signal);
@@ -366,7 +373,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
           if (found === undefined || found === 'no_match' || closed || !ticket || !selectors) return false;
           // The probe may have waited: a connection revoked meanwhile records nothing.
           if (!activeNow(ticket.connectionId)) return false;
-          return recordVerdict(ticket, question, selectors, found, id => { answerId = id; });
+          return recordVerdict(ticket, question, selectors, found, (id, secret) => { answerId = id; secretMatch = secret; });
         } catch {
           return false;
         }
@@ -381,7 +388,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     args: Readonly<Record<string, unknown>>,
     ticket: WaitingQuestionTicket | undefined,
     releaseCheck: ReleaseCheck | undefined,
-    recordedId?: (id: string) => void,
+    recordedId?: (id: string, secretMatch: boolean) => void,
   ): Promise<boolean> | undefined => {
     let finished: ReturnType<SourceAnswerJobScope['registry']['whenFinished']>;
     try {
@@ -471,8 +478,8 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
       }
       const ref: WaitingQuestionRef = { id: record.id, generation: record.generation, connectionId: record.connectionId };
       try {
-        if (store.settleUnchecked(ref, verdict)) {
-          if (verdict === 'match') counts.matched += 1;
+        if (store.settleUnchecked(ref, verdict === 'secret_match' ? 'match' : verdict)) {
+          if (verdict !== 'no_match') counts.matched += 1;
           else counts.cleared += 1;
         }
       } catch {
@@ -490,12 +497,14 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
           if (operation === 'source_answer') {
             const ticket = ticketFor(connectionId);
             let answerId: string | undefined;
+            let secretMatch = false;
             return {
               get answerId() { return answerId; },
+              get secretMatch() { return secretMatch; },
               async settle(raw, released) {
                 const pending = asRecord(raw);
                 if (pending?.status === 'working' && typeof pending.job_id === 'string') {
-                  const settled = settleWhenFinished(context?.jobs, pending.job_id, args, ticket, context?.releaseCheck, id => { answerId = id; const handoff = handoffs.get(`${connectionId}\u0000${pending.job_id}`); if (handoff) handoff.answerId = id; });
+                  const settled = settleWhenFinished(context?.jobs, pending.job_id, args, ticket, context?.releaseCheck, (id, secret) => { answerId = id; secretMatch = secret; const handoff = handoffs.get(`${connectionId}\u0000${pending.job_id}`); if (handoff) { handoff.answerId = id; handoff.secretMatch = secret; } });
                   if (settled) {
                     sweep();
                     handoffs.set(`${connectionId}\u0000${pending.job_id}`, { settled, expiresAt: now() + handoffTtlMs });
@@ -503,7 +512,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
                   }
                   return false;
                 }
-                return settleAnswer(raw, released, args, ticket, id => { answerId = id; });
+                return settleAnswer(raw, released, args, ticket, (id, secret) => { answerId = id; secretMatch = secret; });
               },
             };
           }
@@ -512,6 +521,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
             if (!jobId) return undefined;
             return {
               get answerId() { return handoffs.get(`${connectionId}\u0000${jobId}`)?.answerId; },
+              get secretMatch() { return handoffs.get(`${connectionId}\u0000${jobId}`)?.secretMatch; },
               async settle(raw) {
                 sweep();
                 const entry = handoffs.get(`${connectionId}\u0000${jobId}`);

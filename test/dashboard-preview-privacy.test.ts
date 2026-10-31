@@ -1,8 +1,22 @@
 import { describe, expect, test } from 'bun:test';
-import { DASHBOARD_PREVIEW_STATES, previewPrivacyToolResult } from '../scripts/dashboard-preview.ts';
+import { DASHBOARD_PREVIEW_STATES, previewPrivacyToolResult, previewPrivacySteps, previewPrivacyScope } from '../scripts/dashboard-preview.ts';
 import { PRIVACY_META_KEY } from '../src/workers/chatgpt/dashboard-contract.ts';
 
 describe('privacy preview fixtures', () => {
+  test('deep links reach every sheet step, Details and conflict; picker fixtures have no names in structuredContent', () => {
+    for (const state of ['privacy-edit', 'privacy-empty', 'privacy-description-editing', 'privacy-questions', 'privacy-add-kind', 'privacy-add-pick', 'privacy-add-confirm', 'privacy-details', 'privacy-conflict', 'privacy-add-folder', 'privacy-add-label'] as const) {
+      expect(DASHBOARD_PREVIEW_STATES).toContain(state);
+      expect(previewPrivacySteps(state)).toStartWith('key:privacy:edit');
+    }
+    expect(previewPrivacyToolResult('privacy-empty', 'get')._meta[PRIVACY_META_KEY]!.description).toBe('');
+    expect(previewPrivacySteps('privacy-description-editing')).toEndWith('key:privacy:description:edit');
+    expect(previewPrivacySteps('privacy-add-confirm')).toEndWith('key:privacy:sender:add');
+    expect(previewPrivacySteps('privacy-conflict')).toEndWith('key:privacy:sheet:confirm');
+    expect(previewPrivacySteps('privacy-details')).toEndWith('key:privacy:details');
+    for (const source of ['gmail.email', 'dropbox.files']) {
+      expect(JSON.stringify(previewPrivacyScope(source).structuredContent)).not.toMatch(/Health|Family|Travel/);
+    }
+  });
   test('provides an editor and a conflict using invented settings', () => {
     expect(DASHBOARD_PREVIEW_STATES).toContain('privacy-edit');
     expect(DASHBOARD_PREVIEW_STATES).toContain('privacy-conflict');
