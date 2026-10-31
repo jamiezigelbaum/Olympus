@@ -145,7 +145,30 @@ keeps the capability unspent: no successful acknowledgment, or pinned sealed
 hand-out, until deletion commits (or that generation is already absent). No claim within 30 seconds schedules a local inbox answer;
 a claimed job that expires without acknowledgment also falls back. Restart
 forgets in-memory panel claims and resumes persisted questions after their
-grace window. An acknowledged answer never appears in the inbox.
+grace window. An acknowledged answer without a Secret notice never appears in the inbox.
+
+**Secret notice navigation (2026-10-31).** On `/mcp`, the sealed answer panel
+can open its question's local Inbox answer through a random 128-bit handle.
+The handle expires with the in-memory panel job (normally ten minutes), is
+bound to the question generation, and resolves only through the local control
+session and CSRF boundary. It carries no item name, locator, identity or count;
+none of those, or the handle, enter the model-visible response. The website's
+`/open/private/` landing page forwards the handle from its fragment to the
+existing `olympus://` handler without sending the fragment to the website.
+The engine and the landing-page asset must ship together. The pinned
+`/openai/mcp` panel and listing remain unchanged.
+
+A Secret notice keeps its Inbox entry, including after panel acknowledgment,
+and makes it visible immediately. A Secret-only notice needs no inference;
+mixed Secret/Private questions retain the panel grace period before background
+inference starts. The local answer names its screened matches and uses the existing
+source-opening adapters for Open controls. Every read and open rechecks source
+scope and screening. Locations alone need no answer model. Unavailable or
+expired links direct the owner to open Olympus, then Inbox; server mode uses
+the existing tunnel instructions. Items whose location cannot be disclosed or
+whose source has no opening adapter retain the existing location-only notice.
+Failed Inbox rows use the warning tint, border and icon in both themes;
+successful rows retain the ordinary appearance.
 
 **Priority and failures.** The inbox runs at background priority, at most
 one answer globally (therefore at most one per connection). Interactive
@@ -154,9 +177,17 @@ shared model completion boundary, including synthesis and audit. Evidence
 authorization is repeated after queueing, before the model call starts, for
 both inbox/panel answers and ordinary source answers sharing that model. A running
 model call finishes; subsequent background calls yield. Upgrade resumes
-bounded existing records. Failures remain row states, with persisted
-exponential backoff from 5 seconds up to 30 minutes, no raw exception text.
-Rows say Answering…, Trying again…, or Could not check yet.
+bounded existing records. Migration v6 adds a content-free reason code for each
+retry: answer failure, model unavailable/downloading, changed evidence,
+unavailable eligibility, or refused save. A question generation gets at most
+eight attempts, with persisted exponential backoff starting at five seconds.
+The eighth failed attempt stores an unread failure outcome, visible in Inbox
+and its Needs you count; opening it marks that generation read. No exception
+text, answer text, source name or locator enters the retry history. Asking the
+question again starts a fresh generation and clears its retry history. This
+bounds attempts for one question; it adds no allowance on questions asked or
+kept. Rows say Answering…, Retrying on this computer…, not checked yet, or
+Olympus could not answer this. Try again.
 
 **Storage.** Migration v2 of the question store retains answer text, citation
 labels/locators (no source content copies), an allowlist of corpus/tier/source

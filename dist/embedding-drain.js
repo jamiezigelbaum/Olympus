@@ -14158,6 +14158,28 @@ class SecretLocationsIndex {
   count() {
     return this.db.query("SELECT COUNT(*) AS n FROM secret_locations").get().n;
   }
+  recheck(expected, scope, options = {}) {
+    const rows = this.db.query(`SELECT * FROM secret_locations ${scope.accountScope ? "WHERE account_scope = ?" : ""}`).all(...scope.accountScope ? [scope.accountScope] : []);
+    for (const row of rows) {
+      const location = locationFromRow(row);
+      if (location.source !== expected.source || secretLocationRef(location) !== expected.ref || !secretLocationWithinScope(location, scope))
+        continue;
+      const identity = {
+        provider: location.source,
+        accountScope: location.accountScope,
+        providerItemId: location.providerItemId,
+        ...location.conversationKey ? { providerConversationId: location.conversationKey } : {}
+      };
+      try {
+        if (options.hide?.([identity]).has(identity))
+          return false;
+      } catch {
+        return false;
+      }
+      return secretLocationFingerprint({ locator: location.namesReleasable ? location.locator : null, title: location.namesReleasable ? location.title : null }) === expected.fingerprint;
+    }
+    return false;
+  }
   search(query, scope, options = {}) {
     const terms = secretLocationQueryTerms(query);
     if (terms.length === 0)
@@ -14206,6 +14228,9 @@ class SecretLocationsIndex {
       detectedAt: location.detectedAt
     }));
   }
+}
+function secretLocationFingerprint(location) {
+  return createHash10("sha256").update(JSON.stringify([location.locator, location.title])).digest("hex");
 }
 function secretLocationRef(location) {
   return `secret:${createHash10("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
@@ -33487,6 +33512,7 @@ var DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_PO
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
+  init_embeddings();
   init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();
@@ -38002,203 +38028,6 @@ var init_vocabulary = __esm(() => {
   };
 });
 
-// src/core/waiting-private-questions.ts
-var WAITING_QUESTION_LIMITS;
-var init_waiting_private_questions = __esm(() => {
-  init_sqlite_migrations();
-  init_olympus_layout();
-  WAITING_QUESTION_LIMITS = Object.freeze({
-    questionBytes: 2048,
-    localQuestionBytes: 8 * 1024,
-    selectorBytes: 4096,
-    answerBytes: 128 * 1024,
-    ttlMs: 7 * 24 * 60 * 60000,
-    reanswerAfterMs: 10 * 60000
-  });
-});
-
-// src/core/analyst-built-in.ts
-var GAP_GENERIC_WORDS, utf82;
-var init_analyst_built_in = __esm(() => {
-  init_analyst();
-  init_operation_error();
-  init_model_transport();
-  init_zkapi_consult_settings();
-  init_install();
-  init_manifest2();
-  init_server();
-  GAP_GENERIC_WORDS = new Set([
-    "the",
-    "and",
-    "for",
-    "are",
-    "was",
-    "were",
-    "with",
-    "from",
-    "that",
-    "this",
-    "these",
-    "those",
-    "not",
-    "any",
-    "all",
-    "its",
-    "their",
-    "there",
-    "which",
-    "what",
-    "when",
-    "where",
-    "who",
-    "whom",
-    "how",
-    "why",
-    "does",
-    "did",
-    "has",
-    "have",
-    "had",
-    "been",
-    "being",
-    "into",
-    "about",
-    "than",
-    "then",
-    "also",
-    "such",
-    "other",
-    "only",
-    "more",
-    "most",
-    "some",
-    "can",
-    "could",
-    "would",
-    "should",
-    "may",
-    "might",
-    "will",
-    "shall",
-    "but",
-    "nor",
-    "yet",
-    "per",
-    "via",
-    "each",
-    "your",
-    "you",
-    "user",
-    "his",
-    "her",
-    "our",
-    "they",
-    "them",
-    "one",
-    "out",
-    "over",
-    "under",
-    "between",
-    "within",
-    "specific",
-    "exact",
-    "precise",
-    "actual",
-    "value",
-    "values",
-    "level",
-    "levels",
-    "number",
-    "numbers",
-    "amount",
-    "detail",
-    "details",
-    "detailed",
-    "information",
-    "info",
-    "result",
-    "results",
-    "data",
-    "figure",
-    "figures",
-    "provided",
-    "provide",
-    "evidence",
-    "found",
-    "find",
-    "missing",
-    "available",
-    "unavailable",
-    "mentioned",
-    "mention",
-    "listed",
-    "list",
-    "given",
-    "give",
-    "stated",
-    "state",
-    "states",
-    "shown",
-    "show",
-    "shows",
-    "included",
-    "include",
-    "includes",
-    "contain",
-    "contains",
-    "contained",
-    "reported",
-    "report",
-    "reports",
-    "document",
-    "documents",
-    "item",
-    "items",
-    "text",
-    "source",
-    "sources",
-    "record",
-    "records",
-    "file",
-    "files",
-    "full",
-    "complete",
-    "entire",
-    "whole",
-    "unknown",
-    "unclear",
-    "unspecified",
-    "specified",
-    "answer",
-    "question",
-    "none",
-    "no",
-    "citations",
-    "citation",
-    "unanswered",
-    "sufficient",
-    "insufficient",
-    "claim",
-    "claims"
-  ]);
-  utf82 = new TextEncoder;
-});
-
-// src/workers/chatgpt/private-answer-contract.ts
-var PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_ANSWER_NONE_META;
-var init_private_answer_contract = __esm(() => {
-  PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
-  PRIVATE_ANSWER_NONE_META = Object.freeze({ v: 1, count: 0, state: "none" });
-});
-
-// src/workers/chatgpt/private-answer-model.ts
-var init_private_answer_model = __esm(() => {
-  init_answer_activity();
-  init_source_model_policy();
-  init_evidence_versions();
-  init_private_answer_contract();
-});
-
 // src/core/remote-result.ts
 var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, REMOTE_PENDING_MESSAGE, REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA;
 var init_remote_result = __esm(() => {
@@ -38530,12 +38359,210 @@ var init_remote_result = __esm(() => {
   };
 });
 
+// src/core/waiting-private-questions.ts
+var WAITING_QUESTION_LIMITS;
+var init_waiting_private_questions = __esm(() => {
+  init_sqlite_migrations();
+  init_olympus_layout();
+  WAITING_QUESTION_LIMITS = Object.freeze({
+    questionBytes: 2048,
+    localQuestionBytes: 8 * 1024,
+    selectorBytes: 4096,
+    answerBytes: 128 * 1024,
+    ttlMs: 7 * 24 * 60 * 60000,
+    reanswerAfterMs: 10 * 60000
+  });
+});
+
+// src/core/analyst-built-in.ts
+var GAP_GENERIC_WORDS, utf82;
+var init_analyst_built_in = __esm(() => {
+  init_analyst();
+  init_operation_error();
+  init_model_transport();
+  init_zkapi_consult_settings();
+  init_install();
+  init_manifest2();
+  init_server();
+  GAP_GENERIC_WORDS = new Set([
+    "the",
+    "and",
+    "for",
+    "are",
+    "was",
+    "were",
+    "with",
+    "from",
+    "that",
+    "this",
+    "these",
+    "those",
+    "not",
+    "any",
+    "all",
+    "its",
+    "their",
+    "there",
+    "which",
+    "what",
+    "when",
+    "where",
+    "who",
+    "whom",
+    "how",
+    "why",
+    "does",
+    "did",
+    "has",
+    "have",
+    "had",
+    "been",
+    "being",
+    "into",
+    "about",
+    "than",
+    "then",
+    "also",
+    "such",
+    "other",
+    "only",
+    "more",
+    "most",
+    "some",
+    "can",
+    "could",
+    "would",
+    "should",
+    "may",
+    "might",
+    "will",
+    "shall",
+    "but",
+    "nor",
+    "yet",
+    "per",
+    "via",
+    "each",
+    "your",
+    "you",
+    "user",
+    "his",
+    "her",
+    "our",
+    "they",
+    "them",
+    "one",
+    "out",
+    "over",
+    "under",
+    "between",
+    "within",
+    "specific",
+    "exact",
+    "precise",
+    "actual",
+    "value",
+    "values",
+    "level",
+    "levels",
+    "number",
+    "numbers",
+    "amount",
+    "detail",
+    "details",
+    "detailed",
+    "information",
+    "info",
+    "result",
+    "results",
+    "data",
+    "figure",
+    "figures",
+    "provided",
+    "provide",
+    "evidence",
+    "found",
+    "find",
+    "missing",
+    "available",
+    "unavailable",
+    "mentioned",
+    "mention",
+    "listed",
+    "list",
+    "given",
+    "give",
+    "stated",
+    "state",
+    "states",
+    "shown",
+    "show",
+    "shows",
+    "included",
+    "include",
+    "includes",
+    "contain",
+    "contains",
+    "contained",
+    "reported",
+    "report",
+    "reports",
+    "document",
+    "documents",
+    "item",
+    "items",
+    "text",
+    "source",
+    "sources",
+    "record",
+    "records",
+    "file",
+    "files",
+    "full",
+    "complete",
+    "entire",
+    "whole",
+    "unknown",
+    "unclear",
+    "unspecified",
+    "specified",
+    "answer",
+    "question",
+    "none",
+    "no",
+    "citations",
+    "citation",
+    "unanswered",
+    "sufficient",
+    "insufficient",
+    "claim",
+    "claims"
+  ]);
+  utf82 = new TextEncoder;
+});
+
+// src/workers/chatgpt/private-answer-contract.ts
+var PRIVATE_ANSWER_JOB_TTL_MS, PRIVATE_ANSWER_NONE_META;
+var init_private_answer_contract = __esm(() => {
+  PRIVATE_ANSWER_JOB_TTL_MS = 10 * 60000;
+  PRIVATE_ANSWER_NONE_META = Object.freeze({ v: 1, count: 0, state: "none" });
+});
+
+// src/workers/chatgpt/private-answer-model.ts
+var init_private_answer_model = __esm(() => {
+  init_answer_activity();
+  init_source_model_policy();
+  init_evidence_versions();
+  init_private_answer_contract();
+});
+
 // src/workers/source-index/local-answer.ts
 var IN_SCOPE_SKIPS;
 var init_local_answer = __esm(() => {
   init_evidence_pack();
   init_remote_result();
   init_secret_location_note();
+  init_secret_locations();
   init_source_model_policy();
   init_private_answer_contract();
   init_analyst_answer();
@@ -38546,6 +38573,7 @@ var init_local_answer = __esm(() => {
 // src/workers/email-source/local-private-answers.ts
 var TOKEN_TTL_MS;
 var init_local_private_answers = __esm(() => {
+  init_remote_result();
   init_vocabulary();
   init_tier_ledger();
   init_release_manifest();
@@ -45944,14 +45972,16 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .source-name{font-weight:600}
 .source-head .source-for{flex:1 1 0;min-width:0;font-weight:400}
 .status{color:var(--muted);font-size:0.875rem}
-.source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
+.source-actions{display:flex;flex-wrap:nowrap;align-items:center;gap:12px;justify-content:flex-start}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
 .tone-good{background:var(--good)}.tone-run{background:var(--run)}.tone-warn{background:var(--warn)}
 .tone-bad{background:var(--bad)}.tone-off{background:var(--off)}.tone-line{background:transparent;border:2px solid var(--idle)}
 .fix{display:inline-flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
 .reason{color:var(--muted);font-size:0.875rem}
 .reason.strong{color:var(--text);font-weight:600}
-.actions{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center}
+.actions{display:flex;flex-direction:row;flex-wrap:nowrap;gap:12px;align-items:center;justify-content:flex-start}
+.actions > .primary,.source-actions > .primary{order:-1}
+@media(max-width:480px){.actions,.source-actions{flex-direction:column;align-items:stretch}}
 .tag{font-size:0.75rem;font-weight:400;padding:0 0.4rem;border:1px solid var(--line);border-radius:999px;color:var(--muted);margin-left:0.25rem}
 .index-faster{margin-top:0.5rem}
 .btn{font:inherit;font-size:0.875rem;font-weight:500;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
@@ -64819,8 +64849,15 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .setrow .blurb { color: var(--t2); font-size: var(--fs-body); }
 .setrow .blurb .caveat { color: var(--warn); font-weight: 600; }
 .setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }
-.rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rowform { display: flex; gap: 12px; align-items: center; flex-wrap: nowrap; }
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
+.actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
+.actionrow > form { margin: 0 !important; }
+.actionrow > .primary, .setupactions > .primary { order: -1; }
+.setupactions { margin-top: 24px; }
+@media (max-width: 480px) {
+  .actionrow, .setupactions, .rowform { flex-direction: column; align-items: stretch; }
+}
 .keyfield::placeholder { color: var(--t4); }
 .keyfield:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
 .actmsg { color: var(--t3); font-size: var(--fs-caption); }
@@ -68521,6 +68558,7 @@ init_connector_store();
 init_principal();
 
 // src/workers/email-source/source-answer-lanes.ts
+init_analyst_answer();
 init_embeddings();
 init_connector_store();
 
