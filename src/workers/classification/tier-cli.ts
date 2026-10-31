@@ -21,7 +21,6 @@ import { defaultMailSourceScopeStatePath, readMailSourceScopeApproval } from '..
 import { handleRegistryPathFromEnv, readConnectedHandleRegistry } from '../credential-broker/connected-handles.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
-import { loadSovereigntyEngine } from '../../core/sovereignty.ts';
 import type { SourceFamily } from '../../core/source-index/types.ts';
 import {
   CLASSIFICATION_LEDGER_OWNER_APPROVAL,
@@ -32,7 +31,7 @@ import {
 } from '../classification-ledger.ts';
 import { snifferPromptVersions } from './sniffer.ts';
 import { privacyOwnerContext } from './privacy-profile.ts';
-import { SnifferLaneRefusedError, resolveSnifferLane } from './sniffer-lane.ts';
+import { installedSnifferRuntime } from './installed-sniffer-runtime.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { classifyItemTiers, type ItemTierOverride, type OwnerTierRule } from './tier-classifier.ts';
 import { TierLedger, tierLedgerIdentityKey, type TierLedgerIdentity } from './tier-ledger.ts';
@@ -545,14 +544,8 @@ export async function runTierClassifier(args: readonly string[], context: TierCl
   const env = context.env ?? process.env;
   const [command, ...rest] = args;
   const ledgerPath = resolveClassificationLedgerPath(env);
-  const lane = (() => {
-    try {
-      return resolveSnifferLane(loadSovereigntyEngine({ env }));
-    } catch (error) {
-      if (error instanceof SnifferLaneRefusedError) return { refused: error.reason };
-      throw error;
-    }
-  })();
+  const runtime = installedSnifferRuntime(env);
+  const lane = runtime.source === 'off' ? { refused: runtime.reason } : runtime.lane;
   const promptVersion = snifferPromptVersions(privacyOwnerContext({ env: context.env ?? process.env })).approval;
   const laneSummary = 'refused' in lane
     ? { lane: null, refused: lane.refused }

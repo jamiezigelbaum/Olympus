@@ -31,8 +31,9 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //                A drop zone takes files from the browser's own dialog or a drop; the preview
 //                only keeps their names and sizes (nothing is written).
 //
-// Only the dashboard read answers; every other panel tool says it needs a
-// worker.
+// Privacy previews: /dashboard?controls&state=privacy-edit&picker=key:privacy:edit
+// Conflict: /dashboard?controls&state=privacy-conflict&picker=key:privacy:edit,key:privacy:add:sender,preview-sender,key:privacy:sender:add
+// Privacy changes are fixture-only and never reach a worker.
 import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
@@ -58,6 +59,10 @@ import {
   ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
+  PRIVACY_GET_TOOL_NAME,
+  PRIVACY_SET_TOOL_NAME,
+  type PrivacySettings,
+  type PrivacySetInput,
   DELETE_SOURCE_DATA_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
   SCOPE_UI_META_KEY,
@@ -84,7 +89,7 @@ import { FILES_AND_FOLDERS_URL, FULL_DISK_ACCESS_URL, MAC_ACCESS_COPY } from '..
 import { displayText } from '../src/workers/dashboard/display-text.ts';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from '../src/workers/chatgpt/dashboard-view-model.ts';
-import { dashboardToolResult } from '../src/workers/chatgpt/response-builder.ts';
+import { dashboardToolResult, privacyToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import type { ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
@@ -358,6 +363,7 @@ function reviewPreview(variant: 'review' | 'review-unconfigured' | 'review-index
  * older states.
  */
 export function buildDashboardPreviewOptions(state: string): Pick<ChatGptDashboardOptions, 'privacy' | 'privateModel'> {
+  if (state.startsWith('privacy-')) return { privacy: { configured: true, pendingCount: 0, ruleCount: 3 } };
   if (!state.startsWith('review')) return {};
   const configured = state !== 'review-unconfigured';
   return {
@@ -368,6 +374,7 @@ export function buildDashboardPreviewOptions(state: string): Pick<ChatGptDashboa
 }
 
 export function buildDashboardPreviewView(state: string): SourceDashboardViewModel {
+  if (state === 'privacy-edit' || state === 'privacy-conflict') return buildDashboardPreviewView('full');
   if (state === 'review' || state === 'review-unconfigured' || state === 'review-indexing') return reviewPreview(state);
   if (state === 'models') {
     const view = buildDashboardPreviewView('fresh');
@@ -1671,7 +1678,7 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
 }
 
 export const DASHBOARD_PREVIEW_STATES = [
-  'review', 'review-unconfigured', 'review-indexing',
+  'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-conflict',
   'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
   'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
@@ -1683,6 +1690,34 @@ export const DASHBOARD_PREVIEW_STATES = [
   ...ARCHIVE_STATES,
   ...SOURCE_IMPORT_STATES,
 ] as const;
+
+/** Invented settings only; the conflict simulates another editor changing them. */
+let previewPrivacySaved: PrivacySettings | undefined;
+let previewPrivacyConflicted = false;
+export function previewPrivacyToolResult(state: string, action: 'get' | 'set', input: PrivacySetInput = {}) {
+  const conflict = state === 'privacy-conflict' && action === 'set' && !previewPrivacyConflicted;
+  const initial: PrivacySettings = {
+    configured: true,
+    description: 'Health and family matters are private.',
+    rules: [
+      { kind: 'folder', source_id: 'dropbox.files', key: '/Health', display: 'Health' },
+      { kind: 'label', source_id: 'gmail.email', key: 'Label_preview', value: 'Family' },
+      { kind: 'sender', source_id: 'gmail.email', value: 'doctor@example.com' },
+    ],
+    pendingCount: 0,
+    revision: 'preview-revision-1',
+  };
+  let settings = previewPrivacySaved ?? initial;
+  if (conflict) {
+    settings = { ...initial, description: 'Personal health and family matters are private.', revision: 'preview-revision-2' };
+    previewPrivacySaved = settings;
+    previewPrivacyConflicted = true;
+  } else if (action === 'set') {
+    settings = { ...settings, ...(input.description !== undefined ? { description: input.description } : {}), ...(input.rules !== undefined ? { rules: input.rules } : {}), revision: 'preview-revision-3' };
+    previewPrivacySaved = settings;
+  }
+  return privacyToolResult(settings, action === 'get' ? 'current' : conflict ? 'conflict' : 'saved', action === 'get' ? 'preview-confirmation' : undefined) as ReturnType<typeof privacyToolResult> & { structuredContent: { status: string }; _meta: Record<string, PrivacySettings> };
+}
 
 /** 'delete-data': set once the preview's delete tool has run, so the next read is the done state. */
 let previewDataDeleted = false;
@@ -1770,7 +1805,7 @@ function pickerAutoScript(spec: string): string {
     + `if(step.indexOf('folder:')===0)return document.querySelector('[data-key="picker:open:${LOCAL_FILES_HOME}/'+step.slice(7)+'"]');`
     + `if(step.indexOf('pick:')===0)return document.querySelector('[data-key="picker:pick:${LOCAL_FILES_HOME}/'+step.slice(5)+'"]');`
     + `if(step.indexOf('key:')===0)return document.querySelector('[data-key="'+step.slice(4)+'"]');return null;}`
-    + `function tick(){if(i>=steps.length||tries++>200)return;var n=find(steps[i]);if(n&&!n.disabled){n.click();i++;setTimeout(tick,400);return;}setTimeout(tick,150);}`
+    + `function tick(){if(i>=steps.length||tries++>200)return;if(steps[i]==='preview-sender'){var input=document.querySelector('[data-key="privacy:sender"]');if(input){input.value='person@example.com';input.dispatchEvent(new Event('input',{bubbles:true}));i++;setTimeout(tick,400);return;}}var n=find(steps[i]);if(n&&!n.disabled){n.click();i++;setTimeout(tick,400);return;}setTimeout(tick,150);}`
     + `setTimeout(tick,300);})();</script>`;
 }
 
@@ -1921,6 +1956,9 @@ if (import.meta.main) {
     }
     if (request.method === 'POST' && url.pathname === '/dashboard/tools/call') {
       const body = await request.json().catch(() => ({})) as { name?: unknown; arguments?: { source_id?: unknown; parent_key?: unknown } };
+      if ((state === 'privacy-edit' || state === 'privacy-conflict') && (body.name === PRIVACY_GET_TOOL_NAME || body.name === PRIVACY_SET_TOOL_NAME)) {
+        return Response.json(previewPrivacyToolResult(state, body.name === PRIVACY_GET_TOOL_NAME ? 'get' : 'set', body.arguments as PrivacySetInput));
+      }
       if (body.name === SCOPE_LIST_TOOL_NAME && body.arguments?.source_id === 'local.files' && state.startsWith('local-files')) {
         return Response.json(previewScopeList(state, body.arguments));
       }
@@ -1977,6 +2015,7 @@ if (import.meta.main) {
       const namedState = url.searchParams.get('state') ?? '';
       const stateOverride = (DASHBOARD_PREVIEW_STATES as readonly string[]).includes(namedState) ? namedState : undefined;
       if (stateOverride === 'delete-data') previewDataDeleted = false;
+      if (stateOverride === 'privacy-edit' || stateOverride === 'privacy-conflict') { previewPrivacySaved = undefined; previewPrivacyConflicted = false; }
       const unlocked = previewUnlocked || url.searchParams.has('controls');
       const cookies = [
         ...(stateOverride ? [`olympus_preview_state=${stateOverride}; Path=/; SameSite=Strict`] : []),
