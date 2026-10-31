@@ -229,7 +229,11 @@ export function createDashboardMessagingService(options: {
       if (selecting.has(source)) throw new Error('Chat selection is already running.');
       selecting.add(source);
       try {
-      if (operation === 'chats') return await list(source);
+      if (operation === 'chats') {
+        // Nothing paired yet is an answer, not a failure: the dashboard says to pair first.
+        if (readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath)).kind === 'missing') return { ok: true, state: 'not_paired' };
+        return await list(source);
+      }
       const whole = record.wholeAccount === true;
       if (!Array.isArray(record.chatScopes) || !record.chatScopes.every((value) => typeof value === 'string')) throw new Error('Invalid scope.');
       const selected = [...new Set(record.chatScopes as string[])];

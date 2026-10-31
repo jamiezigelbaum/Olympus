@@ -142688,8 +142688,11 @@ function createDashboardMessagingService(options) {
         throw new Error("Chat selection is already running.");
       selecting.add(source);
       try {
-        if (operation === "chats")
+        if (operation === "chats") {
+          if (readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath)).kind === "missing")
+            return { ok: true, state: "not_paired" };
           return await list(source);
+        }
         const whole = record6.wholeAccount === true;
         if (!Array.isArray(record6.chatScopes) || !record6.chatScopes.every((value2) => typeof value2 === "string"))
           throw new Error("Invalid scope.");
@@ -145088,6 +145091,11 @@ function mountDashboardController(options) {
     }
     say(form, typeof statusMessage === "string" ? statusMessage : released ? successMessage(params) : unreleasedMessage(params.action));
     await refreshNow(false, released);
+    if (params.action === "check_model_setup" && !disposed) {
+      const again = query("form[data-model-check]");
+      if (again && !again.querySelector("[data-action-message]")?.textContent)
+        say(again, "Checked just now.");
+    }
   }
   function renderDiscoveredModels(form, value2) {
     const sheet = form.closest(".sheet");
@@ -145498,7 +145506,8 @@ function mountDashboardController(options) {
       }
     });
     queryAll("[data-messaging-source]").forEach((card) => {
-      messagingRequest(card, "status");
+      if (!card.querySelector("[data-messaging-open-controls]"))
+        messagingRequest(card, "status");
     });
   }
   async function messagingRequest(card, operation, extra = {}) {
@@ -145513,6 +145522,8 @@ function mountDashboardController(options) {
     }
     const source = card.dataset.messagingSource;
     if (source !== "telegram" && source !== "whatsapp")
+      return;
+    if (card.querySelector("[data-messaging-open-controls]"))
       return;
     const timer = messagingTimers.get(card);
     if (timer)
@@ -145538,7 +145549,7 @@ function mountDashboardController(options) {
       const qr = card.querySelector("[data-messaging-qr]");
       if (result.status < 200 || result.status >= 300 || body.ok === false) {
         if (status)
-          status.textContent = "Could not complete this step. Try again from this computer.";
+          status.textContent = result.status === 401 || result.status === 403 ? "Open dashboard controls on this computer to use this, then try again." : "Could not complete this step. Try again from this computer.";
         if (qr) {
           qr.hidden = true;
           qr.removeAttribute("src");
@@ -145556,7 +145567,7 @@ function mountDashboardController(options) {
       const setupSheet = card.querySelector("[data-messaging-setup]");
       if (setupSheet) {
         const intro = setupSheet.querySelector("[data-messaging-setup-intro]");
-        const active = !["idle", "failed", "cancelled", "completed", "complete", "paired"].includes(state);
+        const active = !["idle", "failed", "cancelled", "completed", "complete", "paired", "not_paired"].includes(state);
         if (intro)
           intro.hidden = active || state === "failed";
         const cancel = setupSheet.querySelector('[data-messaging-kind="cancel"]');
@@ -145589,8 +145600,11 @@ function mountDashboardController(options) {
           setupSheet.append(error2);
         }
       }
+      const cardCancel = card.querySelector('.actionrow [data-messaging-kind="cancel"]');
+      if (cardCancel)
+        cardCancel.hidden = ["idle", "failed", "cancelled", "completed", "complete", "paired", "not_paired"].includes(state);
       if (status)
-        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === "telegram" ? "Telegram active sessions" : "WhatsApp linked devices"} to unlink it.` : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
+        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry." : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === "telegram" ? "Telegram active sessions" : "WhatsApp linked devices"} to unlink it.` : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
       if (qr) {
         const value2 = typeof body.qr === "string" ? body.qr : "";
         if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value2)) {
@@ -145709,7 +145723,7 @@ function mountDashboardController(options) {
             slot.append(form);
         }
       }
-      if (operation !== "chats" && (operation !== "cancel" || state === "committing") && !["paired", "complete", "completed", "failed", "cancelled", "idle", "scope_selection_required"].includes(state)) {
+      if (operation !== "chats" && (operation !== "cancel" || state === "committing") && !["paired", "complete", "completed", "failed", "cancelled", "idle", "not_paired", "scope_selection_required"].includes(state)) {
         messagingTimers.set(card, setTimeout(() => {
           messagingTimers.delete(card);
           messagingRequest(card, "status");
@@ -146620,6 +146634,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
 .messaging-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 12px; }
+.messaging-card .actionrow > .btn, .messaging-card .actionrow > form > .btn { min-width: 11rem; }
 .messaging-card p { color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
 .messaging-card form, .messaging-card details { margin: 10px 0; }
 /* Where an open link landed (#olympus-open=…): an accent outline that fades. */
@@ -154759,7 +154774,7 @@ function telegramSetupSheet() {
 function renderMessagingCard(source, localSession) {
   const label = source === "telegram" ? "Telegram" : "WhatsApp";
   const sourceId = source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages";
-  const form = (kind, text4) => `<form method="dialog" data-messaging-kind="${kind}"><button class="btn${kind === "start" ? " primary" : ""}" type="submit">${text4}</button></form>`;
+  const form = (kind, text4) => `<form method="dialog" data-messaging-kind="${kind}"${kind === "cancel" ? " hidden" : ""}><button class="btn${kind === "start" ? " primary" : ""}" type="submit">${text4}</button></form>`;
   return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : source === "telegram" ? `<div class="actionrow"><button class="btn primary" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>${form("chats", "Choose chats")}</div>${telegramSetupSheet()}</section>` : `<div class="actionrow">${form("start", `Pair ${label}`)}${form("chats", "Choose chats")}${form("cancel", "Cancel pairing")}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
 }
 var init_messaging = __esm(() => {
