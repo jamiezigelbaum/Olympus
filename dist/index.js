@@ -5568,6 +5568,15 @@ var init_source_watch = __esm(() => {
   });
 });
 
+// src/core/data-owner-lock.ts
+import { createRequire as createRequire3 } from "node:module";
+var runtimeRequire2, O_CLOEXEC, WORKER_DATA_OWNER_BUSY_EXIT_CODE = 73;
+var init_data_owner_lock = __esm(() => {
+  init_olympus_layout();
+  runtimeRequire2 = createRequire3(import.meta.url);
+  O_CLOEXEC = process.platform === "darwin" ? 16777216 : 524288;
+});
+
 // src/workers/classification/tier-ledger-path.ts
 function tierLedgerPathForStore(storeDbPath) {
   if (storeDbPath === ":memory:")
@@ -18452,15 +18461,6 @@ var init_local_index = __esm(() => {
   ]);
 });
 
-// src/core/data-owner-lock.ts
-import { createRequire as createRequire4 } from "node:module";
-var runtimeRequire3, O_CLOEXEC;
-var init_data_owner_lock = __esm(() => {
-  init_olympus_layout();
-  runtimeRequire3 = createRequire4(import.meta.url);
-  O_CLOEXEC = process.platform === "darwin" ? 16777216 : 524288;
-});
-
 // src/core/source-storage.ts
 var CAPTURE_CLAIM_RECLAIM_AGE_MS;
 var init_source_storage = __esm(() => {
@@ -24831,6 +24831,9 @@ class NativeProcessServiceStoppedError extends Error {
 class NativeProcessConfigurationError extends Error {
 }
 
+class NativeProcessRetryableStartError extends Error {
+}
+
 class NativeProcessChildAliveError extends Error {
   constructor() {
     super("Olympus child process has not exited after the forced kill.");
@@ -24895,11 +24898,18 @@ function createNativeProcessService(options) {
           return;
         if (!await stopFailedStart(lifetime))
           return;
-        reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
-        scheduleRestart(lifetime);
+        reportStartFailure(lifetime, error);
+        if (!(error instanceof NativeProcessConfigurationError))
+          scheduleRestart(lifetime);
       });
     }, delay);
     lifetime.restartTimer.unref?.();
+  };
+  const reportStartFailure = (lifetime, error) => {
+    lifetime.startupFailure = error instanceof NativeProcessRetryableStartError ? error.message : undefined;
+    const message = error instanceof NativeProcessConfigurationError ? error.message : lifetime.startupFailure ?? `Olympus ${options.label} failed to become ready.`;
+    reportFailure(lifetime, message);
+    return message;
   };
   const stopFailedStart = async (lifetime) => {
     let waitingReported = false;
@@ -24962,7 +24972,8 @@ function createNativeProcessService(options) {
     if (settings.endpointOccupied) {
       throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
     }
-    reportFailure(lifetime, `Olympus ${options.label} is starting.`);
+    if (!lifetime.startupFailure)
+      reportFailure(lifetime, `Olympus ${options.label} is starting.`);
     if (!isCurrent(lifetime))
       throw new NativeProcessServiceStoppedError;
     const child = spawnChild(settings.command, [...settings.args], {
@@ -25004,16 +25015,21 @@ function createNativeProcessService(options) {
     child.once("error", () => {
       spawnFailed = true;
     });
-    const outcome = await waitForChildReadiness({
-      lifetime,
-      child,
-      settings,
-      isCurrent,
-      startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
-      readinessPollMs,
-      restartOnCleanExit,
-      spawnFailed: () => spawnFailed
-    });
+    let outcome;
+    try {
+      outcome = await waitForChildReadiness({
+        lifetime,
+        child,
+        settings,
+        isCurrent,
+        startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
+        readinessPollMs,
+        restartOnCleanExit,
+        spawnFailed: () => spawnFailed
+      });
+    } catch (error) {
+      throw settings.startupFailure?.(child) ?? error;
+    }
     if (!isCurrent(lifetime) || lifetime.child !== child)
       throw new NativeProcessServiceStoppedError;
     if (outcome === "cleanCompletion" || !restartOnCleanExit && !spawnFailed && isCleanExit(child)) {
@@ -25038,6 +25054,7 @@ function createNativeProcessService(options) {
       lifetime.restartAttempt = 0;
       lifetime.fastRestarts = 0;
     }
+    lifetime.startupFailure = undefined;
     clearFailure(lifetime);
     lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
   };
@@ -25055,6 +25072,7 @@ function createNativeProcessService(options) {
         context,
         child: undefined,
         childReady: false,
+        startupFailure: undefined,
         stopping: false,
         restartAttempt: 0,
         fastRestarts: 0,
@@ -25069,11 +25087,21 @@ function createNativeProcessService(options) {
       } catch (error) {
         if (error instanceof NativeProcessServiceStoppedError)
           return;
-        await stopChild(lifetime);
-        const message = error instanceof NativeProcessConfigurationError ? error.message : `Olympus ${options.label} failed to become ready.`;
-        reportFailure(lifetime, message);
-        if (current2 === lifetime)
-          current2 = undefined;
+        if (!options.retryInitialStartFailure) {
+          await stopChild(lifetime);
+          const message2 = reportStartFailure(lifetime, error);
+          if (current2 === lifetime)
+            current2 = undefined;
+          throw new NativeProcessReportedStartError(message2);
+        }
+        if (!await stopFailedStart(lifetime))
+          return;
+        const message = reportStartFailure(lifetime, error);
+        if (error instanceof NativeProcessConfigurationError) {
+          if (current2 === lifetime)
+            current2 = undefined;
+        } else
+          scheduleRestart(lifetime);
         throw new NativeProcessReportedStartError(message);
       }
     },
@@ -27346,6 +27374,9 @@ function shouldExposeOperation(operation, context) {
 // src/native-plugin.ts
 init_worker_auth();
 
+// src/core/native-worker-service.ts
+init_data_owner_lock();
+
 // src/core/linux-owner-bridge.ts
 import { createHmac, createHash as createHash2, randomBytes as randomBytes4, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync4, openSync as openSync4, writeFileSync as writeFileSync4, unlinkSync as unlinkSync2 } from "node:fs";
@@ -27464,9 +27495,14 @@ function page(body, status = 200) {
     "X-Frame-Options": "DENY"
   } });
 }
-function restarting() {
-  const response = page(`${openingView().replace("Opening your dashboard…", "Olympus is restarting…")}<script>setTimeout(()=>location.reload(),1000)</script>`, 503);
+var WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict";
+var restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…";
+var restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`;
+function restarting(conflict) {
+  const response = page(`${openingView().replace("Opening your dashboard…", restartWords(conflict))}<script>setTimeout(()=>location.reload(),1000)</script>`, 503);
   response.headers.set("Retry-After", "1");
+  if (conflict)
+    response.headers.set(WORKER_CONFLICT_HEADER, conflict);
   return response;
 }
 function refusal(status = 403) {
@@ -27622,14 +27658,14 @@ function approve(request,proof){return new Promise(function(done){
 (async function(){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
- try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent=${restartWordsScript("r")};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
  if(result.approval)await approve(result.approval,result.proof);
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
  // header-only worker CSP directives cannot be carried through document.write.
  // The ticket is spent now, so a worker restart here must wait, not fail.
- let documentResponse;do{documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});if(documentResponse.status===503&&documentResponse.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ let documentResponse;do{documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});if(documentResponse.status===503&&documentResponse.headers.has('Retry-After')){document.getElementById('message').textContent=${restartWordsScript("documentResponse")};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  const destination=documentResponse.headers.get('X-Olympus-Owner-Location');
  if(destination){location.replace(destination);return;} // ordinary navigation, without a proof header
  if(!documentResponse.ok||!documentResponse.headers.get('Content-Type')?.includes('text/html'))throw new Error();
@@ -27721,7 +27757,7 @@ class LinuxOwnerBridge {
     const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
 (async function(){
  const message=document.getElementById('message');
- try{let r;do{r=await fetch(${JSON.stringify(this.origin + "/owner-proof?challenge=" + challenge)},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'});if(r.status===503&&r.headers.get('Retry-After')){message.textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ try{let r;do{r=await fetch(${JSON.stringify(this.origin + "/owner-proof?challenge=" + challenge)},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'});if(r.status===503&&r.headers.get('Retry-After')){message.textContent=${restartWordsScript("r")};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  if(!r.ok||await r.text()!==${JSON.stringify(answer)}){message.textContent='Olympus refused: the private ticket expired or this listener could not prove its identity. The private ticket was not sent. Run olympus dashboard again.';return;}
  location.replace(${JSON.stringify(url)});
  }catch{message.textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. The private ticket was not sent. " + DESKTOP_BRIDGE_REMEDY)};}
@@ -27806,13 +27842,13 @@ class LinuxOwnerBridge {
         return proofPage();
       const challenge = url.searchParams.get("challenge");
       const ticket = [...this.tickets.values()].find((t) => t.expires > this.now() && equal(challenge, t.challenge));
-      const response2 = !ticket ? refusal() : this.options.workerReady?.() === false ? restarting() : new Response(createHmac("sha256", ticket.value).update(ticket.challenge).digest("base64url"), { headers: { "Cache-Control": "no-store" } });
+      const response2 = !ticket ? refusal() : this.options.workerReady?.() === false ? restarting(this.options.workerConflict?.()) : new Response(createHmac("sha256", ticket.value).update(ticket.challenge).digest("base64url"), { headers: { "Cache-Control": "no-store" } });
       response2.headers.set("Access-Control-Allow-Origin", "*");
-      response2.headers.set("Access-Control-Expose-Headers", "Retry-After");
+      response2.headers.set("Access-Control-Expose-Headers", `Retry-After, ${WORKER_CONFLICT_HEADER}`);
       return response2;
     }
     if (this.options.workerReady?.() === false)
-      return restarting();
+      return restarting(this.options.workerConflict?.());
     if (url.pathname === "/owner-proof" && request.method === "POST") {
       let body2;
       try {
@@ -27824,7 +27860,7 @@ class LinuxOwnerBridge {
       if (!this.live() || !ticket || ticket.expires <= this.now() || !equal(body2.ticket, ticket.value))
         return refusal();
       if (ticket.claimed)
-        return restarting();
+        return restarting(this.options.workerConflict?.());
       ticket.claimed = true;
       try {
         unlinkSync2(ticket.path);
@@ -27832,7 +27868,11 @@ class LinuxOwnerBridge {
       const current2 = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
       let dashboardCookies;
       try {
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
         const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
         if (result === null) {
           this.clearTicket(ticket);
           return refusal();
@@ -27841,7 +27881,7 @@ class LinuxOwnerBridge {
       } catch {
         if (this.live() && current2()) {
           ticket.claimed = false;
-          return restarting();
+          return restarting(this.options.workerConflict?.());
         }
         this.clearTicket(ticket);
         return refusal(503);
@@ -27876,12 +27916,16 @@ class LinuxOwnerBridge {
       if (claim.state !== "approved")
         return new Response(null, { status: 202, headers: { "Cache-Control": "no-store" } });
       if (claim.collecting)
-        return restarting();
+        return restarting(this.options.workerConflict?.());
       claim.collecting = true;
       const current2 = () => this.claim?.record === claim && claim.expires > this.now();
       let dashboardCookies;
       try {
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
         const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
         if (result === null) {
           if (current2())
             this.claim = undefined;
@@ -27891,7 +27935,7 @@ class LinuxOwnerBridge {
       } catch {
         if (this.live() && current2()) {
           claim.collecting = false;
-          return restarting();
+          return restarting(this.options.workerConflict?.());
         }
         return refusal(503);
       }
@@ -27964,6 +28008,8 @@ class LinuxOwnerBridge {
     }
     if (!this.live())
       return refusal(503);
+    if (this.options.workerReady?.() === false)
+      return restarting(this.options.workerConflict?.());
     if (binary && request.body)
       body = request.body;
     ownerRequestAdmitted?.();
@@ -27987,10 +28033,14 @@ class LinuxOwnerBridge {
         ...typeof body === "object" ? { signal: request.signal } : {}
       }));
     } catch {
-      return this.live() ? restarting() : refusal(503);
+      return this.live() ? restarting(this.options.workerConflict?.()) : refusal(503);
     }
     if (!this.live())
       return refusal(503);
+    if (this.options.workerReady?.() === false) {
+      await response.body?.cancel().catch(() => {});
+      return restarting(this.options.workerConflict?.());
+    }
     const outgoing = new Headers(response.headers);
     outgoing.delete("access-control-allow-origin");
     outgoing.delete("access-control-allow-credentials");
@@ -28035,6 +28085,9 @@ import { basename as basename3, delimiter as delimiter2, isAbsolute as isAbsolut
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 init_olympus_layout();
 init_worker_auth();
+var WORKER_DATA_OWNER_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its data. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. Retrying automatically.";
+var WORKER_ENDPOINT_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its endpoint. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.";
+var WORKER_SOCKET_RETAINED_MESSAGE = "Olympus worker cannot start because a stopped worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket. The socket is kept until process and listener custody are verified.";
 var SERVICE_ID3 = "olympus-worker";
 var SERVICE_LABEL = "worker";
 var READINESS_PROBE_TIMEOUT_MS = 1000;
@@ -28054,6 +28107,7 @@ function createNativeWorkerService(options) {
   const service = createNativeProcessService({
     id: SERVICE_ID3,
     label: SERVICE_LABEL,
+    retryInitialStartFailure: true,
     reload: {
       configPrefixes: [
         "plugins.entries.olympus.config.worker",
@@ -28132,8 +28186,22 @@ async function prepareWorkerStart(input, worker) {
   const startupTimeoutMs = config.worker.service.startupTimeoutSeconds * 1000;
   const effectiveStartupTimeoutMs = worker.startupTimeoutMs ?? startupTimeoutMs;
   const endpointOccupied = await workerEndpointIsOccupied(worker.fetchWorker, settings.readinessUrl);
+  if (endpointOccupied)
+    throw new NativeProcessRetryableStartError(WORKER_ENDPOINT_CONFLICT_MESSAGE);
   if (process.platform === "linux" && worker.fetchWorker === workerFetch && !endpointOccupied && input.previousChildReleased) {
     removeReleasedWorkerSocket({ platform: "linux", env: settings.env }, { previousWorkerReleased: true });
+  }
+  if (process.platform === "linux" && worker.fetchWorker === workerFetch) {
+    let socket;
+    try {
+      socket = validateWorkerSocket({ platform: "linux", env: settings.env });
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw error;
+    }
+    if (socket && workerSocketListenerStopped(socket) === true) {
+      throw new NativeProcessRetryableStartError(WORKER_SOCKET_RETAINED_MESSAGE);
+    }
   }
   return {
     ...settings,
@@ -28141,6 +28209,7 @@ async function prepareWorkerStart(input, worker) {
     command: settings.runtimePath,
     args: ["--no-env-file", settings.executablePath, "__worker-service-run", settings.instanceId],
     endpointOccupied,
+    startupFailure: (child) => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
     readinessProbe: () => authenticatedReadinessProbe(worker.fetchWorker, settings.readinessUrl, settings.authToken, settings.instanceId, Math.min(READINESS_PROBE_TIMEOUT_MS, Math.max(effectiveStartupTimeoutMs, 1)))
   };
 }
@@ -29231,7 +29300,7 @@ init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { chmodSync as chmodSync6, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync13, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync12, linkSync, mkdirSync as mkdirSync13, openSync as openSync6, readFileSync as readFileSync26, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync8, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
-import { createRequire as createRequire3 } from "node:module";
+import { createRequire as createRequire4 } from "node:module";
 import { basename as basename6, dirname as dirname24, join as join33, relative as relative4, resolve as resolve9, sep as sep5 } from "node:path";
 init_linux_engine_layout();
 init_atomic_file();
@@ -29359,6 +29428,24 @@ function engineServicePaths(options = {}) {
 }
 function engineStatusPath(env = process.env) {
   return join32(olympusDataDir(env), "engine", "status.json");
+}
+function readEngineWorkerHealth(statusPath) {
+  try {
+    const status = JSON.parse(readFileSync25(statusPath, "utf8"));
+    if (status?.schema !== "olympus.engine.status.v1" || status.state !== "running" || !Number.isSafeInteger(status.pid) || status.pid <= 0)
+      return;
+    process.kill(status.pid, 0);
+    const worker = status.services?.["olympus-worker"];
+    if (!["off", "starting", "ok", "failing", "stopped"].includes(worker?.state))
+      return;
+    return { state: worker.state, message: typeof worker.message === "string" ? worker.message : null };
+  } catch {
+    return;
+  }
+}
+function readEngineWorkerProblem(statusPath) {
+  const worker = readEngineWorkerHealth(statusPath);
+  return worker?.state === "failing" ? worker.message ?? "The engine worker failed to become ready." : undefined;
 }
 function readEngineConfig(path) {
   if (!existsSync12(path))
@@ -29662,7 +29749,7 @@ function systemdPidInCgroup(pid, group) {
     return false;
   }
 }
-var runtimeRequire2 = createRequire3(import.meta.url);
+var runtimeRequire3 = createRequire4(import.meta.url);
 var heldLifecycleLocks = new Set;
 function linuxLayoutFor(options) {
   return resolveLinuxEngineLayout({ ...options.env ?? process.env, HOME: options.homeDir ?? options.env?.HOME ?? process.env.HOME });
@@ -31874,13 +31961,14 @@ function errorCode(error) {
 // src/core/doctor.ts
 async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const home = env.HOME?.trim() || homedir17();
+  const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
   const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync21(workerServicePaths(process.platform, home).unitPath) : false;
-  const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths: engineServicePaths({ homeDir: home, env }), expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
+  const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
-    engine: { installed: engine.installed, state: engine.state, ...process.platform === "linux" ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ("detail" in engine ? engine.detail : ""), linger: readEngineLinger() } : {} },
+    engine: { installed: engine.installed, state: engine.state, ...engine.state === "running" ? { workerProblem: readEngineWorkerProblem(paths.statusPath) } : {}, ...process.platform === "linux" ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ("detail" in engine ? engine.detail : ""), linger: readEngineLinger() } : {} },
     legacyWorkerUnit,
     ...options.insideOpenClaw ? { insideOpenClaw: true } : {}
   };
@@ -32104,6 +32192,13 @@ async function ocrReadingCheck(deps) {
 }
 async function hostCheck(deps) {
   const facts = await deps.hostProbe();
+  if (facts.engine.workerProblem)
+    return {
+      name: "host",
+      ok: false,
+      detail: facts.engine.workerProblem,
+      hint: facts.engine.workerProblem === WORKER_SOCKET_RETAINED_MESSAGE ? "Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : [WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE].includes(facts.engine.workerProblem) ? "Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. The engine retries automatically." : "Run olympus engine status and olympus engine logs to diagnose the worker startup failure."
+    };
   if (facts.engine.installed && facts.legacyWorkerUnit)
     return { name: "host", ok: false, detail: "A worker service from olympus worker install is installed beside the engine and competes with it for the same data and port.", hint: "Run olympus worker uninstall. The engine keeps running and owns the worker." };
   if (facts.engine.installed && (facts.engine.healthy === false || facts.engine.linger === false))

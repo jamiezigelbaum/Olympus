@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import { SecretStoreError } from '../src/core/secret-store.ts';
+import { WORKER_DATA_OWNER_CONFLICT_MESSAGE } from '../src/core/native-worker-service.ts';
 import { runDoctor } from '../src/core/doctor.ts';
 import { stillImageReadinessOf } from '../src/core/still-image-readiness.ts';
 import type { DoctorCheck, DoctorDeps } from '../src/core/doctor.ts';
@@ -229,6 +230,15 @@ describe('runDoctor', () => {
       expect(worker.ok).toBe(platform === 'darwin');
       if (platform === 'linux') { expect(worker.detail).toContain('port_in_use'); expect(worker.hint).toContain('SSH socket forward'); }
     }
+  });
+
+  test('doctor reports the current worker data-lock conflict even when no legacy unit remains', async () => {
+    const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(),
+      hostProbe: () => ({ engine: { installed: true, state: 'running', workerProblem: WORKER_DATA_OWNER_CONFLICT_MESSAGE }, legacyWorkerUnit: false }) }));
+    const host = checkByName(result.checks, 'host');
+    expect(host.ok).toBe(false);
+    expect(host.detail).toContain('another process owns its data');
+    expect(host.hint).toContain('olympus worker uninstall');
   });
 
   test('a worker unit from olympus worker install beside the engine fails host with its removal step', async () => {

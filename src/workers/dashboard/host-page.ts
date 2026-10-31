@@ -416,24 +416,19 @@ function hostProgram(input: {
         window.location.assign(parsed.pathname + parsed.search + parsed.hash);
         return;
       }
-      // No 'noopener' feature: with it window.open answers null even when the tab opened, so a blocked open
-      // (Safari blocks one that comes after the connect call, not inside the click) could not be told apart.
-      let tab: Window | null = null;
       try {
-        tab = window.open(url, '_blank');
+        window.open(url, '_blank', 'noopener,noreferrer');
       } catch {
-        tab = null;
+        // The link below remains usable when opening throws.
       }
-      if (tab) {
-        tab.opener = null;
-        return;
-      }
-      // Blocked: the link goes beside the panel, where pressing it is the person's own click, which no browser blocks.
+      // A browser may block an asynchronous open. Always offer a real link in
+      // the parent, outside the sandbox, so the next click is a user gesture.
       const offer = document.querySelector<HTMLElement>('[data-open-offer]');
       const link = document.querySelector<HTMLAnchorElement>('[data-open-offer-link]');
       if (!offer || !link) return;
       link.href = url;
       offer.hidden = false;
+      link.focus();
     },
   });
   const offerLink = document.querySelector<HTMLAnchorElement>('[data-open-offer-link]');
