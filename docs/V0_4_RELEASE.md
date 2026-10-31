@@ -26,7 +26,12 @@ they ask the owner to choose, with `local-first` recommended. Until the choice,
 the policy must keep data on the computer. Existing policies and the narrow
 1.0.0 default migration remain unchanged. Local-first may use Venice only after
 the owner chooses it and adds a key; without a key the built-in model answers
-locally. The agent walkthrough and dashboard share the choice and save path.
+locally. The agent walkthrough and dashboard share the choice and save path. The pending choice is an explicit durable policy marker; unrelated model
+settings cannot clear it. Until consent, one transport gate denies remote
+source reads, including picker metadata, while the authenticated local
+computer dashboard can browse. Agent setup and engine installation share the
+effective-policy/install-state resolver, preserving environment-backed, inline
+and custom-path upgrades without asking again.
 
 In scope:
 - Mac install and sign-in: #579 (Safari pop-up), #624 and #578 (doctor

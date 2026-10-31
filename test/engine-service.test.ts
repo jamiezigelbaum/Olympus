@@ -1182,6 +1182,19 @@ describe('engine install preflight, policy seeding, and what uninstall keeps', (
   });
 
   const blockers: Array<[string, (home: string, root: string) => Record<string, string>, string]> = [
+    ['an environment-backed policy', () => ({ OLYMPUS_ARGUS_BASE_URL: 'http://127.0.0.1:11434/v1' }), 'already sets OLYMPUS_ARGUS_BASE_URL'],
+    ['an inline policy', (home) => {
+      mkdirSync(join(home, '.olympus'), { recursive: true });
+      writeFileSync(join(home, '.olympus', 'config.json'), JSON.stringify({ sovereignty: { policy: loadSovereigntyPreset('local-only') } }));
+      return {};
+    }, 'existing effective privacy policy'],
+    ['a custom-path policy', (home) => {
+      mkdirSync(join(home, '.olympus'), { recursive: true });
+      const configPath = join(home, 'custom-policy.json');
+      writeFileSync(configPath, JSON.stringify(loadSovereigntyPreset('local-only')));
+      writeFileSync(join(home, '.olympus', 'config.json'), JSON.stringify({ sovereignty: { configPath } }));
+      return {};
+    }, 'existing effective privacy policy'],
     ['an OpenClaw config with an Olympus entry', (home) => {
       mkdirSync(join(home, '.openclaw'), { recursive: true });
       writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { entries: { olympus: { config: {} } }, installs: { olympus: { source: 'npm' } } } }));

@@ -6827,6 +6827,8 @@ function loadSovereigntyEngine(options = {}) {
 function createSovereigntyEngine(rawConfig, metadata = { source: "inline_config" }) {
   const config = validateSovereigntyConfig(rawConfig);
   const resolveAnalystPool = (input) => {
+    if (config.privacyChoicePending)
+      throw new OperationError("source_index_policy_violation", "Choose the first-run privacy policy before answering from source data.");
     const trustDomain = builtinTrustDomain(input.trustDomain);
     const requestedProvider = input.requestedProvider ?? "default";
     const route = config.routes[trustDomain];
@@ -7132,6 +7134,9 @@ function parseSovereigntyConfig(value, label) {
   if (record.schemaVersion !== SOVEREIGNTY_SCHEMA_VERSION) {
     throw new OperationError("config_error", `${label} schemaVersion must be ${SOVEREIGNTY_SCHEMA_VERSION}.`);
   }
+  if (record.privacyChoicePending !== undefined && record.privacyChoicePending !== true) {
+    throw new OperationError("config_error", `${label}.privacyChoicePending must be true or absent.`);
+  }
   const modelProfiles = parseProfiles(record.modelProfiles, label);
   const routes = parseRoutes(record.routes, label);
   const retrievalRecord = asRecord13(record.retrieval);
@@ -7144,6 +7149,7 @@ function parseSovereigntyConfig(value, label) {
   }
   return {
     schemaVersion: SOVEREIGNTY_SCHEMA_VERSION,
+    ...record.privacyChoicePending === true || routes.secure_local?.disabledReason === PENDING_PRIVACY_REASON ? { privacyChoicePending: true } : {},
     modelProfiles,
     routes,
     retrieval: { trustDomains }
@@ -7504,7 +7510,7 @@ function stringArrayField(value, label) {
   }
   return value.map((item) => item.trim()).filter(Boolean);
 }
-var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SUPPORTED_PROVIDERS, SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
+var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_SCHEMA_VERSION = 1, SUPPORTED_PROVIDERS, PENDING_PRIVACY_REASON = "Choose how Olympus may answer with Private items before setup continues.", SecureAnalystPoolE2EEGateError, BUILTIN_DOMAINS, TRUST_ORDER;
 var init_sovereignty = __esm(() => {
   init_owner_config_read();
   init_owner_config_read();

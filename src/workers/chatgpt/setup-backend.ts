@@ -119,13 +119,15 @@ export function privacyRevision(profile: { description: string; rules: readonly 
 export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): ChatGptSetupBackend {
   let policy = options.sovereignty.config;
   const privacySettings = (): PrivacySettings => {
-    const settings = readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
-    if (options.sovereignty.source === 'file' && options.sovereignty.path) {
-      // A separate setup path may already have answered since this worker booted.
-      const current = validateSovereigntyConfig(JSON.parse(readFileSync(options.sovereignty.path, 'utf8')));
-      if (isPendingPrivacyPolicy(current)) settings.privateAnswerChoice = { pending: true, options: PRIVATE_ANSWER_OPTIONS };
-    }
-    return settings;
+    // A separate setup path may already have answered since this worker booted.
+    const current = options.sovereignty.source === 'file' && options.sovereignty.path
+      ? validateSovereigntyConfig(JSON.parse(readFileSync(options.sovereignty.path, 'utf8'))) : policy;
+    if (isPendingPrivacyPolicy(current)) return {
+      configured: false, description: '', rules: [], pendingCount: 0,
+      revision: privacyRevision(undefined),
+      privateAnswerChoice: { pending: true, options: PRIVATE_ANSWER_OPTIONS },
+    };
+    return readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
   };
 
 

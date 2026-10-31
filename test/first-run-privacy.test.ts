@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPendingPrivacyPolicy, isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../src/core/first-run-privacy.ts';
 import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { ModelSetupService } from '../src/core/model-setup.ts';
-import { loadSovereigntyPreset, writeSovereigntyConfigFile } from '../src/core/sovereignty.ts';
+import { loadSovereigntyPreset, validateSovereigntyConfig, writeSovereigntyConfigFile } from '../src/core/sovereignty.ts';
 
 test('pending policy disables remote answer routes and each choice is saved once', () => {
   for (const choice of ['local-first', 'local-only', 'private-cloud-only', 'no-sensitive'] as const) {
@@ -44,4 +44,38 @@ test('a new engine waits for a choice and does not replace an existing policy', 
     seedEngineSovereignty(path);
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(loadSovereigntyPreset('local-only'));
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test.each(['env', 'inline', 'custom-path'] as const)('agent setup preserves an existing %s policy without the default policy file', mode => {
+  const home = mkdtempSync(join(tmpdir(), 'olympus-policy-upgrade-'));
+  try {
+    mkdirSync(join(home, '.olympus'));
+    const env = { ...process.env, HOME: home, OLYMPUS_CONFIG: join(home, '.olympus', 'config.json'),
+      OLYMPUS_SOVEREIGNTY_CONFIG: '', OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '' };
+    const policy = loadSovereigntyPreset('local-only');
+    if (mode === 'env') Object.assign(env, { OLYMPUS_ARGUS_BASE_URL: 'http://127.0.0.1:11434/v1' });
+    if (mode === 'inline') writeFileSync(env.OLYMPUS_CONFIG, JSON.stringify({ sovereignty: { policy } }));
+    if (mode === 'custom-path') {
+      const path = join(home, 'custom-policy.json');
+      writeFileSync(path, JSON.stringify(policy));
+      writeFileSync(env.OLYMPUS_CONFIG, JSON.stringify({ sovereignty: { configPath: path } }));
+    }
+    const result = Bun.spawnSync([process.execPath, 'src/cli.ts', 'setup', '--privacy-options'], { env });
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString()).state).toBe('configured');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+
+test('earlier pending policies acquire the durable marker even after a Personal model change', () => {
+  const legacy = createPendingPrivacyPolicy();
+  delete legacy.privacyChoicePending;
+  const changedModels = loadSovereigntyPreset('local-first');
+  Object.assign(legacy.modelProfiles, changedModels.modelProfiles);
+  legacy.routes.internal = changedModels.routes.internal!;
+  const loaded = validateSovereigntyConfig(legacy);
+  expect(loaded.privacyChoicePending).toBe(true);
+  expect(isPendingPrivacyPolicy(loaded)).toBe(true);
+  expect(() => validateSovereigntyConfig({ ...loaded, privacyChoicePending: false } as never)).toThrow('privacyChoicePending');
 });
