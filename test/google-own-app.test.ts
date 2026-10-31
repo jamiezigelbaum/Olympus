@@ -111,7 +111,7 @@ test('authorized Google check names API step and rejects unavailable or malforme
 import { startExternalOAuthSourceConnection } from '../src/core/connect.ts';
 import { readConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 
-for (const [allowed, failStorage] of [[false, false], [true, false], [true, true]]) test(`only a fully stored Google grant publishes the reusable registration: ${allowed}/${failStorage}`, async () => {
+for (const [allowed, failStorage, failPreference] of [[false, false, false], [true, false, false], [true, true, false], [true, false, true]]) test(`only a fully stored Google grant publishes the reusable registration: ${allowed}/${failStorage}/${failPreference}`, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'google-own-grant-'));
   const values = new Map<string, string>();
   const registryPath = join(dir, 'handles.json');
@@ -119,7 +119,7 @@ for (const [allowed, failStorage] of [[false, false], [true, false], [true, true
     const pending = await startExternalOAuthSourceConnection({
       source: 'gmail', clientId: id, clientSecret: secret, googleOwnApp: true, openBrowser: false,
       redirectUri: 'http://127.0.0.1:8010/oauth/callback/gmail', registryPath,
-      secretStore: { label: 'test', async get(k) { return values.get(k); }, async set(k, v) { if (failStorage && k === 'gmail.personal.oauth.refresh_token') throw new Error('fixture-store-refused'); values.set(k, v); }, async delete(k) { values.delete(k); }, async list() { return [...values.keys()]; } },
+      secretStore: { label: 'test', async get(k) { return values.get(k); }, async set(k, v) { if ((failStorage && k === 'gmail.personal.oauth.refresh_token') || (failPreference && k === 'google.own_app.registration')) throw new Error('fixture-store-refused'); values.set(k, v); }, async delete(k) { values.delete(k); }, async list() { return [...values.keys()]; } },
       fetch: async url => {
         if (String(url).endsWith('/token')) return Response.json({ access_token: 'fixture-access', refresh_token: 'fixture-refresh', expires_in: 3600, token_type: 'Bearer', scope: 'openid https://www.googleapis.com/auth/gmail.readonly' });
         return allowed ? Response.json({ emailAddress: 'fixture@example.test', email: 'fixture@example.test', sub: '123456', scope: 'openid https://www.googleapis.com/auth/gmail.readonly' }) : Response.json({ error: secret }, { status: 403 });
@@ -131,7 +131,8 @@ for (const [allowed, failStorage] of [[false, false], [true, false], [true, true
       expect(values.get('google.own_app.registration')).toBeUndefined();
     } else if (allowed) {
       await pending.completeCallback({ state: pending.state, code: 'fixture-code' });
-      expect(values.get('google.own_app.registration')).toBe(JSON.stringify({ clientId: id, clientSecret: secret }));
+      expect(values.get('google.own_app.registration')).toBe(failPreference ? undefined : JSON.stringify({ clientId: id, clientSecret: secret }));
+      expect(values.get('gmail.personal.oauth.refresh_token')).toBe('fixture-refresh');
       expect(readConnectedHandleRegistry(registryPath).handles.length).toBe(1);
     } else {
       await expect(pending.completeCallback({ state: pending.state, code: 'fixture-code' })).rejects.toThrow('turn on Gmail and Drive');

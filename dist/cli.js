@@ -12030,9 +12030,6 @@ async function completeOAuthSourceConnection(prepared, code) {
       }
       tokenWritesAttempted += 1;
       await prepared.secretStore.set(refreshKey, refreshToken);
-      if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
-        await prepared.secretStore.set("google.own_app.registration", JSON.stringify({ clientId: prepared.clientId, clientSecret }));
-      }
     } catch (error) {
       if (registryBefore && await oldGrantStillMints()) {
         try {
@@ -12071,6 +12068,11 @@ async function completeOAuthSourceConnection(prepared, code) {
     const retired = readConnectedHandleRegistry(prepared.registryPath).handles.filter((handle) => replacedProviders.has(handle.provider) && isRetiredGoogleHandle(handle));
     if (retired.length > 0)
       removeConnectedHandles(retired.map((handle) => handle.handle), prepared.registryPath);
+    if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
+      try {
+        await prepared.secretStore.set("google.own_app.registration", JSON.stringify({ clientId: prepared.clientId, clientSecret }));
+      } catch {}
+    }
     return {
       ok: true,
       source: prepared.options.source,
@@ -144532,7 +144534,8 @@ function mountDashboardController(options) {
     });
     for (const id of openSheets) {
       const sheet = queryAll(".sheet").find((candidate) => candidate.id === id);
-      sheet?.classList.add("on");
+      if (sheet)
+        setSheetOpen(sheet, true);
       queryAll("[data-sheet-toggle]").filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute("aria-expanded", "true"));
     }
     const wait = authorizationWait;
@@ -144619,7 +144622,7 @@ function mountDashboardController(options) {
   }, { once: true });
   const messagingTimers = new Map;
   const messagingBusy = new WeakSet;
-  const messagingSeen = new WeakSet;
+  const messagingSeen = new Set;
   function resumeMessaging() {
     messagingTimers.forEach((timer, card) => {
       if (!card.isConnected) {
@@ -144674,8 +144677,8 @@ function mountDashboardController(options) {
       const field = typeof body.field === "string" ? body.field : "";
       const labels = { api_id: "Telegram API ID", api_hash: "Telegram API hash", phone: "Phone number (with country code)", code: "Telegram login code", password: "Telegram two-step verification password" };
       const label = labels[field];
-      const restoring = operation === "status" && !messagingSeen.has(card);
-      messagingSeen.add(card);
+      const restoring = operation === "status" && !messagingSeen.has(source);
+      messagingSeen.add(source);
       const setupSheet = card.querySelector("[data-messaging-setup]");
       if (setupSheet) {
         const intro = setupSheet.querySelector("[data-messaging-setup-intro]");

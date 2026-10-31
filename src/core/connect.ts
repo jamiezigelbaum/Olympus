@@ -1034,11 +1034,6 @@ async function completeOAuthSourceConnection(
         // everything it needs is in place.
         tokenWritesAttempted += 1;
         await prepared.secretStore.set(refreshKey, refreshToken);
-        // The reusable app is a preference, not a grant credential. Publish it
-        // only after every grant write succeeds, including the refresh token.
-        if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
-          await prepared.secretStore.set('google.own_app.registration', JSON.stringify({ clientId: prepared.clientId, clientSecret }));
-        }
       } catch (error) {
         if (registryBefore && await oldGrantStillMints()) {
           try {
@@ -1086,6 +1081,14 @@ async function completeOAuthSourceConnection(
       const retired = readConnectedHandleRegistry(prepared.registryPath).handles
         .filter((handle) => replacedProviders.has(handle.provider) && isRetiredGoogleHandle(handle));
       if (retired.length > 0) removeConnectedHandles(retired.map((handle) => handle.handle), prepared.registryPath);
+
+      // This optional reuse preference must never undo or misreport a live
+      // grant. If saving it fails, the next source asks for the same file again.
+      if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
+        try {
+          await prepared.secretStore.set('google.own_app.registration', JSON.stringify({ clientId: prepared.clientId, clientSecret }));
+        } catch { /* Grant, cache invalidation and account checks already succeeded. */ }
+      }
 
       return {
         ok: true,

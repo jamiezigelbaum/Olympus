@@ -763,7 +763,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     });
     for (const id of openSheets) {
       const sheet = queryAll<HTMLElement>('.sheet').find((candidate) => candidate.id === id);
-      sheet?.classList.add('on');
+      if (sheet) setSheetOpen(sheet, true);
       queryAll<HTMLElement>('[data-sheet-toggle]').filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute('aria-expanded', 'true'));
     }
     const wait = authorizationWait;
@@ -847,7 +847,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }, { once: true });
   const messagingTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
   const messagingBusy = new WeakSet<HTMLElement>();
-  const messagingSeen = new WeakSet<HTMLElement>();
+  const messagingSeen = new Set<string>();
 
   function resumeMessaging(): void {
     messagingTimers.forEach((timer, card) => { if (!card.isConnected) { clearTimeout(timer); messagingTimers.delete(card); } });
@@ -883,8 +883,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const field = typeof body.field === 'string' ? body.field : '';
       const labels: Record<string, string> = { api_id: 'Telegram API ID', api_hash: 'Telegram API hash', phone: 'Phone number (with country code)', code: 'Telegram login code', password: 'Telegram two-step verification password' };
       const label = labels[field];
-      const restoring = operation === 'status' && !messagingSeen.has(card);
-      messagingSeen.add(card);
+      const restoring = operation === 'status' && !messagingSeen.has(source);
+      messagingSeen.add(source);
       const setupSheet = card.querySelector<HTMLElement>('[data-messaging-setup]');
       if (setupSheet) {
         const intro = setupSheet.querySelector<HTMLElement>('[data-messaging-setup-intro]');

@@ -1355,3 +1355,22 @@ test('Telegram restores an active prompt once without reopening on each poll', a
     expect(sheet.getAttribute('aria-hidden')).toBe('true');
   } finally { controller.dispose(); }
 });
+
+
+test('Telegram preserves an open sheet and a deliberate close across dashboard redraws', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  let reads = 0;
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => result(renderMessagingCard('telegram', true), `read-${++reads}`), returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async () => ({ status: 200, body: { ok: true, state: 'failed' } }) },
+  });
+  try {
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('false');
+    await controller.refresh(); await happyWindow.happyDOM.waitUntilComplete();
+    expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('false');
+    root.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]')!.click();
+    await controller.refresh(); await happyWindow.happyDOM.waitUntilComplete();
+    expect(reads).toBe(2);
+    expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('true');
+  } finally { controller.dispose(); }
+});
