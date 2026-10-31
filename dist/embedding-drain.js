@@ -45073,7 +45073,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }
       take(data2);
       s.loaded = true;
-      if (data2.configured && s.answerChoice)
+      if (s.answerChoice)
         s.screen = "answers";
       kit.render(s.screen === "answers" ? "privacy:answer:local-first" : "privacy:description");
     }, () => {

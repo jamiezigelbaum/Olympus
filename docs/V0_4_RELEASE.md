@@ -30,8 +30,10 @@ locally. The agent walkthrough and dashboard share the choice and save path. The
 settings cannot clear it. Until consent, one transport gate denies remote
 source reads, including picker metadata, while the authenticated local
 computer dashboard can browse. Agent setup and engine installation share the
-effective-policy/install-state resolver, preserving environment-backed, inline
-and custom-path upgrades without asking again.
+installed-policy state resolver, preserving environment-backed, inline
+and custom-path upgrades without asking again. Ambient shell keys and abandoned
+config files do not count as an installation. Pending setup shows the choice
+before profile editing and refuses profile writes, preserving any saved rules.
 
 In scope:
 - Mac install and sign-in: #579 (Safari pop-up), #624 and #578 (doctor

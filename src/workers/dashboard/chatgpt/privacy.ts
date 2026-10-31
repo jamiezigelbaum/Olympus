@@ -202,7 +202,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       take(data);
       s.loaded = true;
-      if (data.configured && s.answerChoice) s.screen = 'answers';
+      if (s.answerChoice) s.screen = 'answers';
       kit.render(s.screen === 'answers' ? 'privacy:answer:local-first' : 'privacy:description');
     }, () => {
       if (mine !== session || !s) return;

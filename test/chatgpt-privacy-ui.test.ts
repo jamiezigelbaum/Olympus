@@ -1045,7 +1045,7 @@ describe('words', () => {
 });
 
 
-test('a first-run privacy save continues to the shared mode choice, then saves the checked recommendation', async () => {
+test('pending first-run opens the shared mode choice before any profile edit', async () => {
   const saves: any[] = [];
   const pending = { pending: true as const, options: PRIVATE_ANSWER_OPTIONS };
   const { host } = await openPrivacy({
@@ -1055,18 +1055,14 @@ test('a first-run privacy save continues to the shared mode choice, then saves t
       return privacyToolResult({ configured: true, description: args.description ?? 'Health', rules: [], pendingCount: 0, revision: 'rev2', ...(!args.private_answer_mode ? { privateAnswerChoice: pending } : {}) }, 'saved', 'choice-token');
     },
   });
-  const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
-  area.value = 'Health';
-  area.dispatchEvent(new host.win.Event('input') as unknown as Event);
-  host.button(W.save).click();
-  if (host.hasButton(W.confirm)) host.button(W.confirm).click();
-  await host.settle();
+  expect(host.doc.querySelector('textarea')).toBeNull();
+  expect(saves).toHaveLength(0);
   expect(host.text()).toContain('How should Olympus answer with Private items?');
   expect(host.text()).toContain('Recommended');
   for (const option of PRIVATE_ANSWER_OPTIONS) expect(host.text()).toContain(option.label);
   expect((host.doc.querySelector('input[value="local-first"]') as unknown as HTMLInputElement).checked).toBe(true);
   host.button('Save Private-answer mode').click();
   await host.settle();
-  expect(saves[1]).toEqual({ private_answer_mode: 'local-first', revision: 'rev2', confirmation: 'choice-token' });
+  expect(saves[0]).toEqual({ private_answer_mode: 'local-first', revision: 'rev1', confirmation: 'owner-token' });
   expect(host.text()).not.toContain('How should Olympus answer with Private items?');
 });
