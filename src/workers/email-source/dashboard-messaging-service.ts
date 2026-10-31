@@ -114,7 +114,7 @@ export function createDashboardMessagingService(options: {
   const grantFor = (source: MessagingSource) => {
     const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
     const read = readCaptureGrantFile(path);
-    if (read.kind !== 'valid' || read.grant.source !== source) throw new Error('No valid capture grant.');
+    if (read.kind !== 'valid' || read.grant.source !== source || read.grant.pairingPending) throw new Error('No valid capture grant.');
     return { path, grant: read.grant, fingerprint: JSON.stringify(read.grant) };
   };
   const manager = createDashboardMessagingPairing({
@@ -123,15 +123,17 @@ export function createDashboardMessagingService(options: {
         source, packageRoot, secretStore: options.secretStore,
         ...(options.registryPath ? { registryPath: options.registryPath } : {}),
         signal: hooks.signal, onCommitStart: hooks.commit, whatsappQrMode: 'artifact',
-        requestCaptureScope: async ({ chats, sessionPath }) => {
-          // Existing consent survives credential renewal, but first pairing never invents it.
+        requestCaptureScope: async ({ chats, sessionPath, accountProof }) => {
+          // Only the authenticated Telegram account reference establishes continuity.
+          // WhatsApp proves a linked device, not which account it belongs to.
           const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
           if (grantSnapshot(source) !== initialGrants.get(source)) throw new Error('Capture grant changed during pairing.');
           let selection: { wholeAccount: boolean; chatScopes: readonly string[] };
-          if (prior.kind === 'valid') {
+          if (source === 'telegram' && /^telegram:[a-f0-9]{16}$/.test(accountProof)
+            && prior.kind === 'valid' && prior.grant.accountProof === accountProof) {
             const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
-            const raw = env[source === 'telegram' ? 'OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES' : 'OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS']!;
-            selection = { wholeAccount: raw === '*', chatScopes: raw === '*' ? [] : raw.split(',').map(value => source === 'whatsapp' ? `whatsapp.personal:chat:${value}` : value) };
+            const raw = env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES!;
+            selection = { wholeAccount: raw === '*', chatScopes: raw === '*' ? [] : raw.split(',') };
           } else {
             let choices: readonly PairingChat[] = chats;
             if (source === 'whatsapp') {
@@ -160,9 +162,8 @@ export function createDashboardMessagingService(options: {
       const prior = readCaptureGrantFile(path);
       if (grantSnapshot(source) !== initialGrants.get(source)) throw new Error('Capture grant changed during pairing.');
       if (prior.kind === 'invalid' || (prior.kind === 'valid' && prior.grant.source !== source)) throw new Error('Invalid capture grant.');
-      const retained = prior.kind === 'valid' ? retainApprovedCaptureScope(source, prior.grant.producer.env) : {};
       if (signal.aborted) return;
-      saveMessagingCaptureGrant({ path, pairing: { ...result, producer: { ...result.producer, env: { ...result.producer.env, ...retained } } } });
+      saveMessagingCaptureGrant({ path, pairing: result });
       available.delete(source);
     }),
   });
@@ -199,6 +200,14 @@ export function createDashboardMessagingService(options: {
         if (selecting.has(source)) throw new Error('Finish choosing chats first.');
         return options.withGrantMutation(async () => {
           if (manager.busy(source)) throw new Error('Pairing is already running.');
+          // Persist the stop before the helper can mutate the session. Failure, cancel,
+          // and process restart must never reactivate this grant against that session.
+          grantSnapshot(source);
+          const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
+          const prior = readCaptureGrantFile(path);
+          if (prior.kind === 'valid') {
+            writePrivateFileAtomicSync(path, `${JSON.stringify({ ...prior.grant, pairingPending: true }, null, 2)}\n`);
+          }
           initialGrants.set(source, grantSnapshot(source));
           return manager.start(source);
         });

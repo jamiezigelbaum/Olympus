@@ -6019,6 +6019,10 @@ function readCaptureGrantFile(path) {
     const value = JSON.parse(readFileSync14(descriptor, "utf8"));
     if (value.version !== 1 || !["telegram", "whatsapp"].includes(value.source) || !value.handle)
       return { kind: "invalid" };
+    if (value.accountProof !== undefined && typeof value.accountProof !== "string")
+      return { kind: "invalid" };
+    if (value.pairingPending !== undefined && value.pairingPending !== true)
+      return { kind: "invalid" };
     if (value.sessionPath !== undefined && (typeof value.sessionPath !== "string" || value.sessionPath === ""))
       return { kind: "invalid" };
     if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment))

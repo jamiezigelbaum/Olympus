@@ -2374,6 +2374,10 @@ function readCaptureGrantFile(path) {
     const value = JSON.parse(readFileSync5(descriptor, "utf8"));
     if (value.version !== 1 || !["telegram", "whatsapp"].includes(value.source) || !value.handle)
       return { kind: "invalid" };
+    if (value.accountProof !== undefined && typeof value.accountProof !== "string")
+      return { kind: "invalid" };
+    if (value.pairingPending !== undefined && value.pairingPending !== true)
+      return { kind: "invalid" };
     if (value.sessionPath !== undefined && (typeof value.sessionPath !== "string" || value.sessionPath === ""))
       return { kind: "invalid" };
     if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment))
@@ -39950,6 +39954,7 @@ function saveMessagingCaptureGrant(input) {
     version: 1,
     source: input.pairing.source,
     handle,
+    ...input.pairing.source === "telegram" && /^telegram:[a-f0-9]{16}$/.test(input.pairing.accountProof) ? { accountProof: input.pairing.accountProof } : {},
     ...input.pairing.sessionLayout === "folder" ? {} : { sessionPath: input.pairing.sessionPath },
     producer: {
       source: input.pairing.producer.source,
@@ -39971,7 +39976,7 @@ function isPlainRecord(value) {
 function readMessagingCaptureGrantFacts(source, grantPath = defaultMessagingCaptureGrantPath(source)) {
   try {
     const read = readGrant(grantPath);
-    if (read.kind !== "valid" || read.grant.source !== source)
+    if (read.kind !== "valid" || read.grant.source !== source || read.grant.pairingPending)
       return {};
     const facts = {};
     const grantedAt = typeof read.grant.grantedAt === "string" ? Date.parse(read.grant.grantedAt) : Number.NaN;
@@ -40051,6 +40056,10 @@ class MessagingCaptureSupervisor {
     if (grant.source !== this.options.source) {
       await this.stop();
       return { state: "blocked", reason: "grant_invalid" };
+    }
+    if (grant.pairingPending) {
+      await this.stop();
+      return { source: grant.source, state: "stopped", reason: "grant_missing" };
     }
     const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath).find((candidate) => candidate.handle === grant.handle);
     if (!handleAllowsCapture(handle, grant.source)) {
@@ -142036,7 +142045,7 @@ function createDashboardMessagingService(options) {
   const grantFor = (source) => {
     const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
     const read = readCaptureGrantFile(path);
-    if (read.kind !== "valid" || read.grant.source !== source)
+    if (read.kind !== "valid" || read.grant.source !== source || read.grant.pairingPending)
       throw new Error("No valid capture grant.");
     return { path, grant: read.grant, fingerprint: JSON.stringify(read.grant) };
   };
@@ -142050,15 +142059,15 @@ function createDashboardMessagingService(options) {
         signal: hooks.signal,
         onCommitStart: hooks.commit,
         whatsappQrMode: "artifact",
-        requestCaptureScope: async ({ chats, sessionPath }) => {
+        requestCaptureScope: async ({ chats, sessionPath, accountProof }) => {
           const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
           if (grantSnapshot(source) !== initialGrants.get(source))
             throw new Error("Capture grant changed during pairing.");
           let selection;
-          if (prior.kind === "valid") {
+          if (source === "telegram" && /^telegram:[a-f0-9]{16}$/.test(accountProof) && prior.kind === "valid" && prior.grant.accountProof === accountProof) {
             const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
-            const raw = env[source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS"];
-            selection = { wholeAccount: raw === "*", chatScopes: raw === "*" ? [] : raw.split(",").map((value2) => source === "whatsapp" ? `whatsapp.personal:chat:${value2}` : value2) };
+            const raw = env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
+            selection = { wholeAccount: raw === "*", chatScopes: raw === "*" ? [] : raw.split(",") };
           } else {
             let choices = chats;
             if (source === "whatsapp") {
@@ -142090,10 +142099,9 @@ function createDashboardMessagingService(options) {
         throw new Error("Capture grant changed during pairing.");
       if (prior.kind === "invalid" || prior.kind === "valid" && prior.grant.source !== source)
         throw new Error("Invalid capture grant.");
-      const retained = prior.kind === "valid" ? retainApprovedCaptureScope(source, prior.grant.producer.env) : {};
       if (signal.aborted)
         return;
-      saveMessagingCaptureGrant({ path, pairing: { ...result, producer: { ...result.producer, env: { ...result.producer.env, ...retained } } } });
+      saveMessagingCaptureGrant({ path, pairing: result });
       available.delete(source);
     })
   });
@@ -142140,6 +142148,13 @@ function createDashboardMessagingService(options) {
         return options.withGrantMutation(async () => {
           if (manager.busy(source))
             throw new Error("Pairing is already running.");
+          grantSnapshot(source);
+          const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
+          const prior = readCaptureGrantFile(path);
+          if (prior.kind === "valid") {
+            writePrivateFileAtomicSync(path, `${JSON.stringify({ ...prior.grant, pairingPending: true }, null, 2)}
+`);
+          }
           initialGrants.set(source, grantSnapshot(source));
           return manager.start(source);
         });

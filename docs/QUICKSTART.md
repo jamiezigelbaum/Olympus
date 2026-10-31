@@ -550,7 +550,13 @@ does not register a capture grant or start capture. Returning to Keys resumes
 the waiting login prompt, QR or chat choice. Cancelling the first chat choice
 leaves capture off but keeps the provider login: remove Olympus in Telegram
 active sessions or WhatsApp linked devices to unlink it.
-Re-pairing an already approved account retains its existing capture scope.
+Re-pairing Telegram retains its existing capture scope only when the authenticated
+account reference matches the one saved with that grant. Older grants without
+that reference, a different or unproven account, and every WhatsApp re-pair ask
+for fresh chat choices. Starting a re-pair suspends the old grant on disk before
+the login can change. Cancellation or failure leaves capture off, including
+after a worker restart, until a successful re-pair publishes proven or newly
+approved consent. Choosing chats from the old grant cannot clear that suspension.
 The WhatsApp picker lists saved contacts and joined groups and may omit unsaved
 chats. Each message is still classified individually; chat selection does not
 set its privacy tier.
