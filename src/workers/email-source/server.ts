@@ -1,3 +1,4 @@
+import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
 import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
@@ -270,6 +271,7 @@ import {
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
   TELEGRAM_MESSAGES_SOURCE_ID,
   TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
+  defaultTelegramCaptureSpoolDir,
   createTelegramConnectorStores,
   createTelegramConnectorStoreSyncHandler,
   defineInternalTelegramMessagesCorpus,
@@ -402,6 +404,7 @@ import {
   WHATSAPP_LIVE_CORPUS_ID,
   WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
   WHATSAPP_PERSONAL_SOURCE_ID,
+  defaultWhatsAppSpoolDir,
   createWhatsAppConnectorStore,
   createWhatsAppTierLane,
   createWhatsAppConnectorStoreSyncHandler,
@@ -3417,6 +3420,8 @@ export async function main(): Promise<void> {
   // these stores beside live capture (docs/design/archive-live-one-dataset.md). Without the live lane
   // an export stays under Archives, as before.
   if (telegramConnectorStoreSync) archiveSourceTargets.register(telegramConnectorStoreSync.archiveTarget());
+  const telegramSpoolChanges = createSpoolChangeSubscription(defaultTelegramCaptureSpoolDir(process.env));
+  const whatsappSpoolChanges = createSpoolChangeSubscription(defaultWhatsAppSpoolDir(process.env));
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(
     process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS,
     'OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS',
@@ -5060,6 +5065,7 @@ export async function main(): Promise<void> {
             : undefined,
         () => createTelegramSchedulerSource({
           config: olympusConfig,
+          subscribeChanges: telegramSpoolChanges,
           ...(telegramConnectorStoreSync ? { sync: telegramConnectorStoreSync } : {}),
           ...(telegramCaptureMaxItems !== undefined ? { maxItems: telegramCaptureMaxItems } : {}),
         }),
@@ -5073,6 +5079,7 @@ export async function main(): Promise<void> {
             : undefined,
         () => createWhatsAppSchedulerSource({
           config: olympusConfig,
+          subscribeChanges: whatsappSpoolChanges,
           ...(whatsappConnectorStoreSync ? { sync: whatsappConnectorStoreSync } : {}),
           ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
           ...(whatsappLiveMaxItems !== undefined ? { maxItems: whatsappLiveMaxItems } : {}),
