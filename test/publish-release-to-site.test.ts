@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { strToU8, zipSync } from 'fflate';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -568,11 +569,10 @@ describe('the Bun program pin', () => {
 test('macOS helper pins are served and validated, or absent', () => {
   const { root, artifact } = fixture();
   const helper = join(root, 'olympus-engine-helper-0123456789abcdef.zip');
-  const app = join(root, 'fixture', 'Olympus Engine.app', 'Contents');
-  mkdirSync(join(app, '_CodeSignature'), { recursive: true });
-  writeFileSync(join(app, 'Info.plist'), '<plist><key>CFBundleIdentifier</key><string>ai.olympusplugin.engine-host</string></plist>');
-  writeFileSync(join(app, '_CodeSignature', 'CodeResources'), 'signature structure');
-  expect(spawnSync('zip', ['-qr', helper, 'Olympus Engine.app'], { cwd: join(root, 'fixture') }).status).toBe(0);
+  writeFileSync(helper, zipSync({
+    'Olympus Engine.app/Contents/Info.plist': strToU8('<plist><key>CFBundleIdentifier</key><string>ai.olympusplugin.engine-host</string></plist>'),
+    'Olympus Engine.app/Contents/_CodeSignature/CodeResources': strToU8('signature structure'),
+  }));
   if (process.platform === 'darwin') {
     expect(() => publishToSite({ root, artifact, macosHelper: helper, macosHelperTeamId: 'ND2P3ZTQRD' })).toThrow('verification failed');
     return;
