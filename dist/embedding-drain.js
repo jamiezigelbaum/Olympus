@@ -64828,10 +64828,11 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 [data-setup-steps] [hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 .actionrow > form { margin: 0 !important; }
-.actionrow > .primary, .setupactions > .primary { order: -1; }
+.actionrow:not(.setupactions) > .primary { order: -1; }
 .setupactions { margin-top: 24px; }
+.setupactions > .primary { margin-left: auto; }
 @media (max-width: 480px) {
-  .actionrow, .setupactions, .rowform { flex-direction: column; align-items: stretch; }
+  .actionrow:not(.setupactions), .rowform { flex-direction: column; align-items: stretch; }
 }
 .keyfield::placeholder { color: var(--t4); }
 .keyfield:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
