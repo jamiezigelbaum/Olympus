@@ -85,6 +85,10 @@ RELEASE_BASE=https://olympusplugin.ai/releases
 WHATSAPP_BRIDGE_NAME=@WHATSAPP_BRIDGE_NAME@
 WHATSAPP_BRIDGE_SHA256=@WHATSAPP_BRIDGE_SHA256@
 WHATSAPP_BRIDGE_BYTES=@WHATSAPP_BRIDGE_BYTES@
+MACOS_HELPER_NAME=@MACOS_HELPER_NAME@
+MACOS_HELPER_SHA256=@MACOS_HELPER_SHA256@
+MACOS_HELPER_BYTES=@MACOS_HELPER_BYTES@
+MACOS_HELPER_TEAM_ID=@MACOS_HELPER_TEAM_ID@
 
 # Bun, pinned by version and by the SHA-256 and size of its Apple-silicon
 # release archive (from Bun's published SHASUMS256.txt and GitHub's asset
@@ -386,6 +390,13 @@ main() {
     case "$WHATSAPP_BRIDGE_BYTES" in ''|*[!0-9]*) die "the installer's WhatsApp bridge size is malformed." ;; esac
   fi
 
+  if [ "$MACOS_HELPER_NAME" != none ]; then
+    printf '%s' "$MACOS_HELPER_NAME" | grep -Eq '^olympus-engine-helper-[0-9a-f]{16}\.zip$' || die "the installer's helper name is malformed."
+    printf '%s' "$MACOS_HELPER_SHA256" | grep -Eq '^[0-9a-f]{64}$' || die "the installer's helper checksum is malformed."
+    printf '%s' "$MACOS_HELPER_TEAM_ID" | grep -Eq '^[A-Z0-9]{10}$' || die "the installer's helper team is malformed."
+    case "$MACOS_HELPER_BYTES" in ''|*[!0-9]*|0) die "the installer's helper size is malformed." ;; esac
+  fi
+
   say "Installing Olympus $OLYMPUS_VERSION for $(id -un 2>/dev/null || echo you) on this Mac."
   say "It needs no administrator password and changes nothing outside your home folder."
   say "By installing Olympus you agree to its Terms (https://olympusplugin.ai/terms/)"
@@ -445,6 +456,16 @@ main() {
     fi
     place_bridge "$RELEASE"
   fi
+  HELPER_READY=0
+  if [ "$MACOS_HELPER_NAME" != none ]; then
+    if fetch "$RELEASE_BASE/$OLYMPUS_VERSION/$MACOS_HELPER_NAME" "$WORK/helper.zip"; then
+      if [ "$(sha256_of "$WORK/helper.zip")" != "$MACOS_HELPER_SHA256" ] || [ "$(bytes_of "$WORK/helper.zip")" != "$MACOS_HELPER_BYTES" ]; then
+        die "the helper download did not match its checksum, so it was not used." "Nothing was changed on this Mac. Run this again."
+      fi
+      mkdir "$WORK/helper"
+      if ditto -x -k "$WORK/helper.zip" "$WORK/helper" && [ -d "$WORK/helper/Olympus Engine.app" ]; then HELPER_READY=1; fi
+    fi
+  fi
   step "The downloads match their published checksums."
 
   # 2. One installer at a time; finish what an interrupted one left.
@@ -473,6 +494,21 @@ main() {
     die "the Bun runtime at $BUN could not be made executable." "Details may be in $LOG. Email $SUPPORT_EMAIL."
   fi
 
+  HELPER_CHANGED=0
+  if [ "$MACOS_HELPER_NAME" != none ]; then
+    if [ "$HELPER_READY" = 1 ] && [ ! -L "$SUPPORT/Olympus Engine.app" ] && [ -d "$SUPPORT/Olympus Engine.app" ] && [ -x "$SUPPORT/Olympus Engine.app/Contents/MacOS/OlympusEngineHost" ] && diff -rq "$WORK/helper/Olympus Engine.app" "$SUPPORT/Olympus Engine.app" >/dev/null 2>&1 \
+      && "$BUN" "$RELEASE/dist/cli.js" engine status > "$WORK/helper-status" 2>> "$LOG" </dev/null 8>&- \
+      && tr -d '[:space:]' < "$WORK/helper-status" | grep -Fq '"helper":{"installed":true,"in_use":true'; then
+      : # The verified bundle is installed and the engine agent uses it.
+    elif [ "$HELPER_READY" = 1 ] && OLYMPUS_MACOS_HELPER_TEAM_ID="$MACOS_HELPER_TEAM_ID" cli "$RELEASE" engine install-helper --from "$WORK/helper/Olympus Engine.app"; then
+      HELPER_CHANGED=1
+    else
+      say "Desktop, Documents, Downloads and iCloud need the Olympus helper. Retry: curl -fsSL https://olympusplugin.ai/install.sh | sh, or run olympus engine install-helper --from <signed app> if you have the app."
+    fi
+  else
+    say "Desktop, Documents, Downloads and iCloud are not available in this release."
+  fi
+
   # 3. The same release again: the installed files must be the verified
   #    download, and the engine must run this build.
   if [ -f "$APP/$RECEIPT_NAME" ] && [ "$(cat "$APP/$RECEIPT_NAME")" = "$OLYMPUS_SHA256" ]; then
@@ -484,7 +520,7 @@ main() {
       fi
       # Proof against the build of the verified download, not whatever the
       # installed agent names: an upgrade cut short leaves the old one there.
-      if ! cli "$APP" engine verify --expect-package "$RELEASE"; then
+      if [ "$HELPER_CHANGED" = 1 ] || ! cli "$APP" engine verify --expect-package "$RELEASE"; then
         start_engine \
           || fail "Olympus is installed but did not start." "Details are in $LOG. Run this again, or email $SUPPORT_EMAIL with that file."
       fi

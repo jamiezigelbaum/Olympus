@@ -1,10 +1,7 @@
 # Local files
 
 Status: owner direction 2026-10-21. The spine landed in #439 and the connector
-in #440. The helper for guarded Mac folders (step 3) is built and proven on a
-real Mac with a development signature (2026-10-22); public releases do not ship
-it until it is signed and notarized under the organization account. Where this page and
-the code differ, the code is current.
+in #440. The helper for guarded Mac folders (step 3) is built; the installer can ship a signed, notarized release helper when one is pinned. The real-Mac permission and upgrade test remains a release qualification step. Where this page and the code differ, the code is current.
 
 ## Outcome
 
@@ -317,8 +314,9 @@ helper app that has been deleted as not ok, with `olympus engine install-helper`
    renders).
 2. **Connector PR:** `local.files`, the watcher, the picker, open, and the
    off-by-default list. Unguarded folders on Mac, all folders on Linux.
-3. **Helper PR (after signing):** the signed helper, per-folder prompts, the
-   Full Disk Access path and the "Needs permission" states.
+3. **Helper:** the signed helper, per-folder prompts, the Full Disk Access path
+   and "Needs permission" states are built. Pin a notarized helper for release;
+   verify the prompt, search and grant survival on a real Mac.
 4. **Copy:** the site, ChatGPT listing and setup order (local files first, per
    `chatgpt-plugin.md`). These come in the legal pass, against final code. The
    reviewer path stays pinned.
