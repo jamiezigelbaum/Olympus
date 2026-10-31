@@ -27975,13 +27975,13 @@ function fuseRankedCandidateLanes(options) {
       const existing = candidates.get(id);
       if (existing) {
         existing.laneRanks.set(lane.name, rank);
-        existing.score += reciprocalRank(rank, rrfK);
+        existing.score += (lane.weight ?? 1) * reciprocalRank(rank, rrfK);
         return;
       }
       candidates.set(id, {
         id,
         item,
-        score: reciprocalRank(rank, rrfK),
+        score: (lane.weight ?? 1) * reciprocalRank(rank, rrfK),
         laneRanks: new Map([[lane.name, rank]])
       });
     });
@@ -29878,7 +29878,7 @@ function createConnectorStoreCorpusAdapter(options) {
       }
       const lanes = [
         { name: "keyword", items: rows },
-        { name: "recency", items: recencyRows }
+        { name: "recency", items: recencyRows, weight: CHAT_RECENCY_WEIGHT }
       ];
       const fused = fuseRankedCandidateLanes({
         lanes,
@@ -30042,7 +30042,7 @@ function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPat
 }
 function withPinnedNewestChatHits(input) {
   const limit = Math.max(1, Math.min(Math.floor(input.limit), MAX_SEARCH_RESULTS));
-  const pinCount = Math.min(CHAT_RECENCY_PIN_COUNT, limit, input.recencyRows.length);
+  const pinCount = Math.min(CHAT_RECENCY_PIN_COUNT, input.hits.length ? limit - 1 : limit, input.recencyRows.length);
   if (pinCount === 0)
     return input.hits;
   const result = [...input.hits];
@@ -30053,7 +30053,7 @@ function withPinnedNewestChatHits(input) {
       continue;
     while (result.length >= limit)
       result.pop();
-    result.push(connectorStoreHitFromRow(input.store, row, reciprocalRank(index + 1), input.resultProjector, input.locatorPathScope));
+    result.push(connectorStoreHitFromRow(input.store, row, CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1), input.resultProjector, input.locatorPathScope));
     present.add(row.sourceItem.localItemId);
   }
   return result;
@@ -30101,7 +30101,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const lanes = [
     { name: "keyword", items: keywordRows },
     { name: "vector", items: vectorRows },
-    ...recencyRows.length > 0 ? [{ name: "recency", items: recencyRows }] : []
+    ...recencyRows.length > 0 ? [{ name: "recency", items: recencyRows, weight: CHAT_RECENCY_WEIGHT }] : []
   ];
   const fused = fuseRankedCandidateLanes({
     lanes,
@@ -32276,7 +32276,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_job_names();
   init_keyword_context();
