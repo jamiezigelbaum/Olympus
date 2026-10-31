@@ -149,9 +149,16 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     });
     // An agent already on the helper is unchanged, but its running launcher is
     // the old app: restart it so the new one is what runs.
-    if (engine.action === 'unchanged') (deps.restartEngine ?? restartEngine)(service);
+    let health = engine.health;
+    if (engine.action === 'unchanged') {
+      const since = (deps.health?.now ?? Date.now)();
+      (deps.restartEngine ?? restartEngine)(service);
+      health = await waitForEngineHealthy({ paths, expectedBuild: engine.program.build ?? null, since }, { ...deps.health, exec: deps.exec });
+    }
+    const usesHelper = installedProgram(paths.plistPath)?.helperPath === helper.executable_path;
+    const ok = health?.ok === true && usesHelper;
     const { plist: _plist, ...summary } = engine;
-    return { ...helper, engine: summary, restarted_engine: true, note: 'The engine was restarted so its agent starts through the helper app.', next: engine.ok ? 'Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine.' : 'Run olympus engine logs to see why the engine did not become healthy.' };
+    return { ...helper, ok, engine: { ...summary, ok, health }, restarted_engine: true, note: ok ? 'The engine was restarted through the helper app.' : 'The engine did not prove it started through the helper app.', next: ok ? 'Pick a folder under Desktop, Documents or Downloads in the Olympus folder picker; macOS will ask once, in the name of Olympus Engine.' : 'Run olympus engine logs to see why the engine did not become healthy.' };
   }
   if (command === 'verify') {
     return verifyEngine({ ...service, ...parseVerifyArgs(rest), ...(deps.health ? { health: deps.health } : {}) });
