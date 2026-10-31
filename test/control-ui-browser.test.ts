@@ -1011,7 +1011,6 @@ test('the serialized controller listens for the exported redraw event name', () 
   expect(mountDashboardController.toString()).toMatch(new RegExp(`['"]${DASHBOARD_REDRAW_EVENT}['"]`));
 });
 
-<<<<<<< HEAD
 
 for (const [state, provider, step] of [
   ['connect-dropbox', 'dropbox', '1'], ['connect-dropbox', 'dropbox', '5'],
@@ -1077,8 +1076,8 @@ test('shared footer submit respects write access, pending state and accepted key
   expect(submit.disabled).toBe(true);
   expect(submit.textContent).toBe('Key saved');
   controller.dispose();
-||||||| aeceae53
-=======
+});
+
 describe('local messaging pairing', () => {
   function messagingRoot() {
     const root = document.createElement('div');
@@ -1250,5 +1249,59 @@ test.each([false, true])('post-pair choice sends only explicit consent (wholeAcc
     expect(choices).toEqual([{ source: 'telegram', wholeAccount, chatScopes: wholeAccount ? [] : ['telegram.personal:chat:101'] }]);
     expect(slot.textContent).toBe('');
   } finally { controller.dispose(); }
->>>>>>> origin/codex/1.3r2-chats
+});
+
+test('Google JSON stays out of visible text and is checked before any provider URL opens', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-loopback'), options: { controlSessionCsrfToken: 'fixture' } });
+  document.body.append(root);
+  let submitted: Record<string, unknown> | undefined;
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async params => { submitted = params; return { status: 400, body: { ok: false, error: { message: 'Google did not accept this app key.' } } }; } },
+  });
+  try {
+    const sheet = root.querySelector<HTMLElement>('#connect-gmail-email')!;
+    const picker = sheet.querySelector<HTMLInputElement>('[data-client-file]')!;
+    const file = new happyWindow.File([JSON.stringify({ installed: { client_id: '123-example.apps.googleusercontent.com', client_secret: 'fixture-upload-secret' } })], 'client_secret_fixture.json');
+    const transfer = new happyWindow.DataTransfer(); transfer.items.add(file);
+    picker.files = transfer.files as unknown as FileList;
+    picker.dispatchEvent(new Event('change', { bubbles: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(sheet.querySelector('[data-client-file-status]')!.textContent).toContain('Desktop app file ready');
+    expect(sheet.textContent).not.toContain('fixture-upload-secret');
+    const form = picker.form!;
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(submitted?.google_desktop).toBe(true);
+    expect(submitted?.google_client_json).toContain('fixture-upload-secret');
+    expect(sheet.querySelector('[data-setup-error]')!.textContent).toContain('Google did not accept');
+    expect(sheet.querySelector('[data-setup-error] details')!.hasAttribute('open')).toBe(false);
+    expect([...sheet.querySelectorAll<HTMLElement>('[data-setup-panel]')].every(panel => panel.hidden)).toBe(true);
+    expect(sheet.textContent).not.toContain('fixture-upload-secret');
+  } finally { controller.dispose(); }
+});
+
+test('Telegram setup hands over to private prompts, shows Cancel only during pairing, and offers error recovery', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  let state: Record<string, unknown> = { state: 'idle' };
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async op => { if (op === 'start') state = { state: 'waiting', field: 'api_id' }; if (op === 'respond') state = { state: 'failed' }; return { status: 200, body: { ok: true, ...state } }; } },
+  });
+  try {
+    await happyWindow.happyDOM.waitUntilComplete();
+    const cancel = root.querySelector<HTMLElement>('[data-messaging-kind="cancel"]')!;
+    expect(cancel.hidden).toBe(true);
+    root.querySelector('[data-messaging-kind="start"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    // Don't drain timers while pairing polls; wait only for the transport microtask.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(true);
+    expect(cancel.hidden).toBe(false);
+    const input = root.querySelector<HTMLInputElement>('[data-messaging-input] input')!; input.value = '12345';
+    input.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(cancel.hidden).toBe(true);
+    expect(root.querySelector('[data-pairing-error] details')!.hasAttribute('open')).toBe(false);
+    root.querySelector<HTMLButtonElement>('[data-messaging-retry]')!.click();
+    expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(false);
+  } finally { controller.dispose(); }
 });

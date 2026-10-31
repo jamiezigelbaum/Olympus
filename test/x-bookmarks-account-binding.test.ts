@@ -79,6 +79,10 @@ async function xServer(state: { userId: string }) {
       response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ data: { id: state.userId } }));
       return;
     }
+    if (url.pathname === `/2/users/${state.userId}/bookmarks`) {
+      response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ meta: { result_count: 0 } }));
+      return;
+    }
     response.writeHead(404).end();
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));

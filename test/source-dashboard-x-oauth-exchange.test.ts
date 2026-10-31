@@ -55,6 +55,9 @@ function xWorkerFixture(initialSecrets: Record<string, string>): XWorkerFixture 
   const runtimeCalls: string[] = [];
   const runtime = xRuntimeFixture(runtimeCalls);
   const oauthFetch: OAuthFetch = async (url, init) => {
+    if (new URL(String(url)).pathname === '/2/users/882404022/bookmarks') {
+      return Response.json({ meta: { result_count: 0 } });
+    }
     if (String(url).includes('/2/users/me')) {
       return new Response(JSON.stringify({ data: { id: '882404022' } }), {
         status: 200,

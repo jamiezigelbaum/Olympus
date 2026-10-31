@@ -59,3 +59,33 @@ test('normal Dropbox has no error banner or Cancel; connecting alone offers Canc
   expect(connecting.textContent).toContain('Cancel connection attempt');
   expect(connecting.querySelector('[data-connect-error]')).toBeNull();
 });
+
+test('Google and X use the same single-footer walkthrough with the approved steps', () => {
+  const google = preview('connect-google-loopback');
+  const sheet = google.querySelector('#connect-gmail-email')!;
+  expect(sheet.querySelector('[data-setup-steps]')).not.toBeNull();
+  expect(sheet.textContent).toContain('Make the project and turn on Gmail and Drive');
+  expect(sheet.textContent).toContain('Set up the sign-in screen and publish it');
+  expect(sheet.textContent).toContain('Make a Desktop app key and download it');
+  expect(sheet.textContent).toContain('Drop the downloaded file here');
+  expect(sheet.querySelector('[type="file"]')).not.toBeNull();
+  expect(sheet.querySelectorAll('[data-setup-actions]').length).toBe(1);
+  const x = preview('connect-x').querySelector('#connect-x-bookmarks')!;
+  expect(x.querySelectorAll('[data-setup-panel]').length).toBe(5);
+  expect(x.textContent).toContain('paid X API access');
+  expect(x.textContent).toContain('bookmark.read');
+  expect(x.querySelector('[data-copy-target]')).not.toBeNull();
+});
+
+test('Google full signal uses owner copy; otherwise shared Connect stays first', () => {
+  const full = preview('connect-google-full').querySelector('#connect-gmail-email')!;
+  expect(full.textContent).toContain("Olympus's Google sign-in is full");
+  expect(full.textContent).toContain('it lets 100 people');
+  expect(full.querySelector('[data-setup-begin]')!.textContent).toBe('Set up my own Google app');
+  expect(full.querySelector('[data-setup-walkthrough]')!.hasAttribute('hidden')).toBe(true);
+  expect(full.querySelector('[data-oauth-autostart]')).toBeNull();
+  const ordinary = preview('connect-google-publisher').querySelector('#connect-gmail-email')!;
+  expect(ordinary.querySelector('button[type="submit"]')!.textContent).toBe('Connect');
+  expect(ordinary.querySelector('[data-setup-begin]')!.textContent).toBe('Use my own Google app');
+  expect(ordinary.querySelector('[data-setup-walkthrough]')!.hasAttribute('hidden')).toBe(true);
+});

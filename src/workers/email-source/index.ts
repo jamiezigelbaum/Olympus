@@ -1,3 +1,4 @@
+import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistration } from '../../core/google-own-app.ts';
 import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
@@ -1879,7 +1880,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const registry = readDashboardRegistry(sourceDashboard.registryPath);
           assertDashboardAccountCardinality(registry, source);
           const clientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
-          const submittedClientId = asOptionalString(record.client_id);
+          let uploadedClient: { clientId: string; clientSecret: string } | undefined;
+          const ownDesktop = dashboardGoogleOAuthSource(source) && record.google_desktop === true;
+          if (ownDesktop && typeof record.google_client_json === 'string') {
+            try { uploadedClient = parseGoogleDesktopClient(record.google_client_json); }
+            catch (error) { throw new EmailSourceWorkerError(400, 'google_app_file_invalid', (error as Error).message); }
+          }
+          const submittedClientId = uploadedClient?.clientId ?? asOptionalString(record.client_id);
           // A sign-in started for ChatGPT returns through the relay to this
           // install (the state's nonce carries the install id the relay routes
           // on). Only the publisher apps' relay callback can do that.
@@ -1944,7 +1951,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           // The saved-secret field's stand-in value means "keep what is stored";
           // it must never be sent to a provider or stored as a secret.
-          const rawClientSecret = asOptionalString(record.client_secret);
+          const rawClientSecret = uploadedClient?.clientSecret ?? asOptionalString(record.client_secret);
           const submittedClientSecret = rawClientSecret === DASHBOARD_SAVED_SECRET_FIELD_VALUE ? undefined : rawClientSecret;
           // Resolved after the client id, because which stored secret may be
           // sent depends on which client this flow is going out with. The
@@ -1958,12 +1965,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
             throw new EmailSourceWorkerError(409, 'oauth_client_secret_missing', `Missing OAuth client secret: ${dashboardOAuthClientSecretConfigKey(source)}.`);
           }
+          if (ownDesktop) {
+            try { await checkGoogleOwnApp({ clientId, clientSecret: clientSecret ?? '' }, sourceDashboard.oauthFetch); }
+            catch (error) { throw new EmailSourceWorkerError(400, 'google_app_check_failed', (error as Error).message); }
+          }
           // A client id in the body is a registration, not one call's argument.
           // It used to reach the store only from a COMPLETED callback, so a
           // flow that died at the provider — as the live X flow did on
           // 2026-08-19 — left the next start call failing with
           // oauth_client_id_missing and the owner re-pasting the same id.
-          if (submittedClientId) {
+          if (submittedClientId && !ownDesktop) {
             await secretStore.set(dashboardOAuthClientIdConfigKey(source), submittedClientId);
             // Explicit, not inferred: an owner-pasted id is bring-your-own by
             // definition, and marking it here means a later render never has
@@ -1976,12 +1987,15 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
             await secretStore.set(dashboardOAuthClientSecretConfigKey(source), submittedClientSecret);
           }
+          if (ownDesktop && submittedClientId) {
+            await secretStore.set('google.own_app.registration', JSON.stringify({ clientId: submittedClientId, clientSecret }));
+          }
           // ONE redirect URI per flow, and the same string reaches the token
           // exchange: `startExternalOAuthSourceConnection` keeps it on the
           // prepared flow and sends it back at exchange time, which is what the
           // providers' exact-string matching requires. Google's Desktop client
           // returns to this engine on loopback (`dashboardGoogleLoopbackOrigin`).
-          const redirectUri = publisher?.loopback
+          const redirectUri = publisher?.loopback || ownDesktop
             ? `${dashboardGoogleLoopbackOrigin(dashboardOrigin, sourceDashboard.loopbackPort)}/oauth/callback/${encodeURIComponent(source)}`
             : publisher?.redirectUri
               ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
@@ -2017,6 +2031,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // under the identical key, and mistaking one for the other broke
             // reauthentication after the first successful publisher connect.
             clientIdSource: publisher ? 'publisher' : 'byo',
+            ...(ownDesktop ? { googleOwnApp: true } : {}),
           });
           // The starter is an injectable seam whose URL the owner's browser
           // will follow and whose clock the dashboard displays: the URL is
@@ -6948,12 +6963,14 @@ async function readConfiguredDashboardOAuthClientIds(
   output: Partial<Record<DashboardOAuthSource | 'google', string>>,
   secretStore: SecretStore,
 ): Promise<void> {
+  const sharedOwnAppId = (await readGoogleOwnAppRegistration(secretStore))?.clientId;
+  if (sharedOwnAppId) output.google = sharedOwnAppId;
   const sources: Array<DashboardOAuthSource | 'google'> = ['google', 'gmail', 'google-drive', 'dropbox', 'x'];
   for (const source of sources) {
     const clientId = await secretStore.get(dashboardOAuthClientIdConfigKey(source));
     if (!clientId) continue;
     if (await dashboardStoredClientIdIsPublisherOwned(source, clientId, dashboardOAuthClientIdConfigKey(source), secretStore)) continue;
-    output[source] = clientId;
+    if (source !== 'google' || !sharedOwnAppId) output[source] = clientId;
   }
 }
 
@@ -7150,6 +7167,8 @@ async function dashboardGoogleOAuthClientSecret(
   clientId: string,
 ): Promise<string | undefined> {
   if (fallback) return fallback;
+  const ownApp = await readGoogleOwnAppRegistration(secretStore);
+  if (ownApp?.clientId === clientId) return ownApp.clientSecret;
   if (clientId === dashboardGooglePilotClientId()) {
     // The pilot client's own secret, for an operator who packaged a
     // confidential client. Absent is the ordinary case and is not an error:
@@ -7378,10 +7397,27 @@ function safeVeniceCheckFailure(error: unknown): string {
 function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSource, clientIdSource?: 'publisher' | 'byo'): string {
   const message = error instanceof Error ? error.message : '';
   if (source === 'dropbox' && clientIdSource === 'byo' && message === 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.') return message;
+  // Only fixed setup-check sentences may cross the callback HTML boundary.
+  const setupMessages = source === 'x' ? [
+    'X could not complete the bookmarks read check. No credentials were stored; try connecting again when X is reachable.',
+    'X did not authorize the bookmarks read. Redo Enable OAuth 2.0 with bookmark.read and sign in again. No credentials were stored.',
+    'X refused the bookmarks read. Redo Check the cost to confirm paid API access and available credits, then Enable OAuth 2.0 with Read permissions and sign in again. No credentials were stored.',
+    'X could not complete the bookmarks read check. No credentials were stored; try connecting again later.',
+    'X returned an invalid bookmarks read result. No credentials were stored; try connecting again later.',
+  ] : dashboardGoogleOAuthSource(source) ? [
+    'Google could not be reached for the API check. Try signing in again.',
+    'Google did not allow this API read. Redo Make the project and turn on Gmail and Drive, then sign in and allow read access.',
+    'Google did not accept the sign-in. Sign in again and allow read access.',
+    'Google could not confirm API access. Check your app settings and sign in again.',
+  ] : [];
+  if (setupMessages.includes(message)) return message;
   const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message);
   // The code inside the shape is re-checked against the allowlist: the shape
   // alone would admit arbitrary lowercase content from a crafted message.
-  if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined)) return message;
+  if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined)) {
+    if (source === 'x' && ['401', '403'].includes(match[1]!)) return 'X did not accept the app key. Redo Enable OAuth 2.0, copy the Client ID and secret from the same app, and check the callback URI.';
+    return message;
+  }
   return `Connecting ${dashboardOAuthSourceLabel(source)} failed partway through. Start connect again from the dashboard.`;
 }
 

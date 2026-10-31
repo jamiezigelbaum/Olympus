@@ -337,6 +337,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         source: body.source as Extract<OlympusDashboardControlParams, { action: 'start_oauth' }>['source'],
         ...(body.client_id ? { client_id: body.client_id } : {}),
         ...(body.client_secret ? { client_secret: body.client_secret } : {}),
+        ...(body.google_desktop === 'true' ? { google_desktop: true } : {}),
+        ...(body.google_client_json ? { google_client_json: body.google_client_json } : {}),
       };
     }
     if (connect === 'this_computer') {
@@ -450,24 +452,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       closeAuthorizationTab(authorizationTab);
       const message = errorMessage(result);
       say(form, message);
-      const setup = form.closest<HTMLElement>('[data-setup-steps]');
-      const step = message.includes('Redo the Set up your account step') ? 0 : message.includes('Redo the Create an API key step') ? 1 : -1;
-      if (setup) {
-        const panels = Array.from(setup.querySelectorAll<HTMLElement>('[data-setup-panel]'));
-        const current = panels.findIndex(panel => !panel.hidden);
-        panels.forEach(panel => { panel.hidden = true; });
-        const actions = setup.querySelector<HTMLElement>('[data-setup-actions]');
-        if (actions) actions.hidden = true;
-        setup.querySelector('[data-setup-error]')?.remove();
-        const error = document.createElement('div');
-        error.dataset.setupError = '';
-        const banner = document.createElement('p');
-        banner.className = 'why'; banner.setAttribute('role', 'alert'); banner.textContent = message;
-        const retry = document.createElement('button');
-        retry.type = 'button'; retry.className = 'btn'; retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current));
-        retry.textContent = step === 0 ? 'Go to account and credit' : step === 1 ? 'Go to API key' : 'Try again';
-        error.append(banner, retry); setup.append(error); retry.focus();
-      }
+      showSetupFailure(form, message);
       return;
     }
     if (typeof authorizationUrl === 'string' && authorizationUrl.startsWith('https://')) {
@@ -893,6 +878,25 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const field = typeof body.field === 'string' ? body.field : '';
       const labels: Record<string, string> = { api_id: 'Telegram API ID', api_hash: 'Telegram API hash', phone: 'Phone number (with country code)', code: 'Telegram login code', password: 'Telegram two-step verification password' };
       const label = labels[field];
+      const setupSheet = card.querySelector<HTMLElement>('[data-messaging-setup]');
+      if (setupSheet) {
+        const intro = setupSheet.querySelector<HTMLElement>('[data-messaging-setup-intro]');
+        const active = !['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired'].includes(state);
+        if (intro) intro.hidden = state !== 'idle' && state !== 'cancelled';
+        const cancel = setupSheet.querySelector<HTMLElement>('[data-messaging-kind="cancel"]');
+        if (cancel) cancel.hidden = !active;
+        if (operation !== 'status' || active || state === 'failed') setSheetOpen(setupSheet, true);
+        setupSheet.querySelector('[data-pairing-error]')?.remove();
+        if (state === 'failed') {
+          const error = document.createElement('div'); error.dataset.pairingError = '';
+          const details = document.createElement('details'); details.className = 'howto';
+          const summary = document.createElement('summary'); summary.textContent = 'How to fix';
+          const hint = document.createElement('p'); hint.textContent = 'Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.';
+          details.append(summary, hint);
+          const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn'; retry.dataset.messagingRetry = ''; retry.textContent = 'Back to setup';
+          error.append(details, retry); setupSheet.append(error);
+        }
+      }
       if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : 'Pairing failed. Start pairing again to retry.') : state === 'idle' ? 'Pair this account to choose the chats Olympus may read.' : state === 'scope_selection_required' ? 'Paired. Nothing is being captured. Choose what Olympus may read.' : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard.' : state === 'cancelled' ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === 'telegram' ? 'Telegram active sessions' : 'WhatsApp linked devices'} to unlink it.` : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Pairing is running on this computer…';
       if (qr) {
         const value = typeof body.qr === 'string' ? body.qr : '';
@@ -1014,6 +1018,30 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     void submitControl(form, tab, submittedValues);
   }
 
+  function showSetupFailure(form: HTMLFormElement, message: string): void {
+      const setup = form.closest<HTMLElement>('[data-setup-steps]');
+      const step = message.includes('Redo the Set up your account step') ? 0 : message.includes('Redo the Create an API key step') ? 1 : -1;
+      if (setup) {
+        const panels = Array.from(setup.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+        const current = panels.findIndex(panel => !panel.hidden);
+        panels.forEach(panel => { panel.hidden = true; });
+        const actions = setup.querySelector<HTMLElement>('[data-setup-actions]');
+        if (actions) actions.hidden = true;
+        setup.querySelector('[data-setup-error]')?.remove();
+        const error = document.createElement('div');
+        error.dataset.setupError = '';
+        const banner = document.createElement('p');
+        banner.className = 'why'; banner.setAttribute('role', 'alert'); banner.textContent = message;
+        const retry = document.createElement('button');
+        retry.type = 'button'; retry.className = 'btn'; retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current));
+        retry.textContent = step === 0 ? 'Go to account and credit' : step === 1 ? 'Go to API key' : 'Try again';
+        const details = document.createElement('details'); details.className = 'howto';
+        const summary = document.createElement('summary'); summary.textContent = 'How to fix';
+        const hint = document.createElement('p'); hint.textContent = 'Return to setup, check the app settings and add the key again. Your login code and password are never shown here.';
+        details.append(summary, hint); error.append(banner, details, retry); setup.append(error); retry.focus();
+      }
+  }
+
   function showSetupStep(sheet: HTMLElement, step: number): void {
     const panels = Array.from(sheet.querySelectorAll<HTMLElement>('[data-setup-panel]'));
     panels.forEach((panel, index) => { panel.hidden = index !== step; });
@@ -1037,9 +1065,74 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (heading) { heading.tabIndex = -1; heading.focus(); }
   }
 
+  async function readClientFile(form: HTMLFormElement, file: File | undefined): Promise<void> {
+    const raw = form.querySelector<HTMLInputElement>('[name="google_client_json"]');
+    const status = form.querySelector<HTMLElement>('[data-client-file-status]');
+    if (!raw || !status || !file) return;
+    raw.value = '';
+    try {
+      if (file.size > 64 * 1024) throw new Error();
+      const text = await file.text();
+      const app = JSON.parse(text)?.installed;
+      if (!app || typeof app.client_id !== 'string' || typeof app.client_secret !== 'string' || !app.client_id.endsWith('.apps.googleusercontent.com') || !app.client_secret.trim()) throw new Error();
+      raw.value = text;
+      for (const field of Array.from(form.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]'))) { field.value = ''; field.disabled = true; }
+      status.textContent = 'Desktop app file ready. Connect to check the key with Google.';
+    } catch {
+      status.textContent = '';
+      showSetupFailure(form, 'Choose the JSON downloaded for a Desktop app in Google Cloud Clients. Web app keys cannot use this flow.');
+      for (const field of Array.from(form.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]'))) field.disabled = false;
+    }
+    const picker = form.querySelector<HTMLInputElement>('[data-client-file]');
+    if (picker) picker.value = '';
+  }
+
+  function onClientFileChange(event: Event): void {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    if (input?.matches('[data-client-file]') && input.form) void readClientFile(input.form, input.files?.[0]);
+  }
+  function onClientFileDrop(event: Event): void {
+    const zone = event.target instanceof Element ? event.target.closest('[data-client-file-drop]') : null;
+    if (!zone) return;
+    event.preventDefault();
+    const form = zone.closest('form');
+    if (form && event.type === 'drop') void readClientFile(form, (event as DragEvent).dataTransfer?.files[0]);
+  }
+
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
+    const messagingRetry = target.closest('[data-messaging-retry]');
+    if (messagingRetry) {
+      const sheet = messagingRetry.closest('[data-messaging-setup]');
+      const intro = sheet?.querySelector<HTMLElement>('[data-messaging-setup-intro]');
+      if (intro) intro.hidden = false;
+      sheet?.querySelector('[data-pairing-error]')?.remove();
+      const status = sheet?.querySelector<HTMLElement>('[data-messaging-status]');
+      if (status) status.textContent = '';
+      return;
+    }
+    if (target.closest('[data-client-paste] summary')) {
+      const form = target.closest('form');
+      const raw = form?.querySelector<HTMLInputElement>('[name="google_client_json"]');
+      if (raw) raw.value = '';
+      const fileStatus = form?.querySelector<HTMLElement>('[data-client-file-status]');
+      if (fileStatus) fileStatus.textContent = '';
+      form?.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]').forEach(field => { field.disabled = false; });
+    }
+    const begin = target.closest('[data-setup-begin]');
+    if (begin) {
+      const sheet = begin.closest('.sheet');
+      const walkthrough = sheet?.querySelector<HTMLElement>('[data-setup-walkthrough]');
+      if (walkthrough) {
+        walkthrough.hidden = false;
+        const heading = walkthrough.querySelector<HTMLElement>('h4');
+        if (heading) { heading.tabIndex = -1; heading.focus(); }
+      }
+      const lead = sheet?.querySelector<HTMLElement>('[data-setup-lead]');
+      if (lead) lead.hidden = true;
+      return;
+    }
     if (target.closest('[data-connect-retry]')) {
       const sheet = target.closest('.sheet');
       const error = sheet?.querySelector<HTMLElement>('[data-connect-error]');
@@ -1259,6 +1352,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
+  root.addEventListener('change', onClientFileChange);
+  root.addEventListener('dragover', onClientFileDrop);
+  root.addEventListener('drop', onClientFileDrop);
   // Coming back from the approval browser or tab is the moment the exchange
   // may have just landed: one authoritative read, and only while this
   // controller still owes the owner an answer about a start it performed.
@@ -1293,6 +1389,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
+    root.removeEventListener('change', onClientFileChange);
+    root.removeEventListener('dragover', onClientFileDrop);
+    root.removeEventListener('drop', onClientFileDrop);
     root.removeEventListener(redrawEvent, onRedrawRequest);
   };
   options.signal.addEventListener('abort', dispose, { once: true });

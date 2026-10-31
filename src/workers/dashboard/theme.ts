@@ -381,6 +381,8 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
 .setupfields { display: grid; gap: 8px; width: 100%; }
+[data-client-file-drop] { border: 1px dashed var(--line); border-radius: 8px; padding: 20px; text-align: center; }
+[data-client-file-drop] input { max-width: 100%; }
 .setupfields .keyfield { width: 100%; box-sizing: border-box; }
 .setupactions { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
 .setupactions > .primary { margin-left: auto; }

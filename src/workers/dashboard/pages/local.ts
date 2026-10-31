@@ -265,7 +265,7 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
       label: source.label,
       blurb: action.instructions.plain_intro,
       ...dashboardSetupLead(source.source_id, action.instructions.plain_intro),
-      action: { label: action.label, kind: 'none', sheet: sheetId, ...gate },
+      action: { label: providerNote(view, action).lead?.button ?? action.label, kind: 'none', sheet: sheetId, ...gate },
       ...(link === undefined ? {} : { blurbLink: link }),
     });
     return `${row}\n${sheet}`;
@@ -278,8 +278,8 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
       const row = setupRow({
         ...id,
         label: source.label,
-        blurb: setupBlurb(source),
-        action: { label: action.label, kind: 'none', sheet: connect.sheetId, ...gate },
+        blurb: providerNote(view, action).lead?.title ?? setupBlurb(source),
+        action: { label: providerNote(view, action).lead?.button ?? action.label, kind: 'none', sheet: connect.sheetId, ...gate },
       });
       return `${row}\n${connect.sheet}`;
     }
@@ -308,7 +308,13 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
 function providerNote(
   view: SourceDashboardViewModel,
   action: Extract<DashboardSourceAction, { kind: 'oauth' | 'needs_setup' }>,
-): { providerNote?: string } {
+): { providerNote?: string; lead?: { title: string; body: string; button: string; notes: string[] } } {
+  if ((action.source === 'gmail' || action.source === 'google-drive') && view.google_pilot?.mode === 'advanced_byo_required') return { lead: {
+    title: "Olympus's Google sign-in is full",
+    body: "Until Google reviews Olympus, it lets 100 people use Olympus's Google app. You can still connect Gmail and Drive with a free app of your own. It takes about ten minutes.",
+    button: 'Set up my own Google app',
+    notes: ["What changes: Google shows your own name on its warning, not Olympus's.", "What stays the same: Olympus reads your mail on this computer, and judges each message Personal, Private or Secret as before."],
+  } };
   const note = dashboardGoogleProviderNote(view, action);
   return note === undefined ? {} : { providerNote: note };
 }

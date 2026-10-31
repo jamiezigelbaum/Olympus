@@ -6553,6 +6553,90 @@ var init_secret_store = __esm(() => {
   };
 });
 
+// src/core/google-own-app.ts
+function parseGoogleDesktopClient(text) {
+  try {
+    if (text.length > 64 * 1024)
+      throw new Error;
+    const value = JSON.parse(text)?.installed;
+    if (!value || typeof value.client_id !== "string" || typeof value.client_secret !== "string")
+      throw new Error;
+    const client = { clientId: value.client_id.trim(), clientSecret: value.client_secret.trim() };
+    validateClient(client);
+    return client;
+  } catch {
+    throw new Error(FILE_ERROR);
+  }
+}
+function validateClient(client) {
+  if (typeof client?.clientId !== "string" || typeof client?.clientSecret !== "string" || !/^[A-Za-z0-9._-]{1,240}\.apps\.googleusercontent\.com$/.test(client.clientId) || !client.clientSecret || client.clientSecret.length > 1024 || /\s/.test(client.clientSecret)) {
+    throw new Error("Copy the Client ID and secret from the same Desktop app in Google Cloud Clients.");
+  }
+}
+async function checkGoogleOwnApp(client, fetchImpl = fetch) {
+  validateClient(client);
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(fetchImpl, "https://oauth2.googleapis.com/token", {
+      method: "POST",
+      redirect: "error",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: client.clientId, client_secret: client.clientSecret, grant_type: "refresh_token", refresh_token: "olympus-app-check-not-a-user-token" }).toString()
+    }, { timeoutMs: 1e4, limitBytes: 16 * 1024 }));
+  } catch {
+    throw new Error("Google could not be reached to check your app key. Try again.");
+  }
+  let code;
+  try {
+    code = JSON.parse(text)?.error;
+  } catch {}
+  if (response.status === 400 && code === "invalid_grant")
+    return;
+  if (code === "invalid_client" || code === "unauthorized_client")
+    throw new Error("Google did not accept this app key. Redo Make a Desktop app key and download it, then add the new file.");
+  throw new Error("Google could not confirm this app key. Check the Desktop client in Google Cloud Clients, then try again.");
+}
+async function checkGoogleOwnAppAccess(source, accessToken, fetchImpl = fetch) {
+  const checks = source === "google" ? ["gmail", "google-drive"] : [source];
+  for (const check of checks) {
+    const url = check === "gmail" ? "https://gmail.googleapis.com/gmail/v1/users/me/profile" : "https://www.googleapis.com/drive/v3/about?fields=user(permissionId)";
+    let response;
+    let text;
+    try {
+      ({ response, text } = await fetchBoundedText(fetchImpl, url, { headers: { Authorization: `Bearer ${accessToken}` }, redirect: "error" }, { timeoutMs: 1e4, limitBytes: 64 * 1024 }));
+    } catch {
+      throw new Error("Google could not be reached for the API check. Try signing in again.");
+    }
+    if (response.status === 403)
+      throw new Error("Google did not allow this API read. Redo Make the project and turn on Gmail and Drive, then sign in and allow read access.");
+    if (response.status === 401)
+      throw new Error("Google did not accept the sign-in. Sign in again and allow read access.");
+    let value = {};
+    try {
+      value = JSON.parse(text) ?? {};
+    } catch {}
+    if (!response.ok || (check === "gmail" ? typeof value.emailAddress !== "string" : typeof value.user?.permissionId !== "string"))
+      throw new Error("Google could not confirm API access. Check your app settings and sign in again.");
+  }
+}
+async function readGoogleOwnAppRegistration(store) {
+  const raw = await store.get("google.own_app.registration");
+  if (!raw)
+    return;
+  try {
+    const client = JSON.parse(raw);
+    validateClient(client);
+    return client;
+  } catch {
+    return;
+  }
+}
+var FILE_ERROR = "Choose the JSON downloaded for a Desktop app in Google Cloud Clients. Web app keys cannot use this flow.";
+var init_google_own_app = __esm(() => {
+  init_http_timeout();
+});
+
 // src/core/owner-config-read.ts
 import { readFileSync as readFileSync11, statSync as statSync3, lstatSync as lstatSync10 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
@@ -11675,6 +11759,39 @@ async function checkDropboxConnection(accessToken, fetchImpl, timeoutMs, tokenUr
   if (!response.ok)
     throw new Error("Dropbox could not complete the list check. No credentials were stored; try again.");
 }
+async function checkXBookmarksConnection(options) {
+  const url = new URL(`/2/users/${encodeURIComponent(options.userId)}/bookmarks`, options.tokenUrl);
+  url.searchParams.set("max_results", "1");
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(options.fetchImpl, url.toString(), {
+      method: "GET",
+      headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" },
+      redirect: "error"
+    }, { timeoutMs: options.timeoutMs, limitBytes: 64 * 1024 }));
+  } catch {
+    throw new Error("X could not complete the bookmarks read check. No credentials were stored; try connecting again when X is reachable.");
+  }
+  if (response.status === 401)
+    throw new Error("X did not authorize the bookmarks read. Redo Enable OAuth 2.0 with bookmark.read and sign in again. No credentials were stored.");
+  if (response.status === 402 || response.status === 403)
+    throw new Error("X refused the bookmarks read. Redo Check the cost to confirm paid API access and available credits, then Enable OAuth 2.0 with Read permissions and sign in again. No credentials were stored.");
+  if (!response.ok)
+    throw new Error("X could not complete the bookmarks read check. No credentials were stored; try connecting again later.");
+  let valid = false;
+  try {
+    const payload = JSON.parse(text);
+    if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+      const count = payload.meta?.result_count;
+      const data = payload.data;
+      const noErrors = payload.errors === undefined || Array.isArray(payload.errors) && payload.errors.length === 0;
+      valid = noErrors && (count === 0 ? data === undefined || Array.isArray(data) && data.length === 0 : count === 1 && Array.isArray(data) && data.length === 1 && typeof data[0]?.id === "string" && /^\d+$/.test(data[0].id) && typeof data[0]?.text === "string");
+    }
+  } catch {}
+  if (!valid)
+    throw new Error("X returned an invalid bookmarks read result. No credentials were stored; try connecting again later.");
+}
 async function completeOAuthSourceConnection(prepared, code) {
   const usesGooglePublisherExchange = isGooglePublisherExchangeClient(prepared.options.source, prepared.clientId);
   const shippedDesktopSecret = isGoogleOAuthSource(prepared.options.source) ? googleDesktopClientSecret(prepared.clientId) : undefined;
@@ -11694,6 +11811,9 @@ async function completeOAuthSourceConnection(prepared, code) {
   if (!token.refreshToken)
     throw new Error("OAuth provider did not return a refresh token. Re-run connect and request offline access.");
   const refreshToken = token.refreshToken;
+  if (prepared.options.googleOwnApp && isGoogleOAuthSource(prepared.options.source)) {
+    await checkGoogleOwnAppAccess(prepared.options.source, token.accessToken, prepared.options.fetch ?? fetch);
+  }
   if (prepared.options.source === "dropbox") {
     await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs, prepared.options.tokenUrl ?? prepared.definition.tokenUrl);
   }
@@ -11701,6 +11821,13 @@ async function completeOAuthSourceConnection(prepared, code) {
   if (prepared.options.source === "x") {
     xUserId = await fetchXUserId({
       tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      accessToken: token.accessToken,
+      fetchImpl: prepared.options.fetch ?? fetch,
+      timeoutMs: prepared.tokenExchangeTimeoutMs
+    });
+    await checkXBookmarksConnection({
+      tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      userId: xUserId,
       accessToken: token.accessToken,
       fetchImpl: prepared.options.fetch ?? fetch,
       timeoutMs: prepared.tokenExchangeTimeoutMs
@@ -12846,6 +12973,7 @@ function retryableErrorDisposition(error, now) {
 }
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, DROPBOX_OAUTH_SCOPES, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
+  init_google_own_app();
   init_owner_config_read();
   init_linux_engine_layout();
   init_google_handle_compatibility();
@@ -95303,8 +95431,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       return { kind: "none" };
     const knownClientId = oauthClientIdForSource(definition.connect_action.source, oauthClientIds);
     const clientSecretRequired = definition.connect_action.source === "x";
-    const googleWebClient = isGoogleOAuthSource2(definition.connect_action.source) && googleOAuthClientType(oauthRedirectBaseUrl) === "web";
-    const clientSecretOnFile = (clientSecretRequired || googleWebClient) && oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
+    const clientSecretOnFile = (clientSecretRequired || isGoogleOAuthSource2(definition.connect_action.source)) && oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
     const hasClientSecret = !clientSecretRequired || clientSecretOnFile;
     const redirectUriToRegister = oauthRedirectUriToRegister(definition.connect_action.source, oauthRedirectBaseUrl);
     const redirectUriGuidance = oauthRedirectUriGuidance(definition.connect_action.source, oauthRedirectBaseUrl);
@@ -95383,7 +95510,7 @@ function publisherOAuthSetupInstructions(sourceLabel2, actionLabel, byo) {
     agent_prompt: `Connect ${sourceLabel2} to Olympus from the Olympus dashboard: press ${actionLabel} on the ` + `${sourceLabel2} card, approve the access in the provider tab that opens, and come back to the dashboard. ` + "Olympus uses its own registered app, so there is nothing for me to create, register, or paste. " + "Do not ask me to edit files, configuration, or code.",
     provider_console_url: byo.provider_console_url,
     ...byo.google_cloud_project_id ? { google_cloud_project_id: byo.google_cloud_project_id } : {},
-    diy_summary: PUBLISHER_ADVANCED_BYO_SUMMARY,
+    diy_summary: byo.credential_file ? "Use my own Google app" : PUBLISHER_ADVANCED_BYO_SUMMARY,
     diy_steps: [],
     secret_shown_once: false,
     fields: [],
@@ -95407,32 +95534,30 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
     secret: true
   };
   if (isGoogleOAuthSource2(source)) {
-    const sourceLabel2 = source === "google-drive" ? "Google Drive" : source === "google" ? "Google" : "Gmail";
-    const sourceObject = source === "google-drive" ? "your Google Drive" : source === "google" ? "your Google data" : "your Gmail";
-    const web = googleOAuthClientType(redirectBaseUrl) === "web";
-    const clientTypeName = web ? "Web application" : "Desktop app";
-    const redirectClause = web ? `adding the redirect URI shown on the Olympus dashboard's ${sourceLabel2} card to that client's Authorized redirect URIs` : "confirming that Google accepts the loopback callback this dashboard uses without registering a redirect URI";
     return {
-      plain_intro: web ? `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google Web application Client ID and Client secret you create in your own Google account. Register the redirect URI shown on this card on that client, then copy the Client ID and the Client secret into the fields on this card. Google Web clients need the secret to finish sign-in. Google shows you exactly what Olympus can see.` : `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google Desktop app Client ID you create in your own Google account. PKCE protects the exchange, so there is no client secret to paste. Google shows you exactly what Olympus can see.`,
-      agent_prompt: web ? `Help me connect ${sourceLabel2} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel2} API, and ${redirectClause}. Then tell me where to find the Client ID and the Client secret so I can paste each into its own field on that card and press Connect. Google Web clients need the secret to finish sign-in; do not ask me to type it into this chat, only into the Client secret field on the card. Do not ask me to edit files, configuration, or code.` : `Help me connect ${sourceLabel2} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel2} API, and ${redirectClause}. Then give me the Client ID so I can paste it into the Client ID field on that card and press Connect. PKCE protects the exchange, so no client secret is needed. Do not ask me to edit files, configuration, or code.`,
-      provider_console_url: googleConsoleUrl("https://console.cloud.google.com/auth/clients", googleCloudProjectId),
-      ...googleCloudProjectId ? { google_cloud_project_id: googleCloudProjectId } : {},
-      diy_summary: "Or set it up yourself (about 5 minutes)",
+      plain_intro: "Three stops in Google Cloud. Each button opens the exact page.",
+      setup_provider: "Google Cloud",
+      setup_heading: "Connect Gmail with your own Google app",
+      credential_file: "google_desktop",
+      agent_prompt: "Help me connect Gmail and Drive with my own Google app using the dashboard walkthrough. Create a project, enable Gmail and Drive APIs, publish the External sign-in screen, then create a Desktop app client and download its JSON. Add that file only in the Olympus dashboard. Never ask for the client secret in chat.",
+      provider_console_url: "https://console.cloud.google.com/auth/clients",
+      diy_summary: "Use my own Google app",
       diy_steps: [
-        { text: "Sign in to Google Cloud.", link: { label: "Open Google OAuth clients", url: googleConsoleUrl("https://console.cloud.google.com/auth/clients", googleCloudProjectId) } },
-        { text: "Create or choose a project named Olympus." },
-        { text: "Set the consent screen to External, then publish it to production. Testing mode stops working after 7 days." },
-        web ? { text: "Create an OAuth client ID, choose Web application, and add the redirect URI shown on this card to its Authorized redirect URIs. A Desktop app client cannot register an https redirect URI." } : { text: "Create an OAuth client ID and choose Desktop app. Google accepts this dashboard's loopback callback with nothing to register." },
-        { text: "Enable the Gmail API for this project. Sync returns 403 errors until the Gmail and Drive APIs are enabled.", link: { label: "Open Gmail API", url: googleConsoleUrl("https://console.cloud.google.com/apis/library/gmail.googleapis.com", googleCloudProjectId) } },
-        { text: "Enable the Google Drive API for the same project.", link: { label: "Open Google Drive API", url: googleConsoleUrl("https://console.cloud.google.com/apis/library/drive.googleapis.com", googleCloudProjectId) } },
-        web ? { text: "Copy the Client ID and the Client secret shown in the popup into the fields below. A Google Web application client needs its secret to finish sign-in. Paste the secret only into the Client secret field on this card; Olympus keeps it on this computer." } : { text: "Copy the Client ID shown in the popup. Olympus uses PKCE and does not need the client secret." }
+        { title: "Make the project and turn on Gmail and Drive", text: "Create a project, select it, then enable both APIs using the links below.", button_label: "Open Google Cloud", link: { label: "Google Cloud", url: "https://console.cloud.google.com/projectcreate" }, links: [
+          { label: "Enable Gmail API", url: "https://console.cloud.google.com/apis/library/gmail.googleapis.com" },
+          { label: "Enable Google Drive API", url: "https://console.cloud.google.com/apis/library/drive.googleapis.com" }
+        ] },
+        { title: "Set up the sign-in screen and publish it", text: "External, your own email, then Publish app.", button_label: "Open the sign-in screen", link: { label: "Sign-in screen", url: "https://console.cloud.google.com/auth/overview" }, links: [{ label: "Publish app in Audience", url: "https://console.cloud.google.com/auth/audience" }] },
+        { title: "Make a Desktop app key and download it", text: "Choose Download JSON when Google shows the key.", button_label: "Open Clients", link: { label: "Clients", url: "https://console.cloud.google.com/auth/clients" } },
+        { title: "Add your app key", text: "Drive uses the same app." }
       ],
       secret_shown_once: false,
-      fields: web ? [clientIdField, clientSecretField] : [clientIdField]
+      fields: [clientIdField, clientSecretField]
     };
   }
   if (source === "dropbox") {
     return {
+      setup_provider: "Dropbox",
       plain_intro: "To read your Dropbox files, Olympus needs your Dropbox App key (Dropbox's name for the OAuth client id), shown on the app's Settings tab in your Dropbox developer account. Dropbox uses PKCE here, so there is no app secret to paste.",
       agent_prompt: "Help me connect Dropbox to Olympus. Walk me through creating a Dropbox app at https://www.dropbox.com/developers/apps (Scoped access, the folder access I want, named Olympus) or reusing my existing Olympus app, enabling the files.metadata.read, files.content.read, sharing.read and account_info.read permissions, and adding the redirect URI shown on the Olympus dashboard's Dropbox card under the app's OAuth 2 redirect URIs. Then give me the App key so I can paste it into the Client ID field on that card and press Connect. Dropbox uses PKCE, so no app secret is needed. Do not ask me to edit files, configuration, or code.",
       provider_console_url: "https://www.dropbox.com/developers/apps",
@@ -95453,12 +95578,13 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
     agent_prompt: "Help me connect X bookmarks to Olympus. Walk me through creating an app at https://console.x.com, opening the app's Settings (Authentication settings: App permissions Read, Type of App Web App, Automated App or Bot), adding the redirect URI shown on the Olympus dashboard's X bookmarks card under Callback URI / Redirect URL, saving, and finding the OAuth 2.0 Client ID and Client secret under Keys & Tokens so I can paste them into that card and press Connect. Remind me that reading bookmarks needs paid X API access before I start. Do not ask me to edit files, configuration, or code.",
     provider_console_url: "https://console.x.com",
     diy_summary: "Or set it up yourself (about 5 minutes)",
+    setup_provider: "X",
     diy_steps: [
-      { text: "Sign in to the X Developer Portal.", link: { label: "Open X developer console", url: "https://console.x.com" } },
-      { text: "Create or choose a project and app named Olympus." },
-      { text: "Open the app's Settings. Under Type of App choose Web App, Automated App or Bot (a Confidential client); under App permissions, Read is enough." },
-      { text: "Under Callback URI / Redirect URL press Add another, paste the exact redirect URI shown on this card, and press Save Changes." },
-      { text: "Back on Keys & Tokens, copy the OAuth 2.0 Client ID and Client secret into the fields below. X shows the secret once; Regenerate it if you no longer have it." }
+      { title: "Check the cost", text: "Reading bookmarks needs paid X API access. X currently charges by usage with credits. Review the costs before connecting.", button_label: "Open X pricing", link: { label: "X pricing", url: "https://docs.x.com/x-api/getting-started/pricing" } },
+      { title: "Create your app", text: "Sign in to the X developer console and create or choose your app.", link: { label: "X developer console", url: "https://console.x.com" } },
+      { title: "Enable OAuth 2.0", text: "Open the app Settings. Choose Web App, Automated App or Bot (Confidential client), with Read permissions. Olympus requests tweet.read, users.read, bookmark.read and offline.access.", link: { label: "X developer console", url: "https://console.x.com" } },
+      { title: "Register the callback", text: "Under Callback URI / Redirect URL, add this exact URI and save.", redirect_uri: true, link: { label: "X developer console", url: "https://console.x.com" } },
+      { title: "Add your app key", text: "Under Keys & Tokens, copy the OAuth 2.0 Client ID and Client secret. X shows the secret once. After sign-in Olympus checks it can read bookmarks before saving the connection." }
     ],
     secret_shown_once: true,
     fields: [clientIdField, clientSecretField]
@@ -144010,7 +144136,9 @@ function mountDashboardController(options) {
         action: "start_oauth",
         source: body.source,
         ...body.client_id ? { client_id: body.client_id } : {},
-        ...body.client_secret ? { client_secret: body.client_secret } : {}
+        ...body.client_secret ? { client_secret: body.client_secret } : {},
+        ...body.google_desktop === "true" ? { google_desktop: true } : {},
+        ...body.google_client_json ? { google_client_json: body.google_client_json } : {}
       };
     }
     if (connect === "this_computer") {
@@ -144116,33 +144244,7 @@ function mountDashboardController(options) {
       closeAuthorizationTab(authorizationTab);
       const message2 = errorMessage3(result);
       say(form, message2);
-      const setup = form.closest("[data-setup-steps]");
-      const step = message2.includes("Redo the Set up your account step") ? 0 : message2.includes("Redo the Create an API key step") ? 1 : -1;
-      if (setup) {
-        const panels = Array.from(setup.querySelectorAll("[data-setup-panel]"));
-        const current2 = panels.findIndex((panel) => !panel.hidden);
-        panels.forEach((panel) => {
-          panel.hidden = true;
-        });
-        const actions = setup.querySelector("[data-setup-actions]");
-        if (actions)
-          actions.hidden = true;
-        setup.querySelector("[data-setup-error]")?.remove();
-        const error2 = document.createElement("div");
-        error2.dataset.setupError = "";
-        const banner = document.createElement("p");
-        banner.className = "why";
-        banner.setAttribute("role", "alert");
-        banner.textContent = message2;
-        const retry = document.createElement("button");
-        retry.type = "button";
-        retry.className = "btn";
-        retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current2));
-        retry.textContent = step === 0 ? "Go to account and credit" : step === 1 ? "Go to API key" : "Try again";
-        error2.append(banner, retry);
-        setup.append(error2);
-        retry.focus();
-      }
+      showSetupFailure(form, message2);
       return;
     }
     if (typeof authorizationUrl === "string" && authorizationUrl.startsWith("https://")) {
@@ -144560,6 +144662,37 @@ function mountDashboardController(options) {
       const field = typeof body.field === "string" ? body.field : "";
       const labels = { api_id: "Telegram API ID", api_hash: "Telegram API hash", phone: "Phone number (with country code)", code: "Telegram login code", password: "Telegram two-step verification password" };
       const label = labels[field];
+      const setupSheet = card.querySelector("[data-messaging-setup]");
+      if (setupSheet) {
+        const intro = setupSheet.querySelector("[data-messaging-setup-intro]");
+        const active = !["idle", "failed", "cancelled", "completed", "complete", "paired"].includes(state);
+        if (intro)
+          intro.hidden = state !== "idle" && state !== "cancelled";
+        const cancel = setupSheet.querySelector('[data-messaging-kind="cancel"]');
+        if (cancel)
+          cancel.hidden = !active;
+        if (operation !== "status" || active || state === "failed")
+          setSheetOpen(setupSheet, true);
+        setupSheet.querySelector("[data-pairing-error]")?.remove();
+        if (state === "failed") {
+          const error2 = document.createElement("div");
+          error2.dataset.pairingError = "";
+          const details = document.createElement("details");
+          details.className = "howto";
+          const summary = document.createElement("summary");
+          summary.textContent = "How to fix";
+          const hint = document.createElement("p");
+          hint.textContent = "Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.";
+          details.append(summary, hint);
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.className = "btn";
+          retry.dataset.messagingRetry = "";
+          retry.textContent = "Back to setup";
+          error2.append(details, retry);
+          setupSheet.append(error2);
+        }
+      }
       if (status)
         status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === "telegram" ? "Telegram active sessions" : "WhatsApp linked devices"} to unlink it.` : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
       if (qr) {
@@ -144762,6 +144895,42 @@ function mountDashboardController(options) {
     const tab = form.dataset.connectKind === "oauth" ? openAuthorizationTab() : null;
     submitControl(form, tab, submittedValues);
   }
+  function showSetupFailure(form, message2) {
+    const setup = form.closest("[data-setup-steps]");
+    const step = message2.includes("Redo the Set up your account step") ? 0 : message2.includes("Redo the Create an API key step") ? 1 : -1;
+    if (setup) {
+      const panels = Array.from(setup.querySelectorAll("[data-setup-panel]"));
+      const current2 = panels.findIndex((panel) => !panel.hidden);
+      panels.forEach((panel) => {
+        panel.hidden = true;
+      });
+      const actions = setup.querySelector("[data-setup-actions]");
+      if (actions)
+        actions.hidden = true;
+      setup.querySelector("[data-setup-error]")?.remove();
+      const error2 = document.createElement("div");
+      error2.dataset.setupError = "";
+      const banner = document.createElement("p");
+      banner.className = "why";
+      banner.setAttribute("role", "alert");
+      banner.textContent = message2;
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "btn";
+      retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current2));
+      retry.textContent = step === 0 ? "Go to account and credit" : step === 1 ? "Go to API key" : "Try again";
+      const details = document.createElement("details");
+      details.className = "howto";
+      const summary = document.createElement("summary");
+      summary.textContent = "How to fix";
+      const hint = document.createElement("p");
+      hint.textContent = "Return to setup, check the app settings and add the key again. Your login code and password are never shown here.";
+      details.append(summary, hint);
+      error2.append(banner, details, retry);
+      setup.append(error2);
+      retry.focus();
+    }
+  }
   function showSetupStep(sheet, step) {
     const panels = Array.from(sheet.querySelectorAll("[data-setup-panel]"));
     panels.forEach((panel, index) => {
@@ -144795,10 +144964,94 @@ function mountDashboardController(options) {
       heading.focus();
     }
   }
+  async function readClientFile(form, file) {
+    const raw = form.querySelector('[name="google_client_json"]');
+    const status = form.querySelector("[data-client-file-status]");
+    if (!raw || !status || !file)
+      return;
+    raw.value = "";
+    try {
+      if (file.size > 64 * 1024)
+        throw new Error;
+      const text3 = await file.text();
+      const app = JSON.parse(text3)?.installed;
+      if (!app || typeof app.client_id !== "string" || typeof app.client_secret !== "string" || !app.client_id.endsWith(".apps.googleusercontent.com") || !app.client_secret.trim())
+        throw new Error;
+      raw.value = text3;
+      for (const field of Array.from(form.querySelectorAll('[name="client_id"], [name="client_secret"]'))) {
+        field.value = "";
+        field.disabled = true;
+      }
+      status.textContent = "Desktop app file ready. Connect to check the key with Google.";
+    } catch {
+      status.textContent = "";
+      showSetupFailure(form, "Choose the JSON downloaded for a Desktop app in Google Cloud Clients. Web app keys cannot use this flow.");
+      for (const field of Array.from(form.querySelectorAll('[name="client_id"], [name="client_secret"]')))
+        field.disabled = false;
+    }
+    const picker = form.querySelector("[data-client-file]");
+    if (picker)
+      picker.value = "";
+  }
+  function onClientFileChange(event) {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    if (input?.matches("[data-client-file]") && input.form)
+      readClientFile(input.form, input.files?.[0]);
+  }
+  function onClientFileDrop(event) {
+    const zone = event.target instanceof Element ? event.target.closest("[data-client-file-drop]") : null;
+    if (!zone)
+      return;
+    event.preventDefault();
+    const form = zone.closest("form");
+    if (form && event.type === "drop")
+      readClientFile(form, event.dataTransfer?.files[0]);
+  }
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    const messagingRetry = target.closest("[data-messaging-retry]");
+    if (messagingRetry) {
+      const sheet = messagingRetry.closest("[data-messaging-setup]");
+      const intro = sheet?.querySelector("[data-messaging-setup-intro]");
+      if (intro)
+        intro.hidden = false;
+      sheet?.querySelector("[data-pairing-error]")?.remove();
+      const status = sheet?.querySelector("[data-messaging-status]");
+      if (status)
+        status.textContent = "";
+      return;
+    }
+    if (target.closest("[data-client-paste] summary")) {
+      const form = target.closest("form");
+      const raw = form?.querySelector('[name="google_client_json"]');
+      if (raw)
+        raw.value = "";
+      const fileStatus = form?.querySelector("[data-client-file-status]");
+      if (fileStatus)
+        fileStatus.textContent = "";
+      form?.querySelectorAll('[name="client_id"], [name="client_secret"]').forEach((field) => {
+        field.disabled = false;
+      });
+    }
+    const begin = target.closest("[data-setup-begin]");
+    if (begin) {
+      const sheet = begin.closest(".sheet");
+      const walkthrough = sheet?.querySelector("[data-setup-walkthrough]");
+      if (walkthrough) {
+        walkthrough.hidden = false;
+        const heading = walkthrough.querySelector("h4");
+        if (heading) {
+          heading.tabIndex = -1;
+          heading.focus();
+        }
+      }
+      const lead = sheet?.querySelector("[data-setup-lead]");
+      if (lead)
+        lead.hidden = true;
+      return;
+    }
     if (target.closest("[data-connect-retry]")) {
       const sheet = target.closest(".sheet");
       const error2 = sheet?.querySelector("[data-connect-error]");
@@ -145010,6 +145263,9 @@ function mountDashboardController(options) {
   }
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
+  root.addEventListener("change", onClientFileChange);
+  root.addEventListener("dragover", onClientFileDrop);
+  root.addEventListener("drop", onClientFileDrop);
   const refreshOnReturn = () => {
     if (disposed || options.signal.aborted || !awaitingAuthorizationReturn)
       return;
@@ -145049,6 +145305,9 @@ function mountDashboardController(options) {
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
+    root.removeEventListener("change", onClientFileChange);
+    root.removeEventListener("dragover", onClientFileDrop);
+    root.removeEventListener("drop", onClientFileDrop);
     root.removeEventListener(redrawEvent, onRedrawRequest);
   };
   options.signal.addEventListener("abort", dispose, { once: true });
@@ -145385,6 +145644,8 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
 .setupfields { display: grid; gap: 8px; width: 100%; }
+[data-client-file-drop] { border: 1px dashed var(--line); border-radius: 8px; padding: 20px; text-align: center; }
+[data-client-file-drop] input { max-width: 100%; }
 .setupfields .keyfield { width: 100%; box-sizing: border-box; }
 .setupactions { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
 .setupactions > .primary { margin-left: auto; }
@@ -145643,9 +145904,13 @@ function setupStepsSheet(input) {
   const formId = `${id}-form`;
   const panels = input.steps.map((step, index) => {
     const url2 = step.link && safeExternalHref(step.link.url);
-    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">Open this page in ${escapeHtml2(input.provider)}</button>` + `<p><a class="ext" href="${escapeHtml2(url2)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml2(input.provider)} ↗</a></p>` : "";
+    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">${escapeHtml2(step.button_label ?? `Open this page in ${input.provider}`)}</button>` + `<p><a class="ext" href="${escapeHtml2(url2)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml2(input.provider)} ↗</a></p>` : "";
+    const extraLinks = (step.links ?? []).map((link2) => {
+      const href = safeExternalHref(link2.url);
+      return href ? `<p><a class="ext" href="${escapeHtml2(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml2(link2.label)} ↗</a></p>` : "";
+    }).join("");
     const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
-    return `<div data-setup-panel${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
+    return `<div data-setup-panel${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${extraLinks}${redirect}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
   }).join("");
   return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${count === 1 ? "" : " hidden"}>${escapeHtml2(input.submitLabel ?? "Connect")}</button></div></div>`;
 }
@@ -145655,7 +145920,7 @@ function connectSetupSheet(input) {
   const inputs = input.fields.map((field) => {
     const value2 = field.secret && input.savedSecrets?.includes(field.name) ? DASHBOARD_SAVED_SECRET_FIELD_VALUE : input.values?.[field.name];
     const placeholder = input.placeholders?.[field.name] ?? field.label;
-    return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml2(field.name)}"` + `${field.required ? " required" : ""}` + `${value2 === undefined ? "" : ` value="${escapeHtml2(value2)}"`}` + ` placeholder="${escapeHtml2(placeholder)}" aria-label="${escapeHtml2(field.label)}">`;
+    return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml2(field.name)}"` + `${field.required ? " required" : ""} autocomplete="off"` + `${value2 === undefined ? "" : ` value="${escapeHtml2(value2)}"`}` + ` placeholder="${escapeHtml2(placeholder)}" aria-label="${escapeHtml2(field.label)}">`;
   }).join("");
   const hasError = Boolean(input.notice?.trim());
   const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
@@ -145666,13 +145931,15 @@ function connectSetupSheet(input) {
   const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
   const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
-  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `${inputs}` + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-  const walkthrough = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm()}`;
+  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="google_client_json" value=""><div data-client-file-drop tabindex="0" role="group" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div><p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><p class="hint">The key check runs before sign-in. Google confirms consent and API access after you sign in.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  const walkthroughBody = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm()}`;
+  const walkthrough = `${input.setupHeading ? `<h4>${escapeHtml2(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
+  const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml2(input.lead.title)}</h4><p>${escapeHtml2(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml2(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml2(note)}</p>`).join("")}</div>` : "";
   if (input.publisher) {
     const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml2(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${prompt}` + `</details></div>` + `</div>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + (input.credentialFile ? `<button type="button" class="btn" data-setup-begin>${escapeHtml2(input.publisher.byoSummary)}</button><div data-setup-walkthrough hidden><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</div>` : `<details class="agentprompt"><summary>${escapeHtml2(input.publisher.byoSummary)}</summary><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</details>`) + `</div>` + `</div>`;
   }
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${cancel}` + `${prompt}</div>` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `${lead}<div data-setup-walkthrough${input.lead ? " hidden" : ""}><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</div>` + `${cancel}</div>` + `</div>`;
 }
 function callbackRegistrationSteps(id, registration) {
   if (registration === undefined)
@@ -145694,7 +145961,8 @@ function dashboardNeedsSetupSheet(source, action, options = {}) {
     promptText: action.instructions.agent_prompt,
     source: action.source,
     fields: action.instructions.fields,
-    ...action.source === "dropbox" ? { steps: action.instructions.diy_steps, provider: "Dropbox" } : {},
+    ...action.instructions.setup_provider ? { steps: action.instructions.diy_steps, provider: action.instructions.setup_provider, setupHeading: action.instructions.setup_heading, credentialFile: action.instructions.credential_file } : {},
+    ...options.lead ? { lead: options.lead } : {},
     ...options.providerNote === undefined ? {} : { providerNote: options.providerNote },
     ...redirectUriInput(action)
   });
@@ -145717,9 +145985,10 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     promptText: byo.agent_prompt,
     source: action.source,
     fields,
-    ...action.source === "dropbox" ? { steps: byo.diy_steps, provider: "Dropbox" } : {},
+    ...byo.setup_provider ? { steps: byo.diy_steps, provider: byo.setup_provider, setupHeading: byo.setup_heading, credentialFile: byo.credential_file } : {},
+    ...options.lead ? { lead: options.lead } : {},
     submitLabel: dashboardActionLabel(action.label),
-    ...action.publisher_client ? {
+    ...action.publisher_client && !options.lead ? {
       publisher: {
         intro: instructions.plain_intro,
         byoSummary: instructions.diy_summary
@@ -153235,10 +153504,24 @@ input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75re
 });
 
 // src/workers/dashboard/messaging.ts
+function telegramSetupSheet() {
+  const walkthrough = setupStepsSheet({
+    id: "telegram-setup",
+    provider: "Telegram",
+    submitLabel: "Check keys and continue",
+    steps: [
+      { title: "Sign in to Telegram", text: "Sign in at my.telegram.org with your Telegram phone number. Telegram sends the login code to your Telegram app.", link: { label: "Sign in to Telegram", url: "https://my.telegram.org/auth" } },
+      { title: "Open API development tools", text: "Choose API development tools. If you have not created an app, enter an app title and short name and create it. Keep the app page open.", link: { label: "API development tools", url: "https://my.telegram.org/apps" } },
+      { title: "Enter your Telegram app credentials", text: "Find api_id and api_hash on the app page. Check keys and continue starts pairing on this computer: enter the API ID and API hash when prompted, then your phone number, Telegram login code and two-step verification password if requested." }
+    ],
+    finalForm: (formId) => `<form id="${formId}" method="dialog" data-messaging-kind="start"></form>`
+  });
+  return '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>' + '<div class="sheet" id="telegram-setup" aria-hidden="true" data-messaging-setup><h4>Connect Telegram</h4>' + `<div data-messaging-setup-intro>${walkthrough}</div>` + '<div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><div data-messaging-input></div><div data-messaging-chats></div></div>' + '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form></div>';
+}
 function renderMessagingCard(source, localSession) {
   const label = source === "telegram" ? "Telegram" : "WhatsApp";
   const form = (kind, text4) => `<form method="dialog" data-messaging-kind="${kind}"><button class="btn" type="submit">${text4}</button></form>`;
-  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages"}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : `${form("start", `Pair ${label}`)}${form("chats", "Choose chats")}<div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div>${form("cancel", "Cancel pairing")}</section>`);
+  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages"}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : source === "telegram" ? `${telegramSetupSheet()}${form("chats", "Choose chats")}</section>` : `${form("start", `Pair ${label}`)}${form("chats", "Choose chats")}<div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div>${form("cancel", "Cancel pairing")}</section>`);
 }
 var init_messaging = __esm(() => {
   init_components();
@@ -154130,7 +154413,7 @@ ${sheet}`;
       label: source.label,
       blurb: action.instructions.plain_intro,
       ...dashboardSetupLead(source.source_id, action.instructions.plain_intro),
-      action: { label: action.label, kind: "none", sheet: sheetId, ...gate },
+      action: { label: providerNote(view3, action).lead?.button ?? action.label, kind: "none", sheet: sheetId, ...gate },
       ...link2 === undefined ? {} : { blurbLink: link2 }
     });
     return `${row}
@@ -154142,8 +154425,8 @@ ${sheet}`;
       const row = setupRow({
         ...id,
         label: source.label,
-        blurb: setupBlurb(source),
-        action: { label: action.label, kind: "none", sheet: connect.sheetId, ...gate }
+        blurb: providerNote(view3, action).lead?.title ?? setupBlurb(source),
+        action: { label: providerNote(view3, action).lead?.button ?? action.label, kind: "none", sheet: connect.sheetId, ...gate }
       });
       return `${row}
 ${connect.sheet}`;
@@ -154166,6 +154449,13 @@ ${connect.sheet}`;
   });
 }
 function providerNote(view3, action) {
+  if ((action.source === "gmail" || action.source === "google-drive") && view3.google_pilot?.mode === "advanced_byo_required")
+    return { lead: {
+      title: "Olympus's Google sign-in is full",
+      body: "Until Google reviews Olympus, it lets 100 people use Olympus's Google app. You can still connect Gmail and Drive with a free app of your own. It takes about ten minutes.",
+      button: "Set up my own Google app",
+      notes: ["What changes: Google shows your own name on its warning, not Olympus's.", "What stays the same: Olympus reads your mail on this computer, and judges each message Personal, Private or Secret as before."]
+    } };
   const note = dashboardGoogleProviderNote(view3, action);
   return note === undefined ? {} : { providerNote: note };
 }
@@ -161168,7 +161458,16 @@ function createEmailSourceWorker(options = {}) {
             const registry2 = readDashboardRegistry(sourceDashboard.registryPath);
             assertDashboardAccountCardinality(registry2, source);
             const clientIdSets = await dashboardOAuthClientIdSets(registry2, secretStore);
-            const submittedClientId = asOptionalString(record7.client_id);
+            let uploadedClient;
+            const ownDesktop = dashboardGoogleOAuthSource(source) && record7.google_desktop === true;
+            if (ownDesktop && typeof record7.google_client_json === "string") {
+              try {
+                uploadedClient = parseGoogleDesktopClient(record7.google_client_json);
+              } catch (error2) {
+                throw new EmailSourceWorkerError(400, "google_app_file_invalid", error2.message);
+              }
+            }
+            const submittedClientId = uploadedClient?.clientId ?? asOptionalString(record7.client_id);
             const handback = record7.handback === "relay" ? sourceDashboard.oauthHandback?.() : undefined;
             const computerHandback = record7.handback === "computer";
             if (record7.handback !== undefined && !handback && !computerHandback) {
@@ -161212,20 +161511,30 @@ function createEmailSourceWorker(options = {}) {
             if (!clientId) {
               throw new EmailSourceWorkerError(409, "oauth_client_id_missing", `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
             }
-            const rawClientSecret = asOptionalString(record7.client_secret);
+            const rawClientSecret = uploadedClient?.clientSecret ?? asOptionalString(record7.client_secret);
             const submittedClientSecret = rawClientSecret === DASHBOARD_SAVED_SECRET_FIELD_VALUE ? undefined : rawClientSecret;
             const clientSecret = publisher && dashboardGoogleOAuthSource(source) ? undefined : await dashboardOAuthClientSecret(source, secretStore, submittedClientSecret, clientId);
             if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
               throw new EmailSourceWorkerError(409, "oauth_client_secret_missing", `Missing OAuth client secret: ${dashboardOAuthClientSecretConfigKey(source)}.`);
             }
-            if (submittedClientId) {
+            if (ownDesktop) {
+              try {
+                await checkGoogleOwnApp({ clientId, clientSecret: clientSecret ?? "" }, sourceDashboard.oauthFetch);
+              } catch (error2) {
+                throw new EmailSourceWorkerError(400, "google_app_check_failed", error2.message);
+              }
+            }
+            if (submittedClientId && !ownDesktop) {
               await secretStore.set(dashboardOAuthClientIdConfigKey(source), submittedClientId);
               await secretStore.set(dashboardOAuthClientIdSourceKey(source), "byo");
             }
             if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
               await secretStore.set(dashboardOAuthClientSecretConfigKey(source), submittedClientSecret);
             }
-            const redirectUri = publisher?.loopback ? `${dashboardGoogleLoopbackOrigin(dashboardOrigin, sourceDashboard.loopbackPort)}/oauth/callback/${encodeURIComponent(source)}` : publisher?.redirectUri ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
+            if (ownDesktop && submittedClientId) {
+              await secretStore.set("google.own_app.registration", JSON.stringify({ clientId: submittedClientId, clientSecret }));
+            }
+            const redirectUri = publisher?.loopback || ownDesktop ? `${dashboardGoogleLoopbackOrigin(dashboardOrigin, sourceDashboard.loopbackPort)}/oauth/callback/${encodeURIComponent(source)}` : publisher?.redirectUri ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
             const relayNonce = publisher?.relay === true ? handback ? `${handback.installId}_${createOAuthRelayNonce()}` : createOAuthRelayNonce() : undefined;
             const relayState = relayNonce === undefined ? undefined : signOAuthRelayState({
               origin: dashboardOrigin,
@@ -161244,7 +161553,8 @@ function createEmailSourceWorker(options = {}) {
               ...relayState ? { state: relayState } : {},
               openBrowser: false,
               ...sourceDashboard.oauthFetch ? { fetch: sourceDashboard.oauthFetch } : {},
-              clientIdSource: publisher ? "publisher" : "byo"
+              clientIdSource: publisher ? "publisher" : "byo",
+              ...ownDesktop ? { googleOwnApp: true } : {}
             });
             const expectedOrigin = oauthAuthorizeOrigin(source);
             let authorizationUrl;
@@ -164414,6 +164724,9 @@ async function dashboardOAuthClientIdSets(registry2, secretStore) {
   return { own: own3, all };
 }
 async function readConfiguredDashboardOAuthClientIds(output, secretStore) {
+  const sharedOwnAppId = (await readGoogleOwnAppRegistration(secretStore))?.clientId;
+  if (sharedOwnAppId)
+    output.google = sharedOwnAppId;
   const sources = ["google", "gmail", "google-drive", "dropbox", "x"];
   for (const source of sources) {
     const clientId = await secretStore.get(dashboardOAuthClientIdConfigKey(source));
@@ -164421,7 +164734,8 @@ async function readConfiguredDashboardOAuthClientIds(output, secretStore) {
       continue;
     if (await dashboardStoredClientIdIsPublisherOwned(source, clientId, dashboardOAuthClientIdConfigKey(source), secretStore))
       continue;
-    output[source] = clientId;
+    if (source !== "google" || !sharedOwnAppId)
+      output[source] = clientId;
   }
 }
 async function dashboardStoredClientIdIsPublisherOwned(source, clientId, clientIdKey, secretStore) {
@@ -164484,6 +164798,9 @@ async function dashboardOAuthClientSecret(source, secretStore, fallback, clientI
 async function dashboardGoogleOAuthClientSecret(source, secretStore, fallback, clientId) {
   if (fallback)
     return fallback;
+  const ownApp = await readGoogleOwnAppRegistration(secretStore);
+  if (ownApp?.clientId === clientId)
+    return ownApp.clientSecret;
   if (clientId === dashboardGooglePilotClientId()) {
     return process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_SECRET?.trim();
   }
@@ -164609,9 +164926,26 @@ function dashboardCallbackFailureReason(error2, source, clientIdSource) {
   const message2 = error2 instanceof Error ? error2.message : "";
   if (source === "dropbox" && clientIdSource === "byo" && message2 === "Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.")
     return message2;
-  const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message2);
-  if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined))
+  const setupMessages = source === "x" ? [
+    "X could not complete the bookmarks read check. No credentials were stored; try connecting again when X is reachable.",
+    "X did not authorize the bookmarks read. Redo Enable OAuth 2.0 with bookmark.read and sign in again. No credentials were stored.",
+    "X refused the bookmarks read. Redo Check the cost to confirm paid API access and available credits, then Enable OAuth 2.0 with Read permissions and sign in again. No credentials were stored.",
+    "X could not complete the bookmarks read check. No credentials were stored; try connecting again later.",
+    "X returned an invalid bookmarks read result. No credentials were stored; try connecting again later."
+  ] : dashboardGoogleOAuthSource(source) ? [
+    "Google could not be reached for the API check. Try signing in again.",
+    "Google did not allow this API read. Redo Make the project and turn on Gmail and Drive, then sign in and allow read access.",
+    "Google did not accept the sign-in. Sign in again and allow read access.",
+    "Google could not confirm API access. Check your app settings and sign in again."
+  ] : [];
+  if (setupMessages.includes(message2))
     return message2;
+  const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message2);
+  if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined)) {
+    if (source === "x" && ["401", "403"].includes(match[1]))
+      return "X did not accept the app key. Redo Enable OAuth 2.0, copy the Client ID and secret from the same app, and check the callback URI.";
+    return message2;
+  }
   return `Connecting ${dashboardOAuthSourceLabel(source)} failed partway through. Start connect again from the dashboard.`;
 }
 function dashboardOAuthSourceLabel(source) {
@@ -164923,6 +165257,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 var init_email_source = __esm(() => {
+  init_google_own_app();
   init_dashboard_messaging_service();
   init_source_scope_approval();
   init_release_manifest();

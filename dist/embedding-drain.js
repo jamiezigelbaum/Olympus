@@ -39449,6 +39449,11 @@ var init_unpaired_sources = __esm(() => {
   };
 });
 
+// src/core/google-own-app.ts
+var init_google_own_app = __esm(() => {
+  init_http_timeout();
+});
+
 // src/core/worker-service.ts
 var WORKER_LOG_TAIL_BYTES;
 var init_worker_service = __esm(() => {
@@ -39477,6 +39482,7 @@ var init_provider_account_history = __esm(() => {
 // src/core/connect.ts
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
+  init_google_own_app();
   init_owner_config_read();
   init_linux_engine_layout();
   init_google_handle_compatibility();
@@ -64365,6 +64371,9 @@ init_vlm();
 // src/workers/email-source/server.ts
 init_apple_vision_ocr();
 
+// src/workers/email-source/index.ts
+init_google_own_app();
+
 // src/workers/email-source/dashboard-messaging-service.ts
 init_atomic_file();
 init_file_lease();
@@ -64821,6 +64830,8 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
 .setupfields { display: grid; gap: 8px; width: 100%; }
+[data-client-file-drop] { border: 1px dashed var(--line); border-radius: 8px; padding: 20px; text-align: center; }
+[data-client-file-drop] input { max-width: 100%; }
 .setupfields .keyfield { width: 100%; box-sizing: border-box; }
 .setupactions { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
 .setupactions > .primary { margin-left: auto; }

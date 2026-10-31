@@ -295,7 +295,7 @@ function connectPreview(
           source: source as 'gmail' | 'dropbox' | 'x',
           started_at: at(300),
           expires_at: new Date(NOW.getTime() + 5 * 60_000).toISOString(),
-          ...(options.refused ? { error: { code: 'redirect_uri_mismatch', at: at(280) } } : {}),
+          ...(options.refused ? { error: { code: provider === 'dropbox' ? 'redirect_uri_mismatch' : 'invalid_client', at: at(280) } } : {}),
         }],
       }
       : {}),
@@ -505,6 +505,9 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
   if (state.startsWith('archives-')) return archivesPreview(state);
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
+  if (state === 'connect-google-full') { const result = connectPreview('google'); result.google_pilot!.mode = 'advanced_byo_required'; return result; }
+  if (state === 'connect-google-error') return connectPreview('google', { refused: true });
+  if (state === 'connect-x-error') return connectPreview('x', { refused: true });
   if (state === 'connect-google') return connectPreview('google');
   if (state === 'connect-google-loopback') return connectPreview('google', { loopback: true });
   if (state === 'connect-venice') return buildDashboardPreviewView('models');
@@ -1685,6 +1688,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'whatsapp-qr', 'whatsapp-post-pair', 'whatsapp-chats', 'whatsapp-capturing',
   'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-conflict',
   'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+  'connect-google-full', 'connect-google-error', 'connect-x-error', 'telegram-setup', 'telegram-pair-api-id', 'telegram-pair-api-hash',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
   'connect-venice', 'connect-dropbox-connecting', 'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
   'local-files-off', 'local-files-connected', 'local-files-indexing', 'local-files-reading', 'local-files-needs-permission',
@@ -1698,7 +1702,8 @@ export const DASHBOARD_PREVIEW_STATES = [
 
 // Synthetic messaging data; no provider, credential, or worker is involved.
 export function previewMessagingFixture(state: string): Record<string, unknown> | undefined {
-  const fields: Record<string, string> = { 'telegram-pair-phone': 'phone', 'telegram-pair-code': 'code', 'telegram-pair-2fa': 'password' };
+  if (state === 'telegram-setup') return { ok: true, state: 'idle' };
+  const fields: Record<string, string> = { 'telegram-pair-api-id': 'api_id', 'telegram-pair-api-hash': 'api_hash', 'telegram-pair-phone': 'phone', 'telegram-pair-code': 'code', 'telegram-pair-2fa': 'password' };
   if (fields[state]) return { ok: true, state: 'waiting', field: fields[state] };
   if (state === 'telegram-pair-error') return { ok: true, state: 'failed' };
   if (state === 'whatsapp-qr') return { ok: true, state: 'waiting', qr: PREVIEW_QR };
@@ -1847,10 +1852,17 @@ function pickerAutoScript(spec: string): string {
 
 /** The dashboard tool's result for a preview state, with the computer's Index faster state (and waiting questions, unlocked). */
 export function setupPreviewScript(name: string | null, step: string | null): string {
-  if (name !== 'dropbox' && name !== 'venice') return '';
-  const index = Math.max(0, Math.min(name === 'dropbox' ? 4 : 2, Number(step ?? 1) - 1 || 0));
-  const selector = name === 'dropbox' ? '#connect-dropbox-files' : '[data-setup-steps]:has([name="source"][value="venice"])';
-  return `<script>window.addEventListener('DOMContentLoaded',function(){var sheet=document.querySelector(${JSON.stringify(selector)});if(!sheet)return;sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');var steps=sheet.matches('[data-setup-steps]')?sheet:sheet.querySelector('[data-setup-steps]');if(steps){var details=steps.closest('details');if(details)details.open=true;for(var i=0;i<${index};i++){steps.querySelector('[data-setup-next]').click();}}sheet.scrollIntoView({block:'center'});});</script>`;
+  const sheets: Record<string, { selector: string; count: number }> = {
+    dropbox: { selector: '#connect-dropbox-files', count: 5 },
+    venice: { selector: '[data-setup-steps]:has([name="source"][value="venice"])', count: 3 },
+    google: { selector: '#connect-gmail-email', count: 4 },
+    x: { selector: '#connect-x-bookmarks', count: 5 },
+    telegram: { selector: '#telegram-setup', count: 3 },
+  };
+  const selected = name ? sheets[name] : undefined;
+  if (!selected) return '';
+  const index = Math.max(0, Math.min(selected.count - 1, Number(step ?? 1) - 1 || 0));
+  return `<script>window.addEventListener('DOMContentLoaded',function(){var sheet=document.querySelector(${JSON.stringify(selected.selector)});if(!sheet)return;sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');var steps=sheet.matches('[data-setup-steps]')?sheet:sheet.querySelector('[data-setup-steps]');if(steps){var details=steps.closest('details');if(details)details.open=true;var walk=steps.closest('[data-setup-walkthrough]');if(walk&&!sheet.querySelector('[data-setup-lead]')&&${JSON.stringify(step)}!=='choice')walk.hidden=false;for(var i=0;i<${index};i++){steps.querySelector('[data-setup-next]').click();}}sheet.scrollIntoView({block:'center'});});</script>`;
 }
 
 export function previewDashboardToolResult(state: string, indexFasterOn: boolean, waitingPrivateQuestions = 0) {
@@ -1964,6 +1976,7 @@ function html(body: string, csp?: string, theme?: string | null): Response {
 if (import.meta.main) {
   const port = Number(process.env.DASHBOARD_PREVIEW_PORT ?? 8930);
   Bun.serve({
+  hostname: '127.0.0.1',
   port,
   async fetch(request) {
     const url = new URL(request.url);
@@ -2088,7 +2101,7 @@ if (import.meta.main) {
         }), COMPUTER_HOST_PAGE_CSP), cookies);
       }
       if (page === 'keys' && unlocked && previewMessagingFixture(pageState)) {
-        return withCookies(html(renderMessagingPreviewPage(pageState), undefined, url.searchParams.get('theme')), cookies);
+        return withCookies(html(renderMessagingPreviewPage(pageState) + setupPreviewScript(url.searchParams.get('sheet'), url.searchParams.get('step')), undefined, url.searchParams.get('theme')), cookies);
       }
       return withCookies(html(renderDashboardLocalPage(page, {
         url,

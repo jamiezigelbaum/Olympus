@@ -30017,6 +30017,9 @@ function unique(values) {
 // src/core/doctor.ts
 init_connected_handles();
 
+// src/core/google-own-app.ts
+init_http_timeout();
+
 // src/core/connect.ts
 init_owner_config_read();
 init_linux_engine_layout();

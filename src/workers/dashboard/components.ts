@@ -516,6 +516,9 @@ export interface DashboardConnectSheetInput {
   /** The instructions' declared fields; the route reads them by name. */
   fields: readonly DashboardConnectField[];
   steps?: readonly DashboardSetupStep[];
+  setupHeading?: string;
+  credentialFile?: 'google_desktop';
+  lead?: { title: string; body: string; button: string; notes: string[] };
   provider?: string;
   /**
    * The exact callback URI the provider must accept, plus the one line saying
@@ -578,11 +581,12 @@ export function setupStepsSheet(input: { id: string; provider: string; steps: re
   const formId = `${id}-form`;
   const panels = input.steps.map((step, index) => {
     const url = step.link && safeExternalHref(step.link.url);
-    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">Open this page in ${escapeHtml(input.provider)}</button>`
+    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">${escapeHtml(step.button_label ?? `Open this page in ${input.provider}`)}</button>`
       + `<p><a class="ext" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml(input.provider)} ↗</a></p>` : '';
+    const extraLinks = (step.links ?? []).map(link => { const href = safeExternalHref(link.url); return href ? `<p><a class="ext" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)} ↗</a></p>` : ''; }).join('');
     const redirect = step.redirect_uri && input.redirect
       ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : '';
-    return `<div data-setup-panel${index ? ' hidden' : ''}><h4>${escapeHtml(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
+    return `<div data-setup-panel${index ? ' hidden' : ''}><h4>${escapeHtml(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml(step.text)}</p>${link}${extraLinks}${redirect}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
   }).join('');
   return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${count === 1 ? '' : ' hidden'}>${escapeHtml(input.submitLabel ?? 'Connect')}</button></div></div>`;
 }
@@ -604,7 +608,7 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     // read-only display: a wrong Client ID is exactly the thing the owner came
     // here to change (owner, 2026-09-03).
     return `<input class="keyfield" type="${field.secret ? 'password' : 'text'}" name="${escapeHtml(field.name)}"`
-      + `${field.required ? ' required' : ''}`
+      + `${field.required ? ' required' : ''} autocomplete="off"`
       + `${value === undefined ? '' : ` value="${escapeHtml(value)}"`}`
       + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
   }).join('');
@@ -646,15 +650,17 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`;
   const byoForm = (formId?: string) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">`
     + sourceField
-    + `${inputs}`
+    + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="google_client_json" value=""><div data-client-file-drop tabindex="0" role="group" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div><p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><p class="hint">The key check runs before sign-in. Google confirms consent and API access after you sign in.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, '<input disabled ')}</details>` : inputs)
     + (formId ? '' : `<button class="btn primary" type="submit">${submitLabel}</button>`)
     + `<span class="actmsg" data-action-message role="status"></span>`
     // Where the authorization link lands when the browser blocks the new tab.
     + `<span class="authfallback" data-authorization-fallback></span>`
     + `</form>`;
-  const walkthrough = input.steps?.length && input.provider
+  const walkthroughBody = input.steps?.length && input.provider
     ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? 'Connect', ...(input.redirectUri ? { redirect: input.redirectUri.uri } : {}) })
     : `${registration}${redirect}${byoForm()}`;
+  const walkthrough = `${input.setupHeading ? `<h4>${escapeHtml(input.setupHeading)}</h4>` : ''}${walkthroughBody}`;
+  const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml(input.lead.title)}</h4><p>${escapeHtml(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml(input.lead.button)}</button>${input.lead.notes.map(note => `<p class="hint">${escapeHtml(note)}</p>`).join('')}</div>` : '';
   if (input.publisher) {
     // The whole point of publisher mode is that there is nothing to do first.
     // The one-click form carries the source and NOTHING else: no client id
@@ -672,21 +678,17 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
       + `<p>${escapeHtml(input.publisher.intro)}</p>`
       + `${publisherForm}`
       + `${cancel}`
-      + `<details class="agentprompt">`
-      + `<summary>${escapeHtml(input.publisher.byoSummary)}</summary>`
-      + `<p>${escapeHtml(input.intro)}</p>`
-      + `${walkthrough}`
-      + `${prompt}`
-      + `</details></div>`
+      + (input.credentialFile
+        ? `<button type="button" class="btn" data-setup-begin>${escapeHtml(input.publisher.byoSummary)}</button><div data-setup-walkthrough hidden><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</div>`
+        : `<details class="agentprompt"><summary>${escapeHtml(input.publisher.byoSummary)}</summary><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</details>`)
+      + `</div>`
       + `</div>`;
   }
   return `<div class="sheet" id="${id}" aria-hidden="true">`
     + `<h4>${escapeHtml(input.heading)}</h4>`
     + `${notice}<div data-connect-content${hasError ? ' hidden' : ''}>${providerNote}`
-    + `<p>${escapeHtml(input.intro)}</p>`
-    + `${walkthrough}`
-    + `${cancel}`
-    + `${prompt}</div>`
+    + `${lead}<div data-setup-walkthrough${input.lead ? ' hidden' : ''}><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</div>`
+    + `${cancel}</div>`
     + `</div>`;
 }
 
@@ -732,7 +734,7 @@ function callbackRegistrationSteps(
 export function dashboardNeedsSetupSheet(
   source: Pick<DashboardSourceCard, 'source_id' | 'label'>,
   action: Extract<DashboardSourceAction, { kind: 'needs_setup' }>,
-  options: { providerNote?: string } = {},
+  options: { providerNote?: string; lead?: DashboardConnectSheetInput['lead'] } = {},
 ): { sheetId: string; sheet: string } {
   const sheetId = `setup-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
   const sheet = connectSetupSheet({
@@ -742,7 +744,8 @@ export function dashboardNeedsSetupSheet(
     promptText: action.instructions.agent_prompt,
     source: action.source,
     fields: action.instructions.fields,
-    ...(action.source === 'dropbox' ? { steps: action.instructions.diy_steps, provider: 'Dropbox' } : {}),
+    ...(action.instructions.setup_provider ? { steps: action.instructions.diy_steps, provider: action.instructions.setup_provider, setupHeading: action.instructions.setup_heading, credentialFile: action.instructions.credential_file } : {}),
+    ...(options.lead ? { lead: options.lead } : {}),
     ...(options.providerNote === undefined ? {} : { providerNote: options.providerNote }),
     ...redirectUriInput(action),
   });
@@ -765,7 +768,7 @@ export function dashboardNeedsSetupSheet(
 export function dashboardOAuthConnectSheet(
   source: Pick<DashboardSourceCard, 'source_id' | 'label'>,
   action: Extract<DashboardSourceAction, { kind: 'oauth' }>,
-  options: { notice?: string; noticeDetail?: string; providerNote?: string } = {},
+  options: { notice?: string; noticeDetail?: string; providerNote?: string; lead?: DashboardConnectSheetInput['lead'] } = {},
 ): { sheetId: string; sheet: string } | undefined {
   const instructions = action.instructions;
   if (instructions === undefined) return undefined;
@@ -792,13 +795,14 @@ export function dashboardOAuthConnectSheet(
     promptText: byo.agent_prompt,
     source: action.source,
     fields,
-    ...(action.source === 'dropbox' ? { steps: byo.diy_steps, provider: 'Dropbox' } : {}),
+    ...(byo.setup_provider ? { steps: byo.diy_steps, provider: byo.setup_provider, setupHeading: byo.setup_heading, credentialFile: byo.credential_file } : {}),
+    ...(options.lead ? { lead: options.lead } : {}),
     submitLabel: dashboardActionLabel(action.label),
     // Publisher mode: Olympus's own registered app does the asking, so the
     // sheet leads with the button and keeps the bring-your-own walkthrough
     // one click away rather than deleting it. The sentence is the action's own
     // plain_intro, so the page and dashboard.json cannot drift apart.
-    ...(action.publisher_client
+    ...(action.publisher_client && !options.lead
       ? {
         publisher: {
           intro: instructions.plain_intro,
