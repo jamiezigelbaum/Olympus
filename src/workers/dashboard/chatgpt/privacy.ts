@@ -114,7 +114,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     if (kit.compact()) kit.fullscreen();
     s = {
       screen: 'main', returnKey, loaded: false, loading: true, error: '',
-      description: '', rules: [], pendingCount: 0,
+      description: '', rules: [], intents: [], savedRules: [], pendingCount: 0,
       // The saved settings this view started from: the compare-and-swap revision,
       // the saved description, and the owner's confirmation for a save that lowers protection.
       revision: '', savedDescription: '', confirmation: '', confirmedAt: 0, confirmStep: false,
@@ -174,6 +174,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     s.confirmStep = false;
     // `saved`: removing it lowers protection, so the save needs the owner's confirmation.
     s.rules = data.rules.filter(validRule).map(viewRule);
+    s.savedRules = s.rules.map(ruleOut);
+    s.intents = [];
     s.hidden = data.rules.filter((rule: Any) => !validRule(rule));
     s.server = null;
     s.pendingCount = typeof data.pendingCount === 'number' && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
@@ -239,9 +241,49 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   }
 
   function addRule(rule: Any): void {
+    if (s.saving || s.server) return;
+    // Save only the addition against the saved revision. Other draft edits may
+    // lower protection and must retain their separate confirmation.
+    const baseline = s.savedRules.slice().concat(s.hidden);
+    if (!s.savedRules.some((item: Any) => identity(item) === identity(rule))) baseline.push(ruleOut(rule));
+    // Record the choice before sending: failures and conflicts do not erase it.
     L.addTo(s.rules, rule);
+    L.setIntent(s.intents, rule, true);
     changed();
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
+    const args: Any = { description: s.savedDescription, rules: baseline };
+    if (s.revision) args.revision = s.revision;
+    s.saving = true;
     s.saveError = '';
+    const mine = session;
+    kit.call(T.set, args).then((result) => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      const data = settings(result);
+      const content = result && result.structuredContent;
+      if (data && content && content.status === 'conflict') return conflict(data);
+      if (!data || !content || content.status !== 'saved') {
+        s.saveError = W.addRuleFailed;
+        kit.render('privacy:save');
+        return;
+      }
+      // This immediate save covers only this addition, never other pending edits.
+      if (!L.satisfies([{ rule, present: true }], data.rules)) return conflict(data);
+      draft.intents = draft.intents.filter((intent: Any) => identity(intent.rule) !== identity(rule));
+      take(data);
+      s.intents = draft.intents;
+      const replayed = L.replay(draft, s.rules);
+      s.rules = replayed.rules;
+      if (replayed.description !== null) s.description = replayed.description;
+      s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
+      kit.remember(data.rules.filter(validRule).length);
+      kit.render('privacy:add:folder');
+    }, () => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      s.saveError = W.addRuleFailed;
+      kit.render('privacy:save');
+    });
   }
 
   /** Saved rules this save would drop, and whether it changes the saved description: both lower protection. */
@@ -300,12 +342,13 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       const data = settings(result);
       if (data && content && content.status === 'conflict') return conflict(data);
-      if (!data || result.isError) {
+      if (!data || !content || content.status !== 'saved') {
         s.saveError = W.saveFailed;
         kit.render('privacy:save');
         return;
       }
       if (confirmed) s.confirmation = '';
+      if (!L.satisfies(s.intents, data.rules) || data.description !== args.description) return conflict(data);
       kit.remember(data.rules.filter(validRule).length);
       leave(W.saved, true);
     }, () => {
@@ -332,8 +375,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   function applyAgain(): void {
     const server = s.server;
     if (!server) return;
-    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     take(server);
+    s.intents = draft.intents;
     const replayed = L.replay(draft, s.rules);
     s.rules = replayed.rules;
     s.confirmStep = false;
@@ -542,6 +586,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       add(li, el('p', 'fname leaf muted', fill(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, 'privacy:rule:' + index, s.saving ? null : () => {
         rule.removed = false;
+        L.setIntent(s.intents, rule, true);
         changed();
         kit.render('privacy:rule:' + index);
       }, 'plain');
@@ -551,6 +596,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     add(li, add(el('p', 'fname leaf two-line'), el('span', 'two-top', rule.display), el('span', 'two-bottom', kindText(rule))));
     const remove = kit.button(W.remove, 'privacy:rule:' + index, s.saving ? null : () => {
       rule.removed = true;
+      L.setIntent(s.intents, rule, false);
       changed();
       s.saveError = '';
       kit.render('privacy:rule:' + index);
@@ -673,19 +719,18 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     } else add(rules, el('p', 'muted fempty', W.rulesEmpty));
     const folders = folderSources().length > 0 && !!kit.picker;
     const gmail = gmailConnected();
+    const canAdd = !s.saving && !s.server;
     add(rules, add(el('div', 'actions add-rules'),
-      kit.button(W.addFolder, 'privacy:add:folder', folders && !s.saving ? addFolder : null, 'plain'),
-      kit.button(W.addLabel, 'privacy:add:label', gmail && !s.saving ? addLabel : null, 'plain'),
-      kit.button(W.addSender, 'privacy:add:sender', s.saving ? null : addSender, 'plain')));
+      kit.button(W.addFolder, 'privacy:add:folder', folders && canAdd ? addFolder : null, 'plain'),
+      kit.button(W.addLabel, 'privacy:add:label', gmail && canAdd ? addLabel : null, 'plain'),
+      kit.button(W.addSender, 'privacy:add:sender', canAdd ? addSender : null, 'plain')));
+    if (s.server) add(rules, el('p', 'reason', W.conflictAddBlocked));
     if (!folders) add(rules, el('p', 'reason', W.needFolderSource));
     if (!gmail) add(rules, el('p', 'reason', W.needGmail));
     add(rules, el('p', 'reason', W.namesShared));
     add(page, rules);
 
     const footer = el('section', 'picker-footer');
-    if (s.pendingCount > 0) {
-      add(footer, el('p', '', fill(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
-    }
     // The confirmation step stands in for Save while it is open (and while the change still lowers protection).
     if (s.confirmStep && !s.saving && lowers()) {
       add(page, add(footer, confirmBox()));
@@ -833,7 +878,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   }
 
   function backOut(): void {
-    if (!s) return;
+    if (!s || s.saving) return;
     if (s.edited && !s.saving) {
       s.discarding = true;
       kit.render('privacy:discard:no');
