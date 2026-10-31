@@ -122,6 +122,21 @@ describe('packaged messaging pairing', () => {
     expect(JSON.stringify(result)).not.toContain('fixture-hash');
   });
 
+  test('Telegram whole-account approval includes chats created after pairing', async () => {
+    const root = packageFixture();
+    const result = await pairMessagingSource({
+      source: 'telegram', packageRoot: root, homeDir: join(root, 'home'), env: {},
+      pythonExecutable: '/usr/bin/python3', secretStore: memorySecretStore(),
+      captureScopeApproval: { source: 'telegram', explicitApproval: true, wholeAccount: true } as never,
+      runCommand: async (request) => telegramReady(request.env.OLYMPUS_TELEGRAM_SESSION_PATH),
+      registerSession: async () => ({ ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] }),
+    });
+    expect(result.status).toBe('connected');
+    if (result.status !== 'connected') throw new Error('expected connected result');
+    expect(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES).toBe('*');
+    expect(result.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES).toBe('*');
+  });
+
   test('Telegram publishes ready only after an exact listed-chat approval', async () => {
     const root = packageFixture();
     const secrets = memorySecretStore();
